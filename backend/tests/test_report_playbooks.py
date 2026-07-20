@@ -337,6 +337,126 @@ async def test_compose_playbook_income_statement_r1_failure_still_fails_closed(d
     assert rows == []
 
 
+# --- Task 4 fix-loop (T2 review Important): the 2-source shape (balance_sheet /
+# trial_balance — compare={"prior": "r2"} only, no yoy/trend) had ZERO end-to-end
+# compose coverage; only income_statement's 4-source shape was exercised. Both playbook
+# keys below share the SAME assembly seam (assemble_spec -> build_statement_model) but a
+# regression scoped to the 2-source path (e.g. required_result_ids treating a
+# financial_statement's sole compare rid as required) would have gone undetected by the
+# income_statement tests alone. ------------------------------------------------------
+
+
+def _balance_sheet_by_params(*, r1=None, r2=None) -> dict:
+    payloads = fx.balance_sheet_payloads()
+    return {
+        ("balance_sheet", "Jun 2026"): r1 or _raw_tool_result(payloads["r1"]),
+        ("balance_sheet", "May 2026"): r2 or _raw_tool_result(payloads["r2"]),
+    }
+
+
+def _trial_balance_by_params(*, r1=None, r2=None) -> dict:
+    payloads = fx.trial_balance_payloads()
+    return {
+        ("trial_balance", "Jun 2026"): r1 or _raw_tool_result(payloads["r1"]),
+        ("trial_balance", "May 2026"): r2 or _raw_tool_result(payloads["r2"]),
+    }
+
+
+async def test_compose_playbook_balance_sheet_renders_full_statement(db, monkeypatch):
+    """The 2-source recipe shape (compare={"prior": "r2"} only — no yoy/trend sources)
+    through the full assembly path: recipe -> 2-source fan-out -> build_statement_model
+    -> financial_statement renderer -> persisted Report row."""
+    tenant = await create_test_tenant(db, name="PlaybookBsCorp")
+    user, _ = await create_test_user(db, tenant)
+    calls = _patch_executor(monkeypatch, by_params=_balance_sheet_by_params())
+
+    report = await compose_playbook_report(
+        db,
+        playbook_key="balance_sheet",
+        params={"period": "Jun 2026"},
+        tenant_id=tenant.id,
+        actor_id=user.id,
+    )
+
+    assert len(calls) == 2  # only r1 + r2 — no yoy/trend sources for balance_sheet
+    html = report.rendered_html
+    assert html.count("<h1") == 1
+    assert "Assets = Liabilities + Equity" in html  # the statement's own check row
+    assert 'class="fs-check fs-good"' in html  # the fixture is balanced -> ok=True
+    assert "Δ $" in html  # prior-period deltas present (has_prior=True)
+    for rid in ("r1", "r2"):  # provenance x2 — exactly the recipe's own source count
+        assert f"{rid} —" in html
+    assert "r3 —" not in html and "r4 —" not in html  # never more than the recipe has
+    for row in fx.balance_sheet_payloads()["r1"]["rows"]:
+        assert row[1] in html  # every fixture account name renders (acctname = col 1)
+    assert json.dumps(report.spec_json)  # Risk 3: JSON-clean
+    model = next(s["model"] for s in report.spec_json["sections"] if s["type"] == "financial_statement")
+    assert model["statement"] == "balance_sheet"
+    assert model["prior_period"] == "May 2026"
+    assert model["checks"][0]["ok"] is True
+
+
+async def test_compose_playbook_trial_balance_renders_full_statement(db, monkeypatch):
+    """Same 2-source shape, the OTHER statement type with no `section` column at all
+    (a flat GL listing) — proves the assembly seam is statement-type-agnostic."""
+    tenant = await create_test_tenant(db, name="PlaybookTbCorp")
+    user, _ = await create_test_user(db, tenant)
+    calls = _patch_executor(monkeypatch, by_params=_trial_balance_by_params())
+
+    report = await compose_playbook_report(
+        db,
+        playbook_key="trial_balance",
+        params={"period": "Jun 2026"},
+        tenant_id=tenant.id,
+        actor_id=user.id,
+    )
+
+    assert len(calls) == 2
+    html = report.rendered_html
+    assert html.count("<h1") == 1
+    assert "Debits = Credits" in html  # the statement's own check row
+    assert 'class="fs-check fs-good"' in html  # the fixture is in balance -> ok=True
+    assert "Δ $" in html  # prior-period deltas present
+    for rid in ("r1", "r2"):
+        assert f"{rid} —" in html
+    for row in fx.trial_balance_payloads()["r1"]["rows"]:
+        assert row[1] in html
+    assert json.dumps(report.spec_json)
+    model = next(s["model"] for s in report.spec_json["sections"] if s["type"] == "financial_statement")
+    assert model["statement"] == "trial_balance"
+    assert model["prior_period"] == "May 2026"
+    assert model["checks"][0]["ok"] is True
+
+
+async def test_compose_playbook_balance_sheet_degrades_when_prior_source_fails(db, monkeypatch):
+    """Risk 2 on the 2-source shape: r1 succeeds, r2 (the ONLY compare source) fails at
+    the tool layer -- the statement still composes without deltas, rather than failing
+    closed (r2 is balance_sheet's sole degradable rid, unlike income_statement's three)."""
+    tenant = await create_test_tenant(db, name="PlaybookBsDegradeCorp")
+    user, _ = await create_test_user(db, tenant)
+    failed = json.dumps({"success": False, "error": "No active NetSuite connection found"})
+    calls = _patch_executor(monkeypatch, by_params=_balance_sheet_by_params(r2=failed))
+
+    report = await compose_playbook_report(
+        db,
+        playbook_key="balance_sheet",
+        params={"period": "Jun 2026"},
+        tenant_id=tenant.id,
+        actor_id=user.id,
+    )
+
+    assert len(calls) == 2  # r2 still attempted — degrade, not skip
+    html = report.rendered_html
+    assert "Assets = Liabilities + Equity" in html  # the statement itself still renders
+    assert "Δ $" not in html  # no prior column at all when prior is unavailable
+    assert "vs May 2026" not in html  # no prior chip
+    model = next(s["model"] for s in report.spec_json["sections"] if s["type"] == "financial_statement")
+    assert model["prior_period"] is None
+    kpis = {k["key"]: k for k in model["kpis"]}
+    assert kpis["total_assets"]["value"] == "$6,550,000"  # r1's own figure unaffected
+    assert kpis["total_assets"]["mom_delta"] is None
+
+
 async def test_compose_playbook_source_failure_creates_nothing(db, monkeypatch):
     tenant = await create_test_tenant(db, name="PlaybookFailCorp")
     user, _ = await create_test_user(db, tenant)
