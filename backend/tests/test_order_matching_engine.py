@@ -186,3 +186,132 @@ class TestDeterministicMatching:
         results = engine.match(charges, deposits)
         matched = [r for r in results if r.match_type == "deterministic"]
         assert len(matched) == 2
+
+
+class TestSameRefDepositCollision:
+    """Several deposits can legitimately share a charge's order_reference (an
+    original posting plus a correction/reversal). Tier-1 must pick one
+    deterministically — not silently keep whichever the dict-building loop
+    iterated last — and must not leave the non-chosen sibling in the fuzzy
+    pool for an unrelated charge to pick up.
+    """
+
+    def test_amount_exact_wins_regardless_of_deposit_iteration_order(self):
+        """Two same-ref deposits, only one amount-exact: the exact one must win,
+        independent of which order the deposits list presents them in."""
+        from app.services.reconciliation.order_matching_engine import OrderMatchingEngine
+
+        charge = _make_charge(order_reference="R100000001", amount=Decimal("100.00"))
+        deposit_exact = _make_deposit(
+            id="d_exact",
+            order_reference="R100000001",
+            amount=Decimal("100.00"),
+            transaction_date=date(2026, 3, 11),
+        )
+        # A same-ref sibling (e.g. a correction/reversal posting) with a
+        # different amount and an earlier date.
+        deposit_sibling = _make_deposit(
+            id="d_sibling",
+            order_reference="R100000001",
+            amount=Decimal("150.00"),
+            transaction_date=date(2026, 2, 20),
+        )
+
+        for deposits in ([deposit_exact, deposit_sibling], [deposit_sibling, deposit_exact]):
+            engine = OrderMatchingEngine()
+            results = engine.match([charge], list(deposits))
+            assert len(results) == 1
+            assert results[0].match_type == "deterministic"
+            assert results[0].deposit.id == "d_exact"
+            assert results[0].variance_amount == Decimal("0")
+
+    def test_no_exact_amount_nearest_date_wins_and_evidence_carries_sibling(self):
+        """Neither deposit is amount-exact: nearest transaction_date to the
+        charge date wins, and the candidate records the non-chosen sibling's id
+        so the collision is visible downstream (evidence)."""
+        from app.services.reconciliation.order_matching_engine import OrderMatchingEngine
+
+        charge = _make_charge(
+            order_reference="R100000002",
+            amount=Decimal("100.00"),
+            charge_date=date(2026, 3, 10),
+        )
+        deposit_near = _make_deposit(
+            id="d_near",
+            order_reference="R100000002",
+            amount=Decimal("90.00"),
+            transaction_date=date(2026, 3, 11),
+        )
+        deposit_far = _make_deposit(
+            id="d_far",
+            order_reference="R100000002",
+            amount=Decimal("80.00"),
+            transaction_date=date(2026, 2, 1),
+        )
+
+        engine = OrderMatchingEngine()
+        results = engine.match([charge], [deposit_far, deposit_near])
+
+        assert len(results) == 1
+        assert results[0].match_type == "deterministic"
+        assert results[0].deposit.id == "d_near"
+        assert results[0].same_ref_deposit_ids == ["d_far"]
+
+    def test_non_chosen_sibling_excluded_from_fuzzy_pool(self):
+        """The non-chosen same-ref deposit must not leak into tier-2 fuzzy
+        matching for an unrelated no-ref charge, even when its amount happens
+        to coincide with that unrelated charge's amount."""
+        from app.services.reconciliation.order_matching_engine import OrderMatchingEngine
+
+        charge_with_ref = _make_charge(
+            id="c_ref",
+            order_reference="R100000003",
+            amount=Decimal("100.00"),
+            charge_date=date(2026, 3, 10),
+        )
+        # No order_reference — a charge that would otherwise be eligible to
+        # fuzzy-match the same-ref sibling below by amount + date + currency.
+        charge_no_ref = _make_charge(
+            id="c_no_ref",
+            order_reference=None,
+            amount=Decimal("50.00"),
+            charge_date=date(2026, 3, 10),
+        )
+        deposit_exact = _make_deposit(
+            id="d_exact",
+            order_reference="R100000003",
+            amount=Decimal("100.00"),
+            transaction_date=date(2026, 3, 10),
+        )
+        # Shares charge_with_ref's order_reference, but its amount coincides
+        # with charge_no_ref's amount — a tempting (wrong) fuzzy match.
+        deposit_sibling = _make_deposit(
+            id="d_sibling",
+            order_reference="R100000003",
+            amount=Decimal("50.00"),
+            transaction_date=date(2026, 3, 10),
+        )
+
+        engine = OrderMatchingEngine()
+        results = engine.match(
+            [charge_with_ref, charge_no_ref],
+            [deposit_exact, deposit_sibling],
+        )
+
+        by_charge_id = {r.charge.id: r for r in results}
+        assert by_charge_id["c_ref"].match_type == "deterministic"
+        assert by_charge_id["c_ref"].deposit.id == "d_exact"
+        # charge_no_ref must NOT have fuzzy-matched deposit_sibling.
+        assert by_charge_id["c_no_ref"].match_type == "unmatched"
+
+    def test_single_deposit_per_ref_unaffected(self):
+        """Regression: the common case (no collision) is byte-identical —
+        same_ref_deposit_ids is empty."""
+        from app.services.reconciliation.order_matching_engine import OrderMatchingEngine
+
+        engine = OrderMatchingEngine()
+        charges = [_make_charge(order_reference="R100000004", amount=Decimal("100.00"))]
+        deposits = [_make_deposit(order_reference="R100000004", amount=Decimal("100.00"))]
+        results = engine.match(charges, deposits)
+        assert results[0].match_type == "deterministic"
+        assert results[0].same_ref_deposit_ids == []

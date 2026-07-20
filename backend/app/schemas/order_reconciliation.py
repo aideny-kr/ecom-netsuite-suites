@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ChargeRecord(BaseModel):
@@ -43,3 +43,8 @@ class OrderMatchCandidate(BaseModel):
     variance_type: str | None = None
     variance_explanation: str | None = None
     match_rule: str | None = None
+    # Populated only when tier-1 resolved a collision: several deposits shared
+    # this charge's order_reference (e.g. an original posting + a
+    # correction/reversal). Holds the OTHER candidates' ids (never the chosen
+    # deposit's own id); empty when there was no collision.
+    same_ref_deposit_ids: list[str] = Field(default_factory=list)

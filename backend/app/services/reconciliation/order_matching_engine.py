@@ -68,26 +68,41 @@ class OrderMatchingEngine:
     ) -> list[OrderMatchCandidate]:
         """Tier 1: Match on exact order_reference equality.
 
+        Several deposits can legitimately share one order_reference (an
+        original posting plus a later correction/reversal — more likely now
+        that the ref-keyed fetch pulls deposits from a much wider date range).
+        When that happens, ``_select_same_ref_deposit`` picks one
+        deterministically and the rest are treated as consumed alongside it —
+        they leave the pool entirely so a same-ref sibling can never leak into
+        tier-2 fuzzy matching for an unrelated charge.
+
         Mutates unmatched_charges and unmatched_deposits in place,
         removing matched items.
         """
         results: list[OrderMatchCandidate] = []
 
-        # Index deposits by order_reference
-        deposit_by_ref: dict[str, NSPaymentRecord] = {}
+        # Index ALL deposits sharing an order_reference (not just the last one
+        # seen), so a collision is detected rather than silently dropped.
+        deposits_by_ref: dict[str, list[NSPaymentRecord]] = {}
         for d in unmatched_deposits:
             if d.order_reference:
-                deposit_by_ref[d.order_reference] = d
+                deposits_by_ref.setdefault(d.order_reference, []).append(d)
 
         matched_charges: list[ChargeRecord] = []
-        matched_deposits: list[NSPaymentRecord] = []
+        consumed_deposits: list[NSPaymentRecord] = []
 
         for c in unmatched_charges:
             if not c.order_reference:
                 continue
-            d = deposit_by_ref.get(c.order_reference)
-            if d is None:
+            candidates = deposits_by_ref.get(c.order_reference)
+            if not candidates:
                 continue
+
+            if len(candidates) == 1:
+                d = candidates[0]
+                same_ref_deposit_ids: list[str] = []
+            else:
+                d, same_ref_deposit_ids = self._select_same_ref_deposit(c, candidates)
 
             variance = abs(c.amount - d.amount)
             if variance == Decimal("0"):
@@ -109,21 +124,63 @@ class OrderMatchingEngine:
                     variance_amount=variance,
                     variance_type=variance_type,
                     match_rule="order_reference_exact",
+                    same_ref_deposit_ids=same_ref_deposit_ids,
                 )
             )
 
             matched_charges.append(c)
-            matched_deposits.append(d)
-            # Remove from deposit index so it can't double-match
-            del deposit_by_ref[c.order_reference]
+            # The whole same-ref group leaves the pool — the non-chosen
+            # sibling(s) belong to this order, not to some other charge's
+            # fuzzy match.
+            consumed_deposits.extend(candidates)
+            del deposits_by_ref[c.order_reference]
 
         # Remove matched items from unmatched lists
         for c in matched_charges:
             unmatched_charges.remove(c)
-        for d in matched_deposits:
+        for d in consumed_deposits:
             unmatched_deposits.remove(d)
 
         return results
+
+    @staticmethod
+    def _select_same_ref_deposit(
+        charge: ChargeRecord,
+        candidates: list[NSPaymentRecord],
+    ) -> tuple[NSPaymentRecord, list[str]]:
+        """Deterministically pick one deposit among several sharing a charge's
+        order_reference (e.g. an original posting plus a correction/reversal).
+
+        Selection rule: exactly one amount-exact candidate wins outright; with
+        zero or multiple amount-exact candidates, the nearest transaction_date
+        to the charge's date wins, tie-broken by the lowest netsuite_internal_id
+        so the outcome never depends on fetch/iteration order.
+
+        Returns (chosen, other_ids) where other_ids lists the non-chosen
+        candidates' ids for collision evidence.
+        """
+        exact = [d for d in candidates if d.amount == charge.amount]
+        if len(exact) == 1:
+            chosen = exact[0]
+        else:
+            pool = exact if exact else candidates
+
+            def sort_key(d: NSPaymentRecord) -> tuple[int, tuple[int, int | str]]:
+                days_apart = abs((d.transaction_date - charge.charge_date).days)
+                # Numeric ids (the real-world case) sort numerically; any
+                # non-numeric id sorts after all numeric ones. The leading
+                # 0/1 keeps the two branches from ever comparing an int
+                # against a str within the same days_apart tie.
+                try:
+                    tie_break: tuple[int, int | str] = (0, int(d.netsuite_internal_id))
+                except (TypeError, ValueError):
+                    tie_break = (1, d.netsuite_internal_id or "")
+                return (days_apart, tie_break)
+
+            chosen = min(pool, key=sort_key)
+
+        other_ids = [d.id for d in candidates if d.id != chosen.id]
+        return chosen, other_ids
 
     def _fuzzy_match(
         self,

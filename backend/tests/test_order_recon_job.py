@@ -11,6 +11,7 @@ import pytest
 from sqlalchemy import select
 
 from app.models.canonical import PayoutLine
+from app.models.reconciliation import ReconciliationResult
 from app.models.tenant import TenantConfig
 from app.schemas.order_reconciliation import (
     ChargeRecord,
@@ -18,7 +19,7 @@ from app.schemas.order_reconciliation import (
     OrderMatchCandidate,
 )
 from app.services.reconciliation.order_recon_job import OrderReconJob
-from tests.conftest import create_test_netsuite_posting, create_test_payout
+from tests.conftest import create_test_netsuite_posting, create_test_payout, create_test_recon_run
 
 TENANT_ID = str(uuid.uuid4())
 
@@ -408,6 +409,69 @@ class TestRefKeyedDepositFetchDbBacked:
         assert candidates[0].variance_type == "missing_in_netsuite"
 
 
+class TestSameRefDepositCollisionDbBacked:
+    """DB-backed: the ref-keyed fetch (this branch) makes same-ref deposit
+    collisions (an original posting + a correction/reversal) far likelier —
+    two real netsuite_postings rows sharing one order_reference must resolve
+    to a single deterministic match, and the collision must be visible in the
+    persisted evidence (drives the real fetch -> match -> store path, not a
+    mocked db).
+    """
+
+    async def test_amount_exact_wins_and_evidence_carries_collision(self, db, tenant_a):
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_collision",
+            description="Framework Marketplace Order ID: R628489275-XU9EPZPD",
+            amount=Decimal("100.00"),
+            arrival_date=date(2026, 3, 15),
+        )
+        # The true match: exact amount.
+        await create_test_netsuite_posting(
+            db,
+            tenant_a.id,
+            netsuite_internal_id="99010",
+            related_payout_id="R628489275",
+            transaction_date=date(2026, 3, 16),
+            amount=Decimal("100.00"),
+        )
+        # A same-ref sibling (e.g. a correction/reversal posting) that must
+        # NOT be silently chosen just because it iterated last.
+        await create_test_netsuite_posting(
+            db,
+            tenant_a.id,
+            netsuite_internal_id="99011",
+            related_payout_id="R628489275",
+            transaction_date=date(2026, 3, 17),
+            amount=Decimal("250.00"),
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        charges = await job._fetch_charges(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+        order_references = {c.order_reference for c in charges if c.order_reference}
+        deposits = await job._fetch_deposits(
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+            order_references=order_references,
+        )
+        candidates = job.engine.match(charges, deposits)
+
+        assert len(candidates) == 1
+        assert candidates[0].match_type == "deterministic"
+        assert candidates[0].deposit is not None
+        assert candidates[0].deposit.amount == Decimal("100.00")
+        assert len(candidates[0].same_ref_deposit_ids) == 1
+
+        run = await create_test_recon_run(db, tenant_a.id)
+        await job._store_results(run.id, candidates)
+
+        stored_evidence = (
+            await db.execute(select(ReconciliationResult.evidence).where(ReconciliationResult.run_id == run.id))
+        ).scalar_one()
+        assert len(stored_evidence["same_ref_deposit_ids"]) == 1
+
+
 class TestRunProducesSummary:
     """Mock fetch + matching to verify ReconRunSummary with correct counts."""
 
@@ -562,6 +626,93 @@ class TestStoresResultsWithNullPayoutId:
         assert result.evidence["charge_source_id"] == "ch_001"
         assert result.evidence["order_reference"] == "R628489275"
         assert result.evidence["charge_payout_line_id"] == "pl-1"
+
+    @pytest.mark.asyncio
+    async def test_store_results_persists_same_ref_deposit_ids_when_present(self):
+        """A collision-resolved candidate's same_ref_deposit_ids reaches
+        evidence, so the classifier/planner can see the collision."""
+        charge = ChargeRecord(
+            id="pl-1",
+            source_id="ch_003",
+            payout_line_id="pl-1",
+            amount=Decimal("100.00"),
+            fee=Decimal("3.00"),
+            net=Decimal("97.00"),
+            currency="USD",
+            charge_date=date(2026, 3, 15),
+            order_reference="R628489275",
+        )
+        deposit_id = str(uuid.uuid4())
+        sibling_id = str(uuid.uuid4())
+        deposit = NSPaymentRecord(
+            id=deposit_id,
+            netsuite_internal_id="12345",
+            amount=Decimal("100.00"),
+            currency="USD",
+            transaction_date=date(2026, 3, 16),
+            record_type="custdep",
+            order_reference="R628489275",
+        )
+        candidate = OrderMatchCandidate(
+            charge=charge,
+            deposit=deposit,
+            match_type="deterministic",
+            confidence=Decimal("1.0"),
+            variance_amount=Decimal("0"),
+            match_rule="order_reference_exact",
+            same_ref_deposit_ids=[sibling_id],
+        )
+
+        db = _mock_db()
+        job = OrderReconJob(db=db, tenant_id=TENANT_ID)
+        run_id = uuid.uuid4()
+
+        await job._store_results(run_id, [candidate])
+
+        result = db.add.call_args_list[0][0][0]
+        assert result.evidence["same_ref_deposit_ids"] == [sibling_id]
+
+    @pytest.mark.asyncio
+    async def test_store_results_omits_same_ref_deposit_ids_when_absent(self):
+        """No collision -> the evidence key is absent, byte-identical to
+        before this fix (not an empty list cluttering every row's evidence)."""
+        charge = ChargeRecord(
+            id="pl-1",
+            source_id="ch_004",
+            payout_line_id="pl-1",
+            amount=Decimal("100.00"),
+            fee=Decimal("3.00"),
+            net=Decimal("97.00"),
+            currency="USD",
+            charge_date=date(2026, 3, 15),
+            order_reference="R628489275",
+        )
+        deposit = NSPaymentRecord(
+            id=str(uuid.uuid4()),
+            netsuite_internal_id="12345",
+            amount=Decimal("100.00"),
+            currency="USD",
+            transaction_date=date(2026, 3, 16),
+            record_type="custdep",
+            order_reference="R628489275",
+        )
+        candidate = OrderMatchCandidate(
+            charge=charge,
+            deposit=deposit,
+            match_type="deterministic",
+            confidence=Decimal("1.0"),
+            variance_amount=Decimal("0"),
+            match_rule="order_reference_exact",
+        )
+
+        db = _mock_db()
+        job = OrderReconJob(db=db, tenant_id=TENANT_ID)
+        run_id = uuid.uuid4()
+
+        await job._store_results(run_id, [candidate])
+
+        result = db.add.call_args_list[0][0][0]
+        assert "same_ref_deposit_ids" not in result.evidence
 
     @pytest.mark.asyncio
     async def test_store_results_unmatched_no_deposit_id(self):

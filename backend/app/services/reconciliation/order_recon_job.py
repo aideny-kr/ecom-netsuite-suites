@@ -279,12 +279,15 @@ class OrderReconJob:
              fetch postings whose ``related_payout_id`` is in that set, bounded
              only by REF_MATCH_SANITY_DAYS on either side (a sanity cap, not a
              proximity window) so a charge in-window still matches a deposit
-             NetSuite posts weeks later. ``related_payout_id`` already stores
-             the extracted order ref, not raw text — the ingestion pipeline
-             (``netsuite_deposit_sync.sync_netsuite_deposits``) applies the same
-             ``extract_order_ref`` this job uses for charges before writing it —
-             so this is a direct equality filter, not a second extraction.
-             Chunked at ``_REF_CHUNK_SIZE`` refs per IN(...) batch.
+             NetSuite posts weeks later. ``related_payout_id`` normally stores
+             the extracted order ref when the deposit links to a sales order
+             (``netsuite_deposit_sync.sync_netsuite_deposits`` applies the same
+             ``extract_order_ref`` this job uses for charges); rows that fall
+             back to that sync's legacy payout-id-from-memo path hold a Stripe
+             payout id instead, which never equals an order reference, so
+             those rows simply won't be ref-fetched here — the same
+             visibility gap that existed before this change. Chunked at
+             ``_REF_CHUNK_SIZE`` refs per IN(...) batch.
 
         Sets order_reference from related_payout_id.
         """
@@ -303,6 +306,11 @@ class OrderReconJob:
 
         if order_references:
             refs = sorted(order_references)
+            # Measured off the request date_from/date_to, not the +/-14d
+            # buffered charge window above — a charge near the edge of that
+            # buffer effectively gets ~14 fewer days of reach than the nominal
+            # 90. That asymmetry is deliberate slack inside a generous sanity
+            # bound, not an oversight.
             sanity_from = date_from - timedelta(days=REF_MATCH_SANITY_DAYS)
             sanity_to = date_to + timedelta(days=REF_MATCH_SANITY_DAYS)
             for i in range(0, len(refs), _REF_CHUNK_SIZE):
@@ -413,6 +421,12 @@ class OrderReconJob:
             }
             if confidence_signals is not None:
                 evidence["confidence_signals"] = confidence_signals
+            # Tier-1 collision evidence (Fix 1): only present when several
+            # deposits shared this charge's order_reference and the engine had
+            # to pick one deterministically — see
+            # OrderMatchingEngine._select_same_ref_deposit.
+            if candidate.same_ref_deposit_ids:
+                evidence["same_ref_deposit_ids"] = candidate.same_ref_deposit_ids
 
             result = ReconciliationResult(
                 id=uuid.uuid4(),
