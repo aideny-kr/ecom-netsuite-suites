@@ -22,6 +22,10 @@ from datetime import datetime, timezone
 _PERIOD_RE = re.compile(r"^[A-Z][a-z]{2} \d{4}$")
 
 _MONTH_ABBRS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+_MONTH_FULL = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+]  # fmt: skip
 
 # How many trailing months feed an income_statement's trend comparison source (r4).
 _TREND_MONTHS = 6
@@ -45,6 +49,58 @@ def _parse_period(period: str) -> tuple[int, int]:
 
 def _format_period(month: int, year: int) -> str:
     return f"{_MONTH_ABBRS[month - 1]} {year}"
+
+
+# Human period spellings normalize_period accepts, each mapped to a (month, year)
+# extraction it then hands to _format_period for the canonical "Mon YYYY" render.
+_PERIOD_NAME_RE = re.compile(r"^([A-Za-z]+)\s+(\d{4})$")  # "jun 2026" / "June 2026"
+_PERIOD_NUMERIC_RE = re.compile(r"^(\d{1,2})/(\d{4})$")  # "6/2026" / "06/2026"
+_PERIOD_ISO_RE = re.compile(r"^(\d{4})-(\d{2})$")  # "2026-06"
+
+_MONTH_NAME_TO_NUM: dict[str, int] = {}
+for _i, (_abbr, _full) in enumerate(zip(_MONTH_ABBRS, _MONTH_FULL), start=1):
+    _MONTH_NAME_TO_NUM[_abbr.lower()] = _i
+    _MONTH_NAME_TO_NUM[_full.lower()] = _i
+del _i, _abbr, _full
+
+
+def normalize_period(raw: str) -> str:
+    """Accept several unambiguous human period spellings and return the canonical
+    NetSuite "Mon YYYY" form ``build_playbook_recipe``/``_PERIOD_RE`` expect. Pure
+    string mapping -- no LLM, no calendar guessing beyond these exact forms (all
+    case-insensitive, whitespace-tolerant around the whole string and between the
+    month/year tokens):
+      - 3-letter month abbreviation: "jun 2026", "JUN 2026" -> "Jun 2026"
+      - full English month name: "June 2026", "june 2026" -> "Jun 2026"
+      - numeric month/year, 1 or 2 digit month: "6/2026", "06/2026" -> "Jun 2026"
+      - ISO month: "2026-06" -> "Jun 2026"
+    The already-canonical form round-trips unchanged. Raises ``ValueError`` (kept SHORT
+    -- it renders inline in the report launcher) for anything else, including a
+    regex-shaped but out-of-range month (e.g. "13/2026") or a 2-digit year."""
+    accepted = "period must look like 'Jun 2026', 'June 2026', '6/2026', or '2026-06'"
+    if not isinstance(raw, str):
+        raise ValueError(accepted)
+    candidate = raw.strip()
+
+    match = _PERIOD_NAME_RE.match(candidate)
+    if match:
+        month = _MONTH_NAME_TO_NUM.get(match.group(1).lower())
+        if month is not None:
+            return _format_period(month, int(match.group(2)))
+
+    match = _PERIOD_NUMERIC_RE.match(candidate)
+    if match:
+        month, year = int(match.group(1)), int(match.group(2))
+        if 1 <= month <= 12:
+            return _format_period(month, year)
+
+    match = _PERIOD_ISO_RE.match(candidate)
+    if match:
+        year, month = int(match.group(1)), int(match.group(2))
+        if 1 <= month <= 12:
+            return _format_period(month, year)
+
+    raise ValueError(accepted)
 
 
 def prior_period(period: str) -> str:
@@ -104,7 +160,14 @@ def build_playbook_recipe(playbook_key: str, params: dict[str, str]) -> tuple[st
     meta = PLAYBOOKS.get(playbook_key)
     if meta is None:
         raise ValueError(f"Unknown playbook: '{playbook_key}'")
-    period = (params or {}).get("period", "").strip()
+    # normalize_period accepts several human spellings ("jun 2026", "June 2026",
+    # "6/2026", "2026-06") and returns the canonical "Mon YYYY" form -- everything
+    # below (title, sections, EVERY source's params) uses that canonical string, so
+    # SuiteQL always receives exactly "Jun 2026" regardless of what the operator typed.
+    period = normalize_period((params or {}).get("period", ""))
+    # Redundant-by-construction (normalize_period's output is always canonical) but kept
+    # as an explicit belt-and-suspenders gate -- never trust a helper's own invariant
+    # blindly at a boundary this close to SQL interpolation (see _PERIOD_RE's docstring).
     if not _PERIOD_RE.match(period):
         raise ValueError("period must be a NetSuite period name like 'Jun 2026'")
     title = f"{meta['name']} — {period}"
