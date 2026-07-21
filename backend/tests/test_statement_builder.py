@@ -955,3 +955,96 @@ def test_render_statement_preview_harness_writes_four_files(tmp_path):
     # ...but with the compare-fed chip/deltas actually absent (proves it degraded,
     # not that it silently rendered the same happy-path fixture twice).
     assert "vs May 2026" not in contents["income_statement_degraded.html"]
+
+
+# ===========================================================================
+# T2 gate round 3, F-1 — a net-negative-revenue period must not defeat the materiality
+# gates. threshold_dollars must be based on abs(revenue), never revenue's raw sign.
+# ===========================================================================
+
+
+def test_negative_revenue_account_mover_gate_still_discriminates():
+    model = build_statement_model(fx.income_statement_section(), fx.negative_revenue_mover_payloads())
+    watch_texts = [w["text"] for w in model["watch"]]
+    assert not any("Immaterial Mover" in t for t in watch_texts), (
+        f"an immaterial ($300, 0.3% of |revenue|) mover must stay silent, got: {watch_texts}"
+    )
+    assert any("Material Mover" in t for t in watch_texts), (
+        f"a material ($2000, 2% of |revenue|) mover must fire, got: {watch_texts}"
+    )
+
+
+def test_negative_revenue_highlight_gate_still_discriminates():
+    model = build_statement_model(fx.income_statement_section(), fx.negative_revenue_mover_payloads())
+    highlights = model["highlights"]
+    assert not any("Immaterial Mover" in h for h in highlights), (
+        f"an immaterial ($300, 0.3% of |revenue|) mover must not drive a highlight, got: {highlights}"
+    )
+    assert any("Material Mover" in h for h in highlights), (
+        f"a material ($2000, 2% of |revenue|) mover must drive the OpEx highlight, got: {highlights}"
+    )
+
+
+# ===========================================================================
+# T2 gate round 3, F-2 — a trend/compare source landing AT the row cap is invisible to
+# the truncated flag (the SQL cap is baked into the query text, so totalResults reflects
+# the CAPPED count) -- must degrade rather than render as if nothing were wrong.
+# ===========================================================================
+
+
+def test_trend_at_cap_degrades_entirely_with_specific_chip():
+    model = build_statement_model(fx.income_statement_section(), fx.trend_row_cap_boundary_payloads(STATEMENT_ROW_CAP))
+    assert model["trend"] is None
+    kpis = {k["key"]: k for k in model["kpis"]}
+    assert kpis["revenue"]["spark"] is None
+    watch_texts = [w["text"] for w in model["watch"]]
+    assert "trend source at row cap — trend omitted" in watch_texts
+    # the specific chip replaces the generic one -- never both for the same reason
+    assert "Trend comparison unavailable this run" not in watch_texts
+
+
+def test_trend_just_under_cap_renders_normally():
+    model = build_statement_model(
+        fx.income_statement_section(), fx.trend_row_cap_boundary_payloads(STATEMENT_ROW_CAP - 1)
+    )
+    assert model["trend"] is not None
+    watch_texts = [w["text"] for w in model["watch"]]
+    assert "trend source at row cap — trend omitted" not in watch_texts
+
+
+def test_prior_at_cap_degrades_with_existing_chip():
+    model = build_statement_model(fx.income_statement_section(), fx.prior_at_cap_payloads(STATEMENT_ROW_CAP))
+    assert model["prior_period"] is None
+    kpis = {k["key"]: k for k in model["kpis"]}
+    assert kpis["revenue"]["mom_delta"] is None
+    watch_texts = [w["text"] for w in model["watch"]]
+    assert "Prior-period comparison unavailable this run" in watch_texts
+
+
+def test_prior_just_under_cap_renders_normally():
+    model = build_statement_model(fx.income_statement_section(), fx.prior_at_cap_payloads(STATEMENT_ROW_CAP - 1))
+    assert model["prior_period"] is not None
+
+
+def test_r1_at_cap_still_only_warns_unaffected_by_f2():
+    """F-2 only changes COMPARE-rid at-cap handling; r1's existing wave-3/4 at-cap warn
+    (never a degrade/fail) must be completely unchanged."""
+    model = build_statement_model(fx.income_statement_section(), fx.row_cap_boundary_payloads(STATEMENT_ROW_CAP))
+    cap_items = [w for w in model["watch"] if "row cap reached" in w["text"]]
+    assert len(cap_items) == 1
+
+
+# ===========================================================================
+# T2 gate round 3, F-3 — the prior CELL's parens (reduces_profit) convention must key
+# off the PRIOR amount's own sign, not the current amount's.
+# ===========================================================================
+
+
+def test_prior_cell_reduces_profit_keyed_to_its_own_sign():
+    model = build_statement_model(fx.income_statement_section(), fx.sign_flipping_contra_revenue_payloads())
+    section = next(s for s in model["sections"] if s["key"] == "1-Revenue")
+    account = next(a for a in section["accounts"] if a["number"] == "4099")
+    assert account["current"] == "$5,000"  # positive current -- natural sign, no parens
+    assert account["prior"] == "($3,000)", (
+        f"prior was -$3,000 (contra) -- must render in parens per its OWN sign, got: {account['prior']!r}"
+    )

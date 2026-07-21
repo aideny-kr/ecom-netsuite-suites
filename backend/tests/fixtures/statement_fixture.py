@@ -731,6 +731,83 @@ def empty_compare_payload() -> dict[str, dict]:
     }
 
 
+def negative_revenue_mover_payloads() -> dict[str, dict]:
+    """T2 gate F-1: a net-negative-revenue period (refund-heavy month -- revenue held
+    CONSTANT at -$100,000 both periods, so the revenue line itself is never a "mover")
+    with one IMMATERIAL OpEx mover ($300 delta, well under both the 1%-of-|revenue|
+    mover threshold and the 0.5%-of-|revenue| highlight threshold) and one MATERIAL OpEx
+    mover ($2000 delta, well over both) -- proves the materiality gates key off
+    ``abs(revenue)``, not revenue's raw sign. Before the fix, a negative revenue makes
+    ``threshold_dollars`` negative, so ``abs(delta) >= threshold_dollars`` is vacuously
+    true for EVERY mover regardless of magnitude, including the immaterial one."""
+    r1_rows = [
+        _is_row("4000", "Refund-Heavy Revenue", "Income", "1-Revenue", Decimal("-100000")),
+        _is_row("6000", "Immaterial Mover", "Expense", "4-Operating Expense", Decimal("5300")),
+        _is_row("6010", "Material Mover", "Expense", "4-Operating Expense", Decimal("7000")),
+    ]
+    r2_rows = [
+        _is_row("4000", "Refund-Heavy Revenue", "Income", "1-Revenue", Decimal("-100000")),
+        _is_row("6000", "Immaterial Mover", "Expense", "4-Operating Expense", Decimal("5000")),
+        _is_row("6010", "Material Mover", "Expense", "4-Operating Expense", Decimal("5000")),
+    ]
+    return {
+        "r1": _payload(_IS_COLUMNS, r1_rows, query="income_statement (Jun 2026)"),
+        "r2": _payload(_IS_COLUMNS, r2_rows, query="income_statement (May 2026)"),
+    }
+
+
+def trend_row_cap_boundary_payloads(row_count: int) -> dict[str, dict]:
+    """T2 gate F-2: r1 is a normal 5-account payload; r4 (trend) has exactly
+    ``row_count`` synthetic account x period rows, all in a single synthetic period --
+    tests the trend-at-cap degrade guard at its exact boundary. The SQL cap is baked
+    INSIDE the trend query's FETCH FIRST clause, so a capped trend source's own
+    ``totalResults`` reflects the CAPPED count (never flags ``truncated``) -- this
+    fixture mimics exactly that: a well-shaped, non-truncated payload that nonetheless
+    lands at/above STATEMENT_ROW_CAP."""
+    r1_rows = [_is_row(str(4000 + i), f"Account {i}", "Income", "1-Revenue", Decimal("1")) for i in range(5)]
+    trend_rows = [
+        {
+            "periodname": "Jun 2026",
+            "startdate": "2026-06-01",
+            "acctnumber": str(4000 + i),
+            "acctname": f"Account {i}",
+            "accttype": "Income",
+            "section": "1-Revenue",
+            "amount": Decimal("1"),
+        }
+        for i in range(row_count)
+    ]
+    return {
+        "r1": _payload(_IS_COLUMNS, r1_rows, query="income_statement (Jun 2026)"),
+        "r4": _payload(_IS_TREND_COLUMNS, trend_rows, query="income_statement_trend (...)"),
+    }
+
+
+def prior_at_cap_payloads(row_count: int) -> dict[str, dict]:
+    """T2 gate F-2: r1 normal (5 accounts); r2 (prior) has exactly ``row_count``
+    synthetic accounts -- tests _resolve_rows's generic at-cap degrade check for
+    ordinary (non-trend) compare rids (prior/yoy)."""
+    r1_rows = [_is_row(str(4000 + i), f"Account {i}", "Income", "1-Revenue", Decimal("1")) for i in range(5)]
+    r2_rows = [_is_row(str(4000 + i), f"Account {i}", "Income", "1-Revenue", Decimal("1")) for i in range(row_count)]
+    return {
+        "r1": _payload(_IS_COLUMNS, r1_rows, query="income_statement (Jun 2026)"),
+        "r2": _payload(_IS_COLUMNS, r2_rows, query="income_statement (May 2026)"),
+    }
+
+
+def sign_flipping_contra_revenue_payloads() -> dict[str, dict]:
+    """T2 gate F-3: a Revenue-section account that's POSITIVE in the current period
+    ($5,000 -- ordinary revenue, does not reduce profit) but was NEGATIVE (contra) in the
+    prior period (-$3,000 -- reduces profit). The prior CELL's parens convention must key
+    off the PRIOR amount's own sign, not the current amount's."""
+    r1_rows = [_is_row("4099", "Contra Revenue Adj", "Income", "1-Revenue", Decimal("5000"))]
+    r2_rows = [_is_row("4099", "Contra Revenue Adj", "Income", "1-Revenue", Decimal("-3000"))]
+    return {
+        "r1": _payload(_IS_COLUMNS, r1_rows, query="income_statement (Jun 2026)"),
+        "r2": _payload(_IS_COLUMNS, r2_rows, query="income_statement (May 2026)"),
+    }
+
+
 def gp_margin_watch_payloads(delta_pp_direction: str) -> dict[str, dict]:
     """Minimal 2-account (1 revenue + 1 COGS) r1/r2 pair whose GP margin MoM delta lands
     EXACTLY at the watch-rule-1 threshold boundary (0.3pp), for straddling tests.

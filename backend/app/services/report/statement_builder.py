@@ -260,7 +260,7 @@ def _is_truncated(payload: dict, rows: list[dict]) -> bool:
 
 
 def _resolve_rows(
-    payloads: dict[str, dict], rid: str | None, *, amount_cols: tuple[str, ...] = ()
+    payloads: dict[str, dict], rid: str | None, *, amount_cols: tuple[str, ...] = (), cap_degrades: bool = True
 ) -> list[dict] | None:
     """Resolve a compare rid to its parsed rows, or ``None`` on ANY failure — absent, marked
     failed, structurally unparseable, a well-shaped but EMPTY row set (T2 gate M-B — a
@@ -268,13 +268,23 @@ def _resolve_rows(
     against a phantom $0 prior is misleading, so it degrades exactly like an absent
     source), a TRUNCATED payload (T2 gate B1 — see ``_is_truncated``; a PARTIAL prior/yoy/
     trend account list would compute silently wrong deltas/margins/sparklines, worse than
-    no comparison at all), OR (when ``amount_cols`` is given) a row whose value in one of
+    no comparison at all), a row count landing AT/ABOVE ``STATEMENT_ROW_CAP`` when
+    ``cap_degrades`` is true (T2 gate F-2 — the SQL cap is baked INSIDE the query text, so
+    a capped source's own ``totalResults`` reflects the CAPPED count, not the true total —
+    ``_is_truncated`` can never see this; a compare source AT the cap is unreliable, not
+    honest-at-the-boundary data the way r1 is, since we can't tell whether a real account
+    list got cut short), OR (when ``amount_cols`` is given) a row whose value in one of
     those columns doesn't parse to a finite Decimal. This is the degrade-never-raise
     boundary for compare sources: without the ``amount_cols`` pre-validation, a malformed
     amount in a PRIOR/YOY/TREND source would only be discovered much later, deep inside a
     totals/section builder that doesn't wrap its calls in try/except — crashing the WHOLE
     statement instead of degrading just this one comparison. r1 uses ``_require_rows``
-    instead (raises — the primary source must fail closed, never silently degrade)."""
+    instead (raises — the primary source must fail closed, never silently degrade).
+
+    ``cap_degrades=False`` opts a caller OUT of the generic at-cap degrade so it can apply
+    its OWN cap handling instead — the IS builder passes this for the trend rid, which
+    needs a trend-specific chip ("trend source at row cap — trend omitted") rather than
+    the generic missing-compare wording this function's default triggers."""
     if not rid:
         return None
     payload = payloads.get(rid)
@@ -287,6 +297,8 @@ def _resolve_rows(
         if not rows:
             return None
         if _is_truncated(payload, rows):
+            return None
+        if cap_degrades and len(rows) >= STATEMENT_ROW_CAP:
             return None
         for col in amount_cols:
             for row in rows:
@@ -487,7 +499,16 @@ def _build_sections(
                     "number": number,
                     "name": row.get("acctname", ""),
                     "current": fmt_money(current_amt, reduces_profit=reduces_profit),
-                    "prior": fmt_money(prior_amt, reduces_profit=reduces_profit) if prior_amt is not None else None,
+                    # T2 gate F-3: the prior CELL's parens convention keys off the PRIOR
+                    # amount's OWN sign (a sign-flipping contra-revenue account can be
+                    # positive now but negative last period, or vice versa) -- reusing
+                    # `reduces_profit` (computed from current_amt above) would render a
+                    # negative prior with the plain natural-sign minus instead of parens.
+                    "prior": (
+                        fmt_money(prior_amt, reduces_profit=reduces_profit_fn(section_key, prior_amt))
+                        if prior_amt is not None
+                        else None
+                    ),
                     "delta": fmt_money_delta(current_amt - prior_amt) if prior_amt is not None else None,
                     "pct_rev": pct_rev,
                     "reduces_profit": reduces_profit,
@@ -657,7 +678,10 @@ def _build_is_watch(
 
     # Rule 2: up to MAX_ACCOUNT_MOVERS accounts with |delta| >= threshold % of revenue.
     if prior is not None and revenue != 0:
-        threshold_dollars = revenue * ACCOUNT_MOVER_THRESHOLD_PCT_OF_REVENUE / _HUNDRED
+        # T2 gate F-1: abs(revenue) -- a net-negative-revenue period (refund-heavy month)
+        # must not flip the threshold negative, which would make `abs(delta) >=
+        # threshold_dollars` vacuously true for every account regardless of magnitude.
+        threshold_dollars = abs(revenue) * ACCOUNT_MOVER_THRESHOLD_PCT_OF_REVENUE / _HUNDRED
         prior_index = _account_index(prior_rows, "amount") or {}
         movers = []
         for row in current_rows:
@@ -715,7 +739,8 @@ def _build_is_highlights(
     revenue = current["revenue"]
     if revenue == 0:
         return []
-    threshold_dollars = revenue * HIGHLIGHT_THRESHOLD_PCT_OF_REVENUE / _HUNDRED
+    # T2 gate F-1: abs(revenue) -- same reasoning as the account-mover gate above.
+    threshold_dollars = abs(revenue) * HIGHLIGHT_THRESHOLD_PCT_OF_REVENUE / _HUNDRED
     prior_index = _account_index(prior_rows, "amount") or {}
 
     def largest_mover(section_filter=None):
@@ -811,7 +836,17 @@ def _build_income_statement_model(section: dict, payloads: dict[str, dict]) -> d
     current_rows = _require_rows(payloads, section["result_id"])
     prior_rows = _resolve_rows(payloads, compare.get("prior"), amount_cols=("amount",))
     yoy_rows = _resolve_rows(payloads, compare.get("yoy"), amount_cols=("amount",))
-    trend_rows = _resolve_rows(payloads, compare.get("trend"), amount_cols=("amount",))
+    # T2 gate F-2: cap_degrades=False -- the generic at-cap degrade (_resolve_rows) would
+    # fire the generic "Trend comparison unavailable this run" chip; the trend-at-cap
+    # check just below needs to see the raw (still-at-cap) rows so it can degrade with
+    # its OWN, more specific chip instead.
+    trend_rows = _resolve_rows(payloads, compare.get("trend"), amount_cols=("amount",), cap_degrades=False)
+    trend_at_cap = trend_rows is not None and len(trend_rows) >= STATEMENT_ROW_CAP
+    if trend_at_cap:
+        # a 6-month trend is account x period, so STATEMENT_ROW_CAP rows can represent
+        # FAR fewer real accounts than a single-period source at the same cap -- treat the
+        # whole trend as unreliable rather than risk a wrong chart/sparklines/rule-3 claim.
+        trend_rows = None
     trend_buckets = _trend_periods(trend_rows)
 
     current = _is_totals(current_rows)
@@ -880,9 +915,22 @@ def _build_income_statement_model(section: dict, payloads: dict[str, dict]) -> d
         }
 
     watch = _build_is_watch(current, prior, current_rows, prior_rows, trend_buckets)
-    missing_items = _missing_compare_watch_items(compare, {"prior": prior_rows, "yoy": yoy_rows, "trend": trend_rows})
+    trend_cap_item = None
+    missing_compare_arg = compare
+    if trend_at_cap:
+        trend_cap_item = {"tone": "warn", "text": "trend source at row cap — trend omitted"}
+        # exclude "trend" so _missing_compare_watch_items doesn't ALSO add the generic
+        # "Trend comparison unavailable this run" chip for the SAME underlying reason.
+        missing_compare_arg = {k: v for k, v in compare.items() if k != "trend"}
+    missing_items = _missing_compare_watch_items(
+        missing_compare_arg, {"prior": prior_rows, "yoy": yoy_rows, "trend": trend_rows}
+    )
     cap_item = _row_cap_watch_item(len(current_rows))
-    priority_items = ([cap_item] if cap_item is not None else []) + missing_items
+    priority_items = (
+        ([cap_item] if cap_item is not None else [])
+        + ([trend_cap_item] if trend_cap_item is not None else [])
+        + missing_items
+    )
     if priority_items:
         watch = (priority_items + watch)[:MAX_WATCH_ITEMS]
     highlights = _build_is_highlights(current, prior, current_rows, prior_rows)
