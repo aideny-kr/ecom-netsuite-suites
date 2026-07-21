@@ -7,6 +7,8 @@ Mutation endpoints gated by require_permission("recon.run").
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import json
 import uuid
 from datetime import datetime, timezone
@@ -772,6 +774,56 @@ async def plan_resolutions(
     return result
 
 
+async def _fetch_group_summaries(
+    db: AsyncSession, run_uuid: uuid.UUID, tenant_id: uuid.UUID
+) -> list[ResolutionGroupSummary]:
+    """One row per group_key x currency, GROUP BY on real columns (never
+    parsed out of group_key). Only ACTIVE, undecided-or-approved proposal
+    states are included; superseded/rejected history is excluded. Shared by
+    GET .../resolution-summary and the ``section=groups`` export — same
+    aggregation, single source of truth (do not re-derive)."""
+    P = ReconResolutionProposal
+    live = (P.run_id == run_uuid, P.tenant_id == tenant_id, P.status.notin_(("superseded", "rejected")))
+
+    group_rows = (
+        await db.execute(
+            select(
+                P.root_cause,
+                P.action,
+                P.booking_vehicle,
+                P.group_key,
+                P.currency,
+                func.count(P.id).label("count"),
+                func.count(P.id).filter(P.status == "proposed").label("proposed_count"),
+                func.count(P.id).filter(P.status == "approved").label("approved_count"),
+                func.coalesce(func.sum(P.proposed_amount), 0).label("total_amount"),
+                func.count(P.id)
+                .filter(P.above_materiality.is_(True), P.status == "proposed")
+                .label("above_materiality_count"),
+            )
+            .where(*live)
+            .group_by(P.root_cause, P.action, P.booking_vehicle, P.group_key, P.currency)
+            .order_by(func.coalesce(func.sum(P.proposed_amount), 0).desc())
+        )
+    ).all()
+
+    return [
+        ResolutionGroupSummary(
+            group_key=r.group_key,
+            root_cause=r.root_cause,
+            action=r.action,
+            booking_vehicle=r.booking_vehicle,
+            currency=r.currency,
+            count=r.count,
+            proposed_count=r.proposed_count,
+            approved_count=r.approved_count,
+            total_amount=r.total_amount,
+            above_materiality_count=r.above_materiality_count,
+        )
+        for r in group_rows
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Resolution summary + per-group proposal listing (summary-first rework)
 # ---------------------------------------------------------------------------
@@ -800,46 +852,7 @@ async def get_resolution_summary(
     ).scalar_one()
     matches_count = run.matches_count
 
-    P = ReconResolutionProposal
-    live = (P.run_id == run_uuid, P.tenant_id == user.tenant_id, P.status.notin_(("superseded", "rejected")))
-
-    group_rows = (
-        await db.execute(
-            select(
-                P.root_cause,
-                P.action,
-                P.booking_vehicle,
-                P.group_key,
-                P.currency,
-                func.count(P.id).label("count"),
-                func.count(P.id).filter(P.status == "proposed").label("proposed_count"),
-                func.count(P.id).filter(P.status == "approved").label("approved_count"),
-                func.coalesce(func.sum(P.proposed_amount), 0).label("total_amount"),
-                func.count(P.id)
-                .filter(P.above_materiality.is_(True), P.status == "proposed")
-                .label("above_materiality_count"),
-            )
-            .where(*live)
-            .group_by(P.root_cause, P.action, P.booking_vehicle, P.group_key, P.currency)
-            .order_by(func.coalesce(func.sum(P.proposed_amount), 0).desc())
-        )
-    ).all()
-
-    groups = [
-        ResolutionGroupSummary(
-            group_key=r.group_key,
-            root_cause=r.root_cause,
-            action=r.action,
-            booking_vehicle=r.booking_vehicle,
-            currency=r.currency,
-            count=r.count,
-            proposed_count=r.proposed_count,
-            approved_count=r.approved_count,
-            total_amount=r.total_amount,
-            above_materiality_count=r.above_materiality_count,
-        )
-        for r in group_rows
-    ]
+    groups = await _fetch_group_summaries(db, run_uuid, user.tenant_id)
     proposals_count = sum(g.count for g in groups)
     explained_count = sum(g.count for g in groups if g.action != "needs_human")
     # Plain root_cause keys when the run is single-currency; once more than one
@@ -974,6 +987,63 @@ async def _enrich_proposal_response(
     )
 
 
+def _build_proposal_query(
+    run_uuid: uuid.UUID,
+    tenant_id: uuid.UUID,
+    *,
+    group_key: str | None = None,
+    action: str | None = None,
+    currency: str | None = None,
+):
+    """The proposals enrichment join, shared by ``list_group_proposals`` and
+    the ``section=proposals`` export: order_reference off the result's
+    evidence JSON, NetSuite fields + amounts off the result / the deposit it
+    matched to (LEFT JOIN — most needs_human items have no deposit_id).
+    Superseded/rejected proposals are always excluded. Callers add
+    ``.limit()``/``.offset()`` as needed; the export endpoint does not
+    paginate."""
+    P = ReconResolutionProposal
+    conditions = [
+        P.run_id == run_uuid,
+        P.tenant_id == tenant_id,
+        P.status.notin_(("superseded", "rejected")),
+    ]
+    if group_key is not None:
+        root_cause, group_action, vehicle = _parse_group_key(group_key)
+        conditions += [P.root_cause == root_cause, P.action == group_action, P.booking_vehicle == vehicle]
+    if action is not None:
+        conditions.append(P.action == action)
+    if currency is not None:
+        conditions.append(P.currency == currency)
+    return (
+        select(
+            P,
+            ReconciliationResult.evidence["order_reference"].astext,
+            NetsuitePosting.netsuite_internal_id,
+            NetsuitePosting.record_type,
+            ReconciliationResult.stripe_amount,
+            ReconciliationResult.netsuite_amount,
+            ReconciliationResult.variance_amount,
+        )
+        .join(
+            ReconciliationResult,
+            and_(
+                ReconciliationResult.id == P.result_id,
+                ReconciliationResult.tenant_id == tenant_id,
+            ),
+        )
+        .outerjoin(
+            NetsuitePosting,
+            and_(
+                NetsuitePosting.id == ReconciliationResult.deposit_id,
+                NetsuitePosting.tenant_id == tenant_id,
+            ),
+        )
+        .where(*conditions)
+        .order_by(P.proposed_amount.desc())
+    )
+
+
 @router.get(
     "/runs/{run_id}/resolution-groups/{group_key}/proposals",
     response_model=list[ResolutionProposalResponse],
@@ -1000,52 +1070,8 @@ async def list_group_proposals(
     group. Absent both filters, behavior/URL for existing callers is
     unchanged."""
     await _get_run_or_404(db, user.tenant_id, run_id)
-    P = ReconResolutionProposal
-    conditions = [
-        P.run_id == _parse_uuid(run_id),
-        P.tenant_id == user.tenant_id,
-        P.status.notin_(("superseded", "rejected")),
-    ]
-    if group_key is not None:
-        root_cause, group_action, vehicle = _parse_group_key(group_key)
-        conditions += [P.root_cause == root_cause, P.action == group_action, P.booking_vehicle == vehicle]
-    if action is not None:
-        conditions.append(P.action == action)
-    # Single query (join, not N+1): order_reference comes off the result's
-    # evidence JSON; NetSuite fields + amounts come off the result / the
-    # deposit it matched to, if any (LEFT JOIN — most needs_human items have
-    # no deposit_id).
-    rows = (
-        await db.execute(
-            select(
-                P,
-                ReconciliationResult.evidence["order_reference"].astext,
-                NetsuitePosting.netsuite_internal_id,
-                NetsuitePosting.record_type,
-                ReconciliationResult.stripe_amount,
-                ReconciliationResult.netsuite_amount,
-                ReconciliationResult.variance_amount,
-            )
-            .join(
-                ReconciliationResult,
-                and_(
-                    ReconciliationResult.id == P.result_id,
-                    ReconciliationResult.tenant_id == user.tenant_id,
-                ),
-            )
-            .outerjoin(
-                NetsuitePosting,
-                and_(
-                    NetsuitePosting.id == ReconciliationResult.deposit_id,
-                    NetsuitePosting.tenant_id == user.tenant_id,
-                ),
-            )
-            .where(*conditions)
-            .order_by(P.proposed_amount.desc())
-            .limit(limit)
-            .offset(offset)
-        )
-    ).all()
+    stmt = _build_proposal_query(_parse_uuid(run_id), user.tenant_id, group_key=group_key, action=action)
+    rows = (await db.execute(stmt.limit(limit).offset(offset))).all()
     return [_proposal_response_with_enrichment(*row) for row in rows]
 
 
@@ -1333,6 +1359,231 @@ async def download_evidence(
         excel_bytes,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ---------------------------------------------------------------------------
+# Per-section worksheet export (groups / proposals / results — CSV or XLSX)
+# ---------------------------------------------------------------------------
+_EXPORT_SECTIONS = ("groups", "proposals", "results")
+_EXPORT_FORMATS = ("csv", "xlsx")
+
+_GROUPS_HEADERS = [
+    "group_key",
+    "root_cause",
+    "action",
+    "booking_vehicle",
+    "currency",
+    "count",
+    "proposed_count",
+    "approved_count",
+    "above_materiality_count",
+    "total_amount",
+]
+
+_PROPOSALS_HEADERS = [
+    "order_reference",
+    "stripe_charge_id",
+    "netsuite_internal_id",
+    "netsuite_record_type",
+    "stripe_amount",
+    "netsuite_amount",
+    "variance_amount",
+    "proposed_amount",
+    "currency",
+    "status",
+    "above_materiality",
+    "root_cause",
+    "action",
+    "booking_vehicle",
+    "narrative",
+]
+_PROPOSALS_XLSX_EXTRA_HEADERS = ["proposal_id", "run_id", "source", "decided_by", "decided_at", "created_at"]
+
+_RESULTS_HEADERS = [
+    "match_type",
+    "confidence",
+    "status",
+    "bucket",
+    "stripe_amount",
+    "netsuite_amount",
+    "variance_amount",
+    "variance_type",
+    "variance_explanation",
+    "currency",
+    "match_rule",
+]
+
+
+def _groups_export_row(g: ResolutionGroupSummary) -> list:
+    return [
+        g.group_key,
+        g.root_cause,
+        g.action,
+        g.booking_vehicle,
+        g.currency,
+        g.count,
+        g.proposed_count,
+        g.approved_count,
+        g.above_materiality_count,
+        g.total_amount,
+    ]
+
+
+def _proposals_export_row(
+    p: ReconResolutionProposal,
+    order_reference: str | None,
+    netsuite_internal_id: str | None,
+    netsuite_record_type: str | None,
+    stripe_amount: Decimal | None,
+    netsuite_amount: Decimal | None,
+    variance_amount: Decimal | None,
+) -> list:
+    return [
+        order_reference,
+        p.charge_source_id,
+        netsuite_internal_id,
+        netsuite_record_type,
+        stripe_amount,
+        netsuite_amount,
+        variance_amount,
+        p.proposed_amount,
+        p.currency,
+        p.status,
+        p.above_materiality,
+        p.root_cause,
+        p.action,
+        p.booking_vehicle,
+        p.narrative,
+    ]
+
+
+def _proposals_export_xlsx_extra(p: ReconResolutionProposal) -> list:
+    return [
+        str(p.id),
+        str(p.run_id),
+        p.source,
+        str(p.decided_by) if p.decided_by else None,
+        p.decided_at,
+        p.created_at,
+    ]
+
+
+def _results_export_row(r: ReconciliationResult) -> list:
+    return [
+        r.match_type,
+        r.confidence,
+        r.status,
+        r.bucket,
+        r.stripe_amount,
+        r.netsuite_amount,
+        r.variance_amount,
+        r.variance_type,
+        r.variance_explanation,
+        r.currency,
+        r.match_rule,
+    ]
+
+
+def _write_csv(headers: list[str], rows: list[list]) -> io.BytesIO:
+    """stdlib csv into StringIO, then re-wrapped as bytes for StreamingResponse.
+    Decimal cells stringify via csv.writer's own str() conversion — e.g.
+    Decimal('9.00') -> '9.00', never float notation."""
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(headers)
+    writer.writerows(rows)
+    return io.BytesIO(output.getvalue().encode("utf-8"))
+
+
+@router.get("/runs/{run_id}/export")
+async def export_run_section(
+    run_id: str,
+    user: Annotated[User, Depends(require_feature("reconciliation"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    section: str,
+    format: str = "csv",
+    group_key: str | None = None,
+    currency: str | None = None,
+    action: str | None = None,
+):
+    """Read-only per-section export of a worksheet (groups / proposals /
+    classic results) as CSV or a formatted XLSX sheet. No
+    ``recon_resolution_ui`` gate: read endpoints run for every recon tenant —
+    that flag only gates the page and the four mutation endpoints. Data
+    assembly reuses the same queries as GET .../resolution-summary
+    (``_fetch_group_summaries``), ``list_group_proposals``
+    (``_build_proposal_query``), and the evidence endpoint's results query —
+    never a re-invented join. ``group_key``/``currency``/``action`` only
+    narrow the ``proposals`` section; groups/results always export the full
+    run."""
+    if section not in _EXPORT_SECTIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"section must be one of {_EXPORT_SECTIONS}",
+        )
+    if format not in _EXPORT_FORMATS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"format must be one of {_EXPORT_FORMATS}",
+        )
+
+    run = await _get_run_or_404(db, user.tenant_id, run_id)
+    run_uuid = run.id
+
+    xlsx_extra_headers: list[str] = []
+    xlsx_extra_rows: list[list] = []
+
+    if section == "groups":
+        groups = await _fetch_group_summaries(db, run_uuid, user.tenant_id)
+        csv_headers = _GROUPS_HEADERS
+        csv_rows = [_groups_export_row(g) for g in groups]
+    elif section == "proposals":
+        stmt = _build_proposal_query(run_uuid, user.tenant_id, group_key=group_key, action=action, currency=currency)
+        rows = (await db.execute(stmt)).all()
+        csv_headers = _PROPOSALS_HEADERS
+        csv_rows = [_proposals_export_row(*row) for row in rows]
+        xlsx_extra_headers = _PROPOSALS_XLSX_EXTRA_HEADERS
+        xlsx_extra_rows = [_proposals_export_xlsx_extra(row[0]) for row in rows]
+    else:
+        results = (
+            (
+                await db.execute(
+                    select(ReconciliationResult).where(
+                        ReconciliationResult.run_id == run_uuid,
+                        ReconciliationResult.tenant_id == user.tenant_id,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        csv_headers = _RESULTS_HEADERS
+        csv_rows = [_results_export_row(r) for r in results]
+
+    filename_stub = f"recon-{section}-{run.date_from.isoformat()}-{run.date_to.isoformat()}"
+    if group_key:
+        filename_stub += f"-{group_key}"
+
+    if format == "csv":
+        buf = _write_csv(csv_headers, csv_rows)
+        return StreamingResponse(
+            buf,
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{filename_stub}.csv"'},
+        )
+
+    xlsx_headers = csv_headers + xlsx_extra_headers
+    if xlsx_extra_headers:
+        xlsx_rows = [list(row) + extra for row, extra in zip(csv_rows, xlsx_extra_rows)]
+    else:
+        xlsx_rows = csv_rows
+    generator = EvidencePackGenerator()
+    excel_bytes = generator.generate_section_excel(title=section.capitalize(), headers=xlsx_headers, rows=xlsx_rows)
+    return StreamingResponse(
+        excel_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename_stub}.xlsx"'},
     )
 
 
