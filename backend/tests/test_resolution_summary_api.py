@@ -161,7 +161,9 @@ async def test_above_materiality_count_excludes_decided_proposals(db, tenant_a):
 
 async def test_group_proposals_listing_paginated(db, tenant_a):
     user, run = await _seed(db, tenant_a)
-    page = await list_group_proposals(str(run.id), "fees:book_fee_line:deposit", user=user, db=db, limit=1, offset=0)
+    page = await list_group_proposals(
+        str(run.id), group_key="fees:book_fee_line:deposit", user=user, db=db, limit=1, offset=0
+    )
     assert len(page) == 1
     assert page[0].action == "book_fee_line"
 
@@ -191,7 +193,7 @@ async def test_group_proposals_listing_includes_identifiers_when_matched(db, ten
     await db.flush()
     await plan_resolutions(str(run.id), user=user, db=db)
 
-    page = await list_group_proposals(str(run.id), "fees:book_fee_line:deposit", user=user, db=db)
+    page = await list_group_proposals(str(run.id), group_key="fees:book_fee_line:deposit", user=user, db=db)
     assert len(page) == 1
     item = page[0]
     assert item.order_reference == "R9"
@@ -204,13 +206,142 @@ async def test_group_proposals_listing_omits_identifiers_when_unmatched(db, tena
     """A1: an unmatched result (no deposit_id) surfaces order ref + charge id
     but leaves the NetSuite fields None rather than erroring the join."""
     user, run = await _seed(db, tenant_a)
-    page = await list_group_proposals(str(run.id), "fees:book_fee_line:deposit", user=user, db=db)
+    page = await list_group_proposals(str(run.id), group_key="fees:book_fee_line:deposit", user=user, db=db)
     assert len(page) == 2
     for item in page:
         assert item.order_reference == "R1"
         assert item.stripe_charge_id is not None
         assert item.netsuite_internal_id is None
         assert item.netsuite_record_type is None
+
+
+async def test_group_proposals_listing_carries_amounts(db, tenant_a):
+    """Task 1: the response carries the matched result's own stripe/netsuite/
+    variance amounts (A1 drill-down columns) — populated off the enrichment
+    join already performed for the identifiers, no new query."""
+    user, run = await _seed(db, tenant_a)
+    page = await list_group_proposals(str(run.id), group_key="fees:book_fee_line:deposit", user=user, db=db)
+    assert len(page) == 2
+    variances = sorted(item.variance_amount for item in page)
+    assert variances == [Decimal("9.00"), Decimal("120.00")]
+    for item in page:
+        assert item.stripe_amount is not None
+        assert item.netsuite_amount is not None
+        assert item.stripe_amount - item.netsuite_amount == item.variance_amount
+
+
+async def test_needs_human_action_filter_spans_groups_without_group_key(db, tenant_a):
+    """Task 1: action=needs_human with no group_key must fetch across every
+    root_cause/booking_vehicle combination sharing that action in one call —
+    the FE's cross-group needs-human worksheet."""
+    user, _ = await create_test_user(db, tenant_a)
+    await enable_feature_flag(db, tenant_a.id, "recon_resolution_ui")
+    run = await create_test_recon_run(db, tenant_a.id, status="completed")
+    # chargeback -> needs_human (planner rule 3, unconditional policy gate).
+    await create_test_recon_result(
+        db,
+        tenant_a.id,
+        run.id,
+        status="pending",
+        bucket="needs_review",
+        match_type="deterministic",
+        variance_type="chargeback",
+        variance_amount=Decimal("42"),
+        stripe_amount=Decimal("42"),
+        netsuite_amount=Decimal("0"),
+        evidence={"charge_source_id": "ch_c", "order_reference": "R3"},
+    )
+    # manual_adjustment -> needs_human (planner rule 10, catch-all) — a
+    # DIFFERENT root_cause, proving the fetch spans multiple group_keys.
+    await create_test_recon_result(
+        db,
+        tenant_a.id,
+        run.id,
+        status="pending",
+        bucket="needs_review",
+        match_type="exception",
+        variance_type="manual_adjustment",
+        variance_amount=Decimal("15"),
+        stripe_amount=Decimal("115"),
+        netsuite_amount=Decimal("100"),
+        evidence={"charge_source_id": "ch_m", "order_reference": "R5"},
+    )
+    run.matches_count = 0
+    await db.flush()
+    await plan_resolutions(str(run.id), user=user, db=db)
+
+    page = await list_group_proposals(str(run.id), user=user, db=db, action="needs_human")
+    assert len(page) == 2
+    assert {p.root_cause for p in page} == {"chargeback", "manual_adjustment"}
+    assert all(p.action == "needs_human" for p in page)
+
+
+async def test_needs_human_action_filter_http_round_trip(db, admin_user, client):
+    """Task 6 hardening: an actual HTTP request through the ASGI router (not a
+    direct function call, unlike every other test in this module) proves the
+    groupless route is wired end to end — auth, require_feature("reconciliation"),
+    query-param binding, and JSON serialization all fire for real."""
+    user, headers = admin_user
+    await enable_feature_flag(db, user.tenant_id, "recon_resolution_ui")
+    await enable_feature_flag(db, user.tenant_id, "reconciliation")
+    run = await create_test_recon_run(db, user.tenant_id, status="completed")
+    # chargeback -> needs_human (planner rule 3).
+    await create_test_recon_result(
+        db,
+        user.tenant_id,
+        run.id,
+        status="pending",
+        bucket="needs_review",
+        match_type="deterministic",
+        variance_type="chargeback",
+        variance_amount=Decimal("42"),
+        stripe_amount=Decimal("42"),
+        netsuite_amount=Decimal("0"),
+        evidence={"charge_source_id": "ch_c", "order_reference": "R3"},
+    )
+    # manual_adjustment -> needs_human (planner rule 10, catch-all) — a
+    # DIFFERENT root_cause, proving the fetch spans multiple group_keys.
+    await create_test_recon_result(
+        db,
+        user.tenant_id,
+        run.id,
+        status="pending",
+        bucket="needs_review",
+        match_type="exception",
+        variance_type="manual_adjustment",
+        variance_amount=Decimal("15"),
+        stripe_amount=Decimal("115"),
+        netsuite_amount=Decimal("100"),
+        evidence={"charge_source_id": "ch_m", "order_reference": "R5"},
+    )
+    run.matches_count = 0
+    await db.flush()
+    await plan_resolutions(str(run.id), user=user, db=db)
+
+    resp = await client.get(
+        f"/api/v1/reconciliation/runs/{run.id}/resolution-groups/proposals",
+        params={"action": "needs_human"},
+        headers=headers,
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body) == 2
+    assert {item["root_cause"] for item in body} == {"chargeback", "manual_adjustment"}
+    assert all(item["action"] == "needs_human" for item in body)
+    variances = {item["root_cause"]: Decimal(str(item["variance_amount"])) for item in body}
+    assert variances == {"chargeback": Decimal("42"), "manual_adjustment": Decimal("15")}
+
+
+async def test_group_proposals_listing_absent_filters_unchanged(db, tenant_a):
+    """Task 1 regression: calling with only group_key (no action) — the
+    pre-existing calling convention — must return exactly what it did before
+    the action filter was added."""
+    user, run = await _seed(db, tenant_a)
+    page = await list_group_proposals(str(run.id), group_key="timing:carry_forward:none", user=user, db=db)
+    assert len(page) == 1
+    assert page[0].root_cause == "timing"
+    assert page[0].action == "carry_forward"
 
 
 async def _seed_multi_currency_fees(db, tenant):

@@ -12,6 +12,7 @@ from app.services.reconciliation.evidence_service import (
     _EXCEPTION_FILL,
     _SUGGESTED_FILL,
     EvidencePackGenerator,
+    escape_csv_injection,
 )
 
 
@@ -698,3 +699,66 @@ class TestEvidencePackGenerator:
                 row_idx,
                 cell_rgb,
             )
+
+
+class TestGenerateSectionExcelCSVInjectionEscaping:
+    """Task-6 hardening: the worksheet-export surface (Task 2) must neutralize
+    OWASP CSV-injection payloads (leading =, +, -, @) in string cells, while
+    leaving Decimal/number cells — including negative amounts — untouched."""
+
+    def test_escapes_every_leading_trigger_char_and_openpyxl_never_autotypes_formula(self):
+        generator = EvidencePackGenerator()
+        malicious = [
+            '=HYPERLINK("http://evil.example","click")',
+            "+1+1",
+            "-2+3",
+            "@SUM(1,1)",
+        ]
+        buf = generator.generate_section_excel(title="Test", headers=["narrative"], rows=[[v] for v in malicious])
+        wb = load_workbook(buf)
+        ws = wb.active
+        for offset, original in enumerate(malicious):
+            cell = ws.cell(row=2 + offset, column=1)
+            assert cell.value == f"'{original}", f"expected quote-prefixed escape for {original!r}, got {cell.value!r}"
+            # The "=" case is the one openpyxl itself would otherwise auto-type
+            # as a formula cell (data_type='f'); escaping must keep it a plain string.
+            assert cell.data_type == "s", f"{original!r} must never be typed as a formula cell"
+
+    def test_plain_narrative_not_starting_with_trigger_char_is_untouched(self):
+        generator = EvidencePackGenerator()
+        buf = generator.generate_section_excel(title="Test", headers=["narrative"], rows=[["payout not yet settled"]])
+        wb = load_workbook(buf)
+        ws = wb.active
+        assert ws.cell(row=2, column=1).value == "payout not yet settled"
+
+    def test_negative_decimal_amount_not_escaped_and_stays_a_number_cell(self):
+        """A Decimal amount is never a `str` at write time — a negative
+        variance like Decimal('-3.20') must render as the NUMBER -3.2, not be
+        mistaken for a formula-injection string starting with '-'."""
+        generator = EvidencePackGenerator()
+        buf = generator.generate_section_excel(title="Test", headers=["variance_amount"], rows=[[Decimal("-3.20")]])
+        wb = load_workbook(buf)
+        ws = wb.active
+        cell = ws.cell(row=2, column=1)
+        assert cell.value == -3.2
+        assert isinstance(cell.value, float)
+        assert cell.data_type == "n"
+
+    def test_escapes_leading_tab_and_carriage_return_per_full_owasp_set(self):
+        """OWASP's CSV-injection trigger-char set also includes tab (\\t) and
+        carriage return (\\r) — some spreadsheet apps skip leading whitespace
+        before evaluating a formula prefix, so a leading tab/CR ahead of '='
+        is still a live injection vector, not just the bare = + - @ chars."""
+        assert escape_csv_injection("\t=SUM(1,1)") == "'\t=SUM(1,1)"
+        assert escape_csv_injection("\r=SUM(1,1)") == "'\r=SUM(1,1)"
+
+    def test_generate_section_excel_escapes_leading_tab_and_carriage_return(self):
+        generator = EvidencePackGenerator()
+        malicious = ["\t=SUM(1,1)", "\r=SUM(1,1)"]
+        buf = generator.generate_section_excel(title="Test", headers=["narrative"], rows=[[v] for v in malicious])
+        wb = load_workbook(buf)
+        ws = wb.active
+        for offset, original in enumerate(malicious):
+            cell = ws.cell(row=2 + offset, column=1)
+            assert cell.value == f"'{original}", f"expected quote-prefixed escape for {original!r}, got {cell.value!r}"
+            assert cell.data_type == "s"

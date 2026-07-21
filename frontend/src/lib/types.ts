@@ -1057,4 +1057,12 @@ export interface ReconResolutionProposal {
   stripe_charge_id: string | null;
   netsuite_internal_id: string | null;
   netsuite_record_type: string | null;
+  // The matched ReconciliationResult's own amounts (Task 1 drill-down
+  // columns) — Decimal-as-string like proposed_amount, or null when the
+  // proposal has no enriched result match. Required-nullable: the backend
+  // always sends these three keys (Task 1), so `null` (no match) is the
+  // faithful "absent" representation, not an omitted key.
+  stripe_amount: string | null;
+  netsuite_amount: string | null;
+  variance_amount: string | null;
 }

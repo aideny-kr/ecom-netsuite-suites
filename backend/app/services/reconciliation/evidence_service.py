@@ -43,6 +43,26 @@ _THIN_BORDER = Border(
     bottom=Side(style="thin"),
 )
 
+# OWASP CSV-injection mitigation (used by generate_section_excel below AND by
+# reconciliation.py's _write_csv, imported from here as the single source).
+# Full OWASP trigger set: =, +, -, @ plus tab and carriage return — some
+# spreadsheet apps skip leading whitespace/newlines before evaluating a
+# formula prefix, so a leading tab/CR ahead of "=" is still a live vector.
+_CSV_INJECTION_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def escape_csv_injection(value: Any) -> Any:
+    """Prefix a single quote onto a `str` cell that begins with =, +, -, @,
+    tab, or carriage return so neither Excel/other spreadsheet apps nor
+    openpyxl's own auto-typing (which tags a leading '=' as a formula cell)
+    execute it. Applies ONLY to `str` values — Decimal/number/bool/None/
+    datetime cells pass through untouched, so a negative amount (e.g.
+    Decimal('-3.20'), already cast to a NUMBER by the caller) is never
+    mistaken for a formula-injection string."""
+    if isinstance(value, str) and value.startswith(_CSV_INJECTION_PREFIXES):
+        return "'" + value
+    return value
+
 
 class EvidencePackGenerator:
     """Generate evidence pack Excel files from reconciliation results."""
@@ -80,6 +100,46 @@ class EvidencePackGenerator:
         # --- Proposals sheet (summary-first recon rework, Phase 1) ---
         if proposals:
             self._write_proposals_sheet(wb, proposals)
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return buf
+
+    def generate_section_excel(self, title: str, headers: list[str], rows: list[list[Any]]) -> io.BytesIO:
+        """Single-sheet workbook for one worksheet-section export (the
+        groups/proposals/results CSV/XLSX export endpoint). Reuses the same
+        header styling as ``_write_results`` (blue fill, white bold font,
+        thin border) but applies no per-bucket row fill — this is a generic
+        tabular dump, not the full evidence pack. ``Decimal`` cell values are
+        cast to ``float`` (openpyxl has no native Decimal cell type); the CSV
+        sibling path renders exact Decimal strings instead. Timezone-aware
+        ``datetime`` values (our ``DateTime(timezone=True)`` columns) have
+        their tzinfo stripped — openpyxl raises on a tz-aware datetime cell."""
+        wb = Workbook()
+        ws = wb.active
+        ws.title = title[:31]  # Excel sheet-name length limit
+
+        for col_idx, header in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col_idx, value=header)
+            cell.fill = _HEADER_FILL
+            cell.font = _HEADER_FONT
+            cell.border = _THIN_BORDER
+            cell.alignment = Alignment(horizontal="center")
+
+        for row_idx, row in enumerate(rows, 2):
+            for col_idx, value in enumerate(row, 1):
+                if isinstance(value, Decimal):
+                    value = float(value)
+                elif isinstance(value, datetime) and value.tzinfo is not None:
+                    value = value.astimezone(timezone.utc).replace(tzinfo=None)
+                value = escape_csv_injection(value)
+                cell = ws.cell(row=row_idx, column=col_idx, value=value)
+                cell.border = _THIN_BORDER
+
+        for col_idx in range(1, len(headers) + 1):
+            letter = get_column_letter(col_idx)
+            ws.column_dimensions[letter].width = max(15, len(headers[col_idx - 1]) + 4)
 
         buf = io.BytesIO()
         wb.save(buf)
