@@ -11,6 +11,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { ResolutionGroupItems } from "@/components/reconciliation/resolution-group-items";
+import { ExportMenu } from "@/components/reconciliation/export-menu";
 import type { ReconResolutionGroup, ReconResolutionProposal } from "@/lib/types";
 
 // Booking-vehicle chip copy + styling. journalentry is the flagged fallback —
@@ -181,6 +182,7 @@ export function ResolutionGroupsTable({
             · {groups.length.toLocaleString()} groups
           </span>
         </h2>
+        <ExportMenu runId={runId} params={{ section: "groups" }} />
       </div>
       <div className="overflow-x-auto rounded-xl border bg-card shadow-soft">
         <Table>
@@ -321,6 +323,10 @@ export function ResolutionGroupsTable({
                                 className="flex-1 rounded-md border bg-background px-3 py-1.5 text-[13px] text-foreground placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50"
                               />
                               {rejectButton}
+                              <ExportMenu
+                                runId={runId}
+                                params={{ section: "proposals", group_key: group.group_key, currency: group.currency }}
+                              />
                             </div>
                           )}
                           <ResolutionGroupItems
@@ -345,12 +351,13 @@ export function ResolutionGroupsTable({
 }
 
 interface NeedsHumanWorksheetProps {
+  runId: string;
   proposals: ReconResolutionProposal[] | undefined;
   isLoading: boolean;
   onInvestigate: (proposal: ReconResolutionProposal) => void;
 }
 
-export function NeedsHumanWorksheet({ proposals, isLoading, onInvestigate }: NeedsHumanWorksheetProps) {
+export function NeedsHumanWorksheet({ runId, proposals, isLoading, onInvestigate }: NeedsHumanWorksheetProps) {
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between gap-3">
@@ -362,6 +369,7 @@ export function NeedsHumanWorksheet({ proposals, isLoading, onInvestigate }: Nee
             </span>
           )}
         </h2>
+        <ExportMenu runId={runId} params={{ section: "proposals", action: "needs_human" }} />
       </div>
       {isLoading ? (
         <p className="text-[13px] text-muted-foreground">Loading…</p>

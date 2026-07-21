@@ -285,6 +285,43 @@ describe("ResolutionGroupsTable", () => {
     render(<ResolutionGroupsTable {...baseProps({ groups: [] })} />);
     expect(screen.getByText(/no resolution groups/i)).toBeInTheDocument();
   });
+
+  describe("ExportMenu placements (Task 5)", () => {
+    it("renders an Export trigger in the section header with section=groups", () => {
+      render(<ResolutionGroupsTable {...baseProps()} />);
+      fireEvent.click(screen.getByRole("button", { name: /export/i }));
+      const [csv] = screen.getAllByRole("menuitem");
+      expect(csv).toHaveAttribute(
+        "href",
+        "/api/v1/reconciliation/runs/r1/export?section=groups&format=csv",
+      );
+    });
+
+    it("renders a per-group Export trigger in the expanded panel with section=proposals + group_key + currency", () => {
+      render(
+        <ResolutionGroupsTable
+          {...baseProps({ expandedKey: "fees:book_fee_line:deposit:USD" })}
+        />,
+      );
+      // Two triggers now exist: the section header's (section=groups) and the
+      // expanded group's (section=proposals) — the group-level one is last.
+      const triggers = screen.getAllByRole("button", { name: /export/i });
+      expect(triggers).toHaveLength(2);
+      fireEvent.click(triggers[1]);
+      const items = screen.getAllByRole("menuitem");
+      expect(items[0]).toHaveAttribute(
+        "href",
+        `/api/v1/reconciliation/runs/r1/export?section=proposals&format=csv&group_key=${encodeURIComponent(
+          "fees:book_fee_line:deposit",
+        )}&currency=USD`,
+      );
+    });
+
+    it("does not render a per-group Export trigger when the group is collapsed", () => {
+      render(<ResolutionGroupsTable {...baseProps()} />);
+      expect(screen.getAllByRole("button", { name: /export/i })).toHaveLength(1);
+    });
+  });
 });
 
 describe("NeedsHumanWorksheet", () => {
@@ -316,7 +353,7 @@ describe("NeedsHumanWorksheet", () => {
   });
 
   it("renders order ref, stripe charge, amount, root cause, and narrative columns", () => {
-    render(<NeedsHumanWorksheet proposals={[proposal]} isLoading={false} onInvestigate={vi.fn()} />);
+    render(<NeedsHumanWorksheet runId="r1" proposals={[proposal]} isLoading={false} onInvestigate={vi.fn()} />);
     expect(screen.getByText("R441209875")).toBeInTheDocument();
     expect(screen.getByText("ch_3RmFa3Jd")).toBeInTheDocument();
     expect(screen.getByText(/\$1,940\.00/)).toBeInTheDocument();
@@ -325,14 +362,14 @@ describe("NeedsHumanWorksheet", () => {
   });
 
   it("shows a dash for NetSuite ID when there is no linked deposit", () => {
-    render(<NeedsHumanWorksheet proposals={[proposal]} isLoading={false} onInvestigate={vi.fn()} />);
+    render(<NeedsHumanWorksheet runId="r1" proposals={[proposal]} isLoading={false} onInvestigate={vi.fn()} />);
     const row = screen.getByText("R441209875").closest("tr")!;
     expect(within(row).getByText("—")).toBeInTheDocument();
   });
 
   it("fires onInvestigate with the proposal when its button is clicked", () => {
     const onInvestigate = vi.fn();
-    render(<NeedsHumanWorksheet proposals={[proposal]} isLoading={false} onInvestigate={onInvestigate} />);
+    render(<NeedsHumanWorksheet runId="r1" proposals={[proposal]} isLoading={false} onInvestigate={onInvestigate} />);
     fireEvent.click(screen.getByText(/investigate in chat/i));
     expect(onInvestigate).toHaveBeenCalledWith(proposal);
   });
@@ -340,42 +377,52 @@ describe("NeedsHumanWorksheet", () => {
   it("copies the raw identifier value when a segment is clicked", () => {
     const writeText = vi.fn();
     Object.assign(navigator, { clipboard: { writeText } });
-    render(<NeedsHumanWorksheet proposals={[proposal]} isLoading={false} onInvestigate={vi.fn()} />);
+    render(<NeedsHumanWorksheet runId="r1" proposals={[proposal]} isLoading={false} onInvestigate={vi.fn()} />);
     fireEvent.click(screen.getByText("R441209875"));
     expect(writeText).toHaveBeenCalledWith("R441209875");
   });
 
   it("shows the empty state when there are no needs-human items", () => {
-    render(<NeedsHumanWorksheet proposals={[]} isLoading={false} onInvestigate={vi.fn()} />);
+    render(<NeedsHumanWorksheet runId="r1" proposals={[]} isLoading={false} onInvestigate={vi.fn()} />);
     expect(screen.getByText(/no items need human review/i)).toBeInTheDocument();
   });
 
+  it("renders an Export trigger in the header with section=proposals + action=needs_human (Task 5)", () => {
+    render(<NeedsHumanWorksheet runId="r1" proposals={[proposal]} isLoading={false} onInvestigate={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: /export/i }));
+    const [csv] = screen.getAllByRole("menuitem");
+    expect(csv).toHaveAttribute(
+      "href",
+      "/api/v1/reconciliation/runs/r1/export?section=proposals&format=csv&action=needs_human",
+    );
+  });
+
   it("shows a loading state", () => {
-    render(<NeedsHumanWorksheet proposals={undefined} isLoading={true} onInvestigate={vi.fn()} />);
+    render(<NeedsHumanWorksheet runId="r1" proposals={undefined} isLoading={true} onInvestigate={vi.fn()} />);
     expect(screen.getByText(/loading/i)).toBeInTheDocument();
   });
 
   describe("root-cause chip severity", () => {
     it("colors chargeback/dispute chips critical (red)", () => {
-      render(<NeedsHumanWorksheet proposals={[proposal]} isLoading={false} onInvestigate={vi.fn()} />);
+      render(<NeedsHumanWorksheet runId="r1" proposals={[proposal]} isLoading={false} onInvestigate={vi.fn()} />);
       expect(screen.getByText(/chargebacks/i).className).toContain("red");
     });
 
     it("colors ambiguous-match (amount_mismatch) chips as a warning (amber)", () => {
       const ambiguous = { ...proposal, root_cause: "amount_mismatch" };
-      render(<NeedsHumanWorksheet proposals={[ambiguous]} isLoading={false} onInvestigate={vi.fn()} />);
+      render(<NeedsHumanWorksheet runId="r1" proposals={[ambiguous]} isLoading={false} onInvestigate={vi.fn()} />);
       expect(screen.getByText(/amount mismatch/i).className).toContain("amber");
     });
 
     it("colors payout-unsettled/missing-deposit chips as a warning (amber)", () => {
       const unsettled = { ...proposal, root_cause: "missing_in_netsuite" };
-      render(<NeedsHumanWorksheet proposals={[unsettled]} isLoading={false} onInvestigate={vi.fn()} />);
+      render(<NeedsHumanWorksheet runId="r1" proposals={[unsettled]} isLoading={false} onInvestigate={vi.fn()} />);
       expect(screen.getByText(/missing in netsuite/i).className).toContain("amber");
     });
 
     it("falls back to neutral styling for other root causes", () => {
       const other = { ...proposal, root_cause: "duplicate" };
-      render(<NeedsHumanWorksheet proposals={[other]} isLoading={false} onInvestigate={vi.fn()} />);
+      render(<NeedsHumanWorksheet runId="r1" proposals={[other]} isLoading={false} onInvestigate={vi.fn()} />);
       const chip = screen.getByText(/duplicate deposits/i);
       expect(chip.className).not.toContain("red");
       expect(chip.className).not.toContain("amber");

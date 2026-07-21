@@ -199,6 +199,16 @@ describe("ReconciliationPage four buckets", () => {
     expect(screen.getByText(/skipped 335/)).toBeInTheDocument();
   });
 
+  it("renders an Export menu beside the classic bucket results table (section=results)", () => {
+    render(<ReconciliationPage />);
+    fireEvent.click(screen.getByRole("button", { name: /export/i }));
+    const [csv] = screen.getAllByRole("menuitem");
+    expect(csv).toHaveAttribute(
+      "href",
+      "/api/v1/reconciliation/runs/r1/export?section=results&format=csv",
+    );
+  });
+
   it("does NOT carry a typed note across buckets", () => {
     render(<ReconciliationPage />);
     // Type a note on the Matches bucket.

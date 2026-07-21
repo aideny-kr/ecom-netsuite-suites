@@ -12,6 +12,7 @@ import { CloseChecklist } from "@/components/reconciliation/close-checklist";
 import { BulkApprovalCard } from "@/components/reconciliation/bulk-approval-card";
 import { ResolutionSummaryHeader } from "@/components/reconciliation/resolution-summary-header";
 import { ResolutionGroupsTable, NeedsHumanWorksheet } from "@/components/reconciliation/resolution-groups-table";
+import { ExportMenu } from "@/components/reconciliation/export-menu";
 import {
   useReconRuns,
   useReconResults,
@@ -294,6 +295,11 @@ export default function ReconciliationPage() {
         )}
 
         {/* Results table */}
+        {selectedRunId && (
+          <div className="flex justify-end">
+            <ExportMenu runId={selectedRunId} params={{ section: "results" }} />
+          </div>
+        )}
         <ReconResultsTable
           results={results || []}
           onInvestigate={handleInvestigate}
@@ -406,6 +412,7 @@ export default function ReconciliationPage() {
             onInvestigate={handleInvestigateProposal}
           />
           <NeedsHumanWorksheet
+            runId={selectedRunId}
             proposals={needsHumanProposals.data}
             isLoading={needsHumanProposals.isLoading}
             onInvestigate={handleInvestigateProposal}
