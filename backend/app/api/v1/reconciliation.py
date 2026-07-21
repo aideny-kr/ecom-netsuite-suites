@@ -10,6 +10,7 @@ import asyncio
 import csv
 import io
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -1485,6 +1486,17 @@ def _results_export_row(r: ReconciliationResult) -> list:
     ]
 
 
+_FILENAME_UNSAFE_CHARS_RE = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def _sanitize_filename_component(value: str) -> str:
+    """Replace any char outside [A-Za-z0-9._-] with '-'. `group_key` is
+    caller-supplied and lands directly in the Content-Disposition filename —
+    colons (illegal in a Windows filename) are the common case, but this also
+    closes off path-traversal/header-injection characters generally."""
+    return _FILENAME_UNSAFE_CHARS_RE.sub("-", value)
+
+
 def _write_csv(headers: list[str], rows: list[list]) -> io.BytesIO:
     """stdlib csv into StringIO, then re-wrapped as bytes for StreamingResponse.
     Decimal cells stringify via csv.writer's own str() conversion — e.g.
@@ -1566,7 +1578,7 @@ async def export_run_section(
 
     filename_stub = f"recon-{section}-{run.date_from.isoformat()}-{run.date_to.isoformat()}"
     if group_key:
-        filename_stub += f"-{group_key}"
+        filename_stub += f"-{_sanitize_filename_component(group_key)}"
 
     if format == "csv":
         buf = _write_csv(csv_headers, csv_rows)

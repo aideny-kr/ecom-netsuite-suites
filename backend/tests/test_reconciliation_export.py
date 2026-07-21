@@ -506,6 +506,9 @@ async def test_export_results_negative_variance_not_escaped_stays_numeric(db, te
 
 
 async def test_export_filename_includes_section_dates_and_group_key(db, tenant_a):
+    """group_key's own colons (root_cause:action:booking_vehicle) are illegal
+    in a Windows filename, so they must come out sanitized to dashes — the
+    filename is a download artifact, not the raw query param."""
     user, run = await _seed_run_with_groups(db, tenant_a)
     response = await export_run_section(
         str(run.id),
@@ -516,5 +519,27 @@ async def test_export_filename_includes_section_dates_and_group_key(db, tenant_a
         group_key="fees:book_fee_line:deposit",
     )
     disposition = response.headers["content-disposition"]
-    expected = f"recon-proposals-{run.date_from.isoformat()}-{run.date_to.isoformat()}-fees:book_fee_line:deposit.csv"
+    expected = f"recon-proposals-{run.date_from.isoformat()}-{run.date_to.isoformat()}-fees-book_fee_line-deposit.csv"
+    assert expected in disposition
+    assert ":" not in disposition
+
+
+async def test_export_filename_sanitizes_any_char_outside_safe_set(db, tenant_a):
+    """Every char outside [A-Za-z0-9._-] becomes '-' — not just colons.
+    group_key is caller-supplied and lands straight in a response header, so
+    this also closes off header-injection/path-traversal characters, not
+    only the Windows-filename concern. Still root_cause:action:vehicle (3
+    colon-separated parts, per `_parse_group_key`) — the unsafe chars (/, space,
+    *) live inside the parts themselves."""
+    user, run = await _seed_run_with_groups(db, tenant_a)
+    response = await export_run_section(
+        str(run.id),
+        user=user,
+        db=db,
+        section="proposals",
+        format="csv",
+        group_key="fe/es:bo ok:de*it",
+    )
+    disposition = response.headers["content-disposition"]
+    expected = f'filename="recon-proposals-{run.date_from.isoformat()}-{run.date_to.isoformat()}-fe-es-bo-ok-de-it.csv"'
     assert expected in disposition
