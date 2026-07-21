@@ -275,6 +275,23 @@ describe("ResolutionGroupsTable", () => {
       expect(screen.getByText(/payout not yet settled/i)).toBeInTheDocument();
     });
 
+    it("shows the washout label + descriptor and Acknowledge action for washout groups", () => {
+      const washout = {
+        ...feeGroup,
+        group_key: "washout:carry_forward:none",
+        root_cause: "washout",
+        action: "carry_forward",
+        booking_vehicle: "none",
+        above_materiality_count: 0,
+      };
+      render(<ResolutionGroupsTable {...baseProps({ groups: [washout] })} />);
+      expect(screen.getByText("Washout")).toBeInTheDocument();
+      expect(screen.getByText(/canceled order, nothing to book/i)).toBeInTheDocument();
+      // washout is NOT a recency hold — descriptor must not read as a payout wait
+      expect(screen.queryByText(/payout not yet settled/i)).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /acknowledge/i })).toBeInTheDocument();
+    });
+
     it("shows 'payout not yet settled' for recency-hold carry_forward groups (missing_in_netsuite root)", () => {
       const recencyHold = {
         ...feeGroup,
