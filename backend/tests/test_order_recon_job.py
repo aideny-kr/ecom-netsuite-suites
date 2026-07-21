@@ -653,7 +653,13 @@ class TestWashoutEvidenceDbBacked:
         assert candidates[0].match_type == "unmatched"
 
         run = await create_test_recon_run(db, tenant_a.id)
-        await job._store_results(run.id, candidates, refunds_by_ref=refunds_by_ref)
+        await job._store_results(
+            run.id,
+            candidates,
+            refunds_by_ref=refunds_by_ref,
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+        )
 
         stored = (
             await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id))
@@ -699,7 +705,13 @@ class TestWashoutEvidenceDbBacked:
         candidates = job.engine.match(charges, deposits)
 
         run = await create_test_recon_run(db, tenant_a.id)
-        await job._store_results(run.id, candidates, refunds_by_ref=refunds_by_ref)
+        await job._store_results(
+            run.id,
+            candidates,
+            refunds_by_ref=refunds_by_ref,
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+        )
 
         stored = (
             await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id))
@@ -739,7 +751,13 @@ class TestWashoutEvidenceDbBacked:
         candidates = job.engine.match(charges, deposits)
 
         run = await create_test_recon_run(db, tenant_a.id)
-        await job._store_results(run.id, candidates, refunds_by_ref=refunds_by_ref)
+        await job._store_results(
+            run.id,
+            candidates,
+            refunds_by_ref=refunds_by_ref,
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+        )
 
         stored = (
             await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id))
@@ -790,7 +808,13 @@ class TestWashoutEvidenceDbBacked:
         candidates = job.engine.match(charges, deposits)
 
         run = await create_test_recon_run(db, tenant_a.id)
-        await job._store_results(run.id, candidates, refunds_by_ref=refunds_by_ref)
+        await job._store_results(
+            run.id,
+            candidates,
+            refunds_by_ref=refunds_by_ref,
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+        )
 
         stored = (
             await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id))
@@ -850,7 +874,13 @@ class TestWashoutEvidenceDbBacked:
         assert candidates[0].deposit is not None
 
         run = await create_test_recon_run(db, tenant_a.id)
-        await job._store_results(run.id, candidates, refunds_by_ref=refunds_by_ref)
+        await job._store_results(
+            run.id,
+            candidates,
+            refunds_by_ref=refunds_by_ref,
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+        )
 
         stored = (
             await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id))
@@ -980,7 +1010,13 @@ class TestWashoutEvidenceDbBacked:
         candidates = job.engine.match(charges, deposits)
 
         run = await create_test_recon_run(db, tenant_a.id)
-        await job._store_results(run.id, candidates, refunds_by_ref=refunds_by_ref)
+        await job._store_results(
+            run.id,
+            candidates,
+            refunds_by_ref=refunds_by_ref,
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+        )
 
         stored = (
             await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id))
@@ -1049,7 +1085,13 @@ class TestWashoutEvidenceSameRefAmbiguity:
         assert all(c.match_type == "unmatched" for c in candidates)
 
         run = await create_test_recon_run(db, tenant_a.id)
-        await job._store_results(run.id, candidates, refunds_by_ref=refunds_by_ref)
+        await job._store_results(
+            run.id,
+            candidates,
+            refunds_by_ref=refunds_by_ref,
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+        )
 
         stored = (
             (await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id)))
@@ -1118,7 +1160,13 @@ class TestWashoutEvidenceSameRefAmbiguity:
         assert by_source["ch_sibling_matched"].deposit is not None
 
         run = await create_test_recon_run(db, tenant_a.id)
-        await job._store_results(run.id, candidates, refunds_by_ref=refunds_by_ref)
+        await job._store_results(
+            run.id,
+            candidates,
+            refunds_by_ref=refunds_by_ref,
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+        )
 
         stored = (
             (await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id)))
@@ -1164,12 +1212,245 @@ class TestWashoutEvidenceSameRefAmbiguity:
         candidates = job.engine.match(charges, deposits)
 
         run = await create_test_recon_run(db, tenant_a.id)
-        await job._store_results(run.id, candidates, refunds_by_ref=refunds_by_ref)
+        await job._store_results(
+            run.id,
+            candidates,
+            refunds_by_ref=refunds_by_ref,
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+        )
 
         stored = (
             await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id))
         ).scalar_one()
         assert stored.evidence["washout"] is True
+
+
+class TestWashoutEvidenceCrossRunAmbiguity:
+    """Cross-run ambiguity gate (gate finding [MAJOR], 2026-07-21). The in-run
+    ``ref_charge_counts`` gate (TestWashoutEvidenceSameRefAmbiguity, above)
+    only sees charges THIS RUN actually fetched (+/-_DATE_BUFFER around
+    date_from/date_to) — it is blind to a same-ref charge line sitting
+    outside that window but inside the wider +/-REF_MATCH_SANITY_DAYS window
+    the refund fetch searches. ``_cross_run_charge_ref_counts`` closes that
+    gap with a DB-side count bounded to the SAME sanity window, tenant-wide
+    (not just this run's own fetch)."""
+
+    async def test_charge_outside_run_window_but_inside_sanity_window_blocks_washout(self, db, tenant_a):
+        """A second same-ref charge dated well before this run's own charge
+        fetch window (so it never enters `candidates`) but still inside the
+        wider refund-fetch sanity window makes the ref's ownership ambiguous
+        tenant-wide — without the cross-run DB count, the in-run-visible
+        charge would wrongly wash out (the in-run gate alone can't see the
+        sibling)."""
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_xrun_current",
+            description="Framework Marketplace Order ID: R900800700-XU9EPZPD",
+            amount=Decimal("100.00"),
+            arrival_date=date(2026, 3, 15),  # inside this run's charge window
+        )
+        # Same ref, dated well outside this run's +/-_DATE_BUFFER charge
+        # fetch window ([2026-02-24, 2026-04-03] for date_from/date_to
+        # below) — never appears in `candidates` — yet still inside the
+        # +/-REF_MATCH_SANITY_DAYS sanity window ([2025-12-10, 2026-06-18]).
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_xrun_outside",
+            description="Framework Marketplace Order ID: R900800700-XU9EPZPD",
+            amount=Decimal("100.00"),
+            arrival_date=date(2026, 1, 15),
+        )
+        await create_test_payout_line(
+            db,
+            tenant_a.id,
+            source_id="re_xrun",
+            line_type="refund",
+            amount=Decimal("-100.00"),
+            fee=Decimal("0"),
+            net=Decimal("-100.00"),
+            description="Refund for order R900800700",
+            arrival_date=date(2026, 3, 17),  # +2 days, within the washout window
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        charges = await job._fetch_charges(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+        # Only the in-window charge is visible to this run — confirms the
+        # blind spot actually exists in this fixture before asserting the fix.
+        assert len(charges) == 1
+        assert charges[0].source_id == "ch_xrun_current"
+
+        order_references = {c.order_reference for c in charges if c.order_reference}
+        deposits = await job._fetch_deposits(
+            date_from=date(2026, 3, 10), date_to=date(2026, 3, 20), order_references=order_references
+        )
+        refunds_by_ref = await job._fetch_refunds(
+            date_from=date(2026, 3, 10), date_to=date(2026, 3, 20), order_references=order_references
+        )
+        candidates = job.engine.match(charges, deposits)
+        assert len(candidates) == 1
+        assert candidates[0].match_type == "unmatched"
+
+        run = await create_test_recon_run(db, tenant_a.id)
+        await job._store_results(
+            run.id,
+            candidates,
+            refunds_by_ref=refunds_by_ref,
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+        )
+
+        stored = (
+            await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id))
+        ).scalar_one()
+        assert "washout" not in stored.evidence
+
+    async def test_without_the_outside_charge_washout_still_works_regression(self, db, tenant_a):
+        """Same shape minus the outside-window sibling charge: the ordinary
+        case — a charge that's unique on its ref both in-run AND tenant-wide
+        — must still wash out normally after the cross-run gate is added."""
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_xrun_current_solo",
+            description="Framework Marketplace Order ID: R900800701-XU9EPZPD",
+            amount=Decimal("100.00"),
+            arrival_date=date(2026, 3, 15),
+        )
+        await create_test_payout_line(
+            db,
+            tenant_a.id,
+            source_id="re_xrun_solo",
+            line_type="refund",
+            amount=Decimal("-100.00"),
+            fee=Decimal("0"),
+            net=Decimal("-100.00"),
+            description="Refund for order R900800701",
+            arrival_date=date(2026, 3, 17),
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        charges = await job._fetch_charges(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+        order_references = {c.order_reference for c in charges if c.order_reference}
+        deposits = await job._fetch_deposits(
+            date_from=date(2026, 3, 10), date_to=date(2026, 3, 20), order_references=order_references
+        )
+        refunds_by_ref = await job._fetch_refunds(
+            date_from=date(2026, 3, 10), date_to=date(2026, 3, 20), order_references=order_references
+        )
+        candidates = job.engine.match(charges, deposits)
+
+        run = await create_test_recon_run(db, tenant_a.id)
+        await job._store_results(
+            run.id,
+            candidates,
+            refunds_by_ref=refunds_by_ref,
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+        )
+
+        stored = (
+            await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id))
+        ).scalar_one()
+        assert stored.evidence["washout"] is True
+
+    async def test_missing_date_window_declines_washout_fail_closed(self, db, tenant_a):
+        """Calling _store_results without a date window (date_from/date_to
+        omitted) can't run the cross-run check at all — fail CLOSED, not
+        open: washout evidence must be withheld rather than attached
+        unverified."""
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_xrun_nowindow",
+            description="Framework Marketplace Order ID: R900800702-XU9EPZPD",
+            amount=Decimal("100.00"),
+            arrival_date=date(2026, 3, 15),
+        )
+        await create_test_payout_line(
+            db,
+            tenant_a.id,
+            source_id="re_xrun_nowindow",
+            line_type="refund",
+            amount=Decimal("-100.00"),
+            fee=Decimal("0"),
+            net=Decimal("-100.00"),
+            description="Refund for order R900800702",
+            arrival_date=date(2026, 3, 17),
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        charges = await job._fetch_charges(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+        order_references = {c.order_reference for c in charges if c.order_reference}
+        deposits = await job._fetch_deposits(
+            date_from=date(2026, 3, 10), date_to=date(2026, 3, 20), order_references=order_references
+        )
+        refunds_by_ref = await job._fetch_refunds(
+            date_from=date(2026, 3, 10), date_to=date(2026, 3, 20), order_references=order_references
+        )
+        candidates = job.engine.match(charges, deposits)
+
+        run = await create_test_recon_run(db, tenant_a.id)
+        await job._store_results(run.id, candidates, refunds_by_ref=refunds_by_ref)  # no date_from/date_to
+
+        stored = (
+            await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id))
+        ).scalar_one()
+        assert "washout" not in stored.evidence
+
+    async def test_refund_currency_mismatch_no_washout_evidence_db_backed(self, db, tenant_a):
+        """DB-backed currency guard (gate finding [minor], 2026-07-21): a
+        same-ref refund line in a different currency than the charge must
+        not wash it out end-to-end, even though the raw amounts net to zero
+        within the window."""
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_xrun_currency",
+            description="Framework Marketplace Order ID: R900800703-XU9EPZPD",
+            amount=Decimal("100.00"),
+            currency="USD",
+            arrival_date=date(2026, 3, 15),
+        )
+        await create_test_payout_line(
+            db,
+            tenant_a.id,
+            source_id="re_xrun_currency",
+            line_type="refund",
+            amount=Decimal("-100.00"),
+            fee=Decimal("0"),
+            net=Decimal("-100.00"),
+            currency="EUR",
+            description="Refund for order R900800703",
+            arrival_date=date(2026, 3, 17),
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        charges = await job._fetch_charges(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+        order_references = {c.order_reference for c in charges if c.order_reference}
+        deposits = await job._fetch_deposits(
+            date_from=date(2026, 3, 10), date_to=date(2026, 3, 20), order_references=order_references
+        )
+        refunds_by_ref = await job._fetch_refunds(
+            date_from=date(2026, 3, 10), date_to=date(2026, 3, 20), order_references=order_references
+        )
+        candidates = job.engine.match(charges, deposits)
+
+        run = await create_test_recon_run(db, tenant_a.id)
+        await job._store_results(
+            run.id,
+            candidates,
+            refunds_by_ref=refunds_by_ref,
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+        )
+
+        stored = (
+            await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id))
+        ).scalar_one()
+        assert "washout" not in stored.evidence
 
 
 class TestWashoutEvidenceStrictWindowNetting:
@@ -1190,17 +1471,17 @@ class TestWashoutEvidenceStrictWindowNetting:
         charge_amount = Decimal("100.00")
         charge_date = date(2026, 3, 1)
         refunds = [
-            (Decimal("-60.00"), date(2026, 3, 3)),  # +2 days, within window
-            (Decimal("-40.00"), date(2026, 3, 31)),  # +30 days, beyond window
+            (Decimal("-60.00"), date(2026, 3, 3), "USD"),  # +2 days, within window
+            (Decimal("-40.00"), date(2026, 3, 31), "USD"),  # +30 days, beyond window
         ]
-        assert _washout_evidence(charge_amount, charge_date, refunds) is None
+        assert _washout_evidence(charge_amount, charge_date, "USD", refunds) is None
 
     async def test_refund_at_exactly_day_7_is_washout(self):
         """Pins the <= boundary: exactly WASHOUT_WINDOW_DAYS still counts."""
         charge_amount = Decimal("100.00")
         charge_date = date(2026, 3, 1)
-        refunds = [(Decimal("-100.00"), date(2026, 3, 8))]  # exactly +7 days
-        evidence = _washout_evidence(charge_amount, charge_date, refunds)
+        refunds = [(Decimal("-100.00"), date(2026, 3, 8), "USD")]  # exactly +7 days
+        evidence = _washout_evidence(charge_amount, charge_date, "USD", refunds)
         assert evidence is not None
         assert evidence["washout"] is True
         assert evidence["refund_date"] == "2026-03-08"
@@ -1210,20 +1491,20 @@ class TestWashoutEvidenceStrictWindowNetting:
         entirely (not just from a separate window gate)."""
         charge_amount = Decimal("100.00")
         charge_date = date(2026, 3, 1)
-        refunds = [(Decimal("-100.00"), date(2026, 3, 9))]  # +8 days
-        assert _washout_evidence(charge_amount, charge_date, refunds) is None
+        refunds = [(Decimal("-100.00"), date(2026, 3, 9), "USD")]  # +8 days
+        assert _washout_evidence(charge_amount, charge_date, "USD", refunds) is None
 
     async def test_within_window_net_of_exactly_one_cent_is_not_washout(self):
         charge_amount = Decimal("100.00")
         charge_date = date(2026, 3, 1)
-        refunds = [(Decimal("-99.99"), date(2026, 3, 3))]  # net = 0.01
-        assert _washout_evidence(charge_amount, charge_date, refunds) is None
+        refunds = [(Decimal("-99.99"), date(2026, 3, 3), "USD")]  # net = 0.01
+        assert _washout_evidence(charge_amount, charge_date, "USD", refunds) is None
 
     async def test_within_window_net_of_less_than_one_cent_is_washout(self):
         charge_amount = Decimal("100.00")
         charge_date = date(2026, 3, 1)
-        refunds = [(Decimal("-99.991"), date(2026, 3, 3))]  # net = 0.009
-        evidence = _washout_evidence(charge_amount, charge_date, refunds)
+        refunds = [(Decimal("-99.991"), date(2026, 3, 3), "USD")]  # net = 0.009
+        evidence = _washout_evidence(charge_amount, charge_date, "USD", refunds)
         assert evidence is not None
         assert evidence["washout"] is True
 
@@ -1233,10 +1514,10 @@ class TestWashoutEvidenceStrictWindowNetting:
         charge_amount = Decimal("100.00")
         charge_date = date(2026, 3, 1)
         refunds = [
-            (Decimal("-60.00"), date(2026, 3, 3)),  # +2 days
-            (Decimal("-40.00"), date(2026, 3, 6)),  # +5 days, latest
+            (Decimal("-60.00"), date(2026, 3, 3), "USD"),  # +2 days
+            (Decimal("-40.00"), date(2026, 3, 6), "USD"),  # +5 days, latest
         ]
-        evidence = _washout_evidence(charge_amount, charge_date, refunds)
+        evidence = _washout_evidence(charge_amount, charge_date, "USD", refunds)
         assert evidence is not None
         assert evidence["refund_date"] == "2026-03-06"
 
@@ -1250,18 +1531,30 @@ class TestWashoutEvidenceStrictWindowNetting:
         order sharing this ref must not manufacture washout evidence."""
         charge_amount = Decimal("100.00")
         charge_date = date(2026, 3, 10)
-        refunds = [(Decimal("-100.00"), date(2026, 3, 7))]  # -3 days, before the charge
-        assert _washout_evidence(charge_amount, charge_date, refunds) is None
+        refunds = [(Decimal("-100.00"), date(2026, 3, 7), "USD")]  # -3 days, before the charge
+        assert _washout_evidence(charge_amount, charge_date, "USD", refunds) is None
 
     async def test_refund_on_charge_date_is_washout(self):
         """Pins the floor boundary: delta == 0 (same-day refund) still
         counts — only a strictly negative delta is excluded."""
         charge_amount = Decimal("100.00")
         charge_date = date(2026, 3, 10)
-        refunds = [(Decimal("-100.00"), date(2026, 3, 10))]  # 0 days
-        evidence = _washout_evidence(charge_amount, charge_date, refunds)
+        refunds = [(Decimal("-100.00"), date(2026, 3, 10), "USD")]  # 0 days
+        evidence = _washout_evidence(charge_amount, charge_date, "USD", refunds)
         assert evidence is not None
         assert evidence["washout"] is True
+
+    async def test_refund_currency_mismatch_is_not_washout(self):
+        """Currency guard (gate finding [minor], 2026-07-21): a same-ref
+        refund in a DIFFERENT currency than the charge must never count
+        toward the net-zero test, even when the raw amounts would otherwise
+        net to exactly zero — Stripe settles a charge and its refund in the
+        same currency, so a currency mismatch is unrelated same-ref noise,
+        never washout evidence."""
+        charge_amount = Decimal("100.00")
+        charge_date = date(2026, 3, 1)
+        refunds = [(Decimal("-100.00"), date(2026, 3, 3), "EUR")]  # same window, wrong currency
+        assert _washout_evidence(charge_amount, charge_date, "USD", refunds) is None
 
 
 class TestRefundFetchVolumeGuard:
@@ -1318,14 +1611,18 @@ class TestRefundFetchVolumeGuard:
 
         assert len(refunds_by_ref["R555666777"]) == 2
 
+        # One conditional-level log call (not an always-INFO plus a
+        # maybe-WARNING): the same event name, but at warning level with
+        # large=True once the threshold is exceeded.
         warnings = [
             e
             for e in logs
-            if e.get("log_level") == "warning" and e.get("event") == "order_recon_job.refund_fetch_large"
+            if e.get("log_level") == "warning" and e.get("event") == "order_recon_job.refund_fetch_fetched"
         ]
-        assert warnings, f"expected a refund_fetch_large warning, got: {logs}"
+        assert warnings, f"expected a refund_fetch_fetched warning, got: {logs}"
         assert warnings[0]["count"] == 2
         assert warnings[0]["window_days"] == order_recon_job.REF_MATCH_SANITY_DAYS
+        assert warnings[0]["large"] is True
 
     async def test_no_warning_below_threshold(self, db, tenant_a):
         await _seed_charge_line(

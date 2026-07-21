@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections import Counter
 from datetime import date, timedelta
 from decimal import Decimal
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -19,7 +21,7 @@ from app.schemas.order_reconciliation import (
     NSPaymentRecord,
     OrderMatchCandidate,
 )
-from app.schemas.reconciliation import ReconRunSummary
+from app.schemas.reconciliation import WASHOUT_WINDOW_DAYS, ReconRunSummary
 from app.services.reconciliation.confidence_engine import advisory_confidence
 from app.services.reconciliation.four_bucket_classifier import (
     BUCKET_AUTO_CLASSIFICATIONS,
@@ -54,23 +56,9 @@ REF_MATCH_SANITY_DAYS = 90
 # large charge set never emits one enormous IN clause.
 _REF_CHUNK_SIZE = 5000
 
-# Washout rule (operator decision 2026-07-21, recorded verbatim in
-# docs/superpowers/plans/2026-07-21-recon-washout-and-currency-truth.md):
-# "washout = full refund within 7 days of the charge + no deposit ever
-# booked". A charge whose same-ref refund(s) net it to |amount| < $0.01 within
-# this many days of the charge is a canceled order refunded before it ever
-# reached NetSuite — not a missing deposit. Permanent, not a recency/sync-lag
-# hold.
-#
-# STRICT WINDOW NETTING (operator ruling, 2026-07-21): only refunds dated
-# on or after the charge, and within WASHOUT_WINDOW_DAYS of it, count toward
-# the net-zero test AT ALL. A same-ref refund landing outside that window —
-# including one dated BEFORE the charge, which can't be refunding it — is a
-# slow trickle or unrelated same-ref noise, not washout evidence — the order
-# shipped and NetSuite has a booked deposit (reversed later via a credit
-# memo + refund); it either matches normally or deserves human review, no
-# matter how the FULL refund history nets out.
-WASHOUT_WINDOW_DAYS = 7
+# Washout window: see WASHOUT_WINDOW_DAYS in app.schemas.reconciliation for
+# the full operator ruling (2026-07-21) — strict window netting, permanent
+# (not a recency/sync-lag hold) — this module only applies it.
 
 # Fetch-volume guard (review finding 1 mitigation, 2026-07-21): the refund
 # fetch in _fetch_refunds is bounded only by REF_MATCH_SANITY_DAYS, not
@@ -80,31 +68,46 @@ WASHOUT_WINDOW_DAYS = 7
 _REFUND_FETCH_WARN_THRESHOLD = 20_000
 
 
+def _sanity_window(date_from: date, date_to: date) -> tuple[date, date]:
+    """The +/-REF_MATCH_SANITY_DAYS bound shared by every ref-keyed query
+    (deposits, refunds, and the cross-run charge-ref count below) — one
+    helper so the three windows can never drift apart.
+    """
+    return (
+        date_from - timedelta(days=REF_MATCH_SANITY_DAYS),
+        date_to + timedelta(days=REF_MATCH_SANITY_DAYS),
+    )
+
+
 def _washout_evidence(
     charge_amount: Decimal,
     charge_date: date,
-    refunds: list[tuple[Decimal, date]],
+    charge_currency: str,
+    refunds: list[tuple[Decimal, date, str]],
 ) -> dict | None:
     """Return washout evidence for one charge's same-ref refund lines, or None.
 
-    STRICT WINDOW NETTING (operator ruling, 2026-07-21): only refunds dated
-    between ``charge_date`` and ``charge_date + WASHOUT_WINDOW_DAYS``
-    (inclusive both ends) count toward the net-zero test AT ALL. A refund
-    landing outside the window — including one dated BEFORE the charge,
-    which can't be refunding it — is a slow trickle or unrelated same-ref
-    noise, not washout evidence — the order shipped and NetSuite has a
-    booked deposit (reversed later via a credit memo + refund); it either
-    matches normally or deserves human review. ``refund_amount`` and
-    ``net_after_refund`` are computed from within-window refunds only;
-    ``refund_date`` is the latest within-window refund date — the date the
-    refund completed (i.e. the date the within-window net actually hit
-    zero), not the earliest. Decimal arithmetic throughout; stringified only
-    for the JSONB evidence dict.
+    Only refunds dated between ``charge_date`` and ``charge_date +
+    WASHOUT_WINDOW_DAYS`` (inclusive both ends) AND in ``charge_currency``
+    count toward the net-zero test — see WASHOUT_WINDOW_DAYS in
+    app.schemas.reconciliation for the full strict-window-netting ruling.
+
+    CURRENCY GUARD (gate finding [minor], 2026-07-21): Stripe settles a
+    charge and its refund in the same currency, so a same-ref refund line in
+    a DIFFERENT currency is unrelated same-ref noise (or a data anomaly),
+    never evidence this charge washed out — it must not net against the
+    charge just because the raw amounts happen to cancel out.
+
+    ``refund_amount`` and ``net_after_refund`` are computed from
+    within-window, same-currency refunds only; ``refund_date`` is the latest
+    such refund's date — the date the within-window net actually hit zero,
+    not the earliest. Decimal arithmetic throughout; stringified only for
+    the JSONB evidence dict.
     """
     within_window = [
         (amount, refund_date)
-        for amount, refund_date in refunds
-        if 0 <= (refund_date - charge_date).days <= WASHOUT_WINDOW_DAYS
+        for amount, refund_date, currency in refunds
+        if currency == charge_currency and 0 <= (refund_date - charge_date).days <= WASHOUT_WINDOW_DAYS
     ]
     if not within_window:
         return None
@@ -206,6 +209,14 @@ class OrderReconJob:
             # Washout evidence (Phase B Task 1): same-ref refund lines for
             # this run's charges. NEVER passed to the matching engine —
             # refunds only feed the washout evidence check in _store_results.
+            #
+            # NOT asyncio.gather-ed with _fetch_deposits above even though
+            # the two are logically independent: both issue queries on this
+            # SAME AsyncSession (self.db), and SQLAlchemy's AsyncSession is
+            # not safe for concurrent use from multiple coroutines/tasks —
+            # the existing precedent in suitescript_sync_service.py ("Don't
+            # pass db to individual tasks — asyncio.gather with shared
+            # session is unsafe") applies here too. Sequential awaits only.
             refunds_by_ref = await self._fetch_refunds(
                 date_from=date_from,
                 date_to=date_to,
@@ -224,7 +235,14 @@ class OrderReconJob:
             candidates = self.engine.match(charges, deposits)
 
             # 7. Store results (returns the computed bucket per candidate, in order)
-            buckets = await self._store_results(run_id, candidates, refunds_by_ref=refunds_by_ref)
+            buckets = await self._store_results(
+                run_id,
+                candidates,
+                refunds_by_ref=refunds_by_ref,
+                date_from=date_from,
+                date_to=date_to,
+                subsidiary_id=subsidiary_id,
+            )
 
             # Compute summary
             matched = [c for c in candidates if c.match_type in ("deterministic", "fuzzy")]
@@ -429,8 +447,7 @@ class OrderReconJob:
             # buffer effectively gets ~14 fewer days of reach than the nominal
             # 90. That asymmetry is deliberate slack inside a generous sanity
             # bound, not an oversight.
-            sanity_from = date_from - timedelta(days=REF_MATCH_SANITY_DAYS)
-            sanity_to = date_to + timedelta(days=REF_MATCH_SANITY_DAYS)
+            sanity_from, sanity_to = _sanity_window(date_from, date_to)
             for i in range(0, len(refs), _REF_CHUNK_SIZE):
                 chunk = refs[i : i + _REF_CHUNK_SIZE]
                 ref_stmt = select(NetsuitePosting).where(
@@ -467,13 +484,13 @@ class OrderReconJob:
         date_to: date,
         subsidiary_id: str | None = None,
         order_references: set[str] | None = None,
-    ) -> dict[str, list[tuple[Decimal, date]]]:
+    ) -> dict[str, list[tuple[Decimal, date, str]]]:
         """Fetch same-ref refund/payment_refund payout_lines for washout evidence.
 
         Feeds ONLY the washout evidence check in ``_store_results`` — refund
         lines never enter ``OrderMatchingEngine.match()`` as charges or
         deposits (they aren't ``ChargeRecord``/``NSPaymentRecord`` at all,
-        just amount/date tuples keyed by ref).
+        just amount/date/currency tuples keyed by ref).
 
         Unlike the ref-keyed deposit pass in ``_fetch_deposits`` (which
         filters via ``NetsuitePosting.related_payout_id.in_(chunk)`` — a
@@ -487,8 +504,9 @@ class OrderReconJob:
         ``order_references``.
 
         Returns a dict keyed by order_reference -> list of
-        ``(amount, refund_date)`` tuples (amount negative per the grounded
-        fact that Stripe refund/payment_refund lines are always negative).
+        ``(amount, refund_date, currency)`` tuples (amount negative per the
+        grounded fact that Stripe refund/payment_refund lines are always
+        negative; currency feeds ``_washout_evidence``'s currency guard).
         """
         if not order_references:
             return {}
@@ -497,8 +515,7 @@ class OrderReconJob:
         # avoids a second TenantConfig query for the same tenant/run.
         order_ref_pattern = await self._load_order_ref_pattern_once()
 
-        sanity_from = date_from - timedelta(days=REF_MATCH_SANITY_DAYS)
-        sanity_to = date_to + timedelta(days=REF_MATCH_SANITY_DAYS)
+        sanity_from, sanity_to = _sanity_window(date_from, date_to)
 
         rows = await self._fetch_payout_lines(
             line_types=["refund", "payment_refund"],
@@ -509,27 +526,25 @@ class OrderReconJob:
 
         # Fetch-volume guard (review finding 1 mitigation): cheap tripwire
         # until SQL-side ref narrowing is ticketed — see
-        # _REFUND_FETCH_WARN_THRESHOLD.
-        logger.info(
+        # _REFUND_FETCH_WARN_THRESHOLD. One conditional-level log call (not
+        # an always-INFO plus a maybe-WARNING) so a large fetch shows up
+        # exactly once, at the level that matters.
+        large = len(rows) > _REFUND_FETCH_WARN_THRESHOLD
+        (logger.warning if large else logger.info)(
             "order_recon_job.refund_fetch_fetched",
             count=len(rows),
             window_days=REF_MATCH_SANITY_DAYS,
+            large=large,
         )
-        if len(rows) > _REFUND_FETCH_WARN_THRESHOLD:
-            logger.warning(
-                "order_recon_job.refund_fetch_large",
-                count=len(rows),
-                window_days=REF_MATCH_SANITY_DAYS,
-            )
 
-        refunds_by_ref: dict[str, list[tuple[Decimal, date]]] = {}
+        refunds_by_ref: dict[str, list[tuple[Decimal, date, str]]] = {}
         for pl, arrival_date in rows:
             if arrival_date is None:
                 continue
             ref = extract_order_ref(pl.description, order_ref_pattern)
             if ref is None or ref not in order_references:
                 continue
-            refunds_by_ref.setdefault(ref, []).append((pl.amount, arrival_date))
+            refunds_by_ref.setdefault(ref, []).append((pl.amount, arrival_date, pl.currency))
 
         return refunds_by_ref
 
@@ -541,11 +556,89 @@ class OrderReconJob:
         """
         return await load_materiality(self.db, self.tenant_id)
 
+    async def _cross_run_charge_ref_counts(
+        self,
+        refs: set[str],
+        date_from: date,
+        date_to: date,
+        subsidiary_id: str | None,
+    ) -> dict[str, int]:
+        """DB-side count of DISTINCT charge lines per ref, across the SAME
+        +/-REF_MATCH_SANITY_DAYS sanity window ``_fetch_refunds`` uses for
+        this run — NOT bounded to this run's own charge fetch
+        (+/-_DATE_BUFFER). A same-ref charge line sitting outside this run's
+        window but inside the wider sanity window is invisible to
+        ``_store_results``'s in-run ``ref_charge_counts`` (gate finding
+        [MAJOR], 2026-07-21) — this closes that gap. Counts only, never
+        full-row materialization, and only ever called for washout
+        CANDIDATE refs (a small set: unmatched, in-run-unique, same-ref-
+        refund-satisfied) — never every ref in the run.
+
+        The ref extraction happens server-side via Postgres'
+        ``substring(text, pattern)`` two-argument form — verified equivalent
+        to this tenant's Python-side ``extract_order_ref`` (same pattern,
+        same "first capture group, else whole match" semantics), so no full
+        description column ever needs to leave the database. A tenant
+        pattern that Postgres' regex engine can't parse (unlike Python's
+        ``re``, which always falls back safely per ``order_ref._compiled``)
+        would otherwise abort the ambient transaction; the whole chunk loop
+        runs inside one SAVEPOINT so a failure rolls back cleanly instead of
+        poisoning the caller's session. On failure: log a warning and return
+        {} — every candidate ref then reads as "unknown" and the caller's
+        ``== 1`` check fails closed, declining washout evidence rather than
+        crashing the run or auto-attaching unverified evidence.
+        """
+        if not refs:
+            return {}
+
+        order_ref_pattern = await self._load_order_ref_pattern_once()
+        sanity_from, sanity_to = _sanity_window(date_from, date_to)
+        refs_sorted = sorted(refs)
+        extracted_ref = func.substring(PayoutLine.description, order_ref_pattern)
+        p = aliased(Payout)
+
+        counts: dict[str, int] = {}
+        try:
+            async with self.db.begin_nested():
+                for i in range(0, len(refs_sorted), _REF_CHUNK_SIZE):
+                    chunk = refs_sorted[i : i + _REF_CHUNK_SIZE]
+                    stmt = (
+                        select(extracted_ref.label("ref"), func.count(PayoutLine.id))
+                        .join(p, PayoutLine.payout_id == p.id)
+                        .where(
+                            PayoutLine.tenant_id == self.tenant_id,
+                            PayoutLine.line_type == "charge",
+                            p.arrival_date >= sanity_from,
+                            p.arrival_date <= sanity_to,
+                            extracted_ref.in_(chunk),
+                        )
+                        .group_by(extracted_ref)
+                    )
+                    if subsidiary_id:
+                        stmt = stmt.where(PayoutLine.subsidiary_id == subsidiary_id)
+
+                    result = await self.db.execute(stmt)
+                    for ref, count in result.all():
+                        if ref is not None:
+                            counts[ref] = count
+        except DBAPIError:
+            logger.warning(
+                "order_recon_job.cross_run_ref_count_failed",
+                pattern=order_ref_pattern,
+                candidate_ref_count=len(refs_sorted),
+            )
+            return {}
+
+        return counts
+
     async def _store_results(
         self,
         run_id: uuid.UUID,
         candidates: list[OrderMatchCandidate],
-        refunds_by_ref: dict[str, list[tuple[Decimal, date]]] | None = None,
+        refunds_by_ref: dict[str, list[tuple[Decimal, date, str]]] | None = None,
+        date_from: date | None = None,
+        date_to: date | None = None,
+        subsidiary_id: str | None = None,
     ) -> list[str]:
         """Persist match candidates as ReconciliationResult rows.
 
@@ -570,14 +663,43 @@ class OrderReconJob:
         independently net against the SAME refund list — double-counting a
         single refund as covering multiple charges. ``ref_charge_counts``
         counts every charge in this run (matched or not) per ref; washout
-        evidence below is gated to refs with EXACTLY ONE charge.
+        evidence below is gated to refs with EXACTLY ONE charge IN THIS RUN
+        — and then, for that small candidate set, to refs where
+        ``_cross_run_charge_ref_counts`` also finds EXACTLY ONE charge line
+        tenant-wide within the shared sanity window (``date_from``/
+        ``date_to``, below) — see that method for why the in-run count
+        alone isn't enough. When ``date_from``/``date_to`` are omitted (a
+        caller exercising washout evidence without a run window), the
+        cross-run check is skipped and washout evidence is withheld for any
+        would-be-washout candidate — fail closed, never fail open.
         """
         refunds_by_ref = refunds_by_ref or {}
-        ref_charge_counts: dict[str, int] = {}
+        ref_charge_counts: Counter[str] = Counter(
+            candidate.charge.order_reference for candidate in candidates if candidate.charge.order_reference
+        )
+
+        # Washout CANDIDATES: unmatched, in-run-unique-ref charges whose
+        # same-ref refunds already satisfy the window/net-zero test. Only
+        # THESE refs (a small set) ever need the cross-run DB count below.
+        washout_by_ref: dict[str, dict] = {}
         for candidate in candidates:
             ref = candidate.charge.order_reference
-            if ref:
-                ref_charge_counts[ref] = ref_charge_counts.get(ref, 0) + 1
+            if candidate.deposit is None and ref and ref not in washout_by_ref and ref_charge_counts[ref] == 1:
+                washout = _washout_evidence(
+                    candidate.charge.amount,
+                    candidate.charge.charge_date,
+                    candidate.charge.currency,
+                    refunds_by_ref.get(ref, []),
+                )
+                if washout is not None:
+                    washout_by_ref[ref] = washout
+
+        cross_run_counts: dict[str, int] = {}
+        if washout_by_ref and date_from is not None and date_to is not None:
+            cross_run_counts = await self._cross_run_charge_ref_counts(
+                set(washout_by_ref), date_from, date_to, subsidiary_id
+            )
+
         mat_abs, mat_pct = await self._load_materiality()
         buckets: list[str] = []
         for candidate in candidates:
@@ -650,24 +772,15 @@ class OrderReconJob:
                 evidence["same_ref_deposit_ids"] = candidate.same_ref_deposit_ids
             if candidate.ambiguous_same_ref:
                 evidence["ambiguous_same_ref"] = True
-            # Washout evidence (Phase B Task 1): only unmatched charges (no
-            # deposit ever booked) are eligible — a charge that matched a
-            # deposit is not a washout, regardless of any same-ref refund.
-            # Ambiguity gate (gate finding [MAJOR], 2026-07-21): also
-            # requires this ref to belong to exactly one charge in the run —
-            # see ref_charge_counts above.
-            if (
-                candidate.deposit is None
-                and candidate.charge.order_reference
-                and ref_charge_counts.get(candidate.charge.order_reference, 0) == 1
-            ):
-                washout = _washout_evidence(
-                    candidate.charge.amount,
-                    candidate.charge.charge_date,
-                    refunds_by_ref.get(candidate.charge.order_reference, []),
-                )
-                if washout is not None:
-                    evidence.update(washout)
+            # Washout evidence (Phase B Task 1): only unmatched, in-run-
+            # unique-ref charges reach ``washout_by_ref`` at all (built
+            # above); a ref only clears into it when
+            # ``_cross_run_charge_ref_counts`` ALSO confirms exactly one
+            # charge line tenant-wide within the shared sanity window —
+            # both gates required, see the docstring above.
+            washout = washout_by_ref.get(candidate.charge.order_reference)
+            if washout is not None and cross_run_counts.get(candidate.charge.order_reference) == 1:
+                evidence.update(washout)
 
             result = ReconciliationResult(
                 id=uuid.uuid4(),
