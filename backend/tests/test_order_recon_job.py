@@ -20,7 +20,12 @@ from app.schemas.order_reconciliation import (
 )
 from app.services.reconciliation.four_bucket_classifier import BUCKET_MATCHES, BUCKET_NEEDS_REVIEW
 from app.services.reconciliation.order_recon_job import OrderReconJob
-from tests.conftest import create_test_netsuite_posting, create_test_payout, create_test_recon_run
+from tests.conftest import (
+    create_test_netsuite_posting,
+    create_test_payout,
+    create_test_payout_line,
+    create_test_recon_run,
+)
 
 TENANT_ID = str(uuid.uuid4())
 
@@ -599,6 +604,328 @@ class TestSameRefDepositCollisionDbBacked:
         assert stored.bucket == BUCKET_NEEDS_REVIEW
         assert stored.evidence["ambiguous_same_ref"] is True
         assert len(stored.evidence["same_ref_deposit_ids"]) == 1
+
+
+class TestWashoutEvidenceDbBacked:
+    """Washout detection (Phase B Task 1, operator decision 2026-07-21): a
+    charge whose same-ref refund(s) net it to |amount| < $0.01 within
+    WASHOUT_WINDOW_DAYS of the charge is a washout (order canceled, refunded
+    before ever reaching NetSuite) — evidence-only in this task; a later
+    planner rule turns evidence.washout into a root_cause. DB-backed: drives
+    the real fetch -> match -> store path, mirroring
+    TestRefKeyedDepositFetchDbBacked / TestSameRefDepositCollisionDbBacked.
+    """
+
+    async def test_full_refund_within_window_produces_washout_evidence(self, db, tenant_a):
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_washout_full",
+            description="Framework Marketplace Order ID: R628489275-XU9EPZPD",
+            amount=Decimal("100.00"),
+            arrival_date=date(2026, 3, 15),
+        )
+        await create_test_payout_line(
+            db,
+            tenant_a.id,
+            source_id="re_washout_full",
+            line_type="refund",
+            amount=Decimal("-100.00"),
+            fee=Decimal("0"),
+            net=Decimal("-100.00"),
+            description="Refund for order R628489275",
+            arrival_date=date(2026, 3, 18),  # charge + 3 days
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        charges = await job._fetch_charges(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+        order_references = {c.order_reference for c in charges if c.order_reference}
+        deposits = await job._fetch_deposits(
+            date_from=date(2026, 3, 10), date_to=date(2026, 3, 20), order_references=order_references
+        )
+        refunds_by_ref = await job._fetch_refunds(
+            date_from=date(2026, 3, 10), date_to=date(2026, 3, 20), order_references=order_references
+        )
+        candidates = job.engine.match(charges, deposits)
+
+        assert len(candidates) == 1
+        assert candidates[0].match_type == "unmatched"
+
+        run = await create_test_recon_run(db, tenant_a.id)
+        await job._store_results(run.id, candidates, refunds_by_ref=refunds_by_ref)
+
+        stored = (
+            await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id))
+        ).scalar_one()
+        assert stored.evidence["washout"] is True
+        assert stored.evidence["refund_date"] == "2026-03-18"
+        assert stored.evidence["net_after_refund"] == "0.00"
+        assert stored.evidence["refund_amount"] == "-100.00"
+        # Evidence-only in this task: match_type/variance_type/bucket untouched.
+        assert stored.match_type == "unmatched"
+        assert stored.variance_type == "missing_in_netsuite"
+
+    async def test_refund_beyond_window_no_washout_evidence(self, db, tenant_a):
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_washout_late",
+            description="Framework Marketplace Order ID: R577684612-XU9EPZPD",
+            amount=Decimal("100.00"),
+            arrival_date=date(2026, 3, 15),
+        )
+        await create_test_payout_line(
+            db,
+            tenant_a.id,
+            source_id="re_washout_late",
+            line_type="refund",
+            amount=Decimal("-100.00"),
+            fee=Decimal("0"),
+            net=Decimal("-100.00"),
+            description="Refund for order R577684612",
+            arrival_date=date(2026, 3, 23),  # charge + 8 days
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        charges = await job._fetch_charges(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+        order_references = {c.order_reference for c in charges if c.order_reference}
+        deposits = await job._fetch_deposits(
+            date_from=date(2026, 3, 10), date_to=date(2026, 3, 20), order_references=order_references
+        )
+        refunds_by_ref = await job._fetch_refunds(
+            date_from=date(2026, 3, 10), date_to=date(2026, 3, 20), order_references=order_references
+        )
+        candidates = job.engine.match(charges, deposits)
+
+        run = await create_test_recon_run(db, tenant_a.id)
+        await job._store_results(run.id, candidates, refunds_by_ref=refunds_by_ref)
+
+        stored = (
+            await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id))
+        ).scalar_one()
+        assert "washout" not in stored.evidence
+
+    async def test_partial_refund_no_washout_evidence(self, db, tenant_a):
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_washout_partial",
+            description="Framework Marketplace Order ID: R111222333-XU9EPZPD",
+            amount=Decimal("100.00"),
+            arrival_date=date(2026, 3, 15),
+        )
+        await create_test_payout_line(
+            db,
+            tenant_a.id,
+            source_id="re_washout_partial",
+            line_type="refund",
+            amount=Decimal("-50.00"),
+            fee=Decimal("0"),
+            net=Decimal("-50.00"),
+            description="Refund for order R111222333",
+            arrival_date=date(2026, 3, 18),
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        charges = await job._fetch_charges(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+        order_references = {c.order_reference for c in charges if c.order_reference}
+        deposits = await job._fetch_deposits(
+            date_from=date(2026, 3, 10), date_to=date(2026, 3, 20), order_references=order_references
+        )
+        refunds_by_ref = await job._fetch_refunds(
+            date_from=date(2026, 3, 10), date_to=date(2026, 3, 20), order_references=order_references
+        )
+        candidates = job.engine.match(charges, deposits)
+
+        run = await create_test_recon_run(db, tenant_a.id)
+        await job._store_results(run.id, candidates, refunds_by_ref=refunds_by_ref)
+
+        stored = (
+            await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id))
+        ).scalar_one()
+        assert "washout" not in stored.evidence
+
+    async def test_multiple_refunds_summing_to_full_within_window_washout_evidence(self, db, tenant_a):
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_washout_multi",
+            description="Framework Marketplace Order ID: R444555666-XU9EPZPD",
+            amount=Decimal("100.00"),
+            arrival_date=date(2026, 3, 15),
+        )
+        await create_test_payout_line(
+            db,
+            tenant_a.id,
+            source_id="re_washout_multi_1",
+            line_type="refund",
+            amount=Decimal("-60.00"),
+            fee=Decimal("0"),
+            net=Decimal("-60.00"),
+            description="Refund for order R444555666",
+            arrival_date=date(2026, 3, 17),  # +2 days — the earliest
+        )
+        await create_test_payout_line(
+            db,
+            tenant_a.id,
+            source_id="re_washout_multi_2",
+            line_type="payment_refund",
+            amount=Decimal("-40.00"),
+            fee=Decimal("0"),
+            net=Decimal("-40.00"),
+            description="Refund for order R444555666",
+            arrival_date=date(2026, 3, 20),  # +5 days
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        charges = await job._fetch_charges(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+        order_references = {c.order_reference for c in charges if c.order_reference}
+        deposits = await job._fetch_deposits(
+            date_from=date(2026, 3, 10), date_to=date(2026, 3, 20), order_references=order_references
+        )
+        refunds_by_ref = await job._fetch_refunds(
+            date_from=date(2026, 3, 10), date_to=date(2026, 3, 20), order_references=order_references
+        )
+        candidates = job.engine.match(charges, deposits)
+
+        run = await create_test_recon_run(db, tenant_a.id)
+        await job._store_results(run.id, candidates, refunds_by_ref=refunds_by_ref)
+
+        stored = (
+            await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id))
+        ).scalar_one()
+        assert stored.evidence["washout"] is True
+        assert stored.evidence["refund_date"] == "2026-03-17"  # the earliest refund
+        assert stored.evidence["net_after_refund"] == "0.00"
+        assert stored.evidence["refund_amount"] == "-100.00"
+
+    async def test_matched_charge_with_refund_no_washout_evidence(self, db, tenant_a):
+        """A charge that DOES match a deposit never gets washout evidence,
+        even when a same-ref refund exists that would otherwise qualify."""
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_matched_with_refund",
+            description="Framework Marketplace Order ID: R777888999-XU9EPZPD",
+            amount=Decimal("100.00"),
+            arrival_date=date(2026, 3, 15),
+        )
+        await create_test_netsuite_posting(
+            db,
+            tenant_a.id,
+            netsuite_internal_id="99050",
+            related_payout_id="R777888999",
+            transaction_date=date(2026, 3, 16),
+            amount=Decimal("100.00"),
+        )
+        await create_test_payout_line(
+            db,
+            tenant_a.id,
+            source_id="re_matched_with_refund",
+            line_type="refund",
+            amount=Decimal("-100.00"),
+            fee=Decimal("0"),
+            net=Decimal("-100.00"),
+            description="Refund for order R777888999",
+            arrival_date=date(2026, 3, 17),
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        charges = await job._fetch_charges(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+        order_references = {c.order_reference for c in charges if c.order_reference}
+        deposits = await job._fetch_deposits(
+            date_from=date(2026, 3, 10), date_to=date(2026, 3, 20), order_references=order_references
+        )
+        refunds_by_ref = await job._fetch_refunds(
+            date_from=date(2026, 3, 10), date_to=date(2026, 3, 20), order_references=order_references
+        )
+        candidates = job.engine.match(charges, deposits)
+
+        assert len(candidates) == 1
+        assert candidates[0].match_type == "deterministic"
+        assert candidates[0].deposit is not None
+
+        run = await create_test_recon_run(db, tenant_a.id)
+        await job._store_results(run.id, candidates, refunds_by_ref=refunds_by_ref)
+
+        stored = (
+            await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id))
+        ).scalar_one()
+        assert "washout" not in stored.evidence
+
+    async def test_refunds_never_enter_matching_engine_structural(self, db, tenant_a):
+        """Refund lines only feed _fetch_refunds/washout evidence — they never
+        appear in _fetch_deposits's output (the only NetSuite-side list
+        engine.match() ever sees), and job.run() end-to-end must not count
+        them toward total_deposits or flip an unmatched charge to matched."""
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_structural",
+            description="Framework Marketplace Order ID: R123123123-XU9EPZPD",
+            amount=Decimal("100.00"),
+            arrival_date=date(2026, 3, 15),
+        )
+        await create_test_payout_line(
+            db,
+            tenant_a.id,
+            source_id="re_structural",
+            line_type="refund",
+            amount=Decimal("-100.00"),
+            fee=Decimal("0"),
+            net=Decimal("-100.00"),
+            description="Refund for order R123123123",
+            arrival_date=date(2026, 3, 18),
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        summary = await job.run(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+
+        assert summary.total_deposits == 0
+        assert summary.unmatched_count == 1
+        assert summary.matched_count == 0
+
+        result = (
+            await db.execute(
+                select(ReconciliationResult).where(ReconciliationResult.run_id == uuid.UUID(summary.run_id))
+            )
+        ).scalar_one()
+        assert result.evidence["washout"] is True
+        assert result.deposit_id is None
+
+    async def test_refund_fetch_is_tenant_scoped(self, db, tenant_a, tenant_b):
+        """Two tenants sharing an order-ref string never cross-pollinate
+        washout evidence — tenant_b's refund must not attach to tenant_a's
+        unmatched charge with the same ref."""
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_tenant_a",
+            description="Framework Marketplace Order ID: R999000111-XU9EPZPD",
+            amount=Decimal("100.00"),
+            arrival_date=date(2026, 3, 15),
+        )
+        # tenant_b's refund shares the SAME ref string, but must not leak.
+        await create_test_payout_line(
+            db,
+            tenant_b.id,
+            source_id="re_tenant_b",
+            line_type="refund",
+            amount=Decimal("-100.00"),
+            fee=Decimal("0"),
+            net=Decimal("-100.00"),
+            description="Refund for order R999000111",
+            arrival_date=date(2026, 3, 18),
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        charges = await job._fetch_charges(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+        order_references = {c.order_reference for c in charges if c.order_reference}
+        refunds_by_ref = await job._fetch_refunds(
+            date_from=date(2026, 3, 10), date_to=date(2026, 3, 20), order_references=order_references
+        )
+
+        assert refunds_by_ref == {}
 
 
 class TestRunProducesSummary:

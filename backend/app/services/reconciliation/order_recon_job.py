@@ -54,6 +54,47 @@ REF_MATCH_SANITY_DAYS = 90
 # large charge set never emits one enormous IN clause.
 _REF_CHUNK_SIZE = 5000
 
+# Washout rule (operator decision 2026-07-21, recorded verbatim in
+# docs/superpowers/plans/2026-07-21-recon-washout-and-currency-truth.md):
+# "washout = full refund within 7 days of the charge + no deposit ever
+# booked". A charge whose same-ref refund(s) net it to |amount| < $0.01 within
+# this many days of the charge is a canceled order refunded before it ever
+# reached NetSuite — not a missing deposit. Permanent, not a recency/sync-lag
+# hold.
+WASHOUT_WINDOW_DAYS = 7
+
+
+def _washout_evidence(
+    charge_amount: Decimal,
+    charge_date: date,
+    refunds: list[tuple[Decimal, date]],
+) -> dict | None:
+    """Return washout evidence for one charge's same-ref refund lines, or None.
+
+    Washout rule (``WASHOUT_WINDOW_DAYS``): the refunds net the charge to
+    ``|amount| < $0.01`` AND the earliest refund lands within
+    ``WASHOUT_WINDOW_DAYS`` of ``charge_date``. Decimal arithmetic throughout;
+    stringified only for the JSONB evidence dict.
+    """
+    if not refunds:
+        return None
+
+    total_refund_amount = sum((amount for amount, _ in refunds), Decimal("0"))
+    net_after_refund = charge_amount + total_refund_amount
+    if abs(net_after_refund) >= Decimal("0.01"):
+        return None
+
+    _, earliest_date = min(refunds, key=lambda r: r[1])
+    if (earliest_date - charge_date).days > WASHOUT_WINDOW_DAYS:
+        return None
+
+    return {
+        "washout": True,
+        "refund_date": earliest_date.isoformat(),
+        "refund_amount": str(total_refund_amount),
+        "net_after_refund": str(net_after_refund),
+    }
+
 
 class OrderReconJob:
     """Orchestrates order-level reconciliation: charge → deposit matching."""
@@ -119,6 +160,16 @@ class OrderReconJob:
                 order_references=order_references,
             )
 
+            # Washout evidence (Phase B Task 1): same-ref refund lines for
+            # this run's charges. NEVER passed to the matching engine —
+            # refunds only feed the washout evidence check in _store_results.
+            refunds_by_ref = await self._fetch_refunds(
+                date_from=date_from,
+                date_to=date_to,
+                subsidiary_id=subsidiary_id,
+                order_references=order_references,
+            )
+
             logger.info(
                 "order_recon_job.data_fetched",
                 run_id=str(run_id),
@@ -130,7 +181,7 @@ class OrderReconJob:
             candidates = self.engine.match(charges, deposits)
 
             # 7. Store results (returns the computed bucket per candidate, in order)
-            buckets = await self._store_results(run_id, candidates)
+            buckets = await self._store_results(run_id, candidates, refunds_by_ref=refunds_by_ref)
 
             # Compute summary
             matched = [c for c in candidates if c.match_type in ("deterministic", "fuzzy")]
@@ -343,6 +394,71 @@ class OrderReconJob:
             for r in postings_by_id.values()
         ]
 
+    async def _fetch_refunds(
+        self,
+        date_from: date,
+        date_to: date,
+        subsidiary_id: str | None = None,
+        order_references: set[str] | None = None,
+    ) -> dict[str, list[tuple[Decimal, date]]]:
+        """Fetch same-ref refund/payment_refund payout_lines for washout evidence.
+
+        Feeds ONLY the washout evidence check in ``_store_results`` — refund
+        lines never enter ``OrderMatchingEngine.match()`` as charges or
+        deposits (they aren't ``ChargeRecord``/``NSPaymentRecord`` at all,
+        just amount/date tuples keyed by ref).
+
+        Unlike the ref-keyed deposit pass in ``_fetch_deposits`` (which
+        filters via ``NetsuitePosting.related_payout_id.in_(chunk)`` — a
+        column populated at sync time), ``payout_lines`` has no pre-extracted
+        order-ref column. So this bounds by ``REF_MATCH_SANITY_DAYS`` (the
+        same sanity-cap reasoning as the deposit pass, via the joined
+        ``Payout.arrival_date``) and tenant/line_type at the SQL level, then
+        extracts each row's ref in Python using the SAME per-tenant pattern
+        machinery ``_fetch_charges`` uses (never a second extraction scheme),
+        keeping only rows whose ref is in this run's charge
+        ``order_references``.
+
+        Returns a dict keyed by order_reference -> list of
+        ``(amount, refund_date)`` tuples (amount negative per the grounded
+        fact that Stripe refund/payment_refund lines are always negative).
+        """
+        if not order_references:
+            return {}
+
+        order_ref_pattern = await load_order_ref_pattern(self.db, self.tenant_id)
+
+        sanity_from = date_from - timedelta(days=REF_MATCH_SANITY_DAYS)
+        sanity_to = date_to + timedelta(days=REF_MATCH_SANITY_DAYS)
+
+        p = aliased(Payout)
+        stmt = (
+            select(PayoutLine, p.arrival_date)
+            .join(p, PayoutLine.payout_id == p.id)
+            .where(
+                PayoutLine.tenant_id == self.tenant_id,
+                PayoutLine.line_type.in_(["refund", "payment_refund"]),
+                p.arrival_date >= sanity_from,
+                p.arrival_date <= sanity_to,
+            )
+        )
+
+        if subsidiary_id:
+            stmt = stmt.where(PayoutLine.subsidiary_id == subsidiary_id)
+
+        result = await self.db.execute(stmt)
+
+        refunds_by_ref: dict[str, list[tuple[Decimal, date]]] = {}
+        for pl, arrival_date in result.all():
+            if arrival_date is None:
+                continue
+            ref = extract_order_ref(pl.description, order_ref_pattern)
+            if ref is None or ref not in order_references:
+                continue
+            refunds_by_ref.setdefault(ref, []).append((pl.amount, arrival_date))
+
+        return refunds_by_ref
+
     async def _load_materiality(self) -> tuple[Decimal, Decimal]:
         """Load this tenant's recon materiality thresholds (abs, pct).
 
@@ -355,6 +471,7 @@ class OrderReconJob:
         self,
         run_id: uuid.UUID,
         candidates: list[OrderMatchCandidate],
+        refunds_by_ref: dict[str, list[tuple[Decimal, date]]] | None = None,
     ) -> list[str]:
         """Persist match candidates as ReconciliationResult rows.
 
@@ -365,7 +482,13 @@ class OrderReconJob:
         - payout_id is always NULL (order-level, not payout-level)
         - deposit_id set when matched
         - evidence contains charge_source_id, order_reference, charge_payout_line_id
+
+        ``refunds_by_ref`` (Phase B Task 1): when an unmatched charge's
+        same-ref refunds satisfy the washout rule, evidence gains
+        ``{washout, refund_date, refund_amount, net_after_refund}``. Evidence
+        only — match_type/variance_type/bucket are untouched here.
         """
+        refunds_by_ref = refunds_by_ref or {}
         mat_abs, mat_pct = await self._load_materiality()
         buckets: list[str] = []
         for candidate in candidates:
@@ -438,6 +561,17 @@ class OrderReconJob:
                 evidence["same_ref_deposit_ids"] = candidate.same_ref_deposit_ids
             if candidate.ambiguous_same_ref:
                 evidence["ambiguous_same_ref"] = True
+            # Washout evidence (Phase B Task 1): only unmatched charges (no
+            # deposit ever booked) are eligible — a charge that matched a
+            # deposit is not a washout, regardless of any same-ref refund.
+            if candidate.deposit is None and candidate.charge.order_reference:
+                washout = _washout_evidence(
+                    candidate.charge.amount,
+                    candidate.charge.charge_date,
+                    refunds_by_ref.get(candidate.charge.order_reference, []),
+                )
+                if washout is not None:
+                    evidence.update(washout)
 
             result = ReconciliationResult(
                 id=uuid.uuid4(),
