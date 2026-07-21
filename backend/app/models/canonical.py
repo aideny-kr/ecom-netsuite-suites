@@ -107,3 +107,9 @@ class NetsuitePosting(Base, UUIDPrimaryKeyMixin, CanonicalMixin):
     account_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     memo: Mapped[str | None] = mapped_column(Text, nullable=True)
     related_payout_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Currency truth (Phase A, 2026-07-21): the TRANSACTION currency NetSuite
+    # labeled the deposit with, plus the transaction-currency amount and rate.
+    # ``currency``/``amount`` above keep meaning the SUBSIDIARY BASE currency/amount.
+    transaction_currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
+    foreign_amount: Mapped[Decimal | None] = mapped_column(Numeric(15, 2), nullable=True)
+    exchange_rate: Mapped[Decimal | None] = mapped_column(Numeric(12, 6), nullable=True)
