@@ -18,7 +18,11 @@ import type { ReconResolutionProposal } from "@/lib/types";
 // out server-side before they reach the group-proposals list.
 const STATUS_CHIP: Record<string, { label: string; className: string }> = {
   proposed: { label: "Proposed", className: "bg-muted text-muted-foreground border-transparent" },
-  approved: { label: "Approved", className: "bg-emerald-50 text-emerald-700 border-emerald-200" },
+  approved: {
+    label: "Approved",
+    className:
+      "bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/40 dark:text-emerald-300 dark:border-emerald-800",
+  },
 };
 
 function statusChip(status: string) {
@@ -27,7 +31,11 @@ function statusChip(status: string) {
 
 function materialityChip(above: boolean) {
   return above
-    ? { label: "Above materiality", className: "bg-amber-50 text-amber-700 border-amber-300" }
+    ? {
+        label: "Above materiality",
+        className:
+          "bg-amber-50 text-amber-700 border-amber-300 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-800",
+      }
     : { label: "Within materiality", className: "bg-muted text-muted-foreground border-transparent" };
 }
 
@@ -157,12 +165,18 @@ export function ResolutionGroupItems({
                   {money(p.variance_amount, p.currency)}
                 </TableCell>
                 <TableCell>
-                  <span className={`rounded-full border px-2 py-0.5 text-xs ${status.className}`}>
+                  <span
+                    className={`inline-block max-w-full truncate rounded-full border px-2 py-0.5 text-xs ${status.className}`}
+                    title={status.label}
+                  >
                     {status.label}
                   </span>
                 </TableCell>
                 <TableCell>
-                  <span className={`rounded-full border px-2 py-0.5 text-xs ${materiality.className}`}>
+                  <span
+                    className={`inline-block max-w-full truncate rounded-full border px-2 py-0.5 text-xs ${materiality.className}`}
+                    title={materiality.label}
+                  >
                     {materiality.label}
                   </span>
                 </TableCell>

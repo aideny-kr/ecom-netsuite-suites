@@ -322,18 +322,40 @@ describe("ResolutionGroupsTable", () => {
   });
 
   describe("1440px layout fit (Task 6 close-wave item 1)", () => {
-    it("caps the group label + descriptor to one truncated line with a title carrying the full text", () => {
+    // Dark-polish revision (operator report 2026-07-21): the group label and
+    // hint WRAP inside their fixed-width column (wrapping text cannot widen a
+    // table-fixed column — it only grows row height), instead of truncating to
+    // "— deposi…". The title attr stays as the full-text fallback. The pills,
+    // by contrast, must never wrap mid-chip: they truncate as a unit.
+    it("lets the group label + descriptor wrap (no truncate) while keeping the full-text title", () => {
       render(<ResolutionGroupsTable {...baseProps()} />);
       const label = screen.getByTitle("Stripe processing fees — Stripe fee not booked");
-      expect(label.className).toContain("truncate");
+      expect(label.className).not.toContain("truncate");
     });
 
-    it("caps the above-materiality hint to one truncated line with a title carrying the full text", () => {
+    it("lets the above-materiality hint wrap (no truncate) while keeping the full-text title", () => {
       render(<ResolutionGroupsTable {...baseProps()} />);
       const hint = screen.getByTitle(
         "3 above materiality — tick them individually in the item list.",
       );
-      expect(hint.className).toContain("truncate");
+      expect(hint.className).not.toContain("truncate");
+    });
+
+    it("renders action and vehicle pills as single-line truncating chips (never a broken wrapped pill)", () => {
+      render(<ResolutionGroupsTable {...baseProps()} />);
+      const vehicle = screen.getByTitle("Deposit fee line");
+      const action = screen.getByTitle("Fee line");
+      for (const chip of [vehicle, action]) {
+        expect(chip.className).toContain("truncate");
+        expect(chip.className).toContain("inline-block");
+      }
+    });
+
+    it("styles a blocked approve button as muted, not primary-at-half-opacity", () => {
+      render(<ResolutionGroupsTable {...baseProps()} />);
+      const approve = screen.getByRole("button", { name: /approve/i });
+      expect(approve.className).toContain("disabled:bg-muted");
+      expect(approve.className).not.toContain("disabled:opacity-50");
     });
 
     it("uses table-fixed on the groups worksheet so the expanded panel's row never forces the container wider", () => {

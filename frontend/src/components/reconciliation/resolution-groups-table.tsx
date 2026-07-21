@@ -17,14 +17,24 @@ import type { ReconResolutionGroup, ReconResolutionProposal } from "@/lib/types"
 
 // Booking-vehicle chip copy + styling. journalentry is the flagged fallback —
 // finance must SEE what is being booked as a raw JE (spec: amber chip).
+const BLUE_CHIP =
+  "bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/40 dark:text-blue-300 dark:border-blue-800";
+const AMBER_CHIP =
+  "bg-amber-50 text-amber-700 border-amber-300 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-800";
+
 const VEHICLE_CHIP: Record<string, { label: string; className: string }> = {
-  deposit: { label: "Deposit fee line", className: "bg-blue-50 text-blue-700 border-blue-200" },
-  customerdeposit: { label: "Customer deposit", className: "bg-blue-50 text-blue-700 border-blue-200" },
-  depositapplication: { label: "Deposit application", className: "bg-blue-50 text-blue-700 border-blue-200" },
-  creditmemo: { label: "Credit memo + refund", className: "bg-blue-50 text-blue-700 border-blue-200" },
-  journalentry: { label: "Journal entry (fallback)", className: "bg-amber-50 text-amber-700 border-amber-300" },
+  deposit: { label: "Deposit fee line", className: BLUE_CHIP },
+  customerdeposit: { label: "Customer deposit", className: BLUE_CHIP },
+  depositapplication: { label: "Deposit application", className: BLUE_CHIP },
+  creditmemo: { label: "Credit memo + refund", className: BLUE_CHIP },
+  journalentry: { label: "Journal entry (fallback)", className: AMBER_CHIP },
   none: { label: "No booking", className: "bg-muted text-muted-foreground border-transparent" },
 };
+
+// Pills must never break across lines — a wrapped chip renders as two broken
+// pill fragments (dark-mode staging report, 2026-07-21). Truncate + title
+// instead when the fixed column is too narrow for the label.
+const CHIP_BASE = "inline-block max-w-full truncate rounded-full border px-2 py-0.5 text-xs";
 
 const ACTION_LABEL: Record<string, string> = {
   book_fee_line: "Fee line",
@@ -79,8 +89,8 @@ const ROOT_CAUSE_SEVERITY: Record<string, "crit" | "warn"> = {
 };
 
 const SEVERITY_CHIP_CLASS: Record<"crit" | "warn" | "neutral", string> = {
-  crit: "bg-red-50 text-red-700 border-red-300",
-  warn: "bg-amber-50 text-amber-700 border-amber-300",
+  crit: "bg-red-50 text-red-700 border-red-300 dark:bg-red-950/40 dark:text-red-300 dark:border-red-800",
+  warn: AMBER_CHIP,
   neutral: "bg-muted text-muted-foreground border-transparent",
 };
 
@@ -233,7 +243,7 @@ export function ResolutionGroupsTable({
                   type="button"
                   onClick={() => onApprove(group, notes, includedAboveIds)}
                   disabled={blocked}
-                  className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground"
                 >
                   {isApproving
                     ? "Working…"
@@ -269,7 +279,7 @@ export function ResolutionGroupsTable({
                         )}
                         <span className="min-w-0">
                           <span
-                            className="block truncate"
+                            className="block"
                             title={`${ROOT_CAUSE_LABEL[group.root_cause] ?? group.root_cause}${descriptor ? ` — ${descriptor}` : ""}`}
                           >
                             <span className="font-medium text-foreground">
@@ -281,7 +291,7 @@ export function ResolutionGroupsTable({
                           </span>
                           {group.above_materiality_count > 0 && !isNeedsHuman && (
                             <span
-                              className="block truncate text-xs text-amber-700"
+                              className="block text-xs text-amber-700 dark:text-amber-400"
                               title={`${group.above_materiality_count} above materiality — tick them individually in the item list.`}
                             >
                               {group.above_materiality_count} above materiality — tick them
@@ -292,12 +302,15 @@ export function ResolutionGroupsTable({
                       </button>
                     </TableCell>
                     <TableCell className="px-3 py-2">
-                      <span className="rounded-full border bg-muted px-2 py-0.5 text-xs text-muted-foreground">
+                      <span
+                        className={`${CHIP_BASE} bg-muted text-muted-foreground`}
+                        title={ACTION_LABEL[group.action] ?? group.action}
+                      >
                         {ACTION_LABEL[group.action] ?? group.action}
                       </span>
                     </TableCell>
                     <TableCell className="px-3 py-2">
-                      <span className={`rounded-full border px-2 py-0.5 text-xs ${vehicleChip.className}`}>
+                      <span className={`${CHIP_BASE} ${vehicleChip.className}`} title={vehicleChip.label}>
                         {vehicleChip.label}
                       </span>
                     </TableCell>
@@ -309,7 +322,7 @@ export function ResolutionGroupsTable({
                       {group.approved_count.toLocaleString()}
                     </TableCell>
                     <TableCell
-                      className={`px-3 py-2 text-right tabular-nums ${group.above_materiality_count > 0 ? "text-amber-700" : ""}`}
+                      className={`px-3 py-2 text-right tabular-nums ${group.above_materiality_count > 0 ? "text-amber-700 dark:text-amber-400" : ""}`}
                     >
                       {group.above_materiality_count.toLocaleString()}
                     </TableCell>
@@ -450,7 +463,7 @@ export function NeedsHumanWorksheet({ runId, proposals, isLoading, onInvestigate
                   </TableCell>
                   <TableCell className="px-3 py-2">
                     <span
-                      className={`rounded-full border px-2 py-0.5 text-xs ${rootCauseChipClass(p.root_cause)}`}
+                      className={`${CHIP_BASE} ${rootCauseChipClass(p.root_cause)}`}
                     >
                       {ROOT_CAUSE_LABEL[p.root_cause] ?? p.root_cause}
                     </span>
