@@ -13,7 +13,10 @@ enums)."""
 from datetime import date, timedelta
 from decimal import Decimal
 
+from sqlalchemy import select
+
 from app.api.v1.reconciliation import get_resolution_summary, plan_resolutions
+from app.models.reconciliation import ReconResolutionProposal
 from tests.conftest import (
     create_test_payout_line,
     create_test_recon_result,
@@ -66,6 +69,31 @@ async def test_live_shaped_taxonomy_e2e(db, tenant_a):
             "charge_source_id": "ch_missing_old",
             "order_reference": "R_OLD",
             "charge_payout_line_id": str(old_line.id),
+        },
+    )
+
+    # washout (Phase B Task 2, operator decision 2026-07-21): charge fully
+    # refunded within 7 days, no NetSuite deposit ever booked — evidence
+    # attached by order_recon_job's ref-keyed refund fetch (Task 1) —
+    # → carry_forward, root_cause="washout", never create_and_apply_deposit.
+    await create_test_recon_result(
+        db,
+        tenant_a.id,
+        run.id,
+        status="pending",
+        bucket="needs_review",
+        match_type="unmatched",
+        variance_type="missing_in_netsuite",
+        variance_amount=Decimal("9.00"),
+        stripe_amount=Decimal("1000.00"),
+        netsuite_amount=None,
+        evidence={
+            "charge_source_id": "ch_washout",
+            "order_reference": "R_WASHOUT",
+            "washout": True,
+            "refund_date": "2026-03-18",
+            "refund_amount": "-9.00",
+            "net_after_refund": "0.00",
         },
     )
 
@@ -153,13 +181,13 @@ async def test_live_shaped_taxonomy_e2e(db, tenant_a):
     await db.flush()
 
     plan = await plan_resolutions(str(run.id), user=user, db=db)
-    assert plan["planned_count"] == 6  # the zero-variance fuzzy row produces no proposal
+    assert plan["planned_count"] == 7  # the zero-variance fuzzy row produces no proposal
 
     summary = await get_resolution_summary(str(run.id), user=user, db=db)
-    assert summary.proposals_count == 6
-    assert summary.explained_count == 5  # only the above-materiality amount_mismatch is needs_human
+    assert summary.proposals_count == 7
+    assert summary.explained_count == 6  # only the above-materiality amount_mismatch is needs_human
     assert summary.explained_rate > 0
-    assert summary.explained_rate == Decimal("83.3")
+    assert summary.explained_rate == Decimal("85.7")
 
     groups_by_key = {g.group_key: g for g in summary.groups}
     assert groups_by_key["missing_in_netsuite:carry_forward:none"].count == 1
@@ -170,7 +198,27 @@ async def test_live_shaped_taxonomy_e2e(db, tenant_a):
     # the legacy "fees" row keeps its own root_cause — never folded into
     # amount_mismatch's book_fee_line group even though the action matches.
     assert groups_by_key["fees:book_fee_line:deposit"].count == 1
-    assert len(groups_by_key) == 6
+    # washout (Phase B Task 2): its own group, never folded into
+    # missing_in_netsuite's create_and_apply_deposit even though the raw
+    # variance_type is the same "missing_in_netsuite" string.
+    assert groups_by_key["washout:carry_forward:none"].count == 1
+    assert len(groups_by_key) == 7
+
+    washout_proposal = (
+        await db.execute(
+            select(ReconResolutionProposal).where(
+                ReconResolutionProposal.run_id == run.id,
+                ReconResolutionProposal.charge_source_id == "ch_washout",
+            )
+        )
+    ).scalar_one()
+    assert washout_proposal.root_cause == "washout"
+    assert washout_proposal.action == "carry_forward"
+    assert washout_proposal.booking_vehicle == "none"
+    assert (
+        washout_proposal.narrative
+        == "Stripe charge fully refunded on 2026-03-18 within 7 days; order canceled — no NetSuite booking required."
+    )
 
     # the zero-variance fuzzy row never produced a proposal at all.
     all_charge_ids = {

@@ -55,6 +55,7 @@ const ROOT_CAUSE_LABEL: Record<string, string> = {
   manual_adjustment: "Unexplained",
   missing_in_netsuite: "Missing in NetSuite",
   amount_mismatch: "Amount mismatch",
+  washout: "Washout",
 };
 
 // Muted descriptor shown next to the bold root-cause label in the groups
@@ -64,6 +65,9 @@ const ROOT_CAUSE_DESCRIPTOR: Record<string, string> = {
   fees: "Stripe fee not booked",
   missing_in_netsuite: "deposit not found",
   chargeback: "disputed charge",
+  // Washout = charge fully refunded within the 7-day window, never booked —
+  // a permanent standing decision (NOT a recency hold), rendered as Acknowledge.
+  washout: "canceled order, nothing to book",
 };
 
 // Recency-hold carry_forwards (rule-7 sync-lag) reuse the "missing" /
