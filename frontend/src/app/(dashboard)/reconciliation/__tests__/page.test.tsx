@@ -276,6 +276,9 @@ describe("ReconciliationPage investigate-proposal prefill", () => {
     stripe_charge_id: "ch_abc",
     netsuite_internal_id: null,
     netsuite_record_type: null,
+    stripe_amount: null,
+    netsuite_amount: null,
+    variance_amount: null,
   };
 
   const mockGroup: ReconResolutionGroup = {

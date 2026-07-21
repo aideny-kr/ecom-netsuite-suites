@@ -195,6 +195,26 @@ describe("ResolutionGroupsTable", () => {
     expect(screen.getByRole("button", { name: /reject/i })).toBeDisabled();
   });
 
+  it("places the approve control in the row's last cell, never in the expanded detail panel", () => {
+    render(
+      <ResolutionGroupsTable
+        {...baseProps({ expandedKey: "fees:book_fee_line:deposit:USD" })}
+      />
+    );
+    const row = screen.getByText(/stripe processing fees/i).closest("tr")!;
+    const detailPanel = screen.getByTestId("group-items").closest("tr")!;
+
+    // The row's LAST cell hosts the approve control (this would fail if the
+    // button moved to an earlier cell or off the row entirely).
+    const rowCells = within(row).getAllByRole("cell");
+    const lastCell = rowCells[rowCells.length - 1];
+    expect(within(lastCell).getByRole("button", { name: /approve 209/i })).toBeInTheDocument();
+
+    // The detail panel hosts notes/reject/items, but genuinely NO approve
+    // button — this fails if approve were ever moved back into the panel.
+    expect(within(detailPanel).queryByRole("button", { name: /approve/i })).not.toBeInTheDocument();
+  });
+
   it("keeps exactly one approve affordance mounted, fixed in the row, whether collapsed or expanded", () => {
     const { rerender } = render(<ResolutionGroupsTable {...baseProps()} />);
     expect(screen.getAllByRole("button", { name: /approve/i })).toHaveLength(1);
@@ -210,6 +230,19 @@ describe("ResolutionGroupsTable", () => {
   it("tells the operator they can tick above-materiality items individually in the item list", () => {
     render(<ResolutionGroupsTable {...baseProps()} />);
     expect(screen.getByText(/tick them individually in the item list/i)).toBeInTheDocument();
+  });
+
+  it("does not show the 'tick them individually' hint for needs_human groups, even with above_materiality_count > 0", () => {
+    const nh = {
+      ...feeGroup,
+      group_key: "chargeback:needs_human:none",
+      root_cause: "chargeback",
+      action: "needs_human",
+      booking_vehicle: "none",
+      above_materiality_count: 5,
+    };
+    render(<ResolutionGroupsTable {...baseProps({ groups: [nh] })} />);
+    expect(screen.queryByText(/tick them individually/i)).not.toBeInTheDocument();
   });
 
   describe("group descriptor subtitle", () => {
@@ -234,6 +267,19 @@ describe("ResolutionGroupsTable", () => {
         ...feeGroup,
         group_key: "missing:carry_forward:none",
         root_cause: "missing",
+        action: "carry_forward",
+        booking_vehicle: "none",
+        above_materiality_count: 0,
+      };
+      render(<ResolutionGroupsTable {...baseProps({ groups: [recencyHold] })} />);
+      expect(screen.getByText(/payout not yet settled/i)).toBeInTheDocument();
+    });
+
+    it("shows 'payout not yet settled' for recency-hold carry_forward groups (missing_in_netsuite root)", () => {
+      const recencyHold = {
+        ...feeGroup,
+        group_key: "missing_in_netsuite:carry_forward:none",
+        root_cause: "missing_in_netsuite",
         action: "carry_forward",
         booking_vehicle: "none",
         above_materiality_count: 0,
@@ -346,6 +392,9 @@ describe("NeedsHumanWorksheet", () => {
     stripe_charge_id: "ch_3RmFa3Jd",
     netsuite_internal_id: null,
     netsuite_record_type: null,
+    stripe_amount: null,
+    netsuite_amount: null,
+    variance_amount: null,
   };
 
   beforeEach(() => {
@@ -418,6 +467,12 @@ describe("NeedsHumanWorksheet", () => {
       const unsettled = { ...proposal, root_cause: "missing_in_netsuite" };
       render(<NeedsHumanWorksheet runId="r1" proposals={[unsettled]} isLoading={false} onInvestigate={vi.fn()} />);
       expect(screen.getByText(/missing in netsuite/i).className).toContain("amber");
+    });
+
+    it("colors the plain 'missing' root cause (missing NetSuite deposit) as a warning (amber)", () => {
+      const missing = { ...proposal, root_cause: "missing" };
+      render(<NeedsHumanWorksheet runId="r1" proposals={[missing]} isLoading={false} onInvestigate={vi.fn()} />);
+      expect(screen.getByText(/missing netsuite deposit/i).className).toContain("amber");
     });
 
     it("falls back to neutral styling for other root causes", () => {
