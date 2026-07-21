@@ -74,6 +74,14 @@ class TestNormalizeCurrency:
         assert _normalize_currency("EUR") == "EUR"
         assert _normalize_currency("GBP") == "GBP"
 
+    def test_nordic_display_names_map_to_iso(self):
+        # Observed live during the 2026-07-21 180d backfill (637 rows warned):
+        # without entries these truncate to "DAN"/"SWE"/"NOR".
+        assert _normalize_currency("DANISH KRONE") == "DKK"
+        assert _normalize_currency("Swedish Krona") == "SEK"
+        assert _normalize_currency("NORWEGIAN KRONE") == "NOK"
+        assert _normalize_currency("POLISH ZLOTY") == "PLN"
+
     def test_display_names(self):
         assert _normalize_currency("US Dollar") == "USD"
         assert _normalize_currency("Euro") == "EUR"
