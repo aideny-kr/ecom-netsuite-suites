@@ -12,10 +12,12 @@ export interface ExportMenuParams {
   action?: string;
 }
 
-const ENTRIES: { format: "csv" | "xlsx"; label: string }[] = [
-  { format: "csv", label: "CSV — visible columns" },
-  { format: "xlsx", label: "Excel — formatted sheet" },
-];
+const DEFAULT_LABELS: Record<"csv" | "xlsx", string> = {
+  csv: "CSV — visible columns",
+  xlsx: "Excel — formatted sheet",
+};
+
+const FORMATS: ("csv" | "xlsx")[] = ["csv", "xlsx"];
 
 // Query-string order mirrors the export endpoint contract:
 // section, format, then the optional narrowing filters.
@@ -31,6 +33,10 @@ interface ExportMenuProps {
   runId: string;
   params: ExportMenuParams;
   className?: string;
+  // Override the CSV/Excel entry copy at placements where the export's
+  // column set diverges from what's on screen (defaults above cover the
+  // common case where they match). Never changes the href.
+  labels?: { csv?: string; xlsx?: string };
 }
 
 /** Small "Export" dropdown whose entries are bare `<a href>` links to the
@@ -38,7 +44,7 @@ interface ExportMenuProps {
  * apiClient/fetch/blob for downloads). Simple controlled popover (not the
  * unused Radix ui/dropdown-menu.tsx primitive) — mirrors the outside-click +
  * Escape pattern already used in file-mention-picker.tsx / chat-input.tsx. */
-export function ExportMenu({ runId, params, className }: ExportMenuProps) {
+export function ExportMenu({ runId, params, className, labels }: ExportMenuProps) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -78,15 +84,15 @@ export function ExportMenu({ runId, params, className }: ExportMenuProps) {
           role="menu"
           className="absolute right-0 z-20 mt-1 min-w-[13rem] rounded-md border bg-popover p-1 text-popover-foreground shadow-md"
         >
-          {ENTRIES.map((entry) => (
+          {FORMATS.map((format) => (
             <a
-              key={entry.format}
+              key={format}
               role="menuitem"
-              href={buildHref(runId, entry.format, params)}
+              href={buildHref(runId, format, params)}
               onClick={() => setOpen(false)}
               className="block rounded-sm px-2 py-1.5 text-[13px] text-foreground transition-colors hover:bg-accent focus-visible:outline-none focus-visible:bg-accent"
             >
-              {entry.label}
+              {labels?.[format] ?? DEFAULT_LABELS[format]}
             </a>
           ))}
         </div>

@@ -81,6 +81,7 @@ let mockNeedsHumanProposals: ReconResolutionProposal[] = [];
 // mock them like use-reconciliation above so no real QueryClientProvider is
 // needed for this classic-view suite.
 vi.mock("@/hooks/use-resolution", () => ({
+  NEEDS_HUMAN_PROPOSALS_LIMIT: 1000,
   useResolutionSummary: () => ({ data: mockResolutionSummaryData, isLoading: false }),
   useApproveResolutionGroup: () => ({ mutate: vi.fn(), isPending: false }),
   useRejectResolutionGroup: () => ({ mutate: vi.fn(), isPending: false }),
@@ -202,11 +203,16 @@ describe("ReconciliationPage four buckets", () => {
   it("renders an Export menu beside the classic bucket results table (section=results)", () => {
     render(<ReconciliationPage />);
     fireEvent.click(screen.getByRole("button", { name: /export/i }));
-    const [csv] = screen.getAllByRole("menuitem");
+    const [csv, xlsx] = screen.getAllByRole("menuitem");
     expect(csv).toHaveAttribute(
       "href",
       "/api/v1/reconciliation/runs/r1/export?section=results&format=csv",
     );
+    // "Full result set" — the export's column set differs from what's on
+    // screen in classic view (the evidence "All Results" columns), unlike
+    // the default "visible columns" label.
+    expect(csv).toHaveTextContent("CSV — full result set");
+    expect(xlsx).toHaveTextContent("Excel — full result set");
   });
 
   it("does NOT carry a typed note across buckets", () => {

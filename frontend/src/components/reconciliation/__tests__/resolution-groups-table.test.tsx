@@ -367,6 +367,27 @@ describe("ResolutionGroupsTable", () => {
       render(<ResolutionGroupsTable {...baseProps()} />);
       expect(screen.getAllByRole("button", { name: /export/i })).toHaveLength(1);
     });
+
+    it("labels the section-header export 'all groups' — its CSV/Excel includes needs-human group rows the worksheet omits", () => {
+      render(<ResolutionGroupsTable {...baseProps()} />);
+      fireEvent.click(screen.getByRole("button", { name: /export/i }));
+      const [csv, xlsx] = screen.getAllByRole("menuitem");
+      expect(csv).toHaveTextContent("CSV — all groups");
+      expect(xlsx).toHaveTextContent("Excel — all groups");
+    });
+
+    it("keeps the default labels on the per-group export (its columns match what's on screen)", () => {
+      render(
+        <ResolutionGroupsTable
+          {...baseProps({ expandedKey: "fees:book_fee_line:deposit:USD" })}
+        />,
+      );
+      const triggers = screen.getAllByRole("button", { name: /export/i });
+      fireEvent.click(triggers[1]);
+      const items = screen.getAllByRole("menuitem");
+      expect(items[0]).toHaveTextContent(/csv.*visible columns/i);
+      expect(items[1]).toHaveTextContent(/excel.*formatted sheet/i);
+    });
   });
 });
 

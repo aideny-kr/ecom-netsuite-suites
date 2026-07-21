@@ -183,7 +183,11 @@ export function ResolutionGroupsTable({
             · {groups.length.toLocaleString()} groups
           </span>
         </h2>
-        <ExportMenu runId={runId} params={{ section: "groups" }} />
+        <ExportMenu
+          runId={runId}
+          params={{ section: "groups" }}
+          labels={{ csv: "CSV — all groups", xlsx: "Excel — all groups" }}
+        />
       </div>
       <div className="overflow-x-auto rounded-xl border bg-card shadow-soft">
         <Table>

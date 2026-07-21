@@ -70,6 +70,32 @@ describe("ExportMenu", () => {
     );
   });
 
+  it("uses the default labels when no override is passed", () => {
+    render(<ExportMenu runId="r1" params={{ section: "proposals", group_key: "fees:book_fee_line:deposit", currency: "USD" }} />);
+    fireEvent.click(screen.getByRole("button", { name: /export/i }));
+    const [csv, xlsx] = screen.getAllByRole("menuitem");
+    expect(csv).toHaveTextContent(/csv.*visible columns/i);
+    expect(xlsx).toHaveTextContent(/excel.*formatted sheet/i);
+  });
+
+  it("overrides the entry labels via the labels prop without changing the hrefs", () => {
+    render(
+      <ExportMenu
+        runId="r1"
+        params={{ section: "groups" }}
+        labels={{ csv: "CSV — all groups", xlsx: "Excel — all groups" }}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /export/i }));
+    const [csv, xlsx] = screen.getAllByRole("menuitem");
+    expect(csv).toHaveTextContent("CSV — all groups");
+    expect(xlsx).toHaveTextContent("Excel — all groups");
+    expect(csv).toHaveAttribute(
+      "href",
+      "/api/v1/reconciliation/runs/r1/export?section=groups&format=csv",
+    );
+  });
+
   it("closes on outside click", () => {
     render(
       <div>

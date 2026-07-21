@@ -297,7 +297,11 @@ export default function ReconciliationPage() {
         {/* Results table */}
         {selectedRunId && (
           <div className="flex justify-end">
-            <ExportMenu runId={selectedRunId} params={{ section: "results" }} />
+            <ExportMenu
+              runId={selectedRunId}
+              params={{ section: "results" }}
+              labels={{ csv: "CSV — full result set", xlsx: "Excel — full result set" }}
+            />
           </div>
         )}
         <ReconResultsTable
