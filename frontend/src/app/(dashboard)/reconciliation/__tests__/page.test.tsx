@@ -74,6 +74,9 @@ vi.mock("@/hooks/use-features", () => ({
 // button click.
 let mockResolutionSummaryData: Record<string, unknown> | undefined;
 let mockGroupProposals: ReconResolutionProposal[] = [];
+// Needs-human items are fetched cross-group (action=needs_human) for the
+// "Needs human review" worksheet, separate from the per-group fetch above.
+let mockNeedsHumanProposals: ReconResolutionProposal[] = [];
 // page.tsx now unconditionally calls the resolution hooks (Rules of Hooks) —
 // mock them like use-reconciliation above so no real QueryClientProvider is
 // needed for this classic-view suite.
@@ -82,6 +85,7 @@ vi.mock("@/hooks/use-resolution", () => ({
   useApproveResolutionGroup: () => ({ mutate: vi.fn(), isPending: false }),
   useRejectResolutionGroup: () => ({ mutate: vi.fn(), isPending: false }),
   useGroupProposals: () => ({ data: mockGroupProposals, isLoading: false }),
+  useNeedsHumanProposals: () => ({ data: mockNeedsHumanProposals, isLoading: false }),
 }));
 vi.mock("@/components/reconciliation/data-freshness-banner", () => ({
   DataFreshnessBanner: () => null,
@@ -113,6 +117,7 @@ beforeEach(() => {
   mockApproveData = undefined;
   mockResolutionSummaryData = undefined;
   mockGroupProposals = [];
+  mockNeedsHumanProposals = [];
 });
 
 describe("ReconciliationPage four buckets", () => {
@@ -295,13 +300,14 @@ describe("ReconciliationPage investigate-proposal prefill", () => {
     mockRun.date_to = "2026-05-31";
   });
 
-  // Expands the (only) group card so the real ResolutionGroupItems renders,
-  // then clicks its "Investigate in chat" button — exercises
-  // handleInvestigateProposal end to end via a real DOM interaction.
-  // The SQL date filter is driven by the page's own date-range pickers (not
-  // selectedRun's dates), so setDates fills those in via fireEvent.change.
+  // needs_human proposals render directly (as flat rows) in the "Needs human
+  // review" worksheet — no group-card expand step needed — then clicking
+  // "Investigate in chat" exercises handleInvestigateProposal end to end via
+  // a real DOM interaction. The SQL date filter is driven by the page's own
+  // date-range pickers (not selectedRun's dates), so setDates fills those in
+  // via fireEvent.change.
   function renderAndInvestigate(proposal: ReconResolutionProposal, opts: { setDates?: boolean } = {}) {
-    mockGroupProposals = [proposal];
+    mockNeedsHumanProposals = [proposal];
     mockResolutionSummaryData = summaryBase;
     const { container } = render(<ReconciliationPage />);
     if (opts.setDates) {
@@ -309,7 +315,6 @@ describe("ReconciliationPage investigate-proposal prefill", () => {
       fireEvent.change(dateInputs[0], { target: { value: "2026-05-01" } });
       fireEvent.change(dateInputs[1], { target: { value: "2026-05-31" } });
     }
-    fireEvent.click(screen.getByText(/missing netsuite deposit/i));
     fireEvent.click(screen.getByText(/investigate in chat/i));
   }
 

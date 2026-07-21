@@ -11,8 +11,7 @@ import { DataFreshnessBanner } from "@/components/reconciliation/data-freshness-
 import { CloseChecklist } from "@/components/reconciliation/close-checklist";
 import { BulkApprovalCard } from "@/components/reconciliation/bulk-approval-card";
 import { ResolutionSummaryHeader } from "@/components/reconciliation/resolution-summary-header";
-import { ResolutionGroupCard } from "@/components/reconciliation/resolution-group-card";
-import { ResolutionGroupItems } from "@/components/reconciliation/resolution-group-items";
+import { ResolutionGroupsTable, NeedsHumanWorksheet } from "@/components/reconciliation/resolution-groups-table";
 import {
   useReconRuns,
   useReconResults,
@@ -23,10 +22,16 @@ import {
   useResolutionSummary,
   useApproveResolutionGroup,
   useRejectResolutionGroup,
+  useNeedsHumanProposals,
 } from "@/hooks/use-resolution";
 import { useReconPipeline } from "@/hooks/use-recon-pipeline";
 import { useFeature } from "@/hooks/use-features";
-import type { ReconResult, ReconBucketId, ReconResolutionProposal } from "@/lib/types";
+import type {
+  ReconResult,
+  ReconBucketId,
+  ReconResolutionGroup,
+  ReconResolutionProposal,
+} from "@/lib/types";
 
 const BUCKET_TABS: { id: ReconBucketId; label: string }[] = [
   { id: "matches", label: "Matches" },
@@ -67,6 +72,7 @@ export default function ReconciliationPage() {
   // mutations don't fire network calls until .mutate() is invoked.
   const resolutionUiEnabled = useFeature("recon_resolution_ui");
   const resolutionSummary = useResolutionSummary(resolutionUiEnabled ? selectedRunId : null);
+  const needsHumanProposals = useNeedsHumanProposals(resolutionUiEnabled ? selectedRunId : null);
   const approveGroup = useApproveResolutionGroup(selectedRunId || "");
   const rejectGroup = useRejectResolutionGroup(selectedRunId || "");
   const [expandedGroup, setExpandedGroup] = useState<string | null>(null);
@@ -171,6 +177,48 @@ export default function ReconciliationPage() {
       query = `Use SuiteQL to find customer deposits in NetSuite around ${amount} ${dateRange}. Context: ${proposal.narrative} (recon result ${proposal.result_id}). Run: SELECT t.id, t.tranid, t.trandate, t.total, BUILTIN.DF(t.entity) AS customer FROM transaction t WHERE t.type = 'CustDep' AND t.total BETWEEN ${lo} AND ${hi} ${dateFrom ? `AND t.trandate >= TO_DATE('${dateFrom}', 'YYYY-MM-DD') AND t.trandate <= TO_DATE('${dateTo}', 'YYYY-MM-DD')` : ""} FETCH FIRST 10 ROWS ONLY`;
     }
     router.push(`/chat?prefill=${encodeURIComponent(query)}&new_session=true`);
+  };
+
+  // A group_key alone can span more than one currency (multi-currency runs
+  // render one row per currency) — every piece of per-card state keys on the
+  // pair via cardKey, not group_key alone, or two rows would fight over the
+  // same expand/ticked/reset state.
+  const handleApproveGroup = (group: ReconResolutionGroup, notes: string, includedAboveIds: string[]) => {
+    const cardKey = `${group.group_key}:${group.currency}`;
+    approveGroup.mutate(
+      {
+        group_key: group.group_key,
+        notes: notes.trim() || undefined,
+        included_above_materiality_ids: includedAboveIds,
+        currency: group.currency,
+      },
+      {
+        onSuccess: () => {
+          setGroupResetSignals((prev) => ({ ...prev, [cardKey]: (prev[cardKey] ?? 0) + 1 }));
+          // Ticked above-materiality ids are consumed by this approve —
+          // clear them so a re-render doesn't leave stale ids pointing at
+          // now-decided proposals.
+          setTickedAboveByGroup((prev) => {
+            const next = { ...prev };
+            delete next[cardKey];
+            return next;
+          });
+        },
+      }
+    );
+  };
+
+  const handleRejectGroup = (group: ReconResolutionGroup) =>
+    rejectGroup.mutate({ group_key: group.group_key, currency: group.currency });
+
+  const handleTickAbove = (cardKey: string, proposalId: string, ticked: boolean) => {
+    setTickedAboveByGroup((prev) => {
+      const current = prev[cardKey] ?? [];
+      return {
+        ...prev,
+        [cardKey]: ticked ? [...current, proposalId] : current.filter((x) => x !== proposalId),
+      };
+    });
   };
 
   const tabs = BUCKET_TABS.map((t) => ({
@@ -340,68 +388,28 @@ export default function ReconciliationPage() {
       {resolutionUiEnabled && !pipeline.isRunning && selectedRunId && (
         <>
           <ResolutionSummaryHeader summary={resolutionSummary.data ?? null} />
-          <div className="space-y-3">
-            {resolutionSummary.data?.groups.map((group) => {
-              // A group_key alone can span more than one currency
-              // (multi-currency runs render one card per currency) — every
-              // piece of per-card state must key on the pair, not group_key
-              // alone, or two cards would fight over the same expand/ticked/
-              // reset state.
-              const cardKey = `${group.group_key}:${group.currency}`;
-              return (
-                <ResolutionGroupCard
-                  key={cardKey}
-                  group={group}
-                  expanded={expandedGroup === cardKey}
-                  onToggleExpand={() => setExpandedGroup(expandedGroup === cardKey ? null : cardKey)}
-                  isApproving={approveGroup.isPending}
-                  disabled={!reconEnabled || isRunClosed}
-                  includedAboveIds={tickedAboveByGroup[cardKey] ?? []}
-                  resetSignal={groupResetSignals[cardKey] ?? 0}
-                  onApprove={(notes, includedAboveIds) =>
-                    approveGroup.mutate(
-                      {
-                        group_key: group.group_key,
-                        notes: notes.trim() || undefined,
-                        included_above_materiality_ids: includedAboveIds,
-                        currency: group.currency,
-                      },
-                      {
-                        onSuccess: () => {
-                          setGroupResetSignals((prev) => ({ ...prev, [cardKey]: (prev[cardKey] ?? 0) + 1 }));
-                          // Ticked above-materiality ids are consumed by this
-                          // approve — clear them so a re-render doesn't leave
-                          // stale ids pointing at now-decided proposals.
-                          setTickedAboveByGroup((prev) => {
-                            const next = { ...prev };
-                            delete next[cardKey];
-                            return next;
-                          });
-                        },
-                      }
-                    )
-                  }
-                  onReject={() => rejectGroup.mutate({ group_key: group.group_key, currency: group.currency })}
-                >
-                  <ResolutionGroupItems
-                    runId={selectedRunId}
-                    groupKey={group.group_key}
-                    tickedAboveIds={tickedAboveByGroup[cardKey] ?? []}
-                    onTickAbove={(id, ticked) =>
-                      setTickedAboveByGroup((prev) => {
-                        const current = prev[cardKey] ?? [];
-                        return {
-                          ...prev,
-                          [cardKey]: ticked ? [...current, id] : current.filter((x) => x !== id),
-                        };
-                      })
-                    }
-                    onInvestigate={handleInvestigateProposal}
-                  />
-                </ResolutionGroupCard>
-              );
-            })}
-          </div>
+          <ResolutionGroupsTable
+            runId={selectedRunId}
+            // "Resolution groups" worksheet excludes needs_human — those
+            // items surface item-level in the "Needs human review" worksheet
+            // below instead of as a group row.
+            groups={(resolutionSummary.data?.groups ?? []).filter((g) => g.action !== "needs_human")}
+            expandedKey={expandedGroup}
+            onToggleExpand={(cardKey) => setExpandedGroup(expandedGroup === cardKey ? null : cardKey)}
+            isApproving={approveGroup.isPending}
+            disabled={!reconEnabled || isRunClosed}
+            tickedAboveByGroup={tickedAboveByGroup}
+            onTickAbove={handleTickAbove}
+            groupResetSignals={groupResetSignals}
+            onApprove={handleApproveGroup}
+            onReject={handleRejectGroup}
+            onInvestigate={handleInvestigateProposal}
+          />
+          <NeedsHumanWorksheet
+            proposals={needsHumanProposals.data}
+            isLoading={needsHumanProposals.isLoading}
+            onInvestigate={handleInvestigateProposal}
+          />
           <button
             type="button"
             onClick={() => setShowClassicView((v) => !v)}

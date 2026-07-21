@@ -36,9 +36,24 @@ export function useGroupProposals(
   });
 }
 
+// The group_key-less route filters cross-group by action alone — the
+// needs-human worksheet spans every root_cause/booking_vehicle combination
+// sharing that action in one call instead of one fetch per group.
+export function useNeedsHumanProposals(runId: string | null) {
+  return useQuery<ReconResolutionProposal[]>({
+    queryKey: ["recon-needs-human-proposals", runId],
+    queryFn: () =>
+      apiClient.get<ReconResolutionProposal[]>(
+        `/api/v1/reconciliation/runs/${runId}/resolution-groups/proposals?action=needs_human`
+      ),
+    enabled: !!runId,
+  });
+}
+
 function invalidateResolution(queryClient: ReturnType<typeof useQueryClient>) {
   queryClient.invalidateQueries({ queryKey: ["recon-resolution-summary"] });
   queryClient.invalidateQueries({ queryKey: ["recon-group-proposals"] });
+  queryClient.invalidateQueries({ queryKey: ["recon-needs-human-proposals"] });
   queryClient.invalidateQueries({ queryKey: ["recon-results"] });
   queryClient.invalidateQueries({ queryKey: ["recon-bucket-summary"] });
   // Group approval flips result statuses → the period readiness changes.
