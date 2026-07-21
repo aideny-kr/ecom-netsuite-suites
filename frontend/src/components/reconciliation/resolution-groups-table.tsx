@@ -112,11 +112,11 @@ function CopyableId({ prefix = "", value }: { prefix?: string; value: string }) 
       type="button"
       onClick={handleCopy}
       title={`Copy ${value}`}
-      className="inline-flex items-center gap-0.5 font-mono text-xs hover:text-foreground"
+      className="inline-flex max-w-full items-center gap-0.5 truncate font-mono text-[11px] hover:text-foreground"
     >
       {prefix}
       {value}
-      {copied && <Check className="h-3 w-3 text-green-500" />}
+      {copied && <Check className="h-3 w-3 shrink-0 text-green-500" />}
     </button>
   );
 }
@@ -189,19 +189,24 @@ export function ResolutionGroupsTable({
           labels={{ csv: "CSV — all groups", xlsx: "Excel — all groups" }}
         />
       </div>
+      {/* table-fixed + explicit per-column widths (summing to 100%) so the
+          worksheet — including the expanded panel's notes/Reject/Export row,
+          which shares this table's column grid via colSpan — never forces
+          this container wider than its 1440px-viewport content area. Only
+          the items sub-table below (its own overflow-x-auto) may scroll. */}
       <div className="overflow-x-auto rounded-xl border bg-card shadow-soft">
-        <Table>
+        <Table className="table-fixed">
           <TableHeader>
             <TableRow>
-              <TableHead style={{ width: "30%" }}>Group</TableHead>
-              <TableHead>Action</TableHead>
-              <TableHead>Vehicle</TableHead>
-              <TableHead>CCY</TableHead>
-              <TableHead className="text-right">Items</TableHead>
-              <TableHead className="text-right">Approved</TableHead>
-              <TableHead className="text-right">Above mat.</TableHead>
-              <TableHead className="text-right">Total</TableHead>
-              <TableHead className="sr-only">Row actions</TableHead>
+              <TableHead className="w-[24%] px-3 py-2">Group</TableHead>
+              <TableHead className="w-[10%] px-3 py-2">Action</TableHead>
+              <TableHead className="w-[12%] px-3 py-2">Vehicle</TableHead>
+              <TableHead className="w-[6%] px-3 py-2">CCY</TableHead>
+              <TableHead className="w-[7%] px-3 py-2 text-right">Items</TableHead>
+              <TableHead className="w-[9%] px-3 py-2 text-right">Approved</TableHead>
+              <TableHead className="w-[9%] px-3 py-2 text-right">Above mat.</TableHead>
+              <TableHead className="w-[11%] px-3 py-2 text-right">Total</TableHead>
+              <TableHead className="w-[12%] px-3 py-2 sr-only">Row actions</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -251,26 +256,34 @@ export function ResolutionGroupsTable({
               return (
                 <Fragment key={cardKey}>
                   <TableRow className={expanded ? "bg-muted/40" : undefined}>
-                    <TableCell>
+                    <TableCell className="px-3 py-2">
                       <button
                         type="button"
                         onClick={() => onToggleExpand(cardKey)}
-                        className="flex items-start gap-2 text-left"
+                        className="flex w-full items-start gap-2 text-left"
                       >
                         {expanded ? (
                           <ChevronDown className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
                         ) : (
                           <ChevronRight className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
                         )}
-                        <span>
-                          <span className="font-medium text-foreground">
-                            {ROOT_CAUSE_LABEL[group.root_cause] ?? group.root_cause}
+                        <span className="min-w-0">
+                          <span
+                            className="block truncate"
+                            title={`${ROOT_CAUSE_LABEL[group.root_cause] ?? group.root_cause}${descriptor ? ` — ${descriptor}` : ""}`}
+                          >
+                            <span className="font-medium text-foreground">
+                              {ROOT_CAUSE_LABEL[group.root_cause] ?? group.root_cause}
+                            </span>
+                            {descriptor && (
+                              <span className="text-muted-foreground"> — {descriptor}</span>
+                            )}
                           </span>
-                          {descriptor && (
-                            <span className="text-muted-foreground"> — {descriptor}</span>
-                          )}
                           {group.above_materiality_count > 0 && !isNeedsHuman && (
-                            <span className="block text-xs text-amber-700">
+                            <span
+                              className="block truncate text-xs text-amber-700"
+                              title={`${group.above_materiality_count} above materiality — tick them individually in the item list.`}
+                            >
                               {group.above_materiality_count} above materiality — tick them
                               individually in the item list.
                             </span>
@@ -278,32 +291,32 @@ export function ResolutionGroupsTable({
                         </span>
                       </button>
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="px-3 py-2">
                       <span className="rounded-full border bg-muted px-2 py-0.5 text-xs text-muted-foreground">
                         {ACTION_LABEL[group.action] ?? group.action}
                       </span>
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="px-3 py-2">
                       <span className={`rounded-full border px-2 py-0.5 text-xs ${vehicleChip.className}`}>
                         {vehicleChip.label}
                       </span>
                     </TableCell>
-                    <TableCell>{group.currency}</TableCell>
-                    <TableCell className="text-right tabular-nums">
+                    <TableCell className="px-3 py-2">{group.currency}</TableCell>
+                    <TableCell className="px-3 py-2 text-right tabular-nums">
                       {group.count.toLocaleString()}
                     </TableCell>
-                    <TableCell className="text-right tabular-nums">
+                    <TableCell className="px-3 py-2 text-right tabular-nums">
                       {group.approved_count.toLocaleString()}
                     </TableCell>
                     <TableCell
-                      className={`text-right tabular-nums ${group.above_materiality_count > 0 ? "text-amber-700" : ""}`}
+                      className={`px-3 py-2 text-right tabular-nums ${group.above_materiality_count > 0 ? "text-amber-700" : ""}`}
                     >
                       {group.above_materiality_count.toLocaleString()}
                     </TableCell>
-                    <TableCell className="text-right tabular-nums">
+                    <TableCell className="px-3 py-2 text-right tabular-nums">
                       {money(group.total_amount, group.currency)}
                     </TableCell>
-                    <TableCell className="text-right">
+                    <TableCell className="px-3 py-2 text-right">
                       {isNeedsHuman ? (
                         <span className="text-xs text-muted-foreground">Review individually</span>
                       ) : (
@@ -314,9 +327,9 @@ export function ResolutionGroupsTable({
                   {expanded && (
                     <TableRow>
                       <TableCell colSpan={9} className="bg-muted/20 p-0">
-                        <div className="space-y-3 p-4">
+                        <div className="space-y-3 p-3">
                           {!isNeedsHuman && (
-                            <div className="flex items-center gap-3">
+                            <div className="flex items-center gap-2">
                               <input
                                 type="text"
                                 value={notes}
@@ -325,7 +338,7 @@ export function ResolutionGroupsTable({
                                 }
                                 disabled={blocked}
                                 placeholder="Optional note for the audit trail (e.g. month-end close)"
-                                className="flex-1 rounded-md border bg-background px-3 py-1.5 text-[13px] text-foreground placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                                className="min-w-0 flex-1 rounded-md border bg-background px-3 py-1.5 text-[13px] text-foreground placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50"
                               />
                               {rejectButton}
                               <ExportMenu
@@ -391,61 +404,61 @@ export function NeedsHumanWorksheet({ runId, proposals, isLoading, onInvestigate
         <p className="text-[13px] text-muted-foreground">No items need human review.</p>
       ) : (
         <div className="overflow-x-auto rounded-xl border bg-card shadow-soft">
-          <Table>
+          <Table className="table-fixed">
             <TableHeader>
               <TableRow>
-                <TableHead>Order ref</TableHead>
-                <TableHead>Stripe charge</TableHead>
-                <TableHead>NetSuite ID</TableHead>
-                <TableHead className="text-right">Amount</TableHead>
-                <TableHead>Root cause</TableHead>
-                <TableHead>Why held</TableHead>
-                <TableHead className="sr-only">Row actions</TableHead>
+                <TableHead className="w-[11%] px-3 py-2">Order ref</TableHead>
+                <TableHead className="w-[15%] px-3 py-2">Stripe charge</TableHead>
+                <TableHead className="w-[13%] px-3 py-2">NetSuite ID</TableHead>
+                <TableHead className="w-[9%] px-3 py-2 text-right">Amount</TableHead>
+                <TableHead className="w-[12%] px-3 py-2">Root cause</TableHead>
+                <TableHead className="w-[24%] px-3 py-2">Why held</TableHead>
+                <TableHead className="w-[16%] px-3 py-2 sr-only">Row actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {proposals.map((p) => (
                 <TableRow key={p.id}>
-                  <TableCell>
+                  <TableCell className="px-3 py-2">
                     {p.order_reference ? (
                       <CopyableId value={p.order_reference} />
                     ) : (
                       <span className="text-muted-foreground">—</span>
                     )}
                   </TableCell>
-                  <TableCell>
+                  <TableCell className="px-3 py-2">
                     {p.stripe_charge_id ? (
                       <CopyableId value={p.stripe_charge_id} />
                     ) : (
                       <span className="text-muted-foreground">—</span>
                     )}
                   </TableCell>
-                  <TableCell>
+                  <TableCell className="px-3 py-2">
                     {p.netsuite_internal_id ? (
-                      <span className="inline-flex items-center gap-1.5">
+                      <span className="inline-flex max-w-full items-center gap-1.5">
                         <CopyableId prefix="NS#" value={p.netsuite_internal_id} />
                         {p.netsuite_record_type && (
-                          <span className="text-xs text-muted-foreground">{p.netsuite_record_type}</span>
+                          <span className="shrink-0 text-xs text-muted-foreground">{p.netsuite_record_type}</span>
                         )}
                       </span>
                     ) : (
                       <span className="text-muted-foreground">—</span>
                     )}
                   </TableCell>
-                  <TableCell className="text-right tabular-nums">
+                  <TableCell className="px-3 py-2 text-right tabular-nums">
                     {money(p.proposed_amount, p.currency || "USD")}
                   </TableCell>
-                  <TableCell>
+                  <TableCell className="px-3 py-2">
                     <span
                       className={`rounded-full border px-2 py-0.5 text-xs ${rootCauseChipClass(p.root_cause)}`}
                     >
                       {ROOT_CAUSE_LABEL[p.root_cause] ?? p.root_cause}
                     </span>
                   </TableCell>
-                  <TableCell className="max-w-xs truncate text-muted-foreground" title={p.narrative}>
+                  <TableCell className="truncate px-3 py-2 text-muted-foreground" title={p.narrative}>
                     {p.narrative}
                   </TableCell>
-                  <TableCell className="text-right">
+                  <TableCell className="px-3 py-2 text-right">
                     <button
                       type="button"
                       onClick={() => onInvestigate(p)}

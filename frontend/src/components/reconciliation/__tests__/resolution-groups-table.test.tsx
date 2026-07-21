@@ -321,6 +321,28 @@ describe("ResolutionGroupsTable", () => {
     expect(screen.getByText(/review individually/i)).toBeInTheDocument();
   });
 
+  describe("1440px layout fit (Task 6 close-wave item 1)", () => {
+    it("caps the group label + descriptor to one truncated line with a title carrying the full text", () => {
+      render(<ResolutionGroupsTable {...baseProps()} />);
+      const label = screen.getByTitle("Stripe processing fees — Stripe fee not booked");
+      expect(label.className).toContain("truncate");
+    });
+
+    it("caps the above-materiality hint to one truncated line with a title carrying the full text", () => {
+      render(<ResolutionGroupsTable {...baseProps()} />);
+      const hint = screen.getByTitle(
+        "3 above materiality — tick them individually in the item list.",
+      );
+      expect(hint.className).toContain("truncate");
+    });
+
+    it("uses table-fixed on the groups worksheet so the expanded panel's row never forces the container wider", () => {
+      render(<ResolutionGroupsTable {...baseProps()} />);
+      const table = screen.getByRole("table");
+      expect(table.className).toContain("table-fixed");
+    });
+  });
+
   it("renders the section heading with a group count", () => {
     render(<ResolutionGroupsTable {...baseProps({ groups: [feeGroup, { ...feeGroup, group_key: "timing:carry_forward:none", currency: "EUR" }] })} />);
     expect(screen.getByText(/resolution groups/i)).toBeInTheDocument();
@@ -470,6 +492,12 @@ describe("NeedsHumanWorksheet", () => {
   it("shows a loading state", () => {
     render(<NeedsHumanWorksheet runId="r1" proposals={undefined} isLoading={true} onInvestigate={vi.fn()} />);
     expect(screen.getByText(/loading/i)).toBeInTheDocument();
+  });
+
+  it("uses table-fixed on the needs-human worksheet so the Investigate button column stays in the 1440px viewport", () => {
+    render(<NeedsHumanWorksheet runId="r1" proposals={[proposal]} isLoading={false} onInvestigate={vi.fn()} />);
+    const table = screen.getByRole("table");
+    expect(table.className).toContain("table-fixed");
   });
 
   describe("truncation notice (limit=1,000 cross-group fetch)", () => {
