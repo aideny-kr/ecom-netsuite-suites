@@ -63,11 +63,13 @@ _REF_CHUNK_SIZE = 5000
 # hold.
 #
 # STRICT WINDOW NETTING (operator ruling, 2026-07-21): only refunds dated
-# <= WASHOUT_WINDOW_DAYS after the charge count toward the net-zero test AT
-# ALL. A same-ref refund landing outside the window is a slow trickle, not
-# washout evidence — the order shipped and NetSuite has a booked deposit
-# (reversed later via a credit memo + refund); it either matches normally or
-# deserves human review, no matter how the FULL refund history nets out.
+# on or after the charge, and within WASHOUT_WINDOW_DAYS of it, count toward
+# the net-zero test AT ALL. A same-ref refund landing outside that window —
+# including one dated BEFORE the charge, which can't be refunding it — is a
+# slow trickle or unrelated same-ref noise, not washout evidence — the order
+# shipped and NetSuite has a booked deposit (reversed later via a credit
+# memo + refund); it either matches normally or deserves human review, no
+# matter how the FULL refund history nets out.
 WASHOUT_WINDOW_DAYS = 7
 
 # Fetch-volume guard (review finding 1 mitigation, 2026-07-21): the refund
@@ -86,9 +88,11 @@ def _washout_evidence(
     """Return washout evidence for one charge's same-ref refund lines, or None.
 
     STRICT WINDOW NETTING (operator ruling, 2026-07-21): only refunds dated
-    <= ``WASHOUT_WINDOW_DAYS`` after ``charge_date`` count toward the
-    net-zero test AT ALL. A refund landing outside the window is a slow
-    trickle, not washout evidence — the order shipped and NetSuite has a
+    between ``charge_date`` and ``charge_date + WASHOUT_WINDOW_DAYS``
+    (inclusive both ends) count toward the net-zero test AT ALL. A refund
+    landing outside the window — including one dated BEFORE the charge,
+    which can't be refunding it — is a slow trickle or unrelated same-ref
+    noise, not washout evidence — the order shipped and NetSuite has a
     booked deposit (reversed later via a credit memo + refund); it either
     matches normally or deserves human review. ``refund_amount`` and
     ``net_after_refund`` are computed from within-window refunds only;
@@ -100,7 +104,7 @@ def _washout_evidence(
     within_window = [
         (amount, refund_date)
         for amount, refund_date in refunds
-        if (refund_date - charge_date).days <= WASHOUT_WINDOW_DAYS
+        if 0 <= (refund_date - charge_date).days <= WASHOUT_WINDOW_DAYS
     ]
     if not within_window:
         return None
@@ -120,6 +124,9 @@ def _washout_evidence(
     }
 
 
+_PATTERN_UNLOADED = object()
+
+
 class OrderReconJob:
     """Orchestrates order-level reconciliation: charge → deposit matching."""
 
@@ -127,6 +134,18 @@ class OrderReconJob:
         self.db = db
         self.tenant_id = tenant_id
         self.engine = OrderMatchingEngine()
+        # Cache for _load_order_ref_pattern_once — both _fetch_charges and
+        # _fetch_refunds need this tenant's order_ref_pattern within the same
+        # run(); caching avoids querying TenantConfig twice per run. A plain
+        # None is a valid loaded value (no custom pattern -> engine default),
+        # so a distinct sentinel marks "not loaded yet".
+        self._order_ref_pattern: str | None | object = _PATTERN_UNLOADED
+
+    async def _load_order_ref_pattern_once(self) -> str | None:
+        """Load this tenant's order_ref_pattern once per job instance."""
+        if self._order_ref_pattern is _PATTERN_UNLOADED:
+            self._order_ref_pattern = await load_order_ref_pattern(self.db, self.tenant_id)
+        return self._order_ref_pattern
 
     async def run(
         self,
@@ -287,6 +306,41 @@ class OrderReconJob:
             logger.error("order_recon_job.failed", run_id=str(run_id), error=str(e))
             raise
 
+    async def _fetch_payout_lines(
+        self,
+        *,
+        line_types: list[str],
+        date_from: date,
+        date_to: date,
+        subsidiary_id: str | None = None,
+    ) -> list[tuple[PayoutLine, date]]:
+        """Shared Payout-join/tenant/date/subsidiary scaffold for both the
+        charge fetch and the refund fetch — the two call sites differ only
+        in ``line_types`` and their date bounds (the charge path passes
+        ``_DATE_BUFFER``-widened dates; the refund path passes its own
+        ``REF_MATCH_SANITY_DAYS``-widened dates), both already computed by
+        the caller. Returns raw (PayoutLine, arrival_date) row tuples —
+        record construction stays with each caller since it differs
+        completely (ChargeRecord list vs ref-keyed refund grouping).
+        """
+        p = aliased(Payout)
+        stmt = (
+            select(PayoutLine, p.arrival_date)
+            .join(p, PayoutLine.payout_id == p.id)
+            .where(
+                PayoutLine.tenant_id == self.tenant_id,
+                PayoutLine.line_type.in_(line_types),
+                p.arrival_date >= date_from,
+                p.arrival_date <= date_to,
+            )
+        )
+
+        if subsidiary_id:
+            stmt = stmt.where(PayoutLine.subsidiary_id == subsidiary_id)
+
+        result = await self.db.execute(stmt)
+        return result.all()
+
     async def _fetch_charges(
         self,
         date_from: date,
@@ -299,26 +353,15 @@ class OrderReconJob:
         Extracts order_reference from description using extract_order_ref() with
         this tenant's configured pattern (NULL -> engine default).
         """
-        # Load this tenant's order-reference pattern once (NULL -> engine default).
-        order_ref_pattern = await load_order_ref_pattern(self.db, self.tenant_id)
+        # Cached per job instance — _fetch_refunds needs the same pattern.
+        order_ref_pattern = await self._load_order_ref_pattern_once()
 
-        p = aliased(Payout)
-        stmt = (
-            select(PayoutLine, p.arrival_date)
-            .join(p, PayoutLine.payout_id == p.id)
-            .where(
-                PayoutLine.tenant_id == self.tenant_id,
-                PayoutLine.line_type == "charge",
-                p.arrival_date >= date_from - _DATE_BUFFER,
-                p.arrival_date <= date_to + _DATE_BUFFER,
-            )
+        rows = await self._fetch_payout_lines(
+            line_types=["charge"],
+            date_from=date_from - _DATE_BUFFER,
+            date_to=date_to + _DATE_BUFFER,
+            subsidiary_id=subsidiary_id,
         )
-
-        if subsidiary_id:
-            stmt = stmt.where(PayoutLine.subsidiary_id == subsidiary_id)
-
-        result = await self.db.execute(stmt)
-        rows = result.all()
 
         return [
             ChargeRecord(
@@ -450,28 +493,19 @@ class OrderReconJob:
         if not order_references:
             return {}
 
-        order_ref_pattern = await load_order_ref_pattern(self.db, self.tenant_id)
+        # Cached per job instance (_fetch_charges loads it first in run()) —
+        # avoids a second TenantConfig query for the same tenant/run.
+        order_ref_pattern = await self._load_order_ref_pattern_once()
 
         sanity_from = date_from - timedelta(days=REF_MATCH_SANITY_DAYS)
         sanity_to = date_to + timedelta(days=REF_MATCH_SANITY_DAYS)
 
-        p = aliased(Payout)
-        stmt = (
-            select(PayoutLine, p.arrival_date)
-            .join(p, PayoutLine.payout_id == p.id)
-            .where(
-                PayoutLine.tenant_id == self.tenant_id,
-                PayoutLine.line_type.in_(["refund", "payment_refund"]),
-                p.arrival_date >= sanity_from,
-                p.arrival_date <= sanity_to,
-            )
+        rows = await self._fetch_payout_lines(
+            line_types=["refund", "payment_refund"],
+            date_from=sanity_from,
+            date_to=sanity_to,
+            subsidiary_id=subsidiary_id,
         )
-
-        if subsidiary_id:
-            stmt = stmt.where(PayoutLine.subsidiary_id == subsidiary_id)
-
-        result = await self.db.execute(stmt)
-        rows = result.all()
 
         # Fetch-volume guard (review finding 1 mitigation): cheap tripwire
         # until SQL-side ref narrowing is ticketed — see
@@ -527,8 +561,23 @@ class OrderReconJob:
         same-ref refunds satisfy the washout rule, evidence gains
         ``{washout, refund_date, refund_amount, net_after_refund}``. Evidence
         only — match_type/variance_type/bucket are untouched here.
+
+        AMBIGUITY NEVER AUTO-MATCHES (gate finding [MAJOR], 2026-07-21;
+        mirrors the set-to-set same-ref deposit pairing precedent in
+        order_matching_engine.py's ``_match_same_ref_group``):
+        ``refunds_by_ref`` is keyed by order_reference only, so when 2+ of
+        this run's charges share one ref, each would otherwise
+        independently net against the SAME refund list — double-counting a
+        single refund as covering multiple charges. ``ref_charge_counts``
+        counts every charge in this run (matched or not) per ref; washout
+        evidence below is gated to refs with EXACTLY ONE charge.
         """
         refunds_by_ref = refunds_by_ref or {}
+        ref_charge_counts: dict[str, int] = {}
+        for candidate in candidates:
+            ref = candidate.charge.order_reference
+            if ref:
+                ref_charge_counts[ref] = ref_charge_counts.get(ref, 0) + 1
         mat_abs, mat_pct = await self._load_materiality()
         buckets: list[str] = []
         for candidate in candidates:
@@ -604,7 +653,14 @@ class OrderReconJob:
             # Washout evidence (Phase B Task 1): only unmatched charges (no
             # deposit ever booked) are eligible — a charge that matched a
             # deposit is not a washout, regardless of any same-ref refund.
-            if candidate.deposit is None and candidate.charge.order_reference:
+            # Ambiguity gate (gate finding [MAJOR], 2026-07-21): also
+            # requires this ref to belong to exactly one charge in the run —
+            # see ref_charge_counts above.
+            if (
+                candidate.deposit is None
+                and candidate.charge.order_reference
+                and ref_charge_counts.get(candidate.charge.order_reference, 0) == 1
+            ):
                 washout = _washout_evidence(
                     candidate.charge.amount,
                     candidate.charge.charge_date,

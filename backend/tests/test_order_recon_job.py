@@ -990,6 +990,188 @@ class TestWashoutEvidenceDbBacked:
         assert stored.variance_type == "missing_in_netsuite"
 
 
+class TestWashoutEvidenceSameRefAmbiguity:
+    """AMBIGUITY NEVER AUTO-MATCHES (gate finding [MAJOR], 2026-07-21) — the
+    same standing rule behind the set-to-set same-ref deposit pairing in
+    order_matching_engine.py's ``_match_same_ref_group`` (never auto-match
+    when a ref's ownership is ambiguous). ``refunds_by_ref`` is keyed by
+    order_reference only, so when 2+ of this run's charges share one ref,
+    each would otherwise independently net against the SAME refund list —
+    double-counting a single refund as covering multiple charges. Washout
+    evidence may only attach when EXACTLY ONE charge in the run carries that
+    ref (counted across ALL the run's charges, matched or not — a matched
+    sibling still makes the refund's ownership ambiguous)."""
+
+    async def test_two_same_ref_unmatched_charges_share_refund_neither_washes_out(self, db, tenant_a):
+        """Two same-ref charges, both unmatched, would each independently
+        net to zero against the one $100 refund — but a single refund
+        cannot cover two distinct $100 charges. Neither gets washout
+        evidence; both stay in the normal missing_in_netsuite flow."""
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_ambig_wash_a",
+            description="Framework Marketplace Order ID: R700800900-XU9EPZPD",
+            amount=Decimal("100.00"),
+            arrival_date=date(2026, 3, 15),
+        )
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_ambig_wash_b",
+            description="Framework Marketplace Order ID: R700800900-XU9EPZPD",
+            amount=Decimal("100.00"),
+            arrival_date=date(2026, 3, 15),
+        )
+        await create_test_payout_line(
+            db,
+            tenant_a.id,
+            source_id="re_ambig_wash",
+            line_type="refund",
+            amount=Decimal("-100.00"),
+            fee=Decimal("0"),
+            net=Decimal("-100.00"),
+            description="Refund for order R700800900",
+            arrival_date=date(2026, 3, 18),
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        charges = await job._fetch_charges(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+        order_references = {c.order_reference for c in charges if c.order_reference}
+        deposits = await job._fetch_deposits(
+            date_from=date(2026, 3, 10), date_to=date(2026, 3, 20), order_references=order_references
+        )
+        refunds_by_ref = await job._fetch_refunds(
+            date_from=date(2026, 3, 10), date_to=date(2026, 3, 20), order_references=order_references
+        )
+        candidates = job.engine.match(charges, deposits)
+        assert len(candidates) == 2
+        assert all(c.match_type == "unmatched" for c in candidates)
+
+        run = await create_test_recon_run(db, tenant_a.id)
+        await job._store_results(run.id, candidates, refunds_by_ref=refunds_by_ref)
+
+        stored = (
+            (await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id)))
+            .scalars()
+            .all()
+        )
+        assert len(stored) == 2
+        for result in stored:
+            assert "washout" not in result.evidence
+
+    async def test_matched_sibling_same_ref_blocks_washout_on_unmatched_charge(self, db, tenant_a):
+        """A matched sibling sharing the ref still makes the refund's
+        ownership ambiguous — the unmatched charge must not wash out just
+        because it, in isolation, nets to zero against the ref's refund
+        list."""
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_sibling_unmatched",
+            description="Framework Marketplace Order ID: R811922033-XU9EPZPD",
+            amount=Decimal("100.00"),
+            arrival_date=date(2026, 3, 15),
+        )
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_sibling_matched",
+            description="Framework Marketplace Order ID: R811922033-XU9EPZPD",
+            amount=Decimal("50.00"),
+            arrival_date=date(2026, 3, 15),
+        )
+        await create_test_netsuite_posting(
+            db,
+            tenant_a.id,
+            netsuite_internal_id="99070",
+            related_payout_id="R811922033",
+            transaction_date=date(2026, 3, 16),
+            amount=Decimal("50.00"),
+        )
+        await create_test_payout_line(
+            db,
+            tenant_a.id,
+            source_id="re_sibling",
+            line_type="refund",
+            amount=Decimal("-100.00"),
+            fee=Decimal("0"),
+            net=Decimal("-100.00"),
+            description="Refund for order R811922033",
+            arrival_date=date(2026, 3, 18),
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        charges = await job._fetch_charges(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+        order_references = {c.order_reference for c in charges if c.order_reference}
+        deposits = await job._fetch_deposits(
+            date_from=date(2026, 3, 10), date_to=date(2026, 3, 20), order_references=order_references
+        )
+        refunds_by_ref = await job._fetch_refunds(
+            date_from=date(2026, 3, 10), date_to=date(2026, 3, 20), order_references=order_references
+        )
+        candidates = job.engine.match(charges, deposits)
+
+        by_source = {c.charge.source_id: c for c in candidates}
+        assert by_source["ch_sibling_unmatched"].match_type == "unmatched"
+        assert by_source["ch_sibling_unmatched"].deposit is None
+        assert by_source["ch_sibling_matched"].deposit is not None
+
+        run = await create_test_recon_run(db, tenant_a.id)
+        await job._store_results(run.id, candidates, refunds_by_ref=refunds_by_ref)
+
+        stored = (
+            (await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id)))
+            .scalars()
+            .all()
+        )
+        by_charge_source = {r.evidence["charge_source_id"]: r for r in stored}
+        assert "washout" not in by_charge_source["ch_sibling_unmatched"].evidence
+
+    async def test_single_charge_same_ref_still_washes_out_regression(self, db, tenant_a):
+        """Regression: the common case (exactly one charge on this ref)
+        must keep working after the ambiguity gate — a lone charge's
+        same-ref refund still produces washout evidence."""
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_ambig_regression",
+            description="Framework Marketplace Order ID: R123456789-XU9EPZPD",
+            amount=Decimal("100.00"),
+            arrival_date=date(2026, 3, 15),
+        )
+        await create_test_payout_line(
+            db,
+            tenant_a.id,
+            source_id="re_ambig_regression",
+            line_type="refund",
+            amount=Decimal("-100.00"),
+            fee=Decimal("0"),
+            net=Decimal("-100.00"),
+            description="Refund for order R123456789",
+            arrival_date=date(2026, 3, 18),
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        charges = await job._fetch_charges(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+        order_references = {c.order_reference for c in charges if c.order_reference}
+        deposits = await job._fetch_deposits(
+            date_from=date(2026, 3, 10), date_to=date(2026, 3, 20), order_references=order_references
+        )
+        refunds_by_ref = await job._fetch_refunds(
+            date_from=date(2026, 3, 10), date_to=date(2026, 3, 20), order_references=order_references
+        )
+        candidates = job.engine.match(charges, deposits)
+
+        run = await create_test_recon_run(db, tenant_a.id)
+        await job._store_results(run.id, candidates, refunds_by_ref=refunds_by_ref)
+
+        stored = (
+            await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id))
+        ).scalar_one()
+        assert stored.evidence["washout"] is True
+
+
 class TestWashoutEvidenceStrictWindowNetting:
     """Strict window netting (operator ruling, 2026-07-21): only refunds
     dated <= WASHOUT_WINDOW_DAYS after the charge count toward the net-zero
@@ -1057,6 +1239,29 @@ class TestWashoutEvidenceStrictWindowNetting:
         evidence = _washout_evidence(charge_amount, charge_date, refunds)
         assert evidence is not None
         assert evidence["refund_date"] == "2026-03-06"
+
+    async def test_refund_before_charge_is_not_washout(self):
+        """Window floor (gate finding [MAJOR]): a refund dated BEFORE the
+        charge must never count toward the net-zero test, even when it
+        nets the charge to exactly zero — the old filter only checked an
+        upper bound (delta <= WASHOUT_WINDOW_DAYS), so a negative delta
+        slipped through as 'within window'. A refund can't precede the
+        charge it's refunding; a same-ref refund from an unrelated earlier
+        order sharing this ref must not manufacture washout evidence."""
+        charge_amount = Decimal("100.00")
+        charge_date = date(2026, 3, 10)
+        refunds = [(Decimal("-100.00"), date(2026, 3, 7))]  # -3 days, before the charge
+        assert _washout_evidence(charge_amount, charge_date, refunds) is None
+
+    async def test_refund_on_charge_date_is_washout(self):
+        """Pins the floor boundary: delta == 0 (same-day refund) still
+        counts — only a strictly negative delta is excluded."""
+        charge_amount = Decimal("100.00")
+        charge_date = date(2026, 3, 10)
+        refunds = [(Decimal("-100.00"), date(2026, 3, 10))]  # 0 days
+        evidence = _washout_evidence(charge_amount, charge_date, refunds)
+        assert evidence is not None
+        assert evidence["washout"] is True
 
 
 class TestRefundFetchVolumeGuard:
