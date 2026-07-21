@@ -651,6 +651,60 @@ async def test_refresh_of_statement_recipe_degrades_when_compare_sources_fail(db
     assert kpis["revenue"]["mom_delta"] is None
 
 
+async def test_non_refresherror_exception_on_compare_source_degrades_with_warning(db, monkeypatch, caplog):
+    """M-A (T2 gate round 2): the required-vs-degrade contract must hold for ANY
+    exception, not just the RefreshErrors this module raises itself. A transient DB
+    error (set_tenant_context) or an extract shape-edge on a NON-required (compare) rid
+    must degrade that ONE comparison, not kill the whole refresh."""
+    import logging
+
+    _title, recipe = build_playbook_recipe("income_statement", {"period": "Jun 2026"})
+    tenant, user, report = await _seed_report(db, recipe=recipe)
+    by_params = _income_statement_by_params()
+
+    async def fake_execute(tool_name, tool_input, tenant_id, actor_id, correlation_id, db, **kw):
+        key = (tool_input.get("report_type"), tool_input.get("period"))
+        if key == ("income_statement", "Jun 2025"):  # r3 (yoy) -- non-required
+            raise RuntimeError("transient DB error")
+        return by_params[key]
+
+    monkeypatch.setattr("app.services.chat.tools.execute_tool_call", fake_execute)
+    caplog.set_level(logging.WARNING, logger="app.services.report.refresh_service")
+
+    updated = await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
+
+    assert updated.version == 2  # published despite r3's exception
+    model = next(s["model"] for s in updated.spec_json["sections"] if s["type"] == "financial_statement")
+    assert model["yoy_period"] is None  # r3 degraded, not fatal
+    assert any(
+        "source_degraded" in rec.message and "r3" in rec.message and "RuntimeError" in rec.message
+        for rec in caplog.records
+    ), f"expected a loud warning naming rid/tool/exc_type, got: {[r.message for r in caplog.records]}"
+
+
+async def test_non_refresherror_exception_on_required_source_still_fails(db, monkeypatch):
+    """M-A's other half: a REQUIRED rid (r1) must still fail the whole refresh on ANY
+    exception, exactly like the pre-existing RefreshError fail-closed contract."""
+    _title, recipe = build_playbook_recipe("income_statement", {"period": "Jun 2026"})
+    tenant, user, report = await _seed_report(db, recipe=recipe)
+    rid, tid, uid, original_html = report.id, tenant.id, user.id, report.rendered_html
+    by_params = _income_statement_by_params()
+
+    async def fake_execute(tool_name, tool_input, tenant_id, actor_id, correlation_id, db, **kw):
+        key = (tool_input.get("report_type"), tool_input.get("period"))
+        if key == ("income_statement", "Jun 2026"):  # r1 -- required
+            raise RuntimeError("transient DB error")
+        return by_params[key]
+
+    monkeypatch.setattr("app.services.chat.tools.execute_tool_call", fake_execute)
+
+    with pytest.raises(RefreshError) as exc:
+        await refresh_report(db, report_id=rid, tenant_id=tid, actor_id=uid)
+    assert exc.value.status_code == 500
+    row = (await db.execute(select(Report).where(Report.id == rid))).scalar_one()
+    assert row.rendered_html == original_html  # current version untouched
+
+
 async def test_refresh_of_statement_recipe_r1_failure_still_fails_closed(db, monkeypatch):
     """Risk 2's other half on the refresh path: r1 (current period) is still a hard
     dependency — its failure raises RefreshError and never corrupts the current

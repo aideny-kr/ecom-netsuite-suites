@@ -174,7 +174,15 @@ async def _execute_sources(
     refresh-eligibility, connection match) still run in full before any dispatch; a
     tampered compare source is refused exactly as before, it just doesn't abort the
     whole refresh — the security boundary is unchanged, only the blast radius shrinks
-    from "whole report" to "one comparison"."""
+    from "whole report" to "one comparison".
+
+    M-A (T2 gate round 2): "ANY failure" above means exactly that — a required rid also
+    fails the whole refresh on a non-``RefreshError`` exception (a transient
+    ``set_tenant_context`` DB error, an extract shape-edge this loop didn't anticipate),
+    not just the ``RefreshError``s this module raises itself. A non-required rid degrades
+    on that same broader exception set too: caught, logged as a WARNING naming the rid,
+    tool, and exception type (so a systemic problem stays visible even though it's
+    non-fatal), and omitted — exactly like the ``RefreshError`` degrade path."""
     from app.services.chat.tool_call_results import extract_result_payload
     from app.services.chat.tools import execute_tool_call
     from app.services.report.statement_builder import STATEMENT_ROW_CAP
@@ -235,6 +243,25 @@ async def _execute_sources(
             if rid in required_rids:
                 raise
             continue  # non-required (compare) rid degrades — omitted, never raised
+        except Exception as exc:
+            # M-A (T2 gate round 2): the required-vs-degrade contract is "fail closed on
+            # anything short of success," not "fail closed only on a RefreshError this
+            # module raised itself." A required rid must still fail the WHOLE refresh on
+            # a non-RefreshError exception (a transient set_tenant_context DB error, an
+            # extract shape-edge this loop didn't anticipate) -- re-raise unchanged. A
+            # non-required (compare) rid degrades exactly like the RefreshError branch
+            # above: caught, logged loudly (rid/tool/exception type, so a systemic problem
+            # stays visible even though it's non-fatal), and omitted from payloads.
+            if rid in required_rids:
+                raise
+            tool_for_log = (sources.get(rid) or {}).get("tool", "?")
+            logger.warning(
+                "report.refresh.source_degraded reason=unexpected_exception rid=%s tool=%s exc_type=%s",
+                rid,
+                tool_for_log,
+                type(exc).__name__,
+            )
+            continue
     return payloads
 
 
