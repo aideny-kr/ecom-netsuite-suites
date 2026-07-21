@@ -450,3 +450,128 @@ def test_variance_type_literal_includes_new_order_taxonomy_strings():
 
     assert "missing_in_netsuite" in get_args(VarianceType)
     assert "amount_mismatch" in get_args(VarianceType)
+
+
+# ---------------------------------------------------------------------------
+# Washout classification (Phase B Task 2, operator decision 2026-07-21):
+# evidence.washout (attached by order_recon_job._washout_evidence, Task 1)
+# routes to a permanent carry_forward instead of rule 7's
+# create_and_apply_deposit — a charge refunded in full within 7 days never
+# reaches NetSuite, so there is nothing to book.
+# ---------------------------------------------------------------------------
+
+WASHOUT_EVIDENCE = {
+    "charge_source_id": "ch_washout",
+    "order_reference": "R628489275",
+    "washout": True,
+    "refund_date": "2026-03-18",
+    "refund_amount": "-100.00",
+    "net_after_refund": "0.00",
+}
+WASHOUT_NARRATIVE = (
+    "Stripe charge fully refunded on 2026-03-18 within 7 days; order canceled — no NetSuite booking required."
+)
+
+
+def test_washout_evidence_carries_forward_not_create_and_apply():
+    p = _plan(
+        match_type="unmatched",
+        variance_type="missing_in_netsuite",
+        variance_amount=Decimal("100.00"),
+        netsuite_amount=None,
+        evidence=WASHOUT_EVIDENCE,
+    )
+    assert p.action == "carry_forward"
+    assert p.action != "create_and_apply_deposit"
+    assert p.booking_vehicle == "none"
+    assert p.root_cause == "washout"
+    assert p.group_key == "washout:carry_forward:none"
+
+
+def test_washout_narrative_is_exact_evidence_sourced_template():
+    p = _plan(
+        match_type="unmatched",
+        variance_type="missing_in_netsuite",
+        variance_amount=Decimal("100.00"),
+        netsuite_amount=None,
+        evidence=WASHOUT_EVIDENCE,
+    )
+    assert p.narrative == WASHOUT_NARRATIVE
+
+
+def test_washout_wins_over_rule7_dispatch_even_with_old_payout():
+    """Without washout evidence this exact shape (old payout, order ref known)
+    would hit rule 7's create_and_apply_deposit — washout evidence must
+    preempt it."""
+    p = _plan(
+        match_type="unmatched",
+        variance_type="missing_in_netsuite",
+        variance_amount=Decimal("100.00"),
+        netsuite_amount=None,
+        days_since_payout=30,
+        evidence=WASHOUT_EVIDENCE,
+    )
+    assert p.action == "carry_forward"
+    assert p.root_cause == "washout"
+
+
+def test_no_washout_evidence_rule7_unchanged():
+    """Sanity: identical shape minus washout evidence still goes through the
+    ordinary rule-7 dispatch (create_and_apply_deposit — old payout, order
+    ref known)."""
+    p = _plan(
+        match_type="unmatched",
+        variance_type="missing_in_netsuite",
+        variance_amount=Decimal("100.00"),
+        netsuite_amount=None,
+        days_since_payout=30,
+        evidence={"charge_source_id": "ch_1", "order_reference": "R1"},
+    )
+    assert p.action == "create_and_apply_deposit"
+
+
+def test_washout_false_evidence_does_not_trigger_washout_rule():
+    """evidence['washout'] explicitly False (not just absent) must not
+    trigger the washout rule — mirrors rule 4's `is True` evidence check."""
+    p = _plan(
+        match_type="unmatched",
+        variance_type="missing_in_netsuite",
+        variance_amount=Decimal("100.00"),
+        netsuite_amount=None,
+        days_since_payout=30,
+        evidence={"charge_source_id": "ch_1", "order_reference": "R1", "washout": False},
+    )
+    assert p.action == "create_and_apply_deposit"
+
+
+def test_chargeback_gate_preempts_washout_evidence():
+    """Precedence choice (documented in resolution_planner.py at the washout
+    rule): a chargeback is the stricter policy pin and must win over washout
+    evidence — funds already disputed/reversed via a chargeback are never
+    silently downgraded to a no-booking washout carry_forward. The chargeback
+    gate (rule 3) is checked before the washout rule, so this is automatic —
+    this test locks the choice in."""
+    p = _plan(
+        variance_type="chargeback",
+        variance_amount=Decimal("100.00"),
+        evidence=WASHOUT_EVIDENCE,
+    )
+    assert p.action == "needs_human"
+    assert p.root_cause == "chargeback"
+
+
+def test_washout_not_in_recency_hold_root_causes():
+    """A washout is permanent (order canceled), not a 're-check next run'
+    sync-lag snooze — it must never get the recency-hold cross-run lifecycle
+    (see RECENCY_HOLD_ROOT_CAUSES' design note in resolution_planner.py)."""
+    from app.services.reconciliation.resolution_planner import RECENCY_HOLD_ROOT_CAUSES
+
+    assert "washout" not in RECENCY_HOLD_ROOT_CAUSES
+
+
+def test_washout_added_to_variance_type_literal():
+    from typing import get_args
+
+    from app.schemas.reconciliation import VarianceType
+
+    assert "washout" in get_args(VarianceType)

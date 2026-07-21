@@ -7,7 +7,7 @@ from decimal import Decimal
 from sqlalchemy import select
 
 from app.models.audit import AuditEvent
-from app.models.reconciliation import ReconResolutionProposal
+from app.models.reconciliation import ReconciliationResult, ReconResolutionProposal
 from app.services.reconciliation.group_actions import approve_group_core
 from app.services.reconciliation.resolution_planner import plan_run
 from tests.conftest import (
@@ -353,6 +353,105 @@ async def test_plan_run_approved_timing_carry_forward_is_standing_decision(db, t
 
     # Standing decision: the guard suppresses re-planning, exactly like any
     # other approved action — no fresh proposal, no supersede.
+    assert out["skipped_guard_count"] == 1
+    assert out["planned_count"] == 0
+    assert out["recency_holds_superseded_count"] == 0
+
+    await db.refresh(prop1)
+    assert prop1.status == "approved"  # never system-superseded
+
+
+async def test_plan_run_approved_washout_carry_forward_is_standing_decision(db, tenant_a):
+    """Phase B Task 2: a washout carry_forward (root_cause='washout',
+    evidence-driven — order_recon_job Task 1's ref-keyed refund fetch) is,
+    like a TIMING carry_forward, an ordinary standing decision — NOT a rule-7
+    recency hold, even though its underlying variance_type is
+    "missing_in_netsuite" (the same variance_type rule-7 recency holds use —
+    root_cause, not variance_type, decides RECENCY_HOLD_ROOT_CAUSES
+    membership). Once approved it (a) feeds the cross-run
+    decided_charge_ids guard, suppressing re-planning entirely, and (b) is
+    never system-superseded by the recency-hold-only supersede pass. Also
+    exercises approve_group_core directly on a washout group — proving it is
+    batch-approvable (no needs_human-only block applies) and flips to
+    'carried_forward' like any other carry_forward action."""
+    await enable_feature_flag(db, tenant_a.id, "recon_resolution_ui")
+    user, _ = await create_test_user(db, tenant_a)
+    charge_source_id = f"ch_{uuid.uuid4().hex[:8]}"
+    washout_evidence = {
+        "charge_source_id": charge_source_id,
+        "order_reference": "R1",
+        "washout": True,
+        "refund_date": "2026-03-18",
+        "refund_amount": "-9.00",
+        "net_after_refund": "0.00",
+    }
+
+    run1 = await create_test_recon_run(db, tenant_a.id, status="completed")
+    await _result(
+        db,
+        tenant_a.id,
+        run1.id,
+        match_type="unmatched",
+        variance_type="missing_in_netsuite",
+        # sub-materiality (like the other standing-decision tests above): a
+        # $9 charge on a $1000 base keeps above_materiality False, so
+        # approve_group_core succeeds without needing
+        # included_above_materiality_ids — the point of this test is the
+        # carry_forward/standing-decision lifecycle, not the materiality gate.
+        variance_amount=Decimal("9.00"),
+        stripe_amount=Decimal("1000.00"),
+        netsuite_amount=None,
+        evidence=washout_evidence,
+    )
+    await db.flush()
+    await plan_run(db, tenant_a.id, run1.id)
+
+    prop1 = (
+        await db.execute(select(ReconResolutionProposal).where(ReconResolutionProposal.run_id == run1.id))
+    ).scalar_one()
+    assert prop1.action == "carry_forward"
+    assert prop1.root_cause == "washout"
+
+    await approve_group_core(
+        db,
+        tenant_id=tenant_a.id,
+        actor_id=user.id,
+        run_id=str(run1.id),
+        group_key=prop1.group_key,
+        notes=None,
+        included_above_materiality_ids=[],
+        excluded_ids=[],
+        currency=None,
+    )
+    await db.refresh(prop1)
+    assert prop1.status == "approved"
+
+    result1 = (
+        await db.execute(select(ReconciliationResult).where(ReconciliationResult.id == prop1.result_id))
+    ).scalar_one()
+    assert result1.status == "carried_forward"  # batch-approvable like any carry_forward, not needs_human-blocked
+
+    # Same charge shows up again in a later run (e.g. a re-sync noise row).
+    run2 = await create_test_recon_run(db, tenant_a.id, status="completed")
+    await _result(
+        db,
+        tenant_a.id,
+        run2.id,
+        match_type="unmatched",
+        variance_type="missing_in_netsuite",
+        variance_amount=Decimal("9.00"),
+        stripe_amount=Decimal("1000.00"),
+        netsuite_amount=None,
+        evidence=washout_evidence,
+    )
+    await db.flush()
+
+    out = await plan_run(db, tenant_a.id, run2.id)
+
+    # Standing decision: the guard suppresses re-planning entirely — no fresh
+    # proposal, no supersede (unlike a rule-7 missing_in_netsuite recency
+    # hold, which WOULD be re-planned/superseded here — see
+    # test_plan_run_replans_approved_recency_hold_after_lag_window above).
     assert out["skipped_guard_count"] == 1
     assert out["planned_count"] == 0
     assert out["recency_holds_superseded_count"] == 0

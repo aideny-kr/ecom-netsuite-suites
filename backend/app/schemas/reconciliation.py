@@ -28,6 +28,7 @@ VarianceType = Literal[
     "manual_adjustment",
     "missing_in_netsuite",
     "amount_mismatch",
+    "washout",
 ]
 ResultStatus = Literal[
     "pending",

@@ -13,6 +13,12 @@ Ordered rules (first match wins; spec mapping table):
  4b. zero-variance fuzzy match, no evidence      → skip (approve-the-match; no proposal noise)
   5. duplicate                                  → void_duplicate
   6. fees                                       → book_fee_line
+ 6b. washout (evidence: same-ref refund(s) net
+       the charge to ~$0 within the 7-day
+       window; order_recon_job Task 1)          → carry_forward, root_cause="washout"
+                                                   (permanent — beats rule 7's
+                                                   create_and_apply_deposit; the
+                                                   chargeback gate above still wins)
   7. missing / missing_in_netsuite:
        payout failed/canceled                     → needs_human (funds never settled)
        payout pending/in_transit AND past the
@@ -54,6 +60,14 @@ RECENT_PAYOUT_LAG_DAYS = 7
 # is None (no payout row joined — enrichment couldn't determine health, so it
 # must not be treated as proof the payout died).
 HEALTHY_PAYOUT_STATUSES = frozenset({"paid", "pending", "in_transit"})
+# Mirrors order_recon_job.WASHOUT_WINDOW_DAYS (operator decision 2026-07-21,
+# recorded verbatim in
+# docs/superpowers/plans/2026-07-21-recon-washout-and-currency-truth.md).
+# Duplicated here only for the washout rule's narrative text — this planner
+# never recomputes whether a charge IS a washout; it only trusts
+# evidence["washout"] as already decided by order_recon_job's ref-keyed
+# refund fetch.
+WASHOUT_WINDOW_DAYS = 7
 
 ACTION_BOOK_FEE_LINE = "book_fee_line"
 ACTION_CREATE_AND_APPLY = "create_and_apply_deposit"
@@ -219,6 +233,38 @@ def plan_result(
             "fees",
             ACTION_BOOK_FEE_LINE,
             f"Stripe processing fee — book as a fee line on the payout's bank deposit.{explain}",
+            abs_variance,
+            above,
+        )
+    # 6b. washout: order_recon_job's ref-keyed refund fetch (Task 1) attaches
+    #     evidence["washout"] when this charge's same-ref refund(s) net it to
+    #     ~$0 within WASHOUT_WINDOW_DAYS — a canceled order refunded before it
+    #     ever reached NetSuite, not a missing deposit. Checked here, AFTER
+    #     the chargeback gate (rule 3) and duplicate/fees (rules 5/6), so
+    #     those stricter/more-specific signals still win if they were ever to
+    #     co-occur with washout evidence (today they structurally can't: Task
+    #     1 only attaches washout evidence to unmatched order-engine
+    #     candidates, which always carry variance_type="missing_in_netsuite" —
+    #     never "chargeback"/"duplicate"/"fees" — but the precedence is
+    #     pinned here in case that ever changes). Must run BEFORE rule 7,
+    #     which would otherwise route the same evidence to
+    #     create_and_apply_deposit with zero refund signal — the wrong
+    #     proposal this rule exists to prevent. root_cause="washout" is a
+    #     fixed literal (not the raw variance_type, matching the chargeback
+    #     gate's own style) and is deliberately excluded from
+    #     RECENCY_HOLD_ROOT_CAUSES: a washout is permanent, not a "re-check
+    #     next run" sync-lag hold, so it must behave as an ordinary standing
+    #     decision once approved (see the RECENCY HOLDS design note above
+    #     that set). The narrative is a fixed template — no {explain} suffix
+    #     — with only the evidence-sourced refund_date interpolated; the
+    #     window-days figure is a program constant (WASHOUT_WINDOW_DAYS,
+    #     above), not an invented number.
+    if evidence.get("washout") is True:
+        return _mk(
+            "washout",
+            ACTION_CARRY_FORWARD,
+            f"Stripe charge fully refunded on {evidence.get('refund_date')} within "
+            f"{WASHOUT_WINDOW_DAYS} days; order canceled — no NetSuite booking required.",
             abs_variance,
             above,
         )
