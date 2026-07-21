@@ -88,7 +88,11 @@ def _render(playbook_key: str, payloads: dict[str, dict]) -> str:
     return render_report_html(
         spec,
         freshness={"composed_at": recipe["captured_at"], "refreshed_at": ""},
-        provenance=build_provenance(recipe["sources"], recipe["captured_at"]),
+        # T2 gate M1: resolved_rids=set(payloads) matches compose_playbook_report's own
+        # call exactly -- without it, the degraded preview's provenance block falsely
+        # claimed every source "executed" even for a rid the fixture never resolved,
+        # contradicting the in-statement "unavailable this run" watch chips above it.
+        provenance=build_provenance(recipe["sources"], recipe["captured_at"], resolved_rids=set(payloads)),
     )
 
 
