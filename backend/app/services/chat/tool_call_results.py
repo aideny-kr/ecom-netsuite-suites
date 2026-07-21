@@ -15,11 +15,15 @@ from typing import Any
 MAX_STORED_PAYLOAD_ROWS = 2000
 
 
-def _cap_stored_rows(rows: list, row_count: int, truncated: bool) -> tuple[list, int, bool]:
-    """Cap a frozen payload's rows at ``MAX_STORED_PAYLOAD_ROWS``, preserving the
-    TRUE ``row_count`` and forcing ``truncated=True`` when a cap is applied."""
-    if len(rows) > MAX_STORED_PAYLOAD_ROWS:
-        return rows[:MAX_STORED_PAYLOAD_ROWS], row_count, True
+def _cap_stored_rows(
+    rows: list, row_count: int, truncated: bool, *, max_rows: int = MAX_STORED_PAYLOAD_ROWS
+) -> tuple[list, int, bool]:
+    """Cap a frozen payload's rows at ``max_rows`` (default ``MAX_STORED_PAYLOAD_ROWS``),
+    preserving the TRUE ``row_count`` and forcing ``truncated=True`` when a cap is
+    applied. ``max_rows`` (T2 gate B1a, round 2) lets a caller raise the cap for a
+    specific extraction — see ``extract_result_payload``."""
+    if len(rows) > max_rows:
+        return rows[:max_rows], row_count, True
     return rows, row_count, truncated
 
 
@@ -361,8 +365,11 @@ def _extract_report_data_as_table(report_data: dict) -> tuple[list[str], list[li
     return (columns, rows, line_meta) if rows else None
 
 
-def report_data_to_capped_table(report_data: dict) -> tuple[list[str], list[list], list[dict], int, bool] | None:
-    """Flatten a hierarchical ``reportData`` dict AND cap it at ``MAX_STORED_PAYLOAD_ROWS``.
+def report_data_to_capped_table(
+    report_data: dict, *, max_rows: int = MAX_STORED_PAYLOAD_ROWS
+) -> tuple[list[str], list[list], list[dict], int, bool] | None:
+    """Flatten a hierarchical ``reportData`` dict AND cap it at ``max_rows`` (default
+    ``MAX_STORED_PAYLOAD_ROWS``).
 
     Returns ``(columns, capped_rows, capped_line_meta, true_row_count, truncated)`` or
     None when the reportData has nothing to flatten. The TRUE pre-cap ``row_count`` is
@@ -373,12 +380,14 @@ def report_data_to_capped_table(report_data: dict) -> tuple[list[str], list[list
     the persistence path ``extract_result_payload`` Path 2 AND the in-turn intercept
     (orchestrator's ns_runReport branch). Routing both through this one helper makes
     the persist/intercept PARITY structural — the persisted/sidecar table and the
-    live-rendered SSE table can never drift on flatten or cap policy."""
+    live-rendered SSE table can never drift on flatten or cap policy. The in-turn
+    intercept never passes ``max_rows`` (stays at the chat default); only the report
+    compose/refresh path (T2 gate B1a, round 2) raises it."""
     flattened = _extract_report_data_as_table(report_data)
     if flattened is None:
         return None
     columns, rows, line_meta = flattened
-    rows, row_count, truncated = _cap_stored_rows(rows, len(rows), False)
+    rows, row_count, truncated = _cap_stored_rows(rows, len(rows), False, max_rows=max_rows)
     if len(line_meta) > len(rows):  # only when the cap truncated — lockstep, stays aligned
         line_meta = line_meta[: len(rows)]
     return columns, rows, line_meta, row_count, truncated
@@ -414,12 +423,23 @@ def _money_columns(columns: list) -> list:
     return out
 
 
-def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: str) -> dict[str, Any] | None:
+def extract_result_payload(
+    tool_name: str, params: dict[str, Any], result_str: str, *, max_rows: int | None = None
+) -> dict[str, Any] | None:
     """Attach structured query results for UI rendering when available.
 
     Handles local netsuite_suiteql (columns/rows format) and external MCP tools
     (items list-of-dicts, reportData hierarchical).
-    """
+
+    ``max_rows`` (T2 gate B1a, round 2): overrides ``MAX_STORED_PAYLOAD_ROWS`` for THIS
+    extraction only. The 2000-row chat default was silently corrupting any statement
+    source with >2000 accounts (netsuite_financial_report's own SQL cap is 5000 —
+    STATEMENT_ROW_CAP — so the extraction-layer cap was firing FIRST and unconditionally,
+    making the SQL cap moot). ``refresh_service._execute_sources`` (report compose/
+    refresh) passes ``STATEMENT_ROW_CAP`` here so a statement source keeps up to 5000
+    rows. The live chat-turn path NEVER passes this — omitted, it stays at the exact
+    pre-existing 2000-row default; zero chat-visible behavior change."""
+    cap = max_rows if max_rows is not None else MAX_STORED_PAYLOAD_ROWS
     parsed = parse_tool_result_value(result_str)
 
     # Handle top-level list (ns_listAllReports, ns_listSavedSearches)
@@ -475,7 +495,7 @@ def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: s
         row_count = parsed.get("total_rows")
         if not isinstance(row_count, int):
             row_count = len(rows)
-        rows, row_count, truncated = _cap_stored_rows(rows, row_count, False)
+        rows, row_count, truncated = _cap_stored_rows(rows, row_count, False, max_rows=cap)
         return {
             "kind": "table",
             "columns": columns,
@@ -503,7 +523,7 @@ def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: s
                 limit_param = params.get("limit")
                 limit = limit_param if isinstance(limit_param, int) else len(rows)
             truncated = bool(parsed.get("truncated") or parsed.get("rows_truncated"))
-            rows, row_count, truncated = _cap_stored_rows(rows, row_count, truncated)
+            rows, row_count, truncated = _cap_stored_rows(rows, row_count, truncated, max_rows=cap)
             entry: dict[str, Any] = {
                 "kind": "table",
                 "columns": columns,
@@ -537,7 +557,7 @@ def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: s
         if isinstance(report_data, dict):
             # Shared flatten+cap helper — the SAME one the in-turn intercept uses, so
             # the persisted/sidecar table and the live SSE table can never drift.
-            capped = report_data_to_capped_table(report_data)
+            capped = report_data_to_capped_table(report_data, max_rows=cap)
             if capped is not None:
                 columns, rows, line_meta, row_count, truncated = capped
                 return {
@@ -575,7 +595,7 @@ def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: s
         columns, rows = result
         row_count = len(rows)
         query = params.get("sqlQuery", params.get("query", ""))
-        rows, row_count, truncated = _cap_stored_rows(rows, row_count, False)
+        rows, row_count, truncated = _cap_stored_rows(rows, row_count, False, max_rows=cap)
         return {
             "kind": "table",
             "columns": columns,

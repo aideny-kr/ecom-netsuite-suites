@@ -216,6 +216,91 @@ class TestStoredPayloadRowCap:
         assert payload["truncated"] is True
 
 
+class TestMaxRowsOverride:
+    """T2 gate B1(a) round 2: extract_result_payload gains an optional ``max_rows``
+    override so the report compose/refresh path (refresh_service._execute_sources) can
+    keep a statement source's rows up to STATEMENT_ROW_CAP (5000) -- the 2000-row default
+    was silently corrupting any statement source with >2000 accounts (the SQL's own 5000
+    cap was moot). The chat-turn default (omitted max_rows) is COMPLETELY untouched."""
+
+    def test_max_rows_override_preserves_up_to_5000_path0(self):
+        import json
+
+        items = [{"account": str(4000 + i), "amount": i} for i in range(3000)]
+        financial = {
+            "success": True,
+            "report_type": "trial_balance",
+            "period": "Jun 2026",
+            "columns": ["account", "amount"],
+            "items": items,
+            "total_rows": 3000,
+            "summary": {},
+        }
+        payload = extract_result_payload("netsuite_financial_report", {}, json.dumps(financial), max_rows=5000)
+        assert payload is not None
+        assert len(payload["rows"]) == 3000, "a 3000-row statement source must NOT be truncated at 2000"
+        assert payload["row_count"] == 3000
+        assert payload["truncated"] is False
+
+    def test_max_rows_override_still_caps_above_the_override(self):
+        import json
+
+        items = [{"account": str(4000 + i), "amount": i} for i in range(5500)]
+        financial = {
+            "success": True,
+            "report_type": "trial_balance",
+            "period": "Jun 2026",
+            "columns": ["account", "amount"],
+            "items": items,
+            "total_rows": 5500,
+            "summary": {},
+        }
+        payload = extract_result_payload("netsuite_financial_report", {}, json.dumps(financial), max_rows=5000)
+        assert payload is not None
+        assert len(payload["rows"]) == 5000
+        assert payload["row_count"] == 5500
+        assert payload["truncated"] is True
+
+    def test_max_rows_override_applies_to_path1_columns_rows(self):
+        """Path 1 (netsuite_suiteql columns+rows) is also a statement source shape --
+        the override must thread there too, not just Path 0."""
+        import json
+
+        rows = [[f"SO-{i:05d}", i] for i in range(3000)]
+        result = {"columns": ["tranid", "amount"], "rows": rows, "row_count": 3000, "query": "q"}
+        payload = extract_result_payload("netsuite_suiteql", {}, json.dumps(result, default=str), max_rows=5000)
+        assert payload is not None
+        assert len(payload["rows"]) == 3000
+        assert payload["truncated"] is False
+
+    def test_max_rows_override_applies_to_items_path3(self):
+        import json
+
+        items = [{"tranid": f"SO-{i:05d}", "total": i} for i in range(3000)]
+        payload = extract_result_payload("ext__x__ns_runcustomsuiteql", {}, json.dumps({"data": items}), max_rows=5000)
+        assert payload is not None
+        assert len(payload["rows"]) == 3000
+        assert payload["truncated"] is False
+
+    def test_default_omitted_max_rows_2000_boundary_unchanged(self):
+        """Regression: the chat path never passes max_rows -- the pre-existing 2000
+        default boundary (exactly 2000 unchanged, 2001 truncates) must be byte-identical
+        to before this override was added."""
+        import json
+
+        rows_2000 = [[f"SO-{i:05d}", i] for i in range(2000)]
+        result = {"columns": ["tranid", "amount"], "rows": rows_2000, "row_count": 2000, "query": "q"}
+        payload = extract_result_payload("netsuite_suiteql", {}, json.dumps(result, default=str))
+        assert len(payload["rows"]) == 2000
+        assert payload["truncated"] is False
+
+        rows_2001 = [[f"SO-{i:05d}", i] for i in range(2001)]
+        result2 = {"columns": ["tranid", "amount"], "rows": rows_2001, "row_count": 2001, "query": "q"}
+        payload2 = extract_result_payload("netsuite_suiteql", {}, json.dumps(result2, default=str))
+        assert len(payload2["rows"]) == 2000
+        assert payload2["truncated"] is True
+
+
 def _msg(tool_calls):
     return {"role": "assistant", "tool_calls": tool_calls}
 
