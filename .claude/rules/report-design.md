@@ -14,12 +14,14 @@ paths:
 # Report & dashboard design standard — CFO/CEO-grade
 
 > Scope: ALL customer-facing output — playbook/chat/refresh reports, the Skills section's outputs, recon dashboards, BI charts, evidence packs/exports. Load the `executive-dashboard-design` skill for the full reference; this file is the terse binding checklist.
+>
+> The `paths:` list above covers today's known output surfaces — when you build a NEW customer-facing surface, add its path here in the same PR.
 
 Origin: 2026-07-19 redesign session. The first playbook artifact shipped as a raw GL dump (truncated table, no subtotals, no Net Income, meaningless chart) and was rejected on sight. The bar is the approved mock (`cfo-statement-mock-v1` artifact) and this checklist. Benchmarks: Sonar/Dietrich "Executive Command Center" (beat it), NetSuite's own Income Statement Dashboard, IBCS/ISO 24896, CFO board-deck norms.
 
 ## Process — visualize before you build (BINDING)
 
-1. **Mock-first**: any new report/dashboard surface (or material redesign) gets an HTML design mock for operator eyeball-approval BEFORE implementation. Use real numbers wherever available; label illustrative data.
+1. **Mock-first**: any new report/dashboard surface (or material redesign) gets an HTML design mock for operator eyeball-approval BEFORE implementation. Use real numbers wherever available; label illustrative data. Mocks using real tenant numbers live in gitignored/scratch locations only — never committed, never in shared artifacts without operator sign-off.
 2. **Rendered-artifact acceptance gate**: the slice is not done when tests pass — it is done when the actual rendered artifact is viewed and holds up against this standard. Reviews that check seams but never look at the page have failed before (PR #172).
 
 ## Information design (what makes it executive-grade)

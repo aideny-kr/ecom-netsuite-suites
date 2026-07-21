@@ -51,10 +51,10 @@ A bare figure ("$1M revenue") is an incomplete sentence — is that good, bad, o
 
 ## Process (from CLAUDE.md — binding)
 
-1. **Mock-first**: HTML design mock → operator eyeball-approval BEFORE implementation. Real numbers where available; illustrative data labeled.
+1. **Mock-first**: HTML design mock → operator eyeball-approval BEFORE implementation. Real numbers where available; illustrative data labeled. Mocks using real tenant numbers live in gitignored/scratch locations only — never committed, never in shared artifacts without operator sign-off.
 2. **Acceptance gate = the rendered artifact**, viewed against this skill — not green tests. Reviews that check seams but never look at the page have failed before.
 3. The approved exemplar to match: `cfo-statement-mock-v1` (2026-07-19) — neo-brutalist report DNA (cream ground, 3px borders, hard shadows, Inter 800, accent bar) elevated with KPI row, trend chart, variance quad, collapsible two-step statement, computed highlights/narrative, provenance.
 
 ## Applies to
 
-Playbook reports, chat-composed reports, refresh output, the Skills section's outputs, recon dashboards and close packages, BigQuery BI charts, pricing reports, evidence packs / Excel exports, and any future artifact a customer opens. The terse binding checklist auto-loads via `.claude/rules/report-design.md` when editing those paths; this skill is the full reference.
+Playbook reports, chat-composed reports, refresh output, the Skills section's outputs, recon dashboards and close packages, BigQuery BI charts, pricing reports, evidence packs / Excel exports, and any future artifact a customer opens. The terse binding checklist auto-loads via `.claude/rules/report-design.md` when editing those paths; this skill is the full reference. That `paths:` list covers today's known output surfaces — when you build a NEW customer-facing surface, add its path there in the same PR.
