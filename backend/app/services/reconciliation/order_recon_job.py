@@ -5,12 +5,12 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections import Counter
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import structlog
 from sqlalchemy import func, select
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -127,6 +127,36 @@ def _washout_evidence(
     }
 
 
+def _washout_event_date(raw_data: dict | None, fallback: date) -> tuple[date, bool]:
+    """Resolve a payout line's WASHOUT-window date from its Stripe event time.
+
+    Washout window fix (gate finding [MAJOR], 2026-07-21): ``fallback`` (this
+    line's ``Payout.arrival_date`` — batch settlement) can compress a slow
+    trickle INTO the washout window or push a genuine same-day washout OUT
+    of it, because Stripe batches unrelated transactions onto a shared
+    payout schedule. The true event timestamp lives in the line's
+    ``raw_data`` — ``stripe_sync.py`` stores the synced BalanceTransaction as
+    ``txn.to_dict()``, whose ``created`` field is the transaction's own
+    creation time (epoch seconds, UTC) — independent of which payout batch
+    it later settles into. Used for the washout window test ONLY; every
+    other date in this module (matching, temporal confidence, evidence
+    display elsewhere) keeps the arrival-date design.
+
+    Returns ``(event_date, fell_back)``. ``fell_back`` is True when
+    ``raw_data``/``created`` is missing or unparseable, in which case
+    ``fallback`` is returned unchanged — this never raises, so a malformed
+    ``raw_data`` blob can't crash a run.
+    """
+    if isinstance(raw_data, dict):
+        created = raw_data.get("created")
+        if isinstance(created, (int, float)):
+            try:
+                return datetime.fromtimestamp(created, tz=timezone.utc).date(), False
+            except (ValueError, OSError, OverflowError):
+                pass
+    return fallback, True
+
+
 _PATTERN_UNLOADED = object()
 
 
@@ -143,6 +173,12 @@ class OrderReconJob:
         # None is a valid loaded value (no custom pattern -> engine default),
         # so a distinct sentinel marks "not loaded yet".
         self._order_ref_pattern: str | None | object = _PATTERN_UNLOADED
+        # Washout-only event dates (gate finding [MAJOR], 2026-07-21), keyed
+        # by payout_line_id, populated by _fetch_charges. Initialized here
+        # (not just in _fetch_charges) so _store_results's .get() is always
+        # safe even for a candidate list built without calling
+        # _fetch_charges on this job instance (e.g. hand-built test fixtures).
+        self._charge_washout_event_dates: dict[str, date] = {}
 
     async def _load_order_ref_pattern_once(self) -> str | None:
         """Load this tenant's order_ref_pattern once per job instance."""
@@ -370,6 +406,13 @@ class OrderReconJob:
         Joins payouts to get arrival_date for date filtering and charge_date.
         Extracts order_reference from description using extract_order_ref() with
         this tenant's configured pattern (NULL -> engine default).
+
+        Also rebuilds ``self._charge_washout_event_dates`` (gate finding
+        [MAJOR], 2026-07-21) — a payout_line_id -> event-date map consumed
+        ONLY by ``_store_results``'s washout evidence check. ChargeRecord's
+        own ``charge_date`` stays arrival-based (it feeds the matching
+        engine's temporal confidence score, unaffected by this fix). One job
+        instance == one run, so rebuilding fresh on every call is safe.
         """
         # Cached per job instance — _fetch_refunds needs the same pattern.
         order_ref_pattern = await self._load_order_ref_pattern_once()
@@ -381,21 +424,38 @@ class OrderReconJob:
             subsidiary_id=subsidiary_id,
         )
 
-        return [
-            ChargeRecord(
-                id=str(pl.id),
-                source_id=pl.source_id,
-                payout_line_id=str(pl.id),
-                amount=pl.amount,
-                fee=pl.fee,
-                net=pl.net,
-                currency=pl.currency,
-                charge_date=arrival_date,
-                description=pl.description,
-                order_reference=extract_order_ref(pl.description, order_ref_pattern),
+        self._charge_washout_event_dates = {}
+        fallback_count = 0
+        charges: list[ChargeRecord] = []
+        for pl, arrival_date in rows:
+            payout_line_id = str(pl.id)
+            event_date, fell_back = _washout_event_date(pl.raw_data, arrival_date)
+            if fell_back:
+                fallback_count += 1
+            self._charge_washout_event_dates[payout_line_id] = event_date
+            charges.append(
+                ChargeRecord(
+                    id=payout_line_id,
+                    source_id=pl.source_id,
+                    payout_line_id=payout_line_id,
+                    amount=pl.amount,
+                    fee=pl.fee,
+                    net=pl.net,
+                    currency=pl.currency,
+                    charge_date=arrival_date,
+                    description=pl.description,
+                    order_reference=extract_order_ref(pl.description, order_ref_pattern),
+                )
             )
-            for pl, arrival_date in rows
-        ]
+
+        if fallback_count:
+            logger.warning(
+                "order_recon_job.washout_event_date_fallback",
+                side="charge",
+                count=fallback_count,
+            )
+
+        return charges
 
     async def _fetch_deposits(
         self,
@@ -478,6 +538,78 @@ class OrderReconJob:
             for r in postings_by_id.values()
         ]
 
+    async def _fetch_refund_rows(
+        self,
+        *,
+        order_references: set[str],
+        order_ref_pattern: str,
+        sanity_from: date,
+        sanity_to: date,
+        subsidiary_id: str | None,
+    ) -> list[tuple[PayoutLine, date]]:
+        """SQL-side ref-narrowed refund/payment_refund row fetch (review
+        finding 3 mitigation, 2026-07-21).
+
+        ``_fetch_refunds`` used to pull EVERY refund/payment_refund line in
+        the +/-REF_MATCH_SANITY_DAYS window, then filter by ref in Python —
+        the same unbounded-scan shape ``_cross_run_charge_ref_counts`` (the
+        count-only variant) already fixed for charges. This applies the
+        identical server-side ``func.substring(text, pattern)`` extraction —
+        proven equivalent to Python's ``extract_order_ref`` for this
+        tenant's pattern (see the dual-regex-drift test) — chunked at
+        ``_REF_CHUNK_SIZE`` over ``order_references``, so only rows whose
+        extracted ref is a run candidate ever leave the database.
+
+        Fail-open on ``SQLAlchemyError`` (a tenant pattern Postgres' regex
+        engine can't parse — unlike Python's ``re``, which always falls back
+        safely — would otherwise abort the ambient transaction; the whole
+        chunk loop runs inside one SAVEPOINT so a failure rolls back cleanly
+        instead of poisoning the caller's session): falls back to the
+        ORIGINAL unnarrowed fetch. Fetching MORE rows here is safe (unlike
+        ``_cross_run_charge_ref_counts``, where an unnarrowed fetch would
+        silently under-count) — ``_fetch_refunds``'s Python-side ref filter
+        still runs on whatever this returns, so a wider fetch just means
+        more rows filtered out downstream, never a wrong result.
+        """
+        extracted_ref = func.substring(PayoutLine.description, order_ref_pattern)
+        p = aliased(Payout)
+        refs_sorted = sorted(order_references)
+
+        try:
+            rows: list[tuple[PayoutLine, date]] = []
+            async with self.db.begin_nested():
+                for i in range(0, len(refs_sorted), _REF_CHUNK_SIZE):
+                    chunk = refs_sorted[i : i + _REF_CHUNK_SIZE]
+                    stmt = (
+                        select(PayoutLine, p.arrival_date)
+                        .join(p, PayoutLine.payout_id == p.id)
+                        .where(
+                            PayoutLine.tenant_id == self.tenant_id,
+                            PayoutLine.line_type.in_(["refund", "payment_refund"]),
+                            p.arrival_date >= sanity_from,
+                            p.arrival_date <= sanity_to,
+                            extracted_ref.in_(chunk),
+                        )
+                    )
+                    if subsidiary_id:
+                        stmt = stmt.where(PayoutLine.subsidiary_id == subsidiary_id)
+
+                    result = await self.db.execute(stmt)
+                    rows.extend(result.all())
+            return rows
+        except SQLAlchemyError:
+            logger.warning(
+                "order_recon_job.refund_ref_narrowing_failed",
+                pattern=order_ref_pattern,
+                candidate_ref_count=len(refs_sorted),
+            )
+            return await self._fetch_payout_lines(
+                line_types=["refund", "payment_refund"],
+                date_from=sanity_from,
+                date_to=sanity_to,
+                subsidiary_id=subsidiary_id,
+            )
+
     async def _fetch_refunds(
         self,
         date_from: date,
@@ -492,21 +624,24 @@ class OrderReconJob:
         deposits (they aren't ``ChargeRecord``/``NSPaymentRecord`` at all,
         just amount/date/currency tuples keyed by ref).
 
-        Unlike the ref-keyed deposit pass in ``_fetch_deposits`` (which
-        filters via ``NetsuitePosting.related_payout_id.in_(chunk)`` — a
-        column populated at sync time), ``payout_lines`` has no pre-extracted
-        order-ref column. So this bounds by ``REF_MATCH_SANITY_DAYS`` (the
-        same sanity-cap reasoning as the deposit pass, via the joined
-        ``Payout.arrival_date``) and tenant/line_type at the SQL level, then
-        extracts each row's ref in Python using the SAME per-tenant pattern
-        machinery ``_fetch_charges`` uses (never a second extraction scheme),
-        keeping only rows whose ref is in this run's charge
-        ``order_references``.
+        Row fetch is server-side ref-narrowed via ``_fetch_refund_rows``
+        (review finding 3 mitigation) bounded by ``REF_MATCH_SANITY_DAYS``
+        (the same sanity-cap reasoning as the deposit pass, via the joined
+        ``Payout.arrival_date``) and tenant/line_type. Each row's ref is
+        still re-extracted in Python below using the SAME per-tenant pattern
+        machinery ``_fetch_charges`` uses (never a second extraction
+        scheme) — a defense-in-depth check, since the SQL narrowing is a
+        superset filter, not the ref decision itself — keeping only rows
+        whose ref is in this run's charge ``order_references``.
 
         Returns a dict keyed by order_reference -> list of
         ``(amount, refund_date, currency)`` tuples (amount negative per the
         grounded fact that Stripe refund/payment_refund lines are always
         negative; currency feeds ``_washout_evidence``'s currency guard).
+        ``refund_date`` is the line's Stripe event date (gate finding
+        [MAJOR], 2026-07-21 — see ``_washout_event_date``), falling back to
+        arrival_date when the line's ``raw_data``/``created`` is absent or
+        unparseable.
         """
         if not order_references:
             return {}
@@ -517,18 +652,20 @@ class OrderReconJob:
 
         sanity_from, sanity_to = _sanity_window(date_from, date_to)
 
-        rows = await self._fetch_payout_lines(
-            line_types=["refund", "payment_refund"],
-            date_from=sanity_from,
-            date_to=sanity_to,
+        rows = await self._fetch_refund_rows(
+            order_references=order_references,
+            order_ref_pattern=order_ref_pattern,
+            sanity_from=sanity_from,
+            sanity_to=sanity_to,
             subsidiary_id=subsidiary_id,
         )
 
-        # Fetch-volume guard (review finding 1 mitigation): cheap tripwire
-        # until SQL-side ref narrowing is ticketed — see
-        # _REFUND_FETCH_WARN_THRESHOLD. One conditional-level log call (not
-        # an always-INFO plus a maybe-WARNING) so a large fetch shows up
-        # exactly once, at the level that matters.
+        # Fetch-volume guard (review finding 1 mitigation): cheap tripwire,
+        # now mostly a safety net for the _fetch_refund_rows fallback path
+        # above (narrowing itself keeps the common-path row count small).
+        # One conditional-level log call (not an always-INFO plus a
+        # maybe-WARNING) so a large fetch shows up exactly once, at the
+        # level that matters.
         large = len(rows) > _REFUND_FETCH_WARN_THRESHOLD
         (logger.warning if large else logger.info)(
             "order_recon_job.refund_fetch_fetched",
@@ -538,13 +675,24 @@ class OrderReconJob:
         )
 
         refunds_by_ref: dict[str, list[tuple[Decimal, date, str]]] = {}
+        fallback_count = 0
         for pl, arrival_date in rows:
             if arrival_date is None:
                 continue
             ref = extract_order_ref(pl.description, order_ref_pattern)
             if ref is None or ref not in order_references:
                 continue
-            refunds_by_ref.setdefault(ref, []).append((pl.amount, arrival_date, pl.currency))
+            event_date, fell_back = _washout_event_date(pl.raw_data, arrival_date)
+            if fell_back:
+                fallback_count += 1
+            refunds_by_ref.setdefault(ref, []).append((pl.amount, event_date, pl.currency))
+
+        if fallback_count:
+            logger.warning(
+                "order_recon_job.washout_event_date_fallback",
+                side="refund",
+                count=fallback_count,
+            )
 
         return refunds_by_ref
 
@@ -621,7 +769,13 @@ class OrderReconJob:
                     for ref, count in result.all():
                         if ref is not None:
                             counts[ref] = count
-        except DBAPIError:
+        except SQLAlchemyError:
+            # Broadened from DBAPIError (gate finding [cheap], 2026-07-21) —
+            # SQLAlchemyError also catches non-DBAPI SQLAlchemy-layer errors
+            # (e.g. a StatementError from bad bind params) that could
+            # otherwise crash the run instead of failing closed. Excludes
+            # asyncio.CancelledError, which is a BaseException (not an
+            # Exception subclass) since Python 3.8 and always propagates.
             logger.warning(
                 "order_recon_job.cross_run_ref_count_failed",
                 pattern=order_ref_pattern,
@@ -674,25 +828,43 @@ class OrderReconJob:
         would-be-washout candidate — fail closed, never fail open.
         """
         refunds_by_ref = refunds_by_ref or {}
-        ref_charge_counts: Counter[str] = Counter(
-            candidate.charge.order_reference for candidate in candidates if candidate.charge.order_reference
-        )
 
         # Washout CANDIDATES: unmatched, in-run-unique-ref charges whose
         # same-ref refunds already satisfy the window/net-zero test. Only
         # THESE refs (a small set) ever need the cross-run DB count below.
+        # Skipped entirely when this run fetched no refunds at all (gate
+        # finding [cheap], 2026-07-21) — nothing could ever wash out without
+        # at least one refund line, so there's no reason to build the
+        # ref_charge_counts Counter or walk every candidate below.
         washout_by_ref: dict[str, dict] = {}
-        for candidate in candidates:
-            ref = candidate.charge.order_reference
-            if candidate.deposit is None and ref and ref not in washout_by_ref and ref_charge_counts[ref] == 1:
-                washout = _washout_evidence(
-                    candidate.charge.amount,
-                    candidate.charge.charge_date,
-                    candidate.charge.currency,
-                    refunds_by_ref.get(ref, []),
-                )
-                if washout is not None:
-                    washout_by_ref[ref] = washout
+        if refunds_by_ref:
+            ref_charge_counts: Counter[str] = Counter(
+                candidate.charge.order_reference for candidate in candidates if candidate.charge.order_reference
+            )
+            for candidate in candidates:
+                ref = candidate.charge.order_reference
+                if candidate.deposit is None and ref and ref_charge_counts[ref] == 1:
+                    # ref_charge_counts[ref] == 1 means at most one candidate
+                    # in this entire loop can ever match this ref, so a
+                    # duplicate write below is structurally unreachable
+                    # (gate finding [cheap], 2026-07-21 — the old `ref not in
+                    # washout_by_ref` guard here was dead code).
+                    assert ref not in washout_by_ref
+                    # Washout event date (gate finding [MAJOR], 2026-07-21):
+                    # falls back to charge_date (arrival-based) when
+                    # _fetch_charges couldn't resolve this line's Stripe
+                    # event date — see _washout_event_date.
+                    charge_event_date = self._charge_washout_event_dates.get(
+                        candidate.charge.payout_line_id, candidate.charge.charge_date
+                    )
+                    washout = _washout_evidence(
+                        candidate.charge.amount,
+                        charge_event_date,
+                        candidate.charge.currency,
+                        refunds_by_ref.get(ref, []),
+                    )
+                    if washout is not None:
+                        washout_by_ref[ref] = washout
 
         cross_run_counts: dict[str, int] = {}
         if washout_by_ref and date_from is not None and date_to is not None:

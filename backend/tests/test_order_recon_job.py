@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from collections import Counter
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -21,6 +22,7 @@ from app.schemas.order_reconciliation import (
 from app.services.reconciliation import order_recon_job
 from app.services.reconciliation.four_bucket_classifier import BUCKET_MATCHES, BUCKET_NEEDS_REVIEW
 from app.services.reconciliation.order_recon_job import OrderReconJob, _washout_evidence
+from app.services.reconciliation.order_ref import extract_order_ref
 from tests.conftest import (
     create_test_netsuite_posting,
     create_test_payout,
@@ -95,6 +97,15 @@ def _mock_db() -> AsyncMock:
     no_config = MagicMock()
     no_config.scalar_one_or_none = MagicMock(return_value=None)
     db.execute = AsyncMock(return_value=no_config)
+    # begin_nested() (SAVEPOINT) is a SYNC method returning an async context
+    # manager (real AsyncSession.begin_nested is NOT a coroutine function —
+    # see _cross_run_charge_ref_counts / _fetch_refund_rows). A bare
+    # AsyncMock's auto-child would make begin_nested() itself a coroutine,
+    # which `async with` can't enter — wire up a real async-CM double.
+    nested_cm = MagicMock()
+    nested_cm.__aenter__ = AsyncMock(return_value=None)
+    nested_cm.__aexit__ = AsyncMock(return_value=False)
+    db.begin_nested = MagicMock(return_value=nested_cm)
     return db
 
 
@@ -1633,7 +1644,7 @@ class TestRefundFetchVolumeGuard:
             amount=Decimal("100.00"),
             arrival_date=date(2026, 3, 15),
         )
-        await create_test_payout_line(
+        refund_line = await create_test_payout_line(
             db,
             tenant_a.id,
             source_id="re_volume_guard_small",
@@ -1644,6 +1655,13 @@ class TestRefundFetchVolumeGuard:
             description="Refund for order R888999000",
             arrival_date=date(2026, 3, 18),
         )
+        # Real raw_data.created (gate finding [MAJOR], 2026-07-21 washout
+        # event-date fix) so this scenario doesn't ALSO trip the unrelated
+        # washout_event_date_fallback warning — this test is scoped to the
+        # volume guard only; a missing-raw_data fallback is covered
+        # separately (TestWashoutEventDateFallback).
+        refund_line.raw_data = {"created": int(datetime(2026, 3, 18, tzinfo=timezone.utc).timestamp())}
+        await db.flush()
 
         job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
         charges = await job._fetch_charges(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
@@ -2003,6 +2021,20 @@ class TestStoresResultsWithNullPayoutId:
 # ---------------------------------------------------------------------------
 
 
+def _stripe_raw_data(event_date: date | None) -> dict | None:
+    """Build a minimal Stripe BalanceTransaction ``raw_data`` blob (gate
+    finding [MAJOR], 2026-07-21 washout event-date fix) — mirrors what
+    ``stripe_sync.py`` stores (``txn.to_dict()``), whose ``created`` field is
+    epoch seconds at midnight UTC on ``event_date``. ``None`` omits
+    raw_data entirely, so ``_washout_event_date`` falls back to arrival_date
+    (the pre-fix behavior)."""
+    if event_date is None:
+        return None
+    return {
+        "created": int(datetime(event_date.year, event_date.month, event_date.day, tzinfo=timezone.utc).timestamp())
+    }
+
+
 async def _seed_charge_line(
     db,
     tenant_id,
@@ -2014,13 +2046,17 @@ async def _seed_charge_line(
     net: Decimal = Decimal("97.00"),
     currency: str = "USD",
     arrival_date: date = date(2026, 3, 15),
+    event_date: date | None = None,
     subsidiary_id: str | None = None,
 ) -> PayoutLine:
     """Seed a real Payout + PayoutLine(line_type='charge') for _fetch_charges.
 
     _fetch_charges JOINs payout_lines -> payouts for arrival_date, so the parent
     Payout must carry the arrival_date that lands inside the queried window
-    (+/- _DATE_BUFFER).
+    (+/- _DATE_BUFFER). ``event_date`` (gate finding [MAJOR], 2026-07-21) sets
+    a Stripe-shaped ``raw_data.created`` used ONLY by the washout window
+    test; omitted (default) means no raw_data at all, matching every
+    pre-existing washout test's fixtures.
     """
     payout = await create_test_payout(db, tenant_id, arrival_date=arrival_date)
     line = PayoutLine(
@@ -2037,10 +2073,81 @@ async def _seed_charge_line(
         net=net,
         currency=currency,
         description=description,
+        raw_data=_stripe_raw_data(event_date),
     )
     db.add(line)
     await db.flush()
     return line
+
+
+async def _seed_refund_line(
+    db,
+    tenant_id,
+    *,
+    description: str,
+    source_id: str = "re_db",
+    line_type: str = "refund",
+    amount: Decimal = Decimal("-100.00"),
+    fee: Decimal = Decimal("0"),
+    net: Decimal | None = None,
+    currency: str = "USD",
+    arrival_date: date = date(2026, 3, 18),
+    event_date: date | None = None,
+    subsidiary_id: str | None = None,
+) -> PayoutLine:
+    """Seed a real Payout + PayoutLine(line_type='refund'/'payment_refund')
+    for _fetch_refunds, with an optional Stripe-shaped ``raw_data.created``
+    (gate finding [MAJOR], 2026-07-21 washout event-date fix) —
+    ``event_date=None`` (default) omits raw_data, matching every
+    pre-existing washout test's fixtures (falls back to arrival_date);
+    ``event_date=<date>`` makes the washout window test use THIS date
+    instead of the refund's payout arrival_date.
+    """
+    payout = await create_test_payout(db, tenant_id, arrival_date=arrival_date)
+    line = PayoutLine(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        dedupe_key=f"pl-{uuid.uuid4().hex}",
+        source="stripe",
+        source_id=source_id,
+        subsidiary_id=subsidiary_id,
+        payout_id=payout.id,
+        line_type=line_type,
+        amount=amount,
+        fee=fee,
+        net=net if net is not None else amount - fee,
+        currency=currency,
+        description=description,
+        raw_data=_stripe_raw_data(event_date),
+    )
+    db.add(line)
+    await db.flush()
+    return line
+
+
+async def _run_recon_pipeline(job, *, date_from, date_to, subsidiary_id=None):
+    """Fetch charges/deposits/refunds and run the matching engine — the
+    shared fetch -> match half of the fetch -> match -> store -> reload
+    sequence used by the washout-event-date tests below.
+
+    NOT retrofitted onto the ~15 pre-existing washout tests above (gate
+    finding [if clean], 2026-07-21): several of those vary the reload shape
+    (``scalar_one()`` vs ``scalars().all()``) or the ``_store_results`` call
+    itself (``test_missing_date_window_declines_washout_fail_closed``
+    deliberately omits ``date_from``/``date_to``) — forcing one signature
+    onto all of them would obscure those per-test seeds more than it would
+    save.
+    """
+    charges = await job._fetch_charges(date_from=date_from, date_to=date_to, subsidiary_id=subsidiary_id)
+    order_references = {c.order_reference for c in charges if c.order_reference}
+    deposits = await job._fetch_deposits(
+        date_from=date_from, date_to=date_to, subsidiary_id=subsidiary_id, order_references=order_references
+    )
+    refunds_by_ref = await job._fetch_refunds(
+        date_from=date_from, date_to=date_to, subsidiary_id=subsidiary_id, order_references=order_references
+    )
+    candidates = job.engine.match(charges, deposits)
+    return candidates, refunds_by_ref
 
 
 class TestFetchChargesUsesTenantPattern:
@@ -2143,3 +2250,297 @@ class TestFetchChargesUsesTenantPattern:
         assert charges_a[0].order_reference == "1004230001"
         assert charges_b[0].order_reference == "R628489275"
         assert charges_a[0].order_reference != charges_b[0].order_reference
+
+
+# ---------------------------------------------------------------------------
+# Washout window event-time fix (gate finding [MAJOR], 2026-07-21)
+# ---------------------------------------------------------------------------
+
+
+class TestWashoutEventDateFallback:
+    """Washout window must measure Stripe EVENT time, not payout settlement
+    time. Both charge_date and refund_date in the washout net-zero test
+    used to come from ``Payout.arrival_date`` (batch settlement) — payout
+    batching can compress a slow trickle INTO the window (false washout) or
+    push a genuine same-day washout OUT of it (missed washout). The true
+    event timestamp is each line's ``raw_data.created`` (the synced Stripe
+    BalanceTransaction's own creation time) — see ``_washout_event_date``.
+    """
+
+    async def test_event_dates_recover_a_washout_arrival_dates_missed(self, db, tenant_a):
+        """Refund's Stripe EVENT was 3 days after the charge (a real
+        washout), but its PAYOUT didn't arrive for 20 days. Arrival-date
+        washout (the pre-fix behavior) would see a 20-day gap and miss it;
+        event-date washout correctly sees the real 3-day gap."""
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_event_recovers",
+            description="Framework Marketplace Order ID: R910000001-XU9EPZPD",
+            amount=Decimal("100.00"),
+            arrival_date=date(2026, 3, 15),
+            event_date=date(2026, 3, 15),
+        )
+        await _seed_refund_line(
+            db,
+            tenant_a.id,
+            source_id="re_event_recovers",
+            description="Refund for order R910000001",
+            amount=Decimal("-100.00"),
+            arrival_date=date(2026, 4, 4),  # +20 days — would miss the window on arrival alone
+            event_date=date(2026, 3, 18),  # +3 days — the REAL event gap, within WASHOUT_WINDOW_DAYS
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        candidates, refunds_by_ref = await _run_recon_pipeline(
+            job, date_from=date(2026, 3, 10), date_to=date(2026, 3, 20)
+        )
+        assert len(candidates) == 1
+        assert candidates[0].match_type == "unmatched"
+
+        run = await create_test_recon_run(db, tenant_a.id)
+        await job._store_results(
+            run.id,
+            candidates,
+            refunds_by_ref=refunds_by_ref,
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+        )
+
+        stored = (
+            await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id))
+        ).scalar_one()
+        assert stored.evidence["washout"] is True
+        assert stored.evidence["refund_date"] == "2026-03-18"
+
+    async def test_event_dates_prevent_a_false_washout_arrival_dates_created(self, db, tenant_a):
+        """Refund's Stripe EVENT was 20 days after the charge (a genuine
+        slow trickle, not a washout), but its PAYOUT arrived just 2 days
+        after the charge's payout — close settlement dates that would fool
+        arrival-date washout into a false positive. Event-date washout
+        correctly sees the real 20-day gap and declines."""
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_event_prevents",
+            description="Framework Marketplace Order ID: R910000002-XU9EPZPD",
+            amount=Decimal("100.00"),
+            arrival_date=date(2026, 3, 15),
+            event_date=date(2026, 3, 15),
+        )
+        await _seed_refund_line(
+            db,
+            tenant_a.id,
+            source_id="re_event_prevents",
+            description="Refund for order R910000002",
+            amount=Decimal("-100.00"),
+            arrival_date=date(2026, 3, 17),  # +2 days from the charge's payout — settlement compression
+            event_date=date(2026, 4, 4),  # +20 days — the REAL event gap, beyond WASHOUT_WINDOW_DAYS
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        candidates, refunds_by_ref = await _run_recon_pipeline(
+            job, date_from=date(2026, 3, 10), date_to=date(2026, 3, 20)
+        )
+
+        run = await create_test_recon_run(db, tenant_a.id)
+        await job._store_results(
+            run.id,
+            candidates,
+            refunds_by_ref=refunds_by_ref,
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+        )
+
+        stored = (
+            await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id))
+        ).scalar_one()
+        assert "washout" not in stored.evidence
+
+    async def test_missing_raw_data_falls_back_to_arrival_date_with_counted_warning(self, db, tenant_a):
+        """Neither line carries raw_data (the pre-fix norm — see every other
+        washout test in this file): washout still resolves normally via the
+        arrival_date fallback, and exactly one fallback warning per side is
+        logged with the fallen-back row count."""
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_event_fallback",
+            description="Framework Marketplace Order ID: R910000003-XU9EPZPD",
+            amount=Decimal("100.00"),
+            arrival_date=date(2026, 3, 15),
+            # event_date omitted -> no raw_data at all
+        )
+        await _seed_refund_line(
+            db,
+            tenant_a.id,
+            source_id="re_event_fallback",
+            description="Refund for order R910000003",
+            amount=Decimal("-100.00"),
+            arrival_date=date(2026, 3, 18),  # +3 days, within window on arrival_date alone
+            # event_date omitted -> no raw_data at all
+        )
+
+        from structlog.testing import capture_logs
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        with capture_logs() as logs:
+            candidates, refunds_by_ref = await _run_recon_pipeline(
+                job, date_from=date(2026, 3, 10), date_to=date(2026, 3, 20)
+            )
+
+        run = await create_test_recon_run(db, tenant_a.id)
+        await job._store_results(
+            run.id,
+            candidates,
+            refunds_by_ref=refunds_by_ref,
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+        )
+
+        stored = (
+            await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id))
+        ).scalar_one()
+        assert stored.evidence["washout"] is True
+        assert stored.evidence["refund_date"] == "2026-03-18"
+
+        fallback_warnings = [e for e in logs if e.get("event") == "order_recon_job.washout_event_date_fallback"]
+        by_side = {e["side"]: e["count"] for e in fallback_warnings}
+        assert by_side == {"charge": 1, "refund": 1}
+
+
+class TestCrossRunChargeRefCountsDualRegex:
+    """Dual-regex drift guard (gate finding [minor], 2026-07-21): pins that
+    ``_cross_run_charge_ref_counts``'s server-side ``substring()``
+    extraction agrees with Python's ``extract_order_ref`` for a CUSTOM
+    (non-default) tenant ``order_ref_pattern`` — the two implementations
+    must never silently diverge for a pattern other than the R\\d{9}
+    default already exercised by TestWashoutEvidenceCrossRunAmbiguity."""
+
+    async def test_custom_pattern_sql_and_python_extraction_agree(self, db, tenant_a):
+        cfg = (await db.execute(select(TenantConfig).where(TenantConfig.tenant_id == tenant_a.id))).scalar_one()
+        pattern = r"(#\d{4,})"
+        cfg.order_ref_pattern = pattern
+        await db.flush()
+
+        descriptions = {
+            "ch_dual_a1": "Order #100423 settled",
+            "ch_dual_a2": "Order #100423 re-settled",
+            "ch_dual_b1": "Order #200555 settled",
+        }
+        for source_id, description in descriptions.items():
+            await _seed_charge_line(
+                db,
+                tenant_a.id,
+                source_id=source_id,
+                description=description,
+                arrival_date=date(2026, 3, 15),
+            )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        sql_counts = await job._cross_run_charge_ref_counts(
+            {"#100423", "#200555"},
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+            subsidiary_id=None,
+        )
+
+        python_counts = Counter(extract_order_ref(d, pattern) for d in descriptions.values())
+
+        assert sql_counts == dict(python_counts)
+        assert sql_counts["#100423"] == 2
+        assert sql_counts["#200555"] == 1
+
+
+class TestRefundFetchSqlNarrowing:
+    """SQL-side ref narrowing (review finding 3 mitigation, 2026-07-21):
+    ``_fetch_refunds`` now narrows the refund/payment_refund row fetch
+    server-side via ``_fetch_refund_rows`` (the same ``substring()``
+    extraction ``_cross_run_charge_ref_counts`` uses) instead of scanning
+    every refund/payment_refund line in the sanity window and filtering by
+    ref in Python alone."""
+
+    async def test_narrowed_fetch_matches_unnarrowed_result_for_mixed_seed(self, db, tenant_a):
+        """A matching-ref refund PLUS an unrelated same-window refund on a
+        ref this run's charges never produced: narrowing must return the
+        same content the old unnarrowed-then-Python-filtered fetch did —
+        the target ref present, the unrelated ref absent."""
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_narrow_target",
+            description="Framework Marketplace Order ID: R820000001-XU9EPZPD",
+            amount=Decimal("100.00"),
+            arrival_date=date(2026, 3, 15),
+        )
+        await _seed_refund_line(
+            db,
+            tenant_a.id,
+            source_id="re_narrow_target",
+            description="Refund for order R820000001",
+            amount=Decimal("-100.00"),
+            arrival_date=date(2026, 3, 17),
+        )
+        await _seed_refund_line(
+            db,
+            tenant_a.id,
+            source_id="re_narrow_unrelated",
+            description="Refund for order R820099999",
+            amount=Decimal("-50.00"),
+            arrival_date=date(2026, 3, 17),
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        charges = await job._fetch_charges(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+        order_references = {c.order_reference for c in charges if c.order_reference}
+
+        refunds_by_ref = await job._fetch_refunds(
+            date_from=date(2026, 3, 10), date_to=date(2026, 3, 20), order_references=order_references
+        )
+
+        assert set(refunds_by_ref) == {"R820000001"}
+        assert len(refunds_by_ref["R820000001"]) == 1
+        amount, refund_date, currency = refunds_by_ref["R820000001"][0]
+        assert amount == Decimal("-100.00")
+        assert currency == "USD"
+
+    async def test_invalid_pattern_fails_open_to_unnarrowed_fetch(self, db, tenant_a):
+        """A tenant order_ref_pattern Postgres' regex engine can't parse
+        must not crash the run — SQL-side narrowing fails open to the
+        unnarrowed fetch (Python's extract_order_ref always falls back
+        safely to the default pattern, so the ref is still recovered)."""
+        cfg = (await db.execute(select(TenantConfig).where(TenantConfig.tenant_id == tenant_a.id))).scalar_one()
+        cfg.order_ref_pattern = "(R\\d{9"  # unbalanced -- invalid in Postgres AND Python
+        await db.flush()
+
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_narrow_fallback",
+            description="Framework Marketplace Order ID: R830000001-XU9EPZPD",
+            amount=Decimal("100.00"),
+            arrival_date=date(2026, 3, 15),
+        )
+        await _seed_refund_line(
+            db,
+            tenant_a.id,
+            source_id="re_narrow_fallback",
+            description="Refund for order R830000001",
+            amount=Decimal("-100.00"),
+            arrival_date=date(2026, 3, 17),
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        charges = await job._fetch_charges(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+        order_references = {c.order_reference for c in charges if c.order_reference}
+
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            refunds_by_ref = await job._fetch_refunds(
+                date_from=date(2026, 3, 10), date_to=date(2026, 3, 20), order_references=order_references
+            )
+
+        assert refunds_by_ref == {"R830000001": [(Decimal("-100.00"), date(2026, 3, 17), "USD")]}
+        failures = [e for e in logs if e.get("event") == "order_recon_job.refund_ref_narrowing_failed"]
+        assert failures, f"expected a refund_ref_narrowing_failed warning, got: {logs}"
