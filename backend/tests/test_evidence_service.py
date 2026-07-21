@@ -12,6 +12,7 @@ from app.services.reconciliation.evidence_service import (
     _EXCEPTION_FILL,
     _SUGGESTED_FILL,
     EvidencePackGenerator,
+    escape_csv_injection,
 )
 
 
@@ -742,3 +743,22 @@ class TestGenerateSectionExcelCSVInjectionEscaping:
         assert cell.value == -3.2
         assert isinstance(cell.value, float)
         assert cell.data_type == "n"
+
+    def test_escapes_leading_tab_and_carriage_return_per_full_owasp_set(self):
+        """OWASP's CSV-injection trigger-char set also includes tab (\\t) and
+        carriage return (\\r) — some spreadsheet apps skip leading whitespace
+        before evaluating a formula prefix, so a leading tab/CR ahead of '='
+        is still a live injection vector, not just the bare = + - @ chars."""
+        assert escape_csv_injection("\t=SUM(1,1)") == "'\t=SUM(1,1)"
+        assert escape_csv_injection("\r=SUM(1,1)") == "'\r=SUM(1,1)"
+
+    def test_generate_section_excel_escapes_leading_tab_and_carriage_return(self):
+        generator = EvidencePackGenerator()
+        malicious = ["\t=SUM(1,1)", "\r=SUM(1,1)"]
+        buf = generator.generate_section_excel(title="Test", headers=["narrative"], rows=[[v] for v in malicious])
+        wb = load_workbook(buf)
+        ws = wb.active
+        for offset, original in enumerate(malicious):
+            cell = ws.cell(row=2 + offset, column=1)
+            assert cell.value == f"'{original}", f"expected quote-prefixed escape for {original!r}, got {cell.value!r}"
+            assert cell.data_type == "s"
