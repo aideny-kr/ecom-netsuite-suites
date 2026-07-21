@@ -26,6 +26,7 @@ from app.services.ingestion import netsuite_deposit_sync
 from app.services.ingestion.netsuite_deposit_sync import (
     _normalize_currency,
     _parse_date,
+    _parse_optional_decimal,
     extract_order_ref,
     extract_payout_id,
     sync_netsuite_deposits,
@@ -143,6 +144,72 @@ class TestParseDate:
 
     def test_invalid_format(self):
         assert _parse_date("not-a-date") is None
+
+
+class TestParseOptionalDecimal:
+    """Missing (None/"") is silent; a present-but-unparseable value is loud —
+    it means SuiteQL returned something unexpected, not that the field was
+    simply omitted."""
+
+    def test_none_returns_none_silently(self):
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            result = _parse_optional_decimal(None, field_name="exchange_rate")
+        assert result is None
+        assert not any(e.get("log_level") == "warning" for e in logs)
+
+    def test_empty_string_returns_none_silently(self):
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            result = _parse_optional_decimal("", field_name="foreign_amount")
+        assert result is None
+        assert not any(e.get("log_level") == "warning" for e in logs)
+
+    def test_valid_value_parses(self):
+        assert _parse_optional_decimal("1.35", field_name="exchange_rate") == Decimal("1.35")
+
+    def test_malformed_value_with_internal_id_logs_field_and_id(self):
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            result = _parse_optional_decimal("not-a-number", field_name="exchange_rate", internal_id="920099")
+        assert result is None
+        warnings = [
+            e
+            for e in logs
+            if e.get("log_level") == "warning" and e.get("event") == "netsuite_deposit_sync.unparseable_decimal"
+        ]
+        assert warnings, f"expected an unparseable_decimal warning, got: {logs}"
+        assert warnings[0]["field"] == "exchange_rate"
+        assert warnings[0]["internal_id"] == "920099"
+
+    def test_malformed_value_without_internal_id_logs_raw_value(self):
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            result = _parse_optional_decimal("garbage", field_name="foreign_amount")
+        assert result is None
+        warnings = [
+            e
+            for e in logs
+            if e.get("log_level") == "warning" and e.get("event") == "netsuite_deposit_sync.unparseable_decimal"
+        ]
+        assert warnings, f"expected an unparseable_decimal warning, got: {logs}"
+        assert warnings[0]["field"] == "foreign_amount"
+        assert "internal_id" not in warnings[0]
+        assert warnings[0]["value"] == "garbage"
+
+    def test_default_used_for_missing_and_for_malformed(self):
+        assert _parse_optional_decimal(None, field_name="amount", default=Decimal("0")) == Decimal("0")
+
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            result = _parse_optional_decimal("abc", field_name="amount", default=Decimal("0"), internal_id="1")
+        assert result == Decimal("0")
+        assert any(e.get("event") == "netsuite_deposit_sync.unparseable_decimal" for e in logs)
 
 
 class TestExtractOrderRef:
@@ -434,7 +501,11 @@ class TestSyncDepositsCurrencyTruth:
         ``base_currency_name`` key/value in the row), ``currency`` MUST fall back to
         today's behavior (the transaction-currency label) — never a hardcoded "USD" guess.
         transaction_currency/foreign_amount/exchange_rate are still populated when present.
+        The fallback is counted + logged so post-deploy acceptance can tell "honestly
+        fixed" from "join missed".
         """
+        from structlog.testing import capture_logs
+
         rows = [
             {
                 "internal_id": "920003",
@@ -453,13 +524,63 @@ class TestSyncDepositsCurrencyTruth:
                 "sales_order_ref": "",
             }
         ]
-        _result, posting = await _run_sync_and_read_back(db, tenant_a.id, internal_id="920003", rows=rows)
+        with capture_logs() as logs:
+            result, posting = await _run_sync_and_read_back(db, tenant_a.id, internal_id="920003", rows=rows)
 
         # documents the fallback: same as pre-fix behavior, not a guess
         assert posting.currency == "CAD"
         assert posting.transaction_currency == "CAD"
         assert posting.foreign_amount == Decimal("12000.00")
         assert posting.exchange_rate == Decimal("0.75")
+
+        assert result.currency_fallback_count == 1
+        warnings = [
+            e
+            for e in logs
+            if e.get("log_level") == "warning" and e.get("event") == "netsuite_deposit_sync.base_currency_fallback"
+        ]
+        assert warnings, f"expected a base_currency_fallback warning, got: {logs}"
+        assert warnings[0]["internal_id"] == "920003"
+        assert warnings[0]["label"] == "CAD"
+
+    async def test_no_currency_data_at_all_defaults_to_usd_counted_and_logged(self, db, tenant_a):
+        """If SuiteQL returns neither ``currency_name`` nor ``base_currency_name`` at
+        all (fully degenerate row), ``transaction_currency`` stays None (the column
+        is nullable) and ``currency`` falls all the way to a literal "USD" absolute
+        last resort — but this is counted + logged under its own event name so it's
+        never silently indistinguishable from an honest USD deposit.
+        """
+        from structlog.testing import capture_logs
+
+        rows = [
+            {
+                "internal_id": "920006",
+                "document_number": "DEP-FX-6",
+                "transaction_date": "2026-03-16",
+                "record_type": "Deposit",
+                "memo": "bank deposit",
+                "amount": "100.00",
+                # no currency_name key, no base_currency_name key at all
+                "account_id": "10",
+                "account_name": "Bank",
+                "subsidiary_id": "1",
+                "sales_order_ref": "",
+            }
+        ]
+        with capture_logs() as logs:
+            result, posting = await _run_sync_and_read_back(db, tenant_a.id, internal_id="920006", rows=rows)
+
+        assert posting.transaction_currency is None
+        assert posting.currency == "USD"
+        assert result.currency_fallback_count == 1
+
+        warnings = [
+            e
+            for e in logs
+            if e.get("log_level") == "warning" and e.get("event") == "netsuite_deposit_sync.currency_unknown_default"
+        ]
+        assert warnings, f"expected a currency_unknown_default warning, got: {logs}"
+        assert warnings[0]["internal_id"] == "920006"
 
     async def test_missing_foreign_fields_are_stored_as_none(self, db, tenant_a):
         """Rows with no foreign_amount/exchange_rate (e.g. non-multi-currency subsidiary)
@@ -513,7 +634,11 @@ class TestSyncDepositsCurrencyTruth:
             {
                 **first_rows[0],
                 "amount": "13600.00",
-                "foreign_amount": "10000.00",
+                # currency_name + foreign_amount deliberately CHANGE here (a booking
+                # correction) so the test proves resync overwrites the stale values
+                # rather than merely leaving them untouched.
+                "currency_name": "Euro",
+                "foreign_amount": "9000.00",
                 "exchange_rate": "1.36",
             }
         ]
@@ -550,6 +675,8 @@ class TestSyncDepositsCurrencyTruth:
         ).scalar_one()
         assert posting.amount == Decimal("13600.00")
         assert posting.exchange_rate == Decimal("1.36")
+        assert posting.transaction_currency == "EUR"
+        assert posting.foreign_amount == Decimal("9000.00")
 
 
 class TestSyncDepositsMaintainsFreshnessCursor:
