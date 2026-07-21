@@ -414,6 +414,17 @@ def _normalize_currency(currency_name: str) -> str:
         # "Taiwan Dollar" or "New Taiwan Dollar" — see docstring.
         "TAIWAN": "TWD",
         "TWD": "TWD",
+        # Observed as unmapped-label warnings during the 2026-07-21 180d
+        # backfill (637 rows) — the honest-passthrough fallback stored
+        # "DAN"/"SWE" until these landed; the upsert heals them on next sync.
+        "DANISH KRONE": "DKK",
+        "DKK": "DKK",
+        "SWEDISH KRONA": "SEK",
+        "SEK": "SEK",
+        "NORWEGIAN KRONE": "NOK",
+        "NOK": "NOK",
+        "POLISH ZLOTY": "PLN",
+        "PLN": "PLN",
     }
     # If it's already a 3-letter code, use it
     if len(name) == 3 and name.isalpha():
