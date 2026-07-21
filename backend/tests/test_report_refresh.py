@@ -737,6 +737,44 @@ async def test_refresh_of_statement_recipe_zero_row_r1_fails_closed_keeps_old_ve
     assert row.version == 1
 
 
+async def test_refresh_statement_source_over_2000_rows_not_truncated(db, monkeypatch):
+    """T2 gate B1 (round 2), through the REAL extract path: a >2000-row r1 (previously
+    silently truncated to 2000 by the chat-layer extraction cap, corrupting totals) must
+    now flow through intact up to STATEMENT_ROW_CAP (5000). 3000 accounts, $1 each --
+    revenue must equal exactly $3,000, never a truncated $2,000."""
+    _title, recipe = build_playbook_recipe("income_statement", {"period": "Jun 2026"})
+    tenant, user, report = await _seed_report(db, recipe=recipe)
+    big_r1 = _raw_tool_result(fx.row_cap_boundary_payloads(3000)["r1"])
+    calls = _patch_executor(monkeypatch, by_params=_income_statement_by_params(r1=big_r1))
+
+    updated = await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
+
+    assert len(calls) == 4
+    model = next(s["model"] for s in updated.spec_json["sections"] if s["type"] == "financial_statement")
+    kpis = {k["key"]: k for k in model["kpis"]}
+    assert kpis["revenue"]["value"] == "$3,000"
+
+
+async def test_refresh_statement_source_exceeding_5000_fails_closed(db, monkeypatch):
+    """T2 gate B1(b) end-to-end: a source genuinely exceeding even the raised 5000-row
+    extraction cap (5500 rows) must fail the refresh closed -- never silently corrupt
+    totals by rendering with only the first 5000."""
+    _title, recipe = build_playbook_recipe("income_statement", {"period": "Jun 2026"})
+    tenant, user, report = await _seed_report(db, recipe=recipe)
+    rid, tid, uid, original_html = report.id, tenant.id, user.id, report.rendered_html
+    huge_r1 = _raw_tool_result(fx.row_cap_boundary_payloads(5500)["r1"])
+    calls = _patch_executor(monkeypatch, by_params=_income_statement_by_params(r1=huge_r1))
+
+    with pytest.raises(RefreshError) as exc:
+        await refresh_report(db, report_id=rid, tenant_id=tid, actor_id=uid)
+    assert exc.value.status_code == 502
+    assert "account list truncated at 5000 of 5500" in exc.value.detail
+    assert calls  # r1 was attempted before failing
+    row = (await db.execute(select(Report).where(Report.id == rid))).scalar_one()
+    assert row.rendered_html == original_html  # current version untouched
+    assert row.version == 1
+
+
 async def test_refresh_of_v1_style_recipe_stays_byte_stable_no_fs_markup(db, monkeypatch):
     """v1 (table/narrative) recipes must refresh exactly as before Task 4's
     financial_statement wiring landed: no fs-* CSS/markup leaks into a plain report, and

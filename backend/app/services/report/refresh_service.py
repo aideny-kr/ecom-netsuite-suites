@@ -177,6 +177,7 @@ async def _execute_sources(
     from "whole report" to "one comparison"."""
     from app.services.chat.tool_call_results import extract_result_payload
     from app.services.chat.tools import execute_tool_call
+    from app.services.report.statement_builder import STATEMENT_ROW_CAP
 
     if required_rids is None:
         required_rids = set(needed_rids)
@@ -220,7 +221,13 @@ async def _execute_sources(
                     or (error_val if isinstance(error_val, str) else "")
                 )
                 raise RefreshError(502, f"source {rid} ({tool}) failed{': ' + message[:200] if message else ''}")
-            payload = extract_result_payload(tool, params, result_str)
+            # T2 gate B1a (round 2): every report-source extraction (v1 table/narrative
+            # AND financial_statement) gets the higher STATEMENT_ROW_CAP (5000), not the
+            # chat-turn default (2000) -- a report must never truncate a source silently
+            # below what its own SQL cap allows (report-design.md #7). The live chat-turn
+            # dispatch path (execute_tool_call's OWN interceptor) is a completely separate
+            # call site and never passes this -- its default stays untouched.
+            payload = extract_result_payload(tool, params, result_str, max_rows=STATEMENT_ROW_CAP)
             if payload is None:
                 raise RefreshError(502, f"source {rid} ({tool}) returned no extractable data")
             payloads[rid] = payload
