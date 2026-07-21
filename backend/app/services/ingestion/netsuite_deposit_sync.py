@@ -40,6 +40,14 @@ _PAYOUT_ID_PATTERNS = [
 ]
 
 # SuiteQL query template — pagination handled by execute_suiteql_via_rest(paginate=True)
+#
+# Currency truth (Phase A, 2026-07-21 P0 fix): ``t.total``/``amount`` is the
+# SUBSIDIARY BASE currency amount, but the query used to label it with
+# BUILTIN.DF(t.currency) — the TRANSACTION currency — mislabeling e.g.
+# CAD/CHF/SGD/NZD-labeled deposits that actually carried USD amounts. The
+# LEFT JOIN to ``subsidiary`` recovers the honest base currency name
+# (base_currency_name); currency_name keeps meaning the transaction currency
+# label. foreigntotal/exchangerate are the transaction-currency amount/rate.
 _DEPOSIT_QUERY = """\
 SELECT
     t.id AS internal_id,
@@ -49,6 +57,9 @@ SELECT
     t.memo,
     t.total AS amount,
     BUILTIN.DF(t.currency) AS currency_name,
+    BUILTIN.DF(s.currency) AS base_currency_name,
+    t.foreigntotal AS foreign_amount,
+    t.exchangerate AS exchange_rate,
     t.subsidiary AS subsidiary_id,
     BUILTIN.DF(t.subsidiary) AS subsidiary_name,
     t.account AS account_id,
@@ -57,6 +68,7 @@ SELECT
     BUILTIN.DF(tl.createdfrom) AS sales_order_ref
 FROM transaction t
 JOIN transactionline tl ON tl.transaction = t.id AND tl.mainline = 'T'
+LEFT JOIN subsidiary s ON s.id = t.subsidiary
 WHERE
     t.type IN ('Deposit', 'CustDep')
     AND t.trandate >= TO_DATE('{date_from}', 'YYYY-MM-DD')
@@ -74,6 +86,11 @@ class DepositSyncResult:
     records_updated: int = 0
     records_new: int = 0
     errors: list[str] = field(default_factory=list)
+    # Counts every row where `currency` couldn't come from the subsidiary join and
+    # fell back to the transaction-currency label or, in the fully degenerate case,
+    # a literal "USD" last resort. Post-deploy acceptance reads this to distinguish
+    # "honestly fixed" (0) from "join missed" (>0) — see the fallback chain below.
+    currency_fallback_count: int = 0
 
 
 def extract_payout_id(memo: str | None) -> str | None:
@@ -198,15 +215,67 @@ async def sync_netsuite_deposits(
         # Fallback: extract payout ID from memo (legacy path)
         payout_id = extract_payout_id(memo) if not order_ref else None
 
-        # Parse amount
-        try:
-            amount = Decimal(str(row_dict.get("amount", 0)))
-        except Exception:
-            amount = Decimal("0")
+        # Parse amount — required; a malformed value defaults to 0 (never NULL, the
+        # column disallows it) but is logged loudly, same as the optional fields
+        # below, since a bad amount is a real data problem, not an absent-field
+        # non-event.
+        amount = _parse_optional_decimal(
+            row_dict.get("amount", 0), field_name="amount", internal_id=internal_id, default=Decimal("0")
+        )
 
-        # Parse currency — use name if available, fall back to ID
-        currency_name = row_dict.get("currency_name", "")
-        currency = _normalize_currency(currency_name) if currency_name else "USD"
+        # Parse transaction currency — the label NetSuite put on the transaction
+        # itself (BUILTIN.DF(t.currency)). This is always the same field the sync
+        # has always read; it just used to ALSO be (mis)used as the base currency.
+        # No currency_name at all -> None (the column is nullable), NEVER a
+        # fabricated "USD" guess — the `currency` fallback chain below decides
+        # what to store there, and counts/logs when it has to guess.
+        # .strip() before the truthiness gates: a whitespace-only label is truthy
+        # but normalizes to "" inside _normalize_currency, which would store an
+        # empty-string currency — strip here so degenerate labels take the
+        # counted/logged fallback rungs below instead.
+        currency_name = (row_dict.get("currency_name") or "").strip()
+        transaction_currency = _normalize_currency(currency_name) if currency_name else None
+
+        # Parse base currency — honest fix: prefer the subsidiary join
+        # (BUILTIN.DF(subsidiary.currency)), which is the currency `t.total`/`amount`
+        # is actually denominated in. If the join yields nothing for this record
+        # shape, fall back to the transaction currency rather than guessing a
+        # hardcoded "USD" — see Phase A plan note on this exact tradeoff. Both
+        # fallback rungs are counted + logged (never silent) so a post-deploy read
+        # of the sync's result can tell "honestly fixed" from "join missed".
+        base_currency_name = (row_dict.get("base_currency_name") or "").strip()
+        if base_currency_name:
+            currency = _normalize_currency(base_currency_name)
+        elif transaction_currency:
+            currency = transaction_currency
+            result.currency_fallback_count += 1
+            logger.warning(
+                "netsuite_deposit_sync.base_currency_fallback",
+                internal_id=internal_id,
+                label=transaction_currency,
+            )
+        else:
+            # Absolute last resort: neither the subsidiary join nor the transaction
+            # itself gave us a currency label. `currency` is NOT NULL, so this
+            # literal "USD" is the floor — counted + logged under its own event
+            # name so it's never confused with an honest USD deposit.
+            currency = "USD"
+            result.currency_fallback_count += 1
+            logger.warning(
+                "netsuite_deposit_sync.currency_unknown_default",
+                internal_id=internal_id,
+            )
+
+        # Foreign (transaction-currency) amount + exchange rate — nullable; NetSuite
+        # omits these for non-multi-currency subsidiaries. Missing stays silently
+        # None; a present-but-malformed value is logged instead of swallowed, since
+        # that means SuiteQL returned something unexpected.
+        foreign_amount = _parse_optional_decimal(
+            row_dict.get("foreign_amount"), field_name="foreign_amount", internal_id=internal_id
+        )
+        exchange_rate = _parse_optional_decimal(
+            row_dict.get("exchange_rate"), field_name="exchange_rate", internal_id=internal_id
+        )
 
         # Parse transaction date
         txn_date_raw = row_dict.get("transaction_date")
@@ -240,6 +309,9 @@ async def sync_netsuite_deposits(
             "transaction_date": txn_date,
             "amount": amount,
             "currency": currency,
+            "transaction_currency": transaction_currency,
+            "foreign_amount": foreign_amount,
+            "exchange_rate": exchange_rate,
             "account_id": row_account_id,
             "account_name": row_dict.get("account_name"),
             "subsidiary_id": str(row_dict.get("subsidiary_id", "")) or None,
@@ -297,12 +369,22 @@ async def sync_netsuite_deposits(
         synced=result.records_synced,
         new=result.records_new,
         updated=result.records_updated,
+        currency_fallbacks=result.currency_fallback_count,
     )
     return result
 
 
 def _normalize_currency(currency_name: str) -> str:
-    """Normalize NetSuite currency display name to 3-letter ISO code."""
+    """Normalize NetSuite currency display name to 3-letter ISO code.
+
+    An unmapped label is NEVER defaulted to "USD" — that recreates the exact
+    guess-USD lie Phase A exists to kill (live NetSuite verification found a
+    TWD subsidiary's currency display name is literally "Taiwan", which would
+    otherwise silently corrupt both `currency` and `transaction_currency`).
+    Instead the raw label passes through, normalized and truncated to fit the
+    `currency`/`transaction_currency` VARCHAR(3) columns, and a WARNING names
+    the unmapped label so the next surprise surfaces loudly.
+    """
     name = currency_name.strip().upper()
     # Common NetSuite currency display names
     mapping = {
@@ -319,11 +401,65 @@ def _normalize_currency(currency_name: str) -> str:
         "JPY": "JPY",
         "AUSTRALIAN DOLLAR": "AUD",
         "AUD": "AUD",
+        # Currency truth (Phase A): these are the exact currencies the grounded
+        # facts named as mislabeled by the sync (CAD/CHF/SGD/NZD) — without entries
+        # here, transaction_currency would silently default to "USD" below.
+        "SWISS FRANC": "CHF",
+        "CHF": "CHF",
+        "SINGAPORE DOLLAR": "SGD",
+        "SGD": "SGD",
+        "NEW ZEALAND DOLLAR": "NZD",
+        "NZD": "NZD",
+        # Live NetSuite returns the bare country name for this subsidiary, not
+        # "Taiwan Dollar" or "New Taiwan Dollar" — see docstring.
+        "TAIWAN": "TWD",
+        "TWD": "TWD",
     }
     # If it's already a 3-letter code, use it
     if len(name) == 3 and name.isalpha():
         return name
-    return mapping.get(name, "USD")
+    mapped = mapping.get(name)
+    if mapped is not None:
+        return mapped
+    logger.warning("netsuite_deposit_sync.unmapped_currency_label", label=name)
+    return name[:3]
+
+
+def _parse_optional_decimal(
+    value: object,
+    *,
+    field_name: str = "value",
+    internal_id: str | None = None,
+    default: Decimal | None = None,
+) -> Decimal | None:
+    """Parse a SuiteQL numeric field that may be absent, None, or empty string.
+
+    Missing (None/"") is a normal, silent case — NetSuite omits these fields for
+    non-multi-currency subsidiaries, or the caller passes ``default=Decimal("0")``
+    for a required field like ``amount``. A MALFORMED value (present but not
+    parseable as a number) is different: SuiteQL returned something unexpected,
+    so it's logged loudly (``netsuite_deposit_sync.unparseable_decimal``) rather
+    than silently coerced — naming ``internal_id`` when the caller has one to hand,
+    else the raw ``value`` so the failure is still identifiable.
+    """
+    if value is None or value == "":
+        return default
+    try:
+        return Decimal(str(value))
+    except Exception:
+        if internal_id is not None:
+            logger.warning(
+                "netsuite_deposit_sync.unparseable_decimal",
+                field=field_name,
+                internal_id=internal_id,
+            )
+        else:
+            logger.warning(
+                "netsuite_deposit_sync.unparseable_decimal",
+                field=field_name,
+                value=str(value),
+            )
+        return default
 
 
 def _parse_date(value: str | None) -> date | None:
