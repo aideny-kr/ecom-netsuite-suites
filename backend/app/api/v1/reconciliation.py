@@ -912,6 +912,9 @@ def _proposal_response_with_enrichment(
     order_reference: str | None,
     netsuite_internal_id: str | None,
     netsuite_record_type: str | None,
+    stripe_amount: Decimal | None = None,
+    netsuite_amount: Decimal | None = None,
+    variance_amount: Decimal | None = None,
 ) -> ResolutionProposalResponse:
     return ResolutionProposalResponse.model_validate(proposal).model_copy(
         update={
@@ -919,6 +922,9 @@ def _proposal_response_with_enrichment(
             "stripe_charge_id": proposal.charge_source_id,
             "netsuite_internal_id": netsuite_internal_id,
             "netsuite_record_type": netsuite_record_type,
+            "stripe_amount": stripe_amount,
+            "netsuite_amount": netsuite_amount,
+            "variance_amount": variance_amount,
         }
     )
 
@@ -929,13 +935,17 @@ async def _enrich_proposal_response(
     """Single-proposal version of list_group_proposals' enrichment join —
     order_reference off the result's evidence JSON, NetSuite fields off the
     deposit the result matched to (LEFT JOIN, most needs_human items have no
-    deposit_id). Used by mutation endpoints that return one proposal."""
+    deposit_id), plus the result's own stripe/netsuite/variance amounts (A1
+    drill-down columns). Used by mutation endpoints that return one proposal."""
     row = (
         await db.execute(
             select(
                 ReconciliationResult.evidence["order_reference"].astext,
                 NetsuitePosting.netsuite_internal_id,
                 NetsuitePosting.record_type,
+                ReconciliationResult.stripe_amount,
+                ReconciliationResult.netsuite_amount,
+                ReconciliationResult.variance_amount,
             )
             .select_from(ReconciliationResult)
             .outerjoin(
@@ -951,28 +961,60 @@ async def _enrich_proposal_response(
             )
         )
     ).first()
-    order_reference, netsuite_internal_id, record_type = row or (None, None, None)
-    return _proposal_response_with_enrichment(proposal, order_reference, netsuite_internal_id, record_type)
+    order_reference, netsuite_internal_id, record_type, stripe_amount, netsuite_amount, variance_amount = row or (
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    return _proposal_response_with_enrichment(
+        proposal, order_reference, netsuite_internal_id, record_type, stripe_amount, netsuite_amount, variance_amount
+    )
 
 
 @router.get(
     "/runs/{run_id}/resolution-groups/{group_key}/proposals",
     response_model=list[ResolutionProposalResponse],
 )
+@router.get(
+    "/runs/{run_id}/resolution-groups/proposals",
+    response_model=list[ResolutionProposalResponse],
+)
 async def list_group_proposals(
     run_id: str,
-    group_key: str,
     user: Annotated[User, Depends(require_feature("reconciliation"))],
     db: Annotated[AsyncSession, Depends(get_db)],
+    group_key: str | None = None,
+    action: str | None = None,
     limit: int = 100,
     offset: int = 0,
 ):
+    """Lists a group's resolution proposals. ``group_key`` (root_cause:
+    action:booking_vehicle) scopes to one group, as before. The group_key-less
+    route (`/runs/{run_id}/resolution-groups/proposals`) instead filters
+    cross-group by ``action`` alone — e.g. ``action=needs_human`` fetches the
+    FE's needs-human worksheet, which spans every root_cause/booking_vehicle
+    combination sharing that action in one call instead of one fetch per
+    group. Absent both filters, behavior/URL for existing callers is
+    unchanged."""
     await _get_run_or_404(db, user.tenant_id, run_id)
-    root_cause, action, vehicle = _parse_group_key(group_key)
     P = ReconResolutionProposal
+    conditions = [
+        P.run_id == _parse_uuid(run_id),
+        P.tenant_id == user.tenant_id,
+        P.status.notin_(("superseded", "rejected")),
+    ]
+    if group_key is not None:
+        root_cause, group_action, vehicle = _parse_group_key(group_key)
+        conditions += [P.root_cause == root_cause, P.action == group_action, P.booking_vehicle == vehicle]
+    if action is not None:
+        conditions.append(P.action == action)
     # Single query (join, not N+1): order_reference comes off the result's
-    # evidence JSON; NetSuite fields come off the deposit the result matched
-    # to, if any (LEFT JOIN — most needs_human items have no deposit_id).
+    # evidence JSON; NetSuite fields + amounts come off the result / the
+    # deposit it matched to, if any (LEFT JOIN — most needs_human items have
+    # no deposit_id).
     rows = (
         await db.execute(
             select(
@@ -980,6 +1022,9 @@ async def list_group_proposals(
                 ReconciliationResult.evidence["order_reference"].astext,
                 NetsuitePosting.netsuite_internal_id,
                 NetsuitePosting.record_type,
+                ReconciliationResult.stripe_amount,
+                ReconciliationResult.netsuite_amount,
+                ReconciliationResult.variance_amount,
             )
             .join(
                 ReconciliationResult,
@@ -995,23 +1040,13 @@ async def list_group_proposals(
                     NetsuitePosting.tenant_id == user.tenant_id,
                 ),
             )
-            .where(
-                P.run_id == _parse_uuid(run_id),
-                P.tenant_id == user.tenant_id,
-                P.root_cause == root_cause,
-                P.action == action,
-                P.booking_vehicle == vehicle,
-                P.status.notin_(("superseded", "rejected")),
-            )
+            .where(*conditions)
             .order_by(P.proposed_amount.desc())
             .limit(limit)
             .offset(offset)
         )
     ).all()
-    return [
-        _proposal_response_with_enrichment(p, order_reference, netsuite_internal_id, record_type)
-        for p, order_reference, netsuite_internal_id, record_type in rows
-    ]
+    return [_proposal_response_with_enrichment(*row) for row in rows]
 
 
 @router.post(

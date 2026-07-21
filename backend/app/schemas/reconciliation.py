@@ -307,6 +307,12 @@ class ResolutionProposalResponse(BaseModel):
     stripe_charge_id: str | None = None
     netsuite_internal_id: str | None = None
     netsuite_record_type: str | None = None
+    # The matched ReconciliationResult's own amounts (A1 drill-down columns) —
+    # populated off the enrichment join already performed to fetch the
+    # identifiers above, never a separate query.
+    stripe_amount: Decimal | None = None
+    netsuite_amount: Decimal | None = None
+    variance_amount: Decimal | None = None
 
     model_config = {"from_attributes": True}
 
