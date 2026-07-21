@@ -83,8 +83,43 @@ class TestNormalizeCurrency:
         assert _normalize_currency("usd") == "USD"
         assert _normalize_currency("Eur") == "EUR"
 
-    def test_unknown_defaults_to_usd(self):
-        assert _normalize_currency("Unknown Currency") == "USD"
+    def test_taiwan_maps_to_twd(self):
+        """Live NetSuite verification: Taiwan subsidiaries' currency display name
+        is literally "Taiwan", not "Taiwan Dollar" or "New Taiwan Dollar"."""
+        assert _normalize_currency("Taiwan") == "TWD"
+        assert _normalize_currency("taiwan") == "TWD"
+        assert _normalize_currency("TWD") == "TWD"
+
+    def test_unknown_label_does_not_default_to_usd(self):
+        """An unrecognized label must never silently become "USD" — that
+        recreates the exact guess-USD lie Phase A exists to kill. It passes
+        through as its normalized (stripped/uppercased) form instead, truncated
+        to fit the `currency`/`transaction_currency` VARCHAR(3) columns."""
+        result = _normalize_currency("Wakanda Dollar")
+        assert result != "USD"
+        assert result == "WAK"
+
+    def test_unknown_label_logs_warning(self):
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            result = _normalize_currency("Wakanda Dollar")
+
+        assert result == "WAK"
+        warnings = [
+            e
+            for e in logs
+            if e.get("log_level") == "warning" and e.get("event") == "netsuite_deposit_sync.unmapped_currency_label"
+        ]
+        assert warnings, f"expected an unmapped_currency_label warning, got: {logs}"
+        assert warnings[0]["label"] == "WAKANDA DOLLAR"
+
+    def test_existing_mappings_unchanged(self):
+        assert _normalize_currency("Swiss Franc") == "CHF"
+        assert _normalize_currency("Singapore Dollar") == "SGD"
+        assert _normalize_currency("New Zealand Dollar") == "NZD"
+        assert _normalize_currency("Japanese Yen") == "JPY"
+        assert _normalize_currency("Australian Dollar") == "AUD"
 
 
 class TestParseDate:

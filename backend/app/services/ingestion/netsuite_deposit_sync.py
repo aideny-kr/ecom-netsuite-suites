@@ -332,7 +332,16 @@ async def sync_netsuite_deposits(
 
 
 def _normalize_currency(currency_name: str) -> str:
-    """Normalize NetSuite currency display name to 3-letter ISO code."""
+    """Normalize NetSuite currency display name to 3-letter ISO code.
+
+    An unmapped label is NEVER defaulted to "USD" — that recreates the exact
+    guess-USD lie Phase A exists to kill (live NetSuite verification found a
+    TWD subsidiary's currency display name is literally "Taiwan", which would
+    otherwise silently corrupt both `currency` and `transaction_currency`).
+    Instead the raw label passes through, normalized and truncated to fit the
+    `currency`/`transaction_currency` VARCHAR(3) columns, and a WARNING names
+    the unmapped label so the next surprise surfaces loudly.
+    """
     name = currency_name.strip().upper()
     # Common NetSuite currency display names
     mapping = {
@@ -358,11 +367,19 @@ def _normalize_currency(currency_name: str) -> str:
         "SGD": "SGD",
         "NEW ZEALAND DOLLAR": "NZD",
         "NZD": "NZD",
+        # Live NetSuite returns the bare country name for this subsidiary, not
+        # "Taiwan Dollar" or "New Taiwan Dollar" — see docstring.
+        "TAIWAN": "TWD",
+        "TWD": "TWD",
     }
     # If it's already a 3-letter code, use it
     if len(name) == 3 and name.isalpha():
         return name
-    return mapping.get(name, "USD")
+    mapped = mapping.get(name)
+    if mapped is not None:
+        return mapped
+    logger.warning("netsuite_deposit_sync.unmapped_currency_label", label=name)
+    return name[:3]
 
 
 def _parse_optional_decimal(value: object) -> Decimal | None:
