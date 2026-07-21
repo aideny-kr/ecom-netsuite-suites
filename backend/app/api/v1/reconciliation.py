@@ -57,7 +57,7 @@ from app.services.reconciliation.close_scope import (
     closeable_runs_conditions,
     left_for_review_conditions,
 )
-from app.services.reconciliation.evidence_service import EvidencePackGenerator
+from app.services.reconciliation.evidence_service import EvidencePackGenerator, escape_csv_injection
 from app.services.reconciliation.four_bucket_classifier import (
     ALL_BUCKETS,
     BULK_APPROVABLE_BUCKETS,
@@ -1488,11 +1488,14 @@ def _results_export_row(r: ReconciliationResult) -> list:
 def _write_csv(headers: list[str], rows: list[list]) -> io.BytesIO:
     """stdlib csv into StringIO, then re-wrapped as bytes for StreamingResponse.
     Decimal cells stringify via csv.writer's own str() conversion — e.g.
-    Decimal('9.00') -> '9.00', never float notation."""
+    Decimal('9.00') -> '9.00', never float notation. String cells beginning
+    with =, +, -, or @ are quote-prefixed (OWASP CSV-injection mitigation);
+    Decimal/number cells are untouched since escape_csv_injection only acts
+    on `str` values."""
     output = io.StringIO()
     writer = csv.writer(output)
     writer.writerow(headers)
-    writer.writerows(rows)
+    writer.writerows([escape_csv_injection(v) for v in row] for row in rows)
     return io.BytesIO(output.getvalue().encode("utf-8"))
 
 

@@ -43,6 +43,22 @@ _THIN_BORDER = Border(
     bottom=Side(style="thin"),
 )
 
+# OWASP CSV-injection mitigation (used by generate_section_excel below AND by
+# reconciliation.py's _write_csv, imported from here as the single source).
+_CSV_INJECTION_PREFIXES = ("=", "+", "-", "@")
+
+
+def escape_csv_injection(value: Any) -> Any:
+    """Prefix a single quote onto a `str` cell that begins with =, +, -, or @
+    so neither Excel/other spreadsheet apps nor openpyxl's own auto-typing
+    (which tags a leading '=' as a formula cell) execute it. Applies ONLY to
+    `str` values — Decimal/number/bool/None/datetime cells pass through
+    untouched, so a negative amount (e.g. Decimal('-3.20'), already cast to a
+    NUMBER by the caller) is never mistaken for a formula-injection string."""
+    if isinstance(value, str) and value.startswith(_CSV_INJECTION_PREFIXES):
+        return "'" + value
+    return value
+
 
 class EvidencePackGenerator:
     """Generate evidence pack Excel files from reconciliation results."""
@@ -113,6 +129,7 @@ class EvidencePackGenerator:
                     value = float(value)
                 elif isinstance(value, datetime) and value.tzinfo is not None:
                     value = value.astimezone(timezone.utc).replace(tzinfo=None)
+                value = escape_csv_injection(value)
                 cell = ws.cell(row=row_idx, column=col_idx, value=value)
                 cell.border = _THIN_BORDER
 

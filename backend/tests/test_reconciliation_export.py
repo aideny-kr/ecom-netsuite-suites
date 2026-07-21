@@ -13,12 +13,14 @@ from decimal import Decimal
 import pytest
 from fastapi import HTTPException
 from openpyxl import load_workbook
+from sqlalchemy import select
 
 from app.api.v1.reconciliation import (
     export_run_section,
     plan_resolutions,
     reject_resolution_group,
 )
+from app.models.reconciliation import ReconResolutionProposal
 from tests.conftest import (
     create_test_netsuite_posting,
     create_test_recon_result,
@@ -419,6 +421,88 @@ async def test_export_other_tenant_run_404(db, tenant_a, tenant_b):
     with pytest.raises(HTTPException) as exc:
         await export_run_section(str(run_b.id), user=user, db=db, section="groups", format="csv")
     assert exc.value.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# CSV-injection escaping (Task 6 hardening) — OWASP formula-injection
+# mitigation on this new export surface only.
+# ---------------------------------------------------------------------------
+async def test_export_proposals_narrative_formula_injection_escaped_csv_and_xlsx(db, tenant_a):
+    """A free-text narrative starting with '=' must be quote-prefixed in both
+    the CSV and XLSX outputs, and openpyxl must never auto-type it as a
+    formula cell."""
+    user, run = await _seed_run_with_groups(db, tenant_a)
+    proposal = (
+        (
+            await db.execute(
+                select(ReconResolutionProposal).where(
+                    ReconResolutionProposal.run_id == run.id,
+                    ReconResolutionProposal.root_cause == "fees",
+                )
+            )
+        )
+        .scalars()
+        .first()
+    )
+    malicious = '=HYPERLINK("http://evil.example","click")'
+    proposal.narrative = malicious
+    await db.flush()
+
+    csv_response = await export_run_section(
+        str(run.id), user=user, db=db, section="proposals", format="csv", group_key="fees:book_fee_line:deposit"
+    )
+    rows = _csv_rows(await _body_bytes(csv_response))
+    row = dict(zip(_PROPOSALS_HEADERS, rows[1]))
+    assert row["narrative"] == f"'{malicious}"
+
+    xlsx_response = await export_run_section(
+        str(run.id), user=user, db=db, section="proposals", format="xlsx", group_key="fees:book_fee_line:deposit"
+    )
+    wb = load_workbook(io.BytesIO(await _body_bytes(xlsx_response)))
+    ws = wb.active
+    headers = [c.value for c in ws[1]]
+    narrative_col = headers.index("narrative") + 1
+    cell = ws.cell(row=2, column=narrative_col)
+    assert cell.value == f"'{malicious}"
+    assert cell.data_type == "s"  # never auto-typed as a formula
+
+
+async def test_export_results_negative_variance_not_escaped_stays_numeric(db, tenant_a):
+    """A negative Decimal amount is a NUMBER, never a formula-injection
+    string — CSV keeps the exact numeric string, XLSX keeps a numeric cell.
+    Uses a non-whole fraction (-9.35, not -9.00) so the assertion isn't
+    confused by openpyxl's own load-time int/float coercion for whole numbers."""
+    user, _ = await create_test_user(db, tenant_a)
+    run = await create_test_recon_run(db, tenant_a.id, status="completed")
+    await create_test_recon_result(
+        db,
+        tenant_a.id,
+        run.id,
+        status="pending",
+        bucket="needs_review",
+        match_type="deterministic",
+        variance_type="fees",
+        variance_amount=Decimal("-9.35"),
+        stripe_amount=Decimal("990.65"),
+        netsuite_amount=Decimal("1000.00"),
+        evidence={"charge_source_id": "ch_neg", "order_reference": "R9"},
+    )
+    await db.flush()
+
+    csv_response = await export_run_section(str(run.id), user=user, db=db, section="results", format="csv")
+    rows = _csv_rows(await _body_bytes(csv_response))
+    row = dict(zip(_RESULTS_HEADERS, rows[1]))
+    assert row["variance_amount"] == "-9.35"
+
+    xlsx_response = await export_run_section(str(run.id), user=user, db=db, section="results", format="xlsx")
+    wb = load_workbook(io.BytesIO(await _body_bytes(xlsx_response)))
+    ws = wb.active
+    headers = [c.value for c in ws[1]]
+    variance_col = headers.index("variance_amount") + 1
+    cell = ws.cell(row=2, column=variance_col)
+    assert cell.value == -9.35
+    assert isinstance(cell.value, float)
+    assert cell.data_type == "n"
 
 
 async def test_export_filename_includes_section_dates_and_group_key(db, tenant_a):
