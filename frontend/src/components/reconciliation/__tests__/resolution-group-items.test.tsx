@@ -14,6 +14,7 @@ const proposals: ReconResolutionProposal[] = [
     failure_reason: null, correlation_id: null, created_at: "2026-07-06T00:00:00Z",
     order_reference: "R946866359", stripe_charge_id: "ch_3Nxxx",
     netsuite_internal_id: "12345", netsuite_record_type: "custdep",
+    stripe_amount: "3.20", netsuite_amount: "3.15", variance_amount: "0.05",
   },
   {
     id: "p2", run_id: "r1", result_id: "res2",
@@ -25,6 +26,19 @@ const proposals: ReconResolutionProposal[] = [
     failure_reason: null, correlation_id: null, created_at: "2026-07-06T00:00:00Z",
     order_reference: "R123456789", stripe_charge_id: "ch_unmatched",
     netsuite_internal_id: null, netsuite_record_type: null,
+    stripe_amount: "120.00", netsuite_amount: null, variance_amount: null,
+  },
+  {
+    id: "p3", run_id: "r1", result_id: "res3",
+    root_cause: "amount_mismatch", action: "needs_human", booking_vehicle: "none",
+    group_key: "amount_mismatch:needs_human:none", source: "planner",
+    narrative: "Ambiguous match — several open deposits share this amount and date, needs a human to pick the right one before booking anything.",
+    proposed_amount: "45.00", currency: "USD",
+    above_materiality: false, status: "proposed",
+    failure_reason: null, correlation_id: null, created_at: "2026-07-06T00:00:00Z",
+    order_reference: "R555000111", stripe_charge_id: "ch_needs_human",
+    netsuite_internal_id: null, netsuite_record_type: null,
+    stripe_amount: "45.00", netsuite_amount: null, variance_amount: null,
   },
 ];
 
@@ -49,7 +63,7 @@ describe("ResolutionGroupItems", () => {
   it("renders narratives and amounts", () => {
     render(<ResolutionGroupItems {...base} />);
     expect(screen.getByText(/book as a fee line/i)).toBeInTheDocument();
-    expect(screen.getByText(/\$120\.00/)).toBeInTheDocument();
+    expect(screen.getByText("$120.00")).toBeInTheDocument();
   });
 
   it("only above-materiality rows get an inclusion checkbox", () => {
@@ -73,7 +87,7 @@ describe("ResolutionGroupItems", () => {
 
   it("omits the NetSuite segment when the item has no linked deposit", () => {
     render(<ResolutionGroupItems {...base} />);
-    const unmatchedRow = screen.getByText("R123456789").closest("li")!;
+    const unmatchedRow = screen.getByText("R123456789").closest("tr")!;
     expect(within(unmatchedRow).getByText("ch_unmatched")).toBeInTheDocument();
     expect(within(unmatchedRow).queryByText(/^NS#/)).toBeNull();
   });
@@ -93,5 +107,44 @@ describe("ResolutionGroupItems", () => {
     fireEvent.click(screen.getByText("NS#12345"));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("12345"));
     expect(container.querySelector(".text-green-500")).toBeNull();
+  });
+
+  it("renders the Stripe amt, NetSuite amt, and Variance columns from the proposal's amounts", () => {
+    render(<ResolutionGroupItems {...base} />);
+    const row1 = screen.getByText("R946866359").closest("tr")!;
+    expect(within(row1).getByText("$3.20")).toBeInTheDocument();
+    expect(within(row1).getByText("$3.15")).toBeInTheDocument();
+    expect(within(row1).getByText("$0.05")).toBeInTheDocument();
+  });
+
+  it("renders — for null NetSuite amt and Variance when there is no matched result", () => {
+    render(<ResolutionGroupItems {...base} />);
+    const row2 = screen.getByText("R123456789").closest("tr")!;
+    // NetSuite ID, NetSuite amt, and Variance are all null on this row.
+    expect(within(row2).getAllByText("—")).toHaveLength(3);
+  });
+
+  it("renders a status chip and a materiality chip per row", () => {
+    render(<ResolutionGroupItems {...base} />);
+    const row1 = screen.getByText("R946866359").closest("tr")!;
+    expect(within(row1).getByText("Proposed")).toBeInTheDocument();
+    expect(within(row1).getByText("Within materiality")).toBeInTheDocument();
+    const row2 = screen.getByText("R123456789").closest("tr")!;
+    expect(within(row2).getByText("Above materiality")).toBeInTheDocument();
+  });
+
+  it("truncates the narrative with a title attribute carrying the full text", () => {
+    render(<ResolutionGroupItems {...base} />);
+    const cell = screen.getByTitle(proposals[2].narrative);
+    expect(cell.className).toContain("truncate");
+  });
+
+  it("shows the Investigate-in-chat button only on needs_human rows", () => {
+    const onInvestigate = vi.fn();
+    render(<ResolutionGroupItems {...base} onInvestigate={onInvestigate} />);
+    const buttons = screen.getAllByRole("button", { name: /investigate in chat/i });
+    expect(buttons).toHaveLength(1);
+    fireEvent.click(buttons[0]);
+    expect(onInvestigate).toHaveBeenCalledWith(proposals[2]);
   });
 });
