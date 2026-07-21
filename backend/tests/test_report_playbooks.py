@@ -17,6 +17,7 @@ from app.services.report.playbooks import (
     PLAYBOOKS,
     build_playbook_recipe,
     compose_playbook_report,
+    normalize_period,
     prior_period,
     trailing_periods,
     yoy_period,
@@ -83,6 +84,71 @@ def test_trailing_periods_validates_even_when_count_is_one():
     validated up front, not passed through unchecked."""
     with pytest.raises(ValueError, match="period"):
         trailing_periods("garbage", 1)
+
+
+# ---------------------------------------------------------------------------
+# normalize_period — forgiving human period input (operator-reported: "jun 2026" 400s
+# outright on capitalization). Pure string mapping, no LLM, no calendar guessing beyond
+# these exact unambiguous forms.
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("Jun 2026", "Jun 2026"),  # already canonical -- round-trips unchanged
+        ("jun 2026", "Jun 2026"),  # lowercase 3-letter abbreviation
+        ("JUN 2026", "Jun 2026"),  # uppercase 3-letter abbreviation
+        ("June 2026", "Jun 2026"),  # full month name
+        ("june 2026", "Jun 2026"),  # lowercase full month name
+        ("JUNE 2026", "Jun 2026"),  # uppercase full month name
+        ("6/2026", "Jun 2026"),  # numeric M/YYYY
+        ("06/2026", "Jun 2026"),  # numeric MM/YYYY
+        ("2026-06", "Jun 2026"),  # ISO YYYY-MM
+        ("  jun 2026  ", "Jun 2026"),  # leading/trailing whitespace
+        ("jun   2026", "Jun 2026"),  # multiple internal spaces
+        ("December 2025", "Dec 2025"),  # a different month, full name
+        ("1/2026", "Jan 2026"),  # numeric month boundary: January
+        ("12/2026", "Dec 2026"),  # numeric month boundary: December
+        ("2026-01", "Jan 2026"),  # ISO month boundary
+        ("2026-12", "Dec 2026"),  # ISO month boundary
+    ],
+)
+def test_normalize_period_accepts_all_documented_forms(raw, expected):
+    assert normalize_period(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "13/2026",  # month out of range
+        "0/2026",  # month out of range (no month 0)
+        "jun 26",  # 2-digit year not accepted
+        "2026",  # year only, no month
+        "",  # empty
+        "   ",  # whitespace only
+        "Xxx 2026",  # not a real month name
+        "2026-13",  # ISO month out of range
+        "2026-00",  # ISO month out of range
+        "June2026",  # no separator
+        "13-2026",  # not ISO shape (only 2 digits before the dash)
+    ],
+)
+def test_normalize_period_rejects_junk(bad):
+    with pytest.raises(ValueError, match="period"):
+        normalize_period(bad)
+
+
+def test_normalize_period_rejects_non_string():
+    with pytest.raises(ValueError, match="period"):
+        normalize_period(None)
+
+
+def test_normalize_period_error_message_is_short_and_names_accepted_forms():
+    """Renders inline in the launcher -- must stay short and actionable."""
+    with pytest.raises(ValueError) as exc:
+        normalize_period("garbage")
+    message = str(exc.value)
+    assert len(message) < 100
+    assert "Jun 2026" in message
 
 
 # ---------------------------------------------------------------------------
@@ -166,12 +232,28 @@ def test_build_prior_only_recipe(key):
     [
         ("nope", {"period": "Jun 2026"}, "Unknown playbook"),
         ("income_statement", {}, "period"),
-        ("income_statement", {"period": "June 2026"}, "period"),
+        # "June 2026" (full month name) is a VALID normalize_period form now -- "13/2026"
+        # (month out of range) replaces it as the still-invalid-post-normalization case.
+        ("income_statement", {"period": "13/2026"}, "period"),
     ],
 )
 def test_build_rejects_bad_input(key, params, msg):
     with pytest.raises(ValueError, match=msg):
         build_playbook_recipe(key, params)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["jun 2026", "JUN 2026", "June 2026", "6/2026", "06/2026", "2026-06"],
+)
+def test_build_playbook_recipe_accepts_forgiving_period_input(raw):
+    """The operator-reported bug: build_playbook_recipe used to 400 on anything but the
+    exact canonical 'Mon YYYY' form. The canonical string must flow into the title, the
+    section, AND every source's params (so SuiteQL receives exactly 'Jun 2026')."""
+    title, recipe = build_playbook_recipe("income_statement", {"period": raw})
+    assert "Jun 2026" in title
+    assert recipe["sections"][0]["period"] == "Jun 2026"
+    assert recipe["sources"]["r1"]["params"]["period"] == "Jun 2026"
 
 
 _RESULT = json.dumps(
@@ -281,6 +363,34 @@ async def test_compose_playbook_income_statement_renders_full_statement(db, monk
     assert model["trend"]["periods"] == fx.EXPECTED_TREND_PERIODS
     # spark/trend values persisted as JSON-safe strings, never float
     assert all(isinstance(v, str) for v in model["kpis"][0]["spark"])
+
+
+async def test_compose_playbook_lowercase_period_normalizes_before_dispatch(db, monkeypatch):
+    """Operator-reported bug: 'jun 2026' (lowercase) 400'd outright. Now it normalizes to
+    the canonical 'Jun 2026' BEFORE any source dispatches -- proven by reusing the SAME
+    by_params fake keyed on canonical strings only: if normalization ran too late (or not
+    at all), every dispatch would miss every by_params key and silently fall back to the
+    single-row default fixture instead of the full income-statement one."""
+    tenant = await create_test_tenant(db, name="LowercasePeriodCorp")
+    user, _ = await create_test_user(db, tenant)
+    calls = _patch_executor(monkeypatch, by_params=_income_statement_by_params())
+
+    report = await compose_playbook_report(
+        db,
+        playbook_key="income_statement",
+        params={"period": "jun 2026"},
+        tenant_id=tenant.id,
+        actor_id=user.id,
+    )
+
+    assert len(calls) == 4
+    assert calls[0]["params"]["period"] == "Jun 2026"  # r1 dispatched with the CANONICAL form
+    assert "Jun 2026" in report.spec_json["title"]
+    model = next(s["model"] for s in report.spec_json["sections"] if s["type"] == "financial_statement")
+    # prior/yoy/trend only resolve correctly if r2/r3/r4 were ALSO dispatched canonically
+    assert model["prior_period"] == "May 2026"
+    assert model["yoy_period"] == "Jun 2025"
+    assert model["trend"]["periods"] == fx.EXPECTED_TREND_PERIODS
 
 
 async def test_compose_playbook_income_statement_degrades_when_compare_sources_fail(db, monkeypatch):
@@ -607,7 +717,9 @@ async def test_compose_playbook_endpoint_bad_params_is_400(db, monkeypatch):
     with pytest.raises(HTTPException) as exc:
         await compose_playbook_endpoint(
             "income_statement",
-            PlaybookComposeRequest(params={"period": "June 2026"}),  # malformed: "Jun", not "June"
+            # "June 2026" now normalizes fine -- "13/2026" (month out of range) is the
+            # still-invalid-post-normalization malformed input.
+            PlaybookComposeRequest(params={"period": "13/2026"}),
             user=user,
             db=db,
         )

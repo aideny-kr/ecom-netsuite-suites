@@ -756,6 +756,31 @@ def negative_revenue_mover_payloads() -> dict[str, dict]:
     }
 
 
+def negative_revenue_only_immaterial_mover_payloads() -> dict[str, dict]:
+    """T2 gate F-1 regression (round-3 reviewer's recommended discriminating test): a
+    net-negative-revenue period with EXACTLY ONE mover, and it's IMMATERIAL for the
+    highlights gate ($100 delta on |revenue|=$50,000 -- 0.2%, well under the 0.5%
+    threshold). No highlight of any kind should fire. Unlike
+    ``negative_revenue_mover_payloads`` (which always has a genuinely material mover
+    present, so a broken threshold can hide behind it still firing correctly), THIS
+    fixture has no material mover at all -- if the highlights threshold's ``abs()``
+    regresses back to bare ``revenue``, this negative-revenue threshold flips negative
+    and the immaterial mover incorrectly clears it, firing a highlight where none
+    should exist."""
+    r1_rows = [
+        _is_row("4000", "Refund-Heavy Revenue", "Income", "1-Revenue", Decimal("-50000")),
+        _is_row("6000", "Immaterial Mover", "Expense", "4-Operating Expense", Decimal("5100")),
+    ]
+    r2_rows = [
+        _is_row("4000", "Refund-Heavy Revenue", "Income", "1-Revenue", Decimal("-50000")),
+        _is_row("6000", "Immaterial Mover", "Expense", "4-Operating Expense", Decimal("5000")),
+    ]
+    return {
+        "r1": _payload(_IS_COLUMNS, r1_rows, query="income_statement (Jun 2026)"),
+        "r2": _payload(_IS_COLUMNS, r2_rows, query="income_statement (May 2026)"),
+    }
+
+
 def trend_row_cap_boundary_payloads(row_count: int) -> dict[str, dict]:
     """T2 gate F-2: r1 is a normal 5-account payload; r4 (trend) has exactly
     ``row_count`` synthetic account x period rows, all in a single synthetic period --

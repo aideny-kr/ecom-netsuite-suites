@@ -985,6 +985,20 @@ def test_negative_revenue_highlight_gate_still_discriminates():
     )
 
 
+def test_negative_revenue_only_immaterial_mover_no_highlight_fires():
+    """T2 gate F-1 regression (round-3 reviewer's recommended discriminating test): with
+    the ONLY mover in the whole statement being immaterial (0.2% of |revenue|, under the
+    0.5% highlights threshold), NO highlight may fire. Unlike
+    ``test_negative_revenue_highlight_gate_still_discriminates`` above (which always has
+    a genuinely material mover present, so ``largest_mover()`` picks it regardless of
+    whether the threshold gate itself is broken -- that test would pass even with a
+    sabotaged abs()), THIS fixture has no material mover to hide behind: a sabotaged
+    abs(revenue) (reverted to bare ``revenue``) flips this negative-revenue threshold
+    negative, and the immaterial mover would incorrectly clear it and fire a highlight."""
+    model = build_statement_model(fx.income_statement_section(), fx.negative_revenue_only_immaterial_mover_payloads())
+    assert model["highlights"] == []
+
+
 # ===========================================================================
 # T2 gate round 3, F-2 — a trend/compare source landing AT the row cap is invisible to
 # the truncated flag (the SQL cap is baked into the query text, so totalResults reflects
