@@ -61,7 +61,21 @@ _REF_CHUNK_SIZE = 5000
 # this many days of the charge is a canceled order refunded before it ever
 # reached NetSuite — not a missing deposit. Permanent, not a recency/sync-lag
 # hold.
+#
+# STRICT WINDOW NETTING (operator ruling, 2026-07-21): only refunds dated
+# <= WASHOUT_WINDOW_DAYS after the charge count toward the net-zero test AT
+# ALL. A same-ref refund landing outside the window is a slow trickle, not
+# washout evidence — the order shipped and NetSuite has a booked deposit
+# (reversed later via a credit memo + refund); it either matches normally or
+# deserves human review, no matter how the FULL refund history nets out.
 WASHOUT_WINDOW_DAYS = 7
+
+# Fetch-volume guard (review finding 1 mitigation, 2026-07-21): the refund
+# fetch in _fetch_refunds is bounded only by REF_MATCH_SANITY_DAYS, not
+# date_from/date_to, so an arbitrary-window run could still pull an
+# unexpectedly large row count. Cheap tripwire (log + warn) until SQL-side
+# ref narrowing is ticketed — does not change fetch behavior.
+_REFUND_FETCH_WARN_THRESHOLD = 20_000
 
 
 def _washout_evidence(
@@ -71,26 +85,36 @@ def _washout_evidence(
 ) -> dict | None:
     """Return washout evidence for one charge's same-ref refund lines, or None.
 
-    Washout rule (``WASHOUT_WINDOW_DAYS``): the refunds net the charge to
-    ``|amount| < $0.01`` AND the earliest refund lands within
-    ``WASHOUT_WINDOW_DAYS`` of ``charge_date``. Decimal arithmetic throughout;
-    stringified only for the JSONB evidence dict.
+    STRICT WINDOW NETTING (operator ruling, 2026-07-21): only refunds dated
+    <= ``WASHOUT_WINDOW_DAYS`` after ``charge_date`` count toward the
+    net-zero test AT ALL. A refund landing outside the window is a slow
+    trickle, not washout evidence — the order shipped and NetSuite has a
+    booked deposit (reversed later via a credit memo + refund); it either
+    matches normally or deserves human review. ``refund_amount`` and
+    ``net_after_refund`` are computed from within-window refunds only;
+    ``refund_date`` is the latest within-window refund date — the date the
+    refund completed (i.e. the date the within-window net actually hit
+    zero), not the earliest. Decimal arithmetic throughout; stringified only
+    for the JSONB evidence dict.
     """
-    if not refunds:
+    within_window = [
+        (amount, refund_date)
+        for amount, refund_date in refunds
+        if (refund_date - charge_date).days <= WASHOUT_WINDOW_DAYS
+    ]
+    if not within_window:
         return None
 
-    total_refund_amount = sum((amount for amount, _ in refunds), Decimal("0"))
+    total_refund_amount = sum((amount for amount, _ in within_window), Decimal("0"))
     net_after_refund = charge_amount + total_refund_amount
     if abs(net_after_refund) >= Decimal("0.01"):
         return None
 
-    _, earliest_date = min(refunds, key=lambda r: r[1])
-    if (earliest_date - charge_date).days > WASHOUT_WINDOW_DAYS:
-        return None
+    _, latest_date = max(within_window, key=lambda r: r[1])
 
     return {
         "washout": True,
-        "refund_date": earliest_date.isoformat(),
+        "refund_date": latest_date.isoformat(),
         "refund_amount": str(total_refund_amount),
         "net_after_refund": str(net_after_refund),
     }
@@ -447,9 +471,25 @@ class OrderReconJob:
             stmt = stmt.where(PayoutLine.subsidiary_id == subsidiary_id)
 
         result = await self.db.execute(stmt)
+        rows = result.all()
+
+        # Fetch-volume guard (review finding 1 mitigation): cheap tripwire
+        # until SQL-side ref narrowing is ticketed — see
+        # _REFUND_FETCH_WARN_THRESHOLD.
+        logger.info(
+            "order_recon_job.refund_fetch_fetched",
+            count=len(rows),
+            window_days=REF_MATCH_SANITY_DAYS,
+        )
+        if len(rows) > _REFUND_FETCH_WARN_THRESHOLD:
+            logger.warning(
+                "order_recon_job.refund_fetch_large",
+                count=len(rows),
+                window_days=REF_MATCH_SANITY_DAYS,
+            )
 
         refunds_by_ref: dict[str, list[tuple[Decimal, date]]] = {}
-        for pl, arrival_date in result.all():
+        for pl, arrival_date in rows:
             if arrival_date is None:
                 continue
             ref = extract_order_ref(pl.description, order_ref_pattern)

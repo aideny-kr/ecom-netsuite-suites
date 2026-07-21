@@ -18,8 +18,9 @@ from app.schemas.order_reconciliation import (
     NSPaymentRecord,
     OrderMatchCandidate,
 )
+from app.services.reconciliation import order_recon_job
 from app.services.reconciliation.four_bucket_classifier import BUCKET_MATCHES, BUCKET_NEEDS_REVIEW
-from app.services.reconciliation.order_recon_job import OrderReconJob
+from app.services.reconciliation.order_recon_job import OrderReconJob, _washout_evidence
 from tests.conftest import (
     create_test_netsuite_posting,
     create_test_payout,
@@ -795,7 +796,10 @@ class TestWashoutEvidenceDbBacked:
             await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id))
         ).scalar_one()
         assert stored.evidence["washout"] is True
-        assert stored.evidence["refund_date"] == "2026-03-17"  # the earliest refund
+        # Strict window netting (operator ruling 2026-07-21): refund_date is
+        # the LATEST within-window refund, not the earliest — the date the
+        # within-window net actually hit zero.
+        assert stored.evidence["refund_date"] == "2026-03-20"
         assert stored.evidence["net_after_refund"] == "0.00"
         assert stored.evidence["refund_amount"] == "-100.00"
 
@@ -926,6 +930,232 @@ class TestWashoutEvidenceDbBacked:
         )
 
         assert refunds_by_ref == {}
+
+    async def test_partial_within_window_plus_late_remainder_no_washout_evidence(self, db, tenant_a):
+        """Operator ruling (2026-07-21), end-to-end: a day-2 $60 partial +
+        day-30 $40 remainder on a $100 charge must NOT produce washout
+        evidence — the within-window net ($100 - $60 = $40) is nonzero, so
+        this falls through to the normal missing_in_netsuite flow instead,
+        even though the FULL refund history nets to zero."""
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_washout_trickle",
+            description="Framework Marketplace Order ID: R222333444-XU9EPZPD",
+            amount=Decimal("100.00"),
+            arrival_date=date(2026, 3, 15),
+        )
+        await create_test_payout_line(
+            db,
+            tenant_a.id,
+            source_id="re_washout_trickle_1",
+            line_type="refund",
+            amount=Decimal("-60.00"),
+            fee=Decimal("0"),
+            net=Decimal("-60.00"),
+            description="Refund for order R222333444",
+            arrival_date=date(2026, 3, 17),  # charge + 2 days, within window
+        )
+        await create_test_payout_line(
+            db,
+            tenant_a.id,
+            source_id="re_washout_trickle_2",
+            line_type="refund",
+            amount=Decimal("-40.00"),
+            fee=Decimal("0"),
+            net=Decimal("-40.00"),
+            description="Refund for order R222333444",
+            arrival_date=date(2026, 4, 14),  # charge + 30 days, beyond window
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        charges = await job._fetch_charges(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+        order_references = {c.order_reference for c in charges if c.order_reference}
+        deposits = await job._fetch_deposits(
+            date_from=date(2026, 3, 10), date_to=date(2026, 3, 20), order_references=order_references
+        )
+        refunds_by_ref = await job._fetch_refunds(
+            date_from=date(2026, 3, 10), date_to=date(2026, 3, 20), order_references=order_references
+        )
+        candidates = job.engine.match(charges, deposits)
+
+        run = await create_test_recon_run(db, tenant_a.id)
+        await job._store_results(run.id, candidates, refunds_by_ref=refunds_by_ref)
+
+        stored = (
+            await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id))
+        ).scalar_one()
+        assert "washout" not in stored.evidence
+        assert stored.match_type == "unmatched"
+        assert stored.variance_type == "missing_in_netsuite"
+
+
+class TestWashoutEvidenceStrictWindowNetting:
+    """Strict window netting (operator ruling, 2026-07-21): only refunds
+    dated <= WASHOUT_WINDOW_DAYS after the charge count toward the net-zero
+    test AT ALL. A refund landing outside the window is a slow trickle, not
+    washout evidence — the order shipped and NetSuite has a booked deposit
+    (reversed later via a credit memo + refund); it either matches normally
+    or deserves human review. Pure-function tests against
+    ``_washout_evidence`` directly — no DB needed to pin these boundaries.
+    """
+
+    async def test_within_window_partial_plus_late_remainder_is_not_washout(self):
+        """$100 charge, day-2 $60 partial + day-30 $40 remainder: the
+        within-window net (100 - 60 = 40) is nonzero, so this must NOT
+        produce washout evidence even though the FULL refund history nets to
+        zero — the day-30 remainder is a slow trickle, not a washout."""
+        charge_amount = Decimal("100.00")
+        charge_date = date(2026, 3, 1)
+        refunds = [
+            (Decimal("-60.00"), date(2026, 3, 3)),  # +2 days, within window
+            (Decimal("-40.00"), date(2026, 3, 31)),  # +30 days, beyond window
+        ]
+        assert _washout_evidence(charge_amount, charge_date, refunds) is None
+
+    async def test_refund_at_exactly_day_7_is_washout(self):
+        """Pins the <= boundary: exactly WASHOUT_WINDOW_DAYS still counts."""
+        charge_amount = Decimal("100.00")
+        charge_date = date(2026, 3, 1)
+        refunds = [(Decimal("-100.00"), date(2026, 3, 8))]  # exactly +7 days
+        evidence = _washout_evidence(charge_amount, charge_date, refunds)
+        assert evidence is not None
+        assert evidence["washout"] is True
+        assert evidence["refund_date"] == "2026-03-08"
+
+    async def test_refund_at_day_8_is_not_washout(self):
+        """One day past the boundary excludes the refund from the net
+        entirely (not just from a separate window gate)."""
+        charge_amount = Decimal("100.00")
+        charge_date = date(2026, 3, 1)
+        refunds = [(Decimal("-100.00"), date(2026, 3, 9))]  # +8 days
+        assert _washout_evidence(charge_amount, charge_date, refunds) is None
+
+    async def test_within_window_net_of_exactly_one_cent_is_not_washout(self):
+        charge_amount = Decimal("100.00")
+        charge_date = date(2026, 3, 1)
+        refunds = [(Decimal("-99.99"), date(2026, 3, 3))]  # net = 0.01
+        assert _washout_evidence(charge_amount, charge_date, refunds) is None
+
+    async def test_within_window_net_of_less_than_one_cent_is_washout(self):
+        charge_amount = Decimal("100.00")
+        charge_date = date(2026, 3, 1)
+        refunds = [(Decimal("-99.991"), date(2026, 3, 3))]  # net = 0.009
+        evidence = _washout_evidence(charge_amount, charge_date, refunds)
+        assert evidence is not None
+        assert evidence["washout"] is True
+
+    async def test_refund_date_is_latest_within_window_not_earliest(self):
+        """Two within-window refunds: refund_date reports the latest (the
+        date the within-window net actually hit zero), not the earliest."""
+        charge_amount = Decimal("100.00")
+        charge_date = date(2026, 3, 1)
+        refunds = [
+            (Decimal("-60.00"), date(2026, 3, 3)),  # +2 days
+            (Decimal("-40.00"), date(2026, 3, 6)),  # +5 days, latest
+        ]
+        evidence = _washout_evidence(charge_amount, charge_date, refunds)
+        assert evidence is not None
+        assert evidence["refund_date"] == "2026-03-06"
+
+
+class TestRefundFetchVolumeGuard:
+    """Fetch-volume guard (review finding 1 mitigation, 2026-07-21): the
+    refund fetch in ``_fetch_refunds`` is bounded only by
+    ``REF_MATCH_SANITY_DAYS``, not date_from/date_to, so an arbitrary-window
+    run could still pull an unexpectedly large row count. Cheap tripwire
+    (log + warn) until SQL-side ref narrowing is ticketed."""
+
+    async def test_warns_when_fetched_row_count_exceeds_threshold(self, db, tenant_a, monkeypatch):
+        monkeypatch.setattr(order_recon_job, "_REFUND_FETCH_WARN_THRESHOLD", 1)
+
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_volume_guard",
+            description="Framework Marketplace Order ID: R555666777-XU9EPZPD",
+            amount=Decimal("100.00"),
+            arrival_date=date(2026, 3, 15),
+        )
+        await create_test_payout_line(
+            db,
+            tenant_a.id,
+            source_id="re_volume_guard_1",
+            line_type="refund",
+            amount=Decimal("-50.00"),
+            fee=Decimal("0"),
+            net=Decimal("-50.00"),
+            description="Refund for order R555666777",
+            arrival_date=date(2026, 3, 17),
+        )
+        await create_test_payout_line(
+            db,
+            tenant_a.id,
+            source_id="re_volume_guard_2",
+            line_type="refund",
+            amount=Decimal("-50.00"),
+            fee=Decimal("0"),
+            net=Decimal("-50.00"),
+            description="Refund for order R555666777",
+            arrival_date=date(2026, 3, 18),
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        charges = await job._fetch_charges(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+        order_references = {c.order_reference for c in charges if c.order_reference}
+
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            refunds_by_ref = await job._fetch_refunds(
+                date_from=date(2026, 3, 10), date_to=date(2026, 3, 20), order_references=order_references
+            )
+
+        assert len(refunds_by_ref["R555666777"]) == 2
+
+        warnings = [
+            e
+            for e in logs
+            if e.get("log_level") == "warning" and e.get("event") == "order_recon_job.refund_fetch_large"
+        ]
+        assert warnings, f"expected a refund_fetch_large warning, got: {logs}"
+        assert warnings[0]["count"] == 2
+        assert warnings[0]["window_days"] == order_recon_job.REF_MATCH_SANITY_DAYS
+
+    async def test_no_warning_below_threshold(self, db, tenant_a):
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_volume_guard_small",
+            description="Framework Marketplace Order ID: R888999000-XU9EPZPD",
+            amount=Decimal("100.00"),
+            arrival_date=date(2026, 3, 15),
+        )
+        await create_test_payout_line(
+            db,
+            tenant_a.id,
+            source_id="re_volume_guard_small",
+            line_type="refund",
+            amount=Decimal("-100.00"),
+            fee=Decimal("0"),
+            net=Decimal("-100.00"),
+            description="Refund for order R888999000",
+            arrival_date=date(2026, 3, 18),
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        charges = await job._fetch_charges(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+        order_references = {c.order_reference for c in charges if c.order_reference}
+
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            await job._fetch_refunds(
+                date_from=date(2026, 3, 10), date_to=date(2026, 3, 20), order_references=order_references
+            )
+
+        warnings = [e for e in logs if e.get("log_level") == "warning"]
+        assert not warnings, f"expected no warnings, got: {warnings}"
 
 
 class TestRunProducesSummary:
