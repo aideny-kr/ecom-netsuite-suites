@@ -40,6 +40,14 @@ _PAYOUT_ID_PATTERNS = [
 ]
 
 # SuiteQL query template — pagination handled by execute_suiteql_via_rest(paginate=True)
+#
+# Currency truth (Phase A, 2026-07-21 P0 fix): ``t.total``/``amount`` is the
+# SUBSIDIARY BASE currency amount, but the query used to label it with
+# BUILTIN.DF(t.currency) — the TRANSACTION currency — mislabeling e.g.
+# CAD/CHF/SGD/NZD-labeled deposits that actually carried USD amounts. The
+# LEFT JOIN to ``subsidiary`` recovers the honest base currency name
+# (base_currency_name); currency_name keeps meaning the transaction currency
+# label. foreigntotal/exchangerate are the transaction-currency amount/rate.
 _DEPOSIT_QUERY = """\
 SELECT
     t.id AS internal_id,
@@ -49,6 +57,9 @@ SELECT
     t.memo,
     t.total AS amount,
     BUILTIN.DF(t.currency) AS currency_name,
+    BUILTIN.DF(s.currency) AS base_currency_name,
+    t.foreigntotal AS foreign_amount,
+    t.exchangerate AS exchange_rate,
     t.subsidiary AS subsidiary_id,
     BUILTIN.DF(t.subsidiary) AS subsidiary_name,
     t.account AS account_id,
@@ -57,6 +68,7 @@ SELECT
     BUILTIN.DF(tl.createdfrom) AS sales_order_ref
 FROM transaction t
 JOIN transactionline tl ON tl.transaction = t.id AND tl.mainline = 'T'
+LEFT JOIN subsidiary s ON s.id = t.subsidiary
 WHERE
     t.type IN ('Deposit', 'CustDep')
     AND t.trandate >= TO_DATE('{date_from}', 'YYYY-MM-DD')
@@ -204,9 +216,24 @@ async def sync_netsuite_deposits(
         except Exception:
             amount = Decimal("0")
 
-        # Parse currency — use name if available, fall back to ID
+        # Parse transaction currency — the label NetSuite put on the transaction
+        # itself (BUILTIN.DF(t.currency)). This is always the same field the sync
+        # has always read; it just used to ALSO be (mis)used as the base currency.
         currency_name = row_dict.get("currency_name", "")
-        currency = _normalize_currency(currency_name) if currency_name else "USD"
+        transaction_currency = _normalize_currency(currency_name) if currency_name else "USD"
+
+        # Parse base currency — honest fix: prefer the subsidiary join
+        # (BUILTIN.DF(subsidiary.currency)), which is the currency `t.total`/`amount`
+        # is actually denominated in. If the join yields nothing for this record
+        # shape, fall back to today's behavior (transaction currency) rather than
+        # guessing a hardcoded "USD" — see Phase A plan note on this exact tradeoff.
+        base_currency_name = row_dict.get("base_currency_name") or ""
+        currency = _normalize_currency(base_currency_name) if base_currency_name else transaction_currency
+
+        # Foreign (transaction-currency) amount + exchange rate — nullable; NetSuite
+        # omits these for non-multi-currency subsidiaries.
+        foreign_amount = _parse_optional_decimal(row_dict.get("foreign_amount"))
+        exchange_rate = _parse_optional_decimal(row_dict.get("exchange_rate"))
 
         # Parse transaction date
         txn_date_raw = row_dict.get("transaction_date")
@@ -240,6 +267,9 @@ async def sync_netsuite_deposits(
             "transaction_date": txn_date,
             "amount": amount,
             "currency": currency,
+            "transaction_currency": transaction_currency,
+            "foreign_amount": foreign_amount,
+            "exchange_rate": exchange_rate,
             "account_id": row_account_id,
             "account_name": row_dict.get("account_name"),
             "subsidiary_id": str(row_dict.get("subsidiary_id", "")) or None,
@@ -319,11 +349,35 @@ def _normalize_currency(currency_name: str) -> str:
         "JPY": "JPY",
         "AUSTRALIAN DOLLAR": "AUD",
         "AUD": "AUD",
+        # Currency truth (Phase A): these are the exact currencies the grounded
+        # facts named as mislabeled by the sync (CAD/CHF/SGD/NZD) — without entries
+        # here, transaction_currency would silently default to "USD" below.
+        "SWISS FRANC": "CHF",
+        "CHF": "CHF",
+        "SINGAPORE DOLLAR": "SGD",
+        "SGD": "SGD",
+        "NEW ZEALAND DOLLAR": "NZD",
+        "NZD": "NZD",
     }
     # If it's already a 3-letter code, use it
     if len(name) == 3 and name.isalpha():
         return name
     return mapping.get(name, "USD")
+
+
+def _parse_optional_decimal(value: object) -> Decimal | None:
+    """Parse a SuiteQL numeric field that may be absent, None, or empty string.
+
+    Unlike ``amount`` (always required, defaults to 0 on parse failure), these
+    fields must stay NULL when NetSuite doesn't provide them — a fabricated 0
+    would look like a real (and wrong) exchange rate or foreign amount.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return None
 
 
 def _parse_date(value: str | None) -> date | None:
