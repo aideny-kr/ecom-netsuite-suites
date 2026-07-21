@@ -229,7 +229,11 @@ async def sync_netsuite_deposits(
         # No currency_name at all -> None (the column is nullable), NEVER a
         # fabricated "USD" guess — the `currency` fallback chain below decides
         # what to store there, and counts/logs when it has to guess.
-        currency_name = row_dict.get("currency_name", "")
+        # .strip() before the truthiness gates: a whitespace-only label is truthy
+        # but normalizes to "" inside _normalize_currency, which would store an
+        # empty-string currency — strip here so degenerate labels take the
+        # counted/logged fallback rungs below instead.
+        currency_name = (row_dict.get("currency_name") or "").strip()
         transaction_currency = _normalize_currency(currency_name) if currency_name else None
 
         # Parse base currency — honest fix: prefer the subsidiary join
@@ -239,7 +243,7 @@ async def sync_netsuite_deposits(
         # hardcoded "USD" — see Phase A plan note on this exact tradeoff. Both
         # fallback rungs are counted + logged (never silent) so a post-deploy read
         # of the sync's result can tell "honestly fixed" from "join missed".
-        base_currency_name = row_dict.get("base_currency_name") or ""
+        base_currency_name = (row_dict.get("base_currency_name") or "").strip()
         if base_currency_name:
             currency = _normalize_currency(base_currency_name)
         elif transaction_currency:

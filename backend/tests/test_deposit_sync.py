@@ -582,6 +582,35 @@ class TestSyncDepositsCurrencyTruth:
         assert warnings, f"expected a currency_unknown_default warning, got: {logs}"
         assert warnings[0]["internal_id"] == "920006"
 
+    async def test_whitespace_only_labels_take_fallback_not_empty_string(self, db, tenant_a):
+        """A whitespace-only currency label is truthy but normalizes to "" —
+        without stripping at extraction it would store an EMPTY-STRING currency.
+        Stripped labels must fall through the same counted/logged rungs as
+        missing ones: transaction_currency None, currency "USD" last resort.
+        """
+        rows = [
+            {
+                "internal_id": "920007",
+                "document_number": "DEP-FX-7",
+                "transaction_date": "2026-03-17",
+                "record_type": "Deposit",
+                "memo": "bank deposit",
+                "amount": "55.00",
+                "currency_name": "   ",
+                "base_currency_name": " ",
+                "account_id": "10",
+                "account_name": "Bank",
+                "subsidiary_id": "1",
+                "sales_order_ref": "",
+            }
+        ]
+        result, posting = await _run_sync_and_read_back(db, tenant_a.id, internal_id="920007", rows=rows)
+
+        assert posting.transaction_currency is None
+        assert posting.currency == "USD"
+        assert posting.currency != ""
+        assert result.currency_fallback_count == 1
+
     async def test_missing_foreign_fields_are_stored_as_none(self, db, tenant_a):
         """Rows with no foreign_amount/exchange_rate (e.g. non-multi-currency subsidiary)
         must store NULL, not zero or a fabricated value.
