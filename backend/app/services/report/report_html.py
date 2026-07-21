@@ -174,6 +174,8 @@ _FS_CSS = """
 .report--wide { max-width:1120px; }
 @media print { .report--wide { max-width:100%; } }
 .fs-mid { display:grid; grid-template-columns:minmax(0,1.1fr) minmax(0,1fr); gap:18px; margin-bottom:22px; }
+/* minor[6]: BS/TB have only a quad, no trend chart -- span it, don't leave a dead column */
+.fs-mid--single { grid-template-columns:1fr; }
 @media (max-width:900px) { .fs-mid { grid-template-columns:1fr; } }
 .fs-scroll { overflow-x:auto; }
 .fs-legend { display:flex; gap:16px; flex-wrap:wrap; font-size:12px; font-weight:600; margin-top:8px; }
@@ -549,7 +551,7 @@ def _truncate_detail_value(value: object) -> str:
     return s if len(s) <= _DETAIL_VALUE_MAX_LEN else s[:_DETAIL_VALUE_MAX_LEN] + "…"
 
 
-def build_provenance(sources: dict, executed_at: str) -> list[dict]:
+def build_provenance(sources: dict, executed_at: str, *, resolved_rids: set[str] | None = None) -> list[dict]:
     """Translate a recipe's raw ``sources`` map (``result_id -> {tool, params, ...}``)
     into human-readable entries for the renderer's "Sources & method" block: each result
     id, a plain-English label for the tool that produced it, its params as ``detail``,
@@ -558,7 +560,17 @@ def build_provenance(sources: dict, executed_at: str) -> list[dict]:
     ``detail`` is policy-filtered (see ``_ALWAYS_EXCLUDED_PARAM_KEYS`` / ``_LLM_ONLY_PARAMS``
     above) and each surviving value length-capped (``_DETAIL_VALUE_MAX_LEN``) — never a raw
     dump of every captured param. Playbook sources (``report_type``, ``period``) and
-    external-MCP params (e.g. ``reportId``) are unaffected."""
+    external-MCP params (e.g. ``reportId``) are unaffected.
+
+    ``resolved_rids`` (T2 gate M1 — provenance honesty): a ``financial_statement``'s
+    compare-degrade seam can omit a rid from the ``payloads`` a run actually resolved
+    (a failed/unavailable prior/yoy/trend source) — WITHOUT this param, every source in
+    ``sources`` renders as "executed", including one that never actually ran this time, a
+    false trust claim. When given, a rid NOT in this set is marked unresolved: no
+    ``executed_at`` stamp (it did NOT run), and ``_provenance_html`` renders a distinct
+    "not available this run" line for it instead. Default ``None`` = every rid is treated
+    as resolved — BYTE-IDENTICAL to this function's behavior before this param existed,
+    so a caller that doesn't pass it sees no change at all."""
     from app.services.report.refresh_service import _LLM_ONLY_PARAMS
 
     entries = []
@@ -574,16 +586,31 @@ def build_provenance(sources: dict, executed_at: str) -> list[dict]:
         params = src.get("params") or {}
         excluded = _ALWAYS_EXCLUDED_PARAM_KEYS | _LLM_ONLY_PARAMS.get(tool, frozenset())
         detail = ", ".join(f"{k}={_truncate_detail_value(params[k])}" for k in sorted(params) if k not in excluded)
-        entries.append({"result_id": result_id, "label": label, "detail": detail, "executed_at": executed_at})
+        resolved = resolved_rids is None or result_id in resolved_rids
+        entries.append(
+            {
+                "result_id": result_id,
+                "label": label,
+                "detail": detail,
+                "executed_at": executed_at if resolved else None,
+                "resolved": resolved,
+            }
+        )
     return entries
 
 
+def _provenance_line_html(p: dict) -> str:
+    rid = escape(str(p.get("result_id", "")))
+    label = escape(str(p.get("label", "")))
+    detail = escape(str(p.get("detail", "")))
+    if p.get("resolved", True):
+        return f"<div>{rid} — {label} · {detail} · executed {escape(str(p.get('executed_at', '')))}</div>"
+    # T2 gate M1: no executed_at stamp -- it did NOT run this time, never claim it did.
+    return f"<div>{rid} — {label} · {detail} · not available this run — comparison omitted</div>"
+
+
 def _provenance_html(provenance: list[dict]) -> str:
-    rows = "".join(
-        f"<div>{escape(str(p.get('result_id', '')))} — {escape(str(p.get('label', '')))}"
-        f" · {escape(str(p.get('detail', '')))} · executed {escape(str(p.get('executed_at', '')))}</div>"
-        for p in provenance
-    )
+    rows = "".join(_provenance_line_html(p) for p in provenance)
     return (
         '<div class="prov"><strong>Sources &amp; method</strong>'
         f"{rows}"
@@ -659,17 +686,19 @@ _FS_TREND_W, _FS_TREND_H = 620, 240
 _FS_TREND_PAD_L, _FS_TREND_PAD_R, _FS_TREND_PAD_T, _FS_TREND_PAD_B = 56, 28, 24, 34
 
 
-def _fs_sign_tone(text: str) -> tuple[str, str]:
+def _fs_sign_tone(text: str, *, neutral: bool = False) -> tuple[str, str]:
     """(tone_class, arrow) from an already-FORMATTED delta string's own sign — used for
-    KPI headline cards, all of which are inherently "higher is better" metrics (revenue,
-    gross/operating/net income for IS; assets/liabilities/equity, debits/credits for
-    BS/TB, shown as a simplifying default since a balance-sheet line has no P&L
-    favorability framing). ``""`` tone = neutral (a zero delta gets neither color)."""
+    KPI headline cards. An IS KPI (revenue, gross/operating/net income) moving up is
+    inherently favorable. A BS/TB KPI (assets/liabilities/equity, debits/credits) has NO
+    such inherent favorability (design rule #10: color is reserved EXCLUSIVELY for
+    favorable/unfavorable, never decoration) — ``neutral=True`` keeps the arrow (still
+    informative: which way did it move) but always returns tone ``""`` (no color class).
+    ``""`` tone ALSO covers a zero delta regardless of ``neutral`` (nothing moved)."""
     if text in ("$0", "0.0%", "0.0pp"):
         return "", "•"
     if text.startswith(_MINUS):
-        return "fs-bad", "▼"
-    return "fs-good", "▲"
+        return ("", "▼") if neutral else ("fs-bad", "▼")
+    return ("", "▲") if neutral else ("fs-good", "▲")
 
 
 def _fs_delta_tone(delta: str | None, reduces_profit: bool) -> str:
@@ -716,7 +745,7 @@ def _fs_kpi_sub_html(kpi: dict) -> str:
     mom_delta = kpi.get("mom_delta")
     mom_text = mom_pct if mom_pct is not None else mom_delta
     if mom_text is not None:
-        tone, arrow = _fs_sign_tone(mom_text)
+        tone, arrow = _fs_sign_tone(mom_text, neutral=bool(kpi.get("neutral")))
         cls = f" {tone}" if tone else ""
         bits.append(f'<span class="fs-delta{cls}">{arrow} {escape(str(mom_text))} MoM</span>')
     yoy_pct = kpi.get("yoy_pct")
@@ -771,7 +800,11 @@ def _fs_trend_html(trend: dict | None) -> str:
     plot_w = _FS_TREND_W - _FS_TREND_PAD_L - _FS_TREND_PAD_R
     plot_h = _FS_TREND_H - _FS_TREND_PAD_T - _FS_TREND_PAD_B
     bottom = _FS_TREND_PAD_T + plot_h
-    all_vals = [float(v) for s in series for v in (s.get("values") or [])]
+    # Filter to the series that will ACTUALLY plot (matching length) BEFORE computing the
+    # axis scale (T2 gate minor[7]) — a malformed/partial series must never distort
+    # vmax/vmin for the legitimate ones just because it's present in the input.
+    plotted_series = [s for s in series if len(s.get("values") or []) == n]
+    all_vals = [float(v) for s in plotted_series for v in (s.get("values") or [])]
     vmax = max([*all_vals, 0.0])
     vmin = min([*all_vals, 0.0])
     span = (vmax - vmin) or 1.0
@@ -797,10 +830,8 @@ def _fs_trend_html(trend: dict | None) -> str:
                 'stroke="#e4e1d8" stroke-width="1"/>'
             )
     legend_items: list[tuple[str, str]] = []
-    for s in series:
+    for s in plotted_series:
         values = s.get("values") or []
-        if len(values) != n:
-            continue  # a malformed/partial series is skipped rather than mis-plotted
         color = _FS_TREND_COLORS.get(s.get("key"), "#111111")
         pts = [(_FS_TREND_PAD_L + i * step, y_of(float(v))) for i, v in enumerate(values)]
         path = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
@@ -843,10 +874,10 @@ def _fs_trend_html(trend: dict | None) -> str:
 
 def _fs_summary_row_html(row: dict, row_cls: str, *, has_prior: bool, has_pct_rev: bool) -> str:
     """A subtotal/formula/net/quad row — a ``_quad_row``-shaped model dict (label/current/
-    prior/delta/reduces_profit). These never carry ``pct_rev`` (only individual account
-    rows do) — the "% of rev" cell, when that column exists, is left BLANK for a summary
-    row rather than invented here (the renderer never computes a figure the model didn't
-    supply)."""
+    prior/delta/reduces_profit/pct_rev). ``pct_rev`` (design rule #8, T2 gate M3) renders
+    exactly like an account row's when the model supplies one (IS section subtotals,
+    Gross Profit/Operating Income, Net Income) — blank ONLY when the model itself has
+    None (BS/TB, which have no revenue base), never invented here."""
     label = escape(str(row.get("label", "")))
     current = escape(str(row.get("current", "")))
     cells = [f"<td>{label}</td>", f'<td class="num">{current}</td>']
@@ -858,7 +889,8 @@ def _fs_summary_row_html(row: dict, row_cls: str, *, has_prior: bool, has_pct_re
         cells.append(f'<td class="num">{escape(str(prior)) if prior is not None else ""}</td>')
         cells.append(f"<td{tone_cls}>{escape(str(delta)) if delta is not None else ''}</td>")
     if has_pct_rev:
-        cells.append('<td class="num fs-pct"></td>')
+        pct_rev = row.get("pct_rev")
+        cells.append(f'<td class="num fs-pct">{escape(str(pct_rev)) if pct_rev is not None else ""}</td>')
     return f'<tr class="{row_cls}">{"".join(cells)}</tr>'
 
 
@@ -1071,7 +1103,11 @@ def _financial_statement_html(model: dict) -> str:
     kpis_html = "".join(_fs_kpi_html(k) for k in model.get("kpis") or [])
     trend_html = _fs_trend_html(model.get("trend"))
     quad_html = _fs_quad_html(model)
-    mid_html = f'<div class="fs-mid">{trend_html}{quad_html}</div>' if (trend_html or quad_html) else ""
+    # T2 gate minor[6]: BS/TB never have a trend chart (no trend source), so the mid-fold's
+    # default 2-column grid left a dead empty column beside the quad — collapse to a single
+    # column whenever only ONE of trend/quad is actually present.
+    mid_cls = "fs-mid" if (trend_html and quad_html) else "fs-mid fs-mid--single"
+    mid_html = f'<div class="{mid_cls}">{trend_html}{quad_html}</div>' if (trend_html or quad_html) else ""
     stmt_html = _fs_statement_table_html(model)
     hl_html = _fs_highlights_html(model.get("highlights") or [])
     narr_html = _fs_narrative_html(model.get("narrative") or [])

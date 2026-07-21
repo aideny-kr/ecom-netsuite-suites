@@ -458,6 +458,49 @@ def test_no_provenance_renders_no_block():
     assert "Sources & method" not in html
 
 
+def _two_source_sources():
+    return {
+        "r1": {
+            "tool": "netsuite_financial_report",
+            "params": {"report_type": "income_statement", "period": "Jun 2026"},
+            "connection_id": None,
+        },
+        "r2": {
+            "tool": "netsuite_financial_report",
+            "params": {"report_type": "income_statement", "period": "May 2026"},
+            "connection_id": None,
+        },
+    }
+
+
+def test_provenance_resolved_rids_none_is_byte_stable_with_today():
+    """Default (``resolved_rids=None``, every existing caller) must render IDENTICALLY
+    to before this T2 gate fix — no caller passing it gets a behavior change."""
+    prov_default = build_provenance(_two_source_sources(), executed_at="2026-07-17T20:00:00+00:00")
+    prov_explicit_none = build_provenance(
+        _two_source_sources(), executed_at="2026-07-17T20:00:00+00:00", resolved_rids=None
+    )
+    assert prov_default == prov_explicit_none
+    html = render_report_html(_min_spec(), freshness=_freshness(), provenance=prov_default)
+    assert "r1 —" in html and "executed 2026-07-17T20:00:00+00:00" in html
+    assert "r2 —" in html
+    assert "not available this run" not in html
+
+
+def test_provenance_unresolved_rid_shows_not_available_no_executed_stamp():
+    """T2 gate M1: a rid the compare-degrade seam omitted from ``payloads`` (r2, here)
+    must NOT claim it was executed -- that's a false trust claim in the frozen
+    provenance block. r1 (resolved) keeps its normal 'executed ...' stamp."""
+    prov = build_provenance(_two_source_sources(), executed_at="2026-07-17T20:00:00+00:00", resolved_rids={"r1"})
+    html = render_report_html(_min_spec(), freshness=_freshness(), provenance=prov)
+    assert "r1 —" in html and "executed 2026-07-17T20:00:00+00:00" in html
+    assert "r2 — NetSuite GL statement template (SuiteQL)" in html
+    assert "not available this run — comparison omitted" in html
+    # the unresolved entry must NOT carry the executed_at stamp at all
+    r2_line = next(line for line in html.split("<div>") if line.startswith("r2 —"))
+    assert "executed" not in r2_line
+
+
 def test_provenance_values_are_escaped():
     prov = [{"result_id": "r1", "label": "<script>x</script>", "detail": "a=<b>", "executed_at": "t"}]
     html = render_report_html(_min_spec(), freshness=_freshness(), provenance=prov)
@@ -607,6 +650,106 @@ def test_fs_statement_emphasis_rows_present_with_derived_totals():
     assert "$3,500,000" in html  # gross profit (formula row)
     assert "$1,800,000" in html  # operating income (formula row)
     assert "$1,805,000" in html  # net income (net row)
+
+
+def test_fs_pct_rev_renders_on_summary_rows():
+    """T2 gate M3: the common-size column must not go blank on exactly the rows that
+    matter (design rule #8) -- Total Revenue's pct_rev is pinned to 100.0%, and the
+    Gross Profit formula row's matches the KPI card's own margin figure."""
+    html = render_report_html(_fs_spec(_is_model()))
+    assert '<td class="num fs-pct">100.0%</td>' in html
+    assert f'<td class="num fs-pct">{fx.EXPECTED_GP_MARGIN_STR}</td>' in html
+    assert f'<td class="num fs-pct">{fx.EXPECTED_NI_MARGIN_STR}</td>' in html
+
+
+def test_fs_bs_has_no_pct_of_rev_column():
+    """BS has no revenue base -- the whole "% of rev" column (header + cells) stays
+    absent, unaffected by M3 (which only ever populates a value when the builder has a
+    revenue_total to divide by)."""
+    model = build_statement_model(fx.balance_sheet_section(), fx.balance_sheet_payloads())
+    html = render_report_html(_fs_spec(model, title="Balance Sheet"))
+    assert "% of rev" not in html
+
+
+def test_fs_mid_fold_single_column_when_only_quad_present():
+    """T2 gate minor[6]: BS/TB never have a trend chart, so the mid-fold's default
+    2-column grid left a dead empty column beside the quad -- a modifier class collapses
+    it to a single column whenever only ONE of trend/quad exists."""
+    model = build_statement_model(fx.balance_sheet_section(), fx.balance_sheet_payloads())
+    html = render_report_html(_fs_spec(model, title="Balance Sheet"))
+    assert 'class="fs-mid fs-mid--single"' in html
+
+
+def test_fs_mid_fold_two_column_when_trend_and_quad_both_present():
+    html = render_report_html(_fs_spec(_is_model()))
+    assert 'class="fs-mid">' in html  # the DIV's class attribute, not the CSS rule below
+    assert 'class="fs-mid fs-mid--single"' not in html
+
+
+def test_fs_trend_chart_vmax_vmin_computed_after_filtering_mismatched_series():
+    """T2 gate minor[7]: vmax/vmin must be computed from the series that ACTUALLY get
+    plotted (post length-mismatch filter), not from every series including ones that get
+    silently dropped -- a malformed/partial series must never distort the axis scale for
+    the legitimate ones. Unreachable via the real builder (every series it produces is
+    always the same length), so this exercises ``_fs_trend_html``'s own defensive guard
+    directly, in isolation."""
+    from decimal import Decimal
+
+    from app.services.report.report_html import _fs_trend_html
+
+    trend = {
+        "periods": ["Jan 2026", "Feb 2026"],
+        "series": [
+            {"key": "revenue", "label": "Revenue", "values": [Decimal("100"), Decimal("200")]},
+            # mismatched length (3 values for a 2-period trend) -- must be filtered out
+            # BEFORE it's allowed to blow up vmax/vmin for the legitimate series above
+            {
+                "key": "gross_profit",
+                "label": "Gross Profit",
+                "values": [Decimal("1"), Decimal("2"), Decimal("999999")],
+            },
+        ],
+    }
+    html = _fs_trend_html(trend)
+    assert "Gross Profit" not in html  # the malformed series never plots or legends
+    # the Y-AXIS TOP LABEL specifically (not a data-point tooltip, which shows "$200"
+    # regardless of the axis-scale bug) must reflect ONLY the legitimate series' own max
+    assert 'text-anchor="end" fill="#666">$200</text>' in html
+    assert "$1000.0K" not in html  # the malformed series' 999999 must never set the scale
+
+
+def test_fs_bs_kpi_cards_render_without_color_class():
+    """T2 gate minor[9]: a BS KPI's "increase" has no inherent favorability (design rule
+    #10 — color is EXCLUSIVELY favorable/unfavorable, never decoration) -- the delta
+    still shows an arrow (direction is informative) but never a tone class."""
+    model = build_statement_model(fx.balance_sheet_section(), fx.balance_sheet_payloads())
+    html = render_report_html(_fs_spec(model, title="Balance Sheet"))
+    assert 'class="fs-delta fs-good"' not in html
+    assert 'class="fs-delta fs-bad"' not in html
+    assert 'class="fs-delta">' in html  # neutral -- span still renders, just unclassed
+    assert "▲" in html  # arrow direction still shown
+
+
+def test_fs_is_kpi_cards_still_colored():
+    html = render_report_html(_fs_spec(_is_model()))
+    assert 'class="fs-delta fs-good"' in html or 'class="fs-delta fs-bad"' in html
+
+
+def test_fs_kpi_sub_neutral_flag_suppresses_color():
+    from app.services.report.report_html import _fs_kpi_sub_html
+
+    kpi = {"margin_pct": None, "mom_pct": "+8.1%", "mom_delta": None, "yoy_pct": None, "neutral": True}
+    html = _fs_kpi_sub_html(kpi)
+    assert "▲" in html
+    assert "fs-good" not in html and "fs-bad" not in html
+
+
+def test_fs_kpi_sub_non_neutral_still_colored():
+    from app.services.report.report_html import _fs_kpi_sub_html
+
+    kpi = {"margin_pct": None, "mom_pct": "+8.1%", "mom_delta": None, "yoy_pct": None, "neutral": False}
+    html = _fs_kpi_sub_html(kpi)
+    assert "fs-good" in html
 
 
 def test_fs_statement_table_renders_every_fixture_account_no_truncation():
