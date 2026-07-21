@@ -72,6 +72,36 @@ PostFailureReason = Literal[
 
 
 # ---------------------------------------------------------------------------
+# Shared recon constants — single source of truth for values imported by more
+# than one reconciliation service module (mirrors TERMINAL_RESULT_STATUSES'
+# home in four_bucket_classifier.py: a neutral module neither service imports
+# the other through, so cross-imports can never form a cycle).
+# ---------------------------------------------------------------------------
+
+# Washout window (operator decision 2026-07-21, recorded verbatim in
+# docs/superpowers/plans/2026-07-21-recon-washout-and-currency-truth.md):
+# washout = a charge whose same-ref refund(s) net it to |amount| < $0.01 —
+# fully, not partially — within this many days of the charge, with no
+# deposit ever booked. A canceled order refunded before it ever reached
+# NetSuite, not a missing deposit.
+#
+# STRICT WINDOW NETTING (operator ruling, 2026-07-21): only refunds dated on
+# or after the charge, and within WASHOUT_WINDOW_DAYS of it, count toward the
+# net-zero test AT ALL. A same-ref refund landing outside that window —
+# including one dated BEFORE the charge, which can't be refunding it — is a
+# slow trickle or unrelated same-ref noise, not washout evidence: the order
+# shipped and NetSuite has a booked deposit (reversed later via a credit
+# memo + refund); it either matches normally or deserves human review, no
+# matter how the FULL refund history nets out.
+#
+# Imported by BOTH order_recon_job (the ref-keyed refund fetch +
+# _washout_evidence) and resolution_planner (the rule-6b narrative text) so
+# the two can never drift apart, and neither service module has to import
+# the other's constant at module level.
+WASHOUT_WINDOW_DAYS = 7
+
+
+# ---------------------------------------------------------------------------
 # Request schemas
 # ---------------------------------------------------------------------------
 class ReconRunCreate(BaseModel):

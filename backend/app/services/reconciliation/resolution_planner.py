@@ -51,19 +51,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
+# Single source of truth for the washout window — see WASHOUT_WINDOW_DAYS in
+# app.schemas.reconciliation for the full operator ruling (2026-07-21) this
+# constant encodes. Imported, not duplicated, so the planner's narrative text
+# can never drift from the value order_recon_job actually applies when
+# deciding evidence["washout"]; this planner never recomputes whether a
+# charge IS a washout, it only trusts that evidence as already decided by
+# order_recon_job's ref-keyed refund fetch. Sourced from the shared schemas
+# module (not order_recon_job directly) so neither service module needs to
+# import the other at module level.
+from app.schemas.reconciliation import WASHOUT_WINDOW_DAYS
 from app.services.reconciliation.four_bucket_classifier import CLOSED_RUN_STATUSES, is_material
-
-# Single source of truth for the washout window (operator decision
-# 2026-07-21, recorded verbatim in
-# docs/superpowers/plans/2026-07-21-recon-washout-and-currency-truth.md) —
-# imported, not duplicated, so the planner's narrative text can never drift
-# from the value order_recon_job actually applies when deciding
-# evidence["washout"]. This planner never recomputes whether a charge IS a
-# washout; it only trusts that evidence as already decided by
-# order_recon_job's ref-keyed refund fetch. Safe at module level: order_recon_job
-# imports resolution_planner only inside OrderReconJob.run() (deferred), never
-# at its own module top level, so there is no import cycle.
-from app.services.reconciliation.order_recon_job import WASHOUT_WINDOW_DAYS
 
 # Mirrors the payout classifier's fee-match tolerance.
 FEE_EXPLAIN_TOLERANCE = Decimal("0.50")
