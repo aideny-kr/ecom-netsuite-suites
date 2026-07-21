@@ -10,6 +10,7 @@ from app.services.report.report_service import (
     assemble_spec,
     fill_placeholders,
 )
+from tests.fixtures import statement_fixture as fx
 
 FROZEN = {
     "r1": {"columns": ["Period", "Revenue"], "rows": [["Q1", "100"], ["Q2", "150"]], "row_count": 2},
@@ -490,3 +491,138 @@ async def test_compose_report_is_turn_atomic_no_mid_turn_commit(monkeypatch):
     # Flush is still required so report.id is populated before the audit + return.
     db.flush.assert_awaited()
     assert out["report_id"]
+
+
+# --- Task 4: financial_statement wiring in assemble_spec --------------------------------
+
+
+def test_assemble_spec_financial_statement_success_skips_auto_chart():
+    """A resolved financial_statement section emits {"type":"financial_statement",
+    "model":...} and the auto-chart machinery (gated on s["type"] == "table") never
+    fires for it — a statement's chart is baked into its own model, not auto-appended."""
+    payloads = fx.income_statement_payloads()
+    spec = assemble_spec(
+        title="Income Statement — Jun 2026",
+        sections=[fx.income_statement_section()],
+        resolver=lambda rid: payloads[rid],
+    )
+    assert [s["type"] for s in spec["sections"]] == ["financial_statement"]
+    model = spec["sections"][0]["model"]
+    assert model["statement"] == "income_statement"
+    assert model["kpis"][0]["value"] == "$13,500,000"
+
+
+def test_assemble_spec_financial_statement_r1_resolver_failure_is_error_card():
+    """r1 (current period) is a hard dependency at the assemble_spec boundary too —
+    mirrors _resolve_data_section's existing fail-closed shape (an error card, never a
+    raised exception escaping assemble_spec)."""
+
+    def resolver(rid):
+        raise RuntimeError("no active connection")
+
+    spec = assemble_spec(title="X", sections=[fx.income_statement_section()], resolver=resolver)
+    assert spec["sections"] == [{"type": "error", "reason": "r1: no active connection"}]
+
+
+def test_assemble_spec_financial_statement_r1_malformed_payload_is_error_card():
+    """A present-but-structurally-invalid r1 (build_statement_model raises ValueError)
+    degrades to an error card the same way a resolver exception does."""
+    malformed = fx.malformed_r1_payload()
+    spec = assemble_spec(title="X", sections=[fx.income_statement_section()], resolver=lambda rid: malformed[rid])
+    assert spec["sections"][0]["type"] == "error"
+
+
+def test_assemble_spec_financial_statement_compare_resolver_failure_degrades():
+    """Risk 2 at the assemble_spec boundary: r1 resolves, every compare rid's resolver
+    raises — the statement still renders (never an error card), just without the
+    fields those comparisons feed."""
+    payloads = fx.income_statement_payloads()
+
+    def resolver(rid):
+        if rid == "r1":
+            return payloads["r1"]
+        raise RuntimeError(f"{rid} unavailable")
+
+    spec = assemble_spec(title="X", sections=[fx.income_statement_section()], resolver=resolver)
+    assert spec["sections"][0]["type"] == "financial_statement"
+    model = spec["sections"][0]["model"]
+    assert model["prior_period"] is None
+    assert model["trend"] is None
+    assert model["kpis"][0]["mom_delta"] is None
+
+
+def test_financial_statement_resolution_error_detects_error_card():
+    """T2 gate M2: compose/refresh need a way to detect "the financial_statement section
+    the recipe asked for came back as an error card" AFTER assemble_spec, so they can
+    fail closed instead of publishing a contentless statement."""
+    from app.services.report.report_service import financial_statement_resolution_error
+
+    malformed = fx.malformed_r1_payload()
+    section = fx.income_statement_section()
+    spec = assemble_spec(title="X", sections=[section], resolver=lambda rid: malformed[rid])
+    error = financial_statement_resolution_error([section], spec)
+    assert error is not None
+    assert isinstance(error, str) and error
+
+
+def test_financial_statement_resolution_error_none_when_resolved():
+    from app.services.report.report_service import financial_statement_resolution_error
+
+    payloads = fx.income_statement_payloads()
+    section = fx.income_statement_section()
+    spec = assemble_spec(title="X", sections=[section], resolver=lambda rid: payloads[rid])
+    assert financial_statement_resolution_error([section], spec) is None
+
+
+def test_financial_statement_resolution_error_none_when_no_statement_sections():
+    """A DIFFERENT section type's OWN error card must never be mistaken for a
+    financial_statement failure -- there are no financial_statement sections in the
+    INPUT at all here, so the scan is a no-op regardless of what's in resolved_spec."""
+    from app.services.report.report_service import financial_statement_resolution_error
+
+    sections = [{"type": "table", "result_id": "r1"}]
+    resolved_spec = {"title": "X", "sections": [{"type": "error", "reason": "boom"}], "provenance": {}}
+    assert financial_statement_resolution_error(sections, resolved_spec) is None
+
+
+def test_financial_statement_resolution_error_degraded_compare_is_not_an_error():
+    """A compare-only degrade (prior/yoy/trend unavailable) still resolves to
+    type='financial_statement' (never 'error') -- must NOT be flagged."""
+    from app.services.report.report_service import financial_statement_resolution_error
+
+    payloads = fx.income_statement_payloads()
+
+    def resolver(rid):
+        if rid == "r1":
+            return payloads["r1"]
+        raise RuntimeError(f"{rid} unavailable")
+
+    section = fx.income_statement_section()
+    spec = assemble_spec(title="X", sections=[section], resolver=resolver)
+    assert financial_statement_resolution_error([section], spec) is None
+
+
+async def test_compose_report_rejects_financial_statement_section():
+    """Risk 1: financial_statement is PLAYBOOK-ONLY. compose_report is the chat-tool
+    entry point (report_export.execute -> compose_report) and must reject it BEFORE
+    assemble_spec, even when the resolver would otherwise succeed — the report.compose
+    tool's advertised schema never lists this type, and no chat recipe ever produces
+    one (§13 report-design.md no-LLM-numbers)."""
+    import uuid
+    from unittest.mock import AsyncMock
+
+    from app.services.report import report_service
+
+    payloads = fx.income_statement_payloads()
+    db = AsyncMock()
+
+    with pytest.raises(ValueError, match="financial_statement"):
+        await report_service.compose_report(
+            db,
+            tenant_id=uuid.uuid4(),
+            title="Q2",
+            sections=[fx.income_statement_section()],
+            resolver=lambda rid: payloads[rid],
+            created_by=uuid.uuid4(),
+        )
+    db.add.assert_not_called()  # never even constructed a Report row

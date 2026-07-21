@@ -20,6 +20,7 @@
   Subagents do NOT inherit `CLAUDE.md` — these rules must be in the dispatch prompt every time.
 - **Zero regressions**: Run full test suite before committing. Fix CI as a follow-up after every deploy.
 - **Discuss before fixing**: Always discuss approach AND research existing code before making changes.
+- **Visualize before building**: any user-facing surface (report, dashboard, page, artifact) gets an HTML design mock for operator eyeball-approval BEFORE implementation, and the slice's acceptance gate is the actual rendered output viewed against `.claude/rules/report-design.md` — not just green tests. Tests passing ≠ done for visual work.
 - **Commit frequently**: One commit per logical change. Never amend. Push to BOTH repos (`origin` + `framework`).
 - **Workflow model-tiering**: when authoring a `Workflow` or spawning an `Agent`, tier by role (Fable for plan/architect/synthesize/judge · Sonnet for reason/verify/implement · Haiku for search/mechanical) and cap bursty stages with `makeGate(n)`. This is what keeps the T2 gate from rate-limiting (it fanned out ~16 concurrent Opus verifiers). Canonical policy + harness block to paste: `~/.claude/workflows/model-tiering.md`.
 
@@ -96,6 +97,7 @@ Domain knowledge lives in `.claude/skills/`. Use the Skill tool to load when nee
 
 | Skill | Use For |
 |-------|---------|
+| `executive-dashboard-design` | ANY customer-facing dashboard/report/artifact — CFO-grade information design, statement norms, IBCS discipline, computed narrative, mock-first process |
 | `netsuite-mcp-chat` | Chat orchestration, knowledge profiles, tool interception, SSE streaming, entity resolution |
 | `ai-agent-design` | Knowledge-driven agent architecture, YAML profiles, prompt assembly, benchmarks |
 | `netsuite-mastery` | SuiteQL dialect, SuiteScript 2.x, REST API, OAuth, NetSuite tribal knowledge |
@@ -128,4 +130,5 @@ Claude Code auto-loads matching rules from `.claude/rules/` when editing files i
 | `suitescript.md` | `suiteapp/**` |
 | `deploy.md` | workflows + compose + Dockerfiles + infra |
 | `uat-review.md` | backend/frontend/suiteapp app code (UAT + review tiering) |
+| `report-design.md` | report pipeline + reports FE (CFO-grade design standard, mock-first process) |
 

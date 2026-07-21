@@ -566,8 +566,11 @@ def referenced_result_ids(sections: list[dict]) -> list[str]:
     before the first ``.`` inside narrative ``{{result:…}}``/``{{metric:…}}``
     placeholders — single-sourced on the SAME ``_PLACEHOLDER`` regex
     ``fill_placeholders`` resolves, so the two can never disagree on what counts as a
-    reference. Order of first reference, deduped. Tolerates junk sections (recipe
-    capture runs on the raw LLM dicts, pre-validation)."""
+    reference. A ``financial_statement`` section additionally references every rid in
+    its ``compare`` map (prior/yoy/trend) — those must still be DISPATCHED (see
+    ``required_result_ids`` for which ones are hard dependencies vs. degrade-on-failure).
+    Order of first reference, deduped. Tolerates junk sections (recipe capture runs on
+    the raw LLM dicts, pre-validation)."""
     seen: dict[str, None] = {}
     for s in sections or []:
         if not isinstance(s, dict):
@@ -575,6 +578,12 @@ def referenced_result_ids(sections: list[dict]) -> list[str]:
         rid = s.get("result_id")
         if isinstance(rid, str) and rid:
             seen.setdefault(rid)
+        if s.get("type") == "financial_statement":
+            compare = s.get("compare")
+            if isinstance(compare, dict):
+                for compare_rid in compare.values():
+                    if isinstance(compare_rid, str) and compare_rid:
+                        seen.setdefault(compare_rid)
         markdown = s.get("markdown")
         if isinstance(markdown, str):
             for m in _PLACEHOLDER.finditer(markdown):
@@ -582,6 +591,96 @@ def referenced_result_ids(sections: list[dict]) -> list[str]:
                 if ref_rid:
                     seen.setdefault(ref_rid)
     return list(seen)
+
+
+def required_result_ids(sections: list[dict]) -> set[str]:
+    """The subset of ``referenced_result_ids`` whose failure must fail CLOSED (kill the
+    whole compose/refresh) rather than degrade. For a ``financial_statement`` section
+    this is ONLY ``result_id`` (r1, the CURRENT period) — every ``compare`` rid
+    (prior/yoy/trend) is optional and degrades that one comparison instead (see
+    ``statement_builder``'s "Degradation contract" module docstring). Every other
+    section type is UNCHANGED from pre-Task-4 semantics: every rid it references
+    (``result_id`` + narrative placeholder rids) is required — this is what keeps chat
+    compose and v1 (table/narrative) recipes fail-closed exactly as before.
+
+    Consumed by ``refresh_service._execute_sources``'s ``required_rids`` param (and by
+    ``playbooks.compose_playbook_report``, which calls that same executor directly) — see
+    that function's docstring for the degrade-vs-raise mechanics."""
+    required: dict[str, None] = {}
+    for s in sections or []:
+        if not isinstance(s, dict):
+            continue
+        rid = s.get("result_id")
+        if isinstance(rid, str) and rid:
+            required.setdefault(rid)
+        if s.get("type") == "financial_statement":
+            continue  # compare rids are intentionally excluded — they degrade instead
+        markdown = s.get("markdown")
+        if isinstance(markdown, str):
+            for m in _PLACEHOLDER.finditer(markdown):
+                ref_rid = m.group(2).strip().partition(".")[0]
+                if ref_rid:
+                    required.setdefault(ref_rid)
+    return set(required)
+
+
+def financial_statement_resolution_error(sections: list[dict], resolved_spec: dict) -> str | None:
+    """T2 gate M2: detect a ``financial_statement`` section (in the INPUT ``sections``)
+    that resolved to an error card in ``resolved_spec`` (``assemble_spec``'s output) —
+    e.g. r1 resolved but ``build_statement_model`` raised (a malformed payload, or —
+    since ``statement_builder``'s own ``_require_rows`` now rejects it — an empty row
+    set). For a statement report the SECTION IS THE REPORT, so compose/refresh use this
+    to fail closed instead of publishing a contentless statement, unlike every other
+    section type (whose error card renders in place while the rest of the report still
+    publishes fine).
+
+    ``financial_statement`` sections are NEVER callout-popped or auto-charted
+    (``assemble_spec``'s own Pass-2 comment), so each ORIGINAL ``financial_statement``
+    section maps to exactly ONE output section, never reordered — scanning for the FIRST
+    ``"error"``-typed output section is unambiguous for THIS function's only two callers
+    (``playbooks.compose_playbook_report`` / ``refresh_service.refresh_report``): both
+    always operate on a playbook-authored recipe, whose sections are ALWAYS
+    ``financial_statement``-only (never mixed with a table/chart section that could
+    independently produce an UNRELATED error card). Chat's ``compose_report`` path,
+    which DOES mix section types, rejects ``financial_statement`` sections before
+    ``assemble_spec`` ever runs — so this scan is always a no-op there (``sections``
+    never has one to begin with).
+
+    Returns the error's ``reason`` string, or ``None`` when every ``financial_statement``
+    section in the input resolved successfully (or there were none)."""
+    fs_count = sum(1 for s in sections or [] if isinstance(s, dict) and s.get("type") == "financial_statement")
+    if fs_count == 0:
+        return None
+    for s in resolved_spec.get("sections") or []:
+        if isinstance(s, dict) and s.get("type") == "error":
+            return s.get("reason")
+    return None
+
+
+def spec_json_safe(spec: dict) -> dict:
+    """A copy of an assembled ``spec`` safe to persist as JSONB (Task 4 Risk 3): every
+    ``financial_statement`` section's ``model`` has its raw-``Decimal`` spark/trend
+    fields turned into decimal-literal strings (see
+    ``statement_builder.statement_model_json_safe``) — never through ``float`` (no
+    precision loss). Every other section type's fields are already JSON-safe and pass
+    through unchanged. Does not mutate ``spec``; a spec with no ``financial_statement``
+    section is returned UNCHANGED (no copy). Call this only when building the value to
+    persist — the LIVE ``spec`` (real Decimals) is what ``render_report_html`` must run
+    against first (its trend tooltip requires ``Decimal.quantize``)."""
+    sections = spec.get("sections") or []
+    if not any(isinstance(s, dict) and s.get("type") == "financial_statement" for s in sections):
+        return spec
+    from app.services.report.statement_builder import statement_model_json_safe
+
+    return {
+        **spec,
+        "sections": [
+            {**s, "model": statement_model_json_safe(s["model"])}
+            if isinstance(s, dict) and s.get("type") == "financial_statement"
+            else s
+            for s in sections
+        ],
+    }
 
 
 def fill_placeholders(text: str, resolver: Resolver) -> str:
@@ -602,6 +701,38 @@ def fill_placeholders(text: str, resolver: Resolver) -> str:
         return str(val) if val is not None else f"[unresolved: {kind}:{ref}]"
 
     return _PLACEHOLDER.sub(_sub, text)
+
+
+def _resolve_financial_statement_section(s: dict, resolver: Resolver) -> dict:
+    """``financial_statement``'s resolution boundary (Task 4). ``r1`` (``s["result_id"]``,
+    the CURRENT period) is a hard dependency — a resolver failure returns an error card,
+    mirroring ``_resolve_data_section``'s existing fail-closed shape for every other
+    section type (never a raised exception out of ``assemble_spec``). Every ``compare``
+    rid (prior/yoy/trend) is OPTIONAL: a resolver failure for one is simply omitted from
+    the payloads handed to ``build_statement_model`` — the builder's own "Degradation
+    contract" (see its module docstring) treats an absent rid as unavailable and
+    degrades only the fields that ONE comparison feeds, never raising. A
+    malformed-but-present r1 (``build_statement_model`` raises ``ValueError`` — e.g. no
+    parseable accounts) degrades the same way as a resolver exception."""
+    from app.services.report.statement_builder import build_statement_model
+
+    result_id = s["result_id"]
+    try:
+        payloads = {result_id: resolver(result_id)}
+    except Exception as exc:
+        return {"type": "error", "reason": f"{result_id}: {exc}"}
+    for compare_rid in (s.get("compare") or {}).values():
+        if not isinstance(compare_rid, str) or not compare_rid:
+            continue
+        try:
+            payloads[compare_rid] = resolver(compare_rid)
+        except Exception:
+            continue  # compare rid degrades — never raises, never kills the statement
+    try:
+        model = build_statement_model(s, payloads)
+    except ValueError as exc:
+        return {"type": "error", "reason": str(exc)}
+    return {"type": "financial_statement", "model": model}
 
 
 def _resolve_data_section(s: dict, resolver: Resolver) -> dict:
@@ -791,6 +922,14 @@ def assemble_spec(title: str, sections: list[dict], resolver: Resolver) -> dict:
             resolved_pairs.append((s, {"type": "narrative", "markdown": fill_placeholders(s["markdown"], resolver)}))
         elif s["type"] in ("table", "metric_headline", "chart"):
             resolved_pairs.append((s, _resolve_data_section(s, resolver)))
+        elif s["type"] == "financial_statement":
+            # PLAYBOOK-ONLY (Risk 1): assemble_spec is shared infra — the chat compose
+            # boundary (compose_report, below) rejects this type before it ever reaches
+            # here. Never gated on `select`/auto-chart machinery: `_table_key`/the
+            # `s["type"] == "table"` guards in Pass 2 below naturally skip it (a
+            # financial_statement is never charted or callout-popped like a statement
+            # table falling to the positional top-K floor).
+            resolved_pairs.append((s, _resolve_financial_statement_section(s, resolver)))
         elif s["type"] == "heading":
             # TRUST BOUNDARY: rebuild passthrough sections through their SCHEMA so only
             # declared fields (with schema defaults/clamps) survive. The validated dicts
@@ -867,13 +1006,26 @@ async def compose_report(
 ) -> dict:
     from app.models.report import Report
 
+    # CHAT boundary (Risk 1 / T2 gate): financial_statement is PLAYBOOK-ONLY. The
+    # report.compose tool's advertised schema (app/mcp/registry.py) already never lists
+    # it among valid section types, so a well-behaved model never emits one — this is
+    # defense in depth against a model that guesses the type/shape anyway. Reject BEFORE
+    # assemble_spec, which is shared infra with the playbook compose path
+    # (playbooks.compose_playbook_report calls assemble_spec directly, bypassing
+    # compose_report entirely, and legitimately emits financial_statement sections) — the
+    # no-LLM-numbers invariant (§13 report-design.md) means a model-authored
+    # financial_statement section must never reach the statement builder.
+    for s in sections or []:
+        if isinstance(s, dict) and s.get("type") == "financial_statement":
+            raise ValueError("financial_statement sections are not composable via chat — use a report playbook")
+
     spec = assemble_spec(title, sections, resolver)
     html = render_report_html(spec, accent_hsl=accent_hsl)
     await set_tenant_context(db, str(tenant_id))  # TOOL path: RLS context not pre-set
     report = Report(
         tenant_id=tenant_id,
         title=title,
-        spec_json=spec,
+        spec_json=spec_json_safe(spec),
         rendered_html=html,
         created_by=created_by,
         source_run_id=source_run_id,

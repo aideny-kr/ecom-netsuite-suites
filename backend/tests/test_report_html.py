@@ -1,4 +1,9 @@
+import re
+from html import escape
+
 from app.services.report.report_html import build_provenance, fmt_amount, render_report_html
+from app.services.report.statement_builder import build_statement_model
+from tests.fixtures import statement_fixture as fx
 
 
 def test_fmt_amount_accounting_style():
@@ -453,6 +458,49 @@ def test_no_provenance_renders_no_block():
     assert "Sources & method" not in html
 
 
+def _two_source_sources():
+    return {
+        "r1": {
+            "tool": "netsuite_financial_report",
+            "params": {"report_type": "income_statement", "period": "Jun 2026"},
+            "connection_id": None,
+        },
+        "r2": {
+            "tool": "netsuite_financial_report",
+            "params": {"report_type": "income_statement", "period": "May 2026"},
+            "connection_id": None,
+        },
+    }
+
+
+def test_provenance_resolved_rids_none_is_byte_stable_with_today():
+    """Default (``resolved_rids=None``, every existing caller) must render IDENTICALLY
+    to before this T2 gate fix — no caller passing it gets a behavior change."""
+    prov_default = build_provenance(_two_source_sources(), executed_at="2026-07-17T20:00:00+00:00")
+    prov_explicit_none = build_provenance(
+        _two_source_sources(), executed_at="2026-07-17T20:00:00+00:00", resolved_rids=None
+    )
+    assert prov_default == prov_explicit_none
+    html = render_report_html(_min_spec(), freshness=_freshness(), provenance=prov_default)
+    assert "r1 —" in html and "executed 2026-07-17T20:00:00+00:00" in html
+    assert "r2 —" in html
+    assert "not available this run" not in html
+
+
+def test_provenance_unresolved_rid_shows_not_available_no_executed_stamp():
+    """T2 gate M1: a rid the compare-degrade seam omitted from ``payloads`` (r2, here)
+    must NOT claim it was executed -- that's a false trust claim in the frozen
+    provenance block. r1 (resolved) keeps its normal 'executed ...' stamp."""
+    prov = build_provenance(_two_source_sources(), executed_at="2026-07-17T20:00:00+00:00", resolved_rids={"r1"})
+    html = render_report_html(_min_spec(), freshness=_freshness(), provenance=prov)
+    assert "r1 —" in html and "executed 2026-07-17T20:00:00+00:00" in html
+    assert "r2 — NetSuite GL statement template (SuiteQL)" in html
+    assert "not available this run — comparison omitted" in html
+    # the unresolved entry must NOT carry the executed_at stamp at all
+    r2_line = next(line for line in html.split("<div>") if line.startswith("r2 —"))
+    assert "executed" not in r2_line
+
+
 def test_provenance_values_are_escaped():
     prov = [{"result_id": "r1", "label": "<script>x</script>", "detail": "a=<b>", "executed_at": "t"}]
     html = render_report_html(_min_spec(), freshness=_freshness(), provenance=prov)
@@ -550,3 +598,487 @@ def test_provenance_detail_value_truncated_at_80_chars():
     assert long_value not in detail
     assert "…" in detail or "..." in detail
     assert len(detail) < 120  # "note=" + ~80 chars + ellipsis, well short of the full 200
+
+
+# --- Task 3: `financial_statement` renderer (CFO-grade statement, CSS-only interactivity) --
+#
+# The renderer consumes ONLY the MODEL built by statement_builder.build_statement_model —
+# every fixture below goes through the real builder (never a hand-written model dict) so
+# these tests exercise the actual Task 1/2 -> Task 3 contract, not an assumption about it.
+
+
+def _fs_spec(model: dict, title: str = "Income Statement") -> dict:
+    return {"title": title, "sections": [{"type": "financial_statement", "model": model}], "provenance": {}}
+
+
+def _is_model():
+    return build_statement_model(fx.income_statement_section(), fx.income_statement_payloads())
+
+
+def test_fs_report_has_exactly_one_h1():
+    html = render_report_html(_fs_spec(_is_model()))
+    assert html.count("<h1") == 1
+
+
+def test_fs_kpi_values_and_deltas_render_with_formatted_strings():
+    html = render_report_html(_fs_spec(_is_model()))
+    assert "$13,500,000" in html  # revenue value
+    assert fx.EXPECTED_REVENUE_MOM_DELTA_STR in html
+    assert fx.EXPECTED_REVENUE_MOM_PCT_STR in html
+    assert fx.EXPECTED_REVENUE_YOY_PCT_STR in html
+    assert fx.EXPECTED_GP_MARGIN_STR in html  # gross profit KPI margin
+
+
+def test_fs_kpi_sparkline_svg_present_for_is():
+    html = render_report_html(_fs_spec(_is_model()))
+    assert 'class="fs-spark"' in html
+    assert "<polyline" in html
+
+
+def test_fs_quad_rows_render_all_four_metrics():
+    html = render_report_html(_fs_spec(_is_model()))
+    assert 'class="fs-quad' in html
+    for label in ("Revenue", "Gross Profit", "Operating Income", "Net Income"):
+        assert f"<td>{label}</td>" in html
+
+
+def test_fs_statement_emphasis_rows_present_with_derived_totals():
+    html = render_report_html(_fs_spec(_is_model()))
+    assert 'class="fs-sub' in html
+    assert 'class="fs-formula"' in html
+    assert 'class="fs-net"' in html
+    assert "$3,500,000" in html  # gross profit (formula row)
+    assert "$1,800,000" in html  # operating income (formula row)
+    assert "$1,805,000" in html  # net income (net row)
+
+
+def test_fs_pct_rev_renders_on_summary_rows():
+    """T2 gate M3: the common-size column must not go blank on exactly the rows that
+    matter (design rule #8) -- Total Revenue's pct_rev is pinned to 100.0%, and the
+    Gross Profit formula row's matches the KPI card's own margin figure."""
+    html = render_report_html(_fs_spec(_is_model()))
+    assert '<td class="num fs-pct">100.0%</td>' in html
+    assert f'<td class="num fs-pct">{fx.EXPECTED_GP_MARGIN_STR}</td>' in html
+    assert f'<td class="num fs-pct">{fx.EXPECTED_NI_MARGIN_STR}</td>' in html
+
+
+def test_fs_bs_has_no_pct_of_rev_column():
+    """BS has no revenue base -- the whole "% of rev" column (header + cells) stays
+    absent, unaffected by M3 (which only ever populates a value when the builder has a
+    revenue_total to divide by)."""
+    model = build_statement_model(fx.balance_sheet_section(), fx.balance_sheet_payloads())
+    html = render_report_html(_fs_spec(model, title="Balance Sheet"))
+    assert "% of rev" not in html
+
+
+def test_fs_mid_fold_single_column_when_only_quad_present():
+    """T2 gate minor[6]: BS/TB never have a trend chart, so the mid-fold's default
+    2-column grid left a dead empty column beside the quad -- a modifier class collapses
+    it to a single column whenever only ONE of trend/quad exists."""
+    model = build_statement_model(fx.balance_sheet_section(), fx.balance_sheet_payloads())
+    html = render_report_html(_fs_spec(model, title="Balance Sheet"))
+    assert 'class="fs-mid fs-mid--single"' in html
+
+
+def test_fs_mid_fold_two_column_when_trend_and_quad_both_present():
+    html = render_report_html(_fs_spec(_is_model()))
+    assert 'class="fs-mid">' in html  # the DIV's class attribute, not the CSS rule below
+    assert 'class="fs-mid fs-mid--single"' not in html
+
+
+def test_fs_trend_chart_vmax_vmin_computed_after_filtering_mismatched_series():
+    """T2 gate minor[7]: vmax/vmin must be computed from the series that ACTUALLY get
+    plotted (post length-mismatch filter), not from every series including ones that get
+    silently dropped -- a malformed/partial series must never distort the axis scale for
+    the legitimate ones. Unreachable via the real builder (every series it produces is
+    always the same length), so this exercises ``_fs_trend_html``'s own defensive guard
+    directly, in isolation."""
+    from decimal import Decimal
+
+    from app.services.report.report_html import _fs_trend_html
+
+    trend = {
+        "periods": ["Jan 2026", "Feb 2026"],
+        "series": [
+            {"key": "revenue", "label": "Revenue", "values": [Decimal("100"), Decimal("200")]},
+            # mismatched length (3 values for a 2-period trend) -- must be filtered out
+            # BEFORE it's allowed to blow up vmax/vmin for the legitimate series above
+            {
+                "key": "gross_profit",
+                "label": "Gross Profit",
+                "values": [Decimal("1"), Decimal("2"), Decimal("999999")],
+            },
+        ],
+    }
+    html = _fs_trend_html(trend)
+    assert "Gross Profit" not in html  # the malformed series never plots or legends
+    # the Y-AXIS TOP LABEL specifically (not a data-point tooltip, which shows "$200"
+    # regardless of the axis-scale bug) must reflect ONLY the legitimate series' own max
+    assert 'text-anchor="end" fill="#666">$200</text>' in html
+    assert "$1000.0K" not in html  # the malformed series' 999999 must never set the scale
+
+
+def test_fs_bs_kpi_cards_render_without_color_class():
+    """T2 gate minor[9]: a BS KPI's "increase" has no inherent favorability (design rule
+    #10 — color is EXCLUSIVELY favorable/unfavorable, never decoration) -- the delta
+    still shows an arrow (direction is informative) but never a tone class."""
+    model = build_statement_model(fx.balance_sheet_section(), fx.balance_sheet_payloads())
+    html = render_report_html(_fs_spec(model, title="Balance Sheet"))
+    assert 'class="fs-delta fs-good"' not in html
+    assert 'class="fs-delta fs-bad"' not in html
+    assert 'class="fs-delta">' in html  # neutral -- span still renders, just unclassed
+    assert "▲" in html  # arrow direction still shown
+
+
+def test_fs_is_kpi_cards_still_colored():
+    html = render_report_html(_fs_spec(_is_model()))
+    assert 'class="fs-delta fs-good"' in html or 'class="fs-delta fs-bad"' in html
+
+
+def test_fs_kpi_sub_neutral_flag_suppresses_color():
+    from app.services.report.report_html import _fs_kpi_sub_html
+
+    kpi = {"margin_pct": None, "mom_pct": "+8.1%", "mom_delta": None, "yoy_pct": None, "neutral": True}
+    html = _fs_kpi_sub_html(kpi)
+    assert "▲" in html
+    assert "fs-good" not in html and "fs-bad" not in html
+
+
+def test_fs_kpi_sub_non_neutral_still_colored():
+    from app.services.report.report_html import _fs_kpi_sub_html
+
+    kpi = {"margin_pct": None, "mom_pct": "+8.1%", "mom_delta": None, "yoy_pct": None, "neutral": False}
+    html = _fs_kpi_sub_html(kpi)
+    assert "fs-good" in html
+
+
+def test_fs_statement_table_renders_every_fixture_account_no_truncation():
+    html = render_report_html(_fs_spec(_is_model()))
+    # 30 accounts in the fixture -- one <tr class="fs-acct ...> per account, no cap.
+    # (the narrower "fs-acct " with a trailing space excludes the fs-acct-no muted-number
+    # span class, which also starts with "fs-acct".)
+    assert html.count('<tr class="fs-acct ') == 30
+
+
+def test_fs_parens_formatting_present_for_reduces_profit_lines():
+    html = render_report_html(_fs_spec(_is_model()))
+    assert "($10,000,000)" in html  # COGS section subtotal
+
+
+def test_fs_account_name_escaping_never_renders_raw():
+    payloads = fx.income_statement_payloads()
+    r1 = payloads["r1"]
+    cols = r1["columns"]
+    name_idx = cols.index("acctname")
+    rows = [list(row) for row in r1["rows"]]
+    rows[0][name_idx] = "<script>alert(1)</script>"
+    payloads["r1"] = dict(r1, rows=rows)
+    model = build_statement_model(fx.income_statement_section(), payloads)
+    html = render_report_html(_fs_spec(model))
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+
+
+def test_fs_narrative_escaping_never_renders_raw():
+    model = _is_model()
+    model = dict(model, narrative=["<script>alert(2)</script>", *model["narrative"][1:]])
+    html = render_report_html(_fs_spec(model))
+    assert "<script>alert(2)</script>" not in html
+    assert "&lt;script&gt;alert(2)&lt;/script&gt;" in html
+
+
+def test_fs_no_script_tag_anywhere_in_rendered_output():
+    html = render_report_html(_fs_spec(_is_model()))
+    assert "<script" not in html
+
+
+def test_fs_collapse_checkboxes_capped_and_css_rules_match_the_cap():
+    """DRIFT GUARD (mirrors test_css_toggle_rules_cover_every_toggleable_series_index):
+    the CSS :has() collapse rules must cover exactly fs-sec-0..fs-sec-{cap-1}."""
+    from app.services.report.report_html import _MAX_STATEMENT_SECTIONS
+
+    html = render_report_html(_fs_spec(_is_model()))
+    assert ":has(" in html
+    for i in range(_MAX_STATEMENT_SECTIONS):
+        assert f"input.fs-sec-{i}:not(:checked)" in html, f"collapse rule missing for fs-sec-{i}"
+    assert f"input.fs-sec-{_MAX_STATEMENT_SECTIONS}:" not in html  # block ends at the cap
+
+
+def test_fs_delta_tone_cell_actually_gets_the_semantic_color_class_bound():
+    """DRIFT GUARD: _fs_delta_tone / _fs_sign_tone hand back bare "fs-good"/"fs-bad"
+    strings that get applied DIRECTLY as a <td> class on statement/quad delta cells
+    (see _fs_summary_row_html / _fs_account_row_html / _fs_quad_row_with_pct_html) --
+    not just as a compound class alongside .fs-chip/.fs-dot/.fs-delta. A bare
+    `td.fs-good` only picks up color if the stylesheet defines an UNSCOPED base rule
+    for the class itself; a stylesheet with only scoped companions (.fs-chip.fs-good,
+    .fs-dot.fs-good, .fs-delta.fs-good, tr.fs-check.fs-good td) leaves every plain
+    `class="num fs-good"` cell colorless. The regex requires the selector to START a
+    line (^ in MULTILINE mode) so a scoped selector like `.fs-chip.fs-good{` -- where
+    `.fs-good` appears mid-selector, not at line-start -- can't false-positive the
+    match. Presence-of-class is not enough."""
+    html = render_report_html(_fs_spec(_is_model()))
+    assert '<td class="num fs-bad">' in html or '<td class="num fs-good">' in html
+    style_block = html.split("<style>", 1)[1].split("</style>", 1)[0]
+    assert re.search(r"^\s*\.fs-good\s*\{", style_block, re.MULTILINE)
+    assert re.search(r"^\s*\.fs-bad\s*\{", style_block, re.MULTILINE)
+
+
+def test_fs_report_gets_wide_modifier_class_only_for_statement_specs():
+    """EYEBALL-GATE FIX (F1, round 3): a statement report needs the mock's own ~1060px+
+    canvas to fit the mid-fold without either starving the trend chart or leaving the
+    variance quad's own columns hidden behind a scrollbar at rest -- .report{max-width}
+    itself must NOT change (every other report type's byte-stability pin depends on it),
+    so a MODIFIER class is added to the root div only when a financial_statement section
+    is present, gated the same way the CSS itself is."""
+    fs_html = render_report_html(_fs_spec(_is_model()))
+    assert '<div class="report report--wide">' in fs_html
+    plain_html = render_report_html(_slice_d_spec())
+    assert "report--wide" not in plain_html
+    assert '<div class="report">' in plain_html
+
+
+def test_fs_trend_chart_grid_track_clears_the_520px_floor_at_the_wide_canvas():
+    """EYEBALL-GATE FIX (F1, round 3): round 2's 1.5:1 ratio cleared >=560px only at
+    .report's ORIGINAL 840px width -- at that width the two floors (trend + the quad's
+    own unwrapped content) structurally summed to more than the .fs-mid budget had, no
+    matter the ratio (confirmed empirically, not guessed; see the .fs-mid CSS comment).
+    The real fix is .report--wide (see the test above); THIS ratio (chosen algebraically
+    from two measured constants -- .fs-mid's total avail width and the quad table's own
+    natural width, both empirical) only needs to clear the lower floor the dispatch
+    revised down to: >=520px, at the wide canvas."""
+    html = render_report_html(_fs_spec(_is_model()))
+    m = re.search(r"\.fs-mid\s*\{[^}]*grid-template-columns:\s*([^;]+);", html)
+    assert m, "no .fs-mid grid-template-columns rule found"
+    weights = [float(w) for w in re.findall(r"minmax\(0,\s*([\d.]+)fr\)", m.group(1))]
+    assert len(weights) == 2, f"expected two minmax(0, Nfr) tracks, got: {m.group(1)!r}"
+    trend_weight, quad_weight = weights
+    assert trend_weight > quad_weight  # trend (first grid child) still gets the WIDE slot
+    wide_m = re.search(r"\.report--wide\s*\{[^}]*max-width:\s*(\d+)px", html)
+    assert wide_m, "no .report--wide max-width rule found"
+    canvas_px = int(wide_m.group(1))
+    # .report{padding:48px 32px} (unchanged by the modifier) minus the .fs-mid gap:18px
+    avail_px = canvas_px - 2 * 32 - 18
+    trend_px = avail_px * trend_weight / (trend_weight + quad_weight)
+    assert trend_px >= 520, f"trend track would render at {trend_px:.0f}px, need >=520"
+
+
+def test_fs_quad_table_is_scroll_wrapped_so_it_cannot_force_the_grid_track_wide():
+    """.fs-scroll stays as a SAFETY NET even though the wide canvas + tightened quad
+    typography now fit the table unscrolled at rest (live-verified via browse) -- the
+    wrapper must still be present so a future narrower rendering context degrades to a
+    scrollbar instead of visually breaking the grid."""
+    html = render_report_html(_fs_spec(_is_model()))
+    assert '<div class="fs-scroll"><table class="fs-quad' in html
+
+
+def test_fs_quad_typography_tightened_to_the_mocks_scale():
+    """Structural proxy for the live no-scroll check (pytest can't measure real layout):
+    the quad's cell padding and the .fs-mid card padding must both be tightened from the
+    base stylesheet's defaults (8px/12px cell, 24px card) to the mock's own scale -- this
+    is what actually lets the table's unwrapped content fit its grid track at rest. The
+    true acceptance (scrollWidth <= clientWidth) is verified live via browse, not here."""
+    html = render_report_html(_fs_spec(_is_model()))
+    assert (
+        "table.fs-quad th, table.fs-quad td { border:none; border-bottom:1px solid #ddd; font-size:12.5px; padding:6px 8px; }"
+        in html
+    )
+    assert ".fs-mid > .nb-card { padding:18px 20px; }" in html
+
+
+def test_fs_income_statement_is_two_step_interleaved():
+    """EYEBALL-GATE FIX (F2, design rule #6): a two-step statement interleaves formula
+    rows between sections -- Revenue -> Total Revenue -> COGS -> Total COGS -> Gross
+    Profit -> OpEx -> Total OpEx -> Operating Income -> Other Income -> Total Other
+    Income -> Other Expense -> Total Other Expense -> Net Income. NOT
+    statement_builder's internal section-KEY grouping order (Revenue, Other Income,
+    COGS, OpEx, Other Expense -- the SuiteQL/model grouping, an unrelated concern) with
+    all three formula/net rows stacked at the very end."""
+    html = render_report_html(_fs_spec(_is_model()))
+    stmt_html = html.split('<table class="fs-stmt', 1)[1]
+
+    anchors = [
+        "▾</span> Revenue</label>",
+        ">Total Revenue<",
+        "▾</span> Cost of Goods Sold</label>",
+        ">Total Cost of Goods Sold<",
+        ">Gross Profit<",
+        "▾</span> Operating Expense</label>",
+        ">Total Operating Expense<",
+        ">Operating Income<",
+        "▾</span> Other Income</label>",
+        ">Total Other Income<",
+        "▾</span> Other Expense</label>",
+        ">Total Other Expense<",
+        ">Net Income<",
+    ]
+    positions = [stmt_html.index(a) for a in anchors]
+    assert positions == sorted(positions), list(zip(anchors, positions, strict=True))
+
+
+def test_fs_income_statement_two_step_interleave_holds_in_degraded_variant():
+    """Same sequence requirement with no compare data (has_prior=False) -- row PRESENCE/
+    ORDER must not depend on which optional columns are shown."""
+    model = build_statement_model(fx.income_statement_section(), fx.income_statement_payloads_missing_compare())
+    html = render_report_html(_fs_spec(model))
+    stmt_html = html.split('<table class="fs-stmt', 1)[1]
+
+    anchors = [
+        "▾</span> Revenue</label>",
+        ">Total Revenue<",
+        "▾</span> Cost of Goods Sold</label>",
+        ">Total Cost of Goods Sold<",
+        ">Gross Profit<",
+        "▾</span> Operating Expense</label>",
+        ">Total Operating Expense<",
+        ">Operating Income<",
+        "▾</span> Other Income</label>",
+        ">Total Other Income<",
+        "▾</span> Other Expense</label>",
+        ">Total Other Expense<",
+        ">Net Income<",
+    ]
+    positions = [stmt_html.index(a) for a in anchors]
+    assert positions == sorted(positions), list(zip(anchors, positions, strict=True))
+
+
+def test_fs_balance_sheet_section_order_unchanged_by_two_step_interleave():
+    """Confirmed-good at the eyeball gate: BS/TB sections are already sequential and
+    must NOT be touched by the income_statement-only interleave logic."""
+    model = build_statement_model(fx.balance_sheet_section(), fx.balance_sheet_payloads())
+    html = render_report_html(_fs_spec(model, title="Balance Sheet"))
+    stmt_html = html.split('<table class="fs-stmt', 1)[1]
+    positions = [
+        stmt_html.index(a)
+        for a in ("▾</span> Assets</label>", "▾</span> Liabilities</label>", "▾</span> Equity</label>")
+    ]
+    assert positions == sorted(positions)
+
+
+def test_fs_percent_integrity_canary_full_render_does_not_raise():
+    """If a literal % anywhere in the financial-statement CSS were left un-doubled, the
+    %-format call in render_report_html would raise at render time."""
+    html = render_report_html(_fs_spec(_is_model()))
+    assert "<style>" in html
+    assert "fs-stmt" in html
+
+
+def test_fs_balance_sheet_renders_checks_row_and_in_balance_chip():
+    model = build_statement_model(fx.balance_sheet_section(), fx.balance_sheet_payloads())
+    html = render_report_html(_fs_spec(model, title="Balance Sheet"))
+    assert 'class="fs-check fs-good"' in html
+    assert "Assets = Liabilities + Equity" in html
+    assert 'class="fs-chip fs-good"' in html
+
+
+def test_fs_balance_sheet_unbalanced_renders_bad_tone_check():
+    model = build_statement_model(fx.balance_sheet_section(), fx.balance_sheet_unbalanced_payloads())
+    html = render_report_html(_fs_spec(model, title="Balance Sheet"))
+    assert 'class="fs-check fs-bad"' in html
+    assert 'class="fs-chip fs-bad"' in html
+    assert "off by" in html
+
+
+def test_fs_trial_balance_renders_checks_row_and_chip():
+    model = build_statement_model(fx.trial_balance_section(), fx.trial_balance_payloads())
+    html = render_report_html(_fs_spec(model, title="Trial Balance"))
+    assert 'class="fs-check fs-good"' in html
+    assert "Debits = Credits" in html
+
+
+def test_fs_degraded_model_no_compares_omits_delta_columns():
+    model = build_statement_model(fx.income_statement_section(), fx.income_statement_payloads_missing_compare())
+    assert model["prior_period"] is None  # sanity on the fixture contract
+    html = render_report_html(_fs_spec(model))
+    # "class=\"fs-delta" (not the bare substring) -- the CSS *rule definition* for
+    # .fs-delta always ships in <style> regardless of use; only its usage in the body
+    # is what the degraded model must omit.
+    assert 'class="fs-delta' not in html  # no KPI MoM/YoY deltas anywhere
+    assert "May 2026" not in html  # no prior-period column
+    assert "$13,500,000" in html  # current-period figures still render
+
+
+def test_fs_watch_items_render_with_model_driven_tone_dots():
+    model = _is_model()
+    html = render_report_html(_fs_spec(model))
+    assert model["watch"], "fixture is expected to produce at least one watch item"
+    for item in model["watch"]:
+        assert escape(item["text"]) in html
+        assert f'class="fs-dot fs-{item["tone"] if item["tone"] in ("good", "bad") else "warn"}"' in html
+
+
+def test_fs_highlights_render_as_list_items():
+    model = _is_model()
+    html = render_report_html(_fs_spec(model))
+    assert model["highlights"], "fixture is expected to produce at least one highlight"
+    assert 'class="fs-hl"' in html
+    for text in model["highlights"]:
+        assert f"<li>{escape(text)}</li>" in html
+
+
+def test_fs_narrative_renders_paragraphs():
+    model = _is_model()
+    html = render_report_html(_fs_spec(model))
+    for text in model["narrative"]:
+        assert f"<p>{escape(text)}</p>" in html
+
+
+def test_fs_trend_chart_point_has_exact_value_title_tooltip():
+    model = _is_model()
+    html = render_report_html(_fs_spec(model))
+    assert "<circle" in html
+    assert "<title>Jun 2026 — Revenue: $13,500,000</title>" in html
+
+
+def test_fs_trend_chart_right_padding_clears_the_last_x_axis_label():
+    """Final-review minor: the last x-axis label ("Jun 2026") clipped ~2 characters against
+    the SVG's right edge at the old 16px right pad -- text-anchor="middle" means a label
+    extends roughly HALF its own rendered width past its x position, and 16px was narrower
+    than that half-width for a realistic period label. Bumped to 28px; pin the constant (a
+    drift guard) and confirm the actual rendered x-axis baseline reflects it, structurally
+    -- pytest can't measure real glyph widths, so the true acceptance is the live browse
+    re-verification this fix requires, not this test alone."""
+    from app.services.report.report_html import _FS_TREND_PAD_R, _FS_TREND_W
+
+    assert _FS_TREND_PAD_R >= 28
+    html = render_report_html(_fs_spec(_is_model()))
+    assert f'x2="{_FS_TREND_W - _FS_TREND_PAD_R}"' in html
+
+
+def test_fs_css_only_included_when_statement_section_present():
+    """The financial-statement stylesheet block is additive and conditional -- a report
+    with no financial_statement section must not ship the extra CSS bytes at all (this is
+    what makes the byte-stability guarantee below possible for a shared %-formatted _CSS)."""
+    plain_html = render_report_html(_slice_d_spec())
+    assert "fs-stmt" not in plain_html
+    fs_html = render_report_html(_fs_spec(_is_model()))
+    assert "fs-stmt" in fs_html
+
+
+def test_fs_print_css_present_and_forces_full_expansion():
+    html = render_report_html(_fs_spec(_is_model()))
+    assert "@media print" in html
+    printed = html.split("@media print", 1)[1]
+    assert "fs-acct" in printed
+    assert "!important" in printed
+    assert "fs-sec-cb" in printed
+
+
+def test_fs_report_wide_goes_full_width_on_paper():
+    """The mock's own print rule takes the report full-width on paper -- .report--wide
+    (screen-only otherwise) must not clamp a printed statement to its on-screen 1120px
+    canvas cap."""
+    html = render_report_html(_fs_spec(_is_model()))
+    assert re.search(r"@media print\s*\{\s*\.report--wide\s*\{\s*max-width:100%", html)
+
+
+def test_non_statement_spec_byte_stable_after_financial_statement_renderer_added():
+    """Codifies the brief's byte-stability requirement: a spec with no financial_statement
+    section must render BYTE-IDENTICALLY to what it rendered before this renderer existed.
+    Pinned via SHA-256 (captured against the pre-Task-3 report_html.py) rather than a giant
+    inline literal -- equally exact, far more maintainable."""
+    import hashlib
+
+    html = render_report_html(_slice_d_spec())
+    assert (
+        hashlib.sha256(html.encode()).hexdigest() == "6205e74d16941ef5d2c6fcb7e5b148867da7ff4e7075102dd35fefee1aa40661"
+    )

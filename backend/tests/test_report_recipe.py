@@ -15,7 +15,7 @@ import uuid
 from unittest.mock import patch
 
 from app.services.report.recipe import build_recipe, is_recipe_eligible
-from app.services.report.report_service import referenced_result_ids
+from app.services.report.report_service import referenced_result_ids, required_result_ids
 
 _EXT_HEX = uuid.UUID("0f3c9a2e-0000-0000-0000-0000000beef0").hex
 _EXT_RUNREPORT = f"ext__{_EXT_HEX}__ns_runReport"
@@ -49,6 +49,70 @@ def test_referenced_result_ids_covers_sections_and_placeholders():
 
 def test_referenced_result_ids_tolerates_junk_sections():
     assert referenced_result_ids([{"type": "narrative"}, "junk", None, {}]) == []
+
+
+# --- Task 4: financial_statement's compare rids ---------------------------------------
+
+
+def test_referenced_result_ids_includes_financial_statement_compare_rids():
+    sections = [
+        {
+            "type": "financial_statement",
+            "result_id": "r1",
+            "statement": "income_statement",
+            "period": "Jun 2026",
+            "compare": {"prior": "r2", "yoy": "r3", "trend": "r4"},
+        }
+    ]
+    assert referenced_result_ids(sections) == ["r1", "r2", "r3", "r4"]
+
+
+def test_referenced_result_ids_financial_statement_no_compare():
+    sections = [{"type": "financial_statement", "result_id": "r1", "statement": "balance_sheet", "period": "Jun 2026"}]
+    assert referenced_result_ids(sections) == ["r1"]
+
+
+def test_required_result_ids_financial_statement_excludes_compare():
+    """Risk 2: only r1 (the current period) is a hard dependency — every compare rid
+    (prior/yoy/trend) is optional and degrades that comparison instead."""
+    sections = [
+        {
+            "type": "financial_statement",
+            "result_id": "r1",
+            "statement": "income_statement",
+            "period": "Jun 2026",
+            "compare": {"prior": "r2", "yoy": "r3", "trend": "r4"},
+        }
+    ]
+    assert required_result_ids(sections) == {"r1"}
+
+
+def test_required_result_ids_matches_referenced_for_non_statement_sections():
+    """Every OTHER section type keeps pre-Task-4 semantics: everything referenced_result_ids
+    finds is required — v1 (table/narrative) recipes and chat compose are unaffected."""
+    sections = [
+        {"type": "table", "result_id": "r7", "select": ["a"]},
+        {"type": "chart", "result_id": "r7"},
+        {"type": "narrative", "markdown": "Total {{result:r9.value}} vs {{metric:r12.value}}"},
+        {"type": "divider"},
+    ]
+    assert required_result_ids(sections) == set(referenced_result_ids(sections)) == {"r7", "r9", "r12"}
+
+
+def test_required_result_ids_mixed_recipe_only_statement_compare_degrades():
+    """A recipe mixing a financial_statement section with an ordinary table section:
+    the table's result_id is still required, only the statement's compare rids degrade."""
+    sections = [
+        {
+            "type": "financial_statement",
+            "result_id": "r1",
+            "statement": "income_statement",
+            "period": "Jun 2026",
+            "compare": {"prior": "r2"},
+        },
+        {"type": "table", "result_id": "r3"},
+    ]
+    assert required_result_ids(sections) == {"r1", "r3"}
 
 
 # --- the read-only allowlist (fail closed) -------------------------------------------

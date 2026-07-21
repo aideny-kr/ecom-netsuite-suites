@@ -83,3 +83,65 @@ def test_text_alias_with_null_markdown_falls_back_to_body_field():
     secs = parse_sections(req.sections)
     assert secs[0].type == "narrative"
     assert secs[0].markdown == "Summary."
+
+
+# --- Task 4 (Risk 1): financial_statement joins the ComposeSection union ----------------
+# Playbook-only in practice (compose_report rejects it before assembly — see
+# test_report_service.py's chat-boundary test) but the SCHEMA itself must accept the
+# shape assemble_spec consumes, since assemble_spec is shared infra between the chat and
+# playbook compose paths.
+
+
+def test_financial_statement_section_parses():
+    req = ComposeRequest(
+        title="x",
+        sections=[
+            {
+                "type": "financial_statement",
+                "result_id": "r1",
+                "statement": "income_statement",
+                "period": "Jun 2026",
+                "compare": {"prior": "r2", "yoy": "r3", "trend": "r4"},
+            }
+        ],
+    )
+    secs = parse_sections(req.sections)
+    assert secs[0].type == "financial_statement"
+    assert secs[0].result_id == "r1"
+    assert secs[0].statement == "income_statement"
+    assert secs[0].period == "Jun 2026"
+    assert secs[0].compare == {"prior": "r2", "yoy": "r3", "trend": "r4"}
+
+
+def test_financial_statement_section_compare_defaults_to_empty_dict():
+    req = ComposeRequest(
+        title="x",
+        sections=[
+            {"type": "financial_statement", "result_id": "r1", "statement": "trial_balance", "period": "Jun 2026"}
+        ],
+    )
+    secs = parse_sections(req.sections)
+    assert secs[0].compare == {}
+
+
+@pytest.mark.parametrize("field", ["result_id", "statement", "period"])
+def test_financial_statement_section_requires_core_fields(field):
+    section = {
+        "type": "financial_statement",
+        "result_id": "r1",
+        "statement": "income_statement",
+        "period": "Jun 2026",
+    }
+    del section[field]
+    with pytest.raises(ValidationError):
+        ComposeRequest(title="x", sections=[section])
+
+
+def test_financial_statement_section_rejects_unknown_statement_type():
+    with pytest.raises(ValidationError):
+        ComposeRequest(
+            title="x",
+            sections=[
+                {"type": "financial_statement", "result_id": "r1", "statement": "cash_flow", "period": "Jun 2026"}
+            ],
+        )

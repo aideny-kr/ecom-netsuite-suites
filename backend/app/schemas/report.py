@@ -42,8 +42,40 @@ class DividerSection(BaseModel):
     type: Literal["divider"]
 
 
+class FinancialStatementSection(BaseModel):
+    """A CFO-grade statement (Task 2/3/4 redesign) — the model is built server-side by
+    ``statement_builder.build_statement_model``, never authored/filled by an LLM.
+
+    PLAYBOOK-ONLY: this type exists in the union so ``assemble_spec`` (shared infra) can
+    validate a playbook-captured recipe's sections, but the CHAT compose entry point
+    (``report_service.compose_report``) explicitly REJECTS it before assembly — the
+    ``report.compose`` tool's advertised schema (``app/mcp/registry.py``) never lists
+    ``financial_statement`` among its valid section types, and no chat recipe can ever
+    produce one. See ``compose_report`` for the enforcement; this schema member alone
+    does not grant the chat path access to it.
+    """
+
+    type: Literal["financial_statement"]
+    result_id: str
+    statement: Literal["income_statement", "balance_sheet", "trial_balance"]
+    period: str
+    # name -> result_id ("prior"/"yoy"/"trend" -> "r2"/"r3"/"r4"). Every entry is
+    # OPTIONAL data: a compare source that fails to resolve degrades only the fields it
+    # feeds (see statement_builder's "Degradation contract" docstring) rather than
+    # failing the whole statement — unlike `result_id` above, the hard dependency.
+    compare: dict[str, str] = Field(default_factory=dict)
+
+
 ComposeSection = Annotated[
-    Union[HeadingSection, NarrativeSection, MetricHeadlineSection, ChartSection, TableSection, DividerSection],
+    Union[
+        HeadingSection,
+        NarrativeSection,
+        MetricHeadlineSection,
+        ChartSection,
+        TableSection,
+        DividerSection,
+        FinancialStatementSection,
+    ],
     Field(discriminator="type"),
 ]
 
