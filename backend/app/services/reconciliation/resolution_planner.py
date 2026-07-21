@@ -38,8 +38,12 @@ Ordered rules (first match wins; spec mapping table):
 
 Materiality NEVER changes action selection except writeoff_je eligibility
 (rules 8/7b-fallback); it only sets above_materiality, which gates one-click
-bulk approval. `root_cause` on every path is always the raw `variance_type`
-string (group keys stay honest to source data).
+bulk approval. `root_cause` is the raw `variance_type` string on every path
+EXCEPT rule 6b (washout): there `root_cause` is the fixed literal "washout",
+not `variance_type` (which stays "missing_in_netsuite" on the underlying
+result) — washout is derived from evidence, not from the raw variance
+classification, so group keys for that one rule are not honest to
+`variance_type` the way every other rule's are.
 """
 
 from __future__ import annotations
@@ -48,6 +52,18 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from app.services.reconciliation.four_bucket_classifier import CLOSED_RUN_STATUSES, is_material
+
+# Single source of truth for the washout window (operator decision
+# 2026-07-21, recorded verbatim in
+# docs/superpowers/plans/2026-07-21-recon-washout-and-currency-truth.md) —
+# imported, not duplicated, so the planner's narrative text can never drift
+# from the value order_recon_job actually applies when deciding
+# evidence["washout"]. This planner never recomputes whether a charge IS a
+# washout; it only trusts that evidence as already decided by
+# order_recon_job's ref-keyed refund fetch. Safe at module level: order_recon_job
+# imports resolution_planner only inside OrderReconJob.run() (deferred), never
+# at its own module top level, so there is no import cycle.
+from app.services.reconciliation.order_recon_job import WASHOUT_WINDOW_DAYS
 
 # Mirrors the payout classifier's fee-match tolerance.
 FEE_EXPLAIN_TOLERANCE = Decimal("0.50")
@@ -60,14 +76,6 @@ RECENT_PAYOUT_LAG_DAYS = 7
 # is None (no payout row joined — enrichment couldn't determine health, so it
 # must not be treated as proof the payout died).
 HEALTHY_PAYOUT_STATUSES = frozenset({"paid", "pending", "in_transit"})
-# Mirrors order_recon_job.WASHOUT_WINDOW_DAYS (operator decision 2026-07-21,
-# recorded verbatim in
-# docs/superpowers/plans/2026-07-21-recon-washout-and-currency-truth.md).
-# Duplicated here only for the washout rule's narrative text — this planner
-# never recomputes whether a charge IS a washout; it only trusts
-# evidence["washout"] as already decided by order_recon_job's ref-keyed
-# refund fetch.
-WASHOUT_WINDOW_DAYS = 7
 
 ACTION_BOOK_FEE_LINE = "book_fee_line"
 ACTION_CREATE_AND_APPLY = "create_and_apply_deposit"
