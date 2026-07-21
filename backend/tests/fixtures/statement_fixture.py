@@ -386,6 +386,16 @@ def malformed_r1_payload() -> dict[str, dict]:
     return {"r1": {"success": True, "kind": "table", "unexpected": "shape"}}
 
 
+def income_statement_payloads_zero_rows() -> dict[str, dict]:
+    """r1 with a well-formed but EMPTY row set (real columns, zero rows) -- the SQL
+    ran fine but returned no accounts at all. A statement with literally zero GL
+    accounts is a data/connection problem, not a legitimate "quiet period" render (a
+    genuinely quiet account still HAS a $0 line; zero accounts means nothing posted
+    to ANY tracked account type, which never happens for a real tenant) -- must raise,
+    never silently produce an all-zero statement."""
+    return {"r1": _payload(_IS_COLUMNS, [], query="income_statement (Jun 2026)")}
+
+
 def income_statement_string_amount_payloads() -> dict[str, dict]:
     """A minimal (2-account) IS payload whose ``amount`` cells are STRINGS, mirroring how
     SuiteQL actually serializes numeric cells (see ``fmt_amount`` docstring in report_html.py).
@@ -885,6 +895,11 @@ def balance_sheet_payloads_missing_compare() -> dict[str, dict]:
     return {"r1": _payload(_BS_COLUMNS, _BS_R1_ROWS, query="balance_sheet (2026-06-30)")}
 
 
+def balance_sheet_payloads_zero_rows() -> dict[str, dict]:
+    """Balance-sheet analogue of ``income_statement_payloads_zero_rows``."""
+    return {"r1": _payload(_BS_COLUMNS, [], query="balance_sheet (2026-06-30)")}
+
+
 def balance_sheet_unbalanced_payloads() -> dict[str, dict]:
     """Assets deliberately off by 1,000 from Liabilities + Equity -- the check must fail."""
     rows = (
@@ -966,6 +981,11 @@ def trial_balance_payloads() -> dict[str, dict]:
 
 def trial_balance_payloads_missing_compare() -> dict[str, dict]:
     return {"r1": _payload(_TB_COLUMNS, _TB_R1_ROWS, query="trial_balance (Jun 2026)")}
+
+
+def trial_balance_payloads_zero_rows() -> dict[str, dict]:
+    """Trial-balance analogue of ``income_statement_payloads_zero_rows``."""
+    return {"r1": _payload(_TB_COLUMNS, [], query="trial_balance (Jun 2026)")}
 
 
 def trial_balance_unbalanced_payloads() -> dict[str, dict]:

@@ -234,6 +234,23 @@ def test_is_formulas_and_net(is_model):
     assert net["reduces_profit"] is False
 
 
+def test_is_pct_rev_on_summary_rows(is_model):
+    # T2 gate M3: the common-size column must not go blank on exactly the rows that
+    # matter (design rule #8). Revenue's own subtotal is pinned to 100.0% (it IS the
+    # base); GP/OpInc/NI's pct_rev must equal their KPI cards' own margin_pct string
+    # (same underlying figure, same fmt_pct formatting -- never independently derived).
+    revenue_section = next(s for s in is_model["sections"] if s["key"] == "1-Revenue")
+    assert revenue_section["subtotal"]["pct_rev"] == "100.0%"
+    kpis = {k["key"]: k for k in is_model["kpis"]}
+    formulas_by_label = {f_["label"]: f_ for f_ in is_model["formulas"]}
+    assert formulas_by_label["Gross Profit"]["pct_rev"] == kpis["gross_profit"]["margin_pct"]
+    assert formulas_by_label["Operating Income"]["pct_rev"] == kpis["operating_income"]["margin_pct"]
+    assert is_model["net"]["pct_rev"] == kpis["net_income"]["margin_pct"]
+    # every OTHER section's subtotal also gets pct_rev now (not just revenue)
+    cogs_section = next(s for s in is_model["sections"] if s["key"] == "3-COGS")
+    assert cogs_section["subtotal"]["pct_rev"] is not None
+
+
 def test_is_checks_empty():
     model = build_statement_model(fx.income_statement_section(), fx.income_statement_payloads())
     assert model["checks"] == []
@@ -305,7 +322,14 @@ def test_is_missing_all_compare_sources_degrades_gracefully():
     assert model["quad"][0]["delta"] is None
     assert model["sections"][0]["accounts"][0]["prior"] is None
     assert model["sections"][0]["accounts"][0]["delta"] is None
-    assert model["watch"] == []  # every watch rule needs a compare source
+    # T2 gate M1: the WATCH RULES (margin move, movers, trailing-window best/worst) need
+    # a compare source and stay silent -- but the model now surfaces an EXPLICIT
+    # in-statement signal per expected-but-unresolved comparison, so this is no longer []
+    watch_texts = [w["text"] for w in model["watch"]]
+    assert "Prior-period comparison unavailable this run" in watch_texts
+    assert "Year-over-year comparison unavailable this run" in watch_texts
+    assert "Trend comparison unavailable this run" in watch_texts
+    assert all(w["tone"] == "warn" for w in model["watch"])
     assert model["highlights"] == []
 
 
@@ -315,11 +339,33 @@ def test_is_failed_compare_source_degrades_like_missing():
     assert kpis["revenue"]["mom_delta"] is None
     assert kpis["revenue"]["mom_pct"] is None
     assert model["prior_period"] is None
+    watch_texts = [w["text"] for w in model["watch"]]
+    assert "Prior-period comparison unavailable this run" in watch_texts
+
+
+def test_no_missing_compare_chip_when_fully_resolved(is_model):
+    watch_texts = [w["text"] for w in is_model["watch"]]
+    assert not any("unavailable this run" in t for t in watch_texts)
 
 
 def test_malformed_r1_raises_value_error():
     with pytest.raises(ValueError):
         build_statement_model(fx.income_statement_section(), fx.malformed_r1_payload())
+
+
+def test_zero_row_r1_raises_value_error():
+    with pytest.raises(ValueError):
+        build_statement_model(fx.income_statement_section(), fx.income_statement_payloads_zero_rows())
+
+
+def test_zero_row_r1_raises_for_balance_sheet_too():
+    with pytest.raises(ValueError):
+        build_statement_model(fx.balance_sheet_section(), fx.balance_sheet_payloads_zero_rows())
+
+
+def test_zero_row_r1_raises_for_trial_balance_too():
+    with pytest.raises(ValueError):
+        build_statement_model(fx.trial_balance_section(), fx.trial_balance_payloads_zero_rows())
 
 
 def test_missing_r1_entirely_raises_value_error():
@@ -512,6 +558,24 @@ def test_bs_kpis(bs_model):
     assert kpis["total_equity"]["mom_delta"] == fx.EXPECTED_BS_EQUITY_MOM_DELTA_STR
 
 
+def test_bs_kpis_marked_neutral(bs_model):
+    # T2 gate minor[9]: a BS KPI's "increase" has no inherent favorability (design rule
+    # #10 — color is EXCLUSIVELY favorable/unfavorable, never decoration) — the renderer
+    # needs an explicit signal to render these deltas colorless.
+    for kpi in bs_model["kpis"]:
+        assert kpi["neutral"] is True
+
+
+def test_tb_kpis_marked_neutral(tb_model):
+    for kpi in tb_model["kpis"]:
+        assert kpi["neutral"] is True
+
+
+def test_is_kpis_not_neutral(is_model):
+    for kpi in is_model["kpis"]:
+        assert kpi["neutral"] is False
+
+
 def test_bs_sections_three_groups(bs_model):
     keys = [s["key"] for s in bs_model["sections"]]
     assert keys == ["1-Assets", "2-Liabilities", "3-Equity"]
@@ -524,6 +588,19 @@ def test_bs_account_reduces_profit_always_false(bs_model):
         for account in section["accounts"]:
             assert account["reduces_profit"] is False
             assert account["pct_rev"] is None  # no revenue concept on a balance sheet
+
+
+def test_bs_summary_rows_have_no_pct_rev(bs_model):
+    # M3: only IS gets a common-size column -- BS has no revenue base to compute
+    # against, so its subtotal rows stay None (never a fabricated "% of assets" figure
+    # the brief never asked for).
+    for section in bs_model["sections"]:
+        assert section["subtotal"]["pct_rev"] is None
+
+
+def test_bs_no_missing_compare_chip_when_fully_resolved(bs_model):
+    watch_texts = [w["text"] for w in bs_model["watch"]]
+    assert not any("unavailable this run" in t for t in watch_texts)
 
 
 def test_bs_check_in_balance(bs_model):
@@ -553,6 +630,8 @@ def test_bs_missing_compare_degrades():
     assert kpis["total_assets"]["mom_delta"] is None
     assert model["prior_period"] is None
     assert model["sections"][0]["accounts"][0]["prior"] is None
+    watch_texts = [w["text"] for w in model["watch"]]
+    assert "Prior-period comparison unavailable this run" in watch_texts
 
 
 # ===========================================================================
@@ -637,6 +716,8 @@ def test_tb_missing_compare_degrades():
     kpis = {k["key"]: k for k in model["kpis"]}
     assert kpis["total_debits"]["mom_delta"] is None
     assert kpis["total_debits"]["mom_pct"] is None
+    watch_texts = [w["text"] for w in model["watch"]]
+    assert "Prior-period comparison unavailable this run" in watch_texts
     assert kpis["total_credits"]["mom_delta"] is None
     quad_by_label = {q["label"]: q for q in model["quad"]}
     assert quad_by_label["Total Debits"]["prior"] is None

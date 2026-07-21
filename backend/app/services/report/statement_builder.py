@@ -179,6 +179,27 @@ def _row_cap_watch_item(row_count: int) -> dict | None:
     return {"tone": "warn", "text": f"row cap reached — totals may be incomplete ({STATEMENT_ROW_CAP} accounts)"}
 
 
+#: Ordered (dict-insertion order = display order) so the missing-compare watch items
+#: below always list prior/yoy/trend in that priority, never dict-iteration-order luck.
+_COMPARE_LABELS = {"prior": "Prior-period", "yoy": "Year-over-year", "trend": "Trend"}
+
+
+def _missing_compare_watch_items(compare: dict, resolved: dict[str, list | None]) -> list[dict]:
+    """Explicit in-statement signal (T2 gate M1) per expected-but-unresolved comparison:
+    the builder already knows ``section["compare"]``'s INTENT (which comparisons this
+    statement is supposed to carry) vs which of those rids actually resolved
+    (``resolved``, keyed the same as ``compare``) — surface a ``warn`` chip for each gap
+    rather than leaving the reader to infer "no prior column" means "prior unavailable
+    this run" vs "not applicable to this statement type" (BS/TB never have a yoy/trend
+    key in ``compare`` at all, so those never fire for them). A comparison the recipe
+    never asked for (absent from ``compare``) never fires, regardless of ``resolved``."""
+    items = []
+    for key, label in _COMPARE_LABELS.items():
+        if compare.get(key) and resolved.get(key) is None:
+            items.append({"tone": "warn", "text": f"{label} comparison unavailable this run"})
+    return items
+
+
 # ---------------------------------------------------------------------------
 # Parse boundary — the ONLY place a float/str amount becomes a Decimal.
 # ---------------------------------------------------------------------------
@@ -251,12 +272,22 @@ def _resolve_rows(
 
 
 def _require_rows(payloads: dict[str, dict], rid: str) -> list[dict]:
+    """r1's resolution boundary — raises on anything short of a real, non-empty account
+    list (never silently degrades; the caller must fail closed). A well-shaped but EMPTY
+    row set (T2 gate M2) is rejected too: a statement with zero GL accounts at all is a
+    data/connection problem (a genuinely quiet account still posts a $0 line — zero
+    accounts means nothing posted to ANY tracked account type, which a real tenant never
+    produces), not a legitimate render. This is what lets compose/refresh fail closed on
+    an empty statement instead of publishing a contentless one."""
     payload = payloads.get(rid)
     if not isinstance(payload, dict):
         raise ValueError(f"required source {rid!r} is missing from payloads")
     if payload.get("success") is False:
         raise ValueError(f"required source {rid!r} failed: {payload.get('error')}")
-    return _rows_from_payload(payload)  # raises ValueError on malformed shape
+    rows = _rows_from_payload(payload)  # raises ValueError on malformed shape
+    if not rows:
+        raise ValueError(f"required source {rid!r} has no accounts — statement would be empty")
+    return rows
 
 
 def _account_sort_key(number: str):
@@ -303,7 +334,19 @@ def _pct_change(current: Decimal, prior: Decimal | None) -> str | None:
     return fmt_pct_delta((current - prior) / abs(prior) * _HUNDRED)
 
 
-def _quad_row(label: str, current: Decimal, prior: Decimal | None, *, reduces_profit: bool, emph: str) -> dict:
+def _quad_row(
+    label: str,
+    current: Decimal,
+    prior: Decimal | None,
+    *,
+    reduces_profit: bool,
+    emph: str,
+    pct_rev: str | None = None,
+) -> dict:
+    """``pct_rev`` (T2 gate M3, design rule #8): the common-size figure for THIS row, when
+    the caller has a revenue base to compute it against — None for BS/TB (no revenue
+    concept) and for any IS quad row the caller doesn't pass one for (defaults None,
+    backward compatible with every pre-existing call site)."""
     return {
         "label": label,
         "current": fmt_money(current, reduces_profit=reduces_profit),
@@ -312,7 +355,18 @@ def _quad_row(label: str, current: Decimal, prior: Decimal | None, *, reduces_pr
         "delta_pct": _pct_change(current, prior),
         "reduces_profit": reduces_profit,
         "emph": emph,
+        "pct_rev": pct_rev,
     }
+
+
+def _pct_of(value: Decimal, base: Decimal | None) -> str | None:
+    """``value`` as a % of ``base`` (1dp, via ``fmt_pct``), or ``None`` when there's no
+    base to divide by (BS/TB have no revenue concept) or the base is exactly zero
+    (undefined). Shared by KPI margin_pct and every common-size ``pct_rev`` figure — same
+    formula everywhere, so a KPI card's margin and its statement-row twin never drift."""
+    if base is None or base == 0:
+        return None
+    return fmt_pct(value / base * _HUNDRED)
 
 
 def _kpi_row(
@@ -324,14 +378,19 @@ def _kpi_row(
     *,
     margin_base: Decimal | None,
     spark: list[Decimal] | None,
+    neutral: bool = False,
 ) -> dict:
-    margin_pct = None
-    if margin_base is not None and margin_base != 0:
-        margin_pct = fmt_pct(current / margin_base * _HUNDRED)
+    """``neutral`` (T2 gate minor[9], design rule #10): an IS KPI (revenue/profit) moving
+    up is inherently favorable, but a BS/TB KPI (assets/liabilities/equity, debits/
+    credits) moving up has no such inherent favorability — color is reserved EXCLUSIVELY
+    for favorable/unfavorable, never decoration, so a BS/TB KPI's delta must render with
+    an arrow but no color. Defaults False (every pre-existing IS call site unaffected)."""
+    margin_pct = _pct_of(current, margin_base)
     return {
         "key": key,
         "label": label,
         "value": fmt_money(current),
+        "neutral": neutral,
         "margin_pct": margin_pct,
         "mom_delta": fmt_money_delta(current - prior) if prior is not None else None,
         "mom_pct": _pct_change(current, prior),
@@ -424,6 +483,7 @@ def _build_sections(
             prior_subtotal,
             reduces_profit=reduces_profit_fn(section_key, current_subtotal),
             emph="sub",
+            pct_rev=_pct_of(current_subtotal, revenue_total),
         )
         sections_out.append(
             {
@@ -734,16 +794,16 @@ def _build_income_statement_model(section: dict, payloads: dict[str, dict]) -> d
         revenue_total=current["revenue"],
     )
 
+    revenue = current["revenue"]
     quad = [
-        _quad_row(
-            "Revenue", current["revenue"], None if prior is None else prior["revenue"], reduces_profit=False, emph="sub"
-        ),
+        _quad_row("Revenue", revenue, None if prior is None else prior["revenue"], reduces_profit=False, emph="sub"),
         _quad_row(
             "Gross Profit",
             current["gross_profit"],
             None if prior is None else prior["gross_profit"],
             reduces_profit=False,
             emph="formula",
+            pct_rev=_pct_of(current["gross_profit"], revenue),
         ),
         _quad_row(
             "Operating Income",
@@ -751,6 +811,7 @@ def _build_income_statement_model(section: dict, payloads: dict[str, dict]) -> d
             None if prior is None else prior["operating_income"],
             reduces_profit=False,
             emph="formula",
+            pct_rev=_pct_of(current["operating_income"], revenue),
         ),
         _quad_row(
             "Net Income",
@@ -758,6 +819,7 @@ def _build_income_statement_model(section: dict, payloads: dict[str, dict]) -> d
             None if prior is None else prior["net_income"],
             reduces_profit=False,
             emph="net",
+            pct_rev=_pct_of(current["net_income"], revenue),
         ),
     ]
     formulas = [quad[1], quad[2]]
@@ -782,9 +844,11 @@ def _build_income_statement_model(section: dict, payloads: dict[str, dict]) -> d
         }
 
     watch = _build_is_watch(current, prior, current_rows, prior_rows, trend_buckets)
+    missing_items = _missing_compare_watch_items(compare, {"prior": prior_rows, "yoy": yoy_rows, "trend": trend_rows})
     cap_item = _row_cap_watch_item(len(current_rows))
-    if cap_item is not None:
-        watch = [cap_item, *watch][:MAX_WATCH_ITEMS]
+    priority_items = ([cap_item] if cap_item is not None else []) + missing_items
+    if priority_items:
+        watch = (priority_items + watch)[:MAX_WATCH_ITEMS]
     highlights = _build_is_highlights(current, prior, current_rows, prior_rows)
     narrative = _build_is_narrative(current, prior, period)
 
@@ -841,7 +905,14 @@ def _build_balance_sheet_model(section: dict, payloads: dict[str, dict]) -> dict
 
     kpis = [
         _kpi_row(
-            "total_assets", "Total assets", current["assets"], get(prior, "assets"), None, margin_base=None, spark=None
+            "total_assets",
+            "Total assets",
+            current["assets"],
+            get(prior, "assets"),
+            None,
+            margin_base=None,
+            spark=None,
+            neutral=True,
         ),
         _kpi_row(
             "total_liabilities",
@@ -851,9 +922,17 @@ def _build_balance_sheet_model(section: dict, payloads: dict[str, dict]) -> dict
             None,
             margin_base=None,
             spark=None,
+            neutral=True,
         ),
         _kpi_row(
-            "total_equity", "Total equity", current["equity"], get(prior, "equity"), None, margin_base=None, spark=None
+            "total_equity",
+            "Total equity",
+            current["equity"],
+            get(prior, "equity"),
+            None,
+            margin_base=None,
+            spark=None,
+            neutral=True,
         ),
     ]
 
@@ -896,7 +975,7 @@ def _build_balance_sheet_model(section: dict, payloads: dict[str, dict]) -> dict
     ]
 
     cap_item = _row_cap_watch_item(len(current_rows))
-    watch = [cap_item] if cap_item is not None else []
+    watch = ([cap_item] if cap_item is not None else []) + _missing_compare_watch_items(compare, {"prior": prior_rows})
 
     return {
         "statement": "balance_sheet",
@@ -950,7 +1029,14 @@ def _build_trial_balance_model(section: dict, payloads: dict[str, dict]) -> dict
 
     kpis = [
         _kpi_row(
-            "total_debits", "Total debits", current["debit"], get(prior, "debit"), None, margin_base=None, spark=None
+            "total_debits",
+            "Total debits",
+            current["debit"],
+            get(prior, "debit"),
+            None,
+            margin_base=None,
+            spark=None,
+            neutral=True,
         ),
         _kpi_row(
             "total_credits",
@@ -960,6 +1046,7 @@ def _build_trial_balance_model(section: dict, payloads: dict[str, dict]) -> dict
             None,
             margin_base=None,
             spark=None,
+            neutral=True,
         ),
     ]
 
@@ -1002,7 +1089,7 @@ def _build_trial_balance_model(section: dict, payloads: dict[str, dict]) -> dict
     ]
 
     cap_item = _row_cap_watch_item(len(current_rows))
-    watch = [cap_item] if cap_item is not None else []
+    watch = ([cap_item] if cap_item is not None else []) + _missing_compare_watch_items(compare, {"prior": prior_rows})
 
     return {
         "statement": "trial_balance",
