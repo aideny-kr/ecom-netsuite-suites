@@ -451,6 +451,25 @@ describe("NeedsHumanWorksheet", () => {
     expect(screen.getByText(/loading/i)).toBeInTheDocument();
   });
 
+  describe("truncation notice (limit=1,000 cross-group fetch)", () => {
+    it("shows no notice when the result count is below the limit", () => {
+      render(<NeedsHumanWorksheet runId="r1" proposals={[proposal]} isLoading={false} onInvestigate={vi.fn()} />);
+      expect(screen.queryByText(/showing first/i)).not.toBeInTheDocument();
+    });
+
+    it("shows the amber 'showing first 1,000' notice when the result count reaches the limit", () => {
+      const many: ReconResolutionProposal[] = Array.from({ length: 1000 }, (_, i) => ({
+        ...proposal,
+        id: `p${i}`,
+        order_reference: `R${i}`,
+      }));
+      render(<NeedsHumanWorksheet runId="r1" proposals={many} isLoading={false} onInvestigate={vi.fn()} />);
+      const notice = screen.getByText(/showing first 1,000.*download the export for the complete list/i);
+      expect(notice).toBeInTheDocument();
+      expect(notice.className).toContain("amber");
+    });
+  });
+
   describe("root-cause chip severity", () => {
     it("colors chargeback/dispute chips critical (red)", () => {
       render(<NeedsHumanWorksheet runId="r1" proposals={[proposal]} isLoading={false} onInvestigate={vi.fn()} />);

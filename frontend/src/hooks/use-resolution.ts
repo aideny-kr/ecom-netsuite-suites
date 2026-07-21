@@ -36,6 +36,12 @@ export function useGroupProposals(
   });
 }
 
+// The route defaults to limit=100 server-side, which would silently
+// truncate the cross-group needs-human worksheet on a busy run. Request a
+// high ceiling explicitly; the worksheet compares the returned count against
+// this same constant to warn the operator if even THAT ceiling was hit.
+export const NEEDS_HUMAN_PROPOSALS_LIMIT = 1000;
+
 // The group_key-less route filters cross-group by action alone — the
 // needs-human worksheet spans every root_cause/booking_vehicle combination
 // sharing that action in one call instead of one fetch per group.
@@ -44,7 +50,7 @@ export function useNeedsHumanProposals(runId: string | null) {
     queryKey: ["recon-needs-human-proposals", runId],
     queryFn: () =>
       apiClient.get<ReconResolutionProposal[]>(
-        `/api/v1/reconciliation/runs/${runId}/resolution-groups/proposals?action=needs_human`
+        `/api/v1/reconciliation/runs/${runId}/resolution-groups/proposals?action=needs_human&limit=${NEEDS_HUMAN_PROPOSALS_LIMIT}`
       ),
     enabled: !!runId,
   });

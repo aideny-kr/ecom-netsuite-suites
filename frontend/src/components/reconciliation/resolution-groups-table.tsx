@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/table";
 import { ResolutionGroupItems } from "@/components/reconciliation/resolution-group-items";
 import { ExportMenu } from "@/components/reconciliation/export-menu";
+import { NEEDS_HUMAN_PROPOSALS_LIMIT } from "@/hooks/use-resolution";
 import type { ReconResolutionGroup, ReconResolutionProposal } from "@/lib/types";
 
 // Booking-vehicle chip copy + styling. journalentry is the flagged fallback —
@@ -358,6 +359,10 @@ interface NeedsHumanWorksheetProps {
 }
 
 export function NeedsHumanWorksheet({ runId, proposals, isLoading, onInvestigate }: NeedsHumanWorksheetProps) {
+  // The fetch requests NEEDS_HUMAN_PROPOSALS_LIMIT rows; a returned count
+  // that reaches the limit means the run may have more the operator can't
+  // see in this worksheet — the export always carries the complete list.
+  const atLimit = (proposals?.length ?? 0) >= NEEDS_HUMAN_PROPOSALS_LIMIT;
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between gap-3">
@@ -371,6 +376,11 @@ export function NeedsHumanWorksheet({ runId, proposals, isLoading, onInvestigate
         </h2>
         <ExportMenu runId={runId} params={{ section: "proposals", action: "needs_human" }} />
       </div>
+      {atLimit && (
+        <p className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-[13px] text-amber-800">
+          Showing first {NEEDS_HUMAN_PROPOSALS_LIMIT.toLocaleString()} — download the export for the complete list.
+        </p>
+      )}
       {isLoading ? (
         <p className="text-[13px] text-muted-foreground">Loading…</p>
       ) : !proposals?.length ? (
