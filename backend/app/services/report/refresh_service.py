@@ -17,10 +17,18 @@ changes). Three phases so a failure can never corrupt the current version:
    lives in base_agent) — this service's per-source ``is_recipe_eligible`` re-check is
    the load-bearing caller-side gate against a tampered ``recipe_json`` row, on top of
    capture-time structural exclusion, per-tool read-only validators, and the
-   connector-consistency check. Any source failure fails the WHOLE refresh — never a
-   version with mixed-vintage or missing numbers (coverage of every referenced rid is
+   connector-consistency check. A REQUIRED rid's failure fails the WHOLE refresh — never
+   a version with mixed-vintage or missing numbers (coverage of every referenced rid is
    verified BEFORE assemble_spec, which would otherwise render "Data unavailable"
-   sections instead of raising).
+   sections instead of raising). A NON-required rid (a ``financial_statement``'s
+   prior/yoy/trend compare source — see ``report_service.required_result_ids``) instead
+   DEGRADES: its failure is caught, the rid is simply omitted from ``payloads``, and the
+   statement still refreshes, just missing that one comparison — the section IS the
+   report only for its OWN current-period source (r1), never for an optional compare
+   one. See ``_execute_sources``'s own docstring for the required-vs-degrade mechanics,
+   and ``report_service.financial_statement_resolution_error`` for the separate check
+   that DOES still fail the whole refresh closed when r1 itself resolves but the
+   statement built from it turns out to be unbuildable (e.g. zero accounts).
 3. **Atomic publish (own txn):** lazy v1 snapshot on first refresh (pre-refresh parent
    state, honest history dates) → insert version N+1 → mirror parent → audit
    ``report.refresh`` → commit. Unlike compose (chat-turn atomicity), this is a normal
@@ -240,6 +248,7 @@ async def refresh_report(
     from app.services.report.report_html import build_provenance, render_report_html
     from app.services.report.report_service import (
         assemble_spec,
+        financial_statement_resolution_error,
         referenced_result_ids,
         required_result_ids,
         spec_json_safe,
@@ -289,10 +298,22 @@ async def refresh_report(
         )
 
         spec = assemble_spec(report.title, recipe["sections"], lambda rid: payloads[rid])
+        # T2 gate M2: r1 can RESOLVE but still fail to become a real statement (e.g. a
+        # well-shaped but empty account list). For a statement report the section IS the
+        # report, so this fails closed (raised inside this try -> the except below
+        # writes a failure audit + re-raises unchanged, never publishing a version over
+        # the current one) rather than letting the error-card degrade publish a
+        # contentless statement.
+        error_reason = financial_statement_resolution_error(recipe["sections"], spec)
+        if error_reason is not None:
+            raise RefreshError(502, f"statement could not be built: {error_reason}")
         html = render_report_html(
             spec,
             freshness={"composed_at": recipe.get("captured_at", ""), "refreshed_at": now.isoformat()},
-            provenance=build_provenance(recipe["sources"], now.isoformat()),
+            # T2 gate M1: resolved_rids marks any compare rid the degrade seam omitted
+            # from payloads as "not available this run" instead of falsely claiming it
+            # executed — see build_provenance's docstring.
+            provenance=build_provenance(recipe["sources"], now.isoformat(), resolved_rids=set(payloads)),
         )
         persisted_spec = spec_json_safe(spec)
 

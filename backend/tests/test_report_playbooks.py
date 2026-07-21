@@ -313,6 +313,72 @@ async def test_compose_playbook_income_statement_degrades_when_compare_sources_f
     assert "vs May 2026" not in report.rendered_html  # no prior chip when prior is unavailable
 
 
+def _provenance_line(html: str, rid: str) -> str:
+    return next(seg for seg in html.split("<div>") if seg.startswith(f"{rid} —"))
+
+
+async def test_compose_playbook_provenance_shows_not_available_for_degraded_compare(db, monkeypatch):
+    """T2 gate M1: r3 (yoy) fails at the tool layer -- the frozen "Sources & method"
+    block must NOT claim r3 was executed (a false trust claim); r1/r2/r4 keep their
+    normal 'executed ...' stamps. The in-statement watch chip (statement_builder's own
+    half of M1) must also be present, proving the wiring is end-to-end."""
+    tenant = await create_test_tenant(db, name="ProvenanceDegradeCorp")
+    user, _ = await create_test_user(db, tenant)
+    failed = json.dumps({"success": False, "error": "No active NetSuite connection found"})
+    calls = _patch_executor(monkeypatch, by_params=_income_statement_by_params(r3=failed))
+
+    report = await compose_playbook_report(
+        db,
+        playbook_key="income_statement",
+        params={"period": "Jun 2026"},
+        tenant_id=tenant.id,
+        actor_id=user.id,
+    )
+
+    assert len(calls) == 4  # every source still attempted
+    html = report.rendered_html
+    assert "executed" in _provenance_line(html, "r1")
+    assert "executed" in _provenance_line(html, "r2")
+    r3_line = _provenance_line(html, "r3")
+    assert "not available this run — comparison omitted" in r3_line
+    assert "executed" not in r3_line
+    assert "executed" in _provenance_line(html, "r4")
+    assert "Year-over-year comparison unavailable this run" in html
+
+
+async def test_compose_playbook_income_statement_zero_row_r1_fails_closed(db, monkeypatch):
+    """T2 gate M2: r1 RESOLVES (extract_result_payload succeeds -- valid but EMPTY
+    columns+rows) but build_statement_model raises (statement_builder._require_rows now
+    rejects a zero-account statement) -- compose must fail closed (502), never publish a
+    contentless statement. Nothing persisted."""
+    tenant = await create_test_tenant(db, name="ZeroRowCorp")
+    user, _ = await create_test_user(db, tenant)
+    empty_r1 = json.dumps(
+        {
+            "success": True,
+            "columns": ["acctnumber", "acctname", "accttype", "section", "amount"],
+            "rows": [],
+            "row_count": 0,
+            "query": "SELECT 1",
+        }
+    )
+    _patch_executor(monkeypatch, by_params=_income_statement_by_params(r1=empty_r1))
+
+    with pytest.raises(RefreshError) as exc_info:
+        await compose_playbook_report(
+            db,
+            playbook_key="income_statement",
+            params={"period": "Jun 2026"},
+            tenant_id=tenant.id,
+            actor_id=user.id,
+        )
+    assert exc_info.value.status_code == 502
+    assert "statement could not be built" in exc_info.value.detail
+
+    result = await db.execute(select(Report).where(Report.tenant_id == tenant.id))
+    assert result.scalars().all() == []
+
+
 async def test_compose_playbook_income_statement_r1_failure_still_fails_closed(db, monkeypatch):
     """Risk 2's other half: the CURRENT-period source (r1) is still a hard dependency —
     its failure kills the whole compose exactly like before Task 4 (no partial/degraded

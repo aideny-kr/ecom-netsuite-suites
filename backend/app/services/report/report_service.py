@@ -624,6 +624,39 @@ def required_result_ids(sections: list[dict]) -> set[str]:
     return set(required)
 
 
+def financial_statement_resolution_error(sections: list[dict], resolved_spec: dict) -> str | None:
+    """T2 gate M2: detect a ``financial_statement`` section (in the INPUT ``sections``)
+    that resolved to an error card in ``resolved_spec`` (``assemble_spec``'s output) —
+    e.g. r1 resolved but ``build_statement_model`` raised (a malformed payload, or —
+    since ``statement_builder``'s own ``_require_rows`` now rejects it — an empty row
+    set). For a statement report the SECTION IS THE REPORT, so compose/refresh use this
+    to fail closed instead of publishing a contentless statement, unlike every other
+    section type (whose error card renders in place while the rest of the report still
+    publishes fine).
+
+    ``financial_statement`` sections are NEVER callout-popped or auto-charted
+    (``assemble_spec``'s own Pass-2 comment), so each ORIGINAL ``financial_statement``
+    section maps to exactly ONE output section, never reordered — scanning for the FIRST
+    ``"error"``-typed output section is unambiguous for THIS function's only two callers
+    (``playbooks.compose_playbook_report`` / ``refresh_service.refresh_report``): both
+    always operate on a playbook-authored recipe, whose sections are ALWAYS
+    ``financial_statement``-only (never mixed with a table/chart section that could
+    independently produce an UNRELATED error card). Chat's ``compose_report`` path,
+    which DOES mix section types, rejects ``financial_statement`` sections before
+    ``assemble_spec`` ever runs — so this scan is always a no-op there (``sections``
+    never has one to begin with).
+
+    Returns the error's ``reason`` string, or ``None`` when every ``financial_statement``
+    section in the input resolved successfully (or there were none)."""
+    fs_count = sum(1 for s in sections or [] if isinstance(s, dict) and s.get("type") == "financial_statement")
+    if fs_count == 0:
+        return None
+    for s in resolved_spec.get("sections") or []:
+        if isinstance(s, dict) and s.get("type") == "error":
+            return s.get("reason")
+    return None
+
+
 def spec_json_safe(spec: dict) -> dict:
     """A copy of an assembled ``spec`` safe to persist as JSONB (Task 4 Risk 3): every
     ``financial_statement`` section's ``model`` has its raw-``Decimal`` spark/trend

@@ -551,6 +551,57 @@ def test_assemble_spec_financial_statement_compare_resolver_failure_degrades():
     assert model["kpis"][0]["mom_delta"] is None
 
 
+def test_financial_statement_resolution_error_detects_error_card():
+    """T2 gate M2: compose/refresh need a way to detect "the financial_statement section
+    the recipe asked for came back as an error card" AFTER assemble_spec, so they can
+    fail closed instead of publishing a contentless statement."""
+    from app.services.report.report_service import financial_statement_resolution_error
+
+    malformed = fx.malformed_r1_payload()
+    section = fx.income_statement_section()
+    spec = assemble_spec(title="X", sections=[section], resolver=lambda rid: malformed[rid])
+    error = financial_statement_resolution_error([section], spec)
+    assert error is not None
+    assert isinstance(error, str) and error
+
+
+def test_financial_statement_resolution_error_none_when_resolved():
+    from app.services.report.report_service import financial_statement_resolution_error
+
+    payloads = fx.income_statement_payloads()
+    section = fx.income_statement_section()
+    spec = assemble_spec(title="X", sections=[section], resolver=lambda rid: payloads[rid])
+    assert financial_statement_resolution_error([section], spec) is None
+
+
+def test_financial_statement_resolution_error_none_when_no_statement_sections():
+    """A DIFFERENT section type's OWN error card must never be mistaken for a
+    financial_statement failure -- there are no financial_statement sections in the
+    INPUT at all here, so the scan is a no-op regardless of what's in resolved_spec."""
+    from app.services.report.report_service import financial_statement_resolution_error
+
+    sections = [{"type": "table", "result_id": "r1"}]
+    resolved_spec = {"title": "X", "sections": [{"type": "error", "reason": "boom"}], "provenance": {}}
+    assert financial_statement_resolution_error(sections, resolved_spec) is None
+
+
+def test_financial_statement_resolution_error_degraded_compare_is_not_an_error():
+    """A compare-only degrade (prior/yoy/trend unavailable) still resolves to
+    type='financial_statement' (never 'error') -- must NOT be flagged."""
+    from app.services.report.report_service import financial_statement_resolution_error
+
+    payloads = fx.income_statement_payloads()
+
+    def resolver(rid):
+        if rid == "r1":
+            return payloads["r1"]
+        raise RuntimeError(f"{rid} unavailable")
+
+    section = fx.income_statement_section()
+    spec = assemble_spec(title="X", sections=[section], resolver=resolver)
+    assert financial_statement_resolution_error([section], spec) is None
+
+
 async def test_compose_report_rejects_financial_statement_section():
     """Risk 1: financial_statement is PLAYBOOK-ONLY. compose_report is the chat-tool
     entry point (report_export.execute -> compose_report) and must reject it BEFORE

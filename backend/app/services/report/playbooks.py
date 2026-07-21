@@ -148,10 +148,11 @@ async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_
     from app.core.database import set_tenant_context
     from app.models.report import Report
     from app.services import audit_service
-    from app.services.report.refresh_service import _execute_sources, _validated_sources
+    from app.services.report.refresh_service import RefreshError, _execute_sources, _validated_sources
     from app.services.report.report_html import build_provenance, render_report_html
     from app.services.report.report_service import (
         assemble_spec,
+        financial_statement_resolution_error,
         referenced_result_ids,
         required_result_ids,
         spec_json_safe,
@@ -177,10 +178,21 @@ async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_
         required_rids=required_result_ids(recipe["sections"]),
     )
     spec = assemble_spec(title, recipe["sections"], lambda rid: payloads[rid])
+    # T2 gate M2: r1 can RESOLVE but still fail to become a real statement (e.g. a
+    # well-shaped but empty account list — statement_builder._require_rows rejects
+    # that). For a statement report the section IS the report, so this fails closed
+    # (never persists a Report row) rather than letting the error-card degrade publish
+    # a contentless statement the way any OTHER section type's failure would.
+    error_reason = financial_statement_resolution_error(recipe["sections"], spec)
+    if error_reason is not None:
+        raise RefreshError(502, f"statement could not be built: {error_reason}")
     html = render_report_html(
         spec,
         freshness={"composed_at": recipe["captured_at"], "refreshed_at": ""},
-        provenance=build_provenance(recipe["sources"], recipe["captured_at"]),
+        # T2 gate M1: resolved_rids marks any compare rid the degrade seam omitted from
+        # payloads as "not available this run" in the frozen provenance block instead of
+        # falsely claiming it executed — see build_provenance's docstring.
+        provenance=build_provenance(recipe["sources"], recipe["captured_at"], resolved_rids=set(payloads)),
     )
 
     # tool calls may commit (e.g. token refresh) — re-establish before RLS writes

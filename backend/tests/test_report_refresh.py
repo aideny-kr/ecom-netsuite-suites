@@ -669,6 +669,74 @@ async def test_refresh_of_statement_recipe_r1_failure_still_fails_closed(db, mon
     assert row.rendered_html == original_html  # current version untouched
 
 
+def _provenance_line(html: str, rid: str) -> str:
+    return next(seg for seg in html.split("<div>") if seg.startswith(f"{rid} —"))
+
+
+async def test_refresh_of_statement_recipe_provenance_shows_not_available_for_degraded_compare(db, monkeypatch):
+    """T2 gate M1 on the refresh path: r3 (yoy) fails -- the refreshed version's frozen
+    provenance must NOT claim r3 executed; r1/r2/r4 keep normal stamps."""
+    _title, recipe = build_playbook_recipe("income_statement", {"period": "Jun 2026"})
+    tenant, user, report = await _seed_report(db, recipe=recipe)
+    failed = json.dumps({"success": False, "error": "No active NetSuite connection found"})
+    calls = _patch_executor(monkeypatch, by_params=_income_statement_by_params(r3=failed))
+
+    updated = await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
+
+    assert len(calls) == 4
+    html = updated.rendered_html
+    assert "executed" in _provenance_line(html, "r1")
+    assert "executed" in _provenance_line(html, "r2")
+    r3_line = _provenance_line(html, "r3")
+    assert "not available this run — comparison omitted" in r3_line
+    assert "executed" not in r3_line
+    assert "Year-over-year comparison unavailable this run" in html
+
+
+async def test_refresh_of_statement_recipe_fully_resolved_provenance_byte_stable(db, monkeypatch):
+    """Fully-resolved refresh (every source succeeds) renders IDENTICALLY to before this
+    T2 gate fix -- every source shows its normal 'executed ...' stamp, never the
+    unavailable line."""
+    _title, recipe = build_playbook_recipe("income_statement", {"period": "Jun 2026"})
+    tenant, user, report = await _seed_report(db, recipe=recipe)
+    _patch_executor(monkeypatch, by_params=_income_statement_by_params())
+
+    updated = await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
+
+    html = updated.rendered_html
+    for rid in ("r1", "r2", "r3", "r4"):
+        assert "executed" in _provenance_line(html, rid)
+    assert "not available this run" not in html
+
+
+async def test_refresh_of_statement_recipe_zero_row_r1_fails_closed_keeps_old_version(db, monkeypatch):
+    """T2 gate M2 on the refresh path: r1 resolves but is a well-shaped EMPTY row set --
+    build_statement_model raises, refresh fails closed (RefreshError), and the current
+    (old) version is left completely untouched, exactly like the pre-existing r1-failure
+    fail-closed test above."""
+    _title, recipe = build_playbook_recipe("income_statement", {"period": "Jun 2026"})
+    tenant, user, report = await _seed_report(db, recipe=recipe)
+    rid, tid, uid, original_html = report.id, tenant.id, user.id, report.rendered_html
+    empty_r1 = json.dumps(
+        {
+            "success": True,
+            "columns": ["acctnumber", "acctname", "accttype", "section", "amount"],
+            "rows": [],
+            "row_count": 0,
+            "query": "SELECT 1",
+        }
+    )
+    _patch_executor(monkeypatch, by_params=_income_statement_by_params(r1=empty_r1))
+
+    with pytest.raises(RefreshError) as exc:
+        await refresh_report(db, report_id=rid, tenant_id=tid, actor_id=uid)
+    assert exc.value.status_code == 502
+    assert "statement could not be built" in exc.value.detail
+    row = (await db.execute(select(Report).where(Report.id == rid))).scalar_one()
+    assert row.rendered_html == original_html  # current version untouched
+    assert row.version == 1
+
+
 async def test_refresh_of_v1_style_recipe_stays_byte_stable_no_fs_markup(db, monkeypatch):
     """v1 (table/narrative) recipes must refresh exactly as before Task 4's
     financial_statement wiring landed: no fs-* CSS/markup leaks into a plain report, and
