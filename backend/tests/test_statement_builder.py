@@ -759,6 +759,91 @@ def test_row_cap_guard_wired_into_trial_balance():
 
 
 # ===========================================================================
+# T2 gate round 2, B1(b) — a TRUNCATED payload (an extraction-layer cap fired below the
+# SQL's own STATEMENT_ROW_CAP) must be detected, distinctly from the row-cap guard above
+# (which only fires when the statement's OWN row count lands exactly on the SQL cap). r1
+# fails closed; a truncated compare degrades like an absent/failed one.
+# ===========================================================================
+
+
+def test_truncated_r1_raises_value_error():
+    with pytest.raises(ValueError, match="account list truncated at 100 of 6000"):
+        build_statement_model(fx.income_statement_section(), fx.truncated_r1_payload())
+
+
+def test_truncated_r1_error_message_states_statement_cannot_be_computed():
+    with pytest.raises(ValueError, match="statement cannot be computed completely"):
+        build_statement_model(fx.income_statement_section(), fx.truncated_r1_payload())
+
+
+def test_truncated_r1_raises_for_balance_sheet_too():
+    rows = [_bs_row_for_test(i) for i in range(50)]
+    payload = fx._payload(fx._BS_COLUMNS, rows, query="balance_sheet (2026-06-30)")
+    payload["truncated"] = True
+    payload["row_count"] = 9000
+    with pytest.raises(ValueError, match="account list truncated at 50 of 9000"):
+        build_statement_model(fx.balance_sheet_section(), {"r1": payload})
+
+
+def _bs_row_for_test(i: int) -> dict:
+    return {
+        "acctnumber": str(1000 + i),
+        "acctname": f"Asset {i}",
+        "accttype": "Bank",
+        "section": "1-Assets",
+        "balance": Decimal("1"),
+    }
+
+
+def test_truncated_compare_degrades_not_raises():
+    model = build_statement_model(fx.income_statement_section(), fx.truncated_compare_payload())
+    kpis = {k["key"]: k for k in model["kpis"]}
+    assert kpis["revenue"]["value"] == "$5"  # r1 (5 accounts, $1 each) unaffected
+    assert kpis["revenue"]["mom_delta"] is None
+    assert kpis["revenue"]["mom_pct"] is None
+    assert model["prior_period"] is None
+    watch_texts = [w["text"] for w in model["watch"]]
+    assert "Prior-period comparison unavailable this run" in watch_texts
+
+
+def test_row_count_greater_than_len_rows_without_truncated_flag_still_detected():
+    """A payload could theoretically set row_count > len(rows) without also flipping the
+    truncated flag (defensive: the two signals should never disagree, but detection must
+    not depend on both being set correctly)."""
+    payloads = fx.row_cap_boundary_payloads(100)
+    payloads["r1"]["truncated"] = False
+    payloads["r1"]["row_count"] = 500
+    with pytest.raises(ValueError, match="account list truncated at 100 of 500"):
+        build_statement_model(fx.income_statement_section(), payloads)
+
+
+# ===========================================================================
+# T2 gate round 2, M-B — a compare source that resolves successfully but is legitimately
+# EMPTY (a derived period with zero rows) must degrade like an absent/failed source,
+# never render $0 priors / deltas computed against nothing.
+# ===========================================================================
+
+
+def test_empty_compare_degrades_not_zero():
+    model = build_statement_model(fx.income_statement_section(), fx.empty_compare_payload())
+    kpis = {k["key"]: k for k in model["kpis"]}
+    assert kpis["revenue"]["value"] == "$5"  # r1 (5 accounts, $1 each) unaffected
+    assert kpis["revenue"]["mom_delta"] is None, "an empty compare must NOT compute a delta vs $0"
+    assert kpis["revenue"]["mom_pct"] is None
+    assert model["prior_period"] is None
+    assert model["quad"][0]["prior"] is None
+    watch_texts = [w["text"] for w in model["watch"]]
+    assert "Prior-period comparison unavailable this run" in watch_texts
+
+
+def test_r1_zero_rows_still_raises_unaffected_by_mb_fix():
+    """M-B only changes COMPARE handling; r1's existing (wave-4) zero-row fail-closed
+    behavior must be completely unchanged."""
+    with pytest.raises(ValueError):
+        build_statement_model(fx.income_statement_section(), fx.income_statement_payloads_zero_rows())
+
+
+# ===========================================================================
 # Unknown statement type — malformed section input
 # ===========================================================================
 

@@ -243,16 +243,37 @@ def _rows_from_payload(payload: dict) -> list[dict]:
     raise ValueError("payload has neither columns+rows nor an items list")
 
 
+def _is_truncated(payload: dict, rows: list[dict]) -> bool:
+    """T2 gate B1: true when ``payload`` is a WELL-SHAPED but PARTIAL account list -- either
+    the source declares ``truncated`` itself (an under-paginated OAuth1 SuiteQL call, an
+    already-capped upstream payload), or its ``row_count`` (the TRUE pre-cap total a layer
+    like ``tool_call_results._cap_stored_rows`` preserves) exceeds the rows actually
+    present. Distinct from ``_row_cap_watch_item``, which fires when a statement's row
+    count lands exactly on ``STATEMENT_ROW_CAP`` (the SQL's OWN cap, never flagged
+    ``truncated`` by the source) -- this catches the extraction layer cutting rows BELOW
+    what the source actually returned, the round-2 B1 bug (a 2000-row extraction cap
+    silently corrupting a >2000-account statement)."""
+    if payload.get("truncated"):
+        return True
+    row_count = payload.get("row_count")
+    return isinstance(row_count, int) and row_count > len(rows)
+
+
 def _resolve_rows(
     payloads: dict[str, dict], rid: str | None, *, amount_cols: tuple[str, ...] = ()
 ) -> list[dict] | None:
     """Resolve a compare rid to its parsed rows, or ``None`` on ANY failure — absent, marked
-    failed, structurally unparseable, OR (when ``amount_cols`` is given) a row whose value
-    in one of those columns doesn't parse to a finite Decimal. This is the degrade-never-
-    raise boundary for compare sources: without the ``amount_cols`` pre-validation, a
-    malformed amount in a PRIOR/YOY/TREND source would only be discovered much later, deep
-    inside a totals/section builder that doesn't wrap its calls in try/except — crashing the
-    WHOLE statement instead of degrading just this one comparison. r1 uses ``_require_rows``
+    failed, structurally unparseable, a well-shaped but EMPTY row set (T2 gate M-B — a
+    derived compare period can legitimately return zero rows; rendering deltas/margins
+    against a phantom $0 prior is misleading, so it degrades exactly like an absent
+    source), a TRUNCATED payload (T2 gate B1 — see ``_is_truncated``; a PARTIAL prior/yoy/
+    trend account list would compute silently wrong deltas/margins/sparklines, worse than
+    no comparison at all), OR (when ``amount_cols`` is given) a row whose value in one of
+    those columns doesn't parse to a finite Decimal. This is the degrade-never-raise
+    boundary for compare sources: without the ``amount_cols`` pre-validation, a malformed
+    amount in a PRIOR/YOY/TREND source would only be discovered much later, deep inside a
+    totals/section builder that doesn't wrap its calls in try/except — crashing the WHOLE
+    statement instead of degrading just this one comparison. r1 uses ``_require_rows``
     instead (raises — the primary source must fail closed, never silently degrade)."""
     if not rid:
         return None
@@ -263,6 +284,10 @@ def _resolve_rows(
         return None
     try:
         rows = _rows_from_payload(payload)
+        if not rows:
+            return None
+        if _is_truncated(payload, rows):
+            return None
         for col in amount_cols:
             for row in rows:
                 _to_decimal(row.get(col))
@@ -272,13 +297,17 @@ def _resolve_rows(
 
 
 def _require_rows(payloads: dict[str, dict], rid: str) -> list[dict]:
-    """r1's resolution boundary — raises on anything short of a real, non-empty account
-    list (never silently degrades; the caller must fail closed). A well-shaped but EMPTY
-    row set (T2 gate M2) is rejected too: a statement with zero GL accounts at all is a
-    data/connection problem (a genuinely quiet account still posts a $0 line — zero
-    accounts means nothing posted to ANY tracked account type, which a real tenant never
-    produces), not a legitimate render. This is what lets compose/refresh fail closed on
-    an empty statement instead of publishing a contentless one."""
+    """r1's resolution boundary — raises on anything short of a real, non-empty,
+    COMPLETE account list (never silently degrades; the caller must fail closed). A
+    well-shaped but EMPTY row set (T2 gate M2) is rejected too: a statement with zero GL
+    accounts at all is a data/connection problem (a genuinely quiet account still posts a
+    $0 line — zero accounts means nothing posted to ANY tracked account type, which a real
+    tenant never produces), not a legitimate render. A well-shaped but TRUNCATED row set
+    (T2 gate B1 round 2 — see ``_is_truncated``) is rejected too: an extraction-layer cap
+    (below the SQL's own ``STATEMENT_ROW_CAP``) that cut a real tenant's account list
+    short would otherwise silently corrupt every total/NI/balance check downstream while
+    rendering as if nothing were wrong. This is what lets compose/refresh fail closed on
+    an empty OR partial statement instead of publishing a contentless or corrupted one."""
     payload = payloads.get(rid)
     if not isinstance(payload, dict):
         raise ValueError(f"required source {rid!r} is missing from payloads")
@@ -287,6 +316,13 @@ def _require_rows(payloads: dict[str, dict], rid: str) -> list[dict]:
     rows = _rows_from_payload(payload)  # raises ValueError on malformed shape
     if not rows:
         raise ValueError(f"required source {rid!r} has no accounts — statement would be empty")
+    if _is_truncated(payload, rows):
+        row_count = payload.get("row_count")
+        total = row_count if isinstance(row_count, int) else len(rows)
+        raise ValueError(
+            f"required source {rid!r} account list truncated at {len(rows)} of {total} — "
+            "statement cannot be computed completely"
+        )
     return rows
 
 

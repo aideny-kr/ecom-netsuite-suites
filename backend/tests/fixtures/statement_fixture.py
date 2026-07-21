@@ -689,6 +689,48 @@ def tb_row_cap_boundary_payloads(row_count: int) -> dict[str, dict]:
     return {"r1": _payload(_TB_COLUMNS, rows, query="trial_balance (Jun 2026)")}
 
 
+def truncated_r1_payload(present_rows: int = 100, true_total: int = 6000) -> dict[str, dict]:
+    """T2 gate B1(b): r1 with a well-shaped account list that is ITSELF truncated -- exactly
+    the shape a ``_cap_stored_rows``-capped extraction produces (``truncated=True``,
+    ``row_count`` the TRUE pre-cap total, ``len(rows)`` the smaller surviving count).
+    ``_require_rows`` must fail closed on this rather than silently building a statement
+    from a partial account list -- distinct from ``row_cap_boundary_payloads`` (which is
+    NOT truncated; every row it declares is genuinely present)."""
+    rows = [_is_row(str(4000 + i), f"Account {i}", "Income", "1-Revenue", Decimal("1")) for i in range(present_rows)]
+    payload = _payload(_IS_COLUMNS, rows, query="income_statement (Jun 2026)")
+    payload["truncated"] = True
+    payload["row_count"] = true_total
+    return {"r1": payload}
+
+
+def truncated_compare_payload(present_rows: int = 100, true_total: int = 6000) -> dict[str, dict]:
+    """T2 gate B1(b): r1 is a normal, complete payload; r2 (prior) is truncated the same
+    way ``truncated_r1_payload`` is. ``_resolve_rows`` must degrade (None) rather than
+    compute deltas/margins against a partial prior-period account list."""
+    r1_rows = [_is_row(str(4000 + i), f"Account {i}", "Income", "1-Revenue", Decimal("1")) for i in range(5)]
+    r2_rows = [_is_row(str(4000 + i), f"Account {i}", "Income", "1-Revenue", Decimal("1")) for i in range(present_rows)]
+    r2_payload = _payload(_IS_COLUMNS, r2_rows, query="income_statement (May 2026)")
+    r2_payload["truncated"] = True
+    r2_payload["row_count"] = true_total
+    return {
+        "r1": _payload(_IS_COLUMNS, r1_rows, query="income_statement (Jun 2026)"),
+        "r2": r2_payload,
+    }
+
+
+def empty_compare_payload() -> dict[str, dict]:
+    """T2 gate M-B: r2 (prior) is present, well-shaped, and legitimately EMPTY (a derived
+    compare period with zero rows -- fiscal-calendar drift, an empty period). Must degrade
+    (None) exactly like an absent/failed r2, never compute deltas/margins against a $0
+    prior. r1 is a normal 5-account payload (its OWN zero-row case is covered separately
+    by ``income_statement_payloads_zero_rows``, which must still raise)."""
+    r1_rows = [_is_row(str(4000 + i), f"Account {i}", "Income", "1-Revenue", Decimal("1")) for i in range(5)]
+    return {
+        "r1": _payload(_IS_COLUMNS, r1_rows, query="income_statement (Jun 2026)"),
+        "r2": _payload(_IS_COLUMNS, [], query="income_statement (May 2026)"),
+    }
+
+
 def gp_margin_watch_payloads(delta_pp_direction: str) -> dict[str, dict]:
     """Minimal 2-account (1 revenue + 1 COGS) r1/r2 pair whose GP margin MoM delta lands
     EXACTLY at the watch-rule-1 threshold boundary (0.3pp), for straddling tests.
