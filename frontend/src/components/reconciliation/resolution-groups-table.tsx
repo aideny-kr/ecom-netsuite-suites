@@ -45,6 +45,47 @@ const ROOT_CAUSE_LABEL: Record<string, string> = {
   amount_mismatch: "Amount mismatch",
 };
 
+// Muted descriptor shown next to the bold root-cause label in the groups
+// worksheet (design mock: "Fee variance — Stripe fee not booked" etc).
+// Unmapped root causes render with no descriptor rather than a guess.
+const ROOT_CAUSE_DESCRIPTOR: Record<string, string> = {
+  fees: "Stripe fee not booked",
+  missing_in_netsuite: "deposit not found",
+  chargeback: "disputed charge",
+};
+
+// Recency-hold carry_forwards (rule-7 sync-lag) reuse the "missing" /
+// "missing_in_netsuite" root causes but describe a payout still in transit,
+// not an unresolved deposit search — mirrors resolution_planner.py's
+// RECENCY_HOLD_ROOT_CAUSES, which gates the same distinction server-side.
+const RECENCY_HOLD_ROOT_CAUSES = new Set(["missing", "missing_in_netsuite"]);
+
+function groupDescriptor(rootCause: string, action: string): string | null {
+  if (action === "carry_forward" && RECENCY_HOLD_ROOT_CAUSES.has(rootCause)) {
+    return "payout not yet settled";
+  }
+  return ROOT_CAUSE_DESCRIPTOR[rootCause] ?? null;
+}
+
+// Severity coloring for root-cause chips in the needs-human worksheet.
+// Anything not listed renders with the neutral fallback chip.
+const ROOT_CAUSE_SEVERITY: Record<string, "crit" | "warn"> = {
+  chargeback: "crit",
+  amount_mismatch: "warn",
+  missing: "warn",
+  missing_in_netsuite: "warn",
+};
+
+const SEVERITY_CHIP_CLASS: Record<"crit" | "warn" | "neutral", string> = {
+  crit: "bg-red-50 text-red-700 border-red-300",
+  warn: "bg-amber-50 text-amber-700 border-amber-300",
+  neutral: "bg-muted text-muted-foreground border-transparent",
+};
+
+function rootCauseChipClass(rootCause: string): string {
+  return SEVERITY_CHIP_CLASS[ROOT_CAUSE_SEVERITY[rootCause] ?? "neutral"];
+}
+
 function money(amount: string | number, currency: string) {
   return Number(amount).toLocaleString("en-US", { style: "currency", currency });
 }
@@ -168,13 +209,17 @@ export function ResolutionGroupsTable({
               const blocked = disabled || isApproving || oneClickCount <= 0;
               const vehicleChip = VEHICLE_CHIP[group.booking_vehicle] ?? VEHICLE_CHIP.none;
               const notes = notesByGroup[cardKey] ?? "";
+              const descriptor = groupDescriptor(group.root_cause, group.action);
 
-              const approveButton = (source: "row" | "detail") => (
+              // Single reachable Approve/Acknowledge affordance per group — it stays
+              // fixed in the row's last column across both collapsed and expanded
+              // states (no `!expanded &&` swap) and always consumes whatever notes
+              // are currently typed in the expanded panel, so there is never a
+              // second Approve control to create a double-submit path.
+              const approveButton = (
                 <button
                   type="button"
-                  onClick={() =>
-                    onApprove(group, source === "detail" ? notes : "", includedAboveIds)
-                  }
+                  onClick={() => onApprove(group, notes, includedAboveIds)}
                   disabled={blocked}
                   className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50"
                 >
@@ -214,9 +259,13 @@ export function ResolutionGroupsTable({
                           <span className="font-medium text-foreground">
                             {ROOT_CAUSE_LABEL[group.root_cause] ?? group.root_cause}
                           </span>
-                          {group.above_materiality_count > 0 && (
+                          {descriptor && (
+                            <span className="text-muted-foreground"> — {descriptor}</span>
+                          )}
+                          {group.above_materiality_count > 0 && !isNeedsHuman && (
                             <span className="block text-xs text-amber-700">
-                              {group.above_materiality_count} above materiality
+                              {group.above_materiality_count} above materiality — tick them
+                              individually in the item list.
                             </span>
                           )}
                         </span>
@@ -251,12 +300,7 @@ export function ResolutionGroupsTable({
                       {isNeedsHuman ? (
                         <span className="text-xs text-muted-foreground">Review individually</span>
                       ) : (
-                        !expanded && (
-                          <div className="flex justify-end gap-2">
-                            {rejectButton}
-                            {approveButton("row")}
-                          </div>
-                        )
+                        <div className="flex justify-end gap-2">{approveButton}</div>
                       )}
                     </TableCell>
                   </TableRow>
@@ -277,7 +321,6 @@ export function ResolutionGroupsTable({
                                 className="flex-1 rounded-md border bg-background px-3 py-1.5 text-[13px] text-foreground placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50"
                               />
                               {rejectButton}
-                              {approveButton("detail")}
                             </div>
                           )}
                           <ResolutionGroupItems
@@ -371,7 +414,9 @@ export function NeedsHumanWorksheet({ proposals, isLoading, onInvestigate }: Nee
                     {money(p.proposed_amount, p.currency || "USD")}
                   </TableCell>
                   <TableCell>
-                    <span className="rounded-full border bg-muted px-2 py-0.5 text-xs text-muted-foreground">
+                    <span
+                      className={`rounded-full border px-2 py-0.5 text-xs ${rootCauseChipClass(p.root_cause)}`}
+                    >
                       {ROOT_CAUSE_LABEL[p.root_cause] ?? p.root_cause}
                     </span>
                   </TableCell>

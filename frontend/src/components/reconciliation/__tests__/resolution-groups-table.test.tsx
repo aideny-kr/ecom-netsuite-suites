@@ -135,7 +135,7 @@ describe("ResolutionGroupsTable", () => {
     expect(onApprove).toHaveBeenCalledWith(feeGroup, "", []);
   });
 
-  it("approves with the typed note from the expanded panel", () => {
+  it("types a note in the expanded panel, then approves via the row's fixed approve button, carrying the note", () => {
     const onApprove = vi.fn();
     render(
       <ResolutionGroupsTable
@@ -143,6 +143,9 @@ describe("ResolutionGroupsTable", () => {
       />
     );
     fireEvent.change(screen.getByPlaceholderText(/note/i), { target: { value: "close" } });
+    // Exactly one approve button exists — the row's — so this also proves the
+    // expanded detail panel does not host a second Approve affordance.
+    expect(screen.getAllByRole("button", { name: /approve 209/i })).toHaveLength(1);
     fireEvent.click(screen.getByRole("button", { name: /approve 209/i }));
     expect(onApprove).toHaveBeenCalledWith(feeGroup, "close", []);
   });
@@ -165,9 +168,13 @@ describe("ResolutionGroupsTable", () => {
     expect((screen.getByPlaceholderText(/note/i) as HTMLInputElement).value).toBe("");
   });
 
-  it("rejects with the group + currency", () => {
+  it("rejects with the group + currency (reject lives in the expanded panel)", () => {
     const onReject = vi.fn();
-    render(<ResolutionGroupsTable {...baseProps({ onReject })} />);
+    render(
+      <ResolutionGroupsTable
+        {...baseProps({ onReject, expandedKey: "fees:book_fee_line:deposit:USD" })}
+      />
+    );
     fireEvent.click(screen.getByRole("button", { name: /reject/i }));
     expect(onReject).toHaveBeenCalledWith(feeGroup);
   });
@@ -179,9 +186,80 @@ describe("ResolutionGroupsTable", () => {
   });
 
   it("disables approve + reject when the disabled prop is set (e.g. closed run)", () => {
-    render(<ResolutionGroupsTable {...baseProps({ disabled: true })} />);
+    render(
+      <ResolutionGroupsTable
+        {...baseProps({ disabled: true, expandedKey: "fees:book_fee_line:deposit:USD" })}
+      />
+    );
     expect(screen.getByRole("button", { name: /approve/i })).toBeDisabled();
     expect(screen.getByRole("button", { name: /reject/i })).toBeDisabled();
+  });
+
+  it("keeps exactly one approve affordance mounted, fixed in the row, whether collapsed or expanded", () => {
+    const { rerender } = render(<ResolutionGroupsTable {...baseProps()} />);
+    expect(screen.getAllByRole("button", { name: /approve/i })).toHaveLength(1);
+
+    rerender(
+      <ResolutionGroupsTable
+        {...baseProps({ expandedKey: "fees:book_fee_line:deposit:USD" })}
+      />
+    );
+    expect(screen.getAllByRole("button", { name: /approve/i })).toHaveLength(1);
+  });
+
+  it("tells the operator they can tick above-materiality items individually in the item list", () => {
+    render(<ResolutionGroupsTable {...baseProps()} />);
+    expect(screen.getByText(/tick them individually in the item list/i)).toBeInTheDocument();
+  });
+
+  describe("group descriptor subtitle", () => {
+    it("shows the muted descriptor for fee-variance groups", () => {
+      render(<ResolutionGroupsTable {...baseProps()} />);
+      expect(screen.getByText(/stripe fee not booked/i)).toBeInTheDocument();
+    });
+
+    it("shows 'deposit not found' for missing_in_netsuite outside carry_forward", () => {
+      const missing = {
+        ...feeGroup,
+        group_key: "missing_in_netsuite:create_and_apply_deposit:deposit",
+        root_cause: "missing_in_netsuite",
+        action: "create_and_apply_deposit",
+      };
+      render(<ResolutionGroupsTable {...baseProps({ groups: [missing] })} />);
+      expect(screen.getByText(/deposit not found/i)).toBeInTheDocument();
+    });
+
+    it("shows 'payout not yet settled' for recency-hold carry_forward groups (missing/missing_in_netsuite root)", () => {
+      const recencyHold = {
+        ...feeGroup,
+        group_key: "missing:carry_forward:none",
+        root_cause: "missing",
+        action: "carry_forward",
+        booking_vehicle: "none",
+        above_materiality_count: 0,
+      };
+      render(<ResolutionGroupsTable {...baseProps({ groups: [recencyHold] })} />);
+      expect(screen.getByText(/payout not yet settled/i)).toBeInTheDocument();
+    });
+
+    it("shows 'disputed charge' for chargeback groups", () => {
+      const cb = {
+        ...feeGroup,
+        group_key: "chargeback:needs_human:none",
+        root_cause: "chargeback",
+        action: "needs_human",
+        booking_vehicle: "none",
+      };
+      render(<ResolutionGroupsTable {...baseProps({ groups: [cb] })} />);
+      expect(screen.getByText(/disputed charge/i)).toBeInTheDocument();
+    });
+
+    it("falls back to no descriptor for an unmapped root cause", () => {
+      const other = { ...feeGroup, root_cause: "duplicate", above_materiality_count: 0 };
+      render(<ResolutionGroupsTable {...baseProps({ groups: [other] })} />);
+      const row = screen.getByText(/duplicate deposits/i).closest("tr")!;
+      expect(within(row).queryByText(/—/)).not.toBeInTheDocument();
+    });
   });
 
   it("needs_human groups have no approve/reject row action (defensive — page.tsx filters these out upstream)", () => {
@@ -275,5 +353,32 @@ describe("NeedsHumanWorksheet", () => {
   it("shows a loading state", () => {
     render(<NeedsHumanWorksheet proposals={undefined} isLoading={true} onInvestigate={vi.fn()} />);
     expect(screen.getByText(/loading/i)).toBeInTheDocument();
+  });
+
+  describe("root-cause chip severity", () => {
+    it("colors chargeback/dispute chips critical (red)", () => {
+      render(<NeedsHumanWorksheet proposals={[proposal]} isLoading={false} onInvestigate={vi.fn()} />);
+      expect(screen.getByText(/chargebacks/i).className).toContain("red");
+    });
+
+    it("colors ambiguous-match (amount_mismatch) chips as a warning (amber)", () => {
+      const ambiguous = { ...proposal, root_cause: "amount_mismatch" };
+      render(<NeedsHumanWorksheet proposals={[ambiguous]} isLoading={false} onInvestigate={vi.fn()} />);
+      expect(screen.getByText(/amount mismatch/i).className).toContain("amber");
+    });
+
+    it("colors payout-unsettled/missing-deposit chips as a warning (amber)", () => {
+      const unsettled = { ...proposal, root_cause: "missing_in_netsuite" };
+      render(<NeedsHumanWorksheet proposals={[unsettled]} isLoading={false} onInvestigate={vi.fn()} />);
+      expect(screen.getByText(/missing in netsuite/i).className).toContain("amber");
+    });
+
+    it("falls back to neutral styling for other root causes", () => {
+      const other = { ...proposal, root_cause: "duplicate" };
+      render(<NeedsHumanWorksheet proposals={[other]} isLoading={false} onInvestigate={vi.fn()} />);
+      const chip = screen.getByText(/duplicate deposits/i);
+      expect(chip.className).not.toContain("red");
+      expect(chip.className).not.toContain("amber");
+    });
   });
 });
