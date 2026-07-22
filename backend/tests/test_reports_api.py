@@ -607,6 +607,44 @@ async def test_repin_bumps_timestamp_forward(client, db):
     assert second_stamp > first_stamp
 
 
+async def test_repin_flush_refresh_precedes_commit_source_order(db):
+    """Structural guard (C1): pin_report must flush+refresh the row BEFORE commit,
+    never after — a post-commit refresh reads with the RLS GUC already cleared by
+    the real COMMIT and 500s in any RLS-enforcing environment. The savepoint test
+    harness can't reproduce that failure (it never truly commits), so this pins the
+    statement ordering directly against the function source."""
+    import inspect
+
+    from app.api.v1 import reports as reports_module
+
+    src = inspect.getsource(reports_module.pin_report)
+    commit_idx = src.index("await db.commit()")
+    refresh_idx = src.index("await db.refresh(row)")
+    assert refresh_idx < commit_idx, "db.refresh(row) must run BEFORE db.commit() in pin_report"
+
+
+async def test_repin_twice_in_one_session_advances_timestamp(client, db):
+    """Regression companion to the source-order guard: two pins in the same client
+    session each return successfully and the second timestamp is strictly newer,
+    exercising the flush+refresh-before-commit path end to end."""
+    ta = await create_test_tenant(db, name="RepinFlushOrder")
+    ua, _ = await create_test_user(db, ta, role_name="admin")
+    await set_tenant_context(db, str(ta.id))
+    r, _v = await _seed_report(db, ta, ua, title="RepinFlushOrder")
+    headers = make_auth_headers(ua)
+
+    first = await client.post(f"/api/v1/reports/{r.id}/pin", headers=headers)
+    assert first.status_code == 200, first.text
+    first_stamp = first.json()["dashboard_pinned_at"]
+    assert first_stamp is not None
+
+    second = await client.post(f"/api/v1/reports/{r.id}/pin", headers=headers)
+    assert second.status_code == 200, second.text
+    second_stamp = second.json()["dashboard_pinned_at"]
+    assert second_stamp is not None
+    assert second_stamp > first_stamp
+
+
 async def test_pin_unauth_401(client, db):
     ta = await create_test_tenant(db, name="PinUnauth")
     ua, _ = await create_test_user(db, ta, role_name="admin")
@@ -651,3 +689,47 @@ async def test_resume_clears_pause_resets_count_and_audits(client, db):
     again = await client.post(f"/api/v1/reports/{r.id}/auto-refresh/resume", headers=headers)
     assert again.status_code == 200  # idempotent
     assert (await client.post(f"/api/v1/reports/{r.id}/auto-refresh/resume")).status_code == 401
+
+
+# --- I1: _get_owned defense-in-depth tenant predicate (belt-and-suspenders under RLS) --
+#
+# The `db` fixture connects as the BYPASSRLS `postgres` owner (see
+# test_view_cross_tenant_is_rls_invisible above), so under this harness RLS itself does
+# NOT hide tenant B's rows from a tenant A query — meaning these tests exercise exactly
+# the `Report.tenant_id == user.tenant_id` predicate added to `_get_owned`, not RLS.
+
+
+async def test_get_view_delete_pin_are_404_across_tenants_even_without_rls(client, db):
+    """A user from tenant A must get 404 (never leak/mutate) for a report that
+    belongs to tenant B, driven by _get_owned's own tenant_id predicate — proven
+    under the BYPASSRLS test session where RLS alone would NOT block the read."""
+    tenant_a = await create_test_tenant(db, name="I1 Tenant A")
+    tenant_b = await create_test_tenant(db, name="I1 Tenant B")
+    user_a, _ = await create_test_user(db, tenant_a, role_name="admin")
+    user_b, _ = await create_test_user(db, tenant_b, role_name="admin")
+
+    await set_tenant_context(db, str(tenant_b.id))
+    r_b, _v = await _seed_report(db, tenant_b, user_b, title="BelongsToTenantB")
+
+    # switch context back to tenant A before issuing tenant A's request — the request
+    # handler itself sets tenant context per-request, but the fixture session's GUC
+    # must not be left pointed at B for any assertions that follow.
+    await set_tenant_context(db, str(tenant_a.id))
+    headers_a = make_auth_headers(user_a)
+
+    got = await client.get(f"/api/v1/reports/{r_b.id}", headers=headers_a)
+    assert got.status_code == 404
+    assert got.json()["detail"] == "Report not found"
+
+    viewed = await client.get(f"/api/v1/reports/{r_b.id}/view", headers=headers_a)
+    assert viewed.status_code == 404
+
+    pinned = await client.post(f"/api/v1/reports/{r_b.id}/pin", headers=headers_a)
+    assert pinned.status_code == 404
+
+    deleted = await client.delete(f"/api/v1/reports/{r_b.id}", headers=headers_a)
+    assert deleted.status_code == 404
+
+    # untouched: tenant B's report and its pin state survive tenant A's requests
+    fresh = (await db.execute(select(Report).where(Report.id == r_b.id))).scalar_one()
+    assert fresh.dashboard_pinned_at is None
