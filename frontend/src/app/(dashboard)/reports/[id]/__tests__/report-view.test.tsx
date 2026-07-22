@@ -3,17 +3,22 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 
+const routerPush = vi.fn();
 vi.mock("next/navigation", () => ({
   useParams: () => ({ id: "abc" }),
-  useRouter: () => ({ push: vi.fn(), back: vi.fn() }),
+  useRouter: () => ({ push: routerPush, back: vi.fn() }),
 }));
 const api = vi.hoisted(() => ({
   getText: vi.fn(),
   get: vi.fn(),
   post: vi.fn(),
   patch: vi.fn(),
+  delete: vi.fn(),
 }));
 vi.mock("@/lib/api-client", () => ({ apiClient: api }));
+
+const authState = vi.hoisted(() => ({ user: { id: "creator-1", roles: [] as string[] } }));
+vi.mock("@/providers/auth-provider", () => ({ useAuth: () => authState }));
 
 import ReportViewPage from "@/app/(dashboard)/reports/[id]/page";
 
@@ -38,6 +43,7 @@ const _report = (over: object = {}) => ({
   auto_refresh: "daily",
   refresh_failure_count: 0,
   auto_refresh_paused_at: null,
+  created_by: "creator-1",
   ...over,
 });
 
@@ -48,6 +54,7 @@ const _versions = [
 
 beforeEach(() => {
   vi.clearAllMocks();
+  authState.user = { id: "creator-1", roles: [] };
   // jsdom doesn't implement URL.createObjectURL/revokeObjectURL
   (URL as unknown as { createObjectURL: () => string }).createObjectURL = vi.fn(() => "blob:test");
   (URL as unknown as { revokeObjectURL: () => void }).revokeObjectURL = vi.fn();
@@ -190,4 +197,61 @@ it("paused report shows the paused banner with a one-click Resume", async () => 
   await waitFor(() =>
     expect(api.post).toHaveBeenCalledWith("/api/v1/reports/abc/auto-refresh/resume")
   );
+});
+
+// --- Task 4: delete affordances --------------------------------------------------------
+
+// Radix's DropdownMenuTrigger opens on pointerdown, not click — jsdom needs an explicit
+// pointerdown fired before the click for the portal-rendered content to appear.
+function openOverflowMenu(overflow: HTMLElement) {
+  fireEvent.pointerDown(overflow, { button: 0, pointerId: 1 });
+  fireEvent.click(overflow);
+}
+
+it("shows the overflow menu with a Delete report… item for the report's creator", async () => {
+  const { findByRole } = renderPage();
+  const overflow = await findByRole("button", { name: /more options/i });
+  openOverflowMenu(overflow);
+  expect(await findByRole("menuitem", { name: /delete report/i })).toBeTruthy();
+});
+
+it("shows the overflow menu for a tenant admin who did not create the report", async () => {
+  authState.user = { id: "someone-else", roles: ["admin"] };
+  const { findByRole } = renderPage();
+  const overflow = await findByRole("button", { name: /more options/i });
+  openOverflowMenu(overflow);
+  expect(await findByRole("menuitem", { name: /delete report/i })).toBeTruthy();
+});
+
+it("hides the overflow menu entirely for a non-creator, non-admin user", async () => {
+  authState.user = { id: "someone-else", roles: [] };
+  const { findByText, queryByRole } = renderPage();
+  await findByText(/data as of/i); // metadata loaded
+  expect(queryByRole("button", { name: /more options/i })).toBeNull();
+});
+
+it("choosing Delete report… opens the confirm dialog; confirming DELETEs and navigates to /reports", async () => {
+  api.delete.mockResolvedValue(undefined);
+  const { findByRole } = renderPage();
+  const overflow = await findByRole("button", { name: /more options/i });
+  openOverflowMenu(overflow);
+  const menuItem = await findByRole("menuitem", { name: /delete report/i });
+  fireEvent.click(menuItem);
+  expect(await findByRole("heading", { name: "Delete this report?" })).toBeTruthy();
+  const confirmBtn = await findByRole("button", { name: "Delete report" });
+  fireEvent.click(confirmBtn);
+  await waitFor(() => expect(api.delete).toHaveBeenCalledWith("/api/v1/reports/abc"));
+  await waitFor(() => expect(routerPush).toHaveBeenCalledWith("/reports"));
+});
+
+it("cancelling the confirm dialog does not call delete", async () => {
+  const { findByRole, queryByRole } = renderPage();
+  const overflow = await findByRole("button", { name: /more options/i });
+  openOverflowMenu(overflow);
+  const menuItem = await findByRole("menuitem", { name: /delete report/i });
+  fireEvent.click(menuItem);
+  const cancelBtn = await findByRole("button", { name: "Cancel" });
+  fireEvent.click(cancelBtn);
+  expect(api.delete).not.toHaveBeenCalled();
+  await waitFor(() => expect(queryByRole("heading", { name: "Delete this report?" })).toBeNull());
 });

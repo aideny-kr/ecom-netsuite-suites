@@ -1,5 +1,6 @@
 "use client";
 
+import type { MouseEvent } from "react";
 import type { UseMutationResult } from "@tanstack/react-query";
 import {
   AlertDialog,
@@ -42,7 +43,7 @@ export function DeleteReportDialog({
       ? `${report.title} will be permanently removed for everyone in this workspace, and its auto-refresh will stop. This can't be undone.`
       : `${report.title} and its ${report.version} saved versions will be permanently removed for everyone in this workspace, and its auto-refresh will stop. This can't be undone.`;
 
-  function handleDelete(e: Event) {
+  function handleDelete(e: MouseEvent<HTMLButtonElement>) {
     e.preventDefault(); // keep the dialog open — AlertDialogAction would otherwise auto-close on click
     mutate(undefined, { onSuccess: onDeleted });
   }

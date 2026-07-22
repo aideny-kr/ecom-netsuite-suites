@@ -3,8 +3,15 @@ import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { apiClient } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
-import { AlertTriangle, ArrowLeft, Download, PauseCircle, RefreshCw } from "lucide-react";
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { AlertTriangle, ArrowLeft, Download, MoreHorizontal, PauseCircle, RefreshCw, Trash2 } from "lucide-react";
+import {
+  useDeleteReport,
   useRefreshReport,
   useReport,
   useReportVersions,
@@ -12,6 +19,14 @@ import {
   useUpdateReportSettings,
   type AutoRefreshInterval,
 } from "@/hooks/use-reports";
+import { DeleteReportDialog } from "../delete-report-dialog";
+import { useAuth } from "@/providers/auth-provider";
+
+function canManage(userId: string | undefined, roles: string[] | undefined, createdBy: string | null | undefined): boolean {
+  if (!userId) return false;
+  if (createdBy && createdBy === userId) return true;
+  return Boolean(roles?.includes("admin"));
+}
 
 function fmtStamp(iso: string): string {
   const d = new Date(iso);
@@ -29,15 +44,19 @@ export default function ReportViewPage() {
   // bumped after a successful refresh so the effect re-fetches the (new) current HTML.
   const [refreshNonce, setRefreshNonce] = useState(0);
   const [actionMsg, setActionMsg] = useState<string | null>(null);
+  const [deleteOpen, setDeleteOpen] = useState(false);
 
+  const { user } = useAuth();
   const { data: report } = useReport(id);
   const { data: versions } = useReportVersions(id);
   const refresh = useRefreshReport(id);
   const updateSettings = useUpdateReportSettings(id);
   const resume = useResumeAutoRefresh(id);
+  const deleteReport = useDeleteReport(id);
   const viewingCurrent = selectedVersion === null;
   const paused = Boolean(report?.auto_refresh_paused_at);
   const refreshFailing = (report?.refresh_failure_count ?? 0) > 0;
+  const userCanManage = canManage(user?.id, user?.roles, report?.created_by);
 
   useEffect(() => {
     let url: string | null = null;
@@ -151,6 +170,24 @@ export default function ReportViewPage() {
             <Download className="h-4 w-4 mr-1" />
             Download HTML
           </Button>
+          {userCanManage && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon" aria-label="More options">
+                  <MoreHorizontal className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem
+                  className="text-destructive focus:text-destructive"
+                  onClick={() => setDeleteOpen(true)}
+                >
+                  <Trash2 className="mr-2 h-3.5 w-3.5" />
+                  Delete report…
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
         </div>
       </div>
       {/* Failure-ladder banners (§4C): the last good version stays up — never a broken
@@ -192,6 +229,15 @@ export default function ReportViewPage() {
         />
       ) : (
         <div className="p-8 text-muted-foreground">Loading…</div>
+      )}
+      {report && (
+        <DeleteReportDialog
+          report={{ id, title: report.title, version: report.version }}
+          open={deleteOpen}
+          onOpenChange={setDeleteOpen}
+          onDeleted={() => router.push("/reports")}
+          deleteMutation={deleteReport}
+        />
       )}
     </div>
   );
