@@ -177,6 +177,9 @@ class ReportResponse(BaseModel):
     auto_refresh: str = "daily"
     refresh_failure_count: int = 0
     auto_refresh_paused_at: datetime | None = None
+    # Task 2 (reports UX trio): set when pinned to the dashboard landing page; the FE
+    # sorts pinned reports newest-first by this column. None = not pinned.
+    dashboard_pinned_at: datetime | None = None
     model_config = {"from_attributes": True}
 
 

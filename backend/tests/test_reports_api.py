@@ -460,6 +460,165 @@ async def test_created_by_appears_in_list_and_get_responses(client, db):
     assert row["created_by"] == str(ua.id)
 
 
+# --- Task 2: dashboard pin (POST/DELETE /reports/{id}/pin) ----------------------------
+
+
+async def test_pin_sets_timestamp_and_audits(client, db):
+    ta = await create_test_tenant(db, name="PinCreator")
+    ua, _ = await create_test_user(db, ta, role_name="finance")  # creator, not admin
+    await set_tenant_context(db, str(ta.id))
+    r, _v = await _seed_report(db, ta, ua, title="Pinnable")
+    headers = make_auth_headers(ua)
+
+    resp = await client.post(f"/api/v1/reports/{r.id}/pin", headers=headers)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["dashboard_pinned_at"] is not None
+
+    audit = (
+        await db.execute(
+            text(
+                "SELECT actor_id, actor_type, category FROM audit_events "
+                "WHERE action='report.pin' AND resource_id=:rid AND resource_type='report'"
+            ),
+            {"rid": str(r.id)},
+        )
+    ).first()
+    assert audit is not None
+    assert audit[0] == ua.id and audit[1] == "user" and audit[2] == "report"
+
+
+async def test_unpin_clears_timestamp_and_audits_and_is_idempotent(client, db):
+    ta = await create_test_tenant(db, name="UnpinCreator")
+    ua, _ = await create_test_user(db, ta, role_name="finance")
+    await set_tenant_context(db, str(ta.id))
+    r, _v = await _seed_report(db, ta, ua, title="Unpinnable")
+    headers = make_auth_headers(ua)
+
+    assert (await client.post(f"/api/v1/reports/{r.id}/pin", headers=headers)).status_code == 200
+
+    resp = await client.delete(f"/api/v1/reports/{r.id}/pin", headers=headers)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["dashboard_pinned_at"] is None
+
+    audit = (
+        await db.execute(
+            text("SELECT count(*) FROM audit_events WHERE action='report.unpin' AND resource_id=:rid"),
+            {"rid": str(r.id)},
+        )
+    ).scalar_one()
+    assert audit == 1
+
+    # idempotent: unpin of an already-unpinned report still 200s and still audits
+    resp2 = await client.delete(f"/api/v1/reports/{r.id}/pin", headers=headers)
+    assert resp2.status_code == 200
+    assert resp2.json()["dashboard_pinned_at"] is None
+    audit2 = (
+        await db.execute(
+            text("SELECT count(*) FROM audit_events WHERE action='report.unpin' AND resource_id=:rid"),
+            {"rid": str(r.id)},
+        )
+    ).scalar_one()
+    assert audit2 == 2
+
+
+async def test_pin_by_tenant_admin_non_creator_succeeds(client, db):
+    ta = await create_test_tenant(db, name="PinAdmin")
+    creator, _ = await create_test_user(db, ta, role_name="finance")
+    admin, _ = await create_test_user(db, ta, role_name="admin")
+    await set_tenant_context(db, str(ta.id))
+    r, _v = await _seed_report(db, ta, creator)
+
+    resp = await client.post(f"/api/v1/reports/{r.id}/pin", headers=make_auth_headers(admin))
+    assert resp.status_code == 200
+    assert resp.json()["dashboard_pinned_at"] is not None
+
+
+async def test_pin_and_unpin_by_non_creator_non_admin_are_403_with_exact_detail(client, db):
+    ta = await create_test_tenant(db, name="PinForbidden")
+    creator, _ = await create_test_user(db, ta, role_name="finance")
+    other, _ = await create_test_user(db, ta, email="other-pin@test.com", role_name="readonly")
+    await set_tenant_context(db, str(ta.id))
+    r, _v = await _seed_report(db, ta, creator)
+    headers = make_auth_headers(other)
+    expected_detail = "Only the report's creator or a workspace admin can change its dashboard pin"
+
+    pin_resp = await client.post(f"/api/v1/reports/{r.id}/pin", headers=headers)
+    assert pin_resp.status_code == 403
+    assert pin_resp.json()["detail"] == expected_detail
+
+    unpin_resp = await client.delete(f"/api/v1/reports/{r.id}/pin", headers=headers)
+    assert unpin_resp.status_code == 403
+    assert unpin_resp.json()["detail"] == expected_detail
+
+    # untouched
+    fresh = (await db.execute(select(Report).where(Report.id == r.id))).scalar_one()
+    assert fresh.dashboard_pinned_at is None
+
+
+async def test_pin_unknown_uuid_and_malformed_id_are_404(client, db):
+    ta = await create_test_tenant(db, name="PinNotFound")
+    ua, _ = await create_test_user(db, ta, role_name="admin")
+    await set_tenant_context(db, str(ta.id))
+    headers = make_auth_headers(ua)
+
+    unknown = uuid.uuid4()
+    resp = await client.post(f"/api/v1/reports/{unknown}/pin", headers=headers)
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "Report not found"
+
+    resp2 = await client.post("/api/v1/reports/not-a-uuid/pin", headers=headers)
+    assert resp2.status_code == 404
+    assert resp2.json()["detail"] == "Report not found"
+
+
+async def test_pin_visible_in_get_and_list_responses(client, db):
+    ta = await create_test_tenant(db, name="PinVisible")
+    ua, _ = await create_test_user(db, ta, role_name="admin")
+    await set_tenant_context(db, str(ta.id))
+    r, _v = await _seed_report(db, ta, ua, title="PinnedInList")
+    headers = make_auth_headers(ua)
+
+    assert (await client.post(f"/api/v1/reports/{r.id}/pin", headers=headers)).status_code == 200
+
+    got = await client.get(f"/api/v1/reports/{r.id}", headers=headers)
+    assert got.json()["dashboard_pinned_at"] is not None
+
+    listed = await client.get("/api/v1/reports", headers=headers)
+    row = next(row for row in listed.json() if row["id"] == str(r.id))
+    assert row["dashboard_pinned_at"] is not None
+
+
+async def test_repin_bumps_timestamp_forward(client, db):
+    ta = await create_test_tenant(db, name="RepinBump")
+    ua, _ = await create_test_user(db, ta, role_name="admin")
+    await set_tenant_context(db, str(ta.id))
+    r, _v = await _seed_report(db, ta, ua, title="Repinnable")
+    headers = make_auth_headers(ua)
+
+    first = await client.post(f"/api/v1/reports/{r.id}/pin", headers=headers)
+    assert first.status_code == 200
+    first_stamp = first.json()["dashboard_pinned_at"]
+
+    second = await client.post(f"/api/v1/reports/{r.id}/pin", headers=headers)
+    assert second.status_code == 200
+    second_stamp = second.json()["dashboard_pinned_at"]
+
+    assert second_stamp > first_stamp
+
+
+async def test_pin_unauth_401(client, db):
+    ta = await create_test_tenant(db, name="PinUnauth")
+    ua, _ = await create_test_user(db, ta, role_name="admin")
+    await set_tenant_context(db, str(ta.id))
+    r, _v = await _seed_report(db, ta, ua)
+
+    assert (await client.post(f"/api/v1/reports/{r.id}/pin")).status_code == 401
+    assert (await client.delete(f"/api/v1/reports/{r.id}/pin")).status_code == 401
+    fresh = (await db.execute(select(Report).where(Report.id == r.id))).scalar_one()
+    assert fresh.dashboard_pinned_at is None
+
+
 async def test_resume_clears_pause_resets_count_and_audits(client, db):
     """The one-click resume after reconnect (§4C): clears auto_refresh_paused_at AND
     zeroes the count (otherwise one stale failure re-pauses almost immediately).

@@ -4,7 +4,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -36,6 +36,7 @@ def _to_response(r: Report) -> ReportResponse:
         refresh_failure_count=r.refresh_failure_count,
         auto_refresh_paused_at=r.auto_refresh_paused_at,
         created_by=str(r.created_by) if r.created_by else None,
+        dashboard_pinned_at=r.dashboard_pinned_at,
     )
 
 
@@ -140,6 +141,63 @@ async def delete_report(
     await db.delete(row)
     await db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def _require_can_manage_pin(user: User, row: Report) -> None:
+    if not _can_manage(user, row):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the report's creator or a workspace admin can change its dashboard pin",
+        )
+
+
+@router.post("/{report_id}/pin", response_model=ReportResponse)
+async def pin_report(
+    report_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    row = await _get_owned(db, report_id)
+    _require_can_manage_pin(user, row)
+    # server-side timestamp so re-pinning always bumps forward, even across clients
+    # with skewed clocks — newest-first dashboard ordering is the feature. clock_timestamp()
+    # (not now()/func.now(), which is fixed for the whole transaction) so a re-pin inside
+    # the same transaction still advances.
+    row.dashboard_pinned_at = func.clock_timestamp()
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="report",
+        action="report.pin",
+        actor_id=user.id,
+        resource_type="report",
+        resource_id=str(row.id),
+    )
+    await db.commit()
+    await db.refresh(row)
+    return _to_response(row)
+
+
+@router.delete("/{report_id}/pin", response_model=ReportResponse)
+async def unpin_report(
+    report_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    row = await _get_owned(db, report_id)
+    _require_can_manage_pin(user, row)
+    row.dashboard_pinned_at = None
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="report",
+        action="report.unpin",
+        actor_id=user.id,
+        resource_type="report",
+        resource_id=str(row.id),
+    )
+    await db.commit()
+    return _to_response(row)
 
 
 @router.get("/{report_id}/view")
