@@ -35,7 +35,15 @@ def _to_response(r: Report) -> ReportResponse:
         auto_refresh=r.auto_refresh,
         refresh_failure_count=r.refresh_failure_count,
         auto_refresh_paused_at=r.auto_refresh_paused_at,
+        created_by=str(r.created_by) if r.created_by else None,
     )
+
+
+def _can_manage(user: User, row: Report) -> bool:
+    """Creator-or-admin gate for destructive report actions (delete/pin)."""
+    if row.created_by is not None and row.created_by == user.id:
+        return True
+    return any(ur.role.name == "admin" for ur in user.user_roles)
 
 
 @router.get("", response_model=list[ReportResponse])
@@ -103,6 +111,35 @@ async def get_report(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     return _to_response(await _get_owned(db, report_id))
+
+
+@router.delete("/{report_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_report(
+    report_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    row = await _get_owned(db, report_id)
+    if not _can_manage(user, row):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the report's creator or a workspace admin can delete this report",
+        )
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="report",
+        action="report.delete",
+        actor_id=user.id,
+        resource_type="report",
+        resource_id=str(row.id),
+        payload={"title": row.title, "versions": row.version},
+    )
+    # report_versions.report_id has ondelete="CASCADE" — no ORM relationship exists,
+    # so the DB removes version rows itself; do not add one here.
+    await db.delete(row)
+    await db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get("/{report_id}/view")

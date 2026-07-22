@@ -162,6 +162,10 @@ class ReportResponse(BaseModel):
     status: str
     version: int
     created_at: datetime
+    # Task 1 (reports UX trio): the report's creator, if any (SET NULL on user
+    # delete). Drives the FE's canManage mirror of the server-side creator-or-admin
+    # gate on destructive actions (delete/pin) — see _can_manage in reports.py.
+    created_by: str | None = None
     # Slice A: whether a refresh recipe was captured (the FE shows Refresh iff true —
     # Slice B). ONLY the boolean is exposed, never the raw recipe (params embed SQL).
     has_recipe: bool = False

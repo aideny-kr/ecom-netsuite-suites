@@ -3,10 +3,11 @@ import uuid
 
 import pytest
 import sqlalchemy.exc
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from app.core.database import set_tenant_context
 from app.models.report import Report
+from app.models.report_version import ReportVersion
 from tests.conftest import create_test_tenant, create_test_user, make_auth_headers
 
 
@@ -331,6 +332,132 @@ async def test_patch_settings_unauth_401_and_malformed_404(client, db):
             "/api/v1/reports/not-a-uuid/settings", headers=make_auth_headers(ua), json={"auto_refresh": "off"}
         )
     ).status_code == 404
+
+
+# --- Task 1: DELETE /reports/{id} (creator-or-admin gate) -----------------------------
+
+
+async def _seed_report(db, ta, ua, *, title: str = "Deletable"):
+    r = Report(
+        tenant_id=ta.id,
+        title=title,
+        spec_json={"sections": []},
+        rendered_html="<html>deletable</html>",
+        created_by=ua.id,
+        version=1,
+    )
+    db.add(r)
+    await db.flush()
+    v = ReportVersion(
+        tenant_id=ta.id,
+        report_id=r.id,
+        version=1,
+        spec_json={"sections": []},
+        rendered_html="<html>deletable v1</html>",
+        created_by=ua.id,
+    )
+    db.add(v)
+    await db.flush()
+    return r, v
+
+
+async def test_delete_by_creator_removes_report_and_versions_and_audits(client, db):
+    ta = await create_test_tenant(db, name="DelCreator")
+    ua, _ = await create_test_user(db, ta, role_name="finance")  # creator, not admin
+    await set_tenant_context(db, str(ta.id))
+    r, v = await _seed_report(db, ta, ua)
+    headers = make_auth_headers(ua)
+
+    resp = await client.delete(f"/api/v1/reports/{r.id}", headers=headers)
+    assert resp.status_code == 204
+    assert resp.content == b""
+
+    assert (await db.execute(select(Report).where(Report.id == r.id))).scalar_one_or_none() is None
+    assert (await db.execute(select(ReportVersion).where(ReportVersion.id == v.id))).scalar_one_or_none() is None
+
+    audit = (
+        await db.execute(
+            text(
+                "SELECT actor_id, actor_type, category, payload FROM audit_events "
+                "WHERE action='report.delete' AND resource_id=:rid AND resource_type='report'"
+            ),
+            {"rid": str(r.id)},
+        )
+    ).first()
+    assert audit is not None
+    assert audit[0] == ua.id and audit[1] == "user" and audit[2] == "report"
+    assert audit[3]["title"] == "Deletable" and audit[3]["versions"] == 1
+
+
+async def test_delete_by_tenant_admin_non_creator_succeeds(client, db):
+    ta = await create_test_tenant(db, name="DelAdmin")
+    creator, _ = await create_test_user(db, ta, role_name="finance")
+    admin, _ = await create_test_user(db, ta, role_name="admin")
+    await set_tenant_context(db, str(ta.id))
+    r, _v = await _seed_report(db, ta, creator)
+
+    resp = await client.delete(f"/api/v1/reports/{r.id}", headers=make_auth_headers(admin))
+    assert resp.status_code == 204
+    assert (await db.execute(select(Report).where(Report.id == r.id))).scalar_one_or_none() is None
+
+
+async def test_delete_by_non_creator_non_admin_is_403_with_exact_detail(client, db):
+    ta = await create_test_tenant(db, name="DelForbidden")
+    creator, _ = await create_test_user(db, ta, role_name="finance")
+    other, _ = await create_test_user(db, ta, email="other@test.com", role_name="readonly")
+    await set_tenant_context(db, str(ta.id))
+    r, _v = await _seed_report(db, ta, creator)
+
+    resp = await client.delete(f"/api/v1/reports/{r.id}", headers=make_auth_headers(other))
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "Only the report's creator or a workspace admin can delete this report"
+
+    # untouched
+    assert (await db.execute(select(Report).where(Report.id == r.id))).scalar_one_or_none() is not None
+
+
+async def test_delete_unknown_uuid_and_malformed_id_are_404(client, db):
+    ta = await create_test_tenant(db, name="DelNotFound")
+    ua, _ = await create_test_user(db, ta, role_name="admin")
+    await set_tenant_context(db, str(ta.id))
+    headers = make_auth_headers(ua)
+
+    unknown = uuid.uuid4()
+    resp = await client.delete(f"/api/v1/reports/{unknown}", headers=headers)
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "Report not found"
+
+    resp2 = await client.delete("/api/v1/reports/not-a-uuid", headers=headers)
+    assert resp2.status_code == 404
+    assert resp2.json()["detail"] == "Report not found"
+
+
+async def test_delete_unauth_401(client, db):
+    ta = await create_test_tenant(db, name="DelUnauth")
+    ua, _ = await create_test_user(db, ta, role_name="admin")
+    await set_tenant_context(db, str(ta.id))
+    r, _v = await _seed_report(db, ta, ua)
+
+    resp = await client.delete(f"/api/v1/reports/{r.id}")
+    assert resp.status_code == 401
+    assert (await db.execute(select(Report).where(Report.id == r.id))).scalar_one_or_none() is not None
+
+
+async def test_created_by_appears_in_list_and_get_responses(client, db):
+    ta = await create_test_tenant(db, name="CreatedByExposed")
+    ua, _ = await create_test_user(db, ta, role_name="admin")
+    await set_tenant_context(db, str(ta.id))
+    r, _v = await _seed_report(db, ta, ua, title="HasCreator")
+    headers = make_auth_headers(ua)
+
+    got = await client.get(f"/api/v1/reports/{r.id}", headers=headers)
+    assert got.status_code == 200
+    assert got.json()["created_by"] == str(ua.id)
+
+    listed = await client.get("/api/v1/reports", headers=headers)
+    assert listed.status_code == 200
+    row = next(row for row in listed.json() if row["id"] == str(r.id))
+    assert row["created_by"] == str(ua.id)
 
 
 async def test_resume_clears_pause_resets_count_and_audits(client, db):
