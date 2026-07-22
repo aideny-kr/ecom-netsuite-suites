@@ -13,7 +13,7 @@ import { cn } from "@/lib/utils";
 // prior, yoy, trailing trend) — balance_sheet/trial_balance stop at current + prior.
 // Since the source line can't truthfully claim four sources for every playbook, every
 // playbook uses this generic line instead of enumerating sources that don't apply.
-const SOURCE_LINE = "Pulling live data from NetSuite — current period, comparisons, and trend";
+const SOURCE_LINE = "Pulling live data from NetSuite — current period and comparisons";
 
 function ComposingCard({ playbook, period }: { playbook: PlaybookInfo; period: string }) {
   const [elapsed, setElapsed] = useState(0);
@@ -37,7 +37,7 @@ function ComposingCard({ playbook, period }: { playbook: PlaybookInfo; period: s
       </div>
 
       <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-muted">
-        <div className="absolute inset-y-0 w-1/3 animate-[report-sweep_1.4s_ease-in-out_infinite] rounded-full bg-gradient-to-r from-transparent via-primary to-transparent motion-reduce:animate-none" />
+        <div className="absolute inset-y-0 w-1/3 animate-report-sweep rounded-full bg-gradient-to-r from-transparent via-primary to-transparent motion-reduce:animate-none" />
       </div>
 
       <div className="flex items-center gap-2 text-[13px] text-muted-foreground">

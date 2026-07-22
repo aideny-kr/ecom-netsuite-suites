@@ -73,6 +73,7 @@ const config: Config = {
       },
       animation: {
         "fade-in": "fade-in 0.3s ease-out",
+        "report-sweep": "report-sweep 1.4s ease-in-out infinite",
       },
     },
   },
