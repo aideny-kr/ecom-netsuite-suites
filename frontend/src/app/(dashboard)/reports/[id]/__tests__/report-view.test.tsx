@@ -255,3 +255,46 @@ it("cancelling the confirm dialog does not call delete", async () => {
   expect(api.delete).not.toHaveBeenCalled();
   await waitFor(() => expect(queryByRole("heading", { name: "Delete this report?" })).toBeNull());
 });
+
+// --- Task 5: pin-to-dashboard toolbar button --------------------------------------------
+
+it("shows 'Pin to dashboard' for an unpinned report when the user can manage it", async () => {
+  mockReport({ dashboard_pinned_at: null });
+  const { findByRole } = renderPage();
+  expect(await findByRole("button", { name: /pin to dashboard/i })).toBeTruthy();
+});
+
+it("shows 'Unpin from dashboard' for a pinned report", async () => {
+  mockReport({ dashboard_pinned_at: "2026-07-20T10:00:00Z" });
+  const { findByRole } = renderPage();
+  expect(await findByRole("button", { name: /unpin from dashboard/i })).toBeTruthy();
+});
+
+it("hides the pin button for a non-creator, non-admin user", async () => {
+  authState.user = { id: "someone-else", roles: [] };
+  mockReport({ dashboard_pinned_at: null });
+  const { findByText, queryByRole } = renderPage();
+  await findByText(/data as of/i); // metadata loaded
+  expect(queryByRole("button", { name: /pin to dashboard/i })).toBeNull();
+});
+
+it("clicking Pin to dashboard POSTs /pin and disables the button while pending", async () => {
+  mockReport({ dashboard_pinned_at: null });
+  api.post.mockImplementation((path: string) =>
+    path.endsWith("/pin") ? new Promise(() => {}) : Promise.resolve(_report())
+  );
+  const { findByRole } = renderPage();
+  const btn = (await findByRole("button", { name: /pin to dashboard/i })) as HTMLButtonElement;
+  fireEvent.click(btn);
+  await waitFor(() => expect(api.post).toHaveBeenCalledWith("/api/v1/reports/abc/pin"));
+  await waitFor(() => expect(btn.disabled).toBe(true));
+});
+
+it("clicking Unpin from dashboard DELETEs /pin", async () => {
+  mockReport({ dashboard_pinned_at: "2026-07-20T10:00:00Z" });
+  api.delete.mockResolvedValue(_report({ dashboard_pinned_at: null }));
+  const { findByRole } = renderPage();
+  const btn = await findByRole("button", { name: /unpin from dashboard/i });
+  fireEvent.click(btn);
+  await waitFor(() => expect(api.delete).toHaveBeenCalledWith("/api/v1/reports/abc/pin"));
+});

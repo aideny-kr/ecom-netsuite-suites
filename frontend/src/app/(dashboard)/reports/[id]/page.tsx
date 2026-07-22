@@ -9,13 +9,15 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { AlertTriangle, ArrowLeft, Download, MoreHorizontal, PauseCircle, RefreshCw, Trash2 } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Download, MoreHorizontal, PauseCircle, Pin, PinOff, RefreshCw, Trash2 } from "lucide-react";
 import {
   useDeleteReport,
+  usePinReport,
   useRefreshReport,
   useReport,
   useReportVersions,
   useResumeAutoRefresh,
+  useUnpinReport,
   useUpdateReportSettings,
   type AutoRefreshInterval,
 } from "@/hooks/use-reports";
@@ -53,6 +55,8 @@ export default function ReportViewPage() {
   const updateSettings = useUpdateReportSettings(id);
   const resume = useResumeAutoRefresh(id);
   const deleteReport = useDeleteReport(id);
+  const pinReport = usePinReport(id);
+  const unpinReport = useUnpinReport(id);
   const viewingCurrent = selectedVersion === null;
   const paused = Boolean(report?.auto_refresh_paused_at);
   const refreshFailing = (report?.refresh_failure_count ?? 0) > 0;
@@ -170,6 +174,28 @@ export default function ReportViewPage() {
             <Download className="h-4 w-4 mr-1" />
             Download HTML
           </Button>
+          {userCanManage && report && (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={pinReport.isPending || unpinReport.isPending}
+              onClick={() =>
+                report.dashboard_pinned_at ? unpinReport.mutate() : pinReport.mutate()
+              }
+            >
+              {report.dashboard_pinned_at ? (
+                <>
+                  <PinOff className="h-4 w-4 mr-1" />
+                  Unpin from dashboard
+                </>
+              ) : (
+                <>
+                  <Pin className="h-4 w-4 mr-1" />
+                  Pin to dashboard
+                </>
+              )}
+            </Button>
+          )}
           {userCanManage && (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
