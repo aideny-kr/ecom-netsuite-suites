@@ -66,6 +66,10 @@ const config: Config = {
           from: { opacity: "0", transform: "translateY(4px)" },
           to: { opacity: "1", transform: "translateY(0)" },
         },
+        "report-sweep": {
+          "0%": { transform: "translateX(-100%)" },
+          "100%": { transform: "translateX(300%)" },
+        },
       },
       animation: {
         "fade-in": "fade-in 0.3s ease-out",
