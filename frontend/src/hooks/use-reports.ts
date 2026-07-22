@@ -104,6 +104,28 @@ export function useDeleteReport(id: string) {
   });
 }
 
+export function usePinReport(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => apiClient.post<ReportSummary>(`/api/v1/reports/${id}/pin`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["reports"] });
+      queryClient.invalidateQueries({ queryKey: ["reports", id] });
+    },
+  });
+}
+
+export function useUnpinReport(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => apiClient.delete<ReportSummary>(`/api/v1/reports/${id}/pin`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["reports"] });
+      queryClient.invalidateQueries({ queryKey: ["reports", id] });
+    },
+  });
+}
+
 export interface PlaybookParam {
   key: string;
   label: string;
