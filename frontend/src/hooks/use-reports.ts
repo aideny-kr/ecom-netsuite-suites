@@ -21,6 +21,10 @@ export interface ReportSummary {
   refresh_failure_count?: number;
   /** Slice C: set = auto-refresh paused after repeated failures (banner + Resume). */
   auto_refresh_paused_at?: string | null;
+  /** Creator-or-admin gate for delete/pin — mirrored client-side by canManage(). */
+  created_by?: string | null;
+  /** Set when pinned to the dashboard landing page; sorts pinned reports newest-first. */
+  dashboard_pinned_at?: string | null;
 }
 
 export interface ReportVersionEntry {
@@ -86,6 +90,16 @@ export function useResumeAutoRefresh(id: string) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["reports"] });
       queryClient.invalidateQueries({ queryKey: ["reports", id] });
+    },
+  });
+}
+
+export function useDeleteReport(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => apiClient.delete<void>(`/api/v1/reports/${id}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["reports"] });
     },
   });
 }

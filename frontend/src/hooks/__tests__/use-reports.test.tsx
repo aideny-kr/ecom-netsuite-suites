@@ -8,10 +8,12 @@ const api = vi.hoisted(() => ({
   post: vi.fn(),
   patch: vi.fn(),
   getText: vi.fn(),
+  delete: vi.fn(),
 }));
 vi.mock("@/lib/api-client", () => ({ apiClient: api }));
 
 import {
+  useDeleteReport,
   useRefreshReport,
   useReport,
   useReportVersions,
@@ -95,4 +97,18 @@ it("useRefreshReport posts to /refresh and invalidates report + versions queries
   expect(keys).toContain(JSON.stringify(["reports"]));
   expect(keys).toContain(JSON.stringify(["reports", "r-1"]));
   expect(keys).toContain(JSON.stringify(["reports", "r-1", "versions"]));
+});
+
+// --- Task 4: delete -----------------------------------------------------------------
+
+it("useDeleteReport DELETEs the report and invalidates the reports list", async () => {
+  api.delete.mockResolvedValueOnce(undefined);
+  const qc = new QueryClient(qcOpts);
+  const invalidate = vi.spyOn(qc, "invalidateQueries");
+  const { result } = renderHook(() => useDeleteReport("r-1"), { wrapper: makeWrapper(qc) });
+  result.current.mutate();
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(api.delete).toHaveBeenCalledWith("/api/v1/reports/r-1");
+  const keys = invalidate.mock.calls.map((c) => JSON.stringify(c[0]?.queryKey));
+  expect(keys).toContain(JSON.stringify(["reports"]));
 });
