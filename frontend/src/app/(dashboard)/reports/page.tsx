@@ -2,19 +2,14 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { useDeleteReport, useReports, type ReportSummary } from "@/hooks/use-reports";
+import { useDeleteReport, useReports } from "@/hooks/use-reports";
 import { PlaybookLauncher } from "./playbook-launcher";
 import { DeleteReportDialog, type DeleteReportDialogReport } from "./delete-report-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { FileBarChart, ChevronRight, Trash2 } from "lucide-react";
 import { useAuth } from "@/providers/auth-provider";
-
-function canManage(userId: string | undefined, roles: string[] | undefined, report: ReportSummary): boolean {
-  if (!userId) return false;
-  if (report.created_by && report.created_by === userId) return true;
-  return Boolean(roles?.includes("admin"));
-}
+import { canManageReport } from "@/lib/report-utils";
 
 export default function ReportsPage() {
   const { data, isLoading } = useReports();
@@ -61,7 +56,7 @@ export default function ReportsPage() {
               <span className="text-[12px] tabular-nums text-muted-foreground">
                 v{report.version}
               </span>
-              {canManage(user?.id, user?.roles, report) && (
+              {canManageReport(user, report.created_by) && (
                 <button
                   type="button"
                   aria-label="Delete report"

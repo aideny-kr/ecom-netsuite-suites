@@ -18,7 +18,7 @@ it("renders the plural body copy with the report title and version count", () =>
   expect(getByRole("heading", { name: "Delete this report?" })).toBeInTheDocument();
   expect(
     getByText(
-      "Q2 Review and its 3 saved versions will be permanently removed for everyone in this workspace, and its auto-refresh will stop. This can't be undone.",
+      "Q2 Review and all its saved versions will be permanently removed for everyone in this workspace, and its auto-refresh will stop. This can't be undone.",
     ),
   ).toBeInTheDocument();
 });

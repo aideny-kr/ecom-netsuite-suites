@@ -52,7 +52,11 @@ async def list_reports(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    rows = (await db.execute(select(Report).order_by(Report.created_at.desc()))).scalars().all()
+    rows = (
+        (await db.execute(select(Report).where(Report.tenant_id == user.tenant_id).order_by(Report.created_at.desc())))
+        .scalars()
+        .all()
+    )
     return [_to_response(r) for r in rows]
 
 
@@ -139,7 +143,7 @@ async def delete_report(
         actor_id=user.id,
         resource_type="report",
         resource_id=str(row.id),
-        payload={"title": row.title, "versions": row.version},
+        payload={"title": row.title, "current_version": row.version},
     )
     # report_versions.report_id has ondelete="CASCADE" — no ORM relationship exists,
     # so the DB removes version rows itself; do not add one here.

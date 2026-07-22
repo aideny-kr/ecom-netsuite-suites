@@ -41,7 +41,7 @@ export function DeleteReportDialog({
   const body =
     report.version === 1
       ? `${report.title} will be permanently removed for everyone in this workspace, and its auto-refresh will stop. This can't be undone.`
-      : `${report.title} and its ${report.version} saved versions will be permanently removed for everyone in this workspace, and its auto-refresh will stop. This can't be undone.`;
+      : `${report.title} and all its saved versions will be permanently removed for everyone in this workspace, and its auto-refresh will stop. This can't be undone.`;
 
   function handleDelete(e: MouseEvent<HTMLButtonElement>) {
     e.preventDefault(); // keep the dialog open — AlertDialogAction would otherwise auto-close on click

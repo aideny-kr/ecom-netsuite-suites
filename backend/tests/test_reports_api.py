@@ -386,7 +386,7 @@ async def test_delete_by_creator_removes_report_and_versions_and_audits(client, 
     ).first()
     assert audit is not None
     assert audit[0] == ua.id and audit[1] == "user" and audit[2] == "report"
-    assert audit[3]["title"] == "Deletable" and audit[3]["versions"] == 1
+    assert audit[3]["title"] == "Deletable" and audit[3]["current_version"] == 1
 
 
 async def test_delete_by_tenant_admin_non_creator_succeeds(client, db):
@@ -720,6 +720,12 @@ async def test_get_view_delete_pin_are_404_across_tenants_even_without_rls(clien
     got = await client.get(f"/api/v1/reports/{r_b.id}", headers=headers_a)
     assert got.status_code == 404
     assert got.json()["detail"] == "Report not found"
+
+    # LIST must never leak tenant B's report into tenant A's response either — proven
+    # under the same BYPASSRLS test session where RLS alone would not block the read.
+    listed = await client.get("/api/v1/reports", headers=headers_a)
+    assert listed.status_code == 200
+    assert str(r_b.id) not in {row["id"] for row in listed.json()}
 
     viewed = await client.get(f"/api/v1/reports/{r_b.id}/view", headers=headers_a)
     assert viewed.status_code == 404

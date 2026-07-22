@@ -5,6 +5,7 @@ import Link from "next/link";
 import { FileBarChart } from "lucide-react";
 import { apiClient } from "@/lib/api-client";
 import { Skeleton } from "@/components/ui/skeleton";
+import { fmtStamp } from "@/lib/report-utils";
 import type { ReportSummary } from "@/hooks/use-reports";
 
 // The frozen artifact is authored at a fixed 1120px inner width; scale it down to fit
@@ -12,11 +13,6 @@ import type { ReportSummary } from "@/hooks/use-reports";
 const PREVIEW_WIDTH = 1120;
 const PREVIEW_HEIGHT = 300;
 const REPORT_CREAM = "#fbf9f4";
-
-function fmtStamp(iso: string): string {
-  const d = new Date(iso);
-  return isNaN(d.getTime()) ? iso : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
-}
 
 interface FreshnessChipProps {
   report: ReportSummary;
@@ -70,7 +66,9 @@ export function PinnedReportCard({ report }: { report: ReportSummary }) {
       cancelled = true;
       if (url) URL.revokeObjectURL(url);
     };
-  }, [report.id]);
+    // refetch when the report advances to a new version (auto-refresh) so the preview
+    // never shows a stale iframe beside an updated freshness chip.
+  }, [report.id, report.version, report.last_refreshed_at]);
 
   useEffect(() => {
     const el = containerRef.current;

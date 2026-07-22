@@ -106,3 +106,16 @@ it("shows a plain Snapshot chip when auto_refresh is off", async () => {
   );
   expect(await findByText(/^snapshot/i)).toBeTruthy();
 });
+
+it("refetches the preview when the report advances to a new version (auto-refresh)", async () => {
+  const { rerender } = render(<PinnedReportCard report={baseReport} />);
+  await waitFor(() => expect(api.getText).toHaveBeenCalledTimes(1));
+
+  rerender(
+    <PinnedReportCard
+      report={{ ...baseReport, version: 4, last_refreshed_at: "2026-07-22T09:00:00Z" }}
+    />
+  );
+  await waitFor(() => expect(api.getText).toHaveBeenCalledTimes(2));
+  expect(api.getText).toHaveBeenLastCalledWith("/api/v1/reports/r-1/view");
+});

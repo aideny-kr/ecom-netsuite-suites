@@ -23,17 +23,7 @@ import {
 } from "@/hooks/use-reports";
 import { DeleteReportDialog } from "../delete-report-dialog";
 import { useAuth } from "@/providers/auth-provider";
-
-function canManage(userId: string | undefined, roles: string[] | undefined, createdBy: string | null | undefined): boolean {
-  if (!userId) return false;
-  if (createdBy && createdBy === userId) return true;
-  return Boolean(roles?.includes("admin"));
-}
-
-function fmtStamp(iso: string): string {
-  const d = new Date(iso);
-  return isNaN(d.getTime()) ? iso : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
-}
+import { canManageReport, fmtStamp } from "@/lib/report-utils";
 
 export default function ReportViewPage() {
   const { id } = useParams<{ id: string }>();
@@ -60,7 +50,7 @@ export default function ReportViewPage() {
   const viewingCurrent = selectedVersion === null;
   const paused = Boolean(report?.auto_refresh_paused_at);
   const refreshFailing = (report?.refresh_failure_count ?? 0) > 0;
-  const userCanManage = canManage(user?.id, user?.roles, report?.created_by);
+  const userCanManage = canManageReport(user, report?.created_by);
 
   useEffect(() => {
     let url: string | null = null;
