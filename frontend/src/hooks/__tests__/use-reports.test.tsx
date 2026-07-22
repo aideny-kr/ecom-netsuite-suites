@@ -8,14 +8,18 @@ const api = vi.hoisted(() => ({
   post: vi.fn(),
   patch: vi.fn(),
   getText: vi.fn(),
+  delete: vi.fn(),
 }));
 vi.mock("@/lib/api-client", () => ({ apiClient: api }));
 
 import {
+  useDeleteReport,
+  usePinReport,
   useRefreshReport,
   useReport,
   useReportVersions,
   useResumeAutoRefresh,
+  useUnpinReport,
   useUpdateReportSettings,
 } from "@/hooks/use-reports";
 
@@ -95,4 +99,46 @@ it("useRefreshReport posts to /refresh and invalidates report + versions queries
   expect(keys).toContain(JSON.stringify(["reports"]));
   expect(keys).toContain(JSON.stringify(["reports", "r-1"]));
   expect(keys).toContain(JSON.stringify(["reports", "r-1", "versions"]));
+});
+
+// --- Task 4: delete -----------------------------------------------------------------
+
+it("useDeleteReport DELETEs the report and invalidates the reports list", async () => {
+  api.delete.mockResolvedValueOnce(undefined);
+  const qc = new QueryClient(qcOpts);
+  const invalidate = vi.spyOn(qc, "invalidateQueries");
+  const { result } = renderHook(() => useDeleteReport("r-1"), { wrapper: makeWrapper(qc) });
+  result.current.mutate();
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(api.delete).toHaveBeenCalledWith("/api/v1/reports/r-1");
+  const keys = invalidate.mock.calls.map((c) => JSON.stringify(c[0]?.queryKey));
+  expect(keys).toContain(JSON.stringify(["reports"]));
+});
+
+// --- Task 5: pin/unpin --------------------------------------------------------------
+
+it("usePinReport POSTs to /pin and invalidates report + list queries", async () => {
+  api.post.mockResolvedValueOnce({ id: "r-1", dashboard_pinned_at: "2026-07-22T10:00:00Z" });
+  const qc = new QueryClient(qcOpts);
+  const invalidate = vi.spyOn(qc, "invalidateQueries");
+  const { result } = renderHook(() => usePinReport("r-1"), { wrapper: makeWrapper(qc) });
+  result.current.mutate();
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(api.post).toHaveBeenCalledWith("/api/v1/reports/r-1/pin");
+  const keys = invalidate.mock.calls.map((c) => JSON.stringify(c[0]?.queryKey));
+  expect(keys).toContain(JSON.stringify(["reports"]));
+  expect(keys).toContain(JSON.stringify(["reports", "r-1"]));
+});
+
+it("useUnpinReport DELETEs /pin and invalidates report + list queries", async () => {
+  api.delete.mockResolvedValueOnce({ id: "r-1", dashboard_pinned_at: null });
+  const qc = new QueryClient(qcOpts);
+  const invalidate = vi.spyOn(qc, "invalidateQueries");
+  const { result } = renderHook(() => useUnpinReport("r-1"), { wrapper: makeWrapper(qc) });
+  result.current.mutate();
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(api.delete).toHaveBeenCalledWith("/api/v1/reports/r-1/pin");
+  const keys = invalidate.mock.calls.map((c) => JSON.stringify(c[0]?.queryKey));
+  expect(keys).toContain(JSON.stringify(["reports"]));
+  expect(keys).toContain(JSON.stringify(["reports", "r-1"]));
 });

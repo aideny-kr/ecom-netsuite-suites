@@ -1,14 +1,20 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
-import { useReports } from "@/hooks/use-reports";
+import { useDeleteReport, useReports } from "@/hooks/use-reports";
 import { PlaybookLauncher } from "./playbook-launcher";
+import { DeleteReportDialog, type DeleteReportDialogReport } from "./delete-report-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { FileBarChart, ChevronRight } from "lucide-react";
+import { FileBarChart, ChevronRight, Trash2 } from "lucide-react";
+import { useAuth } from "@/providers/auth-provider";
+import { canManageReport } from "@/lib/report-utils";
 
 export default function ReportsPage() {
   const { data, isLoading } = useReports();
+  const { user } = useAuth();
+  const [deleteTarget, setDeleteTarget] = useState<DeleteReportDialogReport | null>(null);
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -50,6 +56,20 @@ export default function ReportsPage() {
               <span className="text-[12px] tabular-nums text-muted-foreground">
                 v{report.version}
               </span>
+              {canManageReport(user, report.created_by) && (
+                <button
+                  type="button"
+                  aria-label="Delete report"
+                  className="shrink-0 rounded-md p-1 text-muted-foreground opacity-0 transition-opacity hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setDeleteTarget({ id: report.id, title: report.title, version: report.version });
+                  }}
+                >
+                  <Trash2 className="h-4 w-4" />
+                </button>
+              )}
               <ChevronRight className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
             </Link>
           ))}
@@ -61,6 +81,36 @@ export default function ReportsPage() {
           </p>
         </div>
       )}
+
+      {deleteTarget && (
+        <ListDeleteDialog
+          report={deleteTarget}
+          onOpenChange={(open) => !open && setDeleteTarget(null)}
+          onDeleted={() => setDeleteTarget(null)}
+        />
+      )}
     </div>
+  );
+}
+
+/** Owns the useDeleteReport(id) mutation for whichever row is currently targeted. */
+function ListDeleteDialog({
+  report,
+  onOpenChange,
+  onDeleted,
+}: {
+  report: DeleteReportDialogReport;
+  onOpenChange: (open: boolean) => void;
+  onDeleted: () => void;
+}) {
+  const deleteMutation = useDeleteReport(report.id);
+  return (
+    <DeleteReportDialog
+      report={report}
+      open
+      onOpenChange={onOpenChange}
+      onDeleted={onDeleted}
+      deleteMutation={deleteMutation}
+    />
   );
 }
