@@ -3,20 +3,27 @@ import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { apiClient } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
-import { AlertTriangle, ArrowLeft, Download, PauseCircle, RefreshCw } from "lucide-react";
 import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { AlertTriangle, ArrowLeft, Download, MoreHorizontal, PauseCircle, Pin, PinOff, RefreshCw, Trash2 } from "lucide-react";
+import {
+  useDeleteReport,
+  usePinReport,
   useRefreshReport,
   useReport,
   useReportVersions,
   useResumeAutoRefresh,
+  useUnpinReport,
   useUpdateReportSettings,
   type AutoRefreshInterval,
 } from "@/hooks/use-reports";
-
-function fmtStamp(iso: string): string {
-  const d = new Date(iso);
-  return isNaN(d.getTime()) ? iso : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
-}
+import { DeleteReportDialog } from "../delete-report-dialog";
+import { useAuth } from "@/providers/auth-provider";
+import { canManageReport, fmtStamp } from "@/lib/report-utils";
 
 export default function ReportViewPage() {
   const { id } = useParams<{ id: string }>();
@@ -29,15 +36,21 @@ export default function ReportViewPage() {
   // bumped after a successful refresh so the effect re-fetches the (new) current HTML.
   const [refreshNonce, setRefreshNonce] = useState(0);
   const [actionMsg, setActionMsg] = useState<string | null>(null);
+  const [deleteOpen, setDeleteOpen] = useState(false);
 
+  const { user } = useAuth();
   const { data: report } = useReport(id);
   const { data: versions } = useReportVersions(id);
   const refresh = useRefreshReport(id);
   const updateSettings = useUpdateReportSettings(id);
   const resume = useResumeAutoRefresh(id);
+  const deleteReport = useDeleteReport(id);
+  const pinReport = usePinReport(id);
+  const unpinReport = useUnpinReport(id);
   const viewingCurrent = selectedVersion === null;
   const paused = Boolean(report?.auto_refresh_paused_at);
   const refreshFailing = (report?.refresh_failure_count ?? 0) > 0;
+  const userCanManage = canManageReport(user, report?.created_by);
 
   useEffect(() => {
     let url: string | null = null;
@@ -96,13 +109,13 @@ export default function ReportViewPage() {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center gap-3 border-b-[3px] border-black bg-card px-4 py-2">
+      <div className="flex flex-wrap items-center gap-3 border-b-[3px] border-black bg-card px-4 py-2">
         <Button variant="ghost" size="sm" onClick={() => router.back()}>
           <ArrowLeft className="h-4 w-4 mr-1" />
           Back
         </Button>
         {stampSource && (
-          <span className="text-[13px] text-muted-foreground">Data as of {fmtStamp(stampSource)}</span>
+          <span className="text-[13px] text-muted-foreground whitespace-nowrap">Data as of {fmtStamp(stampSource)}</span>
         )}
         {actionMsg && <span className="text-[13px] text-destructive">{actionMsg}</span>}
         <div className="ml-auto flex items-center gap-2">
@@ -151,6 +164,46 @@ export default function ReportViewPage() {
             <Download className="h-4 w-4 mr-1" />
             Download HTML
           </Button>
+          {userCanManage && report && (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={pinReport.isPending || unpinReport.isPending}
+              onClick={() =>
+                report.dashboard_pinned_at ? unpinReport.mutate() : pinReport.mutate()
+              }
+            >
+              {report.dashboard_pinned_at ? (
+                <>
+                  <PinOff className="h-4 w-4 mr-1" />
+                  Unpin from dashboard
+                </>
+              ) : (
+                <>
+                  <Pin className="h-4 w-4 mr-1" />
+                  Pin to dashboard
+                </>
+              )}
+            </Button>
+          )}
+          {userCanManage && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="icon" aria-label="More options">
+                  <MoreHorizontal className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem
+                  className="text-destructive focus:text-destructive"
+                  onClick={() => setDeleteOpen(true)}
+                >
+                  <Trash2 className="mr-2 h-3.5 w-3.5" />
+                  Delete report…
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
         </div>
       </div>
       {/* Failure-ladder banners (§4C): the last good version stays up — never a broken
@@ -192,6 +245,15 @@ export default function ReportViewPage() {
         />
       ) : (
         <div className="p-8 text-muted-foreground">Loading…</div>
+      )}
+      {report && (
+        <DeleteReportDialog
+          report={{ id, title: report.title, version: report.version }}
+          open={deleteOpen}
+          onOpenChange={setDeleteOpen}
+          onDeleted={() => router.push("/reports")}
+          deleteMutation={deleteReport}
+        />
       )}
     </div>
   );

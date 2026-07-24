@@ -2,15 +2,14 @@
 
 import Link from "next/link";
 import { useAuth } from "@/providers/auth-provider";
+import { useReports } from "@/hooks/use-reports";
+import { PinnedReportCard } from "./pinned-report-card";
 import {
   Plug,
   ScrollText,
   MessageSquare,
   Table2,
   ArrowRight,
-  TrendingUp,
-  Activity,
-  Database,
 } from "lucide-react";
 
 const quickLinks = [
@@ -52,14 +51,13 @@ const quickLinks = [
   },
 ];
 
-const stats = [
-  { label: "Integrations", icon: Activity, value: "--" },
-  { label: "Data Synced", icon: Database, value: "--" },
-  { label: "This Month", icon: TrendingUp, value: "--" },
-];
-
 export default function DashboardPage() {
   const { user } = useAuth();
+  const { data: reports } = useReports();
+
+  const pinned = (reports ?? [])
+    .filter((r) => r.dashboard_pinned_at != null)
+    .sort((a, b) => (b.dashboard_pinned_at as string).localeCompare(a.dashboard_pinned_at as string));
 
   return (
     <div className="space-y-8 animate-fade-in">
@@ -69,26 +67,26 @@ export default function DashboardPage() {
           Welcome back, {user?.full_name?.split(" ")[0]}
         </h2>
         <p className="mt-1 text-[15px] text-muted-foreground">
-          Here&apos;s an overview of your integration platform.
+          Here&apos;s where your business stands.
         </p>
       </div>
 
-      {/* Stats Row */}
-      <div className="grid grid-cols-3 gap-4">
-        {stats.map((stat) => (
-          <div
-            key={stat.label}
-            className="flex items-center gap-4 rounded-xl border bg-card p-5 shadow-soft"
-          >
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10">
-              <stat.icon className="h-5 w-5 text-primary" />
-            </div>
-            <div>
-              <p className="text-2xl font-semibold tabular-nums">{stat.value}</p>
-              <p className="text-[13px] text-muted-foreground">{stat.label}</p>
-            </div>
+      {/* Pinned reports */}
+      <div>
+        <h3 className="mb-4 text-[13px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Pinned reports
+        </h3>
+        {pinned.length > 0 ? (
+          <div className="space-y-4">
+            {pinned.map((report) => (
+              <PinnedReportCard key={report.id} report={report} />
+            ))}
           </div>
-        ))}
+        ) : (
+          <div className="rounded-xl border border-dashed p-5 text-[13px] text-muted-foreground">
+            No pinned reports yet — open any report and choose Pin to dashboard.
+          </div>
+        )}
       </div>
 
       {/* Quick Links Grid */}

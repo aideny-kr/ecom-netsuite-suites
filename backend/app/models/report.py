@@ -42,6 +42,10 @@ class Report(Base):
     # Slice C: stamped when ~7 consecutive failures pause the sweep for this report;
     # cleared ONLY by the user's explicit resume (a later success never clears it).
     auto_refresh_paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Reports UX trio (Task 2): set when a creator/admin pins this report to the
+    # dashboard landing page; NULL = not pinned. Re-pinning bumps it forward — the
+    # dashboard sorts pinned reports newest-first by this column.
+    dashboard_pinned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     published_drive_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

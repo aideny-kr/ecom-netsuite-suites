@@ -4,7 +4,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -35,7 +35,16 @@ def _to_response(r: Report) -> ReportResponse:
         auto_refresh=r.auto_refresh,
         refresh_failure_count=r.refresh_failure_count,
         auto_refresh_paused_at=r.auto_refresh_paused_at,
+        created_by=str(r.created_by) if r.created_by else None,
+        dashboard_pinned_at=r.dashboard_pinned_at,
     )
+
+
+def _can_manage(user: User, row: Report) -> bool:
+    """Creator-or-admin gate for destructive report actions (delete/pin)."""
+    if row.created_by is not None and row.created_by == user.id:
+        return True
+    return any(ur.role.name == "admin" for ur in user.user_roles)
 
 
 @router.get("", response_model=list[ReportResponse])
@@ -43,7 +52,11 @@ async def list_reports(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    rows = (await db.execute(select(Report).order_by(Report.created_at.desc()))).scalars().all()
+    rows = (
+        (await db.execute(select(Report).where(Report.tenant_id == user.tenant_id).order_by(Report.created_at.desc())))
+        .scalars()
+        .all()
+    )
     return [_to_response(r) for r in rows]
 
 
@@ -85,12 +98,17 @@ async def compose_playbook_endpoint(
     return _to_response(report)
 
 
-async def _get_owned(db: AsyncSession, report_id: str) -> Report:
+async def _get_owned(db: AsyncSession, report_id: str, user: User) -> Report:
     try:
         rid = uuid.UUID(report_id)
     except ValueError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
-    row = (await db.execute(select(Report).where(Report.id == rid))).scalar_one_or_none()
+    # tenant_id predicate is belt-and-suspenders alongside RLS: zero behavior change
+    # under working RLS, but keeps cross-tenant reads 404ing even if RLS were ever
+    # misconfigured.
+    row = (
+        await db.execute(select(Report).where(Report.id == rid, Report.tenant_id == user.tenant_id))
+    ).scalar_one_or_none()
     if row is None:  # RLS-invisible cross-tenant rows land here too → 404 (no existence disclosure)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Report not found")
     return row
@@ -102,7 +120,97 @@ async def get_report(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    return _to_response(await _get_owned(db, report_id))
+    return _to_response(await _get_owned(db, report_id, user))
+
+
+@router.delete("/{report_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_report(
+    report_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    row = await _get_owned(db, report_id, user)
+    if not _can_manage(user, row):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the report's creator or a workspace admin can delete this report",
+        )
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="report",
+        action="report.delete",
+        actor_id=user.id,
+        resource_type="report",
+        resource_id=str(row.id),
+        payload={"title": row.title, "current_version": row.version},
+    )
+    # report_versions.report_id has ondelete="CASCADE" — no ORM relationship exists,
+    # so the DB removes version rows itself; do not add one here.
+    await db.delete(row)
+    await db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def _require_can_manage_pin(user: User, row: Report) -> None:
+    if not _can_manage(user, row):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only the report's creator or a workspace admin can change its dashboard pin",
+        )
+
+
+@router.post("/{report_id}/pin", response_model=ReportResponse)
+async def pin_report(
+    report_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    row = await _get_owned(db, report_id, user)
+    _require_can_manage_pin(user, row)
+    # server-side timestamp so re-pinning always bumps forward, even across clients
+    # with skewed clocks — newest-first dashboard ordering is the feature. clock_timestamp()
+    # (not now()/func.now(), which is fixed for the whole transaction) so a re-pin inside
+    # the same transaction still advances.
+    row.dashboard_pinned_at = func.clock_timestamp()
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="report",
+        action="report.pin",
+        actor_id=user.id,
+        resource_type="report",
+        resource_id=str(row.id),
+    )
+    # flush + refresh BEFORE commit: the clock_timestamp() result needs a read back,
+    # and the commit clears the RLS GUC (FORCE-RLS on reports) — refreshing after
+    # commit would 500 in any RLS-enforcing environment.
+    await db.flush()
+    await db.refresh(row)
+    await db.commit()
+    return _to_response(row)
+
+
+@router.delete("/{report_id}/pin", response_model=ReportResponse)
+async def unpin_report(
+    report_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    row = await _get_owned(db, report_id, user)
+    _require_can_manage_pin(user, row)
+    row.dashboard_pinned_at = None
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="report",
+        action="report.unpin",
+        actor_id=user.id,
+        resource_type="report",
+        resource_id=str(row.id),
+    )
+    await db.commit()
+    return _to_response(row)
 
 
 @router.get("/{report_id}/view")
@@ -111,7 +219,7 @@ async def view_report(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    row = await _get_owned(db, report_id)
+    row = await _get_owned(db, report_id, user)
     return Response(content=row.rendered_html, media_type="text/html")
 
 
@@ -128,7 +236,7 @@ async def refresh_report_endpoint(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    row = await _get_owned(db, report_id)  # 404 shape identical to existing routes
+    row = await _get_owned(db, report_id, user)  # 404 shape identical to existing routes
     try:
         # the CALLER's tenant, never row.tenant_id — under RLS they are equal, but if
         # RLS were ever bypassed the row's value could set a foreign tenant context.
@@ -154,7 +262,7 @@ async def update_report_settings(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    row = await _get_owned(db, report_id)
+    row = await _get_owned(db, report_id, user)
     # Legacy/snapshot reports stay snapshot-only (§6.1): recipe_json loads as Python
     # None for BOTH SQL NULL and the jsonb-'null' rows compose writes explicitly.
     if request.auto_refresh != "off" and row.recipe_json is None:
@@ -188,7 +296,7 @@ async def resume_auto_refresh(
     """One-click resume after the failure ladder paused a report (§4C). Clears the
     pause AND zeroes the count — otherwise one stale failure would re-pause almost
     immediately. Idempotent on a never-paused report."""
-    row = await _get_owned(db, report_id)
+    row = await _get_owned(db, report_id, user)
     row.auto_refresh_paused_at = None
     row.refresh_failure_count = 0
     await audit_service.log_event(
@@ -220,7 +328,7 @@ async def list_report_versions(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    row = await _get_owned(db, report_id)
+    row = await _get_owned(db, report_id, user)
     versions = (
         (
             await db.execute(
@@ -251,7 +359,7 @@ async def view_report_version(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    row = await _get_owned(db, report_id)
+    row = await _get_owned(db, report_id, user)
     snapshot = (
         await db.execute(
             select(ReportVersion).where(ReportVersion.report_id == row.id, ReportVersion.version == version)
