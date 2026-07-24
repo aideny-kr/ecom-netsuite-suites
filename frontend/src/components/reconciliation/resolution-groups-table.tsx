@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/table";
 import { ResolutionGroupItems } from "@/components/reconciliation/resolution-group-items";
 import { ExportMenu } from "@/components/reconciliation/export-menu";
+import { fxChip, money } from "@/components/reconciliation/format";
 import { NEEDS_HUMAN_PROPOSALS_LIMIT } from "@/hooks/use-resolution";
 import type { ReconResolutionGroup, ReconResolutionProposal } from "@/lib/types";
 
@@ -100,10 +101,6 @@ const SEVERITY_CHIP_CLASS: Record<"crit" | "warn" | "neutral", string> = {
 
 function rootCauseChipClass(rootCause: string): string {
   return SEVERITY_CHIP_CLASS[ROOT_CAUSE_SEVERITY[rootCause] ?? "neutral"];
-}
-
-function money(amount: string | number, currency: string) {
-  return Number(amount).toLocaleString("en-US", { style: "currency", currency });
 }
 
 /** One click-to-copy identifier — displays `${prefix}${value}` but copies the
@@ -434,7 +431,9 @@ export function NeedsHumanWorksheet({ runId, proposals, isLoading, onInvestigate
               </TableRow>
             </TableHeader>
             <TableBody>
-              {proposals.map((p) => (
+              {proposals.map((p) => {
+                const fx = fxChip(p);
+                return (
                 <TableRow key={p.id}>
                   <TableCell className="px-3 py-2">
                     {p.order_reference ? (
@@ -456,6 +455,14 @@ export function NeedsHumanWorksheet({ runId, proposals, isLoading, onInvestigate
                         <CopyableId prefix="NS#" value={p.netsuite_internal_id} />
                         {p.netsuite_record_type && (
                           <span className="shrink-0 text-xs text-muted-foreground">{p.netsuite_record_type}</span>
+                        )}
+                        {fx && (
+                          <span
+                            className="inline-block max-w-[7rem] shrink-0 truncate rounded-full bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground"
+                            title={fx.title}
+                          >
+                            {fx.label}
+                          </span>
                         )}
                       </span>
                     ) : (
@@ -486,7 +493,8 @@ export function NeedsHumanWorksheet({ runId, proposals, isLoading, onInvestigate
                     </button>
                   </TableCell>
                 </TableRow>
-              ))}
+                );
+              })}
             </TableBody>
           </Table>
         </div>

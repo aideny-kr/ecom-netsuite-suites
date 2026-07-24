@@ -15,6 +15,7 @@ const proposals: ReconResolutionProposal[] = [
     order_reference: "R946866359", stripe_charge_id: "ch_3Nxxx",
     netsuite_internal_id: "12345", netsuite_record_type: "custdep",
     stripe_amount: "3.20", netsuite_amount: "3.15", variance_amount: "0.05",
+    deposit_transaction_currency: null, deposit_foreign_amount: null, deposit_exchange_rate: null,
   },
   {
     id: "p2", run_id: "r1", result_id: "res2",
@@ -27,6 +28,7 @@ const proposals: ReconResolutionProposal[] = [
     order_reference: "R123456789", stripe_charge_id: "ch_unmatched",
     netsuite_internal_id: null, netsuite_record_type: null,
     stripe_amount: "120.00", netsuite_amount: null, variance_amount: null,
+    deposit_transaction_currency: null, deposit_foreign_amount: null, deposit_exchange_rate: null,
   },
   {
     id: "p3", run_id: "r1", result_id: "res3",
@@ -39,6 +41,50 @@ const proposals: ReconResolutionProposal[] = [
     order_reference: "R555000111", stripe_charge_id: "ch_needs_human",
     netsuite_internal_id: null, netsuite_record_type: null,
     stripe_amount: "45.00", netsuite_amount: null, variance_amount: null,
+    deposit_transaction_currency: null, deposit_foreign_amount: null, deposit_exchange_rate: null,
+  },
+  {
+    id: "p4", run_id: "r1", result_id: "res4",
+    root_cause: "fees", action: "book_fee_line", booking_vehicle: "deposit",
+    group_key: "fees:book_fee_line:deposit", source: "planner",
+    narrative: "FX-marked deposit — booked in EUR at a recorded exchange rate.",
+    proposed_amount: "9.00", currency: "USD",
+    above_materiality: false, status: "proposed",
+    failure_reason: null, correlation_id: null, created_at: "2026-07-06T00:00:00Z",
+    order_reference: "R400000001", stripe_charge_id: "ch_fx_rate",
+    netsuite_internal_id: "44444", netsuite_record_type: "custdep",
+    stripe_amount: "1000.00", netsuite_amount: "991.00", variance_amount: "9.00",
+    deposit_transaction_currency: "EUR", deposit_foreign_amount: "827.00", deposit_exchange_rate: "0.9231",
+  },
+  {
+    id: "p5", run_id: "r1", result_id: "res5",
+    root_cause: "fees", action: "book_fee_line", booking_vehicle: "deposit",
+    group_key: "fees:book_fee_line:deposit", source: "planner",
+    narrative: "FX-marked deposit — no exchange_rate on file, implied from amounts.",
+    proposed_amount: "217.94", currency: "USD",
+    above_materiality: false, status: "proposed",
+    failure_reason: null, correlation_id: null, created_at: "2026-07-06T00:00:00Z",
+    order_reference: "R500000002", stripe_charge_id: "ch_fx_implied",
+    netsuite_internal_id: "55555", netsuite_record_type: "custdep",
+    // Mutation-detecting fixture: the wrong (old) formula netsuite_amount /
+    // stripe_amount = 4782.06 / 5000.00 = 0.9564 differs visibly from the
+    // correct implied rate netsuite_amount / deposit_foreign_amount =
+    // 4782.06 / 6722.37 = 0.7114 — a regression to the old formula fails this.
+    stripe_amount: "5000.00", netsuite_amount: "4782.06", variance_amount: "217.94",
+    deposit_transaction_currency: "EUR", deposit_foreign_amount: "6722.37", deposit_exchange_rate: null,
+  },
+  {
+    id: "p6", run_id: "r1", result_id: "res6",
+    root_cause: "fees", action: "book_fee_line", booking_vehicle: "deposit",
+    group_key: "fees:book_fee_line:deposit", source: "planner",
+    narrative: "Same-currency deposit — no FX chip expected.",
+    proposed_amount: "5.00", currency: "EUR",
+    above_materiality: false, status: "proposed",
+    failure_reason: null, correlation_id: null, created_at: "2026-07-06T00:00:00Z",
+    order_reference: "R600000003", stripe_charge_id: "ch_same_ccy",
+    netsuite_internal_id: "66666", netsuite_record_type: "custdep",
+    stripe_amount: "500.00", netsuite_amount: "495.00", variance_amount: "5.00",
+    deposit_transaction_currency: "EUR", deposit_foreign_amount: "495.00", deposit_exchange_rate: "1.000000",
   },
 ];
 
@@ -146,5 +192,49 @@ describe("ResolutionGroupItems", () => {
     expect(buttons).toHaveLength(1);
     fireEvent.click(buttons[0]);
     expect(onInvestigate).toHaveBeenCalledWith(proposals[2]);
+  });
+
+  describe("FX mark-only chip (Phase C)", () => {
+    it("renders a currency + exchange_rate chip when the deposit's transaction currency differs from the proposal currency", () => {
+      render(<ResolutionGroupItems {...base} />);
+      const row = screen.getByText("R400000001").closest("tr")!;
+      expect(within(row).getByText("EUR @ 0.9231")).toBeInTheDocument();
+    });
+
+    it("carries the full text in the chip's title attribute, distinguishing a recorded rate", () => {
+      render(<ResolutionGroupItems {...base} />);
+      expect(screen.getByText("EUR @ 0.9231")).toHaveAttribute(
+        "title",
+        "Booked in EUR at 0.9231 (recorded rate)"
+      );
+    });
+
+    it("falls back to the implied rate (netsuite_amount / deposit_foreign_amount, never stripe_amount) when exchange_rate is null", () => {
+      render(<ResolutionGroupItems {...base} />);
+      const row = screen.getByText("R500000002").closest("tr")!;
+      expect(within(row).getByText("EUR ≈ 0.7114")).toBeInTheDocument();
+      // Mutation guard: the old (wrong) formula would render 0.9564 here.
+      expect(within(row).queryByText(/0\.9564/)).toBeNull();
+    });
+
+    it("marks the implied fallback with an honest 'estimated' title, distinct from a recorded rate", () => {
+      render(<ResolutionGroupItems {...base} />);
+      expect(screen.getByText("EUR ≈ 0.7114")).toHaveAttribute(
+        "title",
+        "Booked in EUR, ≈0.7114 estimated from booked amounts (no recorded rate)"
+      );
+    });
+
+    it("shows no chip when the deposit's transaction currency equals the proposal currency", () => {
+      render(<ResolutionGroupItems {...base} />);
+      const row = screen.getByText("R600000003").closest("tr")!;
+      expect(within(row).queryByText(/@/)).toBeNull();
+    });
+
+    it("shows no chip when the deposit carries no transaction currency", () => {
+      render(<ResolutionGroupItems {...base} />);
+      const row = screen.getByText("R946866359").closest("tr")!;
+      expect(within(row).queryByText(/@/)).toBeNull();
+    });
   });
 });

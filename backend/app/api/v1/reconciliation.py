@@ -929,6 +929,9 @@ def _proposal_response_with_enrichment(
     stripe_amount: Decimal | None = None,
     netsuite_amount: Decimal | None = None,
     variance_amount: Decimal | None = None,
+    deposit_transaction_currency: str | None = None,
+    deposit_foreign_amount: Decimal | None = None,
+    deposit_exchange_rate: Decimal | None = None,
 ) -> ResolutionProposalResponse:
     return ResolutionProposalResponse.model_validate(proposal).model_copy(
         update={
@@ -939,6 +942,9 @@ def _proposal_response_with_enrichment(
             "stripe_amount": stripe_amount,
             "netsuite_amount": netsuite_amount,
             "variance_amount": variance_amount,
+            "deposit_transaction_currency": deposit_transaction_currency,
+            "deposit_foreign_amount": deposit_foreign_amount,
+            "deposit_exchange_rate": deposit_exchange_rate,
         }
     )
 
@@ -960,6 +966,9 @@ async def _enrich_proposal_response(
                 ReconciliationResult.stripe_amount,
                 ReconciliationResult.netsuite_amount,
                 ReconciliationResult.variance_amount,
+                NetsuitePosting.transaction_currency,
+                NetsuitePosting.foreign_amount,
+                NetsuitePosting.exchange_rate,
             )
             .select_from(ReconciliationResult)
             .outerjoin(
@@ -975,16 +984,28 @@ async def _enrich_proposal_response(
             )
         )
     ).first()
-    order_reference, netsuite_internal_id, record_type, stripe_amount, netsuite_amount, variance_amount = row or (
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
+    (
+        order_reference,
+        netsuite_internal_id,
+        record_type,
+        stripe_amount,
+        netsuite_amount,
+        variance_amount,
+        transaction_currency,
+        foreign_amount,
+        exchange_rate,
+    ) = row or (None, None, None, None, None, None, None, None, None)
     return _proposal_response_with_enrichment(
-        proposal, order_reference, netsuite_internal_id, record_type, stripe_amount, netsuite_amount, variance_amount
+        proposal,
+        order_reference,
+        netsuite_internal_id,
+        record_type,
+        stripe_amount,
+        netsuite_amount,
+        variance_amount,
+        transaction_currency,
+        foreign_amount,
+        exchange_rate,
     )
 
 
@@ -1025,6 +1046,9 @@ def _build_proposal_query(
             ReconciliationResult.stripe_amount,
             ReconciliationResult.netsuite_amount,
             ReconciliationResult.variance_amount,
+            NetsuitePosting.transaction_currency,
+            NetsuitePosting.foreign_amount,
+            NetsuitePosting.exchange_rate,
         )
         .join(
             ReconciliationResult,
@@ -1387,6 +1411,9 @@ _PROPOSALS_HEADERS = [
     "stripe_charge_id",
     "netsuite_internal_id",
     "netsuite_record_type",
+    "transaction_currency",
+    "exchange_rate",
+    "foreign_amount",
     "stripe_amount",
     "netsuite_amount",
     "variance_amount",
@@ -1399,7 +1426,18 @@ _PROPOSALS_HEADERS = [
     "booking_vehicle",
     "narrative",
 ]
-_PROPOSALS_XLSX_EXTRA_HEADERS = ["proposal_id", "run_id", "source", "decided_by", "decided_at", "created_at"]
+# All three Phase-A currency-truth columns (transaction_currency,
+# exchange_rate, foreign_amount) now live in _PROPOSALS_HEADERS above, shared
+# by CSV and xlsx alike — these extras are id/audit-only and must never repeat
+# a column from the main block.
+_PROPOSALS_XLSX_EXTRA_HEADERS = [
+    "proposal_id",
+    "run_id",
+    "source",
+    "decided_by",
+    "decided_at",
+    "created_at",
+]
 
 _RESULTS_HEADERS = [
     "match_type",
@@ -1439,12 +1477,18 @@ def _proposals_export_row(
     stripe_amount: Decimal | None,
     netsuite_amount: Decimal | None,
     variance_amount: Decimal | None,
+    transaction_currency: str | None,
+    foreign_amount: Decimal | None,
+    exchange_rate: Decimal | None,
 ) -> list:
     return [
         order_reference,
         p.charge_source_id,
         netsuite_internal_id,
         netsuite_record_type,
+        transaction_currency,
+        exchange_rate,
+        foreign_amount,
         stripe_amount,
         netsuite_amount,
         variance_amount,

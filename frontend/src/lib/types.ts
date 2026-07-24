@@ -1065,4 +1065,11 @@ export interface ReconResolutionProposal {
   stripe_amount: string | null;
   netsuite_amount: string | null;
   variance_amount: string | null;
+  // Phase C (FX mark-only surfacing): the matched deposit's Phase-A
+  // currency-truth columns — Decimal-as-string like the amounts above, or
+  // null when unmatched or the deposit predates the Phase-A backfill.
+  // Required-nullable: the backend always sends these three keys.
+  deposit_transaction_currency: string | null;
+  deposit_foreign_amount: string | null;
+  deposit_exchange_rate: string | null;
 }

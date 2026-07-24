@@ -47,6 +47,9 @@ _PROPOSALS_HEADERS = [
     "stripe_charge_id",
     "netsuite_internal_id",
     "netsuite_record_type",
+    "transaction_currency",
+    "exchange_rate",
+    "foreign_amount",
     "stripe_amount",
     "netsuite_amount",
     "variance_amount",
@@ -60,7 +63,18 @@ _PROPOSALS_HEADERS = [
     "narrative",
 ]
 
-_PROPOSALS_XLSX_EXTRA_HEADERS = ["proposal_id", "run_id", "source", "decided_by", "decided_at", "created_at"]
+# All three Phase-A currency-truth columns (transaction_currency,
+# exchange_rate, foreign_amount) live in _PROPOSALS_HEADERS, shared by CSV
+# and xlsx alike — these extras are id/audit-only, never a repeat of a
+# main-block column.
+_PROPOSALS_XLSX_EXTRA_HEADERS = [
+    "proposal_id",
+    "run_id",
+    "source",
+    "decided_by",
+    "decided_at",
+    "created_at",
+]
 
 _RESULTS_HEADERS = [
     "match_type",
@@ -228,6 +242,42 @@ async def _seed_needs_human_cross_group(db, tenant):
     return user, run
 
 
+async def _seed_run_with_fx_deposit(db, tenant):
+    """One fees proposal matched to a deposit carrying Phase-A currency-truth
+    columns (transaction_currency/foreign_amount/exchange_rate) — Phase C
+    FX mark-only surfacing, no classification change."""
+    user, _ = await create_test_user(db, tenant)
+    await enable_feature_flag(db, tenant.id, "recon_resolution_ui")
+    run = await create_test_recon_run(db, tenant.id, status="completed")
+    posting = await create_test_netsuite_posting(
+        db,
+        tenant.id,
+        netsuite_internal_id="98765",
+        record_type="custdep",
+        transaction_currency="EUR",
+        foreign_amount=Decimal("827.00"),
+        exchange_rate=Decimal("1.210000"),
+    )
+    await create_test_recon_result(
+        db,
+        tenant.id,
+        run.id,
+        status="pending",
+        bucket="auto_classifications",
+        match_type="deterministic",
+        variance_type="fees",
+        variance_amount=Decimal("9.00"),
+        stripe_amount=Decimal("1000.00"),
+        netsuite_amount=Decimal("991.00"),
+        evidence={"charge_source_id": "ch_fx", "order_reference": "R9"},
+        deposit_id=posting.id,
+    )
+    run.matches_count = 0
+    await db.flush()
+    await plan_resolutions(str(run.id), user=user, db=db)
+    return user, run
+
+
 # ---------------------------------------------------------------------------
 # section=groups
 # ---------------------------------------------------------------------------
@@ -289,6 +339,36 @@ async def test_export_proposals_csv_row_has_exact_decimal_strings(db, tenant_a):
     assert row["variance_amount"] == "9.00"
     assert row["proposed_amount"] == "9.00"
     assert row["above_materiality"] == "False"
+    # Phase C: the matched deposit here (via _seed_run_with_groups) carries no
+    # Phase-A currency-truth data — the new columns are null, not erroring.
+    assert row["transaction_currency"] == ""
+    assert row["exchange_rate"] == ""
+    assert row["foreign_amount"] == ""
+
+
+async def test_export_proposals_csv_has_fx_columns_with_exact_decimal_strings(db, tenant_a):
+    """Phase C task 1 (+ dedup fix, item 5): transaction_currency,
+    exchange_rate, and foreign_amount off the matched deposit's Phase-A
+    currency-truth columns land in the CSV column set, appended right after
+    netsuite_record_type — mark-only FX visibility. foreign_amount was
+    previously xlsx-only despite being threaded through as a parameter; CSV
+    and xlsx now carry the same three FX columns."""
+    user, run = await _seed_run_with_fx_deposit(db, tenant_a)
+    response = await export_run_section(
+        str(run.id),
+        user=user,
+        db=db,
+        section="proposals",
+        format="csv",
+    )
+    rows = _csv_rows(await _body_bytes(response))
+    assert rows[0] == _PROPOSALS_HEADERS
+    row = dict(zip(_PROPOSALS_HEADERS, rows[1]))
+    assert row["order_reference"] == "R9"
+    assert row["transaction_currency"] == "EUR"
+    # exact Decimal strings, never float notation ("1.21" / "827.0")
+    assert row["exchange_rate"] == "1.210000"
+    assert row["foreign_amount"] == "827.00"
 
 
 async def test_export_proposals_xlsx_has_extra_columns(db, tenant_a):
@@ -305,11 +385,43 @@ async def test_export_proposals_xlsx_has_extra_columns(db, tenant_a):
     ws = wb.active
     headers = [c.value for c in ws[1]]
     assert headers == _PROPOSALS_HEADERS + _PROPOSALS_XLSX_EXTRA_HEADERS
+    # Dedup guard (item 4): no header name repeats. This is the "masked" test
+    # that let transaction_currency/exchange_rate duplication ship — it
+    # asserted equality against test-local constants that carried the same
+    # duplication, so it never actually caught the bug.
+    assert len(headers) == len(set(headers)), f"duplicate header names: {headers}"
     row = dict(zip(headers, [c.value for c in ws[2]]))
     assert row["source"] == "planner"
     assert row["run_id"] == str(run.id)
     assert row["decided_by"] is None
     assert row["created_at"] is not None
+
+
+async def test_export_proposals_xlsx_fx_columns_appear_exactly_once(db, tenant_a):
+    """Phase C task 1 (+ dedup fix, items 4/5): the xlsx sheet carries all
+    three Phase-A currency-truth columns (transaction_currency,
+    exchange_rate, foreign_amount), all off the shared main proposals column
+    block (_PROPOSALS_HEADERS) — the xlsx-only extras are id/audit fields
+    only — and each column name appears exactly once. Previously the extras
+    repeated transaction_currency + exchange_rate, so the sheet carried
+    duplicate header names."""
+    user, run = await _seed_run_with_fx_deposit(db, tenant_a)
+    response = await export_run_section(
+        str(run.id),
+        user=user,
+        db=db,
+        section="proposals",
+        format="xlsx",
+    )
+    wb = load_workbook(io.BytesIO(await _body_bytes(response)))
+    ws = wb.active
+    headers = [c.value for c in ws[1]]
+    assert headers == _PROPOSALS_HEADERS + _PROPOSALS_XLSX_EXTRA_HEADERS
+    assert len(headers) == len(set(headers)), f"duplicate header names: {headers}"
+    row = dict(zip(headers, [c.value for c in ws[2]]))
+    assert row["transaction_currency"] == "EUR"
+    assert row["foreign_amount"] == pytest.approx(827.00)
+    assert row["exchange_rate"] == pytest.approx(1.21)
 
 
 async def test_export_proposals_group_key_filter_narrows_rows(db, tenant_a):

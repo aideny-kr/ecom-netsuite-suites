@@ -11,6 +11,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useGroupProposals } from "@/hooks/use-resolution";
+import { fxChip, money } from "@/components/reconciliation/format";
 import type { ReconResolutionProposal } from "@/lib/types";
 
 // Statuses that reach this worksheet are "proposed" (awaiting a decision) or
@@ -37,11 +38,6 @@ function materialityChip(above: boolean) {
           "bg-amber-50 text-amber-700 border-amber-300 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-800",
       }
     : { label: "Within materiality", className: "bg-muted text-muted-foreground border-transparent" };
-}
-
-function money(amount: string | number | null | undefined, currency: string): string {
-  if (amount === null || amount === undefined) return "—";
-  return Number(amount).toLocaleString("en-US", { style: "currency", currency: currency || "USD" });
 }
 
 /** One click-to-copy identifier cell. Displays `${prefix}${value}` but
@@ -117,6 +113,7 @@ export function ResolutionGroupItems({
           {proposals.map((p) => {
             const status = statusChip(p.status);
             const materiality = materialityChip(p.above_materiality);
+            const fx = fxChip(p);
             return (
               <TableRow key={p.id}>
                 <TableCell>
@@ -145,10 +142,18 @@ export function ResolutionGroupItems({
                 </TableCell>
                 <TableCell>
                   {p.netsuite_internal_id ? (
-                    <span className="inline-flex items-center gap-1.5">
+                    <span className="inline-flex max-w-full items-center gap-1.5">
                       <IdentifierSegment prefix="NS#" value={p.netsuite_internal_id} />
                       {p.netsuite_record_type && (
-                        <span className="text-xs text-muted-foreground">{p.netsuite_record_type}</span>
+                        <span className="shrink-0 text-xs text-muted-foreground">{p.netsuite_record_type}</span>
+                      )}
+                      {fx && (
+                        <span
+                          className="inline-block max-w-[7rem] shrink-0 truncate rounded-full bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground"
+                          title={fx.title}
+                        >
+                          {fx.label}
+                        </span>
                       )}
                     </span>
                   ) : (

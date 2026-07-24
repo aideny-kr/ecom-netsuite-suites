@@ -215,6 +215,61 @@ async def test_group_proposals_listing_omits_identifiers_when_unmatched(db, tena
         assert item.netsuite_record_type is None
 
 
+async def test_group_proposals_listing_carries_deposit_fx_fields_when_matched(db, tenant_a):
+    """Phase C task 1: the matched deposit's Phase-A currency-truth columns
+    (transaction_currency/foreign_amount/exchange_rate) surface on the
+    response — FX mark-only visibility, no classification change, no new
+    query (same enrichment join used for the NetSuite identifiers)."""
+    user, _ = await create_test_user(db, tenant_a)
+    await enable_feature_flag(db, tenant_a.id, "recon_resolution_ui")
+    run = await create_test_recon_run(db, tenant_a.id, status="completed")
+    posting = await create_test_netsuite_posting(
+        db,
+        tenant_a.id,
+        netsuite_internal_id="98765",
+        record_type="custdep",
+        transaction_currency="EUR",
+        foreign_amount=Decimal("827.00"),
+        exchange_rate=Decimal("1.210000"),
+    )
+    await create_test_recon_result(
+        db,
+        tenant_a.id,
+        run.id,
+        status="pending",
+        bucket="auto_classifications",
+        match_type="deterministic",
+        variance_type="fees",
+        variance_amount=Decimal("9.00"),
+        stripe_amount=Decimal("1000"),
+        netsuite_amount=Decimal("991"),
+        evidence={"charge_source_id": "ch_fx", "order_reference": "R9"},
+        deposit_id=posting.id,
+    )
+    run.matches_count = 0
+    await db.flush()
+    await plan_resolutions(str(run.id), user=user, db=db)
+
+    page = await list_group_proposals(str(run.id), group_key="fees:book_fee_line:deposit", user=user, db=db)
+    assert len(page) == 1
+    item = page[0]
+    assert item.deposit_transaction_currency == "EUR"
+    assert item.deposit_foreign_amount == Decimal("827.00")
+    assert item.deposit_exchange_rate == Decimal("1.210000")
+
+
+async def test_group_proposals_listing_omits_deposit_fx_fields_when_unmatched(db, tenant_a):
+    """Unmatched results (no deposit_id, the _seed() default) leave the three
+    FX fields None rather than erroring the join."""
+    user, run = await _seed(db, tenant_a)
+    page = await list_group_proposals(str(run.id), group_key="fees:book_fee_line:deposit", user=user, db=db)
+    assert len(page) == 2
+    for item in page:
+        assert item.deposit_transaction_currency is None
+        assert item.deposit_foreign_amount is None
+        assert item.deposit_exchange_rate is None
+
+
 async def test_group_proposals_listing_carries_amounts(db, tenant_a):
     """Task 1: the response carries the matched result's own stripe/netsuite/
     variance amounts (A1 drill-down columns) — populated off the enrichment

@@ -477,6 +477,9 @@ describe("NeedsHumanWorksheet", () => {
     stripe_amount: null,
     netsuite_amount: null,
     variance_amount: null,
+    deposit_transaction_currency: null,
+    deposit_foreign_amount: null,
+    deposit_exchange_rate: null,
   };
 
   beforeEach(() => {
@@ -588,6 +591,63 @@ describe("NeedsHumanWorksheet", () => {
       const chip = screen.getByText(/duplicate deposits/i);
       expect(chip.className).not.toContain("red");
       expect(chip.className).not.toContain("amber");
+    });
+  });
+
+  describe("FX mark-only chip (Phase C)", () => {
+    const fxProposal: ReconResolutionProposal = {
+      ...proposal,
+      netsuite_internal_id: "98765",
+      netsuite_record_type: "custdep",
+      currency: "USD",
+      stripe_amount: "1000.00",
+      netsuite_amount: "991.00",
+      deposit_transaction_currency: "EUR",
+      deposit_foreign_amount: "827.00",
+      deposit_exchange_rate: "0.9231",
+    };
+
+    it("renders a currency + exchange_rate chip when the deposit's transaction currency differs from the proposal currency", () => {
+      render(<NeedsHumanWorksheet runId="r1" proposals={[fxProposal]} isLoading={false} onInvestigate={vi.fn()} />);
+      expect(screen.getByText("EUR @ 0.9231")).toBeInTheDocument();
+    });
+
+    it("carries the full text in the chip's title attribute, distinguishing a recorded rate", () => {
+      render(<NeedsHumanWorksheet runId="r1" proposals={[fxProposal]} isLoading={false} onInvestigate={vi.fn()} />);
+      expect(screen.getByText("EUR @ 0.9231")).toHaveAttribute(
+        "title",
+        "Booked in EUR at 0.9231 (recorded rate)"
+      );
+    });
+
+    it("falls back to the implied rate (netsuite_amount / deposit_foreign_amount, never stripe_amount) when exchange_rate is null", () => {
+      // Mutation-detecting: netsuite_amount 991.00 / deposit_foreign_amount 827.00
+      // ≈ 1.1983 — visibly different from the old (wrong) formula
+      // netsuite_amount / stripe_amount = 991.00 / 1000.00 = 0.9910.
+      const implied = { ...fxProposal, deposit_exchange_rate: null };
+      render(<NeedsHumanWorksheet runId="r1" proposals={[implied]} isLoading={false} onInvestigate={vi.fn()} />);
+      expect(screen.getByText("EUR ≈ 1.1983")).toBeInTheDocument();
+      expect(screen.queryByText(/0\.9910/)).toBeNull();
+    });
+
+    it("marks the implied fallback with an honest 'estimated' title, distinct from a recorded rate", () => {
+      const implied = { ...fxProposal, deposit_exchange_rate: null };
+      render(<NeedsHumanWorksheet runId="r1" proposals={[implied]} isLoading={false} onInvestigate={vi.fn()} />);
+      expect(screen.getByText("EUR ≈ 1.1983")).toHaveAttribute(
+        "title",
+        "Booked in EUR, ≈1.1983 estimated from booked amounts (no recorded rate)"
+      );
+    });
+
+    it("shows no chip when the deposit's transaction currency equals the proposal currency", () => {
+      const sameCcy = { ...fxProposal, deposit_transaction_currency: "USD" };
+      render(<NeedsHumanWorksheet runId="r1" proposals={[sameCcy]} isLoading={false} onInvestigate={vi.fn()} />);
+      expect(screen.queryByText(/@/)).toBeNull();
+    });
+
+    it("shows no chip when the deposit carries no transaction currency", () => {
+      render(<NeedsHumanWorksheet runId="r1" proposals={[proposal]} isLoading={false} onInvestigate={vi.fn()} />);
+      expect(screen.queryByText(/@/)).toBeNull();
     });
   });
 });

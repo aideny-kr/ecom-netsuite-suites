@@ -285,6 +285,9 @@ describe("ReconciliationPage investigate-proposal prefill", () => {
     stripe_amount: null,
     netsuite_amount: null,
     variance_amount: null,
+    deposit_transaction_currency: null,
+    deposit_foreign_amount: null,
+    deposit_exchange_rate: null,
   };
 
   const mockGroup: ReconResolutionGroup = {

@@ -305,11 +305,18 @@ async def create_test_netsuite_posting(
     amount: Decimal = Decimal("100.00"),
     currency: str = "USD",
     related_payout_id: str | None = None,
+    transaction_currency: str | None = None,
+    foreign_amount: Decimal | None = None,
+    exchange_rate: Decimal | None = None,
 ) -> "NetsuitePosting":  # noqa: F821
     """Seed a canonical ``netsuite_postings`` row so a result can reference it via deposit_id.
 
     Pass ``id=`` (a UUID) to match the UUID a deposit/NSPaymentRecord carries so the
     reconciliation_results_deposit_id_fkey is satisfied. Flushes for its id.
+
+    ``transaction_currency``/``foreign_amount``/``exchange_rate`` are the
+    Phase-A currency-truth columns (migration 090) — None by default (most
+    fixtures don't need them; Phase C FX-marking tests pass them explicitly).
     """
     from app.models.canonical import NetsuitePosting
 
@@ -325,6 +332,9 @@ async def create_test_netsuite_posting(
         amount=amount,
         currency=currency,
         related_payout_id=related_payout_id,
+        transaction_currency=transaction_currency,
+        foreign_amount=foreign_amount,
+        exchange_rate=exchange_rate,
     )
     db.add(posting)
     await db.flush()
