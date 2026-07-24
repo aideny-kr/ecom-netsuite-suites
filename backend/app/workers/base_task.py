@@ -13,6 +13,23 @@ from app.models.job import Job
 sync_engine = create_engine(settings.DATABASE_URL_SYNC)
 
 
+def set_tenant_context_sync(session: Session, tenant_id: str) -> None:
+    """Set RLS tenant context (SET LOCAL, scoped to the current transaction) on a
+    sync Session. Sync twin of ``app.core.database.set_tenant_context``.
+
+    SET LOCAL doesn't support $1 bind params in PostgreSQL, so the tenant_id is
+    validated as a UUID first to prevent SQL injection via the f-string.
+
+    Must be re-run after every commit within a long-running sync task — SET
+    LOCAL is cleared when its transaction ends, silently dropping tenant scoping
+    for whatever runs next in the same session (see
+    ``stripe_sync.refresh_payout_statuses`` for a caller that re-establishes it
+    after mid-run commits).
+    """
+    validated = str(uuid.UUID(str(tenant_id)))
+    session.execute(text(f"SET LOCAL app.current_tenant_id = '{validated}'"))
+
+
 @contextmanager
 def tenant_session(tenant_id: str):
     """Create a sync DB session with RLS tenant context set.
@@ -21,10 +38,7 @@ def tenant_session(tenant_id: str):
     so all queries are scoped to the given tenant.
     """
     with Session(sync_engine) as session:
-        # SET LOCAL doesn't support $1 bind params in PostgreSQL.
-        # Validate UUID to prevent SQL injection.
-        validated = str(uuid.UUID(str(tenant_id)))
-        session.execute(text(f"SET LOCAL app.current_tenant_id = '{validated}'"))
+        set_tenant_context_sync(session, tenant_id)
         yield session
 
 
