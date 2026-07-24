@@ -121,6 +121,11 @@ def refresh_payout_statuses(db: Session, connection_id: str, tenant_id: str) -> 
         checked += 1
         try:
             stripe_payout = stripe.Payout.retrieve(row.source_id)
+            # LOAD-BEARING ORDER: both new values are fully computed into locals
+            # BEFORE either ORM assignment below. The per-row except relies on
+            # this — any failure (fetch/parse) happens pre-assignment, so a row
+            # can never be left half-mutated for the finally-block commit to
+            # persist. Do not interleave per-field parse+assign.
             new_status = stripe_payout.status
             new_arrival_date = _stripe_epoch_to_date(stripe_payout.arrival_date)
 
@@ -147,6 +152,10 @@ def refresh_payout_statuses(db: Session, connection_id: str, tenant_id: str) -> 
                 set_tenant_context_sync(db, tenant_id)
 
     db.commit()
+    # The trailing commit also clears SET LOCAL — re-establish so the phases
+    # that run after this function (payout_lines, disputes) never execute with
+    # a dead tenant context (standing rule: set-local-tenant-context-mid-commit).
+    set_tenant_context_sync(db, tenant_id)
 
     summary = {"checked": checked, "updated": updated, "errors": errors}
     logger.info("stripe_sync.status_refresh", connection_id=connection_id, **summary)
@@ -246,6 +255,10 @@ def sync_stripe(
             exc_info=True,
         )
         db.rollback()
+        # rollback also clears SET LOCAL — restore context for the phases below.
+        from app.workers.base_task import set_tenant_context_sync as _set_ctx
+
+        _set_ctx(db, tenant_id)
         refresh_summary = {"checked": 0, "updated": 0, "errors": 0}
 
     # ---- payout lines (balance transactions) ------------------------------

@@ -518,8 +518,10 @@ class TestStripeStatusRefresh:
 
         expected_sql = f"SET LOCAL app.current_tenant_id = '{tenant_id}'"
         set_local_calls = [c for c in db.execute.call_args_list if str(c.args[0]) == expected_sql]
-        # Once before the row query, once more after the row-10 mid-loop commit.
-        assert len(set_local_calls) == 2
+        # Once before the row query, once after the row-10 mid-loop commit,
+        # and once after the trailing commit so the phases that run AFTER this
+        # function (payout_lines/disputes) never start with a dead context.
+        assert len(set_local_calls) == 3
 
     @patch("app.services.ingestion.stripe_sync.decrypt_credentials")
     @patch("app.services.ingestion.stripe_sync.stripe")
