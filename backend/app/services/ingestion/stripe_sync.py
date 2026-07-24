@@ -16,6 +16,74 @@ from app.services.ingestion.base import load_cursor, save_cursor, upsert_canonic
 
 logger = structlog.get_logger()
 
+# Stripe payout statuses that will never change again once reached. Anything else
+# (`pending`, `in_transit`) is a candidate for the status-refresh pass below.
+_NON_TERMINAL_PAYOUT_STATUSES = ("pending", "in_transit")
+
+
+def refresh_payout_statuses(db: Session, connection_id: str, tenant_id: str) -> dict:
+    """Re-fetch non-terminal payouts from Stripe and update stale status/arrival_date.
+
+    The incremental sync above is cursored on Stripe's `created` timestamp, which
+    never changes when a payout transitions status (e.g. in_transit -> paid) — so
+    once synced, a non-terminal payout is never revisited by that loop and its
+    status/arrival_date silently go stale (verified live 2026-07-24: 10/10 sampled
+    non-terminal payouts were `paid` at Stripe but still `in_transit` in the
+    mirror). This pass re-fetches each `pending`/`in_transit` payout by source_id
+    and updates the canonical row when Stripe disagrees.
+
+    Idempotent (re-running with no real change is a no-op) and defensive: a
+    per-row Stripe error (e.g. a deleted/inaccessible payout) is logged and
+    skipped, never aborts the pass or the surrounding sync.
+    """
+    rows = (
+        db.execute(
+            select(Payout).where(
+                Payout.tenant_id == tenant_id,
+                Payout.source == "stripe",
+                Payout.status.in_(_NON_TERMINAL_PAYOUT_STATUSES),
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    checked = 0
+    updated = 0
+    errors = 0
+
+    for row in rows:
+        checked += 1
+        try:
+            stripe_payout = stripe.Payout.retrieve(row.source_id)
+        except Exception:
+            errors += 1
+            logger.warning(
+                "stripe_sync.status_refresh.fetch_failed",
+                connection_id=connection_id,
+                payout_source_id=row.source_id,
+                exc_info=True,
+            )
+            continue
+
+        new_status = stripe_payout.status
+        new_arrival_date = date.fromtimestamp(stripe_payout.arrival_date) if stripe_payout.arrival_date else None
+
+        if new_status != row.status or new_arrival_date != row.arrival_date:
+            row.status = new_status
+            row.arrival_date = new_arrival_date
+            updated += 1
+
+        # Batch commit every 10 rows — Supabase 2min statement timeout
+        if checked % 10 == 0:
+            db.commit()
+
+    db.commit()
+
+    summary = {"checked": checked, "updated": updated, "errors": errors}
+    logger.info("stripe_sync.status_refresh", connection_id=connection_id, **summary)
+    return summary
+
 
 def sync_stripe(
     db: Session,
@@ -95,6 +163,11 @@ def sync_stripe(
     db.commit()
 
     logger.info("stripe_sync.payouts.done", count=payouts_synced)
+
+    # ---- payout status refresh ---------------------------------------------
+    # Runs every cycle regardless of whether the incremental fetch above found
+    # anything new — non-terminal payouts go stale independently of the cursor.
+    refresh_summary = refresh_payout_statuses(db, connection_id, tenant_id)
 
     # ---- payout lines (balance transactions) ------------------------------
     logger.info("stripe_sync.payout_lines.start", connection_id=connection_id)
@@ -192,6 +265,9 @@ def sync_stripe(
         "payouts_synced": payouts_synced,
         "payout_lines_synced": payout_lines_synced,
         "disputes_synced": disputes_synced,
+        "payouts_refresh_checked": refresh_summary["checked"],
+        "payouts_refresh_updated": refresh_summary["updated"],
+        "payouts_refresh_errors": refresh_summary["errors"],
     }
     logger.info("stripe_sync.complete", **summary)
     return summary

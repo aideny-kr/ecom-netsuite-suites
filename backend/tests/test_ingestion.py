@@ -1,6 +1,7 @@
 """Tests for Stripe and Shopify ingestion services with mocked APIs."""
 
 import uuid
+from datetime import date
 from unittest.mock import MagicMock, patch
 
 from app.services.ingestion.base import load_cursor, save_cursor
@@ -48,6 +49,15 @@ def _make_stripe_balance_txn(txn_id="txn_456", amount=5000, fee=150, net=4850):
     t.description = "Test charge"
     t.source = "ch_789"
     return t
+
+
+def _make_payout_row(source_id="po_123", status="in_transit", arrival_date=None):
+    """Create a mock canonical Payout ORM row (as returned by the status-refresh query)."""
+    row = MagicMock()
+    row.source_id = source_id
+    row.status = status
+    row.arrival_date = arrival_date
+    return row
 
 
 def _make_stripe_dispute(dispute_id="dp_001", amount=2000, currency="usd"):
@@ -174,6 +184,217 @@ class TestStripeSync:
         assert len(dispute_save_call) == 1
         saved_value = dispute_save_call[0].args[3] if dispute_save_call[0].args else dispute_save_call[0][0][3]
         assert saved_value == "1700000099"  # The newest, not 1700000001
+
+
+# ---------------------------------------------------------------------------
+# Stripe payout status-refresh tests (B2)
+#
+# The incremental sync's cursor is keyed on Stripe's `created` timestamp, which
+# never changes when a payout transitions status (e.g. in_transit -> paid) — so
+# once synced, non-terminal payouts are never revisited and go stale (verified
+# live 2026-07-24: 10/10 sampled non-terminal payouts were `paid` at Stripe but
+# `in_transit` in the mirror). ``refresh_payout_statuses`` re-fetches non-terminal
+# rows every sync cycle and updates status/arrival_date when Stripe disagrees.
+# ---------------------------------------------------------------------------
+
+
+class TestStripeStatusRefresh:
+    @patch("app.services.ingestion.stripe_sync.stripe")
+    def test_stale_in_transit_flips_to_paid(self, mock_stripe):
+        """A stale in_transit row whose Stripe truth is now paid gets updated."""
+        row = _make_payout_row(source_id="po_123", status="in_transit", arrival_date=date(2026, 6, 1))
+
+        db = MagicMock()
+        db.execute.return_value.scalars.return_value.all.return_value = [row]
+
+        retrieved = _make_stripe_payout(payout_id="po_123", status="paid")
+        retrieved.arrival_date = 1719878400
+        mock_stripe.Payout.retrieve.return_value = retrieved
+
+        from app.services.ingestion.stripe_sync import refresh_payout_statuses
+
+        result = refresh_payout_statuses(db, "conn-1", "tenant-1")
+
+        mock_stripe.Payout.retrieve.assert_called_once_with("po_123")
+        assert row.status == "paid"
+        assert row.arrival_date == date.fromtimestamp(1719878400)
+        assert result == {"checked": 1, "updated": 1, "errors": 0}
+        db.commit.assert_called()
+
+    @patch("app.services.ingestion.stripe_sync.stripe")
+    def test_pending_past_arrival_flips(self, mock_stripe):
+        """A pending row past its expected arrival flips when Stripe reports paid."""
+        row = _make_payout_row(source_id="po_456", status="pending", arrival_date=date(2026, 5, 1))
+
+        db = MagicMock()
+        db.execute.return_value.scalars.return_value.all.return_value = [row]
+
+        retrieved = _make_stripe_payout(payout_id="po_456", status="paid")
+        retrieved.arrival_date = 1714521600
+        mock_stripe.Payout.retrieve.return_value = retrieved
+
+        from app.services.ingestion.stripe_sync import refresh_payout_statuses
+
+        result = refresh_payout_statuses(db, "conn-1", "tenant-1")
+
+        assert row.status == "paid"
+        assert row.arrival_date == date.fromtimestamp(1714521600)
+        assert result == {"checked": 1, "updated": 1, "errors": 0}
+
+    @patch("app.services.ingestion.stripe_sync.stripe")
+    def test_terminal_rows_are_not_re_fetched(self, mock_stripe):
+        """The refresh query filters to non-terminal statuses only — paid/failed/
+        canceled rows must never even be selected, let alone re-fetched from Stripe."""
+        db = MagicMock()
+        db.execute.return_value.scalars.return_value.all.return_value = []
+
+        from app.services.ingestion.stripe_sync import refresh_payout_statuses
+
+        refresh_payout_statuses(db, "conn-1", str(uuid.uuid4()))
+
+        # Inspect the actual bound parameter values of the constructed SELECT
+        # (not literal-rendered SQL, which chokes on the UUID column type under
+        # the generic str-compiler) to prove the status filter is non-terminal-only.
+        stmt = db.execute.call_args_list[0].args[0]
+        bound_values = set()
+        for value in stmt.compile().params.values():
+            if isinstance(value, (list, tuple, set)):
+                bound_values.update(value)
+            else:
+                bound_values.add(value)
+        assert "pending" in bound_values
+        assert "in_transit" in bound_values
+        assert "paid" not in bound_values
+        assert "failed" not in bound_values
+        assert "canceled" not in bound_values
+
+        mock_stripe.Payout.retrieve.assert_not_called()
+
+    @patch("app.services.ingestion.stripe_sync.stripe")
+    def test_per_row_stripe_error_is_skipped_and_logged_without_failing_sync(self, mock_stripe):
+        """A deleted/inaccessible payout at Stripe must not wedge the whole pass."""
+        from structlog.testing import capture_logs
+
+        row_bad = _make_payout_row(source_id="po_bad", status="in_transit")
+        row_ok = _make_payout_row(source_id="po_ok", status="pending")
+
+        db = MagicMock()
+        db.execute.return_value.scalars.return_value.all.return_value = [row_bad, row_ok]
+
+        retrieved_ok = _make_stripe_payout(payout_id="po_ok", status="paid")
+        retrieved_ok.arrival_date = 1700500000
+
+        mock_stripe.Payout.retrieve.side_effect = [
+            RuntimeError("simulated Stripe error (deleted payout)"),
+            retrieved_ok,
+        ]
+
+        from app.services.ingestion.stripe_sync import refresh_payout_statuses
+
+        with capture_logs() as logs:
+            result = refresh_payout_statuses(db, "conn-1", "tenant-1")
+
+        assert result == {"checked": 2, "updated": 1, "errors": 1}
+        assert row_ok.status == "paid"
+        assert row_bad.status == "in_transit"  # untouched after the failed fetch
+
+        warnings = [
+            e
+            for e in logs
+            if e.get("log_level") == "warning" and e.get("event") == "stripe_sync.status_refresh.fetch_failed"
+        ]
+        assert warnings, f"expected a fetch_failed warning, got: {logs}"
+        assert warnings[0]["payout_source_id"] == "po_bad"
+
+    @patch("app.services.ingestion.stripe_sync.stripe")
+    def test_summary_counts_and_log_event(self, mock_stripe):
+        from structlog.testing import capture_logs
+
+        row1 = _make_payout_row(source_id="po_1", status="in_transit")
+        row2 = _make_payout_row(source_id="po_2", status="pending")
+        row3 = _make_payout_row(source_id="po_3", status="in_transit")
+
+        db = MagicMock()
+        db.execute.return_value.scalars.return_value.all.return_value = [row1, row2, row3]
+
+        unchanged1 = _make_stripe_payout(payout_id="po_1", status="in_transit")
+        unchanged1.arrival_date = None
+        unchanged2 = _make_stripe_payout(payout_id="po_2", status="pending")
+        unchanged2.arrival_date = None
+        changed3 = _make_stripe_payout(payout_id="po_3", status="paid")
+        changed3.arrival_date = 1700600000
+
+        mock_stripe.Payout.retrieve.side_effect = [unchanged1, unchanged2, changed3]
+
+        from app.services.ingestion.stripe_sync import refresh_payout_statuses
+
+        with capture_logs() as logs:
+            result = refresh_payout_statuses(db, "conn-1", "tenant-1")
+
+        assert result == {"checked": 3, "updated": 1, "errors": 0}
+
+        summaries = [e for e in logs if e.get("event") == "stripe_sync.status_refresh"]
+        assert summaries, f"expected a status_refresh summary log, got: {logs}"
+        assert summaries[0]["checked"] == 3
+        assert summaries[0]["updated"] == 1
+        assert summaries[0]["errors"] == 0
+
+    @patch("app.services.ingestion.stripe_sync.stripe")
+    def test_batch_commit_cadence(self, mock_stripe):
+        """Commits every ~10 rows (Supabase 2-min statement timeout), plus a trailing commit."""
+        rows = [_make_payout_row(source_id=f"po_{i}", status="in_transit") for i in range(23)]
+
+        db = MagicMock()
+        db.execute.return_value.scalars.return_value.all.return_value = rows
+
+        def _retrieve(source_id):
+            return _make_stripe_payout(payout_id=source_id, status="in_transit")
+
+        mock_stripe.Payout.retrieve.side_effect = _retrieve
+
+        from app.services.ingestion.stripe_sync import refresh_payout_statuses
+
+        refresh_payout_statuses(db, "conn-1", "tenant-1")
+
+        # Batch commit at row 10 and row 20, plus one trailing commit after the loop.
+        assert db.commit.call_count == 3
+
+    @patch("app.services.ingestion.stripe_sync.decrypt_credentials")
+    @patch("app.services.ingestion.stripe_sync.stripe")
+    def test_sync_stripe_runs_status_refresh_even_with_no_new_payouts(self, mock_stripe, mock_decrypt):
+        """The refresh pass must run every cycle, even when the incremental fetch finds nothing new."""
+        mock_decrypt.return_value = {"api_key": "sk_test_123"}
+
+        mock_stripe.Payout.list.return_value = _FakeListResult([])
+        mock_stripe.BalanceTransaction.list.return_value = _FakeListResult([])
+        mock_stripe.Dispute.list.return_value = _FakeListResult([])
+
+        stale_row = _make_payout_row(source_id="po_stale", status="in_transit")
+        retrieved = _make_stripe_payout(payout_id="po_stale", status="paid")
+        retrieved.arrival_date = 1700700000
+        mock_stripe.Payout.retrieve.return_value = retrieved
+
+        db = MagicMock()
+        conn = _make_connection("stripe")
+        db.execute.return_value.scalar_one.return_value = conn
+        db.execute.return_value.scalar_one_or_none.return_value = None
+        db.execute.return_value.scalars.return_value.all.return_value = [stale_row]
+
+        with (
+            patch("app.services.ingestion.stripe_sync.load_cursor", return_value=None),
+            patch("app.services.ingestion.stripe_sync.save_cursor"),
+            patch("app.services.ingestion.stripe_sync.upsert_canonical"),
+        ):
+            from app.services.ingestion.stripe_sync import sync_stripe
+
+            result = sync_stripe(db, str(conn.id), str(conn.tenant_id))
+
+        assert result["payouts_synced"] == 0
+        assert stale_row.status == "paid"
+        assert stale_row.arrival_date == date.fromtimestamp(1700700000)
+        assert result["payouts_refresh_checked"] == 1
+        assert result["payouts_refresh_updated"] == 1
+        assert result["payouts_refresh_errors"] == 0
 
 
 # ---------------------------------------------------------------------------
