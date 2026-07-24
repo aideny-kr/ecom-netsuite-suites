@@ -44,6 +44,26 @@ function money(amount: string | number | null | undefined, currency: string): st
   return Number(amount).toLocaleString("en-US", { style: "currency", currency: currency || "USD" });
 }
 
+/** Phase C (FX mark-only): a muted "EUR @ 0.9231" chip next to the NetSuite
+ * ID, shown only when the matched deposit's transaction currency differs
+ * from the proposal's currency. Prefers the recorded exchange_rate; falls
+ * back to the implied rate (netsuite_amount / stripe_amount) when that's
+ * null, and omits the rate entirely (currency-only chip) when neither is
+ * available. Mark-only — this never changes the proposal's classification. */
+function fxChip(p: ReconResolutionProposal): { label: string; title: string } | null {
+  const txnCurrency = p.deposit_transaction_currency;
+  if (!txnCurrency || txnCurrency === p.currency) return null;
+  let rate: number | null = p.deposit_exchange_rate !== null ? Number(p.deposit_exchange_rate) : null;
+  if (rate === null && p.netsuite_amount !== null && p.stripe_amount !== null && Number(p.stripe_amount) !== 0) {
+    rate = Number(p.netsuite_amount) / Number(p.stripe_amount);
+  }
+  const rateLabel = rate !== null ? rate.toFixed(4) : null;
+  return {
+    label: rateLabel ? `${txnCurrency} @ ${rateLabel}` : txnCurrency,
+    title: rateLabel ? `Booked in ${txnCurrency} at ${rateLabel}` : `Booked in ${txnCurrency}`,
+  };
+}
+
 /** One click-to-copy identifier cell. Displays `${prefix}${value}` but
  * copies the raw `value` — e.g. "NS#12345" displays with the prefix, but
  * finance pastes "12345" straight into a NetSuite internal-id search. */
@@ -117,6 +137,7 @@ export function ResolutionGroupItems({
           {proposals.map((p) => {
             const status = statusChip(p.status);
             const materiality = materialityChip(p.above_materiality);
+            const fx = fxChip(p);
             return (
               <TableRow key={p.id}>
                 <TableCell>
@@ -145,10 +166,18 @@ export function ResolutionGroupItems({
                 </TableCell>
                 <TableCell>
                   {p.netsuite_internal_id ? (
-                    <span className="inline-flex items-center gap-1.5">
+                    <span className="inline-flex max-w-full items-center gap-1.5">
                       <IdentifierSegment prefix="NS#" value={p.netsuite_internal_id} />
                       {p.netsuite_record_type && (
-                        <span className="text-xs text-muted-foreground">{p.netsuite_record_type}</span>
+                        <span className="shrink-0 text-xs text-muted-foreground">{p.netsuite_record_type}</span>
+                      )}
+                      {fx && (
+                        <span
+                          className="inline-block max-w-[7rem] shrink-0 truncate rounded-full bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground"
+                          title={fx.title}
+                        >
+                          {fx.label}
+                        </span>
                       )}
                     </span>
                   ) : (
