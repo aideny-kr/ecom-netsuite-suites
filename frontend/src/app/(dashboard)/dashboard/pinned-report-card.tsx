@@ -11,7 +11,10 @@ import type { ReportSummary } from "@/hooks/use-reports";
 // The frozen artifact is authored at a fixed 1120px inner width; scale it down to fit
 // the card so it previews faithfully instead of reflowing at a narrower viewport.
 const PREVIEW_WIDTH = 1120;
-const PREVIEW_HEIGHT = 300;
+// Tall enough that the crop reaches the artifact's verdict (watch chips + KPI row),
+// not just its title band: at the ~0.8 fit scale a 300px crop showed only ~370px of
+// report — the headline was cut off on live data. 440 clears the KPI cards.
+const PREVIEW_HEIGHT = 440;
 const REPORT_CREAM = "#fbf9f4";
 
 interface FreshnessChipProps {
