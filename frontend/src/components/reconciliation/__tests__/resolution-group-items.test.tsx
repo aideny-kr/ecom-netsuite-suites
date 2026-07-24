@@ -61,13 +61,17 @@ const proposals: ReconResolutionProposal[] = [
     root_cause: "fees", action: "book_fee_line", booking_vehicle: "deposit",
     group_key: "fees:book_fee_line:deposit", source: "planner",
     narrative: "FX-marked deposit — no exchange_rate on file, implied from amounts.",
-    proposed_amount: "173.00", currency: "USD",
+    proposed_amount: "217.94", currency: "USD",
     above_materiality: false, status: "proposed",
     failure_reason: null, correlation_id: null, created_at: "2026-07-06T00:00:00Z",
     order_reference: "R500000002", stripe_charge_id: "ch_fx_implied",
     netsuite_internal_id: "55555", netsuite_record_type: "custdep",
-    stripe_amount: "1000.00", netsuite_amount: "827.00", variance_amount: "173.00",
-    deposit_transaction_currency: "EUR", deposit_foreign_amount: "827.00", deposit_exchange_rate: null,
+    // Mutation-detecting fixture: the wrong (old) formula netsuite_amount /
+    // stripe_amount = 4782.06 / 5000.00 = 0.9564 differs visibly from the
+    // correct implied rate netsuite_amount / deposit_foreign_amount =
+    // 4782.06 / 6722.37 = 0.7114 — a regression to the old formula fails this.
+    stripe_amount: "5000.00", netsuite_amount: "4782.06", variance_amount: "217.94",
+    deposit_transaction_currency: "EUR", deposit_foreign_amount: "6722.37", deposit_exchange_rate: null,
   },
   {
     id: "p6", run_id: "r1", result_id: "res6",
@@ -197,15 +201,28 @@ describe("ResolutionGroupItems", () => {
       expect(within(row).getByText("EUR @ 0.9231")).toBeInTheDocument();
     });
 
-    it("carries the full text in the chip's title attribute", () => {
+    it("carries the full text in the chip's title attribute, distinguishing a recorded rate", () => {
       render(<ResolutionGroupItems {...base} />);
-      expect(screen.getByText("EUR @ 0.9231")).toHaveAttribute("title", "Booked in EUR at 0.9231");
+      expect(screen.getByText("EUR @ 0.9231")).toHaveAttribute(
+        "title",
+        "Booked in EUR at 0.9231 (recorded rate)"
+      );
     });
 
-    it("falls back to the implied rate (netsuite_amount / stripe_amount) when exchange_rate is null", () => {
+    it("falls back to the implied rate (netsuite_amount / deposit_foreign_amount, never stripe_amount) when exchange_rate is null", () => {
       render(<ResolutionGroupItems {...base} />);
       const row = screen.getByText("R500000002").closest("tr")!;
-      expect(within(row).getByText("EUR @ 0.8270")).toBeInTheDocument();
+      expect(within(row).getByText("EUR ≈ 0.7114")).toBeInTheDocument();
+      // Mutation guard: the old (wrong) formula would render 0.9564 here.
+      expect(within(row).queryByText(/0\.9564/)).toBeNull();
+    });
+
+    it("marks the implied fallback with an honest 'estimated' title, distinct from a recorded rate", () => {
+      render(<ResolutionGroupItems {...base} />);
+      expect(screen.getByText("EUR ≈ 0.7114")).toHaveAttribute(
+        "title",
+        "Booked in EUR, ≈0.7114 estimated from booked amounts (no recorded rate)"
+      );
     });
 
     it("shows no chip when the deposit's transaction currency equals the proposal currency", () => {

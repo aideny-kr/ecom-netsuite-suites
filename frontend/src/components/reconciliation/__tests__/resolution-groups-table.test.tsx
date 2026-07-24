@@ -612,16 +612,31 @@ describe("NeedsHumanWorksheet", () => {
       expect(screen.getByText("EUR @ 0.9231")).toBeInTheDocument();
     });
 
-    it("carries the full text in the chip's title attribute", () => {
+    it("carries the full text in the chip's title attribute, distinguishing a recorded rate", () => {
       render(<NeedsHumanWorksheet runId="r1" proposals={[fxProposal]} isLoading={false} onInvestigate={vi.fn()} />);
-      expect(screen.getByText("EUR @ 0.9231")).toHaveAttribute("title", "Booked in EUR at 0.9231");
+      expect(screen.getByText("EUR @ 0.9231")).toHaveAttribute(
+        "title",
+        "Booked in EUR at 0.9231 (recorded rate)"
+      );
     });
 
-    it("falls back to the implied rate (netsuite_amount / stripe_amount) when exchange_rate is null", () => {
-      // fxProposal: netsuite_amount 991.00 / stripe_amount 1000.00 = 0.9910
+    it("falls back to the implied rate (netsuite_amount / deposit_foreign_amount, never stripe_amount) when exchange_rate is null", () => {
+      // Mutation-detecting: netsuite_amount 991.00 / deposit_foreign_amount 827.00
+      // ≈ 1.1983 — visibly different from the old (wrong) formula
+      // netsuite_amount / stripe_amount = 991.00 / 1000.00 = 0.9910.
       const implied = { ...fxProposal, deposit_exchange_rate: null };
       render(<NeedsHumanWorksheet runId="r1" proposals={[implied]} isLoading={false} onInvestigate={vi.fn()} />);
-      expect(screen.getByText("EUR @ 0.9910")).toBeInTheDocument();
+      expect(screen.getByText("EUR ≈ 1.1983")).toBeInTheDocument();
+      expect(screen.queryByText(/0\.9910/)).toBeNull();
+    });
+
+    it("marks the implied fallback with an honest 'estimated' title, distinct from a recorded rate", () => {
+      const implied = { ...fxProposal, deposit_exchange_rate: null };
+      render(<NeedsHumanWorksheet runId="r1" proposals={[implied]} isLoading={false} onInvestigate={vi.fn()} />);
+      expect(screen.getByText("EUR ≈ 1.1983")).toHaveAttribute(
+        "title",
+        "Booked in EUR, ≈1.1983 estimated from booked amounts (no recorded rate)"
+      );
     });
 
     it("shows no chip when the deposit's transaction currency equals the proposal currency", () => {

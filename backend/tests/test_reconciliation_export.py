@@ -49,6 +49,7 @@ _PROPOSALS_HEADERS = [
     "netsuite_record_type",
     "transaction_currency",
     "exchange_rate",
+    "foreign_amount",
     "stripe_amount",
     "netsuite_amount",
     "variance_amount",
@@ -62,6 +63,10 @@ _PROPOSALS_HEADERS = [
     "narrative",
 ]
 
+# All three Phase-A currency-truth columns (transaction_currency,
+# exchange_rate, foreign_amount) live in _PROPOSALS_HEADERS, shared by CSV
+# and xlsx alike — these extras are id/audit-only, never a repeat of a
+# main-block column.
 _PROPOSALS_XLSX_EXTRA_HEADERS = [
     "proposal_id",
     "run_id",
@@ -69,9 +74,6 @@ _PROPOSALS_XLSX_EXTRA_HEADERS = [
     "decided_by",
     "decided_at",
     "created_at",
-    "transaction_currency",
-    "foreign_amount",
-    "exchange_rate",
 ]
 
 _RESULTS_HEADERS = [
@@ -341,12 +343,16 @@ async def test_export_proposals_csv_row_has_exact_decimal_strings(db, tenant_a):
     # Phase-A currency-truth data — the new columns are null, not erroring.
     assert row["transaction_currency"] == ""
     assert row["exchange_rate"] == ""
+    assert row["foreign_amount"] == ""
 
 
 async def test_export_proposals_csv_has_fx_columns_with_exact_decimal_strings(db, tenant_a):
-    """Phase C task 1: transaction_currency + exchange_rate off the matched
-    deposit's Phase-A currency-truth columns land in the CSV column set,
-    appended right after netsuite_record_type — mark-only FX visibility."""
+    """Phase C task 1 (+ dedup fix, item 5): transaction_currency,
+    exchange_rate, and foreign_amount off the matched deposit's Phase-A
+    currency-truth columns land in the CSV column set, appended right after
+    netsuite_record_type — mark-only FX visibility. foreign_amount was
+    previously xlsx-only despite being threaded through as a parameter; CSV
+    and xlsx now carry the same three FX columns."""
     user, run = await _seed_run_with_fx_deposit(db, tenant_a)
     response = await export_run_section(
         str(run.id),
@@ -360,8 +366,9 @@ async def test_export_proposals_csv_has_fx_columns_with_exact_decimal_strings(db
     row = dict(zip(_PROPOSALS_HEADERS, rows[1]))
     assert row["order_reference"] == "R9"
     assert row["transaction_currency"] == "EUR"
-    # exact Decimal string, never float notation ("1.21")
+    # exact Decimal strings, never float notation ("1.21" / "827.0")
     assert row["exchange_rate"] == "1.210000"
+    assert row["foreign_amount"] == "827.00"
 
 
 async def test_export_proposals_xlsx_has_extra_columns(db, tenant_a):
@@ -378,6 +385,11 @@ async def test_export_proposals_xlsx_has_extra_columns(db, tenant_a):
     ws = wb.active
     headers = [c.value for c in ws[1]]
     assert headers == _PROPOSALS_HEADERS + _PROPOSALS_XLSX_EXTRA_HEADERS
+    # Dedup guard (item 4): no header name repeats. This is the "masked" test
+    # that let transaction_currency/exchange_rate duplication ship — it
+    # asserted equality against test-local constants that carried the same
+    # duplication, so it never actually caught the bug.
+    assert len(headers) == len(set(headers)), f"duplicate header names: {headers}"
     row = dict(zip(headers, [c.value for c in ws[2]]))
     assert row["source"] == "planner"
     assert row["run_id"] == str(run.id)
@@ -385,10 +397,14 @@ async def test_export_proposals_xlsx_has_extra_columns(db, tenant_a):
     assert row["created_at"] is not None
 
 
-async def test_export_proposals_xlsx_has_all_three_fx_extra_columns(db, tenant_a):
-    """Phase C task 1: xlsx extras get all THREE Phase-A currency-truth
-    columns (transaction_currency, foreign_amount, exchange_rate) — CSV only
-    gets two (foreign_amount is xlsx-only per the plan)."""
+async def test_export_proposals_xlsx_fx_columns_appear_exactly_once(db, tenant_a):
+    """Phase C task 1 (+ dedup fix, items 4/5): the xlsx sheet carries all
+    three Phase-A currency-truth columns (transaction_currency,
+    exchange_rate, foreign_amount), all off the shared main proposals column
+    block (_PROPOSALS_HEADERS) — the xlsx-only extras are id/audit fields
+    only — and each column name appears exactly once. Previously the extras
+    repeated transaction_currency + exchange_rate, so the sheet carried
+    duplicate header names."""
     user, run = await _seed_run_with_fx_deposit(db, tenant_a)
     response = await export_run_section(
         str(run.id),
@@ -401,6 +417,7 @@ async def test_export_proposals_xlsx_has_all_three_fx_extra_columns(db, tenant_a
     ws = wb.active
     headers = [c.value for c in ws[1]]
     assert headers == _PROPOSALS_HEADERS + _PROPOSALS_XLSX_EXTRA_HEADERS
+    assert len(headers) == len(set(headers)), f"duplicate header names: {headers}"
     row = dict(zip(headers, [c.value for c in ws[2]]))
     assert row["transaction_currency"] == "EUR"
     assert row["foreign_amount"] == pytest.approx(827.00)

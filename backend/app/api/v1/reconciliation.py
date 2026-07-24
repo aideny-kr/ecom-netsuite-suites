@@ -1413,6 +1413,7 @@ _PROPOSALS_HEADERS = [
     "netsuite_record_type",
     "transaction_currency",
     "exchange_rate",
+    "foreign_amount",
     "stripe_amount",
     "netsuite_amount",
     "variance_amount",
@@ -1425,6 +1426,10 @@ _PROPOSALS_HEADERS = [
     "booking_vehicle",
     "narrative",
 ]
+# All three Phase-A currency-truth columns (transaction_currency,
+# exchange_rate, foreign_amount) now live in _PROPOSALS_HEADERS above, shared
+# by CSV and xlsx alike — these extras are id/audit-only and must never repeat
+# a column from the main block.
 _PROPOSALS_XLSX_EXTRA_HEADERS = [
     "proposal_id",
     "run_id",
@@ -1432,9 +1437,6 @@ _PROPOSALS_XLSX_EXTRA_HEADERS = [
     "decided_by",
     "decided_at",
     "created_at",
-    "transaction_currency",
-    "foreign_amount",
-    "exchange_rate",
 ]
 
 _RESULTS_HEADERS = [
@@ -1486,6 +1488,7 @@ def _proposals_export_row(
         netsuite_record_type,
         transaction_currency,
         exchange_rate,
+        foreign_amount,
         stripe_amount,
         netsuite_amount,
         variance_amount,
@@ -1500,12 +1503,7 @@ def _proposals_export_row(
     ]
 
 
-def _proposals_export_xlsx_extra(
-    p: ReconResolutionProposal,
-    transaction_currency: str | None,
-    foreign_amount: Decimal | None,
-    exchange_rate: Decimal | None,
-) -> list:
+def _proposals_export_xlsx_extra(p: ReconResolutionProposal) -> list:
     return [
         str(p.id),
         str(p.run_id),
@@ -1513,9 +1511,6 @@ def _proposals_export_xlsx_extra(
         str(p.decided_by) if p.decided_by else None,
         p.decided_at,
         p.created_at,
-        transaction_currency,
-        foreign_amount,
-        exchange_rate,
     ]
 
 
@@ -1608,7 +1603,7 @@ async def export_run_section(
         csv_headers = _PROPOSALS_HEADERS
         csv_rows = [_proposals_export_row(*row) for row in rows]
         xlsx_extra_headers = _PROPOSALS_XLSX_EXTRA_HEADERS
-        xlsx_extra_rows = [_proposals_export_xlsx_extra(row[0], row[7], row[8], row[9]) for row in rows]
+        xlsx_extra_rows = [_proposals_export_xlsx_extra(row[0]) for row in rows]
     else:
         results = (
             (
