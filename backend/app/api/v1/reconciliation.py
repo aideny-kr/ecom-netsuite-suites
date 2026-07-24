@@ -929,6 +929,9 @@ def _proposal_response_with_enrichment(
     stripe_amount: Decimal | None = None,
     netsuite_amount: Decimal | None = None,
     variance_amount: Decimal | None = None,
+    deposit_transaction_currency: str | None = None,
+    deposit_foreign_amount: Decimal | None = None,
+    deposit_exchange_rate: Decimal | None = None,
 ) -> ResolutionProposalResponse:
     return ResolutionProposalResponse.model_validate(proposal).model_copy(
         update={
@@ -939,6 +942,9 @@ def _proposal_response_with_enrichment(
             "stripe_amount": stripe_amount,
             "netsuite_amount": netsuite_amount,
             "variance_amount": variance_amount,
+            "deposit_transaction_currency": deposit_transaction_currency,
+            "deposit_foreign_amount": deposit_foreign_amount,
+            "deposit_exchange_rate": deposit_exchange_rate,
         }
     )
 
@@ -960,6 +966,9 @@ async def _enrich_proposal_response(
                 ReconciliationResult.stripe_amount,
                 ReconciliationResult.netsuite_amount,
                 ReconciliationResult.variance_amount,
+                NetsuitePosting.transaction_currency,
+                NetsuitePosting.foreign_amount,
+                NetsuitePosting.exchange_rate,
             )
             .select_from(ReconciliationResult)
             .outerjoin(
@@ -975,16 +984,28 @@ async def _enrich_proposal_response(
             )
         )
     ).first()
-    order_reference, netsuite_internal_id, record_type, stripe_amount, netsuite_amount, variance_amount = row or (
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
+    (
+        order_reference,
+        netsuite_internal_id,
+        record_type,
+        stripe_amount,
+        netsuite_amount,
+        variance_amount,
+        transaction_currency,
+        foreign_amount,
+        exchange_rate,
+    ) = row or (None, None, None, None, None, None, None, None, None)
     return _proposal_response_with_enrichment(
-        proposal, order_reference, netsuite_internal_id, record_type, stripe_amount, netsuite_amount, variance_amount
+        proposal,
+        order_reference,
+        netsuite_internal_id,
+        record_type,
+        stripe_amount,
+        netsuite_amount,
+        variance_amount,
+        transaction_currency,
+        foreign_amount,
+        exchange_rate,
     )
 
 
@@ -1025,6 +1046,9 @@ def _build_proposal_query(
             ReconciliationResult.stripe_amount,
             ReconciliationResult.netsuite_amount,
             ReconciliationResult.variance_amount,
+            NetsuitePosting.transaction_currency,
+            NetsuitePosting.foreign_amount,
+            NetsuitePosting.exchange_rate,
         )
         .join(
             ReconciliationResult,
@@ -1387,6 +1411,8 @@ _PROPOSALS_HEADERS = [
     "stripe_charge_id",
     "netsuite_internal_id",
     "netsuite_record_type",
+    "transaction_currency",
+    "exchange_rate",
     "stripe_amount",
     "netsuite_amount",
     "variance_amount",
@@ -1399,7 +1425,17 @@ _PROPOSALS_HEADERS = [
     "booking_vehicle",
     "narrative",
 ]
-_PROPOSALS_XLSX_EXTRA_HEADERS = ["proposal_id", "run_id", "source", "decided_by", "decided_at", "created_at"]
+_PROPOSALS_XLSX_EXTRA_HEADERS = [
+    "proposal_id",
+    "run_id",
+    "source",
+    "decided_by",
+    "decided_at",
+    "created_at",
+    "transaction_currency",
+    "foreign_amount",
+    "exchange_rate",
+]
 
 _RESULTS_HEADERS = [
     "match_type",
@@ -1439,12 +1475,17 @@ def _proposals_export_row(
     stripe_amount: Decimal | None,
     netsuite_amount: Decimal | None,
     variance_amount: Decimal | None,
+    transaction_currency: str | None,
+    foreign_amount: Decimal | None,
+    exchange_rate: Decimal | None,
 ) -> list:
     return [
         order_reference,
         p.charge_source_id,
         netsuite_internal_id,
         netsuite_record_type,
+        transaction_currency,
+        exchange_rate,
         stripe_amount,
         netsuite_amount,
         variance_amount,
@@ -1459,7 +1500,12 @@ def _proposals_export_row(
     ]
 
 
-def _proposals_export_xlsx_extra(p: ReconResolutionProposal) -> list:
+def _proposals_export_xlsx_extra(
+    p: ReconResolutionProposal,
+    transaction_currency: str | None,
+    foreign_amount: Decimal | None,
+    exchange_rate: Decimal | None,
+) -> list:
     return [
         str(p.id),
         str(p.run_id),
@@ -1467,6 +1513,9 @@ def _proposals_export_xlsx_extra(p: ReconResolutionProposal) -> list:
         str(p.decided_by) if p.decided_by else None,
         p.decided_at,
         p.created_at,
+        transaction_currency,
+        foreign_amount,
+        exchange_rate,
     ]
 
 
@@ -1559,7 +1608,7 @@ async def export_run_section(
         csv_headers = _PROPOSALS_HEADERS
         csv_rows = [_proposals_export_row(*row) for row in rows]
         xlsx_extra_headers = _PROPOSALS_XLSX_EXTRA_HEADERS
-        xlsx_extra_rows = [_proposals_export_xlsx_extra(row[0]) for row in rows]
+        xlsx_extra_rows = [_proposals_export_xlsx_extra(row[0], row[7], row[8], row[9]) for row in rows]
     else:
         results = (
             (

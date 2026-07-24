@@ -344,6 +344,12 @@ class ResolutionProposalResponse(BaseModel):
     stripe_amount: Decimal | None = None
     netsuite_amount: Decimal | None = None
     variance_amount: Decimal | None = None
+    # Phase C (FX mark-only surfacing): the matched deposit's Phase-A
+    # currency-truth columns — NOT a classification change, just visibility.
+    # None when unmatched or when the deposit predates the Phase-A backfill.
+    deposit_transaction_currency: str | None = None
+    deposit_foreign_amount: Decimal | None = None
+    deposit_exchange_rate: Decimal | None = None
 
     model_config = {"from_attributes": True}
 
