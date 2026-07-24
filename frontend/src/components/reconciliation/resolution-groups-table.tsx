@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/table";
 import { ResolutionGroupItems } from "@/components/reconciliation/resolution-group-items";
 import { ExportMenu } from "@/components/reconciliation/export-menu";
+import { fxChip, money } from "@/components/reconciliation/format";
 import { NEEDS_HUMAN_PROPOSALS_LIMIT } from "@/hooks/use-resolution";
 import type { ReconResolutionGroup, ReconResolutionProposal } from "@/lib/types";
 
@@ -100,30 +101,6 @@ const SEVERITY_CHIP_CLASS: Record<"crit" | "warn" | "neutral", string> = {
 
 function rootCauseChipClass(rootCause: string): string {
   return SEVERITY_CHIP_CLASS[ROOT_CAUSE_SEVERITY[rootCause] ?? "neutral"];
-}
-
-function money(amount: string | number, currency: string) {
-  return Number(amount).toLocaleString("en-US", { style: "currency", currency });
-}
-
-/** Phase C (FX mark-only): a muted "EUR @ 0.9231" chip next to the NetSuite
- * ID, shown only when the matched deposit's transaction currency differs
- * from the proposal's currency. Prefers the recorded exchange_rate; falls
- * back to the implied rate (netsuite_amount / stripe_amount) when that's
- * null, and omits the rate entirely (currency-only chip) when neither is
- * available. Mark-only — this never changes the proposal's classification. */
-function fxChip(p: ReconResolutionProposal): { label: string; title: string } | null {
-  const txnCurrency = p.deposit_transaction_currency;
-  if (!txnCurrency || txnCurrency === p.currency) return null;
-  let rate: number | null = p.deposit_exchange_rate !== null ? Number(p.deposit_exchange_rate) : null;
-  if (rate === null && p.netsuite_amount !== null && p.stripe_amount !== null && Number(p.stripe_amount) !== 0) {
-    rate = Number(p.netsuite_amount) / Number(p.stripe_amount);
-  }
-  const rateLabel = rate !== null ? rate.toFixed(4) : null;
-  return {
-    label: rateLabel ? `${txnCurrency} @ ${rateLabel}` : txnCurrency,
-    title: rateLabel ? `Booked in ${txnCurrency} at ${rateLabel}` : `Booked in ${txnCurrency}`,
-  };
 }
 
 /** One click-to-copy identifier — displays `${prefix}${value}` but copies the

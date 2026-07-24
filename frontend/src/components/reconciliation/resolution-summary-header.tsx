@@ -1,14 +1,12 @@
 "use client";
 
 import { CheckCircle2, Lightbulb, DollarSign, Loader2 } from "lucide-react";
+import { money } from "@/components/reconciliation/format";
 import type { ReconResolutionSummary } from "@/lib/types";
 
 interface ResolutionSummaryHeaderProps {
   summary: ReconResolutionSummary | null;
 }
-
-const money = (v: string | number, currency = "USD") =>
-  Number(v).toLocaleString("en-US", { style: "currency", currency });
 
 // variance_by_root_cause keys become "root_cause (CUR)" once a run spans more
 // than one currency (see ResolutionSummaryResponse docstring) — recover the
