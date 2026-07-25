@@ -14,6 +14,7 @@ from app.api.v1 import (
     connection_alerts,
     connections,
     connector_status,
+    dashboard,
     drive_folders,
     exports,
     health,
@@ -87,3 +88,4 @@ api_router.include_router(reconciliation.router)
 api_router.include_router(metrics.router)
 api_router.include_router(tenant_memory.router)
 api_router.include_router(reports.router)
+api_router.include_router(dashboard.router)
