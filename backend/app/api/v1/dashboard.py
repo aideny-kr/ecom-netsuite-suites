@@ -1,8 +1,10 @@
 import uuid
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -99,12 +101,16 @@ async def _build_dashboard_response(db: AsyncSession, user: User) -> DashboardRe
     active_is_fallback = False
 
     if pref is not None:
+        # `pref.report_id` is None when the selected report was deleted (the
+        # FK tombstones via ON DELETE SET NULL, migration 092) — that never
+        # equals a real report's id, so it funnels into the same "unavailable"
+        # branch as an unpublished-but-still-existing selection below.
         active = next((r for r in published if r.id == pref.report_id), None)
         if active is None:
-            # Stored selection unavailable (unpublished — a delete cascades the
-            # preference row away entirely via the FK, so that case degrades to
-            # "never chosen" below instead of reaching here). Self-heal on READ
-            # only: do not delete the row, a report can be re-published.
+            # Stored selection unavailable — either unpublished (report_id
+            # still points at a real, now-unpublished report) or deleted
+            # (report_id is NULL). Self-heal on READ only: do not delete or
+            # repair the row here — an unpublished report can be re-published.
             active = published[0] if published else None
             # Only flag a fallback when there is an actual substitute to name:
             # the FE banner reads "...showing {title} instead", which cannot
@@ -147,12 +153,25 @@ async def set_active_dashboard(
     # RLS-protected query runs after the GUC-clearing commit (constraint 4).
     published = await _published_reports(db, user.tenant_id)
 
-    pref = await _get_preference(db, user.tenant_id, user.id)
-    if pref is None:
-        pref = UserDashboardPreference(tenant_id=user.tenant_id, user_id=user.id, report_id=row.id)
-        db.add(pref)
-    else:
-        pref.report_id = row.id
+    # Real Postgres upsert, not read-then-branch: two concurrent PUTs for the
+    # same user (double-click, two tabs) both racing a `_get_preference`
+    # SELECT would both see "no row", both INSERT, and the loser would
+    # violate uq_user_dashboard_preference_tenant_user as an unhandled
+    # IntegrityError -> 500. ON CONFLICT DO UPDATE makes the second writer a
+    # winning UPDATE instead of a losing INSERT — atomic at the DB level, no
+    # read-modify-write race window.
+    now = datetime.now(timezone.utc)
+    upsert_stmt = pg_insert(UserDashboardPreference).values(
+        tenant_id=user.tenant_id,
+        user_id=user.id,
+        report_id=row.id,
+        updated_at=now,
+    )
+    upsert_stmt = upsert_stmt.on_conflict_do_update(
+        constraint="uq_user_dashboard_preference_tenant_user",
+        set_={"report_id": row.id, "updated_at": now},
+    )
+    await db.execute(upsert_stmt)
 
     await audit_service.log_event(
         db=db,
@@ -186,7 +205,10 @@ async def clear_active_dashboard(
     pref = await _get_preference(db, user.tenant_id, user.id)
     cleared_report_id: str | None = None
     if pref is not None:
-        cleared_report_id = str(pref.report_id)
+        # pref.report_id may already be None (tombstoned by a report delete,
+        # migration 092's ON DELETE SET NULL) — str(None) would log the
+        # literal string "None" as a resource_id, so only stringify a real id.
+        cleared_report_id = str(pref.report_id) if pref.report_id is not None else None
         await db.delete(pref)
 
     await audit_service.log_event(

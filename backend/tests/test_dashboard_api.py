@@ -131,6 +131,43 @@ async def test_get_chosen_then_unpublished_falls_back_with_flag_true(client, db)
     assert pref is not None and pref.report_id == r1.id
 
 
+async def test_get_chosen_then_deleted_falls_back_with_flag_true(client, db):
+    """Deleting the selected report tombstones the preference row (report_id
+    -> NULL via ON DELETE SET NULL, migration 092) instead of removing it —
+    same fallback-notice contract as the unpublished case above."""
+    ta = await create_test_tenant(db, name="ChosenThenDeleted")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    r1 = await _seed_report(db, ta, ua, title="WillBeDeleted")
+    await _pin(db, r1)
+    r2 = await _seed_report(db, ta, ua, title="StaysPublished")
+    await _pin(db, r2)
+    headers = make_auth_headers(ua)
+
+    assert (
+        await client.put("/api/v1/dashboard/active", headers=headers, json={"report_id": str(r1.id)})
+    ).status_code == 200
+
+    await db.delete(r1)
+    await db.flush()
+
+    resp = await client.get("/api/v1/dashboard", headers=headers)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["active"]["id"] == str(r2.id)
+    assert body["active_is_fallback"] is True
+
+    # the preference row survives as a tombstone, not deleted
+    pref = (
+        await db.execute(
+            select(UserDashboardPreference).where(
+                UserDashboardPreference.tenant_id == ta.id, UserDashboardPreference.user_id == ua.id
+            )
+        )
+    ).scalar_one_or_none()
+    assert pref is not None and pref.report_id is None
+
+
 async def test_get_chosen_then_all_unpublished_falls_back_to_none(client, db):
     ta = await create_test_tenant(db, name="ChosenThenAllUnpub")
     ua, _ = await create_test_user(db, ta)
@@ -224,6 +261,39 @@ async def test_put_active_switching_choice_updates_same_row(client, db):
         )
     ).scalar_one()
     assert count == 1  # upsert, not a second row
+
+
+async def test_put_active_conflicting_row_upserts_instead_of_500(client, db):
+    """Regression for the read-then-insert race: PUT must use a real ON
+    CONFLICT upsert, not a SELECT-then-branch. Simulates a racing writer's
+    INSERT having already landed by inserting the conflicting row directly,
+    then asserts the endpoint's own upsert statement resolves via UPDATE
+    (constraint uq_user_dashboard_preference_tenant_user) rather than
+    attempting a second INSERT that would 500 with IntegrityError."""
+    ta = await create_test_tenant(db, name="PutRace")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    r1 = await _seed_report(db, ta, ua, title="First")
+    await _pin(db, r1)
+    r2 = await _seed_report(db, ta, ua, title="Second")
+    await _pin(db, r2)
+    headers = make_auth_headers(ua)
+
+    # Simulate the racing writer landing first.
+    db.add(UserDashboardPreference(tenant_id=ta.id, user_id=ua.id, report_id=r1.id))
+    await db.flush()
+
+    resp = await client.put("/api/v1/dashboard/active", headers=headers, json={"report_id": str(r2.id)})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["active"]["id"] == str(r2.id)
+
+    count = (
+        await db.execute(
+            text("SELECT count(*) FROM user_dashboard_preferences WHERE tenant_id=:tid AND user_id=:uid"),
+            {"tid": str(ta.id), "uid": str(ua.id)},
+        )
+    ).scalar_one()
+    assert count == 1  # upsert resolved to a single row, not a duplicate/error
 
 
 async def test_put_active_unpublished_report_is_409_exact_detail(client, db):

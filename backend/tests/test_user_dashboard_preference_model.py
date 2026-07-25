@@ -1,6 +1,7 @@
 # backend/tests/test_user_dashboard_preference_model.py
 """Migration 092 + UserDashboardPreference model — catalog shape, RLS, unique
-constraint, and cascade-delete-on-report behaviour.
+constraint, and tombstone-on-report-delete behaviour (report_id SET NULL, not
+cascade-deleted).
 
 Pattern mirrors test_report_migration.py (catalog checks) and
 test_agent_lab_model.py (IntegrityError round-trip)."""
@@ -108,7 +109,11 @@ async def test_duplicate_tenant_user_violates_unique_constraint(db: AsyncSession
     await db.rollback()
 
 
-async def test_deleting_report_cascades_to_preference(db: AsyncSession):
+async def test_deleting_report_tombstones_preference(db: AsyncSession):
+    """report_id is nullable with ON DELETE SET NULL (not CASCADE, migration
+    092): deleting the selected report must leave the preference row in place
+    with report_id NULLed out, not delete it — a tombstone, so GET /dashboard
+    can tell "chose it, then it was deleted" apart from "never chosen"."""
     tenant = await create_test_tenant(db, name="WallCorp3")
     user, _ = await create_test_user(db, tenant)
     await set_tenant_context(db, str(tenant.id))
@@ -122,10 +127,11 @@ async def test_deleting_report_cascades_to_preference(db: AsyncSession):
     await db.delete(report)
     await db.flush()
 
-    remaining = (
+    row = (
         await db.execute(
-            text("SELECT count(*) FROM user_dashboard_preferences WHERE id = :id"),
+            text("SELECT report_id FROM user_dashboard_preferences WHERE id = :id"),
             {"id": str(pref_id)},
         )
-    ).scalar()
-    assert remaining == 0, "deleting the referenced report must cascade-delete the preference row"
+    ).first()
+    assert row is not None, "deleting the referenced report must NOT delete the preference row (tombstone, not cascade)"
+    assert row[0] is None, "report_id must be set NULL when the referenced report is deleted"

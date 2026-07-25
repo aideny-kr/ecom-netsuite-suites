@@ -12,10 +12,11 @@ class DashboardResponse(BaseModel):
     `active` = this user's displayed report: their stored selection if it is
     still published, else the most recently published report, else None.
     `active_is_fallback` = True ONLY when the user HAD a stored selection that
-    is no longer available (unpublished — a delete cascades the preference row
-    away entirely, see UserDashboardPreference, so it degrades to "never
-    chosen" instead) and the fallback substituted for it. False when the user
-    simply never chose, or when their choice is still valid.
+    is no longer available — unpublished (report_id still points at a real,
+    now-unpublished report) OR deleted (report_id tombstoned to NULL via
+    `ON DELETE SET NULL`, see UserDashboardPreference / migration 092) — and
+    the fallback substituted for it. False when the user simply never chose,
+    or when their choice is still valid.
     """
 
     published: list[ReportResponse]

@@ -5,10 +5,14 @@ full size, chosen per user (the *published set* — reports.dashboard_pinned_at
 from migration 091 — stays workspace-wide; the *active choice* is personal).
 
 One row per (tenant, user): the report they last selected as their wallpaper.
-`report_id` cascades on report delete so an unpublished-then-deleted report
-simply drops the selection and the user falls back to the most recently
-published report (Task 2's read-side logic) — no orphaned FK, no dangling
-selection to clean up here.
+`report_id` is nullable with `ON DELETE SET NULL` (not CASCADE): deleting the
+selected report tombstones the row instead of removing it, so `GET
+/dashboard` can distinguish "chose it, then it got deleted" from "never
+chosen" and surface the fallback notice for BOTH deleted and unpublished
+selections. (Task 2's read-side treats a NULL report_id the same as a
+still-set report_id that no longer appears in the published set — either way
+`active` self-heals to the most recently published report, flagged as a
+fallback.)
 
 RLS mirrors 084 (reports): ENABLE + FORCE, USING/WITH CHECK both pinned to
 get_current_tenant_id(), no OR-SYSTEM branch — these rows are never
@@ -32,7 +36,7 @@ def upgrade() -> None:
         sa.Column("id", UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
         sa.Column("tenant_id", UUID(as_uuid=True), sa.ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False),
         sa.Column("user_id", UUID(as_uuid=True), sa.ForeignKey("users.id", ondelete="CASCADE"), nullable=False),
-        sa.Column("report_id", UUID(as_uuid=True), sa.ForeignKey("reports.id", ondelete="CASCADE"), nullable=False),
+        sa.Column("report_id", UUID(as_uuid=True), sa.ForeignKey("reports.id", ondelete="SET NULL"), nullable=True),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.UniqueConstraint("tenant_id", "user_id", name="uq_user_dashboard_preference_tenant_user"),
     )
