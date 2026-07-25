@@ -20,18 +20,25 @@ export function useResolutionSummary(runId: string | null) {
   });
 }
 
+// currency narrows the panel's item fetch to the expanded group's own
+// currency — on a multi-currency run, group_key alone can span more than one
+// currency (see the per-group export, which already narrows the same way).
+// Absent, behavior/URL for existing callers is unchanged.
 export function useGroupProposals(
   runId: string | null,
-  groupKey: string | null
+  groupKey: string | null,
+  currency?: string | null
 ) {
   return useQuery<ReconResolutionProposal[]>({
-    queryKey: ["recon-group-proposals", runId, groupKey],
-    queryFn: () =>
-      apiClient.get<ReconResolutionProposal[]>(
-        `/api/v1/reconciliation/runs/${runId}/resolution-groups/${encodeURIComponent(
-          groupKey!
-        )}/proposals`
-      ),
+    queryKey: ["recon-group-proposals", runId, groupKey, currency ?? null],
+    queryFn: () => {
+      const path = `/api/v1/reconciliation/runs/${runId}/resolution-groups/${encodeURIComponent(
+        groupKey!
+      )}/proposals`;
+      return apiClient.get<ReconResolutionProposal[]>(
+        currency ? `${path}?currency=${encodeURIComponent(currency)}` : path
+      );
+    },
     enabled: !!runId && !!groupKey,
   });
 }

@@ -88,14 +88,21 @@ const proposals: ReconResolutionProposal[] = [
   },
 ];
 
+const useGroupProposals = vi.fn(
+  (_runId?: string | null, _groupKey?: string | null, _currency?: string | null) => ({
+    data: proposals,
+    isLoading: false,
+  })
+);
 vi.mock("@/hooks/use-resolution", () => ({
-  useGroupProposals: () => ({ data: proposals, isLoading: false }),
+  useGroupProposals: (...args: Parameters<typeof useGroupProposals>) => useGroupProposals(...args),
 }));
 
 describe("ResolutionGroupItems", () => {
   const base = {
     runId: "r1",
     groupKey: "fees:book_fee_line:deposit",
+    currency: "USD",
     tickedAboveIds: [] as string[],
     onTickAbove: vi.fn(),
     onInvestigate: vi.fn(),
@@ -104,6 +111,11 @@ describe("ResolutionGroupItems", () => {
   beforeEach(() => {
     // jsdom doesn't implement clipboard
     Object.assign(navigator, { clipboard: { writeText: vi.fn() } });
+  });
+
+  it("passes the group's own currency through to useGroupProposals so the expanded panel's items are scoped like the per-group export", () => {
+    render(<ResolutionGroupItems {...base} currency="EUR" />);
+    expect(useGroupProposals).toHaveBeenCalledWith("r1", "fees:book_fee_line:deposit", "EUR");
   });
 
   it("renders narratives and amounts", () => {

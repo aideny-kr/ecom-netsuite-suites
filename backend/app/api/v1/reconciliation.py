@@ -1083,6 +1083,7 @@ async def list_group_proposals(
     db: Annotated[AsyncSession, Depends(get_db)],
     group_key: str | None = None,
     action: str | None = None,
+    currency: str | None = None,
     limit: int = 100,
     offset: int = 0,
 ):
@@ -1092,10 +1093,15 @@ async def list_group_proposals(
     cross-group by ``action`` alone — e.g. ``action=needs_human`` fetches the
     FE's needs-human worksheet, which spans every root_cause/booking_vehicle
     combination sharing that action in one call instead of one fetch per
-    group. Absent both filters, behavior/URL for existing callers is
+    group. ``currency`` narrows a group_key that spans more than one currency
+    on a multi-currency run — the same scoping the per-group export
+    (``section=proposals``) already applies via ``_build_proposal_query``.
+    Absent all three filters, behavior/URL for existing callers is
     unchanged."""
     await _get_run_or_404(db, user.tenant_id, run_id)
-    stmt = _build_proposal_query(_parse_uuid(run_id), user.tenant_id, group_key=group_key, action=action)
+    stmt = _build_proposal_query(
+        _parse_uuid(run_id), user.tenant_id, group_key=group_key, action=action, currency=currency
+    )
     rows = (await db.execute(stmt.limit(limit).offset(offset))).all()
     return [_proposal_response_with_enrichment(*row) for row in rows]
 
