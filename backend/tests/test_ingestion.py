@@ -1,12 +1,17 @@
 """Tests for Stripe and Shopify ingestion services with mocked APIs."""
 
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
+import pytest
 from sqlalchemy import Select
+from sqlalchemy.orm import Session
 
+from app.models.connection import Connection
+from app.models.tenant import Tenant
 from app.services.ingestion.base import load_cursor, save_cursor
+from app.services.ingestion.stripe_sync import _count_active_stripe_connections
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -598,6 +603,85 @@ class TestStripeStatusRefresh:
 
         failures = [e for e in logs if e.get("event") == "stripe_sync.status_refresh.pass_failed"]
         assert failures, f"expected a pass_failed warning, got: {logs}"
+
+
+class TestCountActiveStripeConnectionsDbBacked:
+    """Deferred ledger item: a data-level check of the guard, with real
+    ``Connection`` rows (not the MagicMock ``db`` used everywhere else in this
+    module) — proves the actual Postgres filter distinguishes active from
+    revoked connections, not just the query's bound-value SHAPE already
+    pinned by ``test_count_active_stripe_connections_filters_tenant_provider_and_status``
+    above.
+
+    ``_count_active_stripe_connections`` takes a synchronous
+    ``sqlalchemy.orm.Session`` (the type Celery workers actually use via
+    ``app.workers.base_task.sync_engine``), unlike the rest of this backend's
+    test suite which uses the async ``db``/``tenant_a`` fixtures — so this
+    opens its own sync connection + transaction (rolled back at teardown,
+    mirroring conftest.py's async ``db`` fixture's isolation pattern) rather
+    than reusing those fixtures."""
+
+    @pytest.fixture
+    def sync_db(self):
+        from app.workers.base_task import sync_engine
+
+        with sync_engine.connect() as conn:
+            trans = conn.begin()
+            session = Session(bind=conn)
+            try:
+                yield session
+            finally:
+                session.close()
+                trans.rollback()
+
+    @staticmethod
+    def _make_tenant(session) -> Tenant:
+        tenant = Tenant(
+            name="Stripe Guard Test Corp",
+            slug=f"test-{uuid.uuid4().hex[:8]}",
+            plan="free",
+            plan_expires_at=datetime.now(timezone.utc) + timedelta(days=14),
+            is_active=True,
+        )
+        session.add(tenant)
+        session.flush()
+        return tenant
+
+    @staticmethod
+    def _make_connection(session, tenant_id, *, status: str) -> Connection:
+        conn = Connection(
+            tenant_id=tenant_id,
+            provider="stripe",
+            label="Stripe",
+            status=status,
+            encrypted_credentials="encrypted_blob",
+        )
+        session.add(conn)
+        session.flush()
+        return conn
+
+    def test_one_active_one_revoked_counts_only_the_active_connection(self, sync_db):
+        """One active + one revoked Stripe connection -> exactly 1 active,
+        so refresh_payout_statuses's `!= 1` gate lets the refresh pass run."""
+        tenant = self._make_tenant(sync_db)
+        self._make_connection(sync_db, tenant.id, status="active")
+        self._make_connection(sync_db, tenant.id, status="revoked")
+
+        result = _count_active_stripe_connections(sync_db, str(tenant.id))
+
+        assert result == 1
+
+    def test_two_active_connections_count_as_two(self, sync_db):
+        """Two ACTIVE Stripe connections on the same tenant -> count is 2, so
+        refresh_payout_statuses's `!= 1` gate skips the refresh (can't safely
+        scope a per-row-connectionless Payout to one of two active keys)."""
+        tenant = self._make_tenant(sync_db)
+        self._make_connection(sync_db, tenant.id, status="active")
+        self._make_connection(sync_db, tenant.id, status="active")
+
+        result = _count_active_stripe_connections(sync_db, str(tenant.id))
+
+        assert result == 2
 
 
 class TestStripeEpochConversion:

@@ -762,3 +762,134 @@ class TestGenerateSectionExcelCSVInjectionEscaping:
             cell = ws.cell(row=2 + offset, column=1)
             assert cell.value == f"'{original}", f"expected quote-prefixed escape for {original!r}, got {cell.value!r}"
             assert cell.data_type == "s"
+
+
+class TestEvidencePackWritersCSVInjectionEscaping:
+    """ClickUp 86bb1apfg: the shipped evidence-pack writers (_write_summary,
+    _write_results, _write_proposals_sheet — reached via generate_excel) must
+    neutralize OWASP CSV-injection payloads in str cells the same way
+    generate_section_excel already does, so a leading '=' in a variance
+    explanation or a proposal narrative is never auto-typed as a formula by
+    openpyxl. Numeric/Decimal cells must stay untouched."""
+
+    _MALICIOUS = '=HYPERLINK("http://evil.example","click")'
+
+    def test_results_sheet_escapes_malicious_variance_explanation(self):
+        generator = EvidencePackGenerator()
+        results = [
+            {
+                "id": str(uuid.uuid4()),
+                "match_type": "fuzzy",
+                "confidence": Decimal("0.85"),
+                "status": "suggested",
+                "bucket": "rules",
+                "stripe_amount": Decimal("100.00"),
+                "netsuite_amount": Decimal("100.00"),
+                "variance_amount": Decimal("0.00"),
+                "variance_type": "timing",
+                "variance_explanation": self._MALICIOUS,
+                "currency": "USD",
+                "match_rule": "amount_exact+within_2_days",
+                "evidence": {"payout_source_id": "po_test001", "deposit_ids": ["1"]},
+            }
+        ]
+        excel_bytes = generator.generate_excel(
+            results=results,
+            run_id="test-run-injection",
+            date_from=date(2026, 3, 1),
+            date_to=date(2026, 3, 31),
+        )
+        wb = load_workbook(excel_bytes)
+        ws = wb["All Results"]
+        # Column 8 = "Explanation" (see headers in _write_results).
+        cell = ws.cell(row=2, column=8)
+        assert cell.value == f"'{self._MALICIOUS}", f"expected quote-prefixed escape, got {cell.value!r}"
+        assert cell.data_type == "s", "explanation cell must never be auto-typed as a formula"
+
+    def test_results_sheet_variance_amount_stays_a_number_cell(self):
+        """A negative variance (e.g. Decimal('-3.20')) must render as the
+        NUMBER -3.2, never be mistaken for a formula-injection string
+        starting with '-' — escaping applies to str cells only."""
+        generator = EvidencePackGenerator()
+        results = [
+            {
+                "id": str(uuid.uuid4()),
+                "match_type": "unmatched",
+                "confidence": Decimal("0.0"),
+                "status": "pending",
+                "bucket": "needs_review",
+                "stripe_amount": Decimal("100.00"),
+                "netsuite_amount": None,
+                "variance_amount": Decimal("-3.20"),
+                "variance_type": "missing",
+                "variance_explanation": "No matching deposit found",
+                "currency": "USD",
+                "match_rule": "no_match",
+                "evidence": {"payout_source_id": "po_test002", "deposit_ids": []},
+            }
+        ]
+        excel_bytes = generator.generate_excel(
+            results=results,
+            run_id="test-run-negative-variance",
+            date_from=date(2026, 3, 1),
+            date_to=date(2026, 3, 31),
+        )
+        wb = load_workbook(excel_bytes)
+        ws = wb["All Results"]
+        # Column 6 = "Variance".
+        cell = ws.cell(row=2, column=6)
+        assert cell.value == -3.2
+        assert cell.data_type == "n"
+
+    def test_proposals_sheet_escapes_malicious_narrative(self):
+        generator = EvidencePackGenerator()
+        proposals = [
+            {
+                "group_key": "grp-1",
+                "root_cause": "timing",
+                "action": "post_je",
+                "booking_vehicle": "je",
+                "status": "pending",
+                "source": "stripe",
+                "proposed_amount": Decimal("50.00"),
+                "currency": "USD",
+                "above_materiality": False,
+                "narrative": self._MALICIOUS,
+                "order_reference": "ORD-1",
+                "stripe_charge_id": "ch_test001",
+                "netsuite_internal_id": "1001",
+            }
+        ]
+        excel_bytes = generator.generate_excel(
+            results=[],
+            run_id="test-run-proposals-injection",
+            date_from=date(2026, 3, 1),
+            date_to=date(2026, 3, 31),
+            proposals=proposals,
+        )
+        wb = load_workbook(excel_bytes)
+        ws = wb["Proposals"]
+        # Column 10 = "Narrative" (see headers in _write_proposals_sheet).
+        cell = ws.cell(row=2, column=10)
+        assert cell.value == f"'{self._MALICIOUS}", f"expected quote-prefixed escape, got {cell.value!r}"
+        assert cell.data_type == "s", "narrative cell must never be auto-typed as a formula"
+
+    def test_summary_sheet_escapes_malicious_run_id(self):
+        """The Summary sheet's "Run ID" row writes `str(run_id)` straight into
+        a data cell with no static prefix — unlike the "Tenant: {name}" row
+        (always prefixed, so it can never itself start with a trigger char),
+        this is a directly-exploitable cell if run_id ever carried a leading
+        OWASP trigger char."""
+        generator = EvidencePackGenerator()
+        excel_bytes = generator.generate_excel(
+            results=[],
+            run_id=self._MALICIOUS,
+            date_from=date(2026, 3, 1),
+            date_to=date(2026, 3, 31),
+        )
+        wb = load_workbook(excel_bytes)
+        ws = wb["Summary"]
+        summary = {str(row[0].value): row[1] for row in ws.iter_rows(min_col=1, max_col=2) if row[0].value}
+        cell = summary["Run ID"]
+        assert cell.value == f"'{self._MALICIOUS}", f"expected quote-prefixed escape, got {cell.value!r}"
+        assert cell.data_type == "s", "Run ID cell must never be auto-typed as a formula"

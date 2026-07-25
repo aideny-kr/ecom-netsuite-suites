@@ -2544,3 +2544,123 @@ class TestRefundFetchSqlNarrowing:
         assert refunds_by_ref == {"R830000001": [(Decimal("-100.00"), date(2026, 3, 17), "USD")]}
         failures = [e for e in logs if e.get("event") == "order_recon_job.refund_ref_narrowing_failed"]
         assert failures, f"expected a refund_ref_narrowing_failed warning, got: {logs}"
+
+
+class TestFetchRefundRowsRowLevelSqlNarrowing:
+    """Deferred ledger item (a): ``TestRefundFetchSqlNarrowing`` above only
+    exercises ``_fetch_refunds`` end-to-end, whose own Python-side
+    ``extract_order_ref`` re-check (see ``_fetch_refunds``'s docstring) would
+    ALSO exclude an unrelated ref even if the SQL narrowing inside
+    ``_fetch_refund_rows`` did nothing at all — so that test alone can't
+    distinguish "SQL narrowed it" from "the Python filter caught it
+    downstream." This calls the row-level helper directly (bypassing
+    ``_fetch_refunds`` entirely) and asserts on the RAW rows it returns,
+    proving the exclusion happens at the SQL layer."""
+
+    async def test_fetch_refund_rows_excludes_unrelated_ref_before_any_python_filter(self, db, tenant_a):
+        await _seed_refund_line(
+            db,
+            tenant_a.id,
+            source_id="re_row_target",
+            description="Refund for order R840000001",
+            amount=Decimal("-100.00"),
+            arrival_date=date(2026, 3, 17),
+        )
+        await _seed_refund_line(
+            db,
+            tenant_a.id,
+            source_id="re_row_unrelated",
+            description="Refund for order R840099999",
+            amount=Decimal("-50.00"),
+            arrival_date=date(2026, 3, 17),
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        pattern = await job._load_order_ref_pattern_once()
+        sanity_from, sanity_to = order_recon_job._sanity_window(date(2026, 3, 10), date(2026, 3, 20))
+
+        rows = await job._fetch_refund_rows(
+            order_references={"R840000001"},
+            order_ref_pattern=pattern,
+            sanity_from=sanity_from,
+            sanity_to=sanity_to,
+            subsidiary_id=None,
+        )
+
+        descriptions = {pl.description for pl, _arrival_date in rows}
+        assert descriptions == {"Refund for order R840000001"}, (
+            "the unrelated ref (R840099999) must never leave the row-level "
+            f"SQL fetch — got descriptions: {descriptions!r}"
+        )
+        assert len(rows) == 1
+
+
+class TestRefChunkingAtPatchedBoundary:
+    """Deferred ledger item (b): chunk-boundary coverage for the two
+    ``_REF_CHUNK_SIZE``-batched queries that don't yet have it —
+    ``_cross_run_charge_ref_counts`` and ``_fetch_refund_rows``
+    (``_fetch_deposits`` already has ``test_chunks_ref_keyed_query_at_5000_boundary``
+    above, but that's a mocked-DB call-count test; these seed REAL rows
+    across a boundary and assert the complete result, patching
+    ``_REF_CHUNK_SIZE`` down so the boundary can be crossed with a handful of
+    seeded rows instead of the real 5000)."""
+
+    async def test_cross_run_charge_ref_counts_returns_all_refs_across_chunk_boundary(self, db, tenant_a, monkeypatch):
+        monkeypatch.setattr(order_recon_job, "_REF_CHUNK_SIZE", 2)
+        # 3 distinct refs (chunk size 2 -> chunks of [2, 1]); one ref repeats
+        # so the boundary-straddling chunks each contribute real counts.
+        refs_and_counts = {
+            "R850000001": 1,
+            "R850000002": 2,
+            "R850000003": 1,
+        }
+        for ref, count in refs_and_counts.items():
+            for i in range(count):
+                await _seed_charge_line(
+                    db,
+                    tenant_a.id,
+                    source_id=f"ch_chunk_{ref}_{i}",
+                    description=f"Framework Marketplace Order ID: {ref}-XU9EPZPD",
+                    arrival_date=date(2026, 3, 15),
+                )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        counts = await job._cross_run_charge_ref_counts(
+            set(refs_and_counts),
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+            subsidiary_id=None,
+        )
+
+        assert counts == refs_and_counts
+
+    async def test_fetch_refund_rows_returns_all_rows_across_chunk_boundary(self, db, tenant_a, monkeypatch):
+        monkeypatch.setattr(order_recon_job, "_REF_CHUNK_SIZE", 2)
+        # 3 distinct refs (chunk size 2 -> chunks of [2, 1]) each with one
+        # refund row — proves no row is dropped at the chunk boundary.
+        refs = ["R860000001", "R860000002", "R860000003"]
+        for ref in refs:
+            await _seed_refund_line(
+                db,
+                tenant_a.id,
+                source_id=f"re_chunk_{ref}",
+                description=f"Refund for order {ref}",
+                amount=Decimal("-25.00"),
+                arrival_date=date(2026, 3, 17),
+            )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        pattern = await job._load_order_ref_pattern_once()
+        sanity_from, sanity_to = order_recon_job._sanity_window(date(2026, 3, 10), date(2026, 3, 20))
+
+        rows = await job._fetch_refund_rows(
+            order_references=set(refs),
+            order_ref_pattern=pattern,
+            sanity_from=sanity_from,
+            sanity_to=sanity_to,
+            subsidiary_id=None,
+        )
+
+        descriptions = {pl.description for pl, _arrival_date in rows}
+        assert descriptions == {f"Refund for order {r}" for r in refs}
+        assert len(rows) == 3

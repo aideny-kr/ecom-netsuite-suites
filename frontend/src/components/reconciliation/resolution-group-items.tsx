@@ -72,6 +72,10 @@ function IdentifierSegment({ prefix = "", value }: { prefix?: string; value: str
 interface ResolutionGroupItemsProps {
   runId: string;
   groupKey: string;
+  // Scopes the panel's item fetch to the expanded group's own currency — on
+  // a multi-currency run, group_key alone can span more than one currency
+  // (the per-group export already narrows the same way).
+  currency: string;
   tickedAboveIds: string[];
   onTickAbove: (proposalId: string, ticked: boolean) => void;
   onInvestigate: (proposal: ReconResolutionProposal) => void;
@@ -80,11 +84,12 @@ interface ResolutionGroupItemsProps {
 export function ResolutionGroupItems({
   runId,
   groupKey,
+  currency,
   tickedAboveIds,
   onTickAbove,
   onInvestigate,
 }: ResolutionGroupItemsProps) {
-  const { data: proposals, isLoading } = useGroupProposals(runId, groupKey);
+  const { data: proposals, isLoading } = useGroupProposals(runId, groupKey, currency);
   if (isLoading) {
     return <p className="text-[13px] text-muted-foreground">Loading items…</p>;
   }

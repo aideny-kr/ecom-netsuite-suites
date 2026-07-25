@@ -478,6 +478,37 @@ async def test_approve_group_scoped_to_currency(db, tenant_a):
     assert by_currency["EUR"] == "proposed"
 
 
+async def test_group_proposals_listing_narrows_by_currency(db, tenant_a):
+    """ClickUp 86bb1apgh: group_key alone can span more than one currency —
+    the expanded group panel's items fetch must narrow by currency the same
+    way the per-group export already does (_build_proposal_query already
+    accepts currency; this proves list_group_proposals threads it through)."""
+    user, run = await _seed_multi_currency_fees(db, tenant_a)
+
+    usd_only = await list_group_proposals(
+        str(run.id), group_key="fees:book_fee_line:deposit", currency="USD", user=user, db=db
+    )
+    assert len(usd_only) == 1
+    assert usd_only[0].currency == "USD"
+
+    eur_only = await list_group_proposals(
+        str(run.id), group_key="fees:book_fee_line:deposit", currency="EUR", user=user, db=db
+    )
+    assert len(eur_only) == 1
+    assert eur_only[0].currency == "EUR"
+
+
+async def test_group_proposals_listing_absent_currency_returns_both(db, tenant_a):
+    """Absent currency param = unchanged behavior — both currencies of the
+    group_key still come back together (this is what the pre-fix panel did,
+    and must keep working for any caller that doesn't pass currency)."""
+    user, run = await _seed_multi_currency_fees(db, tenant_a)
+
+    both = await list_group_proposals(str(run.id), group_key="fees:book_fee_line:deposit", user=user, db=db)
+    assert len(both) == 2
+    assert {p.currency for p in both} == {"USD", "EUR"}
+
+
 async def test_summary_404_on_foreign_run(db, tenant_a, tenant_b):
     user, _ = await create_test_user(db, tenant_a)
     run_b = await create_test_recon_run(db, tenant_b.id, status="completed")

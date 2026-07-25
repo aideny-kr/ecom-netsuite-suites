@@ -167,19 +167,19 @@ class EvidencePackGenerator:
         for p in proposals:
             ws.append(
                 [
-                    p.get("group_key"),
-                    p.get("root_cause"),
-                    p.get("action"),
-                    p.get("booking_vehicle"),
-                    p.get("status"),
-                    p.get("source"),
+                    escape_csv_injection(p.get("group_key")),
+                    escape_csv_injection(p.get("root_cause")),
+                    escape_csv_injection(p.get("action")),
+                    escape_csv_injection(p.get("booking_vehicle")),
+                    escape_csv_injection(p.get("status")),
+                    escape_csv_injection(p.get("source")),
                     float(p.get("proposed_amount") or 0),
-                    p.get("currency"),
+                    escape_csv_injection(p.get("currency")),
                     "YES" if p.get("above_materiality") else "no",
-                    p.get("narrative"),
-                    p.get("order_reference"),
-                    p.get("stripe_charge_id"),
-                    p.get("netsuite_internal_id"),
+                    escape_csv_injection(p.get("narrative")),
+                    escape_csv_injection(p.get("order_reference")),
+                    escape_csv_injection(p.get("stripe_charge_id")),
+                    escape_csv_injection(p.get("netsuite_internal_id")),
                 ]
             )
 
@@ -221,6 +221,10 @@ class EvidencePackGenerator:
         ws.cell(row=row, column=1, value="Reconciliation Evidence Pack").font = title_font
         row += 1
         if tenant_name:
+            # Always prefixed with "Tenant: " — the cell value can never itself
+            # start with an OWASP trigger char regardless of tenant_name's
+            # content, so no escaping is needed here (contrast with "Run ID"
+            # below, which writes str(value) with no static prefix).
             ws.cell(row=row, column=1, value=f"Tenant: {tenant_name}").font = value_font
             row += 1
 
@@ -241,9 +245,14 @@ class EvidencePackGenerator:
         ]
 
         for label, value in summary_data:
+            # label is a static constant (never user data) — no escaping needed.
             ws.cell(row=row, column=1, value=label).font = label_font
             # Render integer 0 counts as "0" (not blank); spacer "" rows stay blank.
-            ws.cell(row=row, column=2, value=str(value) if value is not None else "").font = value_font
+            # run_id/date_from/date_to are system-generated but escape defensively —
+            # escape_csv_injection is a no-op unless the str actually starts with a
+            # trigger char, so this is safe for the numeric-looking counts too.
+            cell_value = escape_csv_injection(str(value)) if value is not None else ""
+            ws.cell(row=row, column=2, value=cell_value).font = value_font
             row += 1
 
         ws.column_dimensions["A"].width = 30
@@ -282,19 +291,22 @@ class EvidencePackGenerator:
         # Data rows
         for row_idx, result in enumerate(results, 2):
             evidence = result.get("evidence", {}) or {}
+            # escape_csv_injection is a no-op on non-str values (floats/""), so it's
+            # safe to apply uniformly across the row — only str cells (e.g. a
+            # variance_explanation narrative) can ever be escaped here.
             row_data: list[Any] = [
-                result.get("match_type", ""),
+                escape_csv_injection(result.get("match_type", "")),
                 float(result.get("confidence", 0)),
-                result.get("status", ""),
+                escape_csv_injection(result.get("status", "")),
                 float(result["stripe_amount"]) if result.get("stripe_amount") is not None else "",
                 float(result["netsuite_amount"]) if result.get("netsuite_amount") is not None else "",
                 float(result.get("variance_amount", 0)),
-                result.get("variance_type", ""),
-                result.get("variance_explanation", ""),
-                result.get("currency", ""),
-                result.get("match_rule", ""),
-                evidence.get("payout_source_id", ""),
-                ", ".join(evidence.get("deposit_ids", [])),
+                escape_csv_injection(result.get("variance_type", "")),
+                escape_csv_injection(result.get("variance_explanation", "")),
+                escape_csv_injection(result.get("currency", "")),
+                escape_csv_injection(result.get("match_rule", "")),
+                escape_csv_injection(evidence.get("payout_source_id", "")),
+                escape_csv_injection(", ".join(evidence.get("deposit_ids", []))),
             ]
 
             # Row fill: clean 1:1 mapping from the authoritative four buckets.

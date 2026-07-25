@@ -364,6 +364,7 @@ export function ResolutionGroupsTable({
                           <ResolutionGroupItems
                             runId={runId}
                             groupKey={group.group_key}
+                            currency={group.currency}
                             tickedAboveIds={includedAboveIds}
                             onTickAbove={(id, ticked) => onTickAbove(cardKey, id, ticked)}
                             onInvestigate={onInvestigate}
