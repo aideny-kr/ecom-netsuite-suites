@@ -1,5 +1,205 @@
 {
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
   "enabledPlugins": {
     "frontend-design@claude-plugins-official": true
+  },
+  "permissions": {
+    "defaultMode": "default",
+    "disableBypassPermissionsMode": "disable",
+    "deny": [
+      "Read(//**/.env)",
+      "Read(//**/.env.local)",
+      "Read(//**/.env.production)",
+      "Read(//**/.env.staging)",
+      "Read(//**/.aws/**)",
+      "Read(//**/.ssh/**)",
+      "Read(//**/.netrc)",
+      "Read(//**/.npmrc)",
+      "Read(//**/.pypirc)",
+      "Read(//**/.docker/config.json)",
+      "Read(//**/.config/gcloud/**)",
+      "Read(//**/.config/stripe/**)",
+      "Read(//**/.kube/**)",
+      "Read(//**/service-account*.json)",
+      "Read(//**/credentials.json)",
+      "Edit(//**/.env)",
+      "Edit(//**/.env.local)",
+      "Edit(//**/.env.production)",
+      "Edit(//**/.env.staging)",
+      "Edit(//**/.aws/**)",
+      "Edit(//**/.ssh/**)",
+      "Edit(//**/.git/objects/**)",
+      "Edit(//**/.git/refs/**)",
+      "Edit(//**/backend/.venv/**)",
+      "Edit(//**/frontend/node_modules/**)",
+      "Edit(//**/frontend/.next/**)",
+      "Write(//**/.env)",
+      "Write(//**/.env.local)",
+      "Write(//**/.env.production)",
+      "Write(//**/.env.staging)",
+      "Write(//**/.aws/**)",
+      "Write(//**/.ssh/**)",
+      "Write(//**/service-account*.json)",
+      "Write(//**/backend/.venv/**)",
+      "Write(//**/frontend/node_modules/**)",
+      "Write(//**/frontend/.next/**)",
+      "Bash(rm -rf /)",
+      "Bash(rm -fr /)",
+      "Bash(rm -rf ~)",
+      "Bash(rm -fr ~)",
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Bash(supabase db push --linked*)",
+      "Bash(supabase db reset*)",
+      "Bash(vercel --prod*)",
+      "Bash(vercel deploy --prod*)",
+      "Bash(terraform apply*)",
+      "Bash(terraform destroy*)",
+      "Bash(kubectl delete *)",
+      "Bash(kubectl drain *)",
+      "Bash(docker system prune*)",
+      "Bash(docker volume prune*)",
+      "Bash(scp *)",
+      "Bash(nc *)",
+      "Bash(find / -delete*)",
+      "Bash(find ~ -delete*)"
+    ],
+    "ask": [
+      "Bash(git push *)",
+      "Bash(git push)",
+      "Bash(git reset --hard *)",
+      "Bash(git clean -fdx*)",
+      "Bash(git clean -fxd*)",
+      "Bash(docker compose down *)",
+      "Bash(docker compose down)",
+      "Bash(docker compose up *)",
+      "Bash(docker exec * alembic upgrade*)",
+      "Bash(.venv/bin/alembic upgrade*)",
+      "Bash(alembic upgrade*)",
+      "Bash(alembic downgrade*)",
+      "Bash(npm publish*)",
+      "Bash(rsync *)",
+      "Bash(ssh *)",
+      "Bash(curl *)",
+      "Bash(wget *)",
+      "Bash(find . -delete*)",
+      "WebFetch(domain:*)"
+    ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": false,
+    "autoAllowBashIfSandboxed": false,
+    "filesystem": {
+      "denyRead": [
+        "//**/.env",
+        "//**/.env.local",
+        "//**/.env.production",
+        "//**/.env.staging",
+        "//**/.env.development",
+        "//**/.env.test",
+        "//**/.aws/**",
+        "//**/.ssh/**",
+        "//**/.netrc",
+        "//**/.npmrc",
+        "//**/.pypirc",
+        "//**/.docker/config.json",
+        "//**/.config/gcloud/**",
+        "//**/.config/stripe/**",
+        "//**/.kube/**",
+        "//**/service-account*.json",
+        "//**/credentials.json"
+      ],
+      "denyWrite": [
+        "//**/.env",
+        "//**/.env.local",
+        "//**/.env.production",
+        "//**/.env.staging",
+        "//**/.env.development",
+        "//**/.env.test",
+        "//**/.aws/**",
+        "//**/.ssh/**",
+        "//**/.netrc",
+        "//**/.npmrc",
+        "//**/.pypirc",
+        "//**/.docker/config.json",
+        "//**/.config/gcloud/**",
+        "//**/.config/stripe/**",
+        "//**/.kube/**",
+        "//**/.git/objects/**",
+        "//**/.git/refs/**",
+        "//**/service-account*.json",
+        "//**/credentials.json"
+      ]
+    }
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/scripts/detect-secrets.sh",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/scripts/guard-destructive.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/scripts/format-on-write.sh",
+            "timeout": 30
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/scripts/bash-secret-scan.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/scripts/worktree-banner.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "ConfigChange": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PROJECT_DIR}/.claude/hooks/scripts/audit-config-change.sh",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
   }
 }
