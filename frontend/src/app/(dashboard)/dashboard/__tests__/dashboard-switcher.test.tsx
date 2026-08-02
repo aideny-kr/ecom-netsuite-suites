@@ -143,3 +143,33 @@ it("still renders the menu (with Manage published set…) when published.length 
 
   expect(await findByRole("menuitem", { name: /manage published set/i })).toBeTruthy();
 });
+
+// --- Review fix: surface a failed switch instead of failing silently -------
+
+it("shows the backend's error message inline when the switch PUT fails, and it persists after the menu closes", async () => {
+  api.put.mockRejectedValueOnce(new Error("That report isn't published to the dashboard"));
+  const { findByRole, findByText, queryByRole } = renderSwitcher();
+  const trigger = await findByRole("button", { name: /switch/i });
+  openSwitcher(trigger);
+
+  const otherItem = await findByRole("menuitem", { name: /cash flow.*q2/i });
+  fireEvent.click(otherItem);
+
+  expect(await findByText("That report isn't published to the dashboard")).toBeTruthy();
+  // Radix closes the menu on selection — the message must still be visible after
+  // the menu itself has unmounted, not just while it happens to still be open.
+  await waitFor(() => expect(queryByRole("menuitem", { name: /cash flow.*q2/i })).toBeNull());
+  expect(await findByText("That report isn't published to the dashboard")).toBeTruthy();
+});
+
+it("falls back to a generic message when the backend error has no message", async () => {
+  api.put.mockRejectedValueOnce(new Error());
+  const { findByRole, findByText } = renderSwitcher();
+  const trigger = await findByRole("button", { name: /switch/i });
+  openSwitcher(trigger);
+
+  const otherItem = await findByRole("menuitem", { name: /cash flow.*q2/i });
+  fireEvent.click(otherItem);
+
+  expect(await findByText("Couldn't switch dashboard")).toBeTruthy();
+});

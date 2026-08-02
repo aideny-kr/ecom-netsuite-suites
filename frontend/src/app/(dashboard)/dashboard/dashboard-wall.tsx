@@ -48,6 +48,13 @@ export function DashboardWall({ report, subtitle, published, activeIsFallback }:
     let url: string | null = null;
     let cancelled = false;
     setError(false);
+    // Clear synchronously so the Skeleton renders during the transition — without
+    // this, the previous report's iframe stays on screen under the NEW report's
+    // title/freshness chip until this fetch resolves, presenting one report's
+    // frozen financials under another report's identity. The previous blob itself
+    // is revoked by that prior run's own cleanup below, not here — this reset only
+    // touches display state.
+    setBlobUrl(null);
     apiClient
       .getText(`/api/v1/reports/${report.id}/view`)
       .then((html) => {
@@ -67,6 +74,13 @@ export function DashboardWall({ report, subtitle, published, activeIsFallback }:
     // a new version (auto-refresh) — the wall must never show a stale iframe beside
     // an updated freshness chip.
   }, [report.id, report.version, report.last_refreshed_at]);
+
+  // A dismissal only ever covers the fallback event it was shown for — if the
+  // user's NEW pick later gets deleted/unpublished by someone else, that's a
+  // distinct fallback event and must not be swallowed by the earlier dismissal.
+  useEffect(() => {
+    setBannerDismissed(false);
+  }, [report.id]);
 
   useEffect(() => {
     const el = containerRef.current;

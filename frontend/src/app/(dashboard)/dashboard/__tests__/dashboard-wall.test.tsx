@@ -1,6 +1,6 @@
-import { fireEvent, render, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { beforeEach, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 
 const api = vi.hoisted(() => ({ getText: vi.fn(), put: vi.fn() }));
@@ -105,6 +105,38 @@ it("revokes the previous blob and refetches when the displayed report changes (a
   await waitFor(() => expect(api.getText).toHaveBeenCalledTimes(2));
   expect(api.getText).toHaveBeenLastCalledWith("/api/v1/reports/r-2/view");
   await waitFor(() => expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:one"));
+});
+
+it("clears report A's iframe to a Skeleton immediately on switch, BEFORE report B's fetch resolves", async () => {
+  const { container, rerender } = renderWall();
+  await waitFor(() => expect(container.querySelector("iframe")).toBeTruthy());
+
+  // Hold report B's fetch open so we can inspect the DOM mid-transition — the bug
+  // this guards against is report A's frozen financials staying on screen under
+  // report B's title/freshness chip until this promise resolves.
+  let resolveNext!: (html: string) => void;
+  api.getText.mockReturnValueOnce(
+    new Promise((resolve) => {
+      resolveNext = resolve;
+    })
+  );
+
+  rerender(
+    <DashboardWall
+      report={{ ...baseReport, id: "r-2", version: 1, last_refreshed_at: "2026-07-24T08:00:00Z" }}
+      published={[baseReport]}
+    />
+  );
+
+  // Intermediate assertion — before B's fetch resolves, report A's iframe must
+  // already be gone and the Skeleton must be showing.
+  await waitFor(() => expect(container.querySelector("iframe")).toBeNull());
+  expect(container.querySelector(".animate-pulse")).toBeTruthy();
+
+  await act(async () => {
+    resolveNext("<!DOCTYPE html><html><body>REPORT B</body></html>");
+  });
+  await waitFor(() => expect(container.querySelector("iframe")).toBeTruthy());
 });
 
 it("fits the report down on a narrow container (scale < 1)", async () => {
@@ -221,4 +253,27 @@ it("dismissing the fallback notice hides it (per-session component state, not pe
   const dismissBtn = await findByRole("button", { name: /dismiss/i });
   fireEvent.click(dismissBtn);
   await waitFor(() => expect(queryByText(/no longer available/i)).toBeNull());
+});
+
+it("resets the dismissed fallback notice when the displayed report changes, so a later distinct fallback event still shows", async () => {
+  const { rerender, findByRole, findByText, queryByText } = renderWall({ activeIsFallback: true });
+  const dismissBtn = await findByRole("button", { name: /dismiss/i });
+  fireEvent.click(dismissBtn);
+  await waitFor(() => expect(queryByText(/no longer available/i)).toBeNull());
+
+  // The user's new pick (report B) gets deleted/unpublished by someone else —
+  // a distinct fallback event that must not be swallowed by the earlier dismissal.
+  rerender(
+    <DashboardWall
+      report={{ ...baseReport, id: "r-2", title: "Cash Flow — Q2", version: 1, last_refreshed_at: "2026-07-24T08:00:00Z" }}
+      published={[baseReport]}
+      activeIsFallback={true}
+    />
+  );
+
+  expect(
+    await findByText(
+      "The dashboard you had chosen is no longer available — showing Cash Flow — Q2 instead."
+    )
+  ).toBeTruthy();
 });
