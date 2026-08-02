@@ -829,7 +829,14 @@ def test_fs_report_gets_wide_modifier_class_only_for_statement_specs():
     variance quad's own columns hidden behind a scrollbar at rest -- .report{max-width}
     itself must NOT change (every other report type's byte-stability pin depends on it),
     so a MODIFIER class is added to the root div only when a financial_statement section
-    is present, gated the same way the CSS itself is."""
+    is present, gated the same way the CSS itself is.
+
+    FRONTEND CONTRACT: the dashboard wall (dashboard-wall.tsx) derives each report's
+    authored width by matching the literal `class="report report--wide"` in the frozen
+    HTML -- wide statements size its iframe and scale denominator at 1120px, everything
+    else at 840px. Reordering this class list, or inserting a class between the two,
+    would silently render wide reports at the narrow width. The exact attribute strings
+    asserted below are that contract; keep them byte-stable."""
     fs_html = render_report_html(_fs_spec(_is_model()))
     assert '<div class="report report--wide">' in fs_html
     plain_html = render_report_html(_slice_d_spec())
