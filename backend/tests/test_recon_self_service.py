@@ -114,11 +114,15 @@ class TestStripeSyncAll:
         # The actual task dispatches per-tenant sync tasks
         assert callable(_find_active_stripe_connections)
 
-    def test_skips_inactive_connections(self):
-        """Should not dispatch tasks for inactive/error Stripe connections."""
+    def test_skips_revoked_connections(self):
+        """Should not dispatch tasks for revoked Stripe connections. (`error`
+        connections ARE now dispatched -- see DISPATCHABLE_CONNECTION_STATUSES
+        and test_sync_all_fanout.py -- so the exclusion is revoked/other
+        intentionally-dead statuses only, not error.)"""
         from app.workers.tasks.stripe_sync_all import _find_active_stripe_connections
 
-        # Tested via the helper function
+        # Real filter-shape coverage lives in test_sync_all_fanout.py
+        # (DB-backed); this file only pins that the helper is importable.
         assert callable(_find_active_stripe_connections)
 
 

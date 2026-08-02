@@ -16,13 +16,24 @@ logger = logging.getLogger(__name__)
 
 
 def _find_active_netsuite_connections(db: Session) -> list[dict]:
-    """Find all active NetSuite REST connections across all tenants."""
-    from app.models.connection import Connection
+    """Find all DISPATCHABLE NetSuite REST connections across all tenants.
+
+    Deliberately includes `error`-status connections (not just active/healthy)
+    -- see DISPATCHABLE_CONNECTION_STATUSES. 2026-07-29 incident: a connection
+    that flipped to `error` used to be filtered out HERE, before dispatch, so
+    it was silently skipped every night forever and the child task's
+    raise-on-failure logic never got a chance to run. Dispatching for it lets
+    get_netsuite_rest_connection's active-only lookup (service layer,
+    untouched) fail the sync and the task raise, producing a visible failed
+    job row every night the connection stays dead. `revoked`/other
+    intentionally-dead statuses stay excluded.
+    """
+    from app.models.connection import DISPATCHABLE_CONNECTION_STATUSES, Connection
 
     result = db.execute(
         select(Connection.id, Connection.tenant_id).where(
             Connection.provider == "netsuite",
-            Connection.status.in_(["active", "healthy"]),
+            Connection.status.in_(DISPATCHABLE_CONNECTION_STATUSES),
         )
     )
     return [{"connection_id": str(row[0]), "tenant_id": str(row[1])} for row in result.all()]
