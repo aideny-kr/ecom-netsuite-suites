@@ -81,3 +81,48 @@ def test_healthy_sync_completes(monkeypatch):
 
     assert summary["records_synced"] == 5
     assert summary["errors"] == []
+
+
+class TestRaisedMessagePreservesAllErrors:
+    """Total failure previously raised with only errors[0] -- a SuiteQL
+    failure that repeats per-row (or several distinct causes on the same run)
+    lost everything after the first entry from the job row's error_message.
+    The raise must join ALL errors (capped, so it stays bounded)."""
+
+    def test_multiple_errors_are_all_joined(self, monkeypatch):
+        _patch_sync(
+            monkeypatch,
+            _FakeResult(errors=["auth failure", "SuiteQL query failed: timeout"]),
+        )
+
+        with pytest.raises(NetsuiteDepositSyncFailedError) as exc_info:
+            netsuite_deposit_sync(tenant_id="t1", date_from="2026-07-01", date_to="2026-07-02")
+
+        message = str(exc_info.value)
+        assert "auth failure" in message
+        assert "SuiteQL query failed: timeout" in message
+
+    def test_errors_beyond_the_cap_are_summarized_not_dropped_silently(self, monkeypatch):
+        errors = [f"row {i} unparseable" for i in range(8)]
+        _patch_sync(monkeypatch, _FakeResult(errors=errors))
+
+        with pytest.raises(NetsuiteDepositSyncFailedError) as exc_info:
+            netsuite_deposit_sync(tenant_id="t1", date_from="2026-07-01", date_to="2026-07-02")
+
+        message = str(exc_info.value)
+        for err in errors[:5]:
+            assert err in message
+        assert errors[5] not in message
+        assert "+3 more" in message
+
+    def test_single_error_message_unchanged(self, monkeypatch):
+        """Single-error case must stay exactly the bare message -- no cap
+        suffix, no trailing punctuation added -- so the existing
+        test_no_active_connection_raises_total_failure match string keeps
+        working verbatim."""
+        _patch_sync(monkeypatch, _FakeResult(errors=["No active NetSuite REST connection found"]))
+
+        with pytest.raises(NetsuiteDepositSyncFailedError) as exc_info:
+            netsuite_deposit_sync(tenant_id="t1", date_from="2026-07-01", date_to="2026-07-02")
+
+        assert str(exc_info.value) == "No active NetSuite REST connection found"

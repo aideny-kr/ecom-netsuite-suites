@@ -13,6 +13,22 @@ from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
 
+# Caps how many individual errors are joined into the raised exception message
+# so a SuiteQL failure that repeats per-row doesn't produce an unbounded
+# job.error_message; the remainder is summarized as "+N more".
+_MAX_ERRORS_IN_MESSAGE = 5
+
+
+def _format_errors(errors: list[str]) -> str:
+    """Join ALL errors (not just the first) so the job row's error_message
+    keeps the full picture -- capped at _MAX_ERRORS_IN_MESSAGE."""
+    shown = errors[:_MAX_ERRORS_IN_MESSAGE]
+    message = "; ".join(shown)
+    remaining = len(errors) - len(shown)
+    if remaining > 0:
+        message += f" (+{remaining} more)"
+    return message
+
 
 class NetsuiteDepositSyncFailedError(RuntimeError):
     """Raised when the sync did NOTHING and the service reported at least one
@@ -77,6 +93,6 @@ def netsuite_deposit_sync(
     # stays `completed`, carrying the errors in the returned summary (which
     # InstrumentedTask.on_success stores verbatim as `result_summary`).
     if summary["errors"] and summary["records_synced"] == 0:
-        raise NetsuiteDepositSyncFailedError(summary["errors"][0])
+        raise NetsuiteDepositSyncFailedError(_format_errors(summary["errors"]))
 
     return summary
