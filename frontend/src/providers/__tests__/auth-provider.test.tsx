@@ -64,12 +64,93 @@ function ConsumerCapture({ onSettled }: { onSettled: (result: "resolved" | "reje
   );
 }
 
-function renderWithClient(qc: QueryClient) {
+function LoginConsumer() {
+  const { login } = useAuth();
+  return (
+    <button
+      type="button"
+      onClick={() => login({ email: "a@b.com", password: "pw" }).catch(() => {})}
+    >
+      login
+    </button>
+  );
+}
+
+function LoginConsumerCapture({ onSettled }: { onSettled: (result: "resolved" | "rejected") => void }) {
+  const { login } = useAuth();
+  return (
+    <button
+      type="button"
+      onClick={() =>
+        login({ email: "a@b.com", password: "pw" })
+          .then(() => onSettled("resolved"))
+          .catch(() => onSettled("rejected"))
+      }
+    >
+      login
+    </button>
+  );
+}
+
+function RegisterConsumer() {
+  const { register } = useAuth();
+  return (
+    <button
+      type="button"
+      onClick={() =>
+        register({
+          tenant_name: "Acme",
+          tenant_slug: "acme",
+          email: "a@b.com",
+          password: "pw",
+          full_name: "A B",
+        }).catch(() => {})
+      }
+    >
+      register
+    </button>
+  );
+}
+
+function RegisterConsumerCapture({ onSettled }: { onSettled: (result: "resolved" | "rejected") => void }) {
+  const { register } = useAuth();
+  return (
+    <button
+      type="button"
+      onClick={() =>
+        register({
+          tenant_name: "Acme",
+          tenant_slug: "acme",
+          email: "a@b.com",
+          password: "pw",
+          full_name: "A B",
+        })
+          .then(() => onSettled("resolved"))
+          .catch(() => onSettled("rejected"))
+      }
+    >
+      register
+    </button>
+  );
+}
+
+// logout's context type is `() => void` (fire-and-forget from the caller's
+// perspective, matching sidebar/topbar callers), so unlike login/register/
+// switchTenant this consumer can't chain .then/.catch on the call itself —
+// tests instead assert on cache/router state via waitFor.
+function LogoutConsumer() {
+  const { logout } = useAuth();
+  return (
+    <button type="button" onClick={() => logout()}>
+      logout
+    </button>
+  );
+}
+
+function renderWithClient(qc: QueryClient, child: React.ReactNode = <Consumer />) {
   return render(
     <QueryClientProvider client={qc}>
-      <AuthProvider>
-        <Consumer />
-      </AuthProvider>
+      <AuthProvider>{child}</AuthProvider>
     </QueryClientProvider>
   );
 }
@@ -160,6 +241,191 @@ it("cancels in-flight queries before clearing the cache on a tenant switch", asy
   renderWithClient(qc);
   await act(async () => {
     screen.getByRole("button", { name: "switch" }).click();
+  });
+
+  await waitFor(() => expect(clearSpy).toHaveBeenCalled());
+  expect(cancelSpy).toHaveBeenCalled();
+  const cancelOrder = cancelSpy.mock.invocationCallOrder[0];
+  const clearOrder = clearSpy.mock.invocationCallOrder[0];
+  expect(cancelOrder).toBeLessThan(clearOrder);
+});
+
+// The cross-tenant cache leak isn't specific to switchTenant: login, register,
+// and logout all run the same setTokens() -> /auth/me -> router.push sequence
+// (or, for logout, the reverse) against a QueryClient that survives client-side
+// navigation for the life of the tab. The following tests mirror the
+// switchTenant coverage above for each of those transitions.
+
+it("clears the entire React Query cache after a login succeeds", async () => {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  qc.setQueryData(["dashboard"], { published: [], active: null, active_is_fallback: false });
+
+  renderWithClient(qc, <LoginConsumer />);
+  await act(async () => {
+    screen.getByRole("button", { name: "login" }).click();
+  });
+
+  await waitFor(() =>
+    expect(api.post).toHaveBeenCalledWith("/api/v1/auth/login", { email: "a@b.com", password: "pw" })
+  );
+  await waitFor(() => expect(qc.getQueryData(["dashboard"])).toBeUndefined());
+  expect(routerPush).toHaveBeenCalledWith("/dashboard");
+});
+
+it("does not clear the cache when the login request fails", async () => {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  qc.setQueryData(["dashboard"], { published: [], active: null, active_is_fallback: false });
+  api.post.mockRejectedValueOnce(new Error("network error"));
+
+  renderWithClient(qc, <LoginConsumer />);
+  await act(async () => {
+    screen.getByRole("button", { name: "login" }).click();
+  });
+
+  await waitFor(() => expect(api.post).toHaveBeenCalled());
+  // No tokens were ever installed, so there's no new identity to protect — the
+  // still-signed-out cache (if any) must survive.
+  expect(qc.getQueryData(["dashboard"])).toBeDefined();
+});
+
+it("clears the cache and rejects the caller when /me fails right after tokens are already installed for a new login", async () => {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  qc.setQueryData(["dashboard"], { published: [], active: null, active_is_fallback: false });
+  api.get.mockRejectedValueOnce(new Error("me failed"));
+
+  let settled: "resolved" | "rejected" | null = null;
+  renderWithClient(qc, <LoginConsumerCapture onSettled={(r) => { settled = r; }} />);
+
+  await act(async () => {
+    screen.getByRole("button", { name: "login" }).click();
+  });
+
+  // The login POST did succeed, so tokens were installed — the failure only
+  // happened on the follow-up /me call. The caller must still see it as a
+  // rejection, and no stale data may survive under the new credentials.
+  await waitFor(() => expect(settled).toBe("rejected"));
+  expect(qc.getQueryData(["dashboard"])).toBeUndefined();
+});
+
+it("cancels in-flight queries before clearing the cache on login", async () => {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const cancelSpy = vi.spyOn(qc, "cancelQueries");
+  const clearSpy = vi.spyOn(qc, "clear");
+
+  renderWithClient(qc, <LoginConsumer />);
+  await act(async () => {
+    screen.getByRole("button", { name: "login" }).click();
+  });
+
+  await waitFor(() => expect(clearSpy).toHaveBeenCalled());
+  expect(cancelSpy).toHaveBeenCalled();
+  const cancelOrder = cancelSpy.mock.invocationCallOrder[0];
+  const clearOrder = clearSpy.mock.invocationCallOrder[0];
+  expect(cancelOrder).toBeLessThan(clearOrder);
+});
+
+it("clears the entire React Query cache after a register succeeds", async () => {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  qc.setQueryData(["dashboard"], { published: [], active: null, active_is_fallback: false });
+
+  renderWithClient(qc, <RegisterConsumer />);
+  await act(async () => {
+    screen.getByRole("button", { name: "register" }).click();
+  });
+
+  await waitFor(() => expect(api.post).toHaveBeenCalledWith("/api/v1/auth/register", expect.any(Object)));
+  await waitFor(() => expect(qc.getQueryData(["dashboard"])).toBeUndefined());
+  expect(routerPush).toHaveBeenCalledWith("/dashboard");
+});
+
+it("does not clear the cache when the register request fails", async () => {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  qc.setQueryData(["dashboard"], { published: [], active: null, active_is_fallback: false });
+  api.post.mockRejectedValueOnce(new Error("network error"));
+
+  renderWithClient(qc, <RegisterConsumer />);
+  await act(async () => {
+    screen.getByRole("button", { name: "register" }).click();
+  });
+
+  await waitFor(() => expect(api.post).toHaveBeenCalled());
+  expect(qc.getQueryData(["dashboard"])).toBeDefined();
+});
+
+it("clears the cache and rejects the caller when /me fails right after tokens are already installed for a new registration", async () => {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  qc.setQueryData(["dashboard"], { published: [], active: null, active_is_fallback: false });
+  api.get.mockRejectedValueOnce(new Error("me failed"));
+
+  let settled: "resolved" | "rejected" | null = null;
+  renderWithClient(qc, <RegisterConsumerCapture onSettled={(r) => { settled = r; }} />);
+
+  await act(async () => {
+    screen.getByRole("button", { name: "register" }).click();
+  });
+
+  await waitFor(() => expect(settled).toBe("rejected"));
+  expect(qc.getQueryData(["dashboard"])).toBeUndefined();
+});
+
+it("cancels in-flight queries before clearing the cache on register", async () => {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const cancelSpy = vi.spyOn(qc, "cancelQueries");
+  const clearSpy = vi.spyOn(qc, "clear");
+
+  renderWithClient(qc, <RegisterConsumer />);
+  await act(async () => {
+    screen.getByRole("button", { name: "register" }).click();
+  });
+
+  await waitFor(() => expect(clearSpy).toHaveBeenCalled());
+  expect(cancelSpy).toHaveBeenCalled();
+  const cancelOrder = cancelSpy.mock.invocationCallOrder[0];
+  const clearOrder = clearSpy.mock.invocationCallOrder[0];
+  expect(cancelOrder).toBeLessThan(clearOrder);
+});
+
+it("clears the entire React Query cache after logout", async () => {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  qc.setQueryData(["dashboard"], { published: [], active: null, active_is_fallback: false });
+
+  renderWithClient(qc, <LogoutConsumer />);
+  await act(async () => {
+    screen.getByRole("button", { name: "logout" }).click();
+  });
+
+  await waitFor(() => expect(api.post).toHaveBeenCalledWith("/api/v1/auth/logout"));
+  await waitFor(() => expect(qc.getQueryData(["dashboard"])).toBeUndefined());
+  expect(routerPush).toHaveBeenCalledWith("/login");
+});
+
+it("still clears the cache when the logout request itself fails", async () => {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  qc.setQueryData(["dashboard"], { published: [], active: null, active_is_fallback: false });
+  api.post.mockRejectedValueOnce(new Error("network error"));
+
+  renderWithClient(qc, <LogoutConsumer />);
+  await act(async () => {
+    screen.getByRole("button", { name: "logout" }).click();
+  });
+
+  await waitFor(() => expect(api.post).toHaveBeenCalledWith("/api/v1/auth/logout"));
+  // logout is best-effort about the server call (see the existing catch around
+  // it) — but clearing local state, including the query cache, must not be
+  // skipped just because the network call failed. Leaving a signed-out user's
+  // data cached is the same leak as the other transitions, with a worse story.
+  await waitFor(() => expect(qc.getQueryData(["dashboard"])).toBeUndefined());
+  expect(routerPush).toHaveBeenCalledWith("/login");
+});
+
+it("cancels in-flight queries before clearing the cache on logout", async () => {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const cancelSpy = vi.spyOn(qc, "cancelQueries");
+  const clearSpy = vi.spyOn(qc, "clear");
+
+  renderWithClient(qc, <LogoutConsumer />);
+  await act(async () => {
+    screen.getByRole("button", { name: "logout" }).click();
   });
 
   await waitFor(() => expect(clearSpy).toHaveBeenCalled());
