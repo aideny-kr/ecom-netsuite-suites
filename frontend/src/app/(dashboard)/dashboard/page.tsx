@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useAuth } from "@/providers/auth-provider";
 import { useDashboard } from "@/hooks/use-dashboard";
 import { DashboardWall, DashboardWallSkeleton } from "./dashboard-wall";
+import { DashboardEmptyState } from "./dashboard-empty-state";
 import {
   Plug,
   ScrollText,
@@ -63,10 +64,10 @@ export default function DashboardPage() {
           activeIsFallback={data?.active_is_fallback}
           subtitle={<p className="text-[13px] text-muted-foreground">Welcome back, {firstName}</p>}
         />
-      ) : (
-        // Nothing published (or the fetch failed): Task 5 owns the dashed
-        // "No dashboard on the wall yet" empty-state card that goes here. This
-        // branch just has to not crash and still let Quick Access render below.
+      ) : isError ? (
+        // The dashboard query itself failed — distinct from "legitimately nothing
+        // published": don't invite the user to "browse reports" when we don't
+        // actually know the published state.
         <div>
           <h2 className="text-2xl font-semibold tracking-tight text-foreground">
             Welcome back, {firstName}
@@ -74,12 +75,12 @@ export default function DashboardPage() {
           <p className="mt-1 text-[15px] text-muted-foreground">
             Here&apos;s where your business stands.
           </p>
-          {isError && (
-            <p className="mt-4 text-[13px] text-muted-foreground">
-              Couldn&apos;t load your dashboard. Try refreshing the page.
-            </p>
-          )}
+          <p className="mt-4 text-[13px] text-muted-foreground">
+            Couldn&apos;t load your dashboard. Try refreshing the page.
+          </p>
         </div>
+      ) : (
+        <DashboardEmptyState />
       )}
 
       {/* Quick Access — slim row beneath the wall, not a bulletin board of its own. */}

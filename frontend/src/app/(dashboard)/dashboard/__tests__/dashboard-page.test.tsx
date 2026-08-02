@@ -77,10 +77,10 @@ it("fetches the active report's frozen HTML into a fully sandboxed iframe", asyn
   });
 });
 
-it("renders nothing where the wall would be when there is no active report, without crashing", async () => {
+it("shows the real empty state (not the wall) when nothing is published", async () => {
   api.get.mockResolvedValue({ published: [], active: null, active_is_fallback: false });
   const { findByText, queryByText } = renderPage();
-  expect(await findByText(/welcome back, jamie/i)).toBeTruthy();
+  expect(await findByText("No dashboard on the wall yet")).toBeTruthy();
   expect(queryByText("Open ↗")).toBeNull();
 });
 
@@ -116,5 +116,5 @@ it("shows a skeleton sized like the wall while the dashboard query is loading", 
   const { container, findByText } = renderPage();
   await waitFor(() => expect(container.querySelectorAll(".animate-pulse").length).toBeGreaterThan(0));
   resolveGet({ published: [], active: null, active_is_fallback: false });
-  expect(await findByText(/welcome back, jamie/i)).toBeTruthy();
+  expect(await findByText("No dashboard on the wall yet")).toBeTruthy();
 });
