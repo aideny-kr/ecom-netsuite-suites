@@ -33,10 +33,15 @@ const published = [
   report({ id: "r-3", title: "Board Snapshot", auto_refresh: "off" }),
 ];
 
+// Exposed so tests can spy on invalidateQueries against the exact instance the
+// component is wired to (each renderSwitcher() call makes a fresh one).
+let lastQueryClient: QueryClient | null = null;
+
 function renderSwitcher(props: Partial<React.ComponentProps<typeof DashboardSwitcher>> = {}) {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
+  lastQueryClient = qc;
   function Wrapper({ children }: { children: ReactNode }) {
     return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
   }
@@ -172,4 +177,22 @@ it("falls back to a generic message when the backend error has no message", asyn
   fireEvent.click(otherItem);
 
   expect(await findByText("Couldn't switch dashboard")).toBeTruthy();
+});
+
+it("invalidates the dashboard query on a failed switch so the stale menu self-heals on retry", async () => {
+  // Review fix M2: a 409 (another user unpublished the report in the meantime) left
+  // the stale menu entry rendered and every retry re-erroring, because nothing ever
+  // refetched ["dashboard"] to drop the now-unpublished entry from `published`.
+  api.put.mockRejectedValueOnce(new Error("That report isn't published to the dashboard"));
+  const { findByRole, findByText } = renderSwitcher();
+  const invalidate = vi.spyOn(lastQueryClient!, "invalidateQueries");
+  const trigger = await findByRole("button", { name: /switch/i });
+  openSwitcher(trigger);
+
+  const otherItem = await findByRole("menuitem", { name: /cash flow.*q2/i });
+  fireEvent.click(otherItem);
+
+  await findByText("That report isn't published to the dashboard");
+  const keys = invalidate.mock.calls.map((c) => JSON.stringify(c[0]?.queryKey));
+  expect(keys).toContain(JSON.stringify(["dashboard"]));
 });

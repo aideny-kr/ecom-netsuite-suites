@@ -52,7 +52,10 @@ async def _published_reports(db: AsyncSession, tenant_id: uuid.UUID) -> list[Rep
             await db.execute(
                 select(Report)
                 .where(Report.tenant_id == tenant_id, Report.dashboard_pinned_at.is_not(None))
-                .order_by(Report.dashboard_pinned_at.desc())
+                # id DESC as a tiebreaker: two reports published in the same tick
+                # otherwise have no deterministic order between requests, and the
+                # fallback (published[0]) would inherit that nondeterminism.
+                .order_by(Report.dashboard_pinned_at.desc(), Report.id.desc())
             )
         )
         .scalars()
@@ -90,15 +93,20 @@ async def _get_visible_report(db: AsyncSession, report_id: str, user: User) -> R
 
 
 async def _build_dashboard_response(db: AsyncSession, user: User) -> DashboardResponse:
-    """Read-only assembly used by GET only — PUT/DELETE build their response from
-    data already loaded pre-commit (see constraint 4: never query an RLS table
-    after db.commit(), since the SET LOCAL tenant GUC is cleared by the commit and
-    the tenant policy would silently filter every row rather than 500)."""
+    """Read-only-ish assembly used by GET only — PUT/DELETE build their response
+    from data already loaded pre-commit (see constraint 4: never query an RLS
+    table after db.commit(), since the SET LOCAL tenant GUC is cleared by the
+    commit and the tenant policy would silently filter every row rather than
+    500). GET follows the same discipline for its own conditional commit below
+    (the deleted-report tombstone self-heal): build the full response from
+    already-loaded data FIRST, then delete + commit, then return without
+    querying anything else."""
     published = await _published_reports(db, user.tenant_id)
     pref = await _get_preference(db, user.tenant_id, user.id)
 
     active: Report | None = None
     active_is_fallback = False
+    tombstone_to_clear: UserDashboardPreference | None = None
 
     if pref is not None:
         # `pref.report_id` is None when the selected report was deleted (the
@@ -109,23 +117,37 @@ async def _build_dashboard_response(db: AsyncSession, user: User) -> DashboardRe
         if active is None:
             # Stored selection unavailable — either unpublished (report_id
             # still points at a real, now-unpublished report) or deleted
-            # (report_id is NULL). Self-heal on READ only: do not delete or
-            # repair the row here — an unpublished report can be re-published.
+            # (report_id is NULL). Self-heal on READ: do not delete or repair
+            # an unpublished-report row here — that report can be re-published,
+            # so the row must keep remembering the user's choice.
             active = published[0] if published else None
             # Only flag a fallback when there is an actual substitute to name:
             # the FE banner reads "...showing {title} instead", which cannot
             # render with no report at all — the empty state (Task 5) owns that
             # surface instead of a banner naming nothing.
             active_is_fallback = active is not None
+            if active_is_fallback and pref.report_id is None:
+                # A deleted-report tombstone, by contrast, is a permanent dead
+                # end — report_id can never again match a real published report
+                # — so the banner would otherwise reappear on every load
+                # forever. Reporting it once (this response) and clearing the
+                # row here is what makes it a one-time notice.
+                tombstone_to_clear = pref
         # else: their choice is still published — active_is_fallback stays False.
     elif published:
         active = published[0]  # never chosen — not a fallback
 
-    return DashboardResponse(
+    response = DashboardResponse(
         published=[_to_response(r) for r in published],
         active=_to_response(active) if active is not None else None,
         active_is_fallback=active_is_fallback,
     )
+
+    if tombstone_to_clear is not None:
+        await db.delete(tombstone_to_clear)
+        await db.commit()
+
+    return response
 
 
 @router.get("", response_model=DashboardResponse)

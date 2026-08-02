@@ -142,6 +142,10 @@ function PublishedDashboardRow({
   canManage: boolean;
 }) {
   const unpin = useUnpinReport(report.id);
+  // House pattern (matches DashboardSwitcher's actionMsg): unpin.mutate() had no
+  // onError, so a failed Unpublish (e.g. a permission race) failed silently — the
+  // button just stopped spinning with nothing to explain why.
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   return (
     <div className="flex items-center gap-3 rounded-lg border bg-background px-3 py-2">
@@ -162,6 +166,7 @@ function PublishedDashboardRow({
       >
         {isOnWall ? "On your wall" : "Published"}
       </Badge>
+      {errorMsg && <span className="shrink-0 text-[13px] text-destructive">{errorMsg}</span>}
       {/* The pin/unpin endpoints are creator-or-admin gated server-side — mirror
           that here so nobody sees a button that would just 403. */}
       {canManage && (
@@ -169,7 +174,12 @@ function PublishedDashboardRow({
           variant="ghost"
           size="sm"
           disabled={unpin.isPending}
-          onClick={() => unpin.mutate()}
+          onClick={() => {
+            setErrorMsg(null);
+            unpin.mutate(undefined, {
+              onError: (e: Error) => setErrorMsg(e.message || "Couldn't unpublish"),
+            });
+          }}
         >
           Unpublish
         </Button>

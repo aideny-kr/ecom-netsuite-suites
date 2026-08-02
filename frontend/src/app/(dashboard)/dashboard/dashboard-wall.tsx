@@ -96,6 +96,10 @@ export function DashboardWall({ report, subtitle, published, activeIsFallback }:
   // Fit DOWN on narrow screens; NEVER scale up past 1:1 — the report is authored at a
   // fixed width and stretching it past native would blur/misrender it.
   const scale = Math.min(1, box.width / WALL_WIDTH);
+  // When scale caps at 1 (container wider than WALL_WIDTH), the frame no longer fills
+  // the container — center the leftover space instead of leaving it all on the right
+  // (transformOrigin: "top left" would otherwise pin the frame to the left edge).
+  const centerOffset = scale >= 1 ? Math.max(0, (box.width - WALL_WIDTH) / 2) : 0;
 
   const showFallbackNotice = Boolean(activeIsFallback) && !bannerDismissed;
 
@@ -166,6 +170,7 @@ export function DashboardWall({ report, subtitle, published, activeIsFallback }:
               height: scale > 0 ? box.height / scale : box.height,
               transform: `scale(${scale})`,
               transformOrigin: "top left",
+              marginLeft: `${centerOffset}px`,
             }}
           />
         ) : (

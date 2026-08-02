@@ -161,6 +161,31 @@ it("never scales up past 1:1 even when the container is wider than the report's 
   });
 });
 
+// --- Review fix M10: center the (never-upscaled) frame in a wider container ------
+
+it("centers the frame horizontally when the container is wider than the report's authored width", async () => {
+  const { container } = renderWall();
+  await waitFor(() => expect(container.querySelector("iframe")).toBeTruthy());
+  // Container is 2000px wide; the frame stays capped at its native 1120px, leaving
+  // 880px of dead space split evenly (440px) on each side instead of all on the right.
+  capturedCallback?.([{ contentRect: { width: 2000, height: 800 } }]);
+  await waitFor(() => {
+    const iframe = container.querySelector("iframe") as HTMLIFrameElement;
+    expect(iframe.style.marginLeft).toBe("440px");
+  });
+});
+
+it("keeps zero centering offset when the container is narrower than the report's authored width", async () => {
+  const { container } = renderWall();
+  await waitFor(() => expect(container.querySelector("iframe")).toBeTruthy());
+  capturedCallback?.([{ contentRect: { width: 560, height: 600 } }]);
+  await waitFor(() => {
+    const iframe = container.querySelector("iframe") as HTMLIFrameElement;
+    expect(iframe.style.transform).toBe("scale(0.5)");
+    expect(iframe.style.marginLeft).toBe("0px");
+  });
+});
+
 it("shows a quiet 'Preview unavailable' fallback on fetch failure, header link still works", async () => {
   api.getText.mockRejectedValue(new Error("not found"));
   const { findByText, findByRole } = renderWall();

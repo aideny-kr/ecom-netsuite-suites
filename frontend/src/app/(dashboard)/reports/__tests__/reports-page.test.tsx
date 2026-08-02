@@ -156,3 +156,27 @@ it("shows Unpublish for a tenant admin who did not create the report", () => {
   render(<ReportsPage />);
   expect(screen.getByRole("button", { name: /unpublish/i })).toBeInTheDocument();
 });
+
+// --- Review fix M4: a failed Unpublish must surface, not fail silently -----------
+
+it("shows the backend's error message inline when Unpublish fails", () => {
+  const pub = publishedReport();
+  dashboardData.current = { published: [pub], active: { id: pub.id }, active_is_fallback: false };
+  unpinMutate.mockImplementation((_vars?: unknown, opts?: { onError?: (e: Error) => void }) =>
+    opts?.onError?.(new Error("That report isn't published to the dashboard"))
+  );
+  render(<ReportsPage />);
+  fireEvent.click(screen.getByRole("button", { name: /unpublish/i }));
+  expect(screen.getByText("That report isn't published to the dashboard")).toBeInTheDocument();
+});
+
+it("falls back to a generic message when Unpublish fails with no message", () => {
+  const pub = publishedReport();
+  dashboardData.current = { published: [pub], active: { id: pub.id }, active_is_fallback: false };
+  unpinMutate.mockImplementation((_vars?: unknown, opts?: { onError?: (e: Error) => void }) =>
+    opts?.onError?.(new Error())
+  );
+  render(<ReportsPage />);
+  fireEvent.click(screen.getByRole("button", { name: /unpublish/i }));
+  expect(screen.getByText(/couldn.t unpublish/i)).toBeInTheDocument();
+});

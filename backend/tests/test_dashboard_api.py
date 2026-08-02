@@ -134,7 +134,10 @@ async def test_get_chosen_then_unpublished_falls_back_with_flag_true(client, db)
 async def test_get_chosen_then_deleted_falls_back_with_flag_true(client, db):
     """Deleting the selected report tombstones the preference row (report_id
     -> NULL via ON DELETE SET NULL, migration 092) instead of removing it —
-    same fallback-notice contract as the unpublished case above."""
+    same fallback-notice contract as the unpublished case above. The tombstone
+    itself is then self-healed by THIS get (see the one-time-notice test below):
+    it is permanent (report_id can never start matching `published` again), so
+    reporting it once and deleting the row is what makes the banner one-time."""
     ta = await create_test_tenant(db, name="ChosenThenDeleted")
     ua, _ = await create_test_user(db, ta)
     await set_tenant_context(db, str(ta.id))
@@ -157,7 +160,8 @@ async def test_get_chosen_then_deleted_falls_back_with_flag_true(client, db):
     assert body["active"]["id"] == str(r2.id)
     assert body["active_is_fallback"] is True
 
-    # the preference row survives as a tombstone, not deleted
+    # M3: this same GET self-heals the now-reported tombstone — the row is gone,
+    # not surviving with report_id NULL (that was the old, permanent-banner bug).
     pref = (
         await db.execute(
             select(UserDashboardPreference).where(
@@ -165,7 +169,86 @@ async def test_get_chosen_then_deleted_falls_back_with_flag_true(client, db):
             )
         )
     ).scalar_one_or_none()
-    assert pref is not None and pref.report_id is None
+    assert pref is None
+
+
+async def test_get_deleted_report_tombstone_banner_fires_exactly_once(client, db):
+    """M3 fix: a deleted-report tombstone is a permanent dead end (report_id can
+    never start matching `published` again), so the FIRST get that reports
+    active_is_fallback=True because of it also deletes the row — the SECOND get
+    is a clean 'never chose' fallback with no banner, instead of the amber
+    notice reappearing on every page load forever."""
+    ta = await create_test_tenant(db, name="TombstoneOnce")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    r1 = await _seed_report(db, ta, ua, title="WillBeDeleted")
+    await _pin(db, r1)
+    r2 = await _seed_report(db, ta, ua, title="StaysPublished")
+    await _pin(db, r2)
+    headers = make_auth_headers(ua)
+
+    assert (
+        await client.put("/api/v1/dashboard/active", headers=headers, json={"report_id": str(r1.id)})
+    ).status_code == 200
+
+    await db.delete(r1)
+    await db.flush()
+
+    first = await client.get("/api/v1/dashboard", headers=headers)
+    assert first.status_code == 200, first.text
+    assert first.json()["active_is_fallback"] is True
+    assert first.json()["active"]["id"] == str(r2.id)
+
+    second = await client.get("/api/v1/dashboard", headers=headers)
+    assert second.status_code == 200, second.text
+    assert second.json()["active_is_fallback"] is False
+    assert second.json()["active"]["id"] == str(r2.id)
+
+    pref = (
+        await db.execute(
+            select(UserDashboardPreference).where(
+                UserDashboardPreference.tenant_id == ta.id, UserDashboardPreference.user_id == ua.id
+            )
+        )
+    ).scalar_one_or_none()
+    assert pref is None
+
+
+async def test_get_unpublished_report_tombstone_survives_repeated_gets(client, db):
+    """The self-heal-and-delete behavior above is scoped to a DELETED report's
+    tombstone (report_id IS NULL) only. An unpublished-but-still-existing
+    selection must survive every repeated get untouched — the report can be
+    re-published, so the row keeps remembering the user's choice."""
+    ta = await create_test_tenant(db, name="UnpubSurvivesRepeats")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    r1 = await _seed_report(db, ta, ua, title="WillUnpublish")
+    await _pin(db, r1)
+    r2 = await _seed_report(db, ta, ua, title="StaysPublished")
+    await _pin(db, r2)
+    headers = make_auth_headers(ua)
+
+    assert (
+        await client.put("/api/v1/dashboard/active", headers=headers, json={"report_id": str(r1.id)})
+    ).status_code == 200
+
+    r1.dashboard_pinned_at = None
+    await db.flush()
+
+    for _ in range(3):
+        resp = await client.get("/api/v1/dashboard", headers=headers)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["active_is_fallback"] is True
+        assert resp.json()["active"]["id"] == str(r2.id)
+
+    pref = (
+        await db.execute(
+            select(UserDashboardPreference).where(
+                UserDashboardPreference.tenant_id == ta.id, UserDashboardPreference.user_id == ua.id
+            )
+        )
+    ).scalar_one_or_none()
+    assert pref is not None and pref.report_id == r1.id
 
 
 async def test_get_chosen_then_all_unpublished_falls_back_to_none(client, db):
@@ -196,6 +279,58 @@ async def test_get_chosen_then_all_unpublished_falls_back_to_none(client, db):
 async def test_get_unauth_401(client, db):
     resp = await client.get("/api/v1/dashboard")
     assert resp.status_code == 401
+
+
+async def test_get_published_order_is_deterministic_when_pinned_at_ties(client, db):
+    """M6: `ORDER BY dashboard_pinned_at DESC` alone has no tiebreaker, so two (or
+    more) reports published in the same tick could flip order between requests —
+    and the fallback is `published[0]`, so the fallback itself was nondeterministic.
+    Assert a stable id-DESC secondary sort when timestamps are identical."""
+    ta = await create_test_tenant(db, name="TieBreak")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    from datetime import datetime, timezone
+
+    same_ts = datetime.now(timezone.utc)
+    reports = []
+    for i in range(5):
+        r = await _seed_report(db, ta, ua, title=f"Tied-{i}")
+        r.dashboard_pinned_at = same_ts
+        reports.append(r)
+    await db.flush()
+    headers = make_auth_headers(ua)
+
+    resp = await client.get("/api/v1/dashboard", headers=headers)
+    assert resp.status_code == 200, resp.text
+    order = [row["id"] for row in resp.json()["published"]]
+    expected = sorted((str(r.id) for r in reports), reverse=True)
+    assert order == expected
+
+
+async def test_get_published_reports_excludes_cross_tenant_reports_even_without_rls(client, db):
+    """M7a: same defense-in-depth idiom as
+    test_put_active_cross_tenant_report_is_404_even_without_rls — the `db` fixture
+    connects as the BYPASSRLS owner, so this proves `_published_reports`' own
+    explicit tenant_id predicate keeps another tenant's published reports out of
+    `published`, not RLS."""
+    tenant_a = await create_test_tenant(db, name="GetCrossA")
+    tenant_b = await create_test_tenant(db, name="GetCrossB")
+    user_a, _ = await create_test_user(db, tenant_a)
+    user_b, _ = await create_test_user(db, tenant_b)
+
+    await set_tenant_context(db, str(tenant_b.id))
+    r_b = await _seed_report(db, tenant_b, user_b, title="BelongsToB")
+    await _pin(db, r_b)
+
+    await set_tenant_context(db, str(tenant_a.id))
+    r_a = await _seed_report(db, tenant_a, user_a, title="BelongsToA")
+    await _pin(db, r_a)
+
+    resp = await client.get("/api/v1/dashboard", headers=make_auth_headers(user_a))
+    assert resp.status_code == 200, resp.text
+    ids = {row["id"] for row in resp.json()["published"]}
+    assert ids == {str(r_a.id)}
+    assert str(r_b.id) not in ids
 
 
 # --- PUT /dashboard/active ---------------------------------------------------

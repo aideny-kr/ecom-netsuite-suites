@@ -37,7 +37,12 @@ export function useSetActiveDashboard() {
   return useMutation({
     mutationFn: (reportId: string) =>
       apiClient.put<DashboardResponse>("/api/v1/dashboard/active", { report_id: reportId }),
-    onSuccess: () => {
+    // onSettled (not onSuccess): a failed PUT — e.g. the 409 when another tab
+    // unpublished the target report in the meantime — leaves the switcher's menu
+    // built from a now-stale ["dashboard"] cache. Without refetching on the error
+    // path too, the stale entry stays offered and every retry just re-errors the
+    // same way; refetching drops it from `published` so the menu self-heals.
+    onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     },
   });
