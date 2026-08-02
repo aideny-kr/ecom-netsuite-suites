@@ -32,7 +32,8 @@ PR #181 shipped a *bulletin board*: pinned reports stacked as 300px-cropped prev
 **Files owned**: `backend/alembic/versions/<new>.py`, `backend/app/models/user_dashboard_preference.py` (new), `backend/app/models/__init__.py` (if it aggregates models), backend test file(s).
 
 - Migration `092_user_dashboard_preference` — parent = the CURRENT single head (verify by walking the revision graph; **never** create a merge migration; the graph is a single chain 001→091 today). New table `user_dashboard_preferences`:
-  - `id` uuid PK, `tenant_id` uuid FK `tenants.id` ON DELETE CASCADE (indexed), `user_id` uuid FK `users.id` ON DELETE CASCADE (indexed), `report_id` uuid FK `reports.id` **ON DELETE CASCADE** (so deleting/`unpublishing`-then-deleting a report simply drops the selection and the user falls back), `updated_at` timestamptz.
+  - `id` uuid PK, `tenant_id` uuid FK `tenants.id` ON DELETE CASCADE (indexed), `user_id` uuid FK `users.id` ON DELETE CASCADE (indexed), `report_id` uuid **nullable** FK `reports.id` **ON DELETE SET NULL**, `updated_at` timestamptz.
+  - *(Amended during Task 2, before merge: this was originally CASCADE, which dropped the row outright and made a **deleted** dashboard indistinguishable from "never chose" — so the approved design's "tells you once" notice could never fire for deletions. SET NULL leaves a tombstone meaning "you had a pick and it's gone", which the GET reports once and then clears.)*
   - **UNIQUE (tenant_id, user_id)** — one active choice per user per tenant.
   - RLS: enable + FORCE row level security with the same tenant policy shape the other tenant tables use (copy the pattern from migration 084 / whichever is canonical — research it, do not invent).
   - Downgrade drops the table.
