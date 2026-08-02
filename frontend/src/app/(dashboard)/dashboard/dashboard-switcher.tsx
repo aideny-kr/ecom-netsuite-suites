@@ -45,7 +45,9 @@ export function DashboardSwitcher({ published, activeId }: DashboardSwitcherProp
         <DropdownMenuTrigger asChild>
           <button
             type="button"
-            className="shrink-0 text-[13px] font-medium text-muted-foreground hover:text-foreground"
+            // Bordered, not ghost: this is the feature's primary control (the approved
+            // mock draws it as a button) — a plain text link under-sells it.
+            className="shrink-0 rounded-lg border bg-card px-3 py-1.5 text-[13px] font-medium text-foreground shadow-soft hover:bg-muted/40"
           >
             Switch ▾
           </button>
