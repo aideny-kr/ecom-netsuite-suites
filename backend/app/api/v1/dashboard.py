@@ -144,6 +144,18 @@ async def _build_dashboard_response(db: AsyncSession, user: User) -> DashboardRe
     )
 
     if tombstone_to_clear is not None:
+        # Audited like any other mutation (rules/sqlalchemy-fastapi #4) even though
+        # it is system GC on a read path: it is a real row deletion, and the audit
+        # trail is what explains why the user's stored choice vanished.
+        await audit_service.log_event(
+            db=db,
+            tenant_id=user.tenant_id,
+            category="report",
+            action="dashboard.tombstone_cleared",
+            actor_id=user.id,
+            resource_type="report",
+            resource_id=str(tombstone_to_clear.id),
+        )
         await db.delete(tombstone_to_clear)
         await db.commit()
 

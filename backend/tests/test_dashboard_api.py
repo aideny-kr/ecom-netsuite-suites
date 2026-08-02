@@ -204,6 +204,13 @@ async def test_get_deleted_report_tombstone_banner_fires_exactly_once(client, db
     assert second.json()["active_is_fallback"] is False
     assert second.json()["active"]["id"] == str(r2.id)
 
+    # the GC deletes a row, so it audits like any other mutation — exactly once,
+    # on the read that reported the notice (not again on the second GET).
+    cleared = (
+        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.tombstone_cleared'"))
+    ).scalar_one()
+    assert cleared == 1
+
     pref = (
         await db.execute(
             select(UserDashboardPreference).where(
