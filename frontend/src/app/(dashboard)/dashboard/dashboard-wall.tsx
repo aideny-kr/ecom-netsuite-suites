@@ -2,10 +2,11 @@
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
-import { FileBarChart } from "lucide-react";
+import { FileBarChart, X } from "lucide-react";
 import { apiClient } from "@/lib/api-client";
 import { Skeleton } from "@/components/ui/skeleton";
 import { FreshnessChip } from "@/lib/report-utils";
+import { DashboardSwitcher } from "./dashboard-switcher";
 import type { ReportSummary } from "@/hooks/use-reports";
 
 // The frozen artifact is authored at a fixed 1120px inner width (matches the report
@@ -23,11 +24,23 @@ export interface DashboardWallProps {
    * approved mock (wallpaper-mock-v1 §1). Optional so DashboardWall stays testable
    * standalone without a page-level user/auth dependency. */
   subtitle?: ReactNode;
+  /** Task 4: the workspace-wide published set, for the Switch ▾ menu. Always
+   * includes `report` itself by construction (the backend never returns an
+   * `active` that isn't in `published`). */
+  published: ReportSummary[];
+  /** Task 4: true when the caller's stored selection is gone (unpublished or
+   * deleted) and `report` is the substituted fallback — shows the dismissible
+   * one-time notice above the wall. */
+  activeIsFallback?: boolean;
 }
 
-export function DashboardWall({ report, subtitle }: DashboardWallProps) {
+export function DashboardWall({ report, subtitle, published, activeIsFallback }: DashboardWallProps) {
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [error, setError] = useState(false);
+  // Dismissal is per-session component state, deliberately NOT persisted (no
+  // localStorage/query invalidation) — a fresh mount (reload, revisit) shows the
+  // notice again until the backend-tracked selection itself changes.
+  const [bannerDismissed, setBannerDismissed] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const [box, setBox] = useState({ width: WALL_WIDTH, height: WALL_MIN_HEIGHT });
 
@@ -70,8 +83,26 @@ export function DashboardWall({ report, subtitle }: DashboardWallProps) {
   // fixed width and stretching it past native would blur/misrender it.
   const scale = Math.min(1, box.width / WALL_WIDTH);
 
+  const showFallbackNotice = Boolean(activeIsFallback) && !bannerDismissed;
+
   return (
     <div>
+      {showFallbackNotice && (
+        <div className="mb-3 flex items-center gap-2.5 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2">
+          <span className="flex-1 text-[13px]">
+            The dashboard you had chosen is no longer available — showing {report.title} instead.
+          </span>
+          <button
+            type="button"
+            aria-label="Dismiss"
+            onClick={() => setBannerDismissed(true)}
+            className="shrink-0 text-muted-foreground hover:text-foreground"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+
       <div className="flex flex-wrap items-center gap-3">
         <Link
           href={`/reports/${report.id}`}
@@ -84,8 +115,7 @@ export function DashboardWall({ report, subtitle }: DashboardWallProps) {
         </Link>
         <FreshnessChip report={report} />
         <span className="flex-1" />
-        {/* Task 4: <DashboardSwitcher /> ("Switch ▾") renders here, immediately left
-            of Open ↗ — deliberately not built by Task 3. */}
+        <DashboardSwitcher published={published} activeId={report.id} />
         <Link
           href={`/reports/${report.id}`}
           className="shrink-0 text-[13px] font-medium text-muted-foreground hover:text-foreground"

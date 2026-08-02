@@ -59,6 +59,8 @@ export default function DashboardPage() {
       ) : active ? (
         <DashboardWall
           report={active}
+          published={data?.published ?? []}
+          activeIsFallback={data?.active_is_fallback}
           subtitle={<p className="text-[13px] text-muted-foreground">Welcome back, {firstName}</p>}
         />
       ) : (

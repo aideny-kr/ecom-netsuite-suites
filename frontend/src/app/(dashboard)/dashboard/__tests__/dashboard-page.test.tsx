@@ -97,6 +97,15 @@ it("Quick Access grid still renders when nothing is published", async () => {
   expect(await findByText("Quick Access")).toBeTruthy();
 });
 
+// Carried from Task 3's review: this outer isError branch (no active report AND
+// the GET failed) previously had zero coverage.
+it("shows a 'Couldn't load your dashboard' message when the dashboard query errors and nothing is active", async () => {
+  api.get.mockRejectedValue(new Error("network down"));
+  const { findByText } = renderPage();
+  expect(await findByText(/couldn.t load your dashboard/i)).toBeTruthy();
+  expect(await findByText(/try refreshing the page/i)).toBeTruthy();
+});
+
 it("shows a skeleton sized like the wall while the dashboard query is loading", async () => {
   let resolveGet!: (v: unknown) => void;
   api.get.mockReturnValue(

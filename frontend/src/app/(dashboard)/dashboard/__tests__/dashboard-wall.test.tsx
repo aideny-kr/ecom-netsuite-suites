@@ -1,7 +1,9 @@
-import { render, waitFor } from "@testing-library/react";
+import { fireEvent, render, waitFor } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import type { ReactNode } from "react";
 
-const api = vi.hoisted(() => ({ getText: vi.fn() }));
+const api = vi.hoisted(() => ({ getText: vi.fn(), put: vi.fn() }));
 vi.mock("@/lib/api-client", () => ({ apiClient: api }));
 
 import { DashboardWall } from "@/app/(dashboard)/dashboard/dashboard-wall";
@@ -35,6 +37,19 @@ class CapturingResizeObserver {
   }
 }
 
+function renderWall(props: Partial<React.ComponentProps<typeof DashboardWall>> = {}) {
+  const qc = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  function Wrapper({ children }: { children: ReactNode }) {
+    return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
+  }
+  return render(
+    <DashboardWall report={baseReport} published={[baseReport]} {...props} />,
+    { wrapper: Wrapper }
+  );
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   capturedCallback = null;
@@ -43,14 +58,11 @@ beforeEach(() => {
   (globalThis as unknown as { ResizeObserver: typeof CapturingResizeObserver }).ResizeObserver =
     CapturingResizeObserver;
   api.getText.mockResolvedValue("<!DOCTYPE html><html><body>REPORT</body></html>");
-});
-
-afterEach(() => {
-  vi.restoreAllMocks();
+  api.put.mockResolvedValue({ published: [baseReport], active: baseReport, active_is_fallback: false });
 });
 
 it("renders the header row with title, freshness chip, and an Open ↗ link to the report", async () => {
-  const { findByText, getAllByRole } = render(<DashboardWall report={baseReport} />);
+  const { findByText, getAllByRole } = renderWall();
   expect(await findByText(baseReport.title)).toBeTruthy();
   expect(await findByText(/refreshed daily/i)).toBeTruthy();
   const links = getAllByRole("link");
@@ -59,7 +71,7 @@ it("renders the header row with title, freshness chip, and an Open ↗ link to t
 });
 
 it("fetches the frozen HTML and renders it in a fully sandboxed iframe", async () => {
-  const { container } = render(<DashboardWall report={baseReport} />);
+  const { container } = renderWall();
   await waitFor(() => expect(api.getText).toHaveBeenCalledWith("/api/v1/reports/r-1/view"));
   const iframe = await waitFor(() => {
     const el = container.querySelector("iframe");
@@ -71,7 +83,7 @@ it("fetches the frozen HTML and renders it in a fully sandboxed iframe", async (
 });
 
 it("revokes the object URL on unmount", async () => {
-  const { unmount } = render(<DashboardWall report={baseReport} />);
+  const { unmount } = renderWall();
   await waitFor(() => expect(api.getText).toHaveBeenCalled());
   unmount();
   expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:test");
@@ -81,12 +93,13 @@ it("revokes the previous blob and refetches when the displayed report changes (a
   (URL.createObjectURL as ReturnType<typeof vi.fn>)
     .mockReturnValueOnce("blob:one")
     .mockReturnValueOnce("blob:two");
-  const { rerender } = render(<DashboardWall report={baseReport} />);
+  const { rerender } = renderWall();
   await waitFor(() => expect(api.getText).toHaveBeenCalledTimes(1));
 
   rerender(
     <DashboardWall
       report={{ ...baseReport, id: "r-2", version: 1, last_refreshed_at: "2026-07-24T08:00:00Z" }}
+      published={[baseReport]}
     />
   );
   await waitFor(() => expect(api.getText).toHaveBeenCalledTimes(2));
@@ -95,7 +108,7 @@ it("revokes the previous blob and refetches when the displayed report changes (a
 });
 
 it("fits the report down on a narrow container (scale < 1)", async () => {
-  const { container } = render(<DashboardWall report={baseReport} />);
+  const { container } = renderWall();
   await waitFor(() => expect(container.querySelector("iframe")).toBeTruthy());
   capturedCallback?.([{ contentRect: { width: 560, height: 600 } }]);
   await waitFor(() => {
@@ -105,7 +118,7 @@ it("fits the report down on a narrow container (scale < 1)", async () => {
 });
 
 it("never scales up past 1:1 even when the container is wider than the report's authored width", async () => {
-  const { container } = render(<DashboardWall report={baseReport} />);
+  const { container } = renderWall();
   await waitFor(() => expect(container.querySelector("iframe")).toBeTruthy());
   capturedCallback?.([{ contentRect: { width: 2000, height: 800 } }]);
   await waitFor(() => {
@@ -118,46 +131,42 @@ it("never scales up past 1:1 even when the container is wider than the report's 
 
 it("shows a quiet 'Preview unavailable' fallback on fetch failure, header link still works", async () => {
   api.getText.mockRejectedValue(new Error("not found"));
-  const { findByText, findByRole } = render(<DashboardWall report={baseReport} />);
+  const { findByText, findByRole } = renderWall();
   expect(await findByText(/preview unavailable/i)).toBeTruthy();
   expect(await findByRole("link", { name: new RegExp(baseReport.title) })).toBeTruthy();
 });
 
 it("shows the healthy freshness chip (green) for an auto-refreshing report", async () => {
-  const { findByText } = render(<DashboardWall report={baseReport} />);
+  const { findByText } = renderWall();
   expect(await findByText(/refreshed daily/i)).toBeTruthy();
 });
 
 it("shows the failing freshness chip (amber) when refresh_failure_count > 0", async () => {
-  const { findByText } = render(
-    <DashboardWall report={{ ...baseReport, refresh_failure_count: 3 }} />
-  );
+  const { findByText } = renderWall({ report: { ...baseReport, refresh_failure_count: 3 } });
   expect(await findByText(/refresh failing/i)).toBeTruthy();
 });
 
 it("shows the failing freshness chip (amber) when auto_refresh_paused_at is set", async () => {
-  const { findByText } = render(
-    <DashboardWall report={{ ...baseReport, auto_refresh_paused_at: "2026-07-24T07:00:00Z" }} />
-  );
+  const { findByText } = renderWall({
+    report: { ...baseReport, auto_refresh_paused_at: "2026-07-24T07:00:00Z" },
+  });
   expect(await findByText(/refresh failing/i)).toBeTruthy();
 });
 
 it("shows a plain Snapshot chip for a non-recipe report", async () => {
-  const { findByText } = render(
-    <DashboardWall report={{ ...baseReport, has_recipe: false, auto_refresh: undefined }} />
-  );
+  const { findByText } = renderWall({
+    report: { ...baseReport, has_recipe: false, auto_refresh: undefined },
+  });
   expect(await findByText(/^snapshot/i)).toBeTruthy();
 });
 
 it("shows a plain Snapshot chip when auto_refresh is off", async () => {
-  const { findByText } = render(<DashboardWall report={{ ...baseReport, auto_refresh: "off" }} />);
+  const { findByText } = renderWall({ report: { ...baseReport, auto_refresh: "off" } });
   expect(await findByText(/^snapshot/i)).toBeTruthy();
 });
 
 it("renders an optional subtitle slot beneath the header row, above the display", async () => {
-  const { container, findByText } = render(
-    <DashboardWall report={baseReport} subtitle={<p>Welcome back, Aiden</p>} />
-  );
+  const { container, findByText } = renderWall({ subtitle: <p>Welcome back, Aiden</p> });
   await findByText("Welcome back, Aiden");
   const whead = container.firstElementChild as HTMLElement;
   const headerRow = whead.children[0];
@@ -169,10 +178,47 @@ it("renders an optional subtitle slot beneath the header row, above the display"
 });
 
 it("refetches when the report advances to a new version (auto-refresh) with the same id", async () => {
-  const { rerender } = render(<DashboardWall report={baseReport} />);
+  const { rerender } = renderWall();
   await waitFor(() => expect(api.getText).toHaveBeenCalledTimes(1));
   rerender(
-    <DashboardWall report={{ ...baseReport, version: 5, last_refreshed_at: "2026-07-24T09:00:00Z" }} />
+    <DashboardWall
+      report={{ ...baseReport, version: 5, last_refreshed_at: "2026-07-24T09:00:00Z" }}
+      published={[baseReport]}
+    />
   );
   await waitFor(() => expect(api.getText).toHaveBeenCalledTimes(2));
+});
+
+// --- Task 4: switcher + fallback notice -----------------------------------
+
+it("renders the Switch ▾ trigger in the header row, immediately left of Open ↗", async () => {
+  const { container, findByRole } = renderWall();
+  const switchBtn = await findByRole("button", { name: /switch/i });
+  const openLink = await findByRole("link", { name: "Open ↗" });
+  const headerRow = container.firstElementChild!.children[0];
+  const kids = Array.from(headerRow.querySelectorAll("button, a"));
+  expect(kids.indexOf(switchBtn)).toBeGreaterThanOrEqual(0);
+  expect(kids.indexOf(switchBtn)).toBeLessThan(kids.indexOf(openLink));
+});
+
+it("does not show a fallback notice when activeIsFallback is false or omitted", async () => {
+  const { queryByText } = renderWall();
+  await waitFor(() => expect(api.getText).toHaveBeenCalled());
+  expect(queryByText(/no longer available/i)).toBeNull();
+});
+
+it("shows the exact dismissible fallback notice above the wall when activeIsFallback is true", async () => {
+  const { findByText } = renderWall({ activeIsFallback: true });
+  expect(
+    await findByText(
+      "The dashboard you had chosen is no longer available — showing Income Statement — Jun 2026 instead."
+    )
+  ).toBeTruthy();
+});
+
+it("dismissing the fallback notice hides it (per-session component state, not persisted)", async () => {
+  const { findByRole, queryByText } = renderWall({ activeIsFallback: true });
+  const dismissBtn = await findByRole("button", { name: /dismiss/i });
+  fireEvent.click(dismissBtn);
+  await waitFor(() => expect(queryByText(/no longer available/i)).toBeNull());
 });
