@@ -1,6 +1,6 @@
 "use client";
 
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import type { ReportSummary } from "@/hooks/use-reports";
 
@@ -24,5 +24,34 @@ export function useDashboard() {
   return useQuery<DashboardResponse>({
     queryKey: ["dashboard"],
     queryFn: () => apiClient.get<DashboardResponse>("/api/v1/dashboard"),
+  });
+}
+
+// --- Task 4: the switcher's mutations --------------------------------------
+
+/** Sets the caller's active dashboard selection. `reportId` must already be in
+ * the published set (backend 409s otherwise — the switcher only ever offers
+ * published reports, so that path isn't reachable from the UI). */
+export function useSetActiveDashboard() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (reportId: string) =>
+      apiClient.put<DashboardResponse>("/api/v1/dashboard/active", { report_id: reportId }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    },
+  });
+}
+
+/** Clears the caller's stored selection — the wall falls back to the most
+ * recently published report. Not wired into the switcher UI yet (no "clear"
+ * menu item in the approved mock); provided per the plan for a future caller. */
+export function useClearActiveDashboard() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => apiClient.delete<DashboardResponse>("/api/v1/dashboard/active"),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    },
   });
 }

@@ -1,12 +1,12 @@
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 
-const api = vi.hoisted(() => ({ get: vi.fn() }));
+const api = vi.hoisted(() => ({ get: vi.fn(), put: vi.fn(), delete: vi.fn() }));
 vi.mock("@/lib/api-client", () => ({ apiClient: api }));
 
-import { useDashboard } from "@/hooks/use-dashboard";
+import { useClearActiveDashboard, useDashboard, useSetActiveDashboard } from "@/hooks/use-dashboard";
 
 function makeWrapper(qc: QueryClient) {
   return function Wrapper({ children }: { children: ReactNode }) {
@@ -40,4 +40,36 @@ it("returns the published set and the active report", async () => {
   await waitFor(() => expect(result.current.data?.active?.id).toBe("r-1"));
   expect(result.current.data?.published).toHaveLength(1);
   expect(result.current.data?.active_is_fallback).toBe(false);
+});
+
+// --- Task 4: switcher mutations ------------------------------------------------
+
+it("useSetActiveDashboard PUTs the chosen report id and invalidates ['dashboard']", async () => {
+  const response = { published: [], active: null, active_is_fallback: false };
+  api.put.mockResolvedValueOnce(response);
+  const qc = new QueryClient(qcOpts);
+  const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
+  const { result } = renderHook(() => useSetActiveDashboard(), { wrapper: makeWrapper(qc) });
+
+  await act(async () => {
+    await result.current.mutateAsync("r-9");
+  });
+
+  expect(api.put).toHaveBeenCalledWith("/api/v1/dashboard/active", { report_id: "r-9" });
+  expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["dashboard"] });
+});
+
+it("useClearActiveDashboard DELETEs the selection and invalidates ['dashboard']", async () => {
+  const response = { published: [], active: null, active_is_fallback: false };
+  api.delete.mockResolvedValueOnce(response);
+  const qc = new QueryClient(qcOpts);
+  const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
+  const { result } = renderHook(() => useClearActiveDashboard(), { wrapper: makeWrapper(qc) });
+
+  await act(async () => {
+    await result.current.mutateAsync();
+  });
+
+  expect(api.delete).toHaveBeenCalledWith("/api/v1/dashboard/active");
+  expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["dashboard"] });
 });
