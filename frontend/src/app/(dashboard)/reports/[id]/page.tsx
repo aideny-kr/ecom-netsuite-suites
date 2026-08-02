@@ -164,6 +164,11 @@ export default function ReportViewPage() {
             <Download className="h-4 w-4 mr-1" />
             Download HTML
           </Button>
+          {/* Task 5 rename: UI copy says "Publish"/"Unpublish" (matches the wallpaper
+              concept — "pin" read as a bulletin board, this is a landing-page wallpaper),
+              but the endpoints (/pin), hook names (usePinReport/useUnpinReport), and audit
+              actions all stay pin/unpin — the API is already shipped and this is a
+              copy-only change. Deliberate; don't "fix" the naming mismatch. */}
           {userCanManage && report && (
             <Button
               variant="outline"
@@ -176,12 +181,12 @@ export default function ReportViewPage() {
               {report.dashboard_pinned_at ? (
                 <>
                   <PinOff className="h-4 w-4 mr-1" />
-                  Unpin from dashboard
+                  Unpublish from dashboard
                 </>
               ) : (
                 <>
                   <Pin className="h-4 w-4 mr-1" />
-                  Pin to dashboard
+                  Publish to dashboard
                 </>
               )}
             </Button>
