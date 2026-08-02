@@ -8,6 +8,7 @@ import {
   useState,
 } from "react";
 import { useRouter } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import type {
   AuthResponse,
@@ -47,6 +48,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [tenants, setTenants] = useState<TenantSummary[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const router = useRouter();
+  const queryClient = useQueryClient();
 
   const loadTenants = useCallback(async () => {
     try {
@@ -145,9 +147,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setTokens(res);
       const profile = await apiClient.get<User>("/api/v1/auth/me");
       setUser(profile);
+      // Every cached query (dashboard, reports, recon, chat sessions, ...) was fetched
+      // under the OLD tenant's session — none of it is scoped by tenant_id in its query
+      // key, so leaving it in place would serve tenant A's cached data under tenant B's
+      // session for up to `staleTime` (60s). Drop the whole cache rather than patching
+      // this one hook: the leak is systemic (no query key anywhere includes tenant_id),
+      // so a full clear is the only fix that doesn't need updating every hook that's
+      // added later too.
+      queryClient.clear();
       router.push("/dashboard");
     },
-    [router],
+    [router, queryClient],
   );
 
   const refreshUser = useCallback(async () => {

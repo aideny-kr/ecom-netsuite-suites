@@ -24,6 +24,15 @@ const baseReport: ReportSummary = {
   dashboard_pinned_at: "2026-07-22T09:00:00Z",
 };
 
+// A report's authored width depends on whether report_html.py applied the
+// `report--wide` modifier class (financial-statement pages only — see
+// backend/app/services/report/report_html.py's `report_cls` assembly). The default
+// mock HTML below carries no such marker, so it represents the ORDINARY (non-wide,
+// 840px) case that most of these tests exercise; WIDE_REPORT_HTML is used only by the
+// tests that specifically cover the 1120px statement-page path.
+const WIDE_REPORT_HTML =
+  '<!DOCTYPE html><html><body><div class="report report--wide"><h1>Statement</h1></div></body></html>';
+
 type ROCallback = (entries: Array<{ contentRect: { width: number; height: number } }>) => void;
 
 let capturedCallback: ROCallback | null = null;
@@ -142,7 +151,8 @@ it("clears report A's iframe to a Skeleton immediately on switch, BEFORE report 
 it("fits the report down on a narrow container (scale < 1)", async () => {
   const { container } = renderWall();
   await waitFor(() => expect(container.querySelector("iframe")).toBeTruthy());
-  capturedCallback?.([{ contentRect: { width: 560, height: 600 } }]);
+  // 420 / 840 (the non-wide authored width) = 0.5.
+  capturedCallback?.([{ contentRect: { width: 420, height: 600 } }]);
   await waitFor(() => {
     const iframe = container.querySelector("iframe") as HTMLIFrameElement;
     expect(iframe.style.transform).toBe("scale(0.5)");
@@ -166,23 +176,81 @@ it("never scales up past 1:1 even when the container is wider than the report's 
 it("centers the frame horizontally when the container is wider than the report's authored width", async () => {
   const { container } = renderWall();
   await waitFor(() => expect(container.querySelector("iframe")).toBeTruthy());
-  // Container is 2000px wide; the frame stays capped at its native 1120px, leaving
-  // 880px of dead space split evenly (440px) on each side instead of all on the right.
+  // Container is 2000px wide; the frame stays capped at its native (non-wide) 840px,
+  // leaving 1160px of dead space split evenly (580px) on each side instead of all on
+  // the right.
   capturedCallback?.([{ contentRect: { width: 2000, height: 800 } }]);
   await waitFor(() => {
     const iframe = container.querySelector("iframe") as HTMLIFrameElement;
-    expect(iframe.style.marginLeft).toBe("440px");
+    expect(iframe.style.marginLeft).toBe("580px");
   });
 });
 
 it("keeps zero centering offset when the container is narrower than the report's authored width", async () => {
   const { container } = renderWall();
   await waitFor(() => expect(container.querySelector("iframe")).toBeTruthy());
-  capturedCallback?.([{ contentRect: { width: 560, height: 600 } }]);
+  capturedCallback?.([{ contentRect: { width: 420, height: 600 } }]);
   await waitFor(() => {
     const iframe = container.querySelector("iframe") as HTMLIFrameElement;
     expect(iframe.style.transform).toBe("scale(0.5)");
     expect(iframe.style.marginLeft).toBe("0px");
+  });
+});
+
+// --- Review fix M?? (T2 gate MAJOR 2): the wall must derive the report's AUTHORED
+// width from the fetched HTML (840 default / 1120 only for report--wide statement
+// pages — see backend/app/services/report/report_html.py) instead of assuming every
+// report was authored at 1120px. Assuming 1120 for an ordinary (non-wide) report
+// centers its real 840px content inside a too-wide frame with ~140px of dead
+// background on each side and renders it at ~75% of the intended fill. ------------
+
+it("uses the authored 840px width for a non-wide report (not a hardcoded 1120)", async () => {
+  const { container } = renderWall();
+  await waitFor(() => expect(container.querySelector("iframe")).toBeTruthy());
+  const iframe = container.querySelector("iframe") as HTMLIFrameElement;
+  expect(iframe.style.width).toBe("840px");
+});
+
+it("uses the authored 1120px width for a report whose HTML carries the report--wide class", async () => {
+  api.getText.mockResolvedValueOnce(WIDE_REPORT_HTML);
+  const { container } = renderWall();
+  await waitFor(() => expect(container.querySelector("iframe")).toBeTruthy());
+  const iframe = container.querySelector("iframe") as HTMLIFrameElement;
+  expect(iframe.style.width).toBe("1120px");
+});
+
+it("fills an 840px container for a non-wide report (scale=1, no dead margin) instead of the ~75% underfill", async () => {
+  const { container } = renderWall();
+  await waitFor(() => expect(container.querySelector("iframe")).toBeTruthy());
+  capturedCallback?.([{ contentRect: { width: 840, height: 600 } }]);
+  await waitFor(() => {
+    const iframe = container.querySelector("iframe") as HTMLIFrameElement;
+    expect(iframe.style.transform).toBe("scale(1)");
+    expect(iframe.style.marginLeft).toBe("0px");
+  });
+});
+
+it("never scales a wide (statement) report up past 1:1 either", async () => {
+  api.getText.mockResolvedValueOnce(WIDE_REPORT_HTML);
+  const { container } = renderWall();
+  await waitFor(() => expect(container.querySelector("iframe")).toBeTruthy());
+  capturedCallback?.([{ contentRect: { width: 2000, height: 800 } }]);
+  await waitFor(() => {
+    const iframe = container.querySelector("iframe") as HTMLIFrameElement;
+    const match = iframe.style.transform.match(/scale\(([\d.]+)\)/);
+    const scale = match ? parseFloat(match[1]) : 1;
+    expect(scale).toBeLessThanOrEqual(1);
+  });
+});
+
+it("centers a wide (statement) report's frame using 1120px as the denominator", async () => {
+  api.getText.mockResolvedValueOnce(WIDE_REPORT_HTML);
+  const { container } = renderWall();
+  await waitFor(() => expect(container.querySelector("iframe")).toBeTruthy());
+  capturedCallback?.([{ contentRect: { width: 2000, height: 800 } }]);
+  await waitFor(() => {
+    const iframe = container.querySelector("iframe") as HTMLIFrameElement;
+    expect(iframe.style.marginLeft).toBe("440px"); // (2000 - 1120) / 2
   });
 });
 

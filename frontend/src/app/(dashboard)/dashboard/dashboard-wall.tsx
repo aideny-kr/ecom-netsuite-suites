@@ -9,12 +9,29 @@ import { FreshnessChip } from "@/lib/report-utils";
 import { DashboardSwitcher } from "./dashboard-switcher";
 import type { ReportSummary } from "@/hooks/use-reports";
 
-// The frozen artifact is authored at a fixed 1120px inner width (matches the report
-// page and the retired PinnedReportCard preview). The wall fits it DOWN on narrow
-// screens but never stretches it past 1:1 — the old cropped-card design fixed the
-// preview to a 300px-tall window that only ever showed the title band; rendering at
-// full size here retires that bug entirely instead of patching the crop height.
-const WALL_WIDTH = 1120;
+// The frozen artifact is authored at ONE of two fixed inner widths, per
+// backend/app/services/report/report_html.py's `report_cls` assembly: the default
+// `.report` (840px) for an ordinary report, or `.report--wide` (1120px) ONLY when the
+// spec contains a `financial_statement` section. The wall must derive which one a
+// given report actually used from its fetched HTML rather than assume — assuming the
+// wider 1120 for an 840px (non-wide) report centers its real content inside a too-wide
+// frame with dead background on each side and renders it at ~75% of the intended fill
+// (840/1120). The wall fits the derived width DOWN on narrow screens but never
+// stretches it past 1:1 — the old cropped-card design fixed the preview to a 300px-tall
+// window that only ever showed the title band; rendering at full size here retires
+// that bug entirely instead of patching the crop height.
+const REPORT_WIDTH_NARROW = 840;
+const REPORT_WIDTH_WIDE = 1120;
+// The exact class token report_html.py's `report_cls` emits on the root <div> only
+// when `has_financial_statement` is true (`"report report--wide"` vs plain `"report"`)
+// — matching this literal string can't false-positive on unrelated report content,
+// which is always HTML-escaped before being embedded.
+const WIDE_REPORT_MARKER = 'class="report report--wide"';
+
+function deriveReportWidth(html: string): number {
+  return html.includes(WIDE_REPORT_MARKER) ? REPORT_WIDTH_WIDE : REPORT_WIDTH_NARROW;
+}
+
 export const WALL_MIN_HEIGHT = 520;
 
 export interface DashboardWallProps {
@@ -36,13 +53,14 @@ export interface DashboardWallProps {
 
 export function DashboardWall({ report, subtitle, published, activeIsFallback }: DashboardWallProps) {
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const [reportWidth, setReportWidth] = useState(REPORT_WIDTH_NARROW);
   const [error, setError] = useState(false);
   // Dismissal is per-session component state, deliberately NOT persisted (no
   // localStorage/query invalidation) — a fresh mount (reload, revisit) shows the
   // notice again until the backend-tracked selection itself changes.
   const [bannerDismissed, setBannerDismissed] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
-  const [box, setBox] = useState({ width: WALL_WIDTH, height: WALL_MIN_HEIGHT });
+  const [box, setBox] = useState({ width: REPORT_WIDTH_NARROW, height: WALL_MIN_HEIGHT });
 
   useEffect(() => {
     let url: string | null = null;
@@ -60,6 +78,9 @@ export function DashboardWall({ report, subtitle, published, activeIsFallback }:
       .then((html) => {
         if (cancelled) return;
         url = URL.createObjectURL(new Blob([html], { type: "text/html" }));
+        // Alongside the blob, not before/after it — the iframe width and the scale
+        // denominator (below) must always agree with which document is actually loaded.
+        setReportWidth(deriveReportWidth(html));
         setBlobUrl((old) => {
           if (old) URL.revokeObjectURL(old); // never leak the previous blob on a switch
           return url;
@@ -94,12 +115,13 @@ export function DashboardWall({ report, subtitle, published, activeIsFallback }:
   }, []);
 
   // Fit DOWN on narrow screens; NEVER scale up past 1:1 — the report is authored at a
-  // fixed width and stretching it past native would blur/misrender it.
-  const scale = Math.min(1, box.width / WALL_WIDTH);
-  // When scale caps at 1 (container wider than WALL_WIDTH), the frame no longer fills
+  // fixed width (840 or 1120, per `reportWidth`) and stretching it past native would
+  // blur/misrender it.
+  const scale = Math.min(1, box.width / reportWidth);
+  // When scale caps at 1 (container wider than reportWidth), the frame no longer fills
   // the container — center the leftover space instead of leaving it all on the right
   // (transformOrigin: "top left" would otherwise pin the frame to the left edge).
-  const centerOffset = scale >= 1 ? Math.max(0, (box.width - WALL_WIDTH) / 2) : 0;
+  const centerOffset = scale >= 1 ? Math.max(0, (box.width - reportWidth) / 2) : 0;
 
   const showFallbackNotice = Boolean(activeIsFallback) && !bannerDismissed;
 
@@ -166,7 +188,7 @@ export function DashboardWall({ report, subtitle, published, activeIsFallback }:
             sandbox=""
             className="border-0"
             style={{
-              width: WALL_WIDTH,
+              width: reportWidth,
               height: scale > 0 ? box.height / scale : box.height,
               transform: `scale(${scale})`,
               transformOrigin: "top left",
