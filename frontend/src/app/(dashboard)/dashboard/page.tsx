@@ -2,14 +2,13 @@
 
 import Link from "next/link";
 import { useAuth } from "@/providers/auth-provider";
-import { useReports } from "@/hooks/use-reports";
-import { PinnedReportCard } from "./pinned-report-card";
+import { useDashboard } from "@/hooks/use-dashboard";
+import { DashboardWall, DashboardWallSkeleton } from "./dashboard-wall";
 import {
   Plug,
   ScrollText,
   MessageSquare,
   Table2,
-  ArrowRight,
 } from "lucide-react";
 
 const quickLinks = [
@@ -20,7 +19,6 @@ const quickLinks = [
     icon: Plug,
     color: "from-violet-500/10 to-purple-500/10",
     iconColor: "text-violet-600",
-    borderColor: "group-hover:border-violet-200",
   },
   {
     title: "Data Tables",
@@ -29,7 +27,6 @@ const quickLinks = [
     icon: Table2,
     color: "from-blue-500/10 to-cyan-500/10",
     iconColor: "text-blue-600",
-    borderColor: "group-hover:border-blue-200",
   },
   {
     title: "Audit Log",
@@ -38,7 +35,6 @@ const quickLinks = [
     icon: ScrollText,
     color: "from-amber-500/10 to-orange-500/10",
     iconColor: "text-amber-600",
-    borderColor: "group-hover:border-amber-200",
   },
   {
     title: "AI Chat",
@@ -47,73 +43,65 @@ const quickLinks = [
     icon: MessageSquare,
     color: "from-emerald-500/10 to-teal-500/10",
     iconColor: "text-emerald-600",
-    borderColor: "group-hover:border-emerald-200",
   },
 ];
 
 export default function DashboardPage() {
   const { user } = useAuth();
-  const { data: reports } = useReports();
-
-  const pinned = (reports ?? [])
-    .filter((r) => r.dashboard_pinned_at != null)
-    .sort((a, b) => (b.dashboard_pinned_at as string).localeCompare(a.dashboard_pinned_at as string));
+  const { data, isLoading, isError } = useDashboard();
+  const firstName = user?.full_name?.split(" ")[0];
+  const active = data?.active ?? null;
 
   return (
     <div className="space-y-8 animate-fade-in">
-      {/* Header */}
-      <div>
-        <h2 className="text-2xl font-semibold tracking-tight text-foreground">
-          Welcome back, {user?.full_name?.split(" ")[0]}
-        </h2>
-        <p className="mt-1 text-[15px] text-muted-foreground">
-          Here&apos;s where your business stands.
-        </p>
-      </div>
+      {isLoading ? (
+        <DashboardWallSkeleton />
+      ) : active ? (
+        <DashboardWall
+          report={active}
+          subtitle={<p className="text-[13px] text-muted-foreground">Welcome back, {firstName}</p>}
+        />
+      ) : (
+        // Nothing published (or the fetch failed): Task 5 owns the dashed
+        // "No dashboard on the wall yet" empty-state card that goes here. This
+        // branch just has to not crash and still let Quick Access render below.
+        <div>
+          <h2 className="text-2xl font-semibold tracking-tight text-foreground">
+            Welcome back, {firstName}
+          </h2>
+          <p className="mt-1 text-[15px] text-muted-foreground">
+            Here&apos;s where your business stands.
+          </p>
+          {isError && (
+            <p className="mt-4 text-[13px] text-muted-foreground">
+              Couldn&apos;t load your dashboard. Try refreshing the page.
+            </p>
+          )}
+        </div>
+      )}
 
-      {/* Pinned reports */}
+      {/* Quick Access — slim row beneath the wall, not a bulletin board of its own. */}
       <div>
-        <h3 className="mb-4 text-[13px] font-semibold uppercase tracking-wider text-muted-foreground">
-          Pinned reports
-        </h3>
-        {pinned.length > 0 ? (
-          <div className="space-y-4">
-            {pinned.map((report) => (
-              <PinnedReportCard key={report.id} report={report} />
-            ))}
-          </div>
-        ) : (
-          <div className="rounded-xl border border-dashed p-5 text-[13px] text-muted-foreground">
-            No pinned reports yet — open any report and choose Pin to dashboard.
-          </div>
-        )}
-      </div>
-
-      {/* Quick Links Grid */}
-      <div>
-        <h3 className="mb-4 text-[13px] font-semibold uppercase tracking-wider text-muted-foreground">
+        <h3 className="mb-3 text-[13px] font-semibold uppercase tracking-wider text-muted-foreground">
           Quick Access
         </h3>
-        <div className="grid gap-4 md:grid-cols-2">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
           {quickLinks.map((item) => (
             <Link
               key={item.href}
               href={item.href}
-              className={`group flex items-start gap-4 rounded-xl border bg-card p-5 shadow-soft transition-all duration-200 hover:shadow-soft-md ${item.borderColor}`}
+              className="group flex items-center gap-3 rounded-lg border bg-card p-3 shadow-soft transition-colors hover:bg-muted/30"
             >
               <div
-                className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br ${item.color}`}
+                className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br ${item.color}`}
               >
-                <item.icon className={`h-5 w-5 ${item.iconColor}`} />
+                <item.icon className={`h-4 w-4 ${item.iconColor}`} />
               </div>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-[15px] font-semibold text-foreground">
-                    {item.title}
-                  </h3>
-                  <ArrowRight className="h-4 w-4 text-muted-foreground opacity-0 transition-all duration-200 group-hover:translate-x-0.5 group-hover:opacity-100" />
-                </div>
-                <p className="mt-0.5 text-[13px] leading-relaxed text-muted-foreground">
+              <div className="min-w-0">
+                <p className="truncate text-[13px] font-semibold text-foreground">
+                  {item.title}
+                </p>
+                <p className="truncate text-[11px] text-muted-foreground">
                   {item.description}
                 </p>
               </div>
