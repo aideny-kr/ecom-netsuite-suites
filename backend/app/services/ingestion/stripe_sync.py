@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.core.encryption import decrypt_credentials
 from app.models.canonical import Dispute, Payout, PayoutLine
-from app.models.connection import Connection
+from app.models.connection import ACTIVE_CONNECTION_STATUSES, Connection
 from app.services.ingestion.base import load_cursor, save_cursor, upsert_canonical
 
 logger = structlog.get_logger()
@@ -42,8 +42,11 @@ def _stripe_epoch_to_date(epoch: int | None) -> date | None:
 def _count_active_stripe_connections(db: Session, tenant_id: str) -> int:
     """Count active Stripe connections for a tenant.
 
-    Mirrors the active-status semantics of ``stripe_sync_all._find_active_stripe_connections``
-    (status in active/healthy).
+    Uses ACTIVE_CONNECTION_STATUSES (active/healthy only) -- narrower than
+    stripe_sync_all._find_active_stripe_connections's DISPATCHABLE_CONNECTION_STATUSES
+    (which also dispatches for `error`), since this gates whether the
+    refresh pass can safely treat the connection as the tenant's one true
+    live Stripe key, not whether a sync should be attempted at all.
     """
     return db.execute(
         select(func.count())
@@ -51,7 +54,7 @@ def _count_active_stripe_connections(db: Session, tenant_id: str) -> int:
         .where(
             Connection.tenant_id == tenant_id,
             Connection.provider == "stripe",
-            Connection.status.in_(["active", "healthy"]),
+            Connection.status.in_(ACTIVE_CONNECTION_STATUSES),
         )
     ).scalar_one()
 
@@ -177,7 +180,16 @@ def sync_stripe(
     Returns a summary dict with counts of records synced.
     """
     # ---- bootstrap --------------------------------------------------------
-    connection = db.execute(select(Connection).where(Connection.id == connection_id)).scalar_one()
+    # tenant_id scoping closes a pre-existing gap: this lookup previously had
+    # no tenant predicate at all, so a connection_id belonging to a DIFFERENT
+    # tenant would still be loaded and used here. The workers/tasks/
+    # stripe_sync.py pre-flight guard already scopes by tenant_id before
+    # calling this function, but this is the function's OWN fetch and gets the
+    # same hardening independently (defense in depth -- and this function has
+    # other callers, e.g. the recon pipeline's inline sync).
+    connection = db.execute(
+        select(Connection).where(Connection.id == connection_id, Connection.tenant_id == tenant_id)
+    ).scalar_one()
 
     creds = decrypt_credentials(connection.encrypted_credentials)
     stripe.api_key = creds["api_key"]
