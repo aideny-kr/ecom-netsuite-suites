@@ -111,6 +111,7 @@ export function usePinReport(id: string) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["reports"] });
       queryClient.invalidateQueries({ queryKey: ["reports", id] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     },
   });
 }
@@ -122,6 +123,7 @@ export function useUnpinReport(id: string) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["reports"] });
       queryClient.invalidateQueries({ queryKey: ["reports", id] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     },
   });
 }
