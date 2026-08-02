@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -92,6 +92,52 @@ async def _get_visible_report(db: AsyncSession, report_id: str, user: User) -> R
     return row
 
 
+async def _clear_tombstone_if_still_null(db: AsyncSession, tombstone: UserDashboardPreference, user: User) -> bool:
+    """Conditional delete-and-audit for a deleted-report tombstone. Not
+    `db.delete(tombstone)` by primary key alone: between `tombstone` being
+    loaded (by `_get_preference` in `_build_dashboard_response`, below) and
+    this delete executing, a concurrent `PUT /dashboard/active` on another
+    connection could have re-pointed the SAME row at a real report — the
+    upsert in `set_active_dashboard` updates `report_id` on the existing row
+    via `ON CONFLICT DO UPDATE` rather than inserting a new one. An
+    unconditional-by-pk delete would silently discard that fresh selection
+    along with the tombstone, with no trace. Re-asserting `report_id IS NULL`
+    in the WHERE clause makes the delete a no-op in that case.
+
+    The same conditional also makes this the loser-safe half of two
+    concurrent GETs racing the same stale tombstone: both load it, both call
+    this, but only the winner's DELETE matches a row — the loser's matches
+    zero and (per the `rowcount` gate below) does not audit a second
+    `dashboard.tombstone_cleared` event for what is a one-time notice.
+
+    Returns True iff this call was the one that actually deleted the row
+    (and therefore audited the clear).
+    """
+    result = await db.execute(
+        delete(UserDashboardPreference).where(
+            UserDashboardPreference.id == tombstone.id,
+            UserDashboardPreference.report_id.is_(None),
+        )
+    )
+    if result.rowcount != 1:
+        return False
+    # Audited like any other mutation (rules/sqlalchemy-fastapi #4) even though
+    # it is system GC on a read path: it is a real row deletion, and the audit
+    # trail is what explains why the user's stored choice vanished. Gated on
+    # rowcount so a concurrent loser (or a row re-pointed out from under us)
+    # never logs a phantom clear.
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="report",
+        action="dashboard.tombstone_cleared",
+        actor_id=user.id,
+        resource_type="report",
+        resource_id=str(tombstone.id),
+    )
+    return True
+
+
 async def _build_dashboard_response(db: AsyncSession, user: User) -> DashboardResponse:
     """Read-only-ish assembly used by GET only — PUT/DELETE build their response
     from data already loaded pre-commit (see constraint 4: never query an RLS
@@ -144,19 +190,7 @@ async def _build_dashboard_response(db: AsyncSession, user: User) -> DashboardRe
     )
 
     if tombstone_to_clear is not None:
-        # Audited like any other mutation (rules/sqlalchemy-fastapi #4) even though
-        # it is system GC on a read path: it is a real row deletion, and the audit
-        # trail is what explains why the user's stored choice vanished.
-        await audit_service.log_event(
-            db=db,
-            tenant_id=user.tenant_id,
-            category="report",
-            action="dashboard.tombstone_cleared",
-            actor_id=user.id,
-            resource_type="report",
-            resource_id=str(tombstone_to_clear.id),
-        )
-        await db.delete(tombstone_to_clear)
+        await _clear_tombstone_if_still_null(db, tombstone_to_clear, user)
         await db.commit()
 
     return response

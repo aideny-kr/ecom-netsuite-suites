@@ -221,6 +221,123 @@ async def test_get_deleted_report_tombstone_banner_fires_exactly_once(client, db
     assert pref is None
 
 
+async def test_tombstone_conditional_delete_survives_concurrent_repoint(client, db):
+    """TOCTOU regression: `_get_preference` loads the tombstone (report_id
+    NULL) before the GC delete runs. If, in that window, a concurrent
+    PUT /dashboard/active on another connection re-points the SAME row at a
+    real report (`set_active_dashboard`'s upsert updates report_id on the
+    existing row via ON CONFLICT DO UPDATE, not a new INSERT), an
+    unconditional-by-pk delete would silently discard that fresh selection
+    along with the tombstone.
+
+    The `client`/`db` fixtures share one connection/transaction (conftest.py),
+    so a true two-connection interleave can't be reproduced through a single
+    HTTP request. Instead this calls the module's conditional-delete-and-audit
+    helper directly against a tombstone that has been re-pointed out from
+    under it — exactly the state the real interleave would leave behind —
+    and asserts the row survives with the concurrent selection intact."""
+    from app.api.v1.dashboard import _clear_tombstone_if_still_null
+
+    ta = await create_test_tenant(db, name="ToctouRepoint")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    r1 = await _seed_report(db, ta, ua, title="WillBeDeleted")
+    await _pin(db, r1)
+    r2 = await _seed_report(db, ta, ua, title="RepointTarget")
+    await _pin(db, r2)
+    headers = make_auth_headers(ua)
+
+    assert (
+        await client.put("/api/v1/dashboard/active", headers=headers, json={"report_id": str(r1.id)})
+    ).status_code == 200
+
+    await db.delete(r1)
+    await db.flush()
+
+    # load the tombstone the same way _build_dashboard_response does
+    pref = (
+        await db.execute(
+            select(UserDashboardPreference).where(
+                UserDashboardPreference.tenant_id == ta.id, UserDashboardPreference.user_id == ua.id
+            )
+        )
+    ).scalar_one()
+    assert pref.report_id is None
+
+    # simulate the concurrent PUT landing between load and delete: re-point
+    # the SAME row at r2 (mirrors the upsert, which updates the existing row
+    # rather than inserting a new one)
+    pref.report_id = r2.id
+    await db.flush()
+
+    cleared = await _clear_tombstone_if_still_null(db, pref, ua)
+    assert cleared is False
+    await db.commit()
+
+    survivor = (
+        await db.execute(select(UserDashboardPreference).where(UserDashboardPreference.id == pref.id))
+    ).scalar_one_or_none()
+    assert survivor is not None
+    assert survivor.report_id == r2.id  # the concurrent selection was NOT discarded
+
+    audit_count = (
+        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.tombstone_cleared'"))
+    ).scalar_one()
+    assert audit_count == 0  # a no-op delete must not audit a clear that didn't happen
+
+
+async def test_tombstone_conditional_delete_second_racer_is_noop_no_duplicate_audit(client, db):
+    """Two concurrent GETs both loading the same stale tombstone before either
+    delete runs is the other half of the TOCTOU: the winner's DELETE matches
+    the row, the loser's matches zero. The loser must not log a second
+    dashboard.tombstone_cleared event for what is documented — and tested end
+    to end via test_get_deleted_report_tombstone_banner_fires_exactly_once —
+    as a one-time notice. That existing test only exercises two *sequential*
+    GETs (the tombstone is already gone by the second one); this test drives
+    the actual race by calling the helper twice against one shared, already
+    loaded `pref` object, the way two racing requests both would."""
+    from app.api.v1.dashboard import _clear_tombstone_if_still_null
+
+    ta = await create_test_tenant(db, name="ToctouRacers")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    r1 = await _seed_report(db, ta, ua, title="WillBeDeleted")
+    await _pin(db, r1)
+    headers = make_auth_headers(ua)
+
+    assert (
+        await client.put("/api/v1/dashboard/active", headers=headers, json={"report_id": str(r1.id)})
+    ).status_code == 200
+
+    await db.delete(r1)
+    await db.flush()
+
+    pref = (
+        await db.execute(
+            select(UserDashboardPreference).where(
+                UserDashboardPreference.tenant_id == ta.id, UserDashboardPreference.user_id == ua.id
+            )
+        )
+    ).scalar_one()
+
+    winner = await _clear_tombstone_if_still_null(db, pref, ua)
+    loser = await _clear_tombstone_if_still_null(db, pref, ua)
+    await db.commit()
+
+    assert winner is True
+    assert loser is False
+
+    audit_count = (
+        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.tombstone_cleared'"))
+    ).scalar_one()
+    assert audit_count == 1
+
+    survivor = (
+        await db.execute(select(UserDashboardPreference).where(UserDashboardPreference.id == pref.id))
+    ).scalar_one_or_none()
+    assert survivor is None
+
+
 async def test_get_unpublished_report_tombstone_survives_repeated_gets(client, db):
     """The self-heal-and-delete behavior above is scoped to a DELETED report's
     tombstone (report_id IS NULL) only. An unpublished-but-still-existing
