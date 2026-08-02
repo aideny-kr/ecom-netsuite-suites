@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 
-const api = vi.hoisted(() => ({ getText: vi.fn(), put: vi.fn() }));
+const api = vi.hoisted(() => ({ getText: vi.fn(), put: vi.fn(), post: vi.fn() }));
 vi.mock("@/lib/api-client", () => ({ apiClient: api }));
 
 import { DashboardWall } from "@/app/(dashboard)/dashboard/dashboard-wall";
@@ -68,6 +68,7 @@ beforeEach(() => {
     CapturingResizeObserver;
   api.getText.mockResolvedValue("<!DOCTYPE html><html><body>REPORT</body></html>");
   api.put.mockResolvedValue({ published: [baseReport], active: baseReport, active_is_fallback: false });
+  api.post.mockResolvedValue({ published: [baseReport], active: baseReport, active_is_fallback: false });
 });
 
 it("renders the header row with title, freshness chip, and an Open ↗ link to the report", async () => {
@@ -341,11 +342,23 @@ it("shows the exact dismissible fallback notice above the wall when activeIsFall
   ).toBeTruthy();
 });
 
-it("dismissing the fallback notice hides it (per-session component state, not persisted)", async () => {
+it("dismissing the fallback notice hides it locally", async () => {
   const { findByRole, queryByText } = renderWall({ activeIsFallback: true });
   const dismissBtn = await findByRole("button", { name: /dismiss/i });
   fireEvent.click(dismissBtn);
   await waitFor(() => expect(queryByText(/no longer available/i)).toBeNull());
+});
+
+// --- Round-3 T2-gate fix: GET no longer consumes the tombstone as a read side
+// effect (a visit to /reports sharing the same ["dashboard"] query key must not
+// silently rob /dashboard of the notice) — so dismissal must now persist via an
+// explicit call, not rely on the next GET to self-heal.
+
+it("dismissing the fallback notice also POSTs /dashboard/notice/dismiss so the dismissal persists server-side", async () => {
+  const { findByRole } = renderWall({ activeIsFallback: true });
+  const dismissBtn = await findByRole("button", { name: /dismiss/i });
+  fireEvent.click(dismissBtn);
+  await waitFor(() => expect(api.post).toHaveBeenCalledWith("/api/v1/dashboard/notice/dismiss"));
 });
 
 it("resets the dismissed fallback notice when the displayed report changes, so a later distinct fallback event still shows", async () => {

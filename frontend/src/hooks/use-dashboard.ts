@@ -60,3 +60,20 @@ export function useClearActiveDashboard() {
     },
   });
 }
+
+/** Round-3 T2-gate fix: GET /dashboard is pure now (it no longer clears the
+ * deleted-report tombstone as a side effect of a read — a visit to /reports,
+ * which shares this same ["dashboard"] query key, was silently consuming the
+ * user's one-time notice before they ever saw it on /dashboard). This is the
+ * explicit user action that actually clears it: DashboardWall's dismiss
+ * button calls this IN ADDITION TO hiding the banner locally, so the
+ * dismissal persists instead of depending on the read path. */
+export function useDismissDashboardNotice() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => apiClient.post<DashboardResponse>("/api/v1/dashboard/notice/dismiss"),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    },
+  });
+}

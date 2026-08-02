@@ -145,16 +145,32 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         { tenant_id: tenantId },
       );
       setTokens(res);
-      const profile = await apiClient.get<User>("/api/v1/auth/me");
-      setUser(profile);
-      // Every cached query (dashboard, reports, recon, chat sessions, ...) was fetched
-      // under the OLD tenant's session — none of it is scoped by tenant_id in its query
-      // key, so leaving it in place would serve tenant A's cached data under tenant B's
-      // session for up to `staleTime` (60s). Drop the whole cache rather than patching
-      // this one hook: the leak is systemic (no query key anywhere includes tenant_id),
-      // so a full clear is the only fix that doesn't need updating every hook that's
-      // added later too.
-      queryClient.clear();
+      try {
+        const profile = await apiClient.get<User>("/api/v1/auth/me");
+        setUser(profile);
+      } finally {
+        // Every cached query (dashboard, reports, recon, chat sessions, ...) was fetched
+        // under the OLD tenant's session — none of it is scoped by tenant_id in its query
+        // key, so leaving it in place would serve tenant A's cached data under tenant B's
+        // session for up to `staleTime` (60s). Drop the whole cache rather than patching
+        // this one hook: the leak is systemic (no query key anywhere includes tenant_id),
+        // so a full clear is the only fix that doesn't need updating every hook that's
+        // added later too.
+        //
+        // In `finally`, not just on success: `setTokens` above already installed
+        // tenant B's credentials, so if the `/me` fetch throws (network blip,
+        // transient 401), skipping this would leave tenant A's user/cached data
+        // rendered while every subsequent request authenticates as tenant B. The
+        // error still propagates past this block (no catch here) so the caller
+        // sees the switch as failed.
+        //
+        // `cancelQueries()` before `clear()`: `apiClient` never forwards an
+        // AbortSignal, so `clear()` alone cannot abort a tenant-A fetch still in
+        // flight — cancelling first ensures a late resolution can't repopulate an
+        // unscoped query key now serving tenant B.
+        await queryClient.cancelQueries();
+        queryClient.clear();
+      }
       router.push("/dashboard");
     },
     [router, queryClient],

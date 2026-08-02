@@ -134,10 +134,7 @@ async def test_get_chosen_then_unpublished_falls_back_with_flag_true(client, db)
 async def test_get_chosen_then_deleted_falls_back_with_flag_true(client, db):
     """Deleting the selected report tombstones the preference row (report_id
     -> NULL via ON DELETE SET NULL, migration 092) instead of removing it —
-    same fallback-notice contract as the unpublished case above. The tombstone
-    itself is then self-healed by THIS get (see the one-time-notice test below):
-    it is permanent (report_id can never start matching `published` again), so
-    reporting it once and deleting the row is what makes the banner one-time."""
+    same fallback-notice contract as the unpublished case above."""
     ta = await create_test_tenant(db, name="ChosenThenDeleted")
     ua, _ = await create_test_user(db, ta)
     await set_tenant_context(db, str(ta.id))
@@ -160,8 +157,9 @@ async def test_get_chosen_then_deleted_falls_back_with_flag_true(client, db):
     assert body["active"]["id"] == str(r2.id)
     assert body["active_is_fallback"] is True
 
-    # M3: this same GET self-heals the now-reported tombstone — the row is gone,
-    # not surviving with report_id NULL (that was the old, permanent-banner bug).
+    # GET is pure (M-round-3 fix): it must NEVER write, so the tombstone row
+    # survives untouched — only POST /dashboard/notice/dismiss clears it (see
+    # the dismiss-endpoint tests below).
     pref = (
         await db.execute(
             select(UserDashboardPreference).where(
@@ -169,16 +167,18 @@ async def test_get_chosen_then_deleted_falls_back_with_flag_true(client, db):
             )
         )
     ).scalar_one_or_none()
-    assert pref is None
+    assert pref is not None and pref.report_id is None
 
 
-async def test_get_deleted_report_tombstone_banner_fires_exactly_once(client, db):
-    """M3 fix: a deleted-report tombstone is a permanent dead end (report_id can
-    never start matching `published` again), so the FIRST get that reports
-    active_is_fallback=True because of it also deletes the row — the SECOND get
-    is a clean 'never chose' fallback with no banner, instead of the amber
-    notice reappearing on every page load forever."""
-    ta = await create_test_tenant(db, name="TombstoneOnce")
+async def test_get_deleted_report_tombstone_banner_persists_until_dismissed(client, db):
+    """Round-3 T2-gate fix: GET must never mutate. A `PublishedDashboardsSection`
+    on an unrelated page (`/reports`) shares the same `["dashboard"]` query key
+    but only reads `published`/`active` — if GET silently consumed the
+    tombstone as a side effect, visiting `/reports` before `/dashboard` would
+    clear the notice before the user ever saw the banner. So the tombstone (and
+    the True flag) must survive ANY number of repeated GETs; only an explicit
+    POST /dashboard/notice/dismiss (tested below) may clear it."""
+    ta = await create_test_tenant(db, name="TombstonePersists")
     ua, _ = await create_test_user(db, ta)
     await set_tenant_context(db, str(ta.id))
     r1 = await _seed_report(db, ta, ua, title="WillBeDeleted")
@@ -194,22 +194,17 @@ async def test_get_deleted_report_tombstone_banner_fires_exactly_once(client, db
     await db.delete(r1)
     await db.flush()
 
-    first = await client.get("/api/v1/dashboard", headers=headers)
-    assert first.status_code == 200, first.text
-    assert first.json()["active_is_fallback"] is True
-    assert first.json()["active"]["id"] == str(r2.id)
+    for _ in range(3):
+        resp = await client.get("/api/v1/dashboard", headers=headers)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["active_is_fallback"] is True
+        assert resp.json()["active"]["id"] == str(r2.id)
 
-    second = await client.get("/api/v1/dashboard", headers=headers)
-    assert second.status_code == 200, second.text
-    assert second.json()["active_is_fallback"] is False
-    assert second.json()["active"]["id"] == str(r2.id)
-
-    # the GC deletes a row, so it audits like any other mutation — exactly once,
-    # on the read that reported the notice (not again on the second GET).
+    # GET never audits a mutation it never performed.
     cleared = (
         await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.tombstone_cleared'"))
     ).scalar_one()
-    assert cleared == 1
+    assert cleared == 0
 
     pref = (
         await db.execute(
@@ -218,7 +213,7 @@ async def test_get_deleted_report_tombstone_banner_fires_exactly_once(client, db
             )
         )
     ).scalar_one_or_none()
-    assert pref is None
+    assert pref is not None and pref.report_id is None
 
 
 async def test_tombstone_conditional_delete_survives_concurrent_repoint(client, db):
@@ -455,6 +450,154 @@ async def test_get_published_reports_excludes_cross_tenant_reports_even_without_
     ids = {row["id"] for row in resp.json()["published"]}
     assert ids == {str(r_a.id)}
     assert str(r_b.id) not in ids
+
+
+# --- POST /dashboard/notice/dismiss ------------------------------------------
+#
+# Round-3 T2-gate fix: the GET path above no longer mutates, so the deleted-
+# report tombstone (report_id -> NULL) is only ever cleared by an explicit
+# user action against this endpoint — never as a side effect of a read.
+
+
+async def test_dismiss_clears_tombstone_and_audits_once(client, db):
+    ta = await create_test_tenant(db, name="DismissClears")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    r1 = await _seed_report(db, ta, ua, title="WillBeDeleted")
+    await _pin(db, r1)
+    r2 = await _seed_report(db, ta, ua, title="StaysPublished")
+    await _pin(db, r2)
+    headers = make_auth_headers(ua)
+
+    assert (
+        await client.put("/api/v1/dashboard/active", headers=headers, json={"report_id": str(r1.id)})
+    ).status_code == 200
+    await db.delete(r1)
+    await db.flush()
+
+    # Confirm the tombstone survives an ordinary GET first (round-3 invariant).
+    pre = await client.get("/api/v1/dashboard", headers=headers)
+    assert pre.json()["active_is_fallback"] is True
+
+    resp = await client.post("/api/v1/dashboard/notice/dismiss", headers=headers)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # Same post-clear shape as DELETE /active: no stored selection left, so
+    # falling back to the most recent publish is NOT "your old choice vanished"
+    # anymore — there IS no old choice anymore.
+    assert body["active"]["id"] == str(r2.id)
+    assert body["active_is_fallback"] is False
+
+    pref = (
+        await db.execute(
+            select(UserDashboardPreference).where(
+                UserDashboardPreference.tenant_id == ta.id, UserDashboardPreference.user_id == ua.id
+            )
+        )
+    ).scalar_one_or_none()
+    assert pref is None
+
+    cleared = (
+        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.tombstone_cleared'"))
+    ).scalar_one()
+    assert cleared == 1
+
+    # And a subsequent GET now reports a clean "never chose" fallback.
+    post = await client.get("/api/v1/dashboard", headers=headers)
+    assert post.json()["active_is_fallback"] is False
+    assert post.json()["active"]["id"] == str(r2.id)
+
+
+async def test_dismiss_is_idempotent_second_call_is_noop(client, db):
+    ta = await create_test_tenant(db, name="DismissIdempotent")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    r1 = await _seed_report(db, ta, ua, title="WillBeDeleted")
+    await _pin(db, r1)
+    headers = make_auth_headers(ua)
+
+    assert (
+        await client.put("/api/v1/dashboard/active", headers=headers, json={"report_id": str(r1.id)})
+    ).status_code == 200
+    await db.delete(r1)
+    await db.flush()
+
+    first = await client.post("/api/v1/dashboard/notice/dismiss", headers=headers)
+    assert first.status_code == 200, first.text
+
+    second = await client.post("/api/v1/dashboard/notice/dismiss", headers=headers)
+    assert second.status_code == 200, second.text
+    assert second.json()["active_is_fallback"] is False
+
+    cleared = (
+        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.tombstone_cleared'"))
+    ).scalar_one()
+    assert cleared == 1  # not audited again on the second, no-op call
+
+
+async def test_dismiss_noop_when_no_preference_exists(client, db):
+    """No stored selection at all — a user who never chose anything, or one
+    who is simply revisiting `/dashboard` and the FE fires a dismiss it
+    doesn't strictly need to. Must 200, not error, and must not audit."""
+    ta = await create_test_tenant(db, name="DismissNoPref")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    r1 = await _seed_report(db, ta, ua, title="Solo")
+    await _pin(db, r1)
+    headers = make_auth_headers(ua)
+
+    resp = await client.post("/api/v1/dashboard/notice/dismiss", headers=headers)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["active"]["id"] == str(r1.id)
+    assert resp.json()["active_is_fallback"] is False
+
+    cleared = (
+        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.tombstone_cleared'"))
+    ).scalar_one()
+    assert cleared == 0
+
+
+async def test_dismiss_noop_when_preference_is_not_a_tombstone(client, db):
+    """The unpublished (not deleted) case: report_id still points at a real
+    report, so the conditional DELETE's `report_id IS NULL` predicate never
+    matches — the row must survive untouched (it can be re-published), and
+    dismiss must not audit a clear that didn't happen."""
+    ta = await create_test_tenant(db, name="DismissNotTombstone")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    r1 = await _seed_report(db, ta, ua, title="WillUnpublish")
+    await _pin(db, r1)
+    r2 = await _seed_report(db, ta, ua, title="StaysPublished")
+    await _pin(db, r2)
+    headers = make_auth_headers(ua)
+
+    assert (
+        await client.put("/api/v1/dashboard/active", headers=headers, json={"report_id": str(r1.id)})
+    ).status_code == 200
+    r1.dashboard_pinned_at = None  # unpublish, not delete
+    await db.flush()
+
+    resp = await client.post("/api/v1/dashboard/notice/dismiss", headers=headers)
+    assert resp.status_code == 200, resp.text
+
+    cleared = (
+        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.tombstone_cleared'"))
+    ).scalar_one()
+    assert cleared == 0
+
+    pref = (
+        await db.execute(
+            select(UserDashboardPreference).where(
+                UserDashboardPreference.tenant_id == ta.id, UserDashboardPreference.user_id == ua.id
+            )
+        )
+    ).scalar_one_or_none()
+    assert pref is not None and pref.report_id == r1.id
+
+
+async def test_dismiss_unauth_401(client, db):
+    resp = await client.post("/api/v1/dashboard/notice/dismiss")
+    assert resp.status_code == 401
 
 
 # --- PUT /dashboard/active ---------------------------------------------------

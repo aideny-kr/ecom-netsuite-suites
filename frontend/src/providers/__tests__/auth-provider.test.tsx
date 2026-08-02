@@ -43,6 +43,27 @@ function Consumer() {
   );
 }
 
+// Same switchTenant call as Consumer, but reports whether the returned promise
+// resolved or rejected — Consumer's own button deliberately swallows the
+// rejection (matching sidebar.tsx's real, non-catching caller), which is fine
+// for the cache-only assertions above but hides the outcome the /me-failure
+// test below needs to see.
+function ConsumerCapture({ onSettled }: { onSettled: (result: "resolved" | "rejected") => void }) {
+  const { switchTenant } = useAuth();
+  return (
+    <button
+      type="button"
+      onClick={() =>
+        switchTenant("tenant-b")
+          .then(() => onSettled("resolved"))
+          .catch(() => onSettled("rejected"))
+      }
+    >
+      switch
+    </button>
+  );
+}
+
 function renderWithClient(qc: QueryClient) {
   return render(
     <QueryClientProvider client={qc}>
@@ -92,4 +113,58 @@ it("does not clear the cache when the switch-tenant request fails", async () => 
   await waitFor(() => expect(api.post).toHaveBeenCalled());
   // A failed switch must not wipe the current (still-valid) tenant's cache.
   expect(qc.getQueryData(["dashboard"])).toBeDefined();
+});
+
+it("clears the cache and rejects the caller when /me fails right after tokens are already installed for the new tenant", async () => {
+  // Regression: switch-tenant itself succeeds (tenant B's tokens get
+  // installed by setTokens), but the follow-up GET /auth/me throws (network
+  // blip, transient 401). Without a guard, setUser/queryClient.clear() would
+  // never run — the UI would keep showing tenant A's user and cached data
+  // while every subsequent request now authenticates as tenant B.
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  qc.setQueryData(["dashboard"], { published: [], active: null, active_is_fallback: false });
+  api.get.mockRejectedValueOnce(new Error("me failed"));
+
+  let settled: "resolved" | "rejected" | null = null;
+  render(
+    <QueryClientProvider client={qc}>
+      <AuthProvider>
+        <ConsumerCapture onSettled={(r) => { settled = r; }} />
+      </AuthProvider>
+    </QueryClientProvider>
+  );
+
+  await act(async () => {
+    screen.getByRole("button", { name: "switch" }).click();
+  });
+
+  // The tenant-B switch-tenant call did succeed, so tokens were installed —
+  // the failure only happened on the follow-up /me call. The caller must
+  // still see it as a rejection (not silently swallowed).
+  await waitFor(() => expect(settled).toBe("rejected"));
+  // No tenant-A data may survive rendering under tenant-B's now-installed
+  // credentials.
+  expect(qc.getQueryData(["dashboard"])).toBeUndefined();
+});
+
+it("cancels in-flight queries before clearing the cache on a tenant switch", async () => {
+  // `queryClient.clear()` alone does not abort an outstanding fetch —
+  // `apiClient` never forwards an AbortSignal — so a stale tenant-A request
+  // still in flight when `clear()` runs is a risk of repopulating an
+  // unscoped query key now serving tenant B. `cancelQueries()` must run
+  // first, in that order.
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const cancelSpy = vi.spyOn(qc, "cancelQueries");
+  const clearSpy = vi.spyOn(qc, "clear");
+
+  renderWithClient(qc);
+  await act(async () => {
+    screen.getByRole("button", { name: "switch" }).click();
+  });
+
+  await waitFor(() => expect(clearSpy).toHaveBeenCalled());
+  expect(cancelSpy).toHaveBeenCalled();
+  const cancelOrder = cancelSpy.mock.invocationCallOrder[0];
+  const clearOrder = clearSpy.mock.invocationCallOrder[0];
+  expect(cancelOrder).toBeLessThan(clearOrder);
 });

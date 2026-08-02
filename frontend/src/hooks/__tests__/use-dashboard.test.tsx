@@ -3,10 +3,15 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { expect, it, vi } from "vitest";
 import type { ReactNode } from "react";
 
-const api = vi.hoisted(() => ({ get: vi.fn(), put: vi.fn(), delete: vi.fn() }));
+const api = vi.hoisted(() => ({ get: vi.fn(), put: vi.fn(), delete: vi.fn(), post: vi.fn() }));
 vi.mock("@/lib/api-client", () => ({ apiClient: api }));
 
-import { useClearActiveDashboard, useDashboard, useSetActiveDashboard } from "@/hooks/use-dashboard";
+import {
+  useClearActiveDashboard,
+  useDashboard,
+  useDismissDashboardNotice,
+  useSetActiveDashboard,
+} from "@/hooks/use-dashboard";
 
 function makeWrapper(qc: QueryClient) {
   return function Wrapper({ children }: { children: ReactNode }) {
@@ -71,5 +76,25 @@ it("useClearActiveDashboard DELETEs the selection and invalidates ['dashboard']"
   });
 
   expect(api.delete).toHaveBeenCalledWith("/api/v1/dashboard/active");
+  expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["dashboard"] });
+});
+
+// --- Round-3 T2-gate fix: explicit, persisted notice dismissal -----------------
+// GET is pure now (never consumes the tombstone as a read side effect), so the
+// dismissible fallback banner in DashboardWall must call this mutation for the
+// dismissal to actually persist server-side.
+
+it("useDismissDashboardNotice POSTs to /dashboard/notice/dismiss and invalidates ['dashboard']", async () => {
+  const response = { published: [], active: null, active_is_fallback: false };
+  api.post.mockResolvedValueOnce(response);
+  const qc = new QueryClient(qcOpts);
+  const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
+  const { result } = renderHook(() => useDismissDashboardNotice(), { wrapper: makeWrapper(qc) });
+
+  await act(async () => {
+    await result.current.mutateAsync();
+  });
+
+  expect(api.post).toHaveBeenCalledWith("/api/v1/dashboard/notice/dismiss");
   expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["dashboard"] });
 });

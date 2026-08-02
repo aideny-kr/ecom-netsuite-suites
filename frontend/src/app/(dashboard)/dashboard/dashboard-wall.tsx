@@ -7,6 +7,7 @@ import { apiClient } from "@/lib/api-client";
 import { Skeleton } from "@/components/ui/skeleton";
 import { FreshnessChip } from "@/lib/report-utils";
 import { DashboardSwitcher } from "./dashboard-switcher";
+import { useDismissDashboardNotice } from "@/hooks/use-dashboard";
 import type { ReportSummary } from "@/hooks/use-reports";
 
 // The frozen artifact is authored at ONE of two fixed inner widths, per
@@ -55,10 +56,13 @@ export function DashboardWall({ report, subtitle, published, activeIsFallback }:
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [reportWidth, setReportWidth] = useState(REPORT_WIDTH_NARROW);
   const [error, setError] = useState(false);
-  // Dismissal is per-session component state, deliberately NOT persisted (no
-  // localStorage/query invalidation) — a fresh mount (reload, revisit) shows the
-  // notice again until the backend-tracked selection itself changes.
+  // Local state hides the banner immediately on click (no round-trip wait); the
+  // dismiss button ALSO fires useDismissDashboardNotice() below so the dismissal
+  // persists server-side too — GET is pure (round-3 T2-gate fix) and no longer
+  // clears the underlying tombstone as a side effect of a read, so without this
+  // explicit call the notice would come back on the next fetch/reload.
   const [bannerDismissed, setBannerDismissed] = useState(false);
+  const dismissNotice = useDismissDashboardNotice();
   const containerRef = useRef<HTMLDivElement>(null);
   const [box, setBox] = useState({ width: REPORT_WIDTH_NARROW, height: WALL_MIN_HEIGHT });
 
@@ -135,7 +139,10 @@ export function DashboardWall({ report, subtitle, published, activeIsFallback }:
           <button
             type="button"
             aria-label="Dismiss"
-            onClick={() => setBannerDismissed(true)}
+            onClick={() => {
+              setBannerDismissed(true);
+              dismissNotice.mutate();
+            }}
             className="shrink-0 text-muted-foreground hover:text-foreground"
           >
             <X className="h-3.5 w-3.5" />
