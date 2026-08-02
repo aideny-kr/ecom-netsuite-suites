@@ -14,6 +14,35 @@ if TYPE_CHECKING:
     from app.models.tenant import Tenant
 
 
+# ---------------------------------------------------------------------------
+# Shared status-allowlist constants -- single source of truth for values
+# imported by more than one sync task/service module (mirrors
+# TERMINAL_RESULT_STATUSES' home in four_bucket_classifier.py: Connection is a
+# neutral module none of those consumers import each other through, so
+# cross-imports can never form a cycle). Previously each site duplicated the
+# literal ("active", "healthy") tuple independently.
+# ---------------------------------------------------------------------------
+
+# A connection in one of these statuses is fully healthy -- gates whether a
+# sync's own service-layer lookup treats it as USABLE (e.g.
+# get_netsuite_rest_connection, the stripe pre-flight guard,
+# _count_active_stripe_connections).
+ACTIVE_CONNECTION_STATUSES = ("active", "healthy")
+
+# A connection in one of these statuses is DISPATCHED by the nightly/hourly
+# fan-outs (netsuite_deposit_sync_all, stripe_sync_all) -- deliberately wider
+# than ACTIVE_CONNECTION_STATUSES to include 'error': dispatching for an
+# error-state connection lets the child task's guard/service-error path raise
+# and record a failed job row every night the connection stays dead, instead
+# of silently skipping it forever. (2026-07-29 incident: a NetSuite connection
+# flipped to `error` and fell out of the active set -- the fan-out skipped it
+# every night with no signal, and four days of mirror staleness were invisible
+# in job history.) `revoked` and other intentionally-dead statuses stay
+# excluded -- there's no path back to health for those, and dispatching them
+# would just spam failures for a connection nobody intends to reactivate.
+DISPATCHABLE_CONNECTION_STATUSES = ACTIVE_CONNECTION_STATUSES + ("error",)
+
+
 class Connection(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "connections"
 

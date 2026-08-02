@@ -15,13 +15,24 @@ logger = logging.getLogger(__name__)
 
 
 def _find_active_stripe_connections(db: Session) -> list[dict]:
-    """Find all active Stripe connections across all tenants."""
-    from app.models.connection import Connection
+    """Find all DISPATCHABLE Stripe connections across all tenants.
+
+    Deliberately includes `error`-status connections (not just active/healthy)
+    -- see DISPATCHABLE_CONNECTION_STATUSES. Same reliability class as the
+    2026-07-29 NetSuite incident: a connection that flipped to `error` used to
+    be filtered out HERE, before dispatch, so it was silently skipped every
+    hour forever and the child task's active-connection guard never got a
+    chance to run. Dispatching for it lets that guard (workers/tasks/
+    stripe_sync.py, active-only) reject the connection and the task raise,
+    producing a visible failed job row every cycle the connection stays dead.
+    `revoked`/other intentionally-dead statuses stay excluded.
+    """
+    from app.models.connection import DISPATCHABLE_CONNECTION_STATUSES, Connection
 
     result = db.execute(
         select(Connection.id, Connection.tenant_id).where(
             Connection.provider == "stripe",
-            Connection.status.in_(["active", "healthy"]),
+            Connection.status.in_(DISPATCHABLE_CONNECTION_STATUSES),
         )
     )
     return [{"connection_id": str(row[0]), "tenant_id": str(row[1])} for row in result.all()]
