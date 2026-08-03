@@ -652,6 +652,19 @@ async def test_dismiss_clears_unpublished_selection_and_audits(client, db):
     ).scalar_one()
     assert cleared == 1
 
+    # The audit row must be filed like this module's other dashboard mutations
+    # (dashboard.select / dashboard.clear): category="dashboard" so an operator
+    # filtering GET /audit?category=dashboard sees the whole family, and
+    # resource_id = the REPORT's id — not the preference row's PK, which would
+    # never resolve against resource_type="report".
+    cat, rid = (
+        await db.execute(
+            text("SELECT category, resource_id FROM audit_events WHERE action='dashboard.stale_selection_cleared'")
+        )
+    ).one()
+    assert cat == "dashboard"
+    assert rid == str(r1.id)
+
     # the banner must NOT reappear on the next load
     post = await client.get("/api/v1/dashboard", headers=headers)
     assert post.json()["active_is_fallback"] is False

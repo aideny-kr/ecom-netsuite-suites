@@ -168,6 +168,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       try {
         const profile = await apiClient.get<User>("/api/v1/auth/me");
         setUser(profile);
+      } catch (e) {
+        // Tenant B's credentials are already installed, so keeping tenant A's
+        // profile in state would render A's identity (name, tenant_id, and any
+        // permission gating derived from it) against B's live data. Drop it and
+        // let the auth guard route to login rather than show a stale identity.
+        setUser(null);
+        throw e;
       } finally {
         // Every cached query (dashboard, reports, recon, chat sessions, ...) was fetched
         // under the OLD tenant's session — none of it is scoped by tenant_id in its query

@@ -149,14 +149,19 @@ async def _clear_stale_selection(db: AsyncSession, pref: UserDashboardPreference
     # trail is what explains why the user's stored choice vanished. Gated on
     # rowcount so a concurrent loser (or a row re-pointed/re-published out
     # from under us) never logs a phantom clear.
+    # category="dashboard" and the REPORT's id (not the preference row's PK) — matches
+    # this module's other two audit calls (dashboard.select / dashboard.clear) so an
+    # operator filtering GET /audit?category=dashboard sees the whole family, and so
+    # resource_type="report" + resource_id actually resolves to a report. NULL report_id
+    # (the deleted-report tombstone) has no report left to name, hence the None.
     await audit_service.log_event(
         db=db,
         tenant_id=user.tenant_id,
-        category="report",
+        category="dashboard",
         action="dashboard.stale_selection_cleared",
         actor_id=user.id,
         resource_type="report",
-        resource_id=str(pref.id),
+        resource_id=str(pref.report_id) if pref.report_id is not None else None,
     )
     return True
 
