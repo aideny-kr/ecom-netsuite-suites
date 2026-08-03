@@ -33,17 +33,17 @@ function renderPage() {
 function report(over: Partial<ReportSummary>): ReportSummary {
   return {
     id: "r-1",
-    title: "Report",
+    title: "Income Statement — Jun 2026",
     status: "draft",
-    version: 1,
+    version: 4,
     created_at: "2026-07-01T10:00:00Z",
     has_recipe: true,
-    last_refreshed_at: "2026-07-01T10:00:00Z",
+    last_refreshed_at: "2026-07-24T07:04:00Z",
     auto_refresh: "daily",
     refresh_failure_count: 0,
     auto_refresh_paused_at: null,
     created_by: "u-1",
-    dashboard_pinned_at: null,
+    dashboard_pinned_at: "2026-07-22T09:00:00Z",
     ...over,
   };
 }
@@ -55,55 +55,66 @@ beforeEach(() => {
   (globalThis as unknown as { ResizeObserver: typeof FakeResizeObserver }).ResizeObserver =
     FakeResizeObserver;
   api.getText.mockResolvedValue("<!DOCTYPE html><html><body>REPORT</body></html>");
-  api.get.mockResolvedValue([]);
+  api.get.mockResolvedValue({ published: [], active: null, active_is_fallback: false });
 });
 
-it("greets the user with the new sub-copy and no longer shows the placeholder stats row", async () => {
+it("renders the active report full-size on the wall, with the greeting demoted beneath the header", async () => {
+  const active = report({});
+  api.get.mockResolvedValue({ published: [active], active, active_is_fallback: false });
+  const { findByText } = renderPage();
+  expect(await findByText(active.title)).toBeTruthy();
+  expect(await findByText(/welcome back, jamie/i)).toBeTruthy();
+});
+
+it("fetches the active report's frozen HTML into a fully sandboxed iframe", async () => {
+  const active = report({ id: "r-9" });
+  api.get.mockResolvedValue({ published: [active], active, active_is_fallback: false });
+  const { container } = renderPage();
+  await waitFor(() => expect(api.getText).toHaveBeenCalledWith("/api/v1/reports/r-9/view"));
+  await waitFor(() => {
+    const iframe = container.querySelector("iframe");
+    expect(iframe?.getAttribute("sandbox")).toBe("");
+  });
+});
+
+it("shows the real empty state (not the wall) when nothing is published", async () => {
+  api.get.mockResolvedValue({ published: [], active: null, active_is_fallback: false });
   const { findByText, queryByText } = renderPage();
-  expect(await findByText(/here's where your business stands/i)).toBeTruthy();
-  expect(queryByText("Integrations")).toBeNull();
-  expect(queryByText("Data Synced")).toBeNull();
-  expect(queryByText("--")).toBeNull();
+  expect(await findByText("No dashboard on the wall yet")).toBeTruthy();
+  expect(queryByText("Open ↗")).toBeNull();
 });
 
-it("shows the uppercase 'Pinned reports' section label", async () => {
-  const { findByText } = renderPage();
-  expect(await findByText("Pinned reports")).toBeTruthy();
-});
-
-it("shows the empty state when no reports are pinned", async () => {
-  api.get.mockResolvedValue([report({ id: "r-1", dashboard_pinned_at: null })]);
-  const { findByText } = renderPage();
-  expect(
-    await findByText(/no pinned reports yet.*pin to dashboard/i)
-  ).toBeTruthy();
-});
-
-it("renders only pinned reports, sorted newest-first by dashboard_pinned_at", async () => {
-  api.get.mockResolvedValue([
-    report({ id: "old", title: "Older Pin", dashboard_pinned_at: "2026-07-10T00:00:00Z" }),
-    report({ id: "unpinned", title: "Not Pinned", dashboard_pinned_at: null }),
-    report({ id: "new", title: "Newer Pin", dashboard_pinned_at: "2026-07-20T00:00:00Z" }),
-  ]);
-  const { findByText, queryByText, container } = renderPage();
-  await findByText("Newer Pin");
-  await findByText("Older Pin");
-  expect(queryByText("Not Pinned")).toBeNull();
-  const titles = Array.from(container.querySelectorAll("h2, span")).map((n) => n.textContent);
-  const newerIdx = titles.indexOf("Newer Pin");
-  const olderIdx = titles.indexOf("Older Pin");
-  expect(newerIdx).toBeGreaterThanOrEqual(0);
-  expect(olderIdx).toBeGreaterThan(newerIdx);
-});
-
-it("Quick Access grid still renders below the pinned section", async () => {
+it("Quick Access grid renders below the wall when a report is active", async () => {
+  const active = report({});
+  api.get.mockResolvedValue({ published: [active], active, active_is_fallback: false });
   const { findByText } = renderPage();
   expect(await findByText("Quick Access")).toBeTruthy();
   expect(await findByText("Connections")).toBeTruthy();
 });
 
-it("fetches preview HTML for each pinned report", async () => {
-  api.get.mockResolvedValue([report({ id: "r-9", dashboard_pinned_at: "2026-07-20T00:00:00Z" })]);
-  renderPage();
-  await waitFor(() => expect(api.getText).toHaveBeenCalledWith("/api/v1/reports/r-9/view"));
+it("Quick Access grid still renders when nothing is published", async () => {
+  const { findByText } = renderPage();
+  expect(await findByText("Quick Access")).toBeTruthy();
+});
+
+// Carried from Task 3's review: this outer isError branch (no active report AND
+// the GET failed) previously had zero coverage.
+it("shows a 'Couldn't load your dashboard' message when the dashboard query errors and nothing is active", async () => {
+  api.get.mockRejectedValue(new Error("network down"));
+  const { findByText } = renderPage();
+  expect(await findByText(/couldn.t load your dashboard/i)).toBeTruthy();
+  expect(await findByText(/try refreshing the page/i)).toBeTruthy();
+});
+
+it("shows a skeleton sized like the wall while the dashboard query is loading", async () => {
+  let resolveGet!: (v: unknown) => void;
+  api.get.mockReturnValue(
+    new Promise((resolve) => {
+      resolveGet = resolve;
+    })
+  );
+  const { container, findByText } = renderPage();
+  await waitFor(() => expect(container.querySelectorAll(".animate-pulse").length).toBeGreaterThan(0));
+  resolveGet({ published: [], active: null, active_is_fallback: false });
+  expect(await findByText("No dashboard on the wall yet")).toBeTruthy();
 });

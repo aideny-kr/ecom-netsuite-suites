@@ -67,6 +67,11 @@ export function useRefreshReport(id: string) {
       queryClient.invalidateQueries({ queryKey: ["reports"] });
       queryClient.invalidateQueries({ queryKey: ["reports", id] });
       queryClient.invalidateQueries({ queryKey: ["reports", id, "versions"] });
+      // A refreshed report may be someone's dashboard wallpaper — the wall refetches
+      // the artifact itself by report id/version, but the header freshness chip comes
+      // from the cached /dashboard payload, so that must be busted too or it shows
+      // the old "data as of" stamp beside the new numbers.
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     },
   });
 }
@@ -100,6 +105,10 @@ export function useDeleteReport(id: string) {
     mutationFn: () => apiClient.delete<void>(`/api/v1/reports/${id}`),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["reports"] });
+      // A deleted report may still be published/on someone's wall — without this the
+      // "Published dashboards" section keeps listing it, its link/Unpublish 404, and
+      // the wall renders "Preview unavailable" under its stale title until staleTime.
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     },
   });
 }
@@ -111,6 +120,7 @@ export function usePinReport(id: string) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["reports"] });
       queryClient.invalidateQueries({ queryKey: ["reports", id] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     },
   });
 }
@@ -122,6 +132,7 @@ export function useUnpinReport(id: string) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["reports"] });
       queryClient.invalidateQueries({ queryKey: ["reports", id] });
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
     },
   });
 }

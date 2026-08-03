@@ -8,6 +8,7 @@ import {
   useState,
 } from "react";
 import { useRouter } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import type {
   AuthResponse,
@@ -47,6 +48,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [tenants, setTenants] = useState<TenantSummary[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const router = useRouter();
+  const queryClient = useQueryClient();
 
   const loadTenants = useCallback(async () => {
     try {
@@ -111,12 +113,23 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setTokens(res);
       // Clear stale onboarding skip flag — new session may be a different tenant
       localStorage.removeItem("onboarding_skipped");
-      const profile = await apiClient.get<User>("/api/v1/auth/me");
-      setUser(profile);
-      await loadTenants();
+      try {
+        const profile = await apiClient.get<User>("/api/v1/auth/me");
+        setUser(profile);
+        await loadTenants();
+      } finally {
+        // Same systemic cache leak as switchTenant (see the comment there for
+        // the full rationale) — `setTokens` above already swapped in this
+        // session's credentials, so any cache entries from before this call
+        // belong to a different identity, or to no one at all. Clear
+        // unconditionally, even if `/me` or `loadTenants` throws, so a failed
+        // login can't leave stale data rendered under the new credentials.
+        await queryClient.cancelQueries();
+        queryClient.clear();
+      }
       router.push("/dashboard");
     },
-    [router, loadTenants],
+    [router, loadTenants, queryClient],
   );
 
   const register = useCallback(
@@ -128,12 +141,21 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setTokens(res);
       // Clear any stale onboarding skip flag so the wizard shows for new tenants
       localStorage.removeItem("onboarding_skipped");
-      const profile = await apiClient.get<User>("/api/v1/auth/me");
-      setUser(profile);
-      await loadTenants();
+      try {
+        const profile = await apiClient.get<User>("/api/v1/auth/me");
+        setUser(profile);
+        await loadTenants();
+      } finally {
+        // Same systemic cache leak as switchTenant/login — see the comment on
+        // switchTenant for the full rationale. Clear unconditionally so a
+        // failed registration attempt can't leave a previous identity's data
+        // rendered under the newly-registered session's credentials.
+        await queryClient.cancelQueries();
+        queryClient.clear();
+      }
       router.push("/dashboard");
     },
-    [router, loadTenants],
+    [router, loadTenants, queryClient],
   );
 
   const switchTenant = useCallback(
@@ -143,11 +165,46 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         { tenant_id: tenantId },
       );
       setTokens(res);
-      const profile = await apiClient.get<User>("/api/v1/auth/me");
-      setUser(profile);
+      try {
+        const profile = await apiClient.get<User>("/api/v1/auth/me");
+        setUser(profile);
+      } catch (e) {
+        // Tenant B's credentials are already installed, so keeping tenant A's
+        // profile in state would render A's identity (name, tenant_id, and any
+        // permission gating derived from it) against B's live data. Drop it and
+        // let the auth guard route to login rather than show a stale identity.
+        setUser(null);
+        throw e;
+      } finally {
+        // Every cached query (dashboard, reports, recon, chat sessions, ...) was fetched
+        // under the OLD tenant's session — none of it is scoped by tenant_id in its query
+        // key, so leaving it in place would serve tenant A's cached data under tenant B's
+        // session for up to `staleTime` (60s). Drop the whole cache rather than patching
+        // this one hook: the leak is systemic (no query key anywhere includes tenant_id),
+        // so a full clear is the only fix that doesn't need updating every hook that's
+        // added later too.
+        //
+        // In `finally`, not just on success: `setTokens` above already installed
+        // tenant B's credentials, so if the `/me` fetch throws (network blip,
+        // transient 401), skipping this would leave tenant A's user/cached data
+        // rendered while every subsequent request authenticates as tenant B. The
+        // error still propagates past this block (no catch here) so the caller
+        // sees the switch as failed.
+        //
+        // `cancelQueries()` before `clear()`: `apiClient` never forwards an
+        // AbortSignal, so `clear()` alone cannot abort a tenant-A fetch still in
+        // flight — cancelling first ensures a late resolution can't repopulate an
+        // unscoped query key now serving tenant B.
+        //
+        // The same cancel-then-clear treatment is applied below to `login`,
+        // `register`, and `logout` — every auth transition that changes who's
+        // signed in hits this leak, not just a tenant switch.
+        await queryClient.cancelQueries();
+        queryClient.clear();
+      }
       router.push("/dashboard");
     },
-    [router],
+    [router, queryClient],
   );
 
   const refreshUser = useCallback(async () => {
@@ -167,8 +224,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
     clearTokens();
     setUser(null);
+    // Same systemic cache leak as switchTenant/login/register (see the comment
+    // on switchTenant). Leaving a signed-out user's cached data around is the
+    // same leak with a worse story: the next person to sign in on this tab —
+    // possibly a different tenant entirely — would be served it. Unlike the
+    // other transitions there's no follow-up request whose failure could skip
+    // this, so it always runs right after local session state resets above.
+    await queryClient.cancelQueries();
+    queryClient.clear();
     router.push("/login");
-  }, [router]);
+  }, [router, queryClient]);
 
   return (
     <AuthContext.Provider value={{ user, tenants, isLoading, login, register, switchTenant, refreshUser, logout }}>

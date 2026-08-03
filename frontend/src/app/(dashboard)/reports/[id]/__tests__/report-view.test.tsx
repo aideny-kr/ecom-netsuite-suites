@@ -256,45 +256,47 @@ it("cancelling the confirm dialog does not call delete", async () => {
   await waitFor(() => expect(queryByRole("heading", { name: "Delete this report?" })).toBeNull());
 });
 
-// --- Task 5: pin-to-dashboard toolbar button --------------------------------------------
+// --- Task 5: publish-to-dashboard toolbar button ------------------------------------------
+// Renamed from "Pin"/"Unpin" to "Publish"/"Unpublish" (UI copy only) — the endpoints below
+// are still literally /pin, unchanged.
 
-it("shows 'Pin to dashboard' for an unpinned report when the user can manage it", async () => {
+it("shows 'Publish to dashboard' for an unpublished report when the user can manage it", async () => {
   mockReport({ dashboard_pinned_at: null });
   const { findByRole } = renderPage();
-  expect(await findByRole("button", { name: /pin to dashboard/i })).toBeTruthy();
+  expect(await findByRole("button", { name: /publish to dashboard/i })).toBeTruthy();
 });
 
-it("shows 'Unpin from dashboard' for a pinned report", async () => {
+it("shows 'Unpublish from dashboard' for a published report", async () => {
   mockReport({ dashboard_pinned_at: "2026-07-20T10:00:00Z" });
   const { findByRole } = renderPage();
-  expect(await findByRole("button", { name: /unpin from dashboard/i })).toBeTruthy();
+  expect(await findByRole("button", { name: /unpublish from dashboard/i })).toBeTruthy();
 });
 
-it("hides the pin button for a non-creator, non-admin user", async () => {
+it("hides the publish button for a non-creator, non-admin user", async () => {
   authState.user = { id: "someone-else", roles: [] };
   mockReport({ dashboard_pinned_at: null });
   const { findByText, queryByRole } = renderPage();
   await findByText(/data as of/i); // metadata loaded
-  expect(queryByRole("button", { name: /pin to dashboard/i })).toBeNull();
+  expect(queryByRole("button", { name: /publish to dashboard/i })).toBeNull();
 });
 
-it("clicking Pin to dashboard POSTs /pin and disables the button while pending", async () => {
+it("clicking Publish to dashboard POSTs /pin and disables the button while pending", async () => {
   mockReport({ dashboard_pinned_at: null });
   api.post.mockImplementation((path: string) =>
     path.endsWith("/pin") ? new Promise(() => {}) : Promise.resolve(_report())
   );
   const { findByRole } = renderPage();
-  const btn = (await findByRole("button", { name: /pin to dashboard/i })) as HTMLButtonElement;
+  const btn = (await findByRole("button", { name: /publish to dashboard/i })) as HTMLButtonElement;
   fireEvent.click(btn);
   await waitFor(() => expect(api.post).toHaveBeenCalledWith("/api/v1/reports/abc/pin"));
   await waitFor(() => expect(btn.disabled).toBe(true));
 });
 
-it("clicking Unpin from dashboard DELETEs /pin", async () => {
+it("clicking Unpublish from dashboard DELETEs /pin", async () => {
   mockReport({ dashboard_pinned_at: "2026-07-20T10:00:00Z" });
   api.delete.mockResolvedValue(_report({ dashboard_pinned_at: null }));
   const { findByRole } = renderPage();
-  const btn = await findByRole("button", { name: /unpin from dashboard/i });
+  const btn = await findByRole("button", { name: /unpublish from dashboard/i });
   fireEvent.click(btn);
   await waitFor(() => expect(api.delete).toHaveBeenCalledWith("/api/v1/reports/abc/pin"));
 });

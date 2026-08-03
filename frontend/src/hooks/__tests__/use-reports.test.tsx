@@ -87,7 +87,7 @@ it("useResumeAutoRefresh posts to /auto-refresh/resume and invalidates report qu
   expect(keys).toContain(JSON.stringify(["reports", "r-1"]));
 });
 
-it("useRefreshReport posts to /refresh and invalidates report + versions queries", async () => {
+it("useRefreshReport posts to /refresh and invalidates report + versions + dashboard queries", async () => {
   api.post.mockResolvedValueOnce({ id: "r-1", version: 3, has_recipe: true });
   const qc = new QueryClient(qcOpts);
   const invalidate = vi.spyOn(qc, "invalidateQueries");
@@ -99,11 +99,16 @@ it("useRefreshReport posts to /refresh and invalidates report + versions queries
   expect(keys).toContain(JSON.stringify(["reports"]));
   expect(keys).toContain(JSON.stringify(["reports", "r-1"]));
   expect(keys).toContain(JSON.stringify(["reports", "r-1", "versions"]));
+  // Review fix: a report refreshed while it's the dashboard wallpaper must bust the
+  // cached dashboard payload too — otherwise the wall shows new numbers (it refetches
+  // the artifact by report id/version) under a stale "data as of" freshness chip
+  // (the cached dashboard response) for up to staleTime.
+  expect(keys).toContain(JSON.stringify(["dashboard"]));
 });
 
 // --- Task 4: delete -----------------------------------------------------------------
 
-it("useDeleteReport DELETEs the report and invalidates the reports list", async () => {
+it("useDeleteReport DELETEs the report and invalidates the reports list + dashboard query", async () => {
   api.delete.mockResolvedValueOnce(undefined);
   const qc = new QueryClient(qcOpts);
   const invalidate = vi.spyOn(qc, "invalidateQueries");
@@ -113,11 +118,16 @@ it("useDeleteReport DELETEs the report and invalidates the reports list", async 
   expect(api.delete).toHaveBeenCalledWith("/api/v1/reports/r-1");
   const keys = invalidate.mock.calls.map((c) => JSON.stringify(c[0]?.queryKey));
   expect(keys).toContain(JSON.stringify(["reports"]));
+  // Review fix: deleting a report that's published/on someone's wall must bust the
+  // cached dashboard payload — otherwise "Published dashboards" keeps listing it
+  // (badged "On your wall"), its link 404s, Unpublish 404s silently, and the wall
+  // renders "Preview unavailable" under the deleted title for up to staleTime.
+  expect(keys).toContain(JSON.stringify(["dashboard"]));
 });
 
 // --- Task 5: pin/unpin --------------------------------------------------------------
 
-it("usePinReport POSTs to /pin and invalidates report + list queries", async () => {
+it("usePinReport POSTs to /pin and invalidates report + list + dashboard queries", async () => {
   api.post.mockResolvedValueOnce({ id: "r-1", dashboard_pinned_at: "2026-07-22T10:00:00Z" });
   const qc = new QueryClient(qcOpts);
   const invalidate = vi.spyOn(qc, "invalidateQueries");
@@ -128,9 +138,10 @@ it("usePinReport POSTs to /pin and invalidates report + list queries", async () 
   const keys = invalidate.mock.calls.map((c) => JSON.stringify(c[0]?.queryKey));
   expect(keys).toContain(JSON.stringify(["reports"]));
   expect(keys).toContain(JSON.stringify(["reports", "r-1"]));
+  expect(keys).toContain(JSON.stringify(["dashboard"]));
 });
 
-it("useUnpinReport DELETEs /pin and invalidates report + list queries", async () => {
+it("useUnpinReport DELETEs /pin and invalidates report + list + dashboard queries", async () => {
   api.delete.mockResolvedValueOnce({ id: "r-1", dashboard_pinned_at: null });
   const qc = new QueryClient(qcOpts);
   const invalidate = vi.spyOn(qc, "invalidateQueries");
@@ -141,4 +152,5 @@ it("useUnpinReport DELETEs /pin and invalidates report + list queries", async ()
   const keys = invalidate.mock.calls.map((c) => JSON.stringify(c[0]?.queryKey));
   expect(keys).toContain(JSON.stringify(["reports"]));
   expect(keys).toContain(JSON.stringify(["reports", "r-1"]));
+  expect(keys).toContain(JSON.stringify(["dashboard"]));
 });

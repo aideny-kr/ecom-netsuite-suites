@@ -40,6 +40,7 @@ from app.models.tenant_memory_link import TenantMemoryLink
 from app.models.tenant_profile import TenantProfile
 from app.models.tenant_wallet import TenantWallet
 from app.models.user import Permission, Role, RolePermission, User, UserRole
+from app.models.user_dashboard_preference import UserDashboardPreference  # noqa: F401
 from app.models.workspace import (
     Workspace,
     WorkspaceArtifact,
@@ -104,4 +105,5 @@ __all__ = [
     "AgentConfig",
     "ExperimentLog",
     "Report",
+    "UserDashboardPreference",
 ]

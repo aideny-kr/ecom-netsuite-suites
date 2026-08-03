@@ -2,14 +2,16 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { useDeleteReport, useReports } from "@/hooks/use-reports";
+import { useDeleteReport, useReports, useUnpinReport, type ReportSummary } from "@/hooks/use-reports";
+import { useDashboard } from "@/hooks/use-dashboard";
 import { PlaybookLauncher } from "./playbook-launcher";
 import { DeleteReportDialog, type DeleteReportDialogReport } from "./delete-report-dialog";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { FileBarChart, ChevronRight, Trash2 } from "lucide-react";
 import { useAuth } from "@/providers/auth-provider";
-import { canManageReport } from "@/lib/report-utils";
+import { canManageReport, fmtStamp } from "@/lib/report-utils";
 
 export default function ReportsPage() {
   const { data, isLoading } = useReports();
@@ -26,6 +28,8 @@ export default function ReportsPage() {
       </div>
 
       <PlaybookLauncher />
+
+      <PublishedDashboardsSection />
 
       {isLoading ? (
         <div className="space-y-2">
@@ -88,6 +92,97 @@ export default function ReportsPage() {
           onOpenChange={(open) => !open && setDeleteTarget(null)}
           onDeleted={() => setDeleteTarget(null)}
         />
+      )}
+    </div>
+  );
+}
+
+/** Compact list of every workspace-wide published report (reports.dashboard_pinned_at
+ * IS NOT NULL), above the report list — reuses Task 3/4's useDashboard() (already
+ * tenant-scoped and dashboard_pinned_at-DESC-sorted) rather than re-deriving
+ * "published" + "which one is mine" from useReports(); no new endpoint. Only
+ * rendered when at least one report is published. */
+function PublishedDashboardsSection() {
+  const { data } = useDashboard();
+  const { user } = useAuth();
+  const published = data?.published ?? [];
+
+  if (!published.length) return null;
+
+  return (
+    <div className="rounded-xl border bg-card p-5 shadow-soft">
+      <h3 className="text-[13px] font-semibold uppercase tracking-wider text-muted-foreground">
+        Published dashboards
+      </h3>
+      <div className="mt-3 space-y-2">
+        {published.map((report) => (
+          <PublishedDashboardRow
+            key={report.id}
+            report={report}
+            isOnWall={report.id === data?.active?.id}
+            canManage={canManageReport(user, report.created_by)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/** One row of the published-dashboards list. Owns its own useUnpinReport(id) —
+ * mirrors the ListDeleteDialog pattern below: each row needs a mutation bound to
+ * its own report id, which only works as a per-row hook call, not one shared call
+ * over the mapped array. */
+function PublishedDashboardRow({
+  report,
+  isOnWall,
+  canManage,
+}: {
+  report: ReportSummary;
+  isOnWall: boolean;
+  canManage: boolean;
+}) {
+  const unpin = useUnpinReport(report.id);
+  // House pattern (matches DashboardSwitcher's actionMsg): unpin.mutate() had no
+  // onError, so a failed Unpublish (e.g. a permission race) failed silently — the
+  // button just stopped spinning with nothing to explain why.
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  return (
+    <div className="flex items-center gap-3 rounded-lg border bg-background px-3 py-2">
+      <Link
+        href={`/reports/${report.id}`}
+        className="min-w-0 flex-1 truncate text-[13px] font-medium text-foreground hover:underline"
+      >
+        {report.title}
+      </Link>
+      {report.dashboard_pinned_at && (
+        <span className="shrink-0 text-[11px] text-muted-foreground">
+          Published {fmtStamp(report.dashboard_pinned_at)}
+        </span>
+      )}
+      <Badge
+        variant={isOnWall ? "default" : "secondary"}
+        className="shrink-0 text-[10px] font-semibold uppercase tracking-wide"
+      >
+        {isOnWall ? "On your wall" : "Published"}
+      </Badge>
+      {errorMsg && <span className="shrink-0 text-[13px] text-destructive">{errorMsg}</span>}
+      {/* The pin/unpin endpoints are creator-or-admin gated server-side — mirror
+          that here so nobody sees a button that would just 403. */}
+      {canManage && (
+        <Button
+          variant="ghost"
+          size="sm"
+          disabled={unpin.isPending}
+          onClick={() => {
+            setErrorMsg(null);
+            unpin.mutate(undefined, {
+              onError: (e: Error) => setErrorMsg(e.message || "Couldn't unpublish"),
+            });
+          }}
+        >
+          Unpublish
+        </Button>
       )}
     </div>
   );
