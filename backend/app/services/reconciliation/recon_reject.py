@@ -48,11 +48,11 @@ from app.services.reconciliation.four_bucket_classifier import (
 # Why the match was rejected. A closed vocabulary, because a free-text-only
 # reason cannot be aggregated and an unaggregatable label is not a label.
 REJECT_REASONS: tuple[str, ...] = (
-    "wrong_match",      # payout and deposit are not the same money
-    "wrong_amount",     # right counterparty, but the amounts do not reconcile
-    "duplicate",        # this deposit is already applied elsewhere
-    "not_actionable",   # the match is CORRECT; something else blocks acting on it
-    "other",            # requires a note
+    "wrong_match",  # payout and deposit are not the same money
+    "wrong_amount",  # right counterparty, but the amounts do not reconcile
+    "duplicate",  # this deposit is already applied elsewhere
+    "not_actionable",  # the match is CORRECT; something else blocks acting on it
+    "other",  # requires a note
 )
 
 # The subset that is genuine evidence the matcher was WRONG. `not_actionable`
@@ -67,7 +67,7 @@ FALSE_POSITIVE_REASONS: tuple[str, ...] = (
 )
 
 
-class RejectNotAllowed(Exception):
+class RejectNotAllowedError(Exception):
     """The reject was refused. Message is safe to surface to the caller."""
 
 
@@ -106,15 +106,15 @@ async def reject_result(
     be the back door into a frozen period.
     """
     if reason not in REJECT_REASONS:
-        raise RejectNotAllowed(f"unknown reason {reason!r}; expected one of {', '.join(REJECT_REASONS)}")
+        raise RejectNotAllowedError(f"unknown reason {reason!r}; expected one of {', '.join(REJECT_REASONS)}")
     if reason == "other" and not (note or "").strip():
-        raise RejectNotAllowed("reason 'other' requires a note — an unexplained label is unreadable later")
+        raise RejectNotAllowedError("reason 'other' requires a note — an unexplained label is unreadable later")
 
     if run is not None and getattr(run, "status", None) in CLOSED_RUN_STATUSES:
-        raise RejectNotAllowed("run is closed — the period is frozen and dispositions cannot change")
+        raise RejectNotAllowedError("run is closed — the period is frozen and dispositions cannot change")
 
     if result.status in TERMINAL_RESULT_STATUSES:
-        raise RejectNotAllowed(f"result cannot be rejected (status={result.status})")
+        raise RejectNotAllowedError(f"result cannot be rejected (status={result.status})")
 
     # Snapshot BEFORE mutating status — _is_envelope_eligible reads status, and
     # setting it to 'rejected' first would make every row ineligible and quietly
@@ -141,7 +141,7 @@ async def reject_result(
         resource_type="reconciliation_result",
         resource_id=str(result.id),
         correlation_id=correlation_id or str(uuid.uuid4()),
-        metadata={
+        payload={
             "reason": reason,
             "note": result.reject_note,
             "envelope_eligible_at_decision": eligible,
@@ -190,9 +190,7 @@ async def envelope_false_positive_rate(
     ).scalar_one()
 
     false_positives = (
-        await db.execute(
-            select(func.count()).select_from(R).where(*where, R.counts_as_false_positive.is_(True))
-        )
+        await db.execute(select(func.count()).select_from(R).where(*where, R.counts_as_false_positive.is_(True)))
     ).scalar_one()
 
     decided = int(decided or 0)

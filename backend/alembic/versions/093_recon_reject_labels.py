@@ -19,6 +19,7 @@ migration, which breaks `downgrade -1`.
 """
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "093_recon_reject_labels"
@@ -28,7 +29,9 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("reconciliation_results", sa.Column("rejected_by", sa.dialects.postgresql.UUID(as_uuid=True), nullable=True))
+    op.add_column(
+        "reconciliation_results", sa.Column("rejected_by", sa.dialects.postgresql.UUID(as_uuid=True), nullable=True)
+    )
     op.add_column("reconciliation_results", sa.Column("rejected_at", sa.DateTime(timezone=True), nullable=True))
     op.add_column("reconciliation_results", sa.Column("reject_reason", sa.String(length=50), nullable=True))
     op.add_column("reconciliation_results", sa.Column("reject_note", sa.Text(), nullable=True))

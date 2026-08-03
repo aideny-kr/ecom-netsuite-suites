@@ -33,7 +33,7 @@ from app.models.audit import AuditEvent
 from app.services.reconciliation.recon_reject import (
     FALSE_POSITIVE_REASONS,
     REJECT_REASONS,
-    RejectNotAllowed,
+    RejectNotAllowedError,
     reject_result,
 )
 from tests.conftest import create_test_recon_result, create_test_recon_run, create_test_user
@@ -88,7 +88,7 @@ async def test_reject_rejects_an_unknown_reason(db, tenant_a, user_a):
     is not a label."""
     _, r = await _result(db, tenant_a.id)
 
-    with pytest.raises(RejectNotAllowed, match="reason"):
+    with pytest.raises(RejectNotAllowedError, match="reason"):
         await reject_result(db, result=r, user=user_a, reason="because I said so", note=None)
 
 
@@ -96,7 +96,7 @@ async def test_other_requires_a_note(db, tenant_a, user_a):
     """'other' without an explanation is an unreadable label six months later."""
     _, r = await _result(db, tenant_a.id)
 
-    with pytest.raises(RejectNotAllowed, match="note"):
+    with pytest.raises(RejectNotAllowedError, match="note"):
         await reject_result(db, result=r, user=user_a, reason="other", note=None)
 
 
@@ -109,7 +109,11 @@ async def test_snapshots_envelope_eligibility_for_an_admissible_row(db, tenant_a
     from decimal import Decimal
 
     _, r = await _result(
-        db, tenant_a.id, status="auto_matched", bucket="matches", match_type="deterministic",
+        db,
+        tenant_a.id,
+        status="auto_matched",
+        bucket="matches",
+        match_type="deterministic",
         variance_amount=Decimal("0"),
     )
 
@@ -123,7 +127,11 @@ async def test_snapshots_ineligibility_for_a_variance_row(db, tenant_a, user_a):
     from decimal import Decimal
 
     _, r = await _result(
-        db, tenant_a.id, status="needs_review", bucket="needs_review", match_type="fuzzy",
+        db,
+        tenant_a.id,
+        status="needs_review",
+        bucket="needs_review",
+        match_type="fuzzy",
         variance_amount=Decimal("12.50"),
     )
 
@@ -138,7 +146,11 @@ async def test_not_actionable_never_counts_against_the_envelope(db, tenant_a, us
     from decimal import Decimal
 
     _, r = await _result(
-        db, tenant_a.id, status="auto_matched", bucket="matches", match_type="deterministic",
+        db,
+        tenant_a.id,
+        status="auto_matched",
+        bucket="matches",
+        match_type="deterministic",
         variance_amount=Decimal("0"),
     )
 
@@ -158,7 +170,7 @@ async def test_cannot_reject_inside_a_closed_run(db, tenant_a, user_a):
     r = await create_test_recon_result(db, tenant_a.id, run.id)
     await db.flush()
 
-    with pytest.raises(RejectNotAllowed, match="closed|locked|freeze"):
+    with pytest.raises(RejectNotAllowedError, match="closed|locked|freeze"):
         await reject_result(db, result=r, user=user_a, reason="wrong_match", note=None, run=run)
 
 
@@ -166,7 +178,7 @@ async def test_cannot_reject_inside_a_closed_run(db, tenant_a, user_a):
 async def test_cannot_reject_a_terminal_row(db, tenant_a, user_a, terminal):
     _, r = await _result(db, tenant_a.id, status=terminal)
 
-    with pytest.raises(RejectNotAllowed):
+    with pytest.raises(RejectNotAllowedError):
         await reject_result(db, result=r, user=user_a, reason="wrong_match", note=None)
 
 
@@ -175,7 +187,7 @@ async def test_reject_never_posts_to_netsuite(db, tenant_a, user_a):
     local disposition and nothing else."""
     import app.services.reconciliation.recon_reject as mod
 
-    src = (mod.__file__ or "")
+    src = mod.__file__ or ""
     assert src
     text = open(src).read()
     for forbidden in ("createRecord", "ns_createRecord", "updateRecord", "post_to_netsuite"):
@@ -189,9 +201,13 @@ async def test_reject_writes_one_audit_row(db, tenant_a, user_a):
     await db.flush()
 
     rows = (
-        (await db.execute(select(AuditEvent).where(AuditEvent.action == "recon.reject",
-                                                   AuditEvent.resource_id == str(r.id))))
-        .scalars().all()
+        (
+            await db.execute(
+                select(AuditEvent).where(AuditEvent.action == "recon.reject", AuditEvent.resource_id == str(r.id))
+            )
+        )
+        .scalars()
+        .all()
     )
     assert len(rows) == 1, "exactly one audit row per rejected line — this is the audit trail"
     assert rows[0].actor_id == user_a.id
@@ -209,8 +225,13 @@ async def test_false_positive_rate_is_computable(db, tenant_a, user_a):
     run = await create_test_recon_run(db, tenant_a.id, status="completed")
     for i in range(4):
         row = await create_test_recon_result(
-            db, tenant_a.id, run.id, status="auto_matched", bucket="matches",
-            match_type="deterministic", variance_amount=Decimal("0"),
+            db,
+            tenant_a.id,
+            run.id,
+            status="auto_matched",
+            bucket="matches",
+            match_type="deterministic",
+            variance_amount=Decimal("0"),
         )
         await db.flush()
         if i == 0:
