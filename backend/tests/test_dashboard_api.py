@@ -216,6 +216,54 @@ async def test_get_deleted_report_tombstone_banner_persists_until_dismissed(clie
     assert pref is not None and pref.report_id is None
 
 
+async def test_clear_stale_selection_survives_concurrent_republish(client, db):
+    """TOCTOU for the unpublished-case branch of the generalized helper
+    (FIX1): the predicate re-checks the LIVE `reports` table inside the
+    DELETE statement itself, not a `published` snapshot taken before the
+    race — so if the report gets re-published in the window between load and
+    delete, the delete must not fire (the selection is valid again)."""
+    from app.api.v1.dashboard import _clear_stale_selection
+
+    ta = await create_test_tenant(db, name="ReconRepublishRace")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    r1 = await _seed_report(db, ta, ua, title="WillRepublish")
+    await _pin(db, r1)
+    headers = make_auth_headers(ua)
+
+    assert (
+        await client.put("/api/v1/dashboard/active", headers=headers, json={"report_id": str(r1.id)})
+    ).status_code == 200
+    r1.dashboard_pinned_at = None  # unpublish
+    await db.flush()
+
+    pref = (
+        await db.execute(
+            select(UserDashboardPreference).where(
+                UserDashboardPreference.tenant_id == ta.id, UserDashboardPreference.user_id == ua.id
+            )
+        )
+    ).scalar_one()
+
+    # simulate a concurrent re-publish landing between load and delete
+    await _pin(db, r1)
+
+    cleared = await _clear_stale_selection(db, pref, ua)
+    assert cleared is False
+    await db.commit()
+
+    survivor = (
+        await db.execute(select(UserDashboardPreference).where(UserDashboardPreference.id == pref.id))
+    ).scalar_one_or_none()
+    assert survivor is not None
+    assert survivor.report_id == r1.id  # the now-valid-again selection was NOT discarded
+
+    audit_count = (
+        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.tombstone_cleared'"))
+    ).scalar_one()
+    assert audit_count == 0
+
+
 async def test_tombstone_conditional_delete_survives_concurrent_repoint(client, db):
     """TOCTOU regression: `_get_preference` loads the tombstone (report_id
     NULL) before the GC delete runs. If, in that window, a concurrent
@@ -231,7 +279,7 @@ async def test_tombstone_conditional_delete_survives_concurrent_repoint(client, 
     helper directly against a tombstone that has been re-pointed out from
     under it — exactly the state the real interleave would leave behind —
     and asserts the row survives with the concurrent selection intact."""
-    from app.api.v1.dashboard import _clear_tombstone_if_still_null
+    from app.api.v1.dashboard import _clear_stale_selection
 
     ta = await create_test_tenant(db, name="ToctouRepoint")
     ua, _ = await create_test_user(db, ta)
@@ -265,7 +313,7 @@ async def test_tombstone_conditional_delete_survives_concurrent_repoint(client, 
     pref.report_id = r2.id
     await db.flush()
 
-    cleared = await _clear_tombstone_if_still_null(db, pref, ua)
+    cleared = await _clear_stale_selection(db, pref, ua)
     assert cleared is False
     await db.commit()
 
@@ -291,7 +339,7 @@ async def test_tombstone_conditional_delete_second_racer_is_noop_no_duplicate_au
     GETs (the tombstone is already gone by the second one); this test drives
     the actual race by calling the helper twice against one shared, already
     loaded `pref` object, the way two racing requests both would."""
-    from app.api.v1.dashboard import _clear_tombstone_if_still_null
+    from app.api.v1.dashboard import _clear_stale_selection
 
     ta = await create_test_tenant(db, name="ToctouRacers")
     ua, _ = await create_test_user(db, ta)
@@ -315,8 +363,8 @@ async def test_tombstone_conditional_delete_second_racer_is_noop_no_duplicate_au
         )
     ).scalar_one()
 
-    winner = await _clear_tombstone_if_still_null(db, pref, ua)
-    loser = await _clear_tombstone_if_still_null(db, pref, ua)
+    winner = await _clear_stale_selection(db, pref, ua)
+    loser = await _clear_stale_selection(db, pref, ua)
     await db.commit()
 
     assert winner is True
@@ -557,12 +605,16 @@ async def test_dismiss_noop_when_no_preference_exists(client, db):
     assert cleared == 0
 
 
-async def test_dismiss_noop_when_preference_is_not_a_tombstone(client, db):
-    """The unpublished (not deleted) case: report_id still points at a real
-    report, so the conditional DELETE's `report_id IS NULL` predicate never
-    matches — the row must survive untouched (it can be re-published), and
-    dismiss must not audit a clear that didn't happen."""
-    ta = await create_test_tenant(db, name="DismissNotTombstone")
+async def test_dismiss_clears_unpublished_selection_and_audits(client, db):
+    """FIX1: `active_is_fallback` has two triggers, per `_resolve_active`'s own
+    docstring — the selected report was deleted (report_id NULL, the
+    tombstone case above) or unpublished (report_id still points at a real,
+    now-unpublished report). Before this fix, dismiss only handled the first:
+    `_clear_tombstone_if_still_null`'s `report_id IS NULL` predicate never
+    matched the unpublished case, so the dismiss button silently no-opped and
+    the banner reappeared on every subsequent load with no way to silence it.
+    The generalized `_clear_stale_selection` must clear this case too."""
+    ta = await create_test_tenant(db, name="DismissClearsUnpub")
     ua, _ = await create_test_user(db, ta)
     await set_tenant_context(db, str(ta.id))
     r1 = await _seed_report(db, ta, ua, title="WillUnpublish")
@@ -577,13 +629,14 @@ async def test_dismiss_noop_when_preference_is_not_a_tombstone(client, db):
     r1.dashboard_pinned_at = None  # unpublish, not delete
     await db.flush()
 
+    pre = await client.get("/api/v1/dashboard", headers=headers)
+    assert pre.json()["active_is_fallback"] is True
+
     resp = await client.post("/api/v1/dashboard/notice/dismiss", headers=headers)
     assert resp.status_code == 200, resp.text
-
-    cleared = (
-        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.tombstone_cleared'"))
-    ).scalar_one()
-    assert cleared == 0
+    body = resp.json()
+    assert body["active"]["id"] == str(r2.id)
+    assert body["active_is_fallback"] is False
 
     pref = (
         await db.execute(
@@ -592,7 +645,80 @@ async def test_dismiss_noop_when_preference_is_not_a_tombstone(client, db):
             )
         )
     ).scalar_one_or_none()
-    assert pref is not None and pref.report_id == r1.id
+    assert pref is None  # the stale selection row is gone, not merely self-healed
+
+    cleared = (
+        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.tombstone_cleared'"))
+    ).scalar_one()
+    assert cleared == 1
+
+    # the banner must NOT reappear on the next load
+    post = await client.get("/api/v1/dashboard", headers=headers)
+    assert post.json()["active_is_fallback"] is False
+    assert post.json()["active"]["id"] == str(r2.id)
+
+
+async def test_dismiss_unpublished_case_is_idempotent_second_call_is_noop(client, db):
+    ta = await create_test_tenant(db, name="DismissUnpubIdempotent")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    r1 = await _seed_report(db, ta, ua, title="WillUnpublish")
+    await _pin(db, r1)
+    headers = make_auth_headers(ua)
+
+    assert (
+        await client.put("/api/v1/dashboard/active", headers=headers, json={"report_id": str(r1.id)})
+    ).status_code == 200
+    r1.dashboard_pinned_at = None
+    await db.flush()
+
+    first = await client.post("/api/v1/dashboard/notice/dismiss", headers=headers)
+    assert first.status_code == 200, first.text
+
+    second = await client.post("/api/v1/dashboard/notice/dismiss", headers=headers)
+    assert second.status_code == 200, second.text
+    assert second.json()["active_is_fallback"] is False
+
+    cleared = (
+        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.tombstone_cleared'"))
+    ).scalar_one()
+    assert cleared == 1  # not audited again on the second, no-op call
+
+
+async def test_dismiss_does_not_clear_a_currently_valid_selection(client, db):
+    """Dismiss must be scoped to STALE selections only. A normal, currently-
+    published choice must survive a dismiss call untouched — e.g. an FE that
+    fires dismiss defensively on every load even when there is nothing stale
+    to dismiss must never destroy a live selection."""
+    ta = await create_test_tenant(db, name="DismissKeepsValid")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    r1 = await _seed_report(db, ta, ua, title="Chosen")
+    await _pin(db, r1)
+    headers = make_auth_headers(ua)
+
+    assert (
+        await client.put("/api/v1/dashboard/active", headers=headers, json={"report_id": str(r1.id)})
+    ).status_code == 200
+
+    resp = await client.post("/api/v1/dashboard/notice/dismiss", headers=headers)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["active"]["id"] == str(r1.id)
+    assert resp.json()["active_is_fallback"] is False
+
+    pref = (
+        await db.execute(
+            select(UserDashboardPreference).where(
+                UserDashboardPreference.tenant_id == ta.id, UserDashboardPreference.user_id == ua.id
+            )
+        )
+    ).scalar_one_or_none()
+    assert pref is not None and pref.report_id == r1.id  # untouched
+
+    cleared = (
+        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.tombstone_cleared'"))
+    ).scalar_one()
+    assert cleared == 0
 
 
 async def test_dismiss_unauth_401(client, db):
@@ -817,6 +943,10 @@ async def test_delete_active_clears_selection_and_audits(client, db):
 
 
 async def test_delete_active_is_idempotent(client, db):
+    """FIX3: the `dashboard.clear` audit must be gated on an actual deletion —
+    a repeat/idempotent DELETE with no preference to clear (never chosen
+    anything, so there is nothing to delete on either call) must return 200
+    without writing a phantom audit row claiming a clear that didn't happen."""
     ta = await create_test_tenant(db, name="DeleteIdempotent")
     ua, _ = await create_test_user(db, ta)
     await set_tenant_context(db, str(ta.id))
@@ -836,7 +966,108 @@ async def test_delete_active_is_idempotent(client, db):
             {"aid": str(ua.id)},
         )
     ).scalar_one()
-    assert audit == 2  # idempotent operations still each audit, matching unpin_report precedent
+    assert audit == 0  # no preference ever existed — nothing was deleted, so nothing is audited
+
+
+async def test_delete_active_second_call_after_real_clear_is_noop_no_audit(client, db):
+    """Distinguishes FIX3's audit-gating from the old "always audit" behavior:
+    the FIRST delete, which actually clears a real preference, must still
+    audit exactly once; only the redundant SECOND call (nothing left to
+    delete) must stay silent."""
+    ta = await create_test_tenant(db, name="DeleteRealThenNoop")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    r1 = await _seed_report(db, ta, ua, title="Chosen")
+    await _pin(db, r1)
+    headers = make_auth_headers(ua)
+
+    assert (
+        await client.put("/api/v1/dashboard/active", headers=headers, json={"report_id": str(r1.id)})
+    ).status_code == 200
+
+    first = await client.delete("/api/v1/dashboard/active", headers=headers)
+    assert first.status_code == 200, first.text
+
+    second = await client.delete("/api/v1/dashboard/active", headers=headers)
+    assert second.status_code == 200, second.text
+
+    audit = (
+        await db.execute(
+            text("SELECT count(*) FROM audit_events WHERE action='dashboard.clear' AND actor_id=:aid"),
+            {"aid": str(ua.id)},
+        )
+    ).scalar_one()
+    assert audit == 1  # the real clear audited once; the redundant repeat did not
+
+
+async def test_delete_active_conditional_survives_concurrent_repoint(client, db):
+    """FIX2: `clear_active_dashboard`'s DELETE must not be an unconditional
+    `db.delete(pref)` by primary key — a concurrent PUT can re-point the SAME
+    row (the upsert in `set_active_dashboard` updates the existing row via
+    `ON CONFLICT DO UPDATE`, not a new INSERT) between this row being loaded
+    and this delete executing, and an unconditional delete would silently
+    discard that fresh selection. Same conditional-delete idiom as
+    `_clear_stale_selection`, but re-asserting the captured `report_id` value
+    rather than checking "is it stale" — an explicit user DELETE has no
+    staleness question to ask, it means "forget whatever is there."
+
+    The `client`/`db` fixtures share one connection/transaction (conftest.py),
+    so this drives the race the same way the tombstone TOCTOU tests above do:
+    call the module's conditional-delete helper directly against a row that
+    has been re-pointed out from under it."""
+    from app.api.v1.dashboard import _delete_preference_if_unchanged
+
+    ta = await create_test_tenant(db, name="DeleteRepointRace")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    r1 = await _seed_report(db, ta, ua, title="Original")
+    await _pin(db, r1)
+    r2 = await _seed_report(db, ta, ua, title="RepointTarget")
+    await _pin(db, r2)
+    headers = make_auth_headers(ua)
+
+    assert (
+        await client.put("/api/v1/dashboard/active", headers=headers, json={"report_id": str(r1.id)})
+    ).status_code == 200
+
+    pref = (
+        await db.execute(
+            select(UserDashboardPreference).where(
+                UserDashboardPreference.tenant_id == ta.id, UserDashboardPreference.user_id == ua.id
+            )
+        )
+    ).scalar_one()
+    assert pref.report_id == r1.id
+
+    # Simulate the concurrent PUT landing between load and delete: re-point
+    # the SAME row at r2 via a raw UPDATE that bypasses this ORM object,
+    # exactly like a concurrent writer on a SEPARATE connection would — so
+    # `pref` (this request's in-memory snapshot) keeps holding the value it
+    # was loaded with (r1.id) while the actual row now holds r2.id. Mutating
+    # `pref.report_id` directly, as the tombstone TOCTOU tests above do,
+    # would be self-defeating here: `_delete_preference_if_unchanged`
+    # re-asserts equality against `pref.report_id` itself, so comparing the
+    # object against its own just-mutated attribute would trivially match.
+    await db.execute(
+        text("UPDATE user_dashboard_preferences SET report_id = :rid WHERE id = :id"),
+        {"rid": str(r2.id), "id": str(pref.id)},
+    )
+    await db.flush()
+
+    cleared = await _delete_preference_if_unchanged(db, pref)
+    assert cleared is False
+    await db.commit()
+
+    survivor = (
+        await db.execute(select(UserDashboardPreference).where(UserDashboardPreference.id == pref.id))
+    ).scalar_one_or_none()
+    assert survivor is not None
+    assert survivor.report_id == r2.id  # the concurrent selection was NOT discarded
+
+    audit_count = (
+        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.clear'"))
+    ).scalar_one()
+    assert audit_count == 0  # a no-op delete must not audit a clear that didn't happen
 
 
 async def test_delete_active_unauth_401(client, db):

@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -92,22 +92,37 @@ async def _get_visible_report(db: AsyncSession, report_id: str, user: User) -> R
     return row
 
 
-async def _clear_tombstone_if_still_null(db: AsyncSession, tombstone: UserDashboardPreference, user: User) -> bool:
-    """Conditional delete-and-audit for a deleted-report tombstone. Not
-    `db.delete(tombstone)` by primary key alone: between `tombstone` being
-    loaded (by `_get_preference` in `_build_dashboard_response`, below) and
-    this delete executing, a concurrent `PUT /dashboard/active` on another
-    connection could have re-pointed the SAME row at a real report — the
-    upsert in `set_active_dashboard` updates `report_id` on the existing row
-    via `ON CONFLICT DO UPDATE` rather than inserting a new one. An
-    unconditional-by-pk delete would silently discard that fresh selection
-    along with the tombstone, with no trace. Re-asserting `report_id IS NULL`
-    in the WHERE clause makes the delete a no-op in that case.
+async def _clear_stale_selection(db: AsyncSession, pref: UserDashboardPreference, user: User) -> bool:
+    """Conditional delete-and-audit for a stale stored selection — generalized
+    from a deleted-report-only tombstone GC to cover BOTH triggers of
+    `active_is_fallback` (see `_resolve_active`'s own docstring): the selected
+    report was deleted (`report_id IS NULL`, migration 092's ON DELETE SET
+    NULL) or it was unpublished (`report_id` still points at a real report
+    that is no longer in the published set). Dismissing the notice must clear
+    either — a dismiss that only handled the deleted-report case left the
+    unpublished case's banner reappearing on every subsequent load with no
+    way to silence it.
+
+    Not `db.delete(pref)` by primary key alone: between `pref` being loaded
+    (by `_get_preference` in the caller) and this delete executing, a
+    concurrent `PUT /dashboard/active` on another connection could have
+    re-pointed the SAME row at a currently-published report — the upsert in
+    `set_active_dashboard` updates `report_id` on the existing row via
+    `ON CONFLICT DO UPDATE` rather than inserting a new one. An
+    unconditional-by-pk delete would silently discard that fresh, valid
+    selection along with the stale one, with no trace.
+
+    The WHERE clause re-checks staleness against the LIVE `reports` table
+    inside the same DELETE statement — not a `published` snapshot captured
+    before the race — so it is correct regardless of what a concurrent writer
+    did in between: a re-point to a published report, or the original report
+    getting re-published, both make the delete a no-op, exactly like the
+    original NULL-only check did for the tombstone case.
 
     The same conditional also makes this the loser-safe half of two
-    concurrent GETs racing the same stale tombstone: both load it, both call
-    this, but only the winner's DELETE matches a row — the loser's matches
-    zero and (per the `rowcount` gate below) does not audit a second
+    concurrent GETs racing the same stale row: both load it, both call this,
+    but only the winner's DELETE matches a row — the loser's matches zero and
+    (per the `rowcount` gate below) does not audit a second
     `dashboard.tombstone_cleared` event for what is a one-time notice.
 
     Returns True iff this call was the one that actually deleted the row
@@ -115,8 +130,16 @@ async def _clear_tombstone_if_still_null(db: AsyncSession, tombstone: UserDashbo
     """
     result = await db.execute(
         delete(UserDashboardPreference).where(
-            UserDashboardPreference.id == tombstone.id,
-            UserDashboardPreference.report_id.is_(None),
+            UserDashboardPreference.id == pref.id,
+            or_(
+                UserDashboardPreference.report_id.is_(None),
+                UserDashboardPreference.report_id.notin_(
+                    select(Report.id).where(
+                        Report.tenant_id == user.tenant_id,
+                        Report.dashboard_pinned_at.is_not(None),
+                    )
+                ),
+            ),
         )
     )
     if result.rowcount != 1:
@@ -124,8 +147,8 @@ async def _clear_tombstone_if_still_null(db: AsyncSession, tombstone: UserDashbo
     # Audited like any other mutation (rules/sqlalchemy-fastapi #4) even though
     # it is system GC on a read path: it is a real row deletion, and the audit
     # trail is what explains why the user's stored choice vanished. Gated on
-    # rowcount so a concurrent loser (or a row re-pointed out from under us)
-    # never logs a phantom clear.
+    # rowcount so a concurrent loser (or a row re-pointed/re-published out
+    # from under us) never logs a phantom clear.
     await audit_service.log_event(
         db=db,
         tenant_id=user.tenant_id,
@@ -133,9 +156,44 @@ async def _clear_tombstone_if_still_null(db: AsyncSession, tombstone: UserDashbo
         action="dashboard.tombstone_cleared",
         actor_id=user.id,
         resource_type="report",
-        resource_id=str(tombstone.id),
+        resource_id=str(pref.id),
     )
     return True
+
+
+async def _delete_preference_if_unchanged(db: AsyncSession, pref: UserDashboardPreference) -> bool:
+    """Conditional delete-by-value for DELETE /dashboard/active. Same race as
+    `_clear_stale_selection` above, guarded the same way (re-assert loaded
+    state in the WHERE clause instead of `db.delete(pref)` by primary key
+    alone): a concurrent `PUT /dashboard/active` on another connection can
+    re-point this SAME row (the upsert in `set_active_dashboard` updates the
+    existing row via `ON CONFLICT DO UPDATE`) between this row being loaded
+    and this delete executing.
+
+    Unlike `_clear_stale_selection` (which re-checks "is this NOW stale"
+    against the live `reports` table), an explicit user DELETE has no
+    staleness question to ask — it means "forget whatever is there" — so
+    instead this re-asserts `report_id` still equals the value it was loaded
+    with. If a concurrent PUT changed it, that is a genuinely fresh selection
+    made after this DELETE was issued, and the WHERE clause makes the delete
+    a no-op rather than silently discarding it.
+
+    Returns True iff this call actually deleted the row (and therefore should
+    audit the clear). Because the WHERE clause re-asserts `report_id`, a True
+    result also guarantees the deleted row's `report_id` equalled `pref.report_id`
+    at the moment of deletion — so the caller's audit `resource_id`, read from
+    the already-loaded `pref`, is never out of sync with what was actually
+    deleted. The audit itself is the caller's responsibility (`clear_active_dashboard`
+    below), not this helper's — unlike `_clear_stale_selection`, which is only
+    ever called from one site and owns its own audit call.
+    """
+    where_clause = [UserDashboardPreference.id == pref.id]
+    if pref.report_id is None:
+        where_clause.append(UserDashboardPreference.report_id.is_(None))
+    else:
+        where_clause.append(UserDashboardPreference.report_id == pref.report_id)
+    result = await db.execute(delete(UserDashboardPreference).where(*where_clause))
+    return result.rowcount == 1
 
 
 def _resolve_active(published: list[Report], pref: UserDashboardPreference | None) -> tuple[Report | None, bool]:
@@ -167,14 +225,14 @@ def _resolve_active(published: list[Report], pref: UserDashboardPreference | Non
 
 
 async def _build_dashboard_response(db: AsyncSession, user: User) -> DashboardResponse:
-    """Pure read — GET must never write. A deleted-report tombstone (the
-    conditional-delete/audit machinery below in `_clear_tombstone_if_still_null`)
-    is a real mutation, so it must never fire as a side effect of a GET: this
+    """Pure read — GET must never write. A stale stored selection (the
+    conditional-delete/audit machinery below in `_clear_stale_selection`) is a
+    real mutation, so it must never fire as a side effect of a GET: this
     module also backs `PublishedDashboardsSection` on the (unrelated) /reports
     page via the same `["dashboard"]` FE query key, and a visit to THAT page
     consuming the one-time notice would silently rob the /dashboard page of the
-    banner it exists to show. The tombstone is cleared only by the explicit
-    POST /dashboard/notice/dismiss endpoint below."""
+    banner it exists to show. The stale selection is cleared only by the
+    explicit POST /dashboard/notice/dismiss endpoint below."""
     published = await _published_reports(db, user.tenant_id)
     pref = await _get_preference(db, user.tenant_id, user.id)
     active, active_is_fallback = _resolve_active(published, pref)
@@ -198,18 +256,22 @@ async def dismiss_dashboard_notice(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Explicit, user-triggered consume of the deleted-report tombstone that
-    GET (above) deliberately no longer touches. Idempotent: with no
-    preference row, or one that isn't a tombstone (report_id still points at
-    a real report — the unpublished case), `_clear_tombstone_if_still_null`'s
-    own `report_id IS NULL` predicate makes the delete a no-op, so this is a
-    safe 200 either way rather than requiring a branch here."""
+    """Explicit, user-triggered consume of the stale-selection notice that GET
+    (above) deliberately no longer touches. `active_is_fallback` has two
+    triggers (see `_resolve_active`'s docstring): the selected report was
+    deleted (report_id NULL) or unpublished (report_id still points at a
+    real, now-unpublished report) — both must be dismissable, or the
+    unpublished case's banner reappears on every subsequent load with no way
+    to silence it. Idempotent: with no preference row, or one whose stored
+    selection is currently valid (still published), `_clear_stale_selection`'s
+    own predicate makes the delete a no-op, so this is a safe 200 either way
+    rather than requiring a branch here."""
     published = await _published_reports(db, user.tenant_id)  # pre-commit, reused below
     pref = await _get_preference(db, user.tenant_id, user.id)
 
     cleared = False
     if pref is not None:
-        cleared = await _clear_tombstone_if_still_null(db, pref, user)
+        cleared = await _clear_stale_selection(db, pref, user)
     await db.commit()
 
     # Build the response from data loaded before the commit above (constraint
@@ -218,8 +280,8 @@ async def dismiss_dashboard_notice(
     # the user now has no stored selection at all — same post-clear shape as
     # DELETE /active (fall back to the most recent publish, not a fallback
     # notice since there is no longer an old choice to have lost). Otherwise
-    # (no pref, or a no-op because it wasn't a tombstone) resolve normally
-    # against the still-valid, already-loaded `pref` object.
+    # (no pref, or a no-op because the stored selection is currently valid)
+    # resolve normally against the still-valid, already-loaded `pref` object.
     effective_pref = None if cleared else pref
     active, active_is_fallback = _resolve_active(published, effective_pref)
     return DashboardResponse(
@@ -296,27 +358,46 @@ async def clear_active_dashboard(
     published = await _published_reports(db, user.tenant_id)  # pre-commit, reused below
 
     pref = await _get_preference(db, user.tenant_id, user.id)
-    cleared_report_id: str | None = None
+    cleared = False
     if pref is not None:
+        # Conditional delete (`_delete_preference_if_unchanged`), not
+        # `db.delete(pref)` by primary key alone: a concurrent
+        # `PUT /dashboard/active` can re-point this same row between this
+        # load and the delete below (see the helper's docstring). An
+        # unconditional delete would silently discard that fresh selection.
+        cleared = await _delete_preference_if_unchanged(db, pref)
+
+    if cleared:
         # pref.report_id may already be None (tombstoned by a report delete,
         # migration 092's ON DELETE SET NULL) — str(None) would log the
-        # literal string "None" as a resource_id, so only stringify a real id.
+        # literal string "None" as a resource_id, so only stringify a real
+        # id. Safe to read from the already-loaded `pref` (not a post-delete
+        # re-query): `cleared` is only True because the row's report_id still
+        # matched this exact value at the moment of deletion, so this can
+        # never disagree with what was actually deleted.
         cleared_report_id = str(pref.report_id) if pref.report_id is not None else None
-        await db.delete(pref)
-
-    await audit_service.log_event(
-        db=db,
-        tenant_id=user.tenant_id,
-        category="dashboard",
-        action="dashboard.clear",
-        actor_id=user.id,
-        resource_type="report",
-        resource_id=cleared_report_id,
-    )
+        await audit_service.log_event(
+            db=db,
+            tenant_id=user.tenant_id,
+            category="dashboard",
+            action="dashboard.clear",
+            actor_id=user.id,
+            resource_type="report",
+            resource_id=cleared_report_id,
+        )
+    # Gated on `cleared` (rules/sqlalchemy-fastapi #4 still applies to a real
+    # deletion, but not to a no-op): a repeat DELETE with nothing to clear, or
+    # one that raced a concurrent PUT and lost, must not write an audit row
+    # claiming a clear that didn't happen.
     await db.commit()
-    # After an explicit clear the user has no stored selection at all (not merely
-    # a stale one) — same as "never chosen", so active_is_fallback is False here
-    # even though the wall now shows the most-recently-published fallback.
+    # After an explicit, successful clear the user has no stored selection at
+    # all (not merely a stale one) — same as "never chosen", so
+    # active_is_fallback is False here even though the wall now shows the
+    # most-recently-published fallback. Same response shape when `cleared` is
+    # False: either there was nothing stored to begin with, or a concurrent
+    # PUT already won the race and its fresher selection stands — this
+    # caller's DELETE simply has nothing left to report, and the next GET
+    # reflects the current truth.
     active = published[0] if published else None
     return DashboardResponse(
         published=[_to_response(r) for r in published],
