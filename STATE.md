@@ -1,5 +1,25 @@
 # STATE
 
+## GOAL — read this before anything else
+
+**Product.** Completely automate the end-to-end daily and monthly accounting operations
+routine — reconciliation, close, reporting — via scheduled jobs and agentic flows, with
+memory + reporting tools and **read AND WRITE** access to NetSuite and further MCPs.
+
+*Where we are: Rung 1 of 4. The read half is real and well-gated. The write half does not
+exist — zero posting code, no compensation, no durable execution. The longest-lead blocker
+is evidence, not code: nothing today can produce the error rate unattended posting rests
+on, because no reject/dispute action exists to generate negative labels.*
+
+**How we work** (this is a means, not the goal). A development cycle that suits a frontier
+model: minimum harness, loop engineering for feedback, graph engineering for flow, and one
+place for state. Portable across projects — process global, knowledge local.
+
+> The goal is the product. If a session is producing process artifacts and no movement on
+> the ladder, that is drift — it happened on 2026-08-02 and cost a day.
+
+---
+
 The development loop's state: what the next session must know **without replaying history**.
 
 Both of us read and write this. It lives in the repo because it has to survive a context
