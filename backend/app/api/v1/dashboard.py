@@ -123,7 +123,7 @@ async def _clear_stale_selection(db: AsyncSession, pref: UserDashboardPreference
     concurrent GETs racing the same stale row: both load it, both call this,
     but only the winner's DELETE matches a row — the loser's matches zero and
     (per the `rowcount` gate below) does not audit a second
-    `dashboard.tombstone_cleared` event for what is a one-time notice.
+    `dashboard.stale_selection_cleared` event for what is a one-time notice.
 
     Returns True iff this call was the one that actually deleted the row
     (and therefore audited the clear).
@@ -153,7 +153,7 @@ async def _clear_stale_selection(db: AsyncSession, pref: UserDashboardPreference
         db=db,
         tenant_id=user.tenant_id,
         category="report",
-        action="dashboard.tombstone_cleared",
+        action="dashboard.stale_selection_cleared",
         actor_id=user.id,
         resource_type="report",
         resource_id=str(pref.id),

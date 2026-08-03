@@ -202,7 +202,7 @@ async def test_get_deleted_report_tombstone_banner_persists_until_dismissed(clie
 
     # GET never audits a mutation it never performed.
     cleared = (
-        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.tombstone_cleared'"))
+        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.stale_selection_cleared'"))
     ).scalar_one()
     assert cleared == 0
 
@@ -259,7 +259,7 @@ async def test_clear_stale_selection_survives_concurrent_republish(client, db):
     assert survivor.report_id == r1.id  # the now-valid-again selection was NOT discarded
 
     audit_count = (
-        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.tombstone_cleared'"))
+        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.stale_selection_cleared'"))
     ).scalar_one()
     assert audit_count == 0
 
@@ -324,7 +324,7 @@ async def test_tombstone_conditional_delete_survives_concurrent_repoint(client, 
     assert survivor.report_id == r2.id  # the concurrent selection was NOT discarded
 
     audit_count = (
-        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.tombstone_cleared'"))
+        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.stale_selection_cleared'"))
     ).scalar_one()
     assert audit_count == 0  # a no-op delete must not audit a clear that didn't happen
 
@@ -333,7 +333,7 @@ async def test_tombstone_conditional_delete_second_racer_is_noop_no_duplicate_au
     """Two concurrent GETs both loading the same stale tombstone before either
     delete runs is the other half of the TOCTOU: the winner's DELETE matches
     the row, the loser's matches zero. The loser must not log a second
-    dashboard.tombstone_cleared event for what is documented — and tested end
+    dashboard.stale_selection_cleared event for what is documented — and tested end
     to end via test_get_deleted_report_tombstone_banner_fires_exactly_once —
     as a one-time notice. That existing test only exercises two *sequential*
     GETs (the tombstone is already gone by the second one); this test drives
@@ -371,7 +371,7 @@ async def test_tombstone_conditional_delete_second_racer_is_noop_no_duplicate_au
     assert loser is False
 
     audit_count = (
-        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.tombstone_cleared'"))
+        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.stale_selection_cleared'"))
     ).scalar_one()
     assert audit_count == 1
 
@@ -546,7 +546,7 @@ async def test_dismiss_clears_tombstone_and_audits_once(client, db):
     assert pref is None
 
     cleared = (
-        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.tombstone_cleared'"))
+        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.stale_selection_cleared'"))
     ).scalar_one()
     assert cleared == 1
 
@@ -578,7 +578,7 @@ async def test_dismiss_is_idempotent_second_call_is_noop(client, db):
     assert second.json()["active_is_fallback"] is False
 
     cleared = (
-        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.tombstone_cleared'"))
+        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.stale_selection_cleared'"))
     ).scalar_one()
     assert cleared == 1  # not audited again on the second, no-op call
 
@@ -600,7 +600,7 @@ async def test_dismiss_noop_when_no_preference_exists(client, db):
     assert resp.json()["active_is_fallback"] is False
 
     cleared = (
-        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.tombstone_cleared'"))
+        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.stale_selection_cleared'"))
     ).scalar_one()
     assert cleared == 0
 
@@ -648,7 +648,7 @@ async def test_dismiss_clears_unpublished_selection_and_audits(client, db):
     assert pref is None  # the stale selection row is gone, not merely self-healed
 
     cleared = (
-        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.tombstone_cleared'"))
+        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.stale_selection_cleared'"))
     ).scalar_one()
     assert cleared == 1
 
@@ -680,7 +680,7 @@ async def test_dismiss_unpublished_case_is_idempotent_second_call_is_noop(client
     assert second.json()["active_is_fallback"] is False
 
     cleared = (
-        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.tombstone_cleared'"))
+        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.stale_selection_cleared'"))
     ).scalar_one()
     assert cleared == 1  # not audited again on the second, no-op call
 
@@ -716,7 +716,7 @@ async def test_dismiss_does_not_clear_a_currently_valid_selection(client, db):
     assert pref is not None and pref.report_id == r1.id  # untouched
 
     cleared = (
-        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.tombstone_cleared'"))
+        await db.execute(text("SELECT count(*) FROM audit_events WHERE action='dashboard.stale_selection_cleared'"))
     ).scalar_one()
     assert cleared == 0
 
