@@ -83,6 +83,16 @@ Written so the next session does not re-litigate these.
 - **2026-08-02 · Process global (`~/.claude/`), knowledge local (repo)** · because process
   is identical across projects and currently duplicated into each one, while planning
   harness barely exists anywhere.
+- **2026-08-04 · Reversals post to the CURRENT OPEN period; periods are never reopened
+  programmatically** · answered by the operator (accounting). A wrong posting discovered
+  after close is corrected by a reversing entry dated in the current open period. Reopening
+  a closed period requires an accounting controller's approval and is therefore a HUMAN
+  action outside the automated path — **no endpoint, no flag, no admin override may reopen
+  a period.** The close-lock invariant stays absolute in code.
+  *Consequence: the compensation design never fights our own guard, and needs no exception
+  path. Materiality was left open on purpose — with current-period reversal as the
+  unconditional default, materiality only decides whether a human escalates for the
+  exceptional reopen. It is a controller's judgement, not a constant in the codebase.*
 - **2026-08-02 · The cut test is "recoverable from the repo?", not "execution vs planning"** ·
   because the bare-body test showed an agent with no harness recovered the SET LOCAL
   landmine from a docstring in `database.py:65-73`, but could not recover the T2 gate
@@ -114,7 +124,9 @@ Written so the next session does not re-litigate these.
   so the fan-out completed successfully while silently skipping this tenant.
   *Still uncovered: per-tenant silence inside a healthy fan-out. That is the shape that
   actually bit us, and the Beat-level liveness check does not see it.*
-- **Frozen-period reversal policy** — a wrong auto-post is usually found after the period
-  hard-freezes, so the compensating entry collides with our own close-lock invariant.
-  Needs a controller's written answer. *Blocking: Rung 2 posting.*
+- ~~Frozen-period reversal policy~~ **ANSWERED 2026-08-04** — see DECIDED. Reversals go to
+  the current open period; reopening needs a controller and stays out of the code.
+  *One sub-question deferred, not blocking: at what materiality would a controller prefer a
+  prior-period adjustment over a current-period reversal? Only matters once a reversal is
+  large enough to distort the current month — ask before the first material one, not now.*
 - **Track O: finish or drop?** 22 open majors. *Blocking: nothing, but it rots.*
