@@ -34,22 +34,22 @@ Updated at the end of every task, not "later".
 
 | branch | tier | state | blocked on |
 |---|---|---|---|
-| `feat/agent-graph-operating-model` | mixed | 9 commits, **not merged** | nothing — active |
+| `feat/agent-graph-operating-model` | mixed | 16 commits, **not merged, ungated** | needs splitting |
 
 Contents of that branch, honestly:
 
-- **Process (done, clean)** — daily routine + verification standard in `CLAUDE.md`; gate
-  target-check in `.claude/rules/uat-review.md`; `scripts/verify.sh`.
-- **Doctrine (needs cutting)** — `.claude/rules/agent-graph.md`, 35 rules. The audit found
-  rules 3 and 33–34 **contradict shipped code**, and §13–20 are law for an engine we
-  haven't built. Do not treat this file as authoritative until it is cut.
+- **Process (DONE)** — `verify.sh` · `loop.sh` · `ship.sh` · `STATE.md`; routine +
+  verification standard now global in `~/.claude/CLAUDE.md`; gate target-check in
+  `.claude/rules/uat-review.md`; `agent-graph.md` cut 35 rules → 15.
+- **Product (reject action)** — service + model columns + migration 093 + 16 tests, all
+  green. **Unreachable: no endpoint, no MCP tool, so no labels accrue yet.**
 - **Track O — product code (PARKED)** — ops digest + Sentry-in-workers + InstrumentedTask
   coverage. Passed no gate round cleanly: **22 open majors** from round 2.
 
 ## NEXT — ordered, with the why
 
-1. **Cut `agent-graph.md`** to the rules that are real invariants. *Why first: it currently
-   contains doctrine that would break working code if followed.*
+1. ~~Cut `agent-graph.md`~~ **DONE** — 35 rules → 15; the two that contradicted shipped
+   code are now recorded as decisions not to re-litigate.
 2. ~~Cut the ceremonial layer~~ **DONE** — both false lines fixed; routine + verification
    standard moved to `~/.claude/CLAUDE.md` (global, applies to every project), removing
    3.2 KB of duplication from this repo's always-loaded context.
