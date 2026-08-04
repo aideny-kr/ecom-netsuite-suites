@@ -99,9 +99,14 @@ Written so the next session does not re-litigate these.
 
 ## OPEN — needs a human, blocking something
 
-- **Framework's NetSuite connection is dead** (OAuth expired). Deposit data frozen at
-  07-29; reconciliation has been completing nightly against it. Needs manual re-auth.
-  *Blocking: trustworthy recon on the real tenant.*
+- ~~Framework's NetSuite connection dead~~ **RESOLVED 2026-08-04.** Re-authed; connection
+  `active`, health-checked 02:55, deposit sync completed 02:00, data current to 02:13
+  (75,534 postings). The outage was real — failed 08-03 02:00, data frozen at 07-29 for
+  four nights while recon kept completing against it — and it is the exact failure the
+  liveness check in `services/ops_digest.py` was built to catch: *absence is not failure*,
+  so the fan-out completed successfully while silently skipping this tenant.
+  *Still uncovered: per-tenant silence inside a healthy fan-out. That is the shape that
+  actually bit us, and the Beat-level liveness check does not see it.*
 - **Frozen-period reversal policy** — a wrong auto-post is usually found after the period
   hard-freezes, so the compensating entry collides with our own close-lock invariant.
   Needs a controller's written answer. *Blocking: Rung 2 posting.*
