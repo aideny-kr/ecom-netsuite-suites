@@ -34,15 +34,21 @@ Updated at the end of every task, not "later".
 
 | branch | tier | state | blocked on |
 |---|---|---|---|
-| `feat/agent-graph-operating-model` | mixed | 16 commits, **not merged, ungated** | needs splitting |
+| `feat/dev-loop-and-harness` | T2 | 12 commits, process only — **ready to gate** | nothing |
+| `feat/agent-graph-operating-model` | T2 | Track O (22 majors) + reject action, **ungated** | needs Track O decision |
 
 Contents of that branch, honestly:
 
-- **Process (DONE)** — `verify.sh` · `loop.sh` · `ship.sh` · `STATE.md`; routine +
-  verification standard now global in `~/.claude/CLAUDE.md`; gate target-check in
-  `.claude/rules/uat-review.md`; `agent-graph.md` cut 35 rules → 15.
-- **Product (reject action)** — service + model columns + migration 093 + 16 tests, all
-  green. **Unreachable: no endpoint, no MCP tool, so no labels accrue yet.**
+**Split 2026-08-04** — the two were on one 136 KB branch, which the review gate cannot
+process in a single run (~30 KB practical limit). Cleanly separable: zero shared files.
+
+- **`feat/dev-loop-and-harness` (this branch, 53 KB)** — `verify.sh` · `loop.sh` ·
+  `ship.sh` · `STATE.md`; routine + verification standard now global in
+  `~/.claude/CLAUDE.md`; gate target-check in `.claude/rules/uat-review.md`;
+  `agent-graph.md` cut 35 rules → 15. Finished; gating now.
+- **`feat/agent-graph-operating-model` (58 KB + 24 KB)** — Track O (ops digest, Sentry in
+  workers, InstrumentedTask coverage; **22 open majors**) and the reject action (service +
+  migration 093 + 16 tests, but **no endpoint, so no labels accrue yet**).
 - **Track O — product code (PARKED)** — ops digest + Sentry-in-workers + InstrumentedTask
   coverage. Passed no gate round cleanly: **22 open majors** from round 2.
 
@@ -56,8 +62,8 @@ Contents of that branch, honestly:
 3. ~~Build the dev-cycle graph~~ **DONE** — `loop.sh` (stopping rule in state),
    `verify.sh` (evidence), `ship.sh` (tier computed, gate target pinned). FRAME and
    SCOPE stay human nodes on purpose: that is ownership, not capability.
-4. **Split this branch.** 16 commits mixing finished process work with Track O's 22 open
-   majors. The process half is ready; it should not sit behind Track O's review queue.
+4. ~~Split this branch~~ **DONE 2026-08-04** — process extracted to
+   `feat/dev-loop-and-harness` (12 commits, 53 KB, zero conflicts).
 5. **Ship the reject endpoint + MCP tool.** The service and migration exist and are
    tested, but nothing exposes them — **no labels can be recorded yet, so the evidence
    clock has not started.** This is the only item that moves the ladder.
