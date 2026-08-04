@@ -50,6 +50,22 @@ if ! "$PY" -c "import celery" >/dev/null 2>&1; then
   exit 2
 fi
 
+# Tests run against LOCAL docker, not whatever DATABASE_URL_DIRECT points at.
+#
+# The repo's conftest reads DATABASE_URL_DIRECT, which in a normal .env is the
+# live Supabase instance (26 tenants, 300k+ recon rows). Two problems: a branch's
+# migrations are not applied there, so any model column added on the branch makes
+# every test touching that model fail with UndefinedColumnError and look like a
+# code regression; and it points a test suite at production data.
+#
+# Observed: adding six nullable columns to ReconciliationResult turned a clean
+# "2 failed, 89 passed" into "6 failed, 85 passed" — four phantom failures that
+# were purely a schema-location artifact.
+#
+# Override with VERIFY_DB if you genuinely need a different target.
+export DATABASE_URL="${VERIFY_DB:-postgresql+asyncpg://postgres:postgres@localhost:5432/ecom_netsuite}"
+export DATABASE_URL_DIRECT="$DATABASE_URL"
+
 FAILED=(); PASSED=(); SKIPPED=()
 pass() { PASSED+=("$1"); printf '  PASS  %s\n' "$1"; }
 fail() { FAILED+=("$1"); printf '  FAIL  %s\n' "$1"; [[ -n "${2:-}" ]] && printf '        %s\n' "$2"; }

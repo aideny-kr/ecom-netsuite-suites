@@ -123,3 +123,4 @@ vibe-coding-strategy.md
 desktop/electron/test-results/
 /package.json
 /package-lock.json
+.loop-state.json
