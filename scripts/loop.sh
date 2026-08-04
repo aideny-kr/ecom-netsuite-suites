@@ -84,7 +84,14 @@ check)
   # Fingerprint the failure set. Retrying against an IDENTICAL failure is a stall,
   # not progress — this is what distinguishes "converging slowly" from "stuck",
   # and it is the distinction a bare attempt counter cannot make.
-  now_ev="$(echo "$out" | grep -E '^  (FAIL|WARN)' | sort | shasum | cut -c1-12)"
+  # Strip volatile text before hashing. The WARN lines embed pytest's wall-clock
+  # duration ("... in 13.84s"), so hashing them raw produced a different digest
+  # every run and the stall rule — the whole point of this file — could never
+  # fire. Also include SKIP lines: verify.sh's exit-2 path emits only those.
+  now_ev="$(echo "$out" \
+    | grep -E '^  (FAIL|WARN|SKIP)' \
+    | sed -E 's/in [0-9.]+s.*//; s/\([0-9:]+\)//g; s/[0-9]+\.[0-9]+s//g' \
+    | sort | shasum | cut -c1-12)"
   STATE="$STATE" _put "last_evidence=$now_ev"
 
   if [[ $rc -eq 0 ]]; then

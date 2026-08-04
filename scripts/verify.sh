@@ -66,6 +66,13 @@ fi
 export DATABASE_URL="${VERIFY_DB:-postgresql+asyncpg://postgres:postgres@localhost:5432/ecom_netsuite}"
 export DATABASE_URL_DIRECT="$DATABASE_URL"
 
+# Anything that creates must delete — including on interrupt. Leaked worktrees
+# accumulate in .claude/worktrees/ and blow the sandbox arg limit at ~40, after
+# which every Bash call in the session fails.
+_WORKTREES=()
+_cleanup() { for w in "${_WORKTREES[@]:-}"; do [[ -n "$w" ]] && git worktree remove --force "$w" >/dev/null 2>&1; done; }
+trap _cleanup EXIT INT TERM
+
 FAILED=(); PASSED=(); SKIPPED=()
 pass() { PASSED+=("$1"); printf '  PASS  %s\n' "$1"; }
 fail() { FAILED+=("$1"); printf '  FAIL  %s\n' "$1"; [[ -n "${2:-}" ]] && printf '        %s\n' "$2"; }
@@ -145,18 +152,42 @@ else
   skip "import" "no backend/app"
 fi
 
-# ------------------------------------------- 3. tracked-file check (clean-checkout proxy)
-# .gitignore silently swallowed a new task module; every local check passed and any
-# fresh clone would have failed at worker boot. Cheap proxy: nothing referenced by
-# conf.include may be untracked.
+# ------------------------------- 3. every loaded module must be TRACKED
+# The first version ran `git ls-files --others --exclude-standard`, and
+# --exclude-standard EXCLUDES gitignored files by definition — so it could not
+# see the one bug it was written for (.gitignore's `tasks/` swallowing a new
+# worker module, which passed every local check and would have failed at boot on
+# any clean clone). Verified: with that file present the old command returned 0.
+#
+# Ask the precise question instead: does every module Celery loads resolve to a
+# file git actually tracks?
 echo
 echo "[tracked]"
-if [[ -d backend/app/workers/tasks ]]; then
-  untracked=$(git ls-files --others --exclude-standard backend/app | grep -E '\.py$' || true)
-  if [[ -z "$untracked" ]]; then pass "no untracked .py under backend/app"
-  else fail "untracked .py files (invisible to CI and any fresh clone)" "$(echo "$untracked" | head -5)"; fi
+if [[ -d backend/app ]]; then
+  out=$(cd backend && "$PY" - <<'PYEOF' 2>&1
+import importlib.util, os, subprocess, sys
+from app.workers.celery_app import celery_app
+root = subprocess.run(["git","rev-parse","--show-toplevel"],capture_output=True,text=True).stdout.strip()
+bad = []
+for m in celery_app.conf.include:
+    spec = importlib.util.find_spec(m)
+    if not spec or not spec.origin:
+        bad.append(f"{m}: no file on disk"); continue
+    rel = os.path.relpath(spec.origin, root)
+    if subprocess.run(["git","ls-files","--error-unmatch",rel],
+                      capture_output=True, cwd=root).returncode:
+        bad.append(f"{m} -> {rel}")
+if bad:
+    print("modules Celery loads that git does NOT track (CI and any fresh clone will fail):")
+    [print("   " + b) for b in bad]
+    sys.exit(1)
+print(f"all {len(celery_app.conf.include)} loaded modules are tracked")
+PYEOF
+  )
+  if [[ $? -eq 0 ]]; then pass "every loaded module is tracked"; printf '        %s\n' "$(echo "$out" | tail -1)"
+  else fail "untracked module in conf.include" "$(echo "$out" | head -5)"; fi
 else
-  skip "tracked" "no backend/app/workers/tasks"
+  skip "tracked" "no backend/app"
 fi
 
 # ---------------------------------------------------------------- 4. tests
@@ -181,6 +212,7 @@ if [[ $FULL -eq 1 ]]; then
   BRANCH="$(git rev-parse --abbrev-ref HEAD)"
   TMPWT="$(git rev-parse --git-common-dir)/../.claude/worktrees/_verify_$$"
   if git worktree add --detach "$TMPWT" "$BRANCH" >/dev/null 2>&1; then
+    _WORKTREES+=("$TMPWT")
     out=$(cd "$TMPWT/backend" && "$PY" -m pytest "${TEST_TARGET#backend/}" -q 2>&1 | tail -3)
     if echo "$out" | grep -qE '[0-9]+ passed' && ! echo "$out" | grep -qE '[0-9]+ failed|error'; then
       pass "clean checkout of $BRANCH — $(echo "$out" | grep -oE '[0-9]+ passed.*' | head -1)"
@@ -199,29 +231,52 @@ if [[ $FULL -eq 1 ]]; then
   BASE="${VERIFY_BASE:-origin/main}"
   BASEWT="$(git rev-parse --git-common-dir)/../.claude/worktrees/_base_$$"
 
-  # Parse ONLY pytest's final summary line. Matching '[0-9]+ failed' across the whole
-  # output scrapes numbers out of assertion text too — a test whose failure message
-  # contained "6543 failed" produced a 25-line "count" and a FALSE "new failures"
-  # verdict. A verification tool that cries wolf is worse than no tool.
-  _fail_count() { # $1=dir $2=target -> integer failures
-    local summary
-    summary="$(cd "$1" && "$PY" -m pytest "$2" -q --tb=no 2>&1 \
-                | grep -E '^[0-9]+ (passed|failed)|[0-9]+ (passed|failed).*in [0-9.]+s' | tail -1)"
-    printf '%s' "$summary" > /tmp/.verify_summary_$$
-    local n; n="$(printf '%s' "$summary" | grep -oE '[0-9]+ failed' | head -1 | grep -oE '[0-9]+')"
-    printf '%s' "${n:-0}"
+  # Ask pytest whether it RAN, do not infer it from text.
+  #
+  # The first version parsed only the summary line for '[0-9]+ failed'. A suite
+  # that could not run at all — collection error, import error, Postgres down —
+  # prints no such token, so it scored 0 and sailed through "no new failures".
+  # The worse the breakage, the cleaner the verdict, in the one tool whose whole
+  # purpose is preventing false greens. It also never counted pytest ERRORS,
+  # only failures, so fixture/DB errors were invisible on the happy path too.
+  #
+  # Exit codes are the ground truth: 0 all passed · 1 tests failed · 2 interrupted
+  # · 3 internal error · 4 usage error · 5 no tests collected. Anything >=2 means
+  # the run did not happen and MUST NOT be scored as zero failures.
+  _pytest_run() {   # $1=dir $2=target -> "ran:<failures+errors>|<summary>" or "norun:<why>"
+    local out rc summary f e
+    out="$(cd "$1" && "$PY" -m pytest "$2" -q --tb=no 2>&1)"; rc=$?
+    if [[ $rc -ge 2 ]]; then printf 'norun:pytest exit %s (suite did not run)' "$rc"; return; fi
+    summary="$(printf '%s' "$out" | grep -E '[0-9]+ (passed|failed|error)' | tail -1)"
+    [[ -z "$summary" ]] && { printf 'norun:no parseable pytest summary'; return; }
+    f="$(printf '%s' "$summary" | grep -oE '[0-9]+ failed'  | head -1 | grep -oE '[0-9]+')"
+    e="$(printf '%s' "$summary" | grep -oE '[0-9]+ error'   | head -1 | grep -oE '[0-9]+')"
+    local pcount; pcount="$(printf '%s' "$summary" | grep -oE '[0-9]+ passed' | head -1 | grep -oE '[0-9]+')"
+    # ZERO passing tests is not evidence, whatever the comparison says. With
+    # Postgres down every test ERRORs equally on both sides, so "no new failures
+    # (base=32, head=32)" is arithmetically true and completely worthless.
+    [[ "${pcount:-0}" -eq 0 ]] && { printf 'norun:0 tests passed (%s)' "$summary"; return; }
+    printf 'ran:%s|%s' "$(( ${f:-0} + ${e:-0} ))" "$summary"
   }
 
   if git worktree add --detach "$BASEWT" "$BASE" >/dev/null 2>&1; then
-    bf="$(_fail_count "$BASEWT/backend" "${TEST_TARGET#backend/}")"
-    echo "        baseline($BASE): $(cat /tmp/.verify_summary_$$ 2>/dev/null)"
-    hf="$(_fail_count "$REPO_ROOT/backend" "${TEST_TARGET#backend/}")"
-    echo "        head:            $(cat /tmp/.verify_summary_$$ 2>/dev/null)"
-    rm -f /tmp/.verify_summary_$$
-    if [[ "$hf" -le "$bf" ]]; then
-      pass "no new failures vs $BASE (base=$bf, head=$hf)"
+    _WORKTREES+=("$BASEWT")
+    b="$(_pytest_run "$BASEWT/backend" "${TEST_TARGET#backend/}")"
+    h="$(_pytest_run "$REPO_ROOT/backend" "${TEST_TARGET#backend/}")"
+    echo "        baseline($BASE): ${b#*|}"
+    echo "        head:            ${h#*|}"
+    if [[ "$b" == norun:* || "$h" == norun:* ]]; then
+      # No comparison is possible. Saying "no new failures" here is the exact
+      # false green this rewrite exists to remove.
+      fail "baseline comparison IMPOSSIBLE — the suite did not run" \
+           "base: ${b#norun:} · head: ${h#norun:} (is Postgres up? is the target importable?)"
     else
-      fail "NEW failures vs $BASE" "base=$bf head=$hf — these are yours"
+      bf="${b%%|*}"; bf="${bf#ran:}"; hf="${h%%|*}"; hf="${hf#ran:}"
+      if [[ "$hf" -le "$bf" ]]; then
+        pass "no new failures vs $BASE (base=$bf, head=$hf — failures+errors)"
+      else
+        fail "NEW failures vs $BASE" "base=$bf head=$hf — these are yours"
+      fi
     fi
     git worktree remove --force "$BASEWT" >/dev/null 2>&1
   else
