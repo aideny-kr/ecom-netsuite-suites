@@ -50,11 +50,18 @@ Contents of that branch, honestly:
 
 1. **Cut `agent-graph.md`** to the rules that are real invariants. *Why first: it currently
    contains doctrine that would break working code if followed.*
-2. **Cut the ceremonial layer** from `CLAUDE.md`/`MEMORY.md`; fix the two lines that are
-   factually wrong (PR #138 "paused"; `./deploy-frontend.sh` no longer exists).
-3. **Build the dev-cycle graph** — FRAME → SCOPE → BUILD⇄VERIFY → GATE → LAND, edges
-   enforced in code, not prose.
-4. **Decide Track O** — finish the 22 majors, or drop it. *Not both fronts at once.*
+2. ~~Cut the ceremonial layer~~ **DONE** — both false lines fixed; routine + verification
+   standard moved to `~/.claude/CLAUDE.md` (global, applies to every project), removing
+   3.2 KB of duplication from this repo's always-loaded context.
+3. ~~Build the dev-cycle graph~~ **DONE** — `loop.sh` (stopping rule in state),
+   `verify.sh` (evidence), `ship.sh` (tier computed, gate target pinned). FRAME and
+   SCOPE stay human nodes on purpose: that is ownership, not capability.
+4. **Split this branch.** 16 commits mixing finished process work with Track O's 22 open
+   majors. The process half is ready; it should not sit behind Track O's review queue.
+5. **Ship the reject endpoint + MCP tool.** The service and migration exist and are
+   tested, but nothing exposes them — **no labels can be recorded yet, so the evidence
+   clock has not started.** This is the only item that moves the ladder.
+6. **Decide Track O** — finish the 22 majors, or drop it. Not both fronts at once.
 
 ## DECIDED — date · chose X over Y · because
 

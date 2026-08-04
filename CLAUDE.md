@@ -2,35 +2,9 @@
 
 > Read by Claude Code at session start. Encodes patterns, conventions, and decisions.
 
-## Daily Operating Routine — RUN THIS FIRST
-
-Every session starts here, in order. Do not open an editor before step 2 is done.
-
-**1. Ground in reality, not in the repo.** Read the ops digest (`tasks.ops_digest`, 08:00 UTC). If it has not shipped yet, query `jobs` directly: failures in the last 24h, jobs that *stopped running*, and jobs that completed while reporting internal errors. Absence is not success — a scheduled job that produces nothing produces no failures either. Practising exactly this on 2026-08-02 found a real tenant running reconciliation for 4 nights against deposit data frozen 4 days earlier.
-
-**2. Triage before building.** Unresolved review findings and live incidents outrank new feature work, always. A finding you carry into a new PR gets reviewed twice and fixed later.
-
-**3. Pick ONE item and tier it.** T0/T1/T2 by the table below. Everything unattended-execution is T2 by definition. Say the tier out loud in the commit subject.
-
-**4. Build under the doctrine.** TDD; `.claude/rules/agent-graph.md` binds anything a schedule can start. Max 15 iterations, stop after 3 self-heal attempts.
-
-**5. Verify by the standard below.** This is where the day is usually lost. Green tests are not evidence.
-
-**6. Gate, then land.** T2 ⇒ blocking multi-angle review. Re-run after every fix round.
-
-**7. Close the loop.** Commit, update the plan, write what was non-obvious to memory.
-
-## Verification Standard — earned the hard way, 2026-08-02
-
-Every rule here comes from something that actually got through on this repo. Violating one has already cost a session.
-
-1. **Verification must EXECUTE, not inspect.** An AST/regex/grep check over source cannot catch a name-resolution error, and a disk scan cannot catch an untracked file. A guard test that parsed decorators passed green while four task modules raised `NameError` on import — which would have crash-looped the entire worker fleet. If the claim is "it works," import it, call it, run it.
-2. **Verify from a clean checkout before claiming done.** `.gitignore` silently excluded a new task module; every local check passed and any fresh clone would have failed at boot. `git worktree add --detach <branch>` and run there. Cheap, and it is the only way to see what CI will see.
-3. **Never claim "no regressions" without a baseline.** Run the same suite on pristine `origin/main` in a throwaway worktree and diff the results. Pre-existing failures are common here; asserting "zero regressions" from a green run alone is a guess.
-4. **Read the review gate's `target`/`base` before believing a word of it.** The gate defaults to the session cwd's branch. Working in a worktree while the session sits in another is the normal pattern in this repo, so the default is usually wrong — one run silently reviewed an unrelated branch and reported `target: null` while doing it.
-5. **One clean gate round is weak evidence.** Observed rounds: `0 → 2 → 3 → 1 → 0` majors. A clean round after a dirty one means the last fix was clean, not that the work is. Expect 2+ rounds; a first-round zero on a large diff is a reason to check the gate targeted the right thing.
-6. **A CONFIRMED finding can still be wrong.** Verify each one against the code yourself before acting. Findings are evidence, not verdicts.
-7. **Recovery/verification code that has never run does not exist.** Prove the test fails against the broken code before trusting it green.
+> Daily routine, verification standard, and loop/graph doctrine live in
+> `~/.claude/CLAUDE.md` — they are identical across projects. This file carries only
+> what is specific to THIS repo.
 
 ## Development Workflow — FOLLOW ALWAYS
 
