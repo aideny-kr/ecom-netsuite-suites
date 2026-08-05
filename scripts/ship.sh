@@ -28,35 +28,6 @@ BASE="${SHIP_BASE:-origin/main}"
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 MODE="--full"; [[ "${1:-}" == "--fast" ]] && MODE=""
 
-# ship.sh --self-test : assert the path translation actually fires on known-T2
-# files. "I added more patterns" is precisely the unproven claim that shipped a
-# tier table missing three of this repo's highest-risk surfaces.
-if [[ "${1:-}" == "--self-test" ]]; then
-  fails=0
-  for f in \
-    backend/alembic/versions/093_x.py \
-    backend/app/workers/tasks/ops_digest.py \
-    backend/app/services/chat/mutation_guard.py \
-    backend/app/services/reconciliation/close_scope.py \
-    backend/app/api/v1/reconciliation.py \
-    backend/app/services/chat/orchestrator.py \
-    backend/app/models/reconciliation.py \
-    backend/app/core/dependencies.py \
-    docker-compose.prod.yml \
-    .claude/rules/uat-review.md \
-    CLAUDE.md \
-    scripts/verify.sh
-  do
-    CHANGED="$f"; TRIGGERS=()
-    match() { echo "$CHANGED" | grep -qE "$1" && TRIGGERS+=("$2"); }
-    # shellcheck disable=SC1090
-    source /dev/stdin <<< "$(sed -n '/^match /p' "${BASH_SOURCE[0]}")"
-    if ((${#TRIGGERS[@]})); then printf '  T2  %s\n' "$f"
-    else printf '  MISS %s  <- computes T1, should be T2\n' "$f"; fails=$((fails+1)); fi
-  done
-  echo; [[ $fails -eq 0 ]] && { echo "self-test PASSED — all known-T2 paths compute T2"; exit 0; }
-  echo "self-test FAILED — $fails path(s) misclassified"; exit 1
-fi
 
 echo "ship.sh — $BRANCH vs $BASE"
 echo
@@ -79,41 +50,19 @@ fi
 # ───────────────────────────────────── edge 2: tier is COMPUTED, not remembered
 # The T2 trigger list in CLAUDE.md is prose I have to recall correctly under load.
 # Recall is the failure mode; computing it from the diff is not.
-declare -a TRIGGERS=()
-match() { echo "$CHANGED" | grep -qE "$1" && TRIGGERS+=("$2"); }
-
-# Each pattern names the CLAUDE.md trigger it implements. CLAUDE.md remains the
-# canonical list; this is a PATH TRANSLATION of it, and translations drift — hence
-# `ship.sh --self-test`, which asserts known-T2 paths actually compute T2.
-# The first version silently omitted backend/app/api (the recon approve endpoint),
-# backend/app/services/chat (SSE number interception), and scripts/ (this tooling),
-# so the repo's highest-risk surfaces computed as T1 with "no blocking gate required".
-match '^backend/alembic/'                                   'alembic migration'
-match '^backend/app/workers/'                               'cron/Beat job (InstrumentedTask)'
-match 'mutation_guard|write_confirmation'                   'HITL / mutation guard'
-match '^backend/app/services/reconciliation/'               'financial close / money-variance'
-match '^backend/app/api/'                                   'mutates customer data (API write surface)'
-match '^backend/app/services/chat/|^backend/app/mcp/'       'prompt-pollution / SSE number interception / MCP writes'
-match '^backend/app/core/(dependencies|encryption|security)|auth|rls|tenant_context' 'auth / RLS / tenant-scoping'
-match '^backend/app/models/'                                'schema surface backing customer data'
-match 'docker-compose|Dockerfile|^\.github/workflows/|nginx' 'deploy / runtime infra'
-match 'feature_flag'                                        'feature flags'
-match 'knowledge_profiles|prompt_assembler|golden'          'prompt-pollution surface'
-match 'soul'                                                'soul config'
-match '^\.claude/(rules|workflows)/|^CLAUDE\.md|^scripts/(verify|loop|ship)\.sh' 'the review/UAT tooling or policy itself'
-match 'file_cabinet'                                        'file-cabinet I/O'
-
-if ((${#TRIGGERS[@]})); then TIER="T2"; else
-  if echo "$CHANGED" | grep -qvE '\.(md|txt)$|^docs/'; then TIER="T1"; else TIER="T0"; fi
-fi
-
+# Tier is decided by the human, against CLAUDE.md's list — not by a copy of it.
+# The previous version re-implemented the T2 trigger checklist as path regexes,
+# which .claude/rules/uat-review.md explicitly forbids ("do NOT duplicate this
+# list"), and the copy immediately drifted: backend/app/api, services/chat,
+# models and scripts/ all computed T1 — "no blocking gate required" — on this
+# repo's highest-risk surfaces. A second source of truth is worse than none,
+# because it is trusted.
 echo
-echo "[tier] $TIER"
-if ((${#TRIGGERS[@]})); then
-  printf '  triggered by:\n'; printf '    · %s\n' "${TRIGGERS[@]}"
-else
-  echo "  no T2 triggers matched"
-fi
+echo "[tier] decide against the canonical list in CLAUDE.md:"
+sed -n '/^\*\*T2 (high-risk)\*\*/,/^\*\*T1\*\*/p' CLAUDE.md | fold -s -w 88 | sed 's/^/  /'
+echo
+echo "  files changed:"
+echo "$CHANGED" | sed 's/^/    /'
 
 # ─────────────────────────────────── edge 3: BUILD → GATE requires VERIFY to pass
 echo
@@ -139,7 +88,7 @@ fi
 
 # ───────────────────────────────────────── edge 4: GATE, with target PINNED
 echo
-if [[ "$TIER" == "T2" ]]; then
+if [[ "${TIER:-T2}" == "T2" ]]; then
   cat <<EOF
 [gate] $TIER requires the blocking multi-angle review BEFORE merge.
 

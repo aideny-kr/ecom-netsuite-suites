@@ -49,7 +49,7 @@ docs/
 .mcp.json
 
 # Task queue (local workflow, not code)
-tasks/
+/tasks/
 
 # Personal/internal files
 aiden-*.docx
