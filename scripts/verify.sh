@@ -65,6 +65,24 @@ fi
 # Override with VERIFY_DB if you genuinely need a different target.
 export DATABASE_URL="${VERIFY_DB:-postgresql+asyncpg://postgres:postgres@localhost:5432/ecom_netsuite}"
 export DATABASE_URL_DIRECT="$DATABASE_URL"
+# DATABASE_URL_SYNC too, and this one is not cosmetic. workers/base_task.py does
+# `sync_engine = create_engine(settings.DATABASE_URL_SYNC)` and InstrumentedTask
+# .before_start WRITES a Job row and an AuditEvent through it. A normal .env
+# points that at the live Supabase pooler, so overriding only the async URLs left
+# every instrumented-task test writing rows into production.
+export DATABASE_URL_SYNC="${VERIFY_DB_SYNC:-postgresql://postgres:postgres@localhost:5432/ecom_netsuite}"
+
+# Fail closed rather than silently write somewhere real: if any DB URL still
+# resolves to a non-local host, stop.
+for _u in "$DATABASE_URL" "$DATABASE_URL_DIRECT" "$DATABASE_URL_SYNC"; do
+  case "$_u" in
+    *localhost*|*127.0.0.1*) ;;
+    *) echo "verify.sh: refusing to run — a DB URL points at a non-local host:"
+       echo "           $(printf '%s' "$_u" | sed -E 's#//[^@]*@#//***@#')"
+       echo "           tests write Job/AuditEvent rows; set VERIFY_DB / VERIFY_DB_SYNC."
+       exit 2 ;;
+  esac
+done
 
 # Anything that creates must delete — including on interrupt. Leaked worktrees
 # accumulate in .claude/worktrees/ and blow the sandbox arg limit at ~40, after
@@ -193,13 +211,22 @@ fi
 # ---------------------------------------------------------------- 4. tests
 echo
 echo "[tests]"
-TEST_TARGET="${VERIFY_TESTS:-backend/tests/workers}"
+# Scope is a function of MODE, not a constant.
+#   --fast : a narrow slice, for the inner build/fix loop. Explicitly NOT evidence.
+#   --full : the whole backend suite (5,589 tests). Slow on purpose — it runs once
+#            before landing, not every cycle.
+# The first version used the narrow slice for BOTH, so "verify PASSED · ready for
+# the gate" was reported on 7 of 416 backend test files — about 2% of the suite —
+# while CLAUDE.md requires zero regressions across it.
+if [[ -n "${VERIFY_TESTS:-}" ]]; then TEST_TARGET="$VERIFY_TESTS"
+elif [[ $FULL -eq 1 ]]; then TEST_TARGET="backend/tests"
+else TEST_TARGET="backend/tests/workers"; fi
 if [[ -d "$TEST_TARGET" ]]; then
   out=$(cd backend && "$PY" -m pytest "${TEST_TARGET#backend/}" -q 2>&1 | tail -4)
   if echo "$out" | grep -qE '[0-9]+ passed' && ! echo "$out" | grep -qE '[0-9]+ failed|error'; then
     pass "pytest $TEST_TARGET — $(echo "$out" | grep -oE '[0-9]+ passed.*' | head -1)"
   else
-    warn "pytest $TEST_TARGET — $(echo "$out" | tail -1)" "baseline not compared in fast mode; run --full to tell yours from pre-existing"
+    warn "pytest $TEST_TARGET — $(echo "$out" | tail -1)" "fast mode: narrow scope, no baseline. NOT evidence — run --full before claiming done"
   fi
 else
   skip "pytest" "$TEST_TARGET not found"
@@ -284,7 +311,7 @@ if [[ $FULL -eq 1 ]]; then
   fi
 else
   echo
-  skip "clean-checkout + baseline" "fast mode; run with --full before claiming done"
+  skip "clean-checkout + baseline + full suite" "fast mode covers $(find backend/tests/workers -name 'test_*.py' 2>/dev/null | wc -l | tr -d ' ') of $(find backend/tests -name 'test_*.py' 2>/dev/null | wc -l | tr -d ' ') backend test files — run --full before claiming done"
 fi
 
 # ---------------------------------------------------------------- verdict
