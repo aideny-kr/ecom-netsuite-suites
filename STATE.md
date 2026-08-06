@@ -36,6 +36,7 @@ Updated at the end of every task, not "later".
 |---|---|---|---|
 | `feat/dev-loop-and-harness` | T2 | 21 commits, process only — gated ×3, blockers fixed, **frozen** | nothing |
 | `feat/agent-graph-operating-model` | T2 | Track O (22 majors) + reject action, **ungated** | needs Track O decision |
+| `feat/rolling-period` | T2 | Stage 1 of 2. T1 resolver done (`f6407db`); T2-T5 pending | nothing |
 
 Contents of that branch, honestly:
 
