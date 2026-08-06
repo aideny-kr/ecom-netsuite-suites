@@ -78,10 +78,16 @@ if [[ $VERIFY_RC -ne 0 ]]; then
   echo "Fix the failures and re-run. Do not proceed to the gate on unverified work."
   exit 1
 fi
-if [[ -z "$MODE" ]]; then
+# MODE is the ARGUMENT PASSED TO verify.sh, so empty means FULL and "--quick" means
+# quick — the reverse of how it reads. Testing -z here (the obvious-looking spelling)
+# inverts the gate: it STOPs on the full run and proceeds on the quick one, making the
+# gate command reachable ONLY via the mode this script calls insufficient to land.
+# Proven by running it: `./scripts/ship.sh` with no args exited 2 saying "ran in
+# --quick mode" and printed the Workflow command zero times.
+if [[ -n "$MODE" ]]; then
   echo
-  echo "STOP — ran in --quick mode, which skips the suite entirely."
-  echo "Re-run without --quick before landing."
+  echo "STOP — ran in $MODE mode, which skips the suite entirely."
+  echo "Re-run without $MODE before landing."
   exit 2
 fi
 
