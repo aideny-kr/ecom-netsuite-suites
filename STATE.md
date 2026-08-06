@@ -102,6 +102,28 @@ fresh branch off `main` and leave Track O behind pending its own decision.
 
 Written so the next session does not re-litigate these.
 
+- **2026-08-06 · We had been SKIPPING RUNGS on the agentic-engineering ladder** · because
+  the ladder (flat capture → code graph → domain graph → single-agent loop → verifier →
+  small fan-out → gated team → worktrees) says each rung needs an entry trigger and a kill
+  rule, and we were running 60-agent fan-outs (rung 6) with no working single-agent loop
+  (rung 3), no Stop hook, and no measured baseline. The 31×-cost finding was the bill for
+  that. Corrective: fix rung 3 first, and treat "does it beat one agent on cost per
+  successful outcome" as the gate for climbing at all.
+- **2026-08-06 · A deterministic Stop hook backs every done-claim — `stop_guard.py`** ·
+  because `/goal`'s evaluator (and any transcript-reading judge) **cannot run commands or
+  read files**, so it cannot distinguish a true claim from a confident one — the
+  "narrated success" failure, which is this workspace's single most repeated defect. The
+  hook blocks a turn that asserts green when no verify PASS is recorded for the CURRENT
+  HEAD. Narrow by design: it only fires where `scripts/verify.sh` exists, and a recorded
+  PASS at that exact sha silences it regardless of wording. Honours `stop_hook_active`,
+  or the session wedges. Rejected: making it a model-evaluated prompt hook — that
+  reintroduces the exact weakness it exists to cover.
+- **2026-08-06 · Compaction carries ground truth forward — `compact_snapshot.py`** ·
+  because a summary compresses narrative and drops state: on 2026-08-05 this session hit
+  100% context and branch/sha, verify status and parked branches all had to be
+  reconstructed by hand, while the summary confidently carried claims that were no longer
+  true. PostCompact now re-reads those facts from git at injection time (never trusting
+  the pre-snapshot) and states that where it disagrees with the summary, it wins.
 - **2026-08-06 · The stopping rule is now IN RUN STATE — `~/.claude/hooks/loop_state.py`** ·
   because deleting `loop.sh` was right (a script you must invoke enforces nothing) but
   nothing replaced the function it served, so for three days the iteration cap lived in
