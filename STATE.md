@@ -59,7 +59,11 @@ process in a single run (~30 KB practical limit). Cleanly separable: zero shared
 2. ~~Cut the ceremonial layer~~ **DONE** — both false lines fixed; routine + verification
    standard moved to `~/.claude/CLAUDE.md` (global, applies to every project), removing
    3.2 KB of duplication from this repo's always-loaded context.
-3. ~~Build the dev-cycle graph~~ **DONE** — `loop.sh` (stopping rule in state),
+3. **Convert the two rules I keep breaking into hooks** — (a) `PreToolUse` refusing a
+   gate invocation without a pinned `target`, (b) `PostToolUse` recording which HEAD
+   `verify.sh` last passed on. These are the exact failures repeated all of 2026-08-02→05.
+4. **Single-agent baseline** on the round-3 diff before spending another 60 agents.
+5. ~~Build the dev-cycle graph~~ **DONE** — `loop.sh` (stopping rule in state),
    `verify.sh` (evidence), `ship.sh` (tier computed, gate target pinned). FRAME and
    SCOPE stay human nodes on purpose: that is ownership, not capability.
 4. ~~Split this branch~~ **DONE 2026-08-04** — process extracted to
@@ -72,6 +76,22 @@ process in a single run (~30 KB practical limit). Cleanly separable: zero shared
 ## DECIDED — date · chose X over Y · because
 
 Written so the next session does not re-litigate these.
+
+- **2026-08-05 · Enforcement lives in HOOKS, not in shell scripts we choose to run** ·
+  because a script that must be invoked is the same category as prose, just executable.
+  `loop.sh` was deleted on the belief that self-imposed iteration budgets are
+  unenforceable — that was wrong. `PreToolUse`/`PostToolUse`/`SessionStart` hooks run
+  whether or not the agent cooperates, and 9 were already configured in
+  `~/.claude/settings.json` the whole time. Split verification into PULL (verify.sh —
+  fine to invoke) and PUSH (hooks — the only real enforcement).
+- **2026-08-05 · Measure the single-agent review baseline before any further fan-out** ·
+  because the 180-config scaling study reports returns go NEGATIVE once the single-agent
+  baseline exceeds ~45%, and sequential-reasoning tasks lose 39-70% under ANY multi-agent
+  variant. Three gate rounds (~180 agents, ~14M tokens) ran over ~300 lines of shell with
+  no baseline ever taken. Source: `~/Downloads/graph-engineering.md` §2.4.
+- **2026-08-05 · Every tooling pilot gets a KILL RULE set in advance** · because round 3
+  was stopped by reaction to bad results, not against a pre-agreed threshold. A pilot
+  that ends in "do not build" is a success only if the bar was set beforehand.
 
 - **2026-08-02 · Adopt the Agent-Graph track, reject the Knowledge-Graph track** · because
   our matching is 1-hop on `order_ref` and measured graph advantage starts at ≥3 hops.
