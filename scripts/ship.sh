@@ -17,8 +17,8 @@
 # the correct path a single command, so doing it right is easier than doing it wrong.
 # A rule that nags is just more prose to ignore; a command that does the work gets used.
 #
-#   ./scripts/ship.sh            # compute tier, run verify --full, print the gate command
-#   ./scripts/ship.sh --fast     # verify fast mode (NOT sufficient to land)
+#   ./scripts/ship.sh            # full verify, then print the gate command
+#   ./scripts/ship.sh --quick    # skips the suite. NOT sufficient to land.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -26,7 +26,7 @@ cd "$REPO_ROOT"
 
 BASE="${SHIP_BASE:-origin/main}"
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-MODE="--full"; [[ "${1:-}" == "--fast" ]] && MODE=""
+MODE=""; [[ "${1:-}" == "--quick" ]] && MODE="--quick"
 
 
 echo "ship.sh — $BRANCH vs $BASE"
@@ -66,7 +66,7 @@ echo "$CHANGED" | sed 's/^/    /'
 
 # ─────────────────────────────────── edge 3: BUILD → GATE requires VERIFY to pass
 echo
-echo "[verify] running scripts/verify.sh $MODE"
+echo "[verify] running scripts/verify.sh ${MODE:-(full)}"
 echo "────────────────────────────────────────────"
 # shellcheck disable=SC2086
 ./scripts/verify.sh $MODE
@@ -80,9 +80,8 @@ if [[ $VERIFY_RC -ne 0 ]]; then
 fi
 if [[ -z "$MODE" ]]; then
   echo
-  echo "STOP — ran in --fast mode. Fast mode skips the clean-checkout and baseline"
-  echo "comparison, so it cannot distinguish your regressions from pre-existing ones."
-  echo "Re-run without --fast before landing."
+  echo "STOP — ran in --quick mode, which skips the suite entirely."
+  echo "Re-run without --quick before landing."
   exit 2
 fi
 
