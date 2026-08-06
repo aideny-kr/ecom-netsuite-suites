@@ -49,7 +49,7 @@ docs/
 .mcp.json
 
 # Task queue (local workflow, not code)
-tasks/
+/tasks/
 
 # Personal/internal files
 aiden-*.docx
@@ -123,3 +123,4 @@ vibe-coding-strategy.md
 desktop/electron/test-results/
 /package.json
 /package-lock.json
+.loop-state.json

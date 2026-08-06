@@ -17,12 +17,12 @@ from sqlalchemy import delete, select
 
 from app.core.database import async_session_factory
 from app.models.domain_knowledge import DomainKnowledgeChunk
+from app.services.chat.domain_knowledge import embed_domain_texts
 from app.services.oracle_skill_seeder import (
     SLUG_MAP,
     chunk_markdown,
     walk_oracle_skills,
 )
-from app.services.chat.domain_knowledge import embed_domain_texts
 from app.workers.celery_app import celery_app
 
 if TYPE_CHECKING:
@@ -50,9 +50,7 @@ async def _read_stored_hashes(db: "AsyncSession", partition_ids: list[str]) -> d
     return {row.partition_id: (row.topic_tags or {}).get("oracle_skill_hash", "") for row in rows}
 
 
-async def _reseed_partition(
-    db: "AsyncSession", root: Path, skill_name: str, slug: str, new_hash: str
-) -> int:
+async def _reseed_partition(db: "AsyncSession", root: Path, skill_name: str, slug: str, new_hash: str) -> int:
     """Delete + re-insert one partition. Writes a sentinel row for hash state."""
     chunks: list[str] = []
     paths: list[Path] = []
@@ -72,29 +70,33 @@ async def _reseed_partition(
 
     embeddings = await embed_domain_texts(chunks) or [None] * len(chunks)
     for idx, (path, chunk_text, vec) in enumerate(zip(paths, chunks, embeddings, strict=True)):
-        db.add(DomainKnowledgeChunk(
-            source_uri=f"{slug}/{path.name}#chunk-{idx}",
-            chunk_index=idx,
-            raw_text=chunk_text,
-            token_count=len(chunk_text) // 4,
-            source_type="oracle_skill",
-            partition_id=slug,
-            embedding=vec,
-            is_deprecated=False,
-        ))
+        db.add(
+            DomainKnowledgeChunk(
+                source_uri=f"{slug}/{path.name}#chunk-{idx}",
+                chunk_index=idx,
+                raw_text=chunk_text,
+                token_count=len(chunk_text) // 4,
+                source_type="oracle_skill",
+                partition_id=slug,
+                embedding=vec,
+                is_deprecated=False,
+            )
+        )
 
     # Sentinel row for next-cycle hash comparison.
-    db.add(DomainKnowledgeChunk(
-        source_uri=f"{slug}/__hash_sentinel__",
-        chunk_index=-1,
-        raw_text="",
-        token_count=0,
-        source_type="oracle_skill_sentinel",
-        partition_id=slug,
-        embedding=None,
-        topic_tags={"oracle_skill_hash": new_hash},
-        is_deprecated=False,
-    ))
+    db.add(
+        DomainKnowledgeChunk(
+            source_uri=f"{slug}/__hash_sentinel__",
+            chunk_index=-1,
+            raw_text="",
+            token_count=0,
+            source_type="oracle_skill_sentinel",
+            partition_id=slug,
+            embedding=None,
+            topic_tags={"oracle_skill_hash": new_hash},
+            is_deprecated=False,
+        )
+    )
 
     return len(chunks)
 
@@ -137,6 +139,7 @@ async def _run_reseed(db: "AsyncSession", root: Path | str | None = None) -> int
 @celery_app.task(name="tasks.oracle_skill_reseed")
 def reseed_oracle_skills_task() -> dict:
     """Celery entrypoint. Runs every 6 hours per Beat schedule."""
+
     async def _run():
         async with async_session_factory() as db:
             try:
@@ -147,4 +150,5 @@ def reseed_oracle_skills_task() -> dict:
                 logger.exception("Oracle reseed task failed")
                 await db.rollback()
                 return {"status": "error", "error": str(e)}
+
     return asyncio.run(_run())

@@ -2,6 +2,10 @@
 
 > Read by Claude Code at session start. Encodes patterns, conventions, and decisions.
 
+> Daily routine, verification standard, and loop/graph doctrine live in
+> `~/.claude/CLAUDE.md` — they are identical across projects. This file carries only
+> what is specific to THIS repo.
+
 ## Development Workflow — FOLLOW ALWAYS
 
 - **TDD strictly**: Write failing tests FIRST, then implement. No production code without a failing test. This applies to EVERY task, regardless of whether the plan document explicitly says "TDD" — assume TDD unless the task is purely non-code (docs, config, infra).
@@ -22,6 +26,7 @@
 - **Discuss before fixing**: Always discuss approach AND research existing code before making changes.
 - **Visualize before building**: any user-facing surface (report, dashboard, page, artifact) gets an HTML design mock for operator eyeball-approval BEFORE implementation, and the slice's acceptance gate is the actual rendered output viewed against `.claude/rules/report-design.md` — not just green tests. Tests passing ≠ done for visual work.
 - **Commit frequently**: One commit per logical change. Never amend. Push to BOTH repos (`origin` + `framework`).
+- **Unattended execution is a different discipline**: anything a *schedule* can start — not a human — is bound by `.claude/rules/agent-graph.md`. The one-line test: *if this runs at 03:00 and nobody is watching, what happens?* Non-negotiables: guardrails are code at the choke point (never prompt prose, never one caller); allow-list derived from a registry, never a deny-list; termination returns a reason enum with cost budgets, not just a step cap; irreversible steps go last, with a work-derived idempotency key and a side-effect log written *before* the call. Program plan: `docs/superpowers/plans/2026-08-02-autonomous-accounting-ops-program.md`.
 - **Workflow model-tiering**: when authoring a `Workflow` or spawning an `Agent`, tier by role (Fable for plan/architect/synthesize/judge · Sonnet for reason/verify/implement · Haiku for search/mechanical) and cap bursty stages with `makeGate(n)`. This is what keeps the T2 gate from rate-limiting (it fanned out ~16 concurrent Opus verifiers). Canonical policy + harness block to paste: `~/.claude/workflows/model-tiering.md`.
 
 ## UAT + Review — tier EVERY PR
@@ -131,4 +136,5 @@ Claude Code auto-loads matching rules from `.claude/rules/` when editing files i
 | `deploy.md` | workflows + compose + Dockerfiles + infra |
 | `uat-review.md` | backend/frontend/suiteapp app code (UAT + review tiering) |
 | `report-design.md` | report pipeline + reports FE (CFO-grade design standard, mock-first process) |
+| `agent-graph.md` | workers + chat + MCP + recon (unattended-execution doctrine) |
 

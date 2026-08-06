@@ -162,9 +162,7 @@ async def sweep_tenant_reports(
             continue
         except RefreshError as exc:
             stats["failed"] += 1
-            logger.warning(
-                "report auto-refresh failed", extra={"report_id": str(c.id), "detail": exc.detail}
-            )
+            logger.warning("report auto-refresh failed", extra={"report_id": str(c.id), "detail": exc.detail})
 
             async def outcome(db, tenant_id, report_id, *, _detail=exc.detail, _now=now):
                 if await _record_failure(db, tenant_id, report_id, now=_now, detail=_detail):
@@ -197,9 +195,7 @@ async def collect_and_dispatch(db: AsyncSession) -> dict:
     stats = {"enabled": True, "dispatched": 0, "failed": 0}
     for tenant_id in tenant_ids:
         try:
-            celery_app.send_task(
-                "tasks.report_auto_refresh", kwargs={"tenant_id": str(tenant_id)}, queue="sync"
-            )
+            celery_app.send_task("tasks.report_auto_refresh", kwargs={"tenant_id": str(tenant_id)}, queue="sync")
             stats["dispatched"] += 1
         except Exception:
             stats["failed"] += 1

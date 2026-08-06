@@ -32,9 +32,7 @@ from app.workers.celery_app import celery_app
 logger = logging.getLogger(__name__)
 
 
-async def _get_sheets_connector(
-    db: AsyncSession, tenant_id: uuid.UUID
-) -> McpConnector | None:
+async def _get_sheets_connector(db: AsyncSession, tenant_id: uuid.UUID) -> McpConnector | None:
     """Look up the tenant's active Google Sheets connector (service account)."""
     return (
         (
@@ -58,13 +56,9 @@ async def _sync_one_async(folder_id: str) -> dict:
     the indexer."""
     fid = uuid.UUID(folder_id)
     async with async_session_factory() as db:
-        folder = (
-            await db.execute(select(DriveFolder).where(DriveFolder.id == fid))
-        ).scalars().first()
+        folder = (await db.execute(select(DriveFolder).where(DriveFolder.id == fid))).scalars().first()
         if not folder:
-            logger.warning(
-                "drive_rag.sync_folder.not_found", extra={"folder_id": folder_id}
-            )
+            logger.warning("drive_rag.sync_folder.not_found", extra={"folder_id": folder_id})
             return {"skipped": "folder_not_found", "folder_id": folder_id}
 
         connector = await _get_sheets_connector(db, folder.tenant_id)
@@ -80,12 +74,8 @@ async def _sync_one_async(folder_id: str) -> dict:
         return await sync_folder(db, folder_id=fid, credentials=credentials)
 
 
-@celery_app.task(
-    base=InstrumentedTask, name="tasks.drive_rag_sync_folder", queue="sync"
-)
-def drive_rag_sync_folder(
-    folder_id: str, tenant_id: str | None = None, **kwargs
-) -> dict:
+@celery_app.task(base=InstrumentedTask, name="tasks.drive_rag_sync_folder", queue="sync")
+def drive_rag_sync_folder(folder_id: str, tenant_id: str | None = None, **kwargs) -> dict:
     """Sync ONE Drive folder (manual button or per-folder dispatch).
 
     `tenant_id` is an optional keyword arg used by `InstrumentedTask` to tag
@@ -99,15 +89,7 @@ async def _sync_all_async() -> dict:
     """Async body of `drive_rag_sync_all`. Queries all enabled DriveFolder
     rows across all tenants and enqueues a per-folder sync task for each."""
     async with async_session_factory() as db:
-        folders = (
-            (
-                await db.execute(
-                    select(DriveFolder).where(DriveFolder.is_enabled.is_(True))
-                )
-            )
-            .scalars()
-            .all()
-        )
+        folders = (await db.execute(select(DriveFolder).where(DriveFolder.is_enabled.is_(True)))).scalars().all()
 
     enqueued = 0
     for f in folders:
@@ -123,9 +105,7 @@ async def _sync_all_async() -> dict:
     return {"enqueued": enqueued}
 
 
-@celery_app.task(
-    base=InstrumentedTask, name="tasks.drive_rag_sync_all", queue="sync"
-)
+@celery_app.task(base=InstrumentedTask, name="tasks.drive_rag_sync_all", queue="sync")
 def drive_rag_sync_all() -> dict:
     """Beat-scheduled entry point — enqueue per-folder sync tasks across tenants.
 
