@@ -46,6 +46,17 @@ class Report(Base):
     # dashboard landing page; NULL = not pinned. Re-pinning bumps it forward — the
     # dashboard sorts pinned reports newest-first by this column.
     dashboard_pinned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Rolling-period Stage 1 (migration 093): NULL/NULL = a one-off snapshot report
+    # (every pre-existing row — no backfill). Both are set together at compose time when
+    # mode="tracking" (Task 3): series_id links this report into its playbook's tracking
+    # lineage; period is the canonical "Mon YYYY" it covers, denormalized from
+    # recipe_json so finding the newest report in a series doesn't require parsing JSON.
+    # ON DELETE SET NULL: deleting the series must not delete this report — it remains a
+    # valid standalone artifact, just no longer tracked.
+    series_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("report_series.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    period: Mapped[str | None] = mapped_column(Text, nullable=True)
     published_drive_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
