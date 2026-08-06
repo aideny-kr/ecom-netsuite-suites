@@ -128,11 +128,14 @@ if [[ $QUICK -eq 1 ]]; then
 else
   _failing() {  # $1=worktree root, $2=ids outfile. echoes summary. rc 2 = did not run.
     local out rc
-    out="$(cd "$1/backend" && "$PY" -m pytest tests -q --tb=no -rf 2>&1)"; rc=$?
+    out="$(cd "$1/backend" && "$PY" -m pytest tests -q --tb=no -rfE 2>&1)"; rc=$?
     # exit >=2 means pytest could not run at all (collection/usage/internal).
     # Scoring that as "0 failures" is how a totally broken suite passed before.
     [[ $rc -ge 2 ]] && { echo "DID-NOT-RUN (pytest exit $rc)"; return 2; }
     printf '%s\n' "$out" | grep -E '^(FAILED|ERROR)' | awk '{print $2}' | sort -u > "$2"
+    # Zero passing tests is not evidence however the comparison reads.
+    local psd; psd="$(printf '%s' "$out" | grep -oE '[0-9]+ passed' | head -1 | grep -oE '[0-9]+')"
+    [[ "${psd:-0}" -eq 0 ]] && { echo "NOTHING PASSED ($(printf '%s' "$out" | tail -1))"; return 2; }
     printf '%s' "$out" | grep -E '[0-9]+ (passed|failed|error)' | tail -1
   }
   hs="$(_failing "$REPO_ROOT" "$TMP/head.ids")"; hrc=$?
@@ -140,8 +143,7 @@ else
   # A run with many ERRORs (DB contention, missing service) still supports the
   # by-id comparison, but it is weak evidence — say so rather than let a clean
   # "no NEW failing tests" imply a healthy suite.
-  _errs="$(printf '%s' "$hs" | grep -oE '[0-9]+ error' | head -1 | grep -oE '[0-9]+' || true)"
-  [[ "${_errs:-0}" -gt 0 ]] && note "$_errs test ERRORs on head — comparison is valid but the suite is degraded (is Postgres healthy?)"
+  _herr="$(printf '%s' "$hs" | grep -oE '[0-9]+ error' | head -1 | grep -oE '[0-9]+' || true)"
   if [[ $hrc -eq 2 ]]; then
     fail "the suite did not run" "$hs"
   else
@@ -152,6 +154,19 @@ else
       if [[ $brc -eq 2 ]]; then
         fail "baseline suite did not run — no comparison possible" "$bs"
       else
+        _berr="$(printf '%s' "$bs" | grep -oE '[0-9]+ error' | head -1 | grep -oE '[0-9]+' || true)"
+        # An ERROR means the test never ran, so there is NO EVIDENCE about it —
+        # whatever the comparison says. Both sides having 1208 errors makes
+        # "no new failing tests" true and "evidence of done" false at the same
+        # time, and this script's contract is the second one. A healthy run of
+        # this suite is 5587 passed / 0 errors, so errors always mean the
+        # environment is broken, never a standing condition to tolerate.
+        if [[ "${_herr:-0}" -gt "${_berr:-0}" ]]; then
+          fail "MORE test ERRORs than $BASE (base=${_berr:-0}, head=${_herr:-0}) — these are yours"
+        elif [[ "${_herr:-0}" -gt 0 ]]; then
+          fail "${_herr} tests ERRORed — they did not run, so this is not evidence" \
+               "same count on $BASE, so not introduced here — but fix the environment (is Postgres up?) before claiming done"
+        fi
         new="$(comm -23 "$TMP/head.ids" "$TMP/base.ids")"
         fixed="$(comm -13 "$TMP/head.ids" "$TMP/base.ids" | grep -c . || true)"
         if [[ -z "$new" ]]; then

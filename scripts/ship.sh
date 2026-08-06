@@ -88,9 +88,10 @@ fi
 
 # ───────────────────────────────────────── edge 4: GATE, with target PINNED
 echo
-if [[ "${TIER:-T2}" == "T2" ]]; then
+# Tier is decided by the human against the list printed above.
+if true; then
   cat <<EOF
-[gate] $TIER requires the blocking multi-angle review BEFORE merge.
+[gate] If any trigger above matches, this is T2 and needs the blocking review BEFORE merge.
 
 Run it with the target PINNED — the gate defaults to the session cwd's branch, and
 in this repo the session usually sits in a different worktree, which already produced
@@ -109,8 +110,6 @@ Then, before believing ANY finding, check the result:
 One clean round is weak evidence — observed 0 → 2 → 3 → 1 → 0 across rounds on a
 single PR. Budget for at least two.
 EOF
-else
-  echo "[gate] $TIER — no blocking gate required. CI is the check."
 fi
 
 echo
@@ -118,5 +117,5 @@ echo "[land] after the gate clears:"
 echo "  · update STATE.md (NOW / NEXT / DECIDED / DON'T)"
 echo "  · record anything non-obvious — prefer a docstring next to the code over a rule"
 echo
-echo "verify PASSED · tier $TIER · ready for the gate"
+echo "verify PASSED · tier: yours to decide against the list above"
 exit 0
