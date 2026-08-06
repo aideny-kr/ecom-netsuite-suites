@@ -34,16 +34,30 @@ Updated at the end of every task, not "later".
 
 | branch | tier | state | blocked on |
 |---|---|---|---|
-| `feat/dev-loop-and-harness` | T2 | 12 commits, process only — **ready to gate** | nothing |
+| `feat/dev-loop-and-harness` | T2 | 21 commits, process only — gated ×3, blockers fixed, **frozen** | nothing |
 | `feat/agent-graph-operating-model` | T2 | Track O (22 majors) + reject action, **ungated** | needs Track O decision |
 
 Contents of that branch, honestly:
 
 **Split 2026-08-04** — the two were on one 136 KB branch, which the review gate cannot
-process in a single run (~30 KB practical limit). Cleanly separable: zero shared files.
+process in a single run (~30 KB practical limit).
 
-- **`feat/dev-loop-and-harness` (this branch, 53 KB)** — `verify.sh` · `loop.sh` ·
-  `ship.sh` · `STATE.md`; routine + verification standard now global in
+**"Zero shared files" was FALSE and it is a merge hazard.** Verified 2026-08-05:
+`comm -12` over the two name-only diffs returns **8 shared files** — the split copied the
+process work onto `dev-loop` but never removed it from `agent-graph`, which therefore
+still carries the PRE-FIX `scripts/ship.sh` (7 `TIER` references — the unbound-variable
+blocker), a 240-line `scripts/verify.sh`, and `scripts/loop.sh`. Merging `agent-graph`
+after `dev-loop` would silently resurrect both blockers. **Do not merge `agent-graph` as
+it stands.** The reject slice is separable and clean: commits `8c8ca1f` + `01a42bd`, four
+files (`recon_reject.py`, `093_recon_reject_labels.py`, `models/reconciliation.py`,
+`test_recon_reject.py`), zero overlap with the process files — cherry-pick those onto a
+fresh branch off `main` and leave Track O behind pending its own decision.
+
+- **`feat/dev-loop-and-harness` (this branch, 47 KB)** — `verify.sh` · `ship.sh` ·
+  `STATE.md`. **There is no `loop.sh`** — it was deleted on this branch (see DECIDED:
+  enforcement lives in hooks); the two hooks in `~/.claude/hooks/` replace it and are
+  the only part that runs whether or not the agent cooperates. Routine + verification
+  standard now global in
   `~/.claude/CLAUDE.md`; gate target-check in `.claude/rules/uat-review.md`;
   `agent-graph.md` cut 35 rules → 15. Finished; gating now.
 - **`feat/agent-graph-operating-model` (58 KB + 24 KB)** — Track O (ops digest, Sentry in
@@ -59,19 +73,30 @@ process in a single run (~30 KB practical limit). Cleanly separable: zero shared
 2. ~~Cut the ceremonial layer~~ **DONE** — both false lines fixed; routine + verification
    standard moved to `~/.claude/CLAUDE.md` (global, applies to every project), removing
    3.2 KB of duplication from this repo's always-loaded context.
-3. **Convert the two rules I keep breaking into hooks** — (a) `PreToolUse` refusing a
-   gate invocation without a pinned `target`, (b) `PostToolUse` recording which HEAD
-   `verify.sh` last passed on. These are the exact failures repeated all of 2026-08-02→05.
-4. **Single-agent baseline** on the round-3 diff before spending another 60 agents.
-5. ~~Build the dev-cycle graph~~ **DONE** — `loop.sh` (stopping rule in state),
-   `verify.sh` (evidence), `ship.sh` (tier computed, gate target pinned). FRAME and
-   SCOPE stay human nodes on purpose: that is ownership, not capability.
-4. ~~Split this branch~~ **DONE 2026-08-04** — process extracted to
-   `feat/dev-loop-and-harness` (12 commits, 53 KB, zero conflicts).
-5. **Ship the reject endpoint + MCP tool.** The service and migration exist and are
-   tested, but nothing exposes them — **no labels can be recorded yet, so the evidence
-   clock has not started.** This is the only item that moves the ladder.
-6. **Decide Track O** — finish the 22 majors, or drop it. Not both fronts at once.
+3. ~~Convert the two rules I keep breaking into hooks~~ **DONE 2026-08-05** — both live in
+   `~/.claude/hooks/` and merged into `~/.claude/settings.json` alongside the 9 existing.
+   `record-verify-run.sh` was rewritten the same day: v1 fired on any command merely
+   *containing* the string `verify.sh` and stamped the HOOK cwd's branch, so it logged
+   phantom runs against a branch that was not under test. It now reads branch, sha and
+   verdict out of verify.sh's own banner — the one source that only a real run emits.
+4. ~~Single-agent baseline~~ **DONE 2026-08-05** — see DECIDED. One agent, 31× cheaper,
+   both blockers, ~44% of distinct defects. Ordering changed; gate not retired.
+5. ~~Build the dev-cycle graph~~ **DONE** — `verify.sh` (evidence) and `ship.sh` (gate
+   target pinned). No `loop.sh`: a script you must choose to run enforces nothing, so
+   the stopping rule moved to hooks. FRAME and SCOPE stay human nodes on purpose —
+   that is ownership, not capability.
+6. ~~Split this branch~~ **DONE 2026-08-04** — process extracted to
+   `feat/dev-loop-and-harness`, zero shared files with the sibling branch.
+7. **→ NOW: ship the reject endpoint + MCP tool.** The service, migration 093 and 16
+   passing tests exist, but nothing exposes them — **no labels can be recorded, so the
+   evidence clock Rung 3 depends on has not started.** The only item that moves the ladder.
+8. **Decide Track O** — finish the 22 majors, or drop it. Not both fronts at once.
+9. **Check whether tests can reach production Redis.** `backend/tests/conftest.py` has
+   zero Redis handling and FakeRedis appears in only 4 test files, so nothing globally
+   prevents `rate_limit` / `redis_lock` / `token_denylist` from building a live client
+   from `settings.REDIS_URL`. Documented defaults are local, so this may be fine — one
+   command settles it: `grep -E '^REDIS_URL=' backend/.env .env | cut -d@ -f2`. If the
+   host is remote, `release_lock` can DEL a key a production recon worker holds.
 
 ## DECIDED — date · chose X over Y · because
 
@@ -84,11 +109,31 @@ Written so the next session does not re-litigate these.
   whether or not the agent cooperates, and 9 were already configured in
   `~/.claude/settings.json` the whole time. Split verification into PULL (verify.sh —
   fine to invoke) and PUSH (hooks — the only real enforcement).
-- **2026-08-05 · Measure the single-agent review baseline before any further fan-out** ·
-  because the 180-config scaling study reports returns go NEGATIVE once the single-agent
-  baseline exceeds ~45%, and sequential-reasoning tasks lose 39-70% under ANY multi-agent
-  variant. Three gate rounds (~180 agents, ~14M tokens) ran over ~300 lines of shell with
-  no baseline ever taken. Source: `~/Downloads/graph-engineering.md` §2.4.
+- **2026-08-05 · MEASURED: one strong agent runs FIRST on every review; the fan-out gate
+  runs second, only if the cheap pass comes back thin** · because on the round-3 diff
+  (~700 lines, commit `fabd731`) one Opus agent cost 146k tokens and 12 minutes against
+  the gate's 4.55M tokens and 60 agents — **31×** — and found ~44% of the distinct
+  defects, including **both blockers**, plus one the gate missed entirely (the DB guard
+  pins three `DATABASE_URL*` vars but leaves `REDIS_URL` to `.env`, and
+  `redis_lock.release_lock` does a live `DEL` — a test could release a lock a production
+  recon worker holds). It also *reproduced* its findings rather than arguing them. The
+  ordering is strictly dominant: the cheap pass can only add findings, and the gate still
+  runs afterwards. NOT decided: whether small diffs can skip the gate entirely — that
+  needs a number I did not contaminate (I wrote the baseline prompt after reading round 3
+  and aimed it at "checks that pass on broken code", which is where the blocker lived).
+  Get it free on the next T2 diff: single agent first, then the gate, record the delta.
+- **2026-08-05 · Count DISTINCT DEFECTS, not findings** · because round 3 reported 30
+  confirmed findings that collapse to ~18 real defects — `TIER: unbound` appeared 7 times
+  and the flag inversion 7 times. Volume read as thoroughness. The same run also returned
+  two mutually contradictory CONFIRMED findings about the same three lines: per-finding
+  verification has no view of the set, so it cannot catch inconsistency between findings.
+- **2026-08-05 · Freeze the dev toolchain after the two blockers; no 4th gate round** ·
+  because the pre-agreed kill rule said so and the exit reason is `done`, not `stall` —
+  the question the rounds existed to answer got answered. Three consecutive rounds each
+  fixed a blocker and left another of the same class (`-rf`→ERROR blindness, then
+  `TIER: unbound`, then the inverted `-z "$MODE"` test). Remaining ~37 findings are
+  quality work on a script only we use; triage by "does it change the exit code?" —
+  almost none do. They live in OPEN, not in another round.
 - **2026-08-05 · Every tooling pilot gets a KILL RULE set in advance** · because round 3
   was stopped by reaction to bad results, not against a pre-agreed threshold. A pilot
   that ends in "do not build" is a success only if the bar was set beforehand.
