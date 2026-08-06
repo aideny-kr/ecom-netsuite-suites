@@ -119,6 +119,24 @@ class ReconResultApprove(BaseModel):
     notes: str | None = None
 
 
+class ReconResultReject(BaseModel):
+    """Body for PATCH /results/{result_id}/reject.
+
+    `reason` is validated against ``recon_reject.REJECT_REASONS`` in the service,
+    not by an Enum here, so the vocabulary has exactly one definition. Duplicating
+    it as a schema Enum is how the two drift, and a reject label that means
+    different things in two places cannot be aggregated.
+
+    ``result_id`` is deliberately NOT accepted in the body (unlike the older
+    ``ReconResultApprove``, which takes it and then ignores it in favour of the path
+    param): two sources for one identity invites a request whose body and path
+    disagree.
+    """
+
+    reason: str = Field(description="One of: wrong_match, wrong_amount, duplicate, not_actionable, other")
+    note: str | None = Field(default=None, description="Free text. REQUIRED when reason is 'other'.")
+
+
 class ReconCloseRequest(BaseModel):
     period: str = Field(description="Period to close, e.g. '2026-03'")
     subsidiary_id: str | None = None

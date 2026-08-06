@@ -40,6 +40,7 @@ from app.schemas.reconciliation import (
     ReconBucketSummary,
     ReconCloseReadiness,
     ReconResultApprove,
+    ReconResultReject,
     ReconResultResponse,
     ReconRunCreate,
     ReconRunResponse,
@@ -54,6 +55,7 @@ from app.schemas.reconciliation import (
     ResolutionSummaryResponse,
 )
 from app.services import audit_service
+from app.services.reconciliation import recon_reject
 from app.services.reconciliation.close_scope import (
     closeable_runs_conditions,
     left_for_review_conditions,
@@ -603,6 +605,68 @@ async def approve_result(
     await db.commit()
     await db.refresh(recon_result)
 
+    return ReconResultResponse.model_validate(recon_result)
+
+
+# ---------------------------------------------------------------------------
+# Reject a single line — the NEGATIVE-label path
+# ---------------------------------------------------------------------------
+# Approve-only feedback teaches us nothing about what the matcher got wrong: a row
+# a human silently walks away from is indistinguishable from one never reviewed.
+# The autonomy ladder's next rung is gated on a measured false-positive rate, and
+# that rate has no numerator without this endpoint.
+#
+# The service (`recon_reject.reject_result`) owns the vocabulary, the freeze check
+# and the envelope snapshot; this handler owns only the HTTP concerns — tenant
+# scoping, loading the run, and translating a refusal into a 400. It does NOT
+# re-implement the guards: a second copy is how approve and reject drift apart,
+# and the reject path skipping a guard approve enforces would be a back door into
+# a closed period.
+@router.patch("/results/{result_id}/reject", response_model=ReconResultResponse)
+async def reject_result(
+    result_id: str,
+    request: ReconResultReject,
+    user: Annotated[User, Depends(require_permission("recon.run"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    recon_result = (
+        await db.execute(
+            select(ReconciliationResult).where(
+                ReconciliationResult.id == _parse_uuid(result_id),
+                ReconciliationResult.tenant_id == user.tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+
+    if not recon_result:
+        # 404 for another tenant's row too — a 403 would confirm the id exists.
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Result not found")
+
+    run = (
+        await db.execute(
+            select(ReconciliationRun).where(
+                ReconciliationRun.id == recon_result.run_id,
+                ReconciliationRun.tenant_id == user.tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+
+    try:
+        await recon_reject.reject_result(
+            db,
+            result=recon_result,
+            user=user,
+            reason=request.reason,
+            note=request.note,
+            run=run,
+        )
+    except recon_reject.RejectNotAllowedError as exc:
+        # The service raises this for a closed run, a terminal row, an unknown
+        # reason, or 'other' with no note. Its messages are written to be shown.
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    await db.commit()
+    await db.refresh(recon_result)
     return ReconResultResponse.model_validate(recon_result)
 
 
