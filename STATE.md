@@ -36,7 +36,7 @@ Updated at the end of every task, not "later".
 |---|---|---|---|
 | `feat/dev-loop-and-harness` | T2 | 21 commits, process only — gated ×3, blockers fixed, **frozen** | nothing |
 | `feat/agent-graph-operating-model` | T2 | Track O (22 majors) + reject action, **ungated** | needs Track O decision |
-| `feat/rolling-period` | T2 | Stage 1 of 2. T1 resolver done (`f6407db`); T2-T5 pending | nothing |
+| `feat/rolling-period` | T2 | Stage 1 of 2. T1 resolver + T2 series/093 done; T3-T5 pending | **093 collides with recon-reject — see OPEN** |
 
 Contents of that branch, honestly:
 
@@ -227,6 +227,22 @@ Written so the next session does not re-litigate these.
 - **Don't add a rule to CLAUDE.md when a docstring next to the code would carry it.**
 
 ## OPEN — needs a human, blocking something
+
+- **TWO migrations are both numbered `093` off parent `092`, on different branches.**
+  `feat/rolling-period` has `093_report_series`; `feat/recon-reject-action` (and
+  `agent-graph`) has `093_recon_reject_labels`. They are schema-orthogonal
+  (`report_series`/`reports` vs `reconciliation_results`), so nothing conflicts
+  logically — but if BOTH merge as-is, `alembic upgrade head` sees **two heads and
+  fails**, and staging auto-migrates on every main merge, so that breaks deploys
+  fleet-wide. **Whichever merges SECOND must re-parent to `094` off the first**
+  (linearize — never a merge migration; see `memory/feedback_merge_migration_breaks_downgrade`).
+  Decide merge order deliberately, not by whoever pushes first.
+  *Local-only side effect:* the shared docker Postgres now has BOTH sets of DDL applied
+  but `alembic_version` stamped at `093_report_series`, so the recon worktree's
+  `alembic upgrade head` cannot locate its own revision. One shared local DB cannot track
+  two divergent branches — whoever works locally re-stamps to their own head
+  (`alembic stamp --purge <their 093>`); no DDL is lost either way. CI and staging use
+  their own databases and are unaffected.
 
 - ~~Framework's NetSuite connection dead~~ **RESOLVED 2026-08-04.** Re-authed; connection
   `active`, health-checked 02:55, deposit sync completed 02:00, data current to 02:13
