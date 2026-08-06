@@ -23,6 +23,7 @@
   5. Files owned by this task (to prevent conflicts with other subagents)
   Subagents do NOT inherit `CLAUDE.md` — these rules must be in the dispatch prompt every time.
 - **Zero regressions**: Run full test suite before committing. Fix CI as a follow-up after every deploy.
+- **Structural questions go to `scripts/codegraph.py`, not grep.** Where is X defined, who calls it, who imports this, what routes exist, what breaks if I change it. Measured on this repo: `grep set_tenant_context` returns 202 lines to find 1 definition (the other "matches" are `_session` and `_sync` — different functions). The index answers in one line, from the AST, in 2s for a full rebuild. Reindex is automatic on checkout/merge/rebase via `scripts/install-git-hooks.sh` (run once per clone). `callers` returning 0 does NOT mean unused — it prints the `use`/`base` counts too, because `base=InstrumentedTask` is a reference, not a call.
 - **Discuss before fixing**: Always discuss approach AND research existing code before making changes.
 - **Visualize before building**: any user-facing surface (report, dashboard, page, artifact) gets an HTML design mock for operator eyeball-approval BEFORE implementation, and the slice's acceptance gate is the actual rendered output viewed against `.claude/rules/report-design.md` — not just green tests. Tests passing ≠ done for visual work.
 - **Commit frequently**: One commit per logical change. Never amend. Push to BOTH repos (`origin` + `framework`).
@@ -75,6 +76,7 @@ T2 review = `Workflow({name:"code-review-multiangle", args:{target:"<PR#|branch>
 | Permission helpers | `backend/app/core/dependencies.py` |
 | API client (frontend) | `frontend/src/lib/api-client.ts` |
 | SSE chat stream normalizer | `frontend/src/lib/chat-stream.ts` |
+| **Code index (use BEFORE grep)** | `scripts/codegraph.py` — `def` · `callers` · `uses` · `importers` · `routes` · `impact` |
 | Specs / Plans | `docs/superpowers/specs/`, `docs/superpowers/plans/` |
 | Architecture memory | `memory/` |
 
