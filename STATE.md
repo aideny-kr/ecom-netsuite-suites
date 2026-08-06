@@ -102,6 +102,24 @@ fresh branch off `main` and leave Track O behind pending its own decision.
 
 Written so the next session does not re-litigate these.
 
+- **2026-08-06 · The stopping rule is now IN RUN STATE — `~/.claude/hooks/loop_state.py`** ·
+  because deleting `loop.sh` was right (a script you must invoke enforces nothing) but
+  nothing replaced the function it served, so for three days the iteration cap lived in
+  `CLAUDE.md` prose — the precise arrangement the doctrine rejects. The claim "the hooks
+  replace it" was FALSE: the two installed hooks pin a gate target and record verify runs;
+  neither counts anything. Three mechanisms now, none needing the agent to cooperate:
+  `capture` (UserPromptSubmit) records the session goal from the first substantive prompt,
+  so there is nothing to remember to invoke; `mirror` (PreToolUse Edit|Write) prints the
+  recorded goal beside the directories actually edited every 25 edits; `attempt`
+  (PostToolUse Bash) counts real verify.sh runs and escalates to `ask` at 15.
+  *Mirror, not blocker, on purpose:* topic drift is a judgement, not a computation — but
+  the PAIR (goal, dirs-touched) is mechanical, and on 2026-08-05 it would have read
+  `goal: "change how we work daily"` / `edited: backend/app/api/v1 (24)`. That is enough.
+  Escalation is `ask` not `deny` because this session's brief was to REMOVE restrictions
+  that degrade the work; an ask you must answer is enforcement, a deny you route around is
+  an obstacle. A failed state write is LOUD, not silent — if it were silent the counters
+  would reset every call and the whole mechanism would look installed while doing nothing,
+  which is the absence-is-not-success trap it exists to catch.
 - **2026-08-05 · Enforcement lives in HOOKS, not in shell scripts we choose to run** ·
   because a script that must be invoked is the same category as prose, just executable.
   `loop.sh` was deleted on the belief that self-imposed iteration budgets are
