@@ -200,4 +200,15 @@ Written so the next session does not re-litigate these.
   *One sub-question deferred, not blocking: at what materiality would a controller prefer a
   prior-period adjustment over a current-period reversal? Only matters once a reversal is
   large enough to distort the current month — ask before the first material one, not now.*
+- **`.gitignore` still shadows tracked FRONTEND files.** `tasks/` was anchored on this
+  branch, which immediately exposed 3 lint violations in worker modules CI had never
+  linted. The same defect remains at `.gitignore:59` — unanchored `memory/` matches
+  `frontend/src/components/memory/` and `frontend/src/app/(dashboard)/memory/`, shadowing
+  **5 tracked files** including `memory-graph-canvas.tsx`, `learned-rules-section.tsx` and
+  their two test files. Verify with `git check-ignore -v --no-index <path>` — plain
+  `check-ignore` stays SILENT for tracked paths, which is why this survived this long.
+  *Not fixed here: anchoring it will likely surface a batch of eslint findings on files
+  that have never been linted, and that is its own task, not a rider on this one. Unknown
+  and worth 5 minutes: whether vitest also skips those two test files (it uses include
+  globs, so probably not) or only eslint does.*
 - **Track O: finish or drop?** 22 open majors. *Blocking: nothing, but it rots.*
