@@ -32,7 +32,13 @@ from sqlalchemy.dialects.postgresql import UUID
 from alembic import op
 
 revision = "093_report_series"
-down_revision = "092_user_dashboard_preference"  # current single head (verify: alembic heads)
+down_revision = "093_recon_reject_labels"  # re-parented 2026-08-07: 093_recon_reject_labels
+# landed on main first (PR #193) and also claimed 092 as its parent. Two children of
+# one revision is the parallel-head case that breaks `alembic upgrade head` on every
+# deploy. Re-parented (LINEARIZED) rather than resolved with a merge migration,
+# because a merge migration breaks `downgrade -1`. The file keeps its 093_ name to
+# avoid churning the down_revision of 094 that points at it; the number is a label,
+# the chain is what matters.
 branch_labels = None
 depends_on = None
 
