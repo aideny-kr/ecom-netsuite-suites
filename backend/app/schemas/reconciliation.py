@@ -119,6 +119,24 @@ class ReconResultApprove(BaseModel):
     notes: str | None = None
 
 
+class ReconResultReject(BaseModel):
+    """Body for PATCH /results/{result_id}/reject.
+
+    `reason` is validated against ``recon_reject.REJECT_REASONS`` in the service,
+    not by an Enum here, so the vocabulary has exactly one definition. Duplicating
+    it as a schema Enum is how the two drift, and a reject label that means
+    different things in two places cannot be aggregated.
+
+    ``result_id`` is deliberately NOT accepted in the body (unlike the older
+    ``ReconResultApprove``, which takes it and then ignores it in favour of the path
+    param): two sources for one identity invites a request whose body and path
+    disagree.
+    """
+
+    reason: str = Field(description="One of: wrong_match, wrong_amount, duplicate, not_actionable, other")
+    note: str | None = Field(default=None, description="Free text. REQUIRED when reason is 'other'.")
+
+
 class ReconCloseRequest(BaseModel):
     period: str = Field(description="Period to close, e.g. '2026-03'")
     subsidiary_id: str | None = None
@@ -190,6 +208,15 @@ class ReconResultResponse(BaseModel):
     match_rule: str | None
     approved_by: StrFromUUID | None = None
     approved_at: datetime | None = None
+    # Reject disposition. Surfaced so a rejected row can show WHY on the review table —
+    # a terminal row with no visible reason forces the reviewer back to the audit log.
+    # `counts_as_false_positive` is deliberately NOT exposed: it is the metric the
+    # corpus feeds, and showing a reviewer which reasons score against the matcher lets
+    # them pick the reason that produces the number they want.
+    reject_reason: str | None = None
+    reject_note: str | None = None
+    rejected_by: StrFromUUID | None = None
+    rejected_at: datetime | None = None
     # Persisted four-bucket classification (R2a). Populated from the stored
     # ``ReconciliationResult.bucket`` column via from_attributes; the materiality
     # routing is already baked into that value at write-time. Falls back to the
@@ -276,6 +303,12 @@ class ReconCloseReadiness(BaseModel):
       reconciling item (timing group-approved). Non-blocking (not
       ``open_exceptions``) and never locked by ``close_period``. Default 0
       keeps older API clients working.
+    - ``rejected``: status='rejected' — a human judged the match wrong (or right
+      but unactionable). Non-blocking for the same reason as ``carried_forward``:
+      it has been decided. It gets its own counter because reject OVERWRITES
+      'pending'/'auto_matched', so without one a reviewer can zero this checklist
+      by rejecting rows and the variance leaves the close report with no trace.
+      "We looked and it was wrong" is a reconciling item, not an absence.
     """
 
     period: str
@@ -285,6 +318,7 @@ class ReconCloseReadiness(BaseModel):
     suggested: int
     left_for_review: int
     carried_forward: int = 0
+    rejected: int = 0
 
 
 class ReconBucketSummary(BaseModel):

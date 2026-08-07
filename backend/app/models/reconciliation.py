@@ -67,6 +67,23 @@ class ReconciliationResult(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     approved_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # Negative-label capture. `rejected` was a declared ResultStatus and already
+    # terminal, but nothing ever set it — so wrong matches left no trace and the
+    # autonomy envelope's false-positive rate was unmeasurable by construction.
+    # See services/reconciliation/recon_reject.py for why each column exists.
+    rejected_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reject_reason: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    reject_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Snapshotted at decision time, never recomputed: the envelope's admission
+    # rules will change, and replaying today's rules over yesterday's rows would
+    # silently re-baseline the metric every time they move.
+    envelope_eligible_at_decision: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Eligible AND rejected for a reason that means the matcher was wrong.
+    # `not_actionable` is excluded on purpose — the match was correct, and
+    # counting it would report operational friction as model error.
+    counts_as_false_positive: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
 
 # Proposal statuses that occupy the one-active-per-result slot (partial unique
 # index in migration 089). superseded/rejected rows are retained history.
