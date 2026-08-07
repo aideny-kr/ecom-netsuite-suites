@@ -50,7 +50,19 @@ BASEWT=""
 cleanup() { [[ -n "$BASEWT" ]] && git worktree remove --force "$BASEWT" >/dev/null 2>&1; rm -rf "$TMP"; }
 trap cleanup EXIT INT TERM
 
-echo "verify.sh — $(git rev-parse --abbrev-ref HEAD) @ $(git rev-parse --short HEAD)"
+# Capture WHAT IS BEING VERIFIED once, at the start, and use it for both the banner
+# and the evidence record. Re-querying HEAD when the run finishes attributes the
+# verdict to whatever is checked out THEN — and a full run takes ~10 minutes, during
+# which an agent can commit. Reproduced: banner said 6f50440, a commit landed
+# mid-run, and the record was written against the new sha. That is a PASS for a
+# commit the suite never saw, which is the exact lie this log exists to prevent.
+#
+# FULL 40-char sha, not --short: abbreviation width auto-scales with object count,
+# so the same commit was recorded as both 44e68db and 44e68dbf, and the consumers'
+# lookup silently missed the older entry. Readers match by prefix.
+VERIFIED_SHA="$(git rev-parse HEAD 2>/dev/null || echo unknown)"
+VERIFIED_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+echo "verify.sh — $VERIFIED_BRANCH @ ${VERIFIED_SHA:0:8}"
 
 # --- 1. lint ---------------------------------------------------------------
 # Lint only what THIS branch changed. Repo-wide lint made verify.sh red over two
@@ -195,13 +207,26 @@ fi
 # has nothing to do with whether the suite ran. So verify.sh appends its own line
 # and stop_guard.py reads it — one producer, one consumer, no inference.
 record() {  # $1 = verdict
-  local dir; dir="$(git rev-parse --git-common-dir 2>/dev/null)/verify-runs"
-  mkdir -p "$dir" 2>/dev/null || return 0
-  printf '%s %s@%s %s quick=%s\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)" \
-    "$(git rev-parse --short HEAD 2>/dev/null || echo unknown)" \
-    "$1" "$([[ $QUICK -eq 1 ]] && echo yes || echo no)" >> "$dir/log" 2>/dev/null || true
+  local dir tree
+  dir="$(git rev-parse --git-common-dir 2>/dev/null)/verify-runs"
+  # Whether the working tree was clean. A PASS earned at a sha does NOT cover
+  # uncommitted edits sitting on top of it, and a fresh branch starts at its base
+  # commit — so without this a `git checkout -b` inherits the base's PASS for work
+  # that has never been tested.
+  tree="clean"; [[ -n "$(git status --porcelain 2>/dev/null | grep -v '^??')" ]] && tree="dirty"
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    echo "verify.sh: WARNING — cannot create $dir; this run leaves NO evidence" >&2
+    return 0
+  fi
+  if ! printf '%s %s@%s %s quick=%s tree=%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$VERIFIED_BRANCH" "$VERIFIED_SHA" \
+    "$1" "$([[ $QUICK -eq 1 ]] && echo yes || echo no)" "$tree" >> "$dir/log" 2>/dev/null
+  then
+    # Silence here is the worst outcome: verify.sh prints PASS and exits 0, then the
+    # Stop hook blocks with "no PASS recorded for HEAD" — the two most authoritative
+    # voices contradicting each other with no explanation.
+    echo "verify.sh: WARNING — could not append to $dir/log; this run leaves NO evidence" >&2
+  fi
 }
 
 # --- verdict ---------------------------------------------------------------
