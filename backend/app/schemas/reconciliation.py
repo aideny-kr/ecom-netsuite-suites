@@ -208,6 +208,15 @@ class ReconResultResponse(BaseModel):
     match_rule: str | None
     approved_by: StrFromUUID | None = None
     approved_at: datetime | None = None
+    # Reject disposition. Surfaced so a rejected row can show WHY on the review table —
+    # a terminal row with no visible reason forces the reviewer back to the audit log.
+    # `counts_as_false_positive` is deliberately NOT exposed: it is the metric the
+    # corpus feeds, and showing a reviewer which reasons score against the matcher lets
+    # them pick the reason that produces the number they want.
+    reject_reason: str | None = None
+    reject_note: str | None = None
+    rejected_by: StrFromUUID | None = None
+    rejected_at: datetime | None = None
     # Persisted four-bucket classification (R2a). Populated from the stored
     # ``ReconciliationResult.bucket`` column via from_attributes; the materiality
     # routing is already baked into that value at write-time. Falls back to the

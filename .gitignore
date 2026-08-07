@@ -14,7 +14,12 @@ build/
 venv/
 
 # Node
+# Both forms on purpose. A trailing slash matches DIRECTORIES ONLY, and the standard
+# worktree setup here symlinks frontend/node_modules at the main checkout — a symlink
+# is not a directory, so `node_modules/` alone left it untracked-but-not-ignored, one
+# `git add -A` away from committing an absolute path to one developer's laptop.
 node_modules/
+node_modules
 .next/
 out/
 
