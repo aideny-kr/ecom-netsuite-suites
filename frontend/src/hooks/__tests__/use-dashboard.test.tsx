@@ -47,6 +47,32 @@ it("returns the published set and the active report", async () => {
   expect(result.current.data?.active_is_fallback).toBe(false);
 });
 
+// Rolling-period Stage 1 (Task 5): the response also carries the tenant's tracking
+// series (mock §5's "Tracking the close" group) and, for a tracking selection, the
+// ribbon's live-check context — both pass through untouched.
+it("returns published_series and active_tracking straight through from the API", async () => {
+  const response = {
+    published: [],
+    published_series: [{ id: "s-1", playbook_key: "income_statement", period: "Jun 2026", report_id: "r-1" }],
+    active: null,
+    active_is_fallback: false,
+    active_tracking: {
+      series_id: "s-1",
+      playbook_key: "income_statement",
+      period: "Jun 2026",
+      period_check_ok: true,
+      resolved_period: "Jun 2026",
+      next_open_period: "Jul 2026",
+    },
+  };
+  api.get.mockResolvedValueOnce(response);
+  const qc = new QueryClient(qcOpts);
+  const { result } = renderHook(() => useDashboard(), { wrapper: makeWrapper(qc) });
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(result.current.data?.published_series).toEqual(response.published_series);
+  expect(result.current.data?.active_tracking).toEqual(response.active_tracking);
+});
+
 // --- Task 4: switcher mutations ------------------------------------------------
 
 it("useSetActiveDashboard PUTs the chosen report id and invalidates ['dashboard']", async () => {
@@ -57,10 +83,27 @@ it("useSetActiveDashboard PUTs the chosen report id and invalidates ['dashboard'
   const { result } = renderHook(() => useSetActiveDashboard(), { wrapper: makeWrapper(qc) });
 
   await act(async () => {
-    await result.current.mutateAsync("r-9");
+    await result.current.mutateAsync({ reportId: "r-9" });
   });
 
   expect(api.put).toHaveBeenCalledWith("/api/v1/dashboard/active", { report_id: "r-9" });
+  expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["dashboard"] });
+});
+
+// Rolling-period Stage 1 (Task 5): a switcher selection can now target a tracking
+// series instead of a single report — same PUT endpoint, the other body key.
+it("useSetActiveDashboard PUTs the chosen series id when given seriesId", async () => {
+  const response = { published: [], active: null, active_is_fallback: false };
+  api.put.mockResolvedValueOnce(response);
+  const qc = new QueryClient(qcOpts);
+  const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
+  const { result } = renderHook(() => useSetActiveDashboard(), { wrapper: makeWrapper(qc) });
+
+  await act(async () => {
+    await result.current.mutateAsync({ seriesId: "s-1" });
+  });
+
+  expect(api.put).toHaveBeenCalledWith("/api/v1/dashboard/active", { series_id: "s-1" });
   expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["dashboard"] });
 });
 

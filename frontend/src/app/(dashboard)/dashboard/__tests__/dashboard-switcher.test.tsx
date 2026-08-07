@@ -8,6 +8,7 @@ vi.mock("@/lib/api-client", () => ({ apiClient: api }));
 
 import { DashboardSwitcher } from "@/app/(dashboard)/dashboard/dashboard-switcher";
 import type { ReportSummary } from "@/hooks/use-reports";
+import type { DashboardSeriesResponse } from "@/hooks/use-dashboard";
 
 function report(over: Partial<ReportSummary>): ReportSummary {
   return {
@@ -27,10 +28,26 @@ function report(over: Partial<ReportSummary>): ReportSummary {
   };
 }
 
+function series(over: Partial<DashboardSeriesResponse>): DashboardSeriesResponse {
+  return {
+    id: "s-1",
+    playbook_key: "income_statement",
+    period: "Jun 2026",
+    report_id: "r-1",
+    ...over,
+  };
+}
+
+// Snapshots (individually pinned reports) — the "Pinned months" group.
 const published = [
-  report({ id: "r-1", title: "Income Statement — Jun 2026", auto_refresh: "daily" }),
   report({ id: "r-2", title: "Cash Flow — Q2", auto_refresh: "hourly" }),
   report({ id: "r-3", title: "Board Snapshot", auto_refresh: "off" }),
+];
+
+// Tracking series — the "Tracking the close" group (mock §5).
+const publishedSeries = [
+  series({ id: "s-1", playbook_key: "income_statement", period: "Jun 2026", report_id: "r-1" }),
+  series({ id: "s-2", playbook_key: "balance_sheet", period: "Jun 2026", report_id: "r-4" }),
 ];
 
 // Exposed so tests can spy on invalidateQueries against the exact instance the
@@ -46,7 +63,13 @@ function renderSwitcher(props: Partial<React.ComponentProps<typeof DashboardSwit
     return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
   }
   return render(
-    <DashboardSwitcher published={published} activeId="r-1" {...props} />,
+    <DashboardSwitcher
+      published={published}
+      activeId="r-2"
+      publishedSeries={publishedSeries}
+      activeSeriesId="s-1"
+      {...props}
+    />,
     { wrapper: Wrapper }
   );
 }
@@ -68,30 +91,102 @@ it("renders a Switch ▾ trigger", async () => {
   expect(await findByRole("button", { name: /switch/i })).toBeTruthy();
 });
 
-it("opens to a Published dashboards group listing every published report with a ✓ on the active one", async () => {
+// --- Rolling-period Stage 1 (Task 5): "Tracking the close" group -------------------
+
+it("opens to a Tracking the close group, humanizing the playbook key, with a ✓ on the active series", async () => {
   const { findByRole, findByText } = renderSwitcher();
   const trigger = await findByRole("button", { name: /switch/i });
   openSwitcher(trigger);
 
-  expect(await findByText("Published dashboards")).toBeTruthy();
-  const activeItem = await findByRole("menuitem", { name: /income statement.*jun 2026/i });
+  expect(await findByText("Tracking the close")).toBeTruthy();
+  const activeItem = await findByRole("menuitem", { name: /income statement/i });
   expect(activeItem.textContent).toContain("✓");
-  const otherItem = await findByRole("menuitem", { name: /cash flow.*q2/i });
+  const otherItem = await findByRole("menuitem", { name: /balance sheet/i });
   expect(otherItem.textContent).not.toContain("✓");
 });
 
-it("shows the auto_refresh value as right-aligned meta, rendering off as snapshot", async () => {
+it("shows the series' current period as meta on a Tracking the close item", async () => {
   const { findByRole } = renderSwitcher();
   const trigger = await findByRole("button", { name: /switch/i });
   openSwitcher(trigger);
 
-  const dailyItem = await findByRole("menuitem", { name: /income statement/i });
-  expect(dailyItem.textContent).toContain("daily");
-  const hourlyItem = await findByRole("menuitem", { name: /cash flow/i });
-  expect(hourlyItem.textContent).toContain("hourly");
-  const offItem = await findByRole("menuitem", { name: /board snapshot/i });
+  const item = await findByRole("menuitem", { name: /income statement/i });
+  expect(item.textContent).toContain("Jun 2026");
+});
+
+it("shows a placeholder meta for a tracking series with no report composed yet", async () => {
+  const { findByRole } = renderSwitcher({
+    publishedSeries: [series({ id: "s-3", playbook_key: "trial_balance", period: null, report_id: null })],
+  });
+  const trigger = await findByRole("button", { name: /switch/i });
+  openSwitcher(trigger);
+
+  const item = await findByRole("menuitem", { name: /trial balance/i });
+  expect(item.textContent).toContain("—");
+});
+
+it("omits the Tracking the close group entirely when there are no tracking series", async () => {
+  const { findByRole, queryByText } = renderSwitcher({ publishedSeries: [] });
+  const trigger = await findByRole("button", { name: /switch/i });
+  openSwitcher(trigger);
+
+  await findByRole("menuitem", { name: /manage published set/i }); // menu is open
+  expect(queryByText("Tracking the close")).toBeNull();
+});
+
+it("lists Tracking the close before Pinned months", async () => {
+  const { findByRole } = renderSwitcher();
+  const trigger = await findByRole("button", { name: /switch/i });
+  openSwitcher(trigger);
+  await findByRole("menuitem", { name: /income statement/i });
+
+  // Radix portals DropdownMenuContent to document.body, not into the render
+  // container — search the whole document for the two group labels' order.
+  const labels = Array.from(document.body.querySelectorAll("[role='menu'] *")).filter(
+    (el) => el.textContent === "Tracking the close" || el.textContent === "Pinned months"
+  );
+  const text = labels.map((el) => el.textContent);
+  expect(text.indexOf("Tracking the close")).toBeGreaterThanOrEqual(0);
+  expect(text.indexOf("Pinned months")).toBeGreaterThan(text.indexOf("Tracking the close"));
+});
+
+it("selecting a Tracking the close item PUTs its series_id to /api/v1/dashboard/active", async () => {
+  const { findByRole } = renderSwitcher();
+  const trigger = await findByRole("button", { name: /switch/i });
+  openSwitcher(trigger);
+
+  const otherItem = await findByRole("menuitem", { name: /balance sheet/i });
+  fireEvent.click(otherItem);
+
+  await waitFor(() =>
+    expect(api.put).toHaveBeenCalledWith("/api/v1/dashboard/active", { series_id: "s-2" })
+  );
+});
+
+// --- Pinned months (renamed from "Published dashboards") ---------------------------
+
+it("opens to a Pinned months group listing every published report with a ✓ on the active one", async () => {
+  const { findByRole, findByText } = renderSwitcher();
+  const trigger = await findByRole("button", { name: /switch/i });
+  openSwitcher(trigger);
+
+  expect(await findByText("Pinned months")).toBeTruthy();
+  const activeItem = await findByRole("menuitem", { name: /cash flow.*q2/i });
+  expect(activeItem.textContent).toContain("✓");
+  const otherItem = await findByRole("menuitem", { name: /board snapshot/i });
+  expect(otherItem.textContent).not.toContain("✓");
+});
+
+it("shows 'snapshot' as meta on every Pinned months item, regardless of its own auto_refresh cadence", async () => {
+  const { findByRole } = renderSwitcher();
+  const trigger = await findByRole("button", { name: /switch/i });
+  openSwitcher(trigger);
+
+  const hourlyItem = await findByRole("menuitem", { name: /cash flow/i }); // auto_refresh: "hourly"
+  expect(hourlyItem.textContent).toContain("snapshot");
+  expect(hourlyItem.textContent).not.toContain("hourly");
+  const offItem = await findByRole("menuitem", { name: /board snapshot/i }); // auto_refresh: "off"
   expect(offItem.textContent).toContain("snapshot");
-  expect(offItem.textContent).not.toContain("off");
 });
 
 it("has a divider then a Manage published set… link to /reports", async () => {
@@ -104,16 +199,16 @@ it("has a divider then a Manage published set… link to /reports", async () => 
   expect(anchor.getAttribute("href")).toBe("/reports");
 });
 
-it("selecting an item PUTs its id to /api/v1/dashboard/active", async () => {
+it("selecting a Pinned months item PUTs its report_id to /api/v1/dashboard/active", async () => {
   const { findByRole } = renderSwitcher();
   const trigger = await findByRole("button", { name: /switch/i });
   openSwitcher(trigger);
 
-  const otherItem = await findByRole("menuitem", { name: /cash flow.*q2/i });
+  const otherItem = await findByRole("menuitem", { name: /board snapshot/i });
   fireEvent.click(otherItem);
 
   await waitFor(() =>
-    expect(api.put).toHaveBeenCalledWith("/api/v1/dashboard/active", { report_id: "r-2" })
+    expect(api.put).toHaveBeenCalledWith("/api/v1/dashboard/active", { report_id: "r-3" })
   );
 });
 
@@ -131,18 +226,18 @@ it("disables report items while the switch mutation is pending", async () => {
   const trigger = await findByRole("button", { name: /switch/i });
   openSwitcher(trigger);
 
-  const otherItem = await findByRole("menuitem", { name: /cash flow.*q2/i });
+  const otherItem = await findByRole("menuitem", { name: /board snapshot/i });
   fireEvent.click(otherItem);
 
   openSwitcher(trigger);
-  const reopenedItem = await findByRole("menuitem", { name: /cash flow.*q2/i });
+  const reopenedItem = await findByRole("menuitem", { name: /board snapshot/i });
   await waitFor(() => expect(reopenedItem.getAttribute("aria-disabled")).toBe("true"));
 
   resolvePut({ published, active: published[1], active_is_fallback: false });
 });
 
-it("still renders the menu (with Manage published set…) when published.length <= 1", async () => {
-  const { findByRole } = renderSwitcher({ published: [published[0]], activeId: "r-1" });
+it("still renders the menu (with Manage published set…) when published.length <= 1 and no series", async () => {
+  const { findByRole } = renderSwitcher({ published: [published[0]], activeId: "r-2", publishedSeries: [] });
   const trigger = await findByRole("button", { name: /switch/i });
   openSwitcher(trigger);
 
@@ -157,13 +252,13 @@ it("shows the backend's error message inline when the switch PUT fails, and it p
   const trigger = await findByRole("button", { name: /switch/i });
   openSwitcher(trigger);
 
-  const otherItem = await findByRole("menuitem", { name: /cash flow.*q2/i });
+  const otherItem = await findByRole("menuitem", { name: /board snapshot/i });
   fireEvent.click(otherItem);
 
   expect(await findByText("That report isn't published to the dashboard")).toBeTruthy();
   // Radix closes the menu on selection — the message must still be visible after
   // the menu itself has unmounted, not just while it happens to still be open.
-  await waitFor(() => expect(queryByRole("menuitem", { name: /cash flow.*q2/i })).toBeNull());
+  await waitFor(() => expect(queryByRole("menuitem", { name: /board snapshot/i })).toBeNull());
   expect(await findByText("That report isn't published to the dashboard")).toBeTruthy();
 });
 
@@ -173,7 +268,7 @@ it("falls back to a generic message when the backend error has no message", asyn
   const trigger = await findByRole("button", { name: /switch/i });
   openSwitcher(trigger);
 
-  const otherItem = await findByRole("menuitem", { name: /cash flow.*q2/i });
+  const otherItem = await findByRole("menuitem", { name: /board snapshot/i });
   fireEvent.click(otherItem);
 
   expect(await findByText("Couldn't switch dashboard")).toBeTruthy();
@@ -189,7 +284,7 @@ it("invalidates the dashboard query on a failed switch so the stale menu self-he
   const trigger = await findByRole("button", { name: /switch/i });
   openSwitcher(trigger);
 
-  const otherItem = await findByRole("menuitem", { name: /cash flow.*q2/i });
+  const otherItem = await findByRole("menuitem", { name: /board snapshot/i });
   fireEvent.click(otherItem);
 
   await findByText("That report isn't published to the dashboard");

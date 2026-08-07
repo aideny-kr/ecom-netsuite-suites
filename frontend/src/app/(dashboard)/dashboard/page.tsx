@@ -62,6 +62,11 @@ export default function DashboardPage() {
           report={active}
           published={data?.published ?? []}
           activeIsFallback={data?.active_is_fallback}
+          // Rolling-period Stage 1 (Task 5): threaded straight through from
+          // useDashboard() — both optional/defaulted on DashboardWall, so this stays
+          // a no-op for a tenant with no tracking series yet.
+          publishedSeries={data?.published_series}
+          activeTracking={data?.active_tracking}
           subtitle={<p className="text-[13px] text-muted-foreground">Welcome back, {firstName}</p>}
         />
       ) : isError ? (

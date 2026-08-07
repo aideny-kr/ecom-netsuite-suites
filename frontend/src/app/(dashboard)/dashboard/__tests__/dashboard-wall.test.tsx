@@ -8,6 +8,7 @@ vi.mock("@/lib/api-client", () => ({ apiClient: api }));
 
 import { DashboardWall } from "@/app/(dashboard)/dashboard/dashboard-wall";
 import type { ReportSummary } from "@/hooks/use-reports";
+import type { DashboardTrackingInfo } from "@/hooks/use-dashboard";
 
 const baseReport: ReportSummary = {
   id: "r-1",
@@ -382,4 +383,114 @@ it("resets the dismissed fallback notice when the displayed report changes, so a
       "The dashboard you had chosen is no longer available — showing Cash Flow — Q2 instead."
     )
   ).toBeTruthy();
+});
+
+// --- Rolling-period Stage 1 (Task 5): the tracking ribbon (mock §3) ----------------
+
+function tracking(over: Partial<DashboardTrackingInfo>): DashboardTrackingInfo {
+  return {
+    series_id: "s-1",
+    playbook_key: "income_statement",
+    period: "Jun 2026",
+    period_check_ok: true,
+    resolved_period: "Jun 2026",
+    next_open_period: "Jul 2026",
+    ...over,
+  };
+}
+
+it("shows no ribbon and no TRACKING pill for a plain snapshot selection (activeTracking omitted)", async () => {
+  const { queryByText } = renderWall();
+  await waitFor(() => expect(api.getText).toHaveBeenCalled());
+  expect(queryByText(/last closed period/i)).toBeNull();
+  expect(queryByText(/couldn.t reach netsuite/i)).toBeNull();
+  expect(queryByText("TRACKING")).toBeNull();
+});
+
+it("shows the green ribbon (caught up) verbatim, plus a TRACKING pill, when resolved_period matches the active report's period", async () => {
+  const { findByText } = renderWall({ activeTracking: tracking({}) });
+  expect(await findByText("Last closed period · Jun 2026")).toBeTruthy();
+  expect(
+    await findByText("— Jul 2026 is still open in NetSuite. This wall moves to July the day it closes.")
+  ).toBeTruthy();
+  expect(await findByText("TRACKING")).toBeTruthy();
+});
+
+it("green ribbon omits the still-open clause when there's no later open period to name", async () => {
+  const { findByText, queryByText } = renderWall({
+    activeTracking: tracking({ next_open_period: null }),
+  });
+  expect(await findByText("Last closed period · Jun 2026")).toBeTruthy();
+  expect(queryByText(/is still open in NetSuite/i)).toBeNull();
+});
+
+it("shows the grey ribbon (can't tell) verbatim, dated from the report's own freshness stamp, when the live check degraded", async () => {
+  const { findByText } = renderWall({
+    activeTracking: tracking({ period_check_ok: false, resolved_period: null, next_open_period: null }),
+  });
+  // baseReport.last_refreshed_at = "2026-07-24T07:04:00Z" -> "Jul 24".
+  expect(
+    await findByText("Couldn't reach NetSuite to check the close — showing Jun 2026 from Jul 24.")
+  ).toBeTruthy();
+});
+
+it("grey ribbon falls back to the report's created_at when it has never been refreshed", async () => {
+  const { findByText } = renderWall({
+    report: { ...baseReport, last_refreshed_at: null }, // created_at = "2026-07-01T10:00:00Z" -> "Jul 1"
+    activeTracking: tracking({ period_check_ok: false, resolved_period: null, next_open_period: null }),
+  });
+  expect(
+    await findByText("Couldn't reach NetSuite to check the close — showing Jun 2026 from Jul 1.")
+  ).toBeTruthy();
+});
+
+// Forward-compat only: Stage 1's backend never sends `closed_days_ago` (see the
+// DashboardTrackingInfo docstring in use-dashboard.ts) — this proves the ribbon CAN
+// render the amber copy the day a real backend starts reporting it, without claiming
+// today's traffic can ever produce it.
+it("renders the amber (building) copy verbatim when the API reports the forward-compat closed_days_ago shape", async () => {
+  const { findByText } = renderWall({
+    activeTracking: tracking({
+      period: "Jun 2026",
+      resolved_period: "Jul 2026",
+      next_open_period: "Aug 2026",
+      closed_days_ago: 2,
+    }),
+  });
+  expect(
+    await findByText("Jul 2026 closed 2 days ago — building July's statement now.")
+  ).toBeTruthy();
+});
+
+it("amber copy pluralizes singular days correctly", async () => {
+  const { findByText } = renderWall({
+    activeTracking: tracking({
+      period: "Jun 2026",
+      resolved_period: "Jul 2026",
+      closed_days_ago: 1,
+    }),
+  });
+  expect(await findByText("Jul 2026 closed 1 day ago — building July's statement now.")).toBeTruthy();
+});
+
+it("renders no ribbon (rather than a misleading green or a false 'couldn't reach') when the check succeeded but found a newer period than the active report's own, and there's no amber data yet", async () => {
+  const { queryByText } = renderWall({
+    activeTracking: tracking({ period: "Jun 2026", resolved_period: "Jul 2026", next_open_period: "Aug 2026" }),
+  });
+  await waitFor(() => expect(api.getText).toHaveBeenCalled());
+  expect(queryByText(/last closed period/i)).toBeNull();
+  expect(queryByText(/couldn.t reach netsuite/i)).toBeNull();
+  expect(queryByText(/closed.*days? ago/i)).toBeNull();
+  // The TRACKING pill still shows — this IS a tracking selection, just with no ribbon
+  // copy for this particular in-between state yet.
+  expect(await queryByText("TRACKING")).toBeTruthy();
+});
+
+it("defensively shows no ribbon when tracking is present but has no period yet (an empty series — shouldn't reach DashboardWall in practice, but must not crash if it does)", async () => {
+  const { queryByText } = renderWall({
+    activeTracking: tracking({ period: null, period_check_ok: false, resolved_period: null, next_open_period: null }),
+  });
+  await waitFor(() => expect(api.getText).toHaveBeenCalled());
+  expect(queryByText(/last closed period/i)).toBeNull();
+  expect(queryByText(/couldn.t reach netsuite/i)).toBeNull();
 });

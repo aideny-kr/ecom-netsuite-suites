@@ -157,11 +157,19 @@ export function usePlaybooks() {
   });
 }
 
+/** Rolling-period Stage 1 (Task 5): `mode` mirrors PlaybookComposeRequest's own
+ * default ("period" — today's behaviour, unchanged for every existing caller). Always
+ * sent explicitly (not omitted when unset) so the request body says exactly what's
+ * being asked for, matching the backend's own literal-default contract rather than
+ * relying on it silently. */
 export function useComposePlaybook() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (args: { key: string; params: Record<string, string> }) =>
-      apiClient.post<ReportSummary>(`/api/v1/reports/playbooks/${args.key}`, { params: args.params }),
+    mutationFn: (args: { key: string; params: Record<string, string>; mode?: "period" | "tracking" }) =>
+      apiClient.post<ReportSummary>(`/api/v1/reports/playbooks/${args.key}`, {
+        params: args.params,
+        mode: args.mode ?? "period",
+      }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["reports"] }),
   });
 }
