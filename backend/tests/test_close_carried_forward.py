@@ -50,3 +50,38 @@ async def test_bulk_approve_skips_carried_forward(db, tenant_a):
     await db.refresh(r)
     assert r.status == "carried_forward"  # TERMINAL_RESULT_STATUSES skip
     assert out.approved_count == 0
+
+
+async def test_rejected_rows_stay_visible_on_the_close_checklist(db, tenant_a):
+    """Reject must not be a way to make unresolved variance disappear from close.
+
+    Reject OVERWRITES 'pending'/'auto_matched', the two statuses close-readiness
+    counts. Without a counter of its own, a reviewer could zero the checklist by
+    rejecting rows and the variance would leave the close report with no trace —
+    measured at $1,150 over two rows. Rejected is decided, so it does not BLOCK;
+    it must still be visible, exactly like carried_forward.
+    """
+    from app.services.reconciliation.recon_reject import reject_result
+
+    user, _ = await create_test_user(db, tenant_a)
+    run = await create_test_recon_run(db, tenant_a.id, status="completed")
+    pending = await create_test_recon_result(
+        db,
+        tenant_a.id,
+        run.id,
+        status="pending",
+        match_type="fuzzy",
+        variance_type="amount_mismatch",
+        variance_amount=Decimal("250"),
+    )
+    await db.flush()
+
+    before = await get_close_readiness("2026-04", user=user, db=db)
+    assert before.open_exceptions == 1
+
+    await reject_result(db, result=pending, user=user, reason="not_actionable", note="vendor dispute", run=run)
+    await db.flush()
+
+    after = await get_close_readiness("2026-04", user=user, db=db)
+    assert after.open_exceptions == 0, "decided, so it no longer blocks"
+    assert after.rejected == 1, "but it must remain VISIBLE on the checklist"

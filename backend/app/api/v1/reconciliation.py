@@ -651,6 +651,13 @@ async def reject_result(
         )
     ).scalar_one_or_none()
 
+    # A result whose run is missing cannot have its period freeze checked, so it is
+    # not dispositionable — refuse rather than proceed with an unknown freeze state.
+    # `reject_result` requires `run` precisely so this cannot be waved through: the
+    # previous signature defaulted it to None and skipped the freeze silently.
+    if not run:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Result not found")
+
     try:
         await recon_reject.reject_result(
             db,
@@ -1780,6 +1787,14 @@ async def get_close_readiness(
                 # Non-blocking (excluded from open_exceptions) and never
                 # locked by close_period's lock_predicate below.
                 func.count().filter(ReconciliationResult.status == "carried_forward").label("carried_forward"),
+                # Same shape as carried_forward, and for the same reason. A reject
+                # overwrites 'pending'/'auto_matched', so without its own counter a
+                # reviewer could zero this checklist by rejecting rows and the
+                # variance would leave the close report silently — measured at
+                # $1,150 across two rows in review. Rejected rows are decided, so
+                # they do not block; they must still be VISIBLE, because "we looked
+                # at it and it was wrong" is a reconciling item, not an absence.
+                func.count().filter(ReconciliationResult.status == "rejected").label("rejected"),
             )
             .select_from(ReconciliationResult)
             .where(
@@ -1801,6 +1816,7 @@ async def get_close_readiness(
         suggested=row.suggested,
         left_for_review=row.left_for_review,
         carried_forward=row.carried_forward,
+        rejected=row.rejected,
     )
 
 

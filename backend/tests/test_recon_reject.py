@@ -72,9 +72,9 @@ def test_reason_taxonomy_separates_false_positives_from_unactionable():
 
 
 async def test_reject_records_who_when_why(db, tenant_a, user_a):
-    _, r = await _result(db, tenant_a.id)
+    run, r = await _result(db, tenant_a.id)
 
-    await reject_result(db, result=r, user=user_a, reason="wrong_match", note="different customer")
+    await reject_result(db, result=r, user=user_a, reason="wrong_match", note="different customer", run=run)
 
     assert r.status == "rejected"
     assert r.rejected_by == user_a.id
@@ -86,18 +86,18 @@ async def test_reject_records_who_when_why(db, tenant_a, user_a):
 async def test_reject_rejects_an_unknown_reason(db, tenant_a, user_a):
     """Free-text-only reasons cannot be aggregated, and an unaggregatable label
     is not a label."""
-    _, r = await _result(db, tenant_a.id)
+    run, r = await _result(db, tenant_a.id)
 
     with pytest.raises(RejectNotAllowedError, match="reason"):
-        await reject_result(db, result=r, user=user_a, reason="because I said so", note=None)
+        await reject_result(db, result=r, user=user_a, reason="because I said so", note=None, run=run)
 
 
 async def test_other_requires_a_note(db, tenant_a, user_a):
     """'other' without an explanation is an unreadable label six months later."""
-    _, r = await _result(db, tenant_a.id)
+    run, r = await _result(db, tenant_a.id)
 
     with pytest.raises(RejectNotAllowedError, match="note"):
-        await reject_result(db, result=r, user=user_a, reason="other", note=None)
+        await reject_result(db, result=r, user=user_a, reason="other", note=None, run=run)
 
 
 # --- envelope eligibility is SNAPSHOTTED, not recomputed ------------------
@@ -108,7 +108,7 @@ async def test_snapshots_envelope_eligibility_for_an_admissible_row(db, tenant_a
     the single most valuable label the system can produce."""
     from decimal import Decimal
 
-    _, r = await _result(
+    run, r = await _result(
         db,
         tenant_a.id,
         status="auto_matched",
@@ -117,7 +117,7 @@ async def test_snapshots_envelope_eligibility_for_an_admissible_row(db, tenant_a
         variance_amount=Decimal("0"),
     )
 
-    await reject_result(db, result=r, user=user_a, reason="wrong_match", note=None)
+    await reject_result(db, result=r, user=user_a, reason="wrong_match", note=None, run=run)
 
     assert r.envelope_eligible_at_decision is True
     assert r.counts_as_false_positive is True
@@ -126,7 +126,7 @@ async def test_snapshots_envelope_eligibility_for_an_admissible_row(db, tenant_a
 async def test_snapshots_ineligibility_for_a_variance_row(db, tenant_a, user_a):
     from decimal import Decimal
 
-    _, r = await _result(
+    run, r = await _result(
         db,
         tenant_a.id,
         status="needs_review",
@@ -135,7 +135,7 @@ async def test_snapshots_ineligibility_for_a_variance_row(db, tenant_a, user_a):
         variance_amount=Decimal("12.50"),
     )
 
-    await reject_result(db, result=r, user=user_a, reason="wrong_match", note=None)
+    await reject_result(db, result=r, user=user_a, reason="wrong_match", note=None, run=run)
 
     assert r.envelope_eligible_at_decision is False
     # still a false-positive REASON, but not against the envelope
@@ -145,7 +145,7 @@ async def test_snapshots_ineligibility_for_a_variance_row(db, tenant_a, user_a):
 async def test_not_actionable_never_counts_against_the_envelope(db, tenant_a, user_a):
     from decimal import Decimal
 
-    _, r = await _result(
+    run, r = await _result(
         db,
         tenant_a.id,
         status="auto_matched",
@@ -154,7 +154,7 @@ async def test_not_actionable_never_counts_against_the_envelope(db, tenant_a, us
         variance_amount=Decimal("0"),
     )
 
-    await reject_result(db, result=r, user=user_a, reason="not_actionable", note="waiting on bank")
+    await reject_result(db, result=r, user=user_a, reason="not_actionable", note="waiting on bank", run=run)
 
     assert r.envelope_eligible_at_decision is True
     assert r.counts_as_false_positive is False, "operational friction is not model error"
@@ -176,10 +176,10 @@ async def test_cannot_reject_inside_a_closed_run(db, tenant_a, user_a):
 
 @pytest.mark.parametrize("terminal", ["approved", "locked", "carried_forward", "rejected"])
 async def test_cannot_reject_a_terminal_row(db, tenant_a, user_a, terminal):
-    _, r = await _result(db, tenant_a.id, status=terminal)
+    run, r = await _result(db, tenant_a.id, status=terminal)
 
     with pytest.raises(RejectNotAllowedError):
-        await reject_result(db, result=r, user=user_a, reason="wrong_match", note=None)
+        await reject_result(db, result=r, user=user_a, reason="wrong_match", note=None, run=run)
 
 
 async def test_reject_never_posts_to_netsuite(db, tenant_a, user_a):
@@ -195,9 +195,9 @@ async def test_reject_never_posts_to_netsuite(db, tenant_a, user_a):
 
 
 async def test_reject_writes_one_audit_row(db, tenant_a, user_a):
-    _, r = await _result(db, tenant_a.id)
+    run, r = await _result(db, tenant_a.id)
 
-    await reject_result(db, result=r, user=user_a, reason="wrong_match", note="n")
+    await reject_result(db, result=r, user=user_a, reason="wrong_match", note="n", run=run)
     await db.flush()
 
     rows = (
@@ -213,54 +213,78 @@ async def test_reject_writes_one_audit_row(db, tenant_a, user_a):
     assert rows[0].actor_id == user_a.id
 
 
-# --- the payoff: a rate you can actually compute --------------------------
+# --- the rate itself is NOT computed here ---------------------------------
+# Two tests lived here asserting envelope_false_positive_rate() returned 0.25 on a
+# 4-row fixture, and both passed. The function was still wrong: the fixture only
+# ever approved rows that WERE envelope-eligible, so it never exercised the case
+# that broke it — an approved row the envelope would refuse, which the endpoint
+# happily allows. The tests encoded the same assumption as the code, so they
+# confirmed it rather than checking it.
+#
+# That is the failure worth remembering: a green test written from the
+# implementation's own model of the world proves only that the model is
+# self-consistent. The defect was found by asking what ELSE can set status
+# 'approved', and the answer was "an endpoint with no envelope check at all".
+#
+# The labels below are the durable artifact and they are correct. Any rate is a
+# pure function of them and can be computed — correctly — later.
 
 
-async def test_false_positive_rate_is_computable(db, tenant_a, user_a):
-    """The whole point. Rung 3 cannot be argued for or against without this."""
+# --- guards that were opt-in or missing, each from a reproduced review finding ---
+
+
+async def test_amount_unknown_row_is_not_envelope_eligible(db, tenant_a, user_a):
+    """A row the envelope refuses must not be snapshotted as eligible.
+
+    `autonomy_envelope.evaluate` excludes amount-unknown rows explicitly so they are
+    not "$0-blessed"; this ladder had dropped that rung. The effect was an error
+    charged against a decision the envelope never made — corpus corruption that
+    reads as a real matcher failure.
+    """
     from decimal import Decimal
 
-    from app.services.reconciliation.recon_reject import envelope_false_positive_rate
+    from app.services.reconciliation.recon_reject import _is_envelope_eligible
 
     run = await create_test_recon_run(db, tenant_a.id, status="completed")
-    for i in range(4):
-        row = await create_test_recon_result(
-            db,
-            tenant_a.id,
-            run.id,
-            status="auto_matched",
-            bucket="matches",
-            match_type="deterministic",
-            variance_amount=Decimal("0"),
-        )
-        await db.flush()
-        if i == 0:
-            await reject_result(db, result=row, user=user_a, reason="wrong_match", note=None)
-        elif i == 1:
-            await reject_result(db, result=row, user=user_a, reason="not_actionable", note="x")
-        else:
-            row.status = "approved"
-            row.approved_by = user_a.id
-            row.approved_at = datetime.now(timezone.utc)
+    row = await create_test_recon_result(
+        db,
+        tenant_a.id,
+        run.id,
+        status="auto_matched",
+        bucket="matches",
+        match_type="deterministic",
+        variance_amount=Decimal("0"),
+    )
+    row.stripe_amount = None
     await db.flush()
 
-    rate = await envelope_false_positive_rate(db, tenant_id=tenant_a.id, run_id=run.id)
+    assert _is_envelope_eligible(row) is False
 
-    # 4 envelope-eligible decided rows, exactly 1 a genuine false positive.
-    assert rate["decided"] == 4
-    assert rate["false_positives"] == 1
-    assert rate["rate"] == pytest.approx(0.25)
+    await reject_result(db, result=row, user=user_a, reason="wrong_match", note=None, run=run)
+    await db.flush()
+    assert row.envelope_eligible_at_decision is False
+    assert row.counts_as_false_positive is False
 
 
-async def test_rate_is_none_when_there_is_no_evidence(db, tenant_a):
-    """With no decided rows the honest answer is 'unknown', not 0.0. A confident
-    zero here is exactly how an unsafe autonomy decision gets justified."""
-    from app.services.reconciliation.recon_reject import envelope_false_positive_rate
+async def test_run_is_required_so_the_freeze_cannot_be_skipped(db, tenant_a, user_a):
+    """`run` had a None default guarded by `if run is not None`, so omitting it
+    silently skipped the period freeze. A guard that depends on the caller
+    remembering an optional argument is documentation, not a guard."""
+    import inspect
 
-    run = await create_test_recon_run(db, tenant_a.id, status="completed")
+    from app.services.reconciliation.recon_reject import reject_result as _rr
+
+    assert inspect.signature(_rr).parameters["run"].default is inspect.Parameter.empty
+
+    run = await create_test_recon_run(db, tenant_a.id, status="closed")
+    row = await create_test_recon_result(db, tenant_a.id, run.id, status="suggested")
     await db.flush()
 
-    rate = await envelope_false_positive_rate(db, tenant_id=tenant_a.id, run_id=run.id)
+    with pytest.raises(RejectNotAllowedError, match="closed"):
+        await reject_result(db, result=row, user=user_a, reason="wrong_match", note=None, run=run)
+    assert row.status == "suggested"
 
-    assert rate["decided"] == 0
-    assert rate["rate"] is None
+    # And an explicit None is refused rather than treated as "no freeze to check".
+    with pytest.raises(RejectNotAllowedError):
+        await reject_result(db, result=row, user=user_a, reason="wrong_match", note=None, run=None)
+    assert row.status == "suggested"

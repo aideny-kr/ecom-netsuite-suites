@@ -85,6 +85,14 @@ def _is_envelope_eligible(result: Any) -> bool:
         return False
     if result.match_type != "deterministic":
         return False
+    # `evaluate` excludes amount-unknown rows explicitly ("must not be $0-blessed"),
+    # and this ladder dropped that rung. stripe_amount is nullable, so a row the
+    # envelope refuses outright was being snapshotted as eligible and then counted
+    # as a false positive AGAINST the envelope — an error charged to a decision it
+    # never made. Reproduced: evaluate() reported excluded={"amount_unknown": 1}
+    # for a row this function called eligible.
+    if getattr(result, "stripe_amount", None) is None:
+        return False
     variance = result.variance_amount
     return variance is not None and Decimal(variance) == Decimal("0")
 
@@ -96,7 +104,7 @@ async def reject_result(
     user: Any,
     reason: str,
     note: str | None,
-    run: Any | None = None,
+    run: Any,
     correlation_id: str | None = None,
 ) -> Any:
     """Record a human's judgement that this match is wrong (or unactionable).
@@ -104,13 +112,27 @@ async def reject_result(
     Inherits every invariant approve enforces — a closed run is a hard freeze and
     a terminal row is immutable — because a reject path that skipped them would
     be the back door into a frozen period.
+
+    ``run`` is REQUIRED and has no default. It used to be ``run: Any | None = None``
+    guarded by ``if run is not None``, which made the hard freeze opt-in: any caller
+    that simply omitted the argument wrote into a closed period and no exception was
+    raised. Reproduced — a run with status='closed' plus a call without ``run=``
+    left the row 'rejected' inside a frozen period. The HTTP handler always passed
+    it, so nothing was exploitable, but the repo already has a second approve path
+    (``app/mcp/tools/recon_approve.py``) and a chat surface; the next caller is the
+    one that would have found this. A guard whose enforcement depends on the caller
+    remembering an optional argument is documentation, not a guard.
     """
     if reason not in REJECT_REASONS:
         raise RejectNotAllowedError(f"unknown reason {reason!r}; expected one of {', '.join(REJECT_REASONS)}")
     if reason == "other" and not (note or "").strip():
         raise RejectNotAllowedError("reason 'other' requires a note — an unexplained label is unreadable later")
 
-    if run is not None and getattr(run, "status", None) in CLOSED_RUN_STATUSES:
+    # No `is not None` escape: a missing run is a programming error, not a licence
+    # to skip the freeze.
+    if run is None:
+        raise RejectNotAllowedError("internal: run is required to check the period freeze")
+    if getattr(run, "status", None) in CLOSED_RUN_STATUSES:
         raise RejectNotAllowedError("run is closed — the period is frozen and dispositions cannot change")
 
     if result.status in TERMINAL_RESULT_STATUSES:
@@ -156,47 +178,32 @@ async def reject_result(
     return result
 
 
-async def envelope_false_positive_rate(
-    db: AsyncSession, *, tenant_id: Any, run_id: Any | None = None
-) -> dict[str, Any]:
-    """The number Rung 3 cannot be argued for or against without.
-
-    Denominator is envelope-eligible rows a human actually DECIDED (approved or
-    rejected) — undecided rows carry no information. Numerator is decided rows a
-    human called a genuine matcher error.
-
-    Returns ``rate: None`` when nothing has been decided. That is deliberate: a
-    confident 0.0 on an empty corpus is precisely how an unsafe autonomy decision
-    gets justified, and 'no evidence' must not render as 'no errors'.
-    """
-    from app.models.reconciliation import ReconciliationResult as R
-
-    where = [R.tenant_id == tenant_id]
-    if run_id is not None:
-        where.append(R.run_id == run_id)
-
-    # Approved rows were eligible by definition of the envelope's own ladder;
-    # rejected rows carry the snapshot taken at decision time.
-    decided = (
-        await db.execute(
-            select(func.count())
-            .select_from(R)
-            .where(
-                *where,
-                R.status.in_(("approved", "rejected")),
-                (R.envelope_eligible_at_decision.is_(True)) | (R.status == "approved"),
-            )
-        )
-    ).scalar_one()
-
-    false_positives = (
-        await db.execute(select(func.count()).select_from(R).where(*where, R.counts_as_false_positive.is_(True)))
-    ).scalar_one()
-
-    decided = int(decided or 0)
-    false_positives = int(false_positives or 0)
-    return {
-        "decided": decided,
-        "false_positives": false_positives,
-        "rate": (false_positives / decided) if decided else None,
-    }
+# ---------------------------------------------------------------------------
+# envelope_false_positive_rate() WAS HERE. Removed 2026-08-06, before it was ever
+# wired to anything, because it computed the number wrongly in two directions at
+# once — and it is the number unattended posting is gated on. A metric that is
+# merely absent blocks a decision; one that is confidently wrong justifies it.
+#
+# Both defects were reproduced against a real database:
+#
+#   DENOMINATOR TOO WIDE. It admitted every `approved` row on the stated grounds
+#   that "approved rows were eligible by definition of the envelope's own ladder".
+#   That is false: PATCH /results/{id}/approve checks only run-open and
+#   non-terminal, so a fuzzy row with $500 variance — one `_is_envelope_eligible`
+#   itself rejects — lands in the denominator. Measured: true rate 1/1, reported
+#   0.1. The bias is toward "safe to post", which is the dangerous direction.
+#
+#   THE CORPUS MOVES AT CLOSE. close_period rewrites approved -> locked while
+#   rejected rows keep their status forever, so month-end close silently deletes
+#   every approval from the denominator. Measured: 0.05 -> 1.0 across a close,
+#   with no change to the matcher.
+#
+# They push opposite ways, so they do not cancel; the number is uninterpretable at
+# any instant. The fix is not a better WHERE clause — it is deciding what the
+# denominator MEANS across a close boundary, and recording eligibility for
+# approvals the way rejects already snapshot it, rather than inferring it after
+# the fact from a status that another workflow is free to rewrite.
+#
+# The labels this module writes are correct and are the durable artifact; they
+# accrue from today and any correct rate can be computed over them later.
+# Tracked in ClickUp 86bb9nw0d.

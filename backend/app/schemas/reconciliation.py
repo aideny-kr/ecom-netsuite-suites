@@ -303,6 +303,12 @@ class ReconCloseReadiness(BaseModel):
       reconciling item (timing group-approved). Non-blocking (not
       ``open_exceptions``) and never locked by ``close_period``. Default 0
       keeps older API clients working.
+    - ``rejected``: status='rejected' — a human judged the match wrong (or right
+      but unactionable). Non-blocking for the same reason as ``carried_forward``:
+      it has been decided. It gets its own counter because reject OVERWRITES
+      'pending'/'auto_matched', so without one a reviewer can zero this checklist
+      by rejecting rows and the variance leaves the close report with no trace.
+      "We looked and it was wrong" is a reconciling item, not an absence.
     """
 
     period: str
@@ -312,6 +318,7 @@ class ReconCloseReadiness(BaseModel):
     suggested: int
     left_for_review: int
     carried_forward: int = 0
+    rejected: int = 0
 
 
 class ReconBucketSummary(BaseModel):
