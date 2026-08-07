@@ -4,11 +4,11 @@ import uuid
 
 from app.mcp.governance import (
     TOOL_CONFIGS,
-    _rate_limits,
     check_rate_limit,
     create_audit_payload,
     governed_execute,
     redact_result,
+    reset_rate_limit,
     validate_params,
 )
 
@@ -57,7 +57,7 @@ class TestParamValidation:
 class TestRateLimiting:
     def setup_method(self):
         """Clear rate limit state between tests."""
-        _rate_limits.clear()
+        reset_rate_limit()
 
     def test_within_limit(self):
         tenant = str(uuid.uuid4())
@@ -162,7 +162,7 @@ class TestAuditPayload:
 
 class TestGovernedExecute:
     async def test_successful_execution(self):
-        _rate_limits.clear()
+        reset_rate_limit()
 
         async def stub_fn(params, **kwargs):
             return {"status": "stub", "row_count": 0, "data": []}
@@ -178,7 +178,7 @@ class TestGovernedExecute:
         assert result["status"] == "stub"
 
     async def test_rate_limited_execution(self):
-        _rate_limits.clear()
+        reset_rate_limit()
         tenant_id = str(uuid.uuid4())
         tool = "recon.run"
         limit = TOOL_CONFIGS[tool]["rate_limit_per_minute"]
@@ -196,7 +196,7 @@ class TestGovernedExecute:
         assert "rate limit" in result["error"].lower()
 
     async def test_execution_error_handled(self):
-        _rate_limits.clear()
+        reset_rate_limit()
 
         async def failing_fn(params, **kwargs):
             raise ValueError("Tool broke")

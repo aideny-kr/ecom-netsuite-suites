@@ -38,6 +38,11 @@ class Settings(BaseSettings):
     MCP_SERVER_PORT: int = 8001
     MCP_RATE_LIMIT_PER_MINUTE: int = 60
 
+    # Chat turns per user per minute. Burst-only: bounds runaway retry loops and
+    # scripted clients spending the platform Anthropic key, without capping a
+    # legitimate heavy recon/report session for the day.
+    CHAT_BURST_PER_MINUTE: int = 20
+
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_MODEL: str = "claude-sonnet-5"
     # OpenRouter gateway — env only, never a shell export (key-billing leak risk).

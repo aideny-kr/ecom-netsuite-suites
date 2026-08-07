@@ -1441,7 +1441,7 @@ async def test_governed_execute_seam_threads_tenant_fiscal_month(db, tenant_a, m
     the period resolver runs. With a frozen today=2026-05-15 and token 'this_year', the
     leaf executor must receive the FISCAL window (Apr 1 2026 -> Mar 31 2027), NOT the
     calendar window (Jan 1 -> Dec 31 2026)."""
-    from app.mcp.governance import _rate_limits, governed_execute
+    from app.mcp.governance import governed_execute, reset_rate_limit
     from app.mcp.registry import TOOL_REGISTRY
     from app.models.tenant import TenantConfig
 
@@ -1480,7 +1480,7 @@ async def test_governed_execute_seam_threads_tenant_fiscal_month(db, tenant_a, m
     monkeypatch.setattr("app.services.metrics.metric_compute._execute_scalar_query", _capture_scalar)
 
     # Avoid cross-test rate-limit bleed for this tool/tenant.
-    _rate_limits.pop(str(tenant_a.id), None)
+    reset_rate_limit(str(tenant_a.id))
 
     out = await governed_execute(
         tool_name="metric.compute",

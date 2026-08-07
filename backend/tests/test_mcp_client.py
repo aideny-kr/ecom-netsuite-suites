@@ -5,7 +5,7 @@ import uuid
 import pytest
 from sqlalchemy import select
 
-from app.mcp.governance import TOOL_CONFIGS, _rate_limits
+from app.mcp.governance import TOOL_CONFIGS, reset_rate_limit
 from app.mcp.metrics import get_metrics, reset_metrics
 from app.mcp.server import MCPServer
 from app.models.audit import AuditEvent
@@ -74,10 +74,10 @@ EXPECTED_TOOLS = {
 @pytest.fixture(autouse=True)
 def _clear_state():
     """Reset rate limits and metrics between tests."""
-    _rate_limits.clear()
+    reset_rate_limit()
     reset_metrics()
     yield
-    _rate_limits.clear()
+    reset_rate_limit()
     reset_metrics()
 
 

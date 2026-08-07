@@ -1,19 +1,21 @@
 import time
 import uuid
-from collections import defaultdict
 from typing import Any, Callable
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.rate_limit import check_mcp_tool_limit, reset_rate_limits
 from app.mcp.metrics import record_call, record_duration, record_rate_limit_rejection
 from app.services import audit_service
 
 logger = structlog.get_logger()
 
-# Rate limit tracking: {tenant_id: {tool_name: [timestamps]}}
-_rate_limits: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
+# Rate limit state lives in app.core.rate_limit (Redis sorted-set sliding window).
+# It used to be a module-level dict here, which made every configured per-tenant,
+# per-tool limit effectively N times higher across N workers/replicas -- the number
+# in TOOL_CONFIGS was not the number being enforced.
 
 TOOL_CONFIGS = {
     "health": {
@@ -282,18 +284,13 @@ def check_rate_limit(tenant_id: str, tool_name: str) -> bool:
     """Check if the tenant is within rate limits for this tool."""
     config = TOOL_CONFIGS.get(tool_name, {})
     limit = config.get("rate_limit_per_minute", 60)
+    return check_mcp_tool_limit(tenant_id, tool_name, limit)
 
-    now = time.time()
-    window_start = now - 60
 
-    # Clean old entries
-    _rate_limits[tenant_id][tool_name] = [ts for ts in _rate_limits[tenant_id][tool_name] if ts > window_start]
-
-    if len(_rate_limits[tenant_id][tool_name]) >= limit:
-        return False
-
-    _rate_limits[tenant_id][tool_name].append(now)
-    return True
+def reset_rate_limit(tenant_id: str | None = None) -> None:
+    """Clear MCP tool rate-limit state, for one tenant or all of them. Tests only."""
+    prefix = f"ratelimit:mcp:{tenant_id}:" if tenant_id else "ratelimit:mcp:"
+    reset_rate_limits(prefix)
 
 
 def validate_params(tool_name: str, params: dict[str, Any], context_need: str | None = None) -> dict[str, Any]:
