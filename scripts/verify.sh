@@ -179,9 +179,35 @@ else
   fi
 fi
 
+# --- the record ------------------------------------------------------------
+# THIS script writes the evidence log. It used to be scraped out of stdout by a
+# PostToolUse hook, which failed in both directions and was trusted anyway:
+#
+#   MISSED real runs — a backgrounded run returns "Command running in background"
+#     to the tool layer, so the banner never reached the hook. Nearly every run on
+#     2026-08-06 was backgrounded and none of them recorded.
+#   INVENTED fake runs — `tail`ing a saved output file echoes the banner, and the
+#     hook dutifully logged a run that never happened. Entries from an unrelated
+#     branch sit in the log with verdict UNKNOWN for the same reason.
+#
+# A verdict is a fact the producer knows. Scraping a consumer's stdout to recover
+# it is fragile by construction: it depends on how the command was invoked, which
+# has nothing to do with whether the suite ran. So verify.sh appends its own line
+# and stop_guard.py reads it — one producer, one consumer, no inference.
+record() {  # $1 = verdict
+  local dir; dir="$(git rev-parse --git-common-dir 2>/dev/null)/verify-runs"
+  mkdir -p "$dir" 2>/dev/null || return 0
+  printf '%s %s@%s %s quick=%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)" \
+    "$(git rev-parse --short HEAD 2>/dev/null || echo unknown)" \
+    "$1" "$([[ $QUICK -eq 1 ]] && echo yes || echo no)" >> "$dir/log" 2>/dev/null || true
+}
+
 # --- verdict ---------------------------------------------------------------
 echo; echo "────────────────────────────────────────────"
 printf 'passed %d · failed %d · notes %d\n' "${#PASSED[@]}" "${#FAILED[@]}" "${#NOTES[@]}"
-if ((${#FAILED[@]})); then printf '  · %s\n' "${FAILED[@]}"; echo "NOT DONE"; exit 1; fi
-[[ $QUICK -eq 1 ]] && { echo "QUICK ONLY — run without --quick before claiming done"; exit 2; }
+if ((${#FAILED[@]})); then printf '  · %s\n' "${FAILED[@]}"; record NOT-DONE; echo "NOT DONE"; exit 1; fi
+[[ $QUICK -eq 1 ]] && { record QUICK-ONLY; echo "QUICK ONLY — run without --quick before claiming done"; exit 2; }
+record PASS
 echo "PASS — evidence of done"; exit 0
