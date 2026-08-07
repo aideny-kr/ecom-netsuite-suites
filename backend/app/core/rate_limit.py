@@ -57,8 +57,13 @@ def _get_redis() -> redis.Redis | None:
         return None
 
 
-def check_limit(key: str, limit: int, window_seconds: int = WINDOW_SECONDS) -> bool:
+def check_limit(key: str, limit: int, window_seconds: int = WINDOW_SECONDS, *, fleet_wide: bool = False) -> bool:
     """Return True if the request is allowed, False if rate-limited.
+
+    `fleet_wide` says whether `limit` is a whole-fleet number or a per-process one,
+    and ONLY affects the fallback path (Redis is shared by definition). Getting this
+    wrong in either direction is a real bug, so every caller states it explicitly
+    rather than inheriting a default that happens to suit one of them.
 
     Two different Redis failures, two different answers:
 
@@ -77,7 +82,7 @@ def check_limit(key: str, limit: int, window_seconds: int = WINDOW_SECONDS) -> b
     global _redis
     r = _get_redis()
     if r is None:
-        return _check_fallback(key, limit, window_seconds)
+        return _check_fallback(key, limit, window_seconds, fleet_wide=fleet_wide)
     try:
         return _check_redis(r, key, limit, window_seconds)
     except Exception:
@@ -87,7 +92,14 @@ def check_limit(key: str, limit: int, window_seconds: int = WINDOW_SECONDS) -> b
 
 
 def check_login_rate_limit(ip: str) -> bool:
-    return check_limit(f"{_LOGIN_PREFIX}{ip}", MAX_ATTEMPTS, WINDOW_SECONDS)
+    """Per-IP login attempts.
+
+    NOT fleet-wide: MAX_ATTEMPTS is a pre-existing per-process number that was never
+    part of the 2026-08-06 MCP re-baseline. Dividing it would have silently cut login
+    lockout from 10 attempts to 2 during a Redis outage -- a quiet change to brute-force
+    semantics, which this work explicitly promised not to make.
+    """
+    return check_limit(f"{_LOGIN_PREFIX}{ip}", MAX_ATTEMPTS, WINDOW_SECONDS, fleet_wide=False)
 
 
 def check_chat_burst_limit(tenant_id: str, user_id: str) -> bool:
@@ -96,7 +108,15 @@ def check_chat_burst_limit(tenant_id: str, user_id: str) -> bool:
     Keyed by both so one noisy user cannot starve their colleagues, and one
     tenant cannot starve another.
     """
-    return check_limit(f"{_CHAT_PREFIX}{tenant_id}:{user_id}", settings.CHAT_BURST_PER_MINUTE, WINDOW_SECONDS)
+    # Fleet-wide: the cap means "N turns a minute for this user", not "N per worker".
+    # Caveat: with sticky routing a user pinned to one worker sees only their share
+    # during a Redis outage. Fleet-correct beats worker-correct for a cost guardrail.
+    return check_limit(
+        f"{_CHAT_PREFIX}{tenant_id}:{user_id}",
+        settings.CHAT_BURST_PER_MINUTE,
+        WINDOW_SECONDS,
+        fleet_wide=True,
+    )
 
 
 def check_mcp_tool_limit(tenant_id: str, tool_name: str, limit: int) -> bool:
@@ -105,7 +125,9 @@ def check_mcp_tool_limit(tenant_id: str, tool_name: str, limit: int) -> bool:
     Previously a per-process dict in `app.mcp.governance`, which silently granted
     N times the configured limit across N workers/replicas.
     """
-    return check_limit(f"{_MCP_PREFIX}{tenant_id}:{tool_name}", limit, WINDOW_SECONDS)
+    # Fleet-wide: TOOL_CONFIGS was multiplied by the worker count on 2026-08-06
+    # precisely so the shared window enforces the real ceiling.
+    return check_limit(f"{_MCP_PREFIX}{tenant_id}:{tool_name}", limit, WINDOW_SECONDS, fleet_wide=True)
 
 
 def _check_redis(r: redis.Redis, key: str, limit: int, window_seconds: int) -> bool:
@@ -151,9 +173,10 @@ def _per_process_limit(limit: int) -> int:
     return max(1, limit // max(1, settings.WEB_CONCURRENCY))
 
 
-def _check_fallback(key: str, limit: int, window_seconds: int) -> bool:
-    """In-memory fallback, enforcing this process's share of the fleet-wide limit."""
-    limit = _per_process_limit(limit)
+def _check_fallback(key: str, limit: int, window_seconds: int, *, fleet_wide: bool = False) -> bool:
+    """In-memory fallback. Splits the limit only when it is a fleet-wide number."""
+    if fleet_wide:
+        limit = _per_process_limit(limit)
     now = time.monotonic()
     cutoff = now - window_seconds
     with _fallback_lock:

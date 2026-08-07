@@ -74,6 +74,10 @@ def test_prefers_row_for_this_account_over_more_recent_other_account():
     prod_row = _conn(PROD)
     connection, switched_from = _select_connection_for_account([sandbox_row, prod_row], PROD)
     assert connection is prod_row, "must not overwrite the sandbox row with prod credentials"
+    # Both rows are active here -- the pathological duplicate state. PROD is among
+    # them, so it is already serving some reads and this is not a switch. Naming
+    # sandbox as "previous" would be arbitrary: which row served any given read was
+    # precisely the nondeterminism being repaired.
     assert switched_from is None
 
 
@@ -213,3 +217,66 @@ def test_already_revoked_rows_are_left_alone():
 
 def test_nothing_to_supersede_on_a_first_connect():
     assert _supersede_other_connections([], None, PROD) == []
+
+
+# ---------------------------------------------------------------------------
+# Superseded rows stay candidates -- so "switched" must be judged against the
+# row actually serving reads, not against whichever row happens to match or sort first
+# ---------------------------------------------------------------------------
+
+
+def test_reconnecting_a_superseded_account_is_still_a_switch():
+    """Gate round 3, major. Matching ANY candidate made this look like a no-op.
+
+    Tenant is live on prod; sandbox sits superseded from an earlier switch. Re-auth
+    sandbox: the old logic matched the sandbox row and reported switched_from=None,
+    so no audit event, no warning page, no label rename -- while supersede flipped
+    prod off underneath and every SuiteQL read silently moved to sandbox.
+    """
+    live_prod = _conn(PROD)
+    old_sandbox = _conn(SANDBOX)
+    old_sandbox.status = "superseded"
+
+    selected, switched_from = _select_connection_for_account([live_prod, old_sandbox], SANDBOX)
+
+    assert selected is old_sandbox, "reclaim the existing row rather than duplicating it"
+    assert switched_from == PROD, "reads are moving off prod — that must be audited and surfaced"
+
+
+def test_switched_from_names_the_active_account_not_a_stale_duplicate():
+    """Gate round 3, major. candidates[0] is newest-touched, not necessarily active.
+
+    A superseded duplicate touched more recently than the live row would have been
+    reported as the previous account, putting a false account id in the audit trail
+    and in the operator-facing warning.
+    """
+    stale_recent = _conn("9999999")
+    stale_recent.status = "superseded"
+    live_prod = _conn(PROD)
+
+    selected, switched_from = _select_connection_for_account([stale_recent, live_prod], "newacct")
+
+    assert switched_from == PROD, "must name the account whose reads were taken away"
+    assert selected is live_prod, "must land on the row that was actually serving reads"
+
+
+def test_reauth_of_the_active_account_is_still_not_a_switch():
+    live_prod = _conn(PROD)
+    old_sandbox = _conn(SANDBOX)
+    old_sandbox.status = "superseded"
+
+    selected, switched_from = _select_connection_for_account([live_prod, old_sandbox], PROD)
+
+    assert selected is live_prod
+    assert switched_from is None
+
+
+def test_no_active_row_at_all_is_adopted_not_reported_as_a_switch():
+    """Every row superseded (e.g. mid-recovery): there is no account losing reads."""
+    orphan = _conn(SANDBOX)
+    orphan.status = "superseded"
+
+    selected, switched_from = _select_connection_for_account([orphan], PROD)
+
+    assert selected is orphan
+    assert switched_from is None

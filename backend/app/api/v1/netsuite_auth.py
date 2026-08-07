@@ -19,7 +19,7 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.dependencies import require_permission
 from app.core.encryption import encrypt_credentials, get_current_key_version
-from app.models.connection import Connection
+from app.models.connection import ACTIVE_CONNECTION_STATUSES, Connection
 from app.models.user import User
 from app.services import audit_service
 from app.services.netsuite_oauth_service import (
@@ -66,17 +66,36 @@ def _select_connection_for_account(
     def account_of(conn: Connection) -> str | None:
         return (conn.metadata_json or {}).get("account_id")
 
-    # Prefer the row already bound to this account, wherever it sorts.
-    for candidate in candidates:
-        if account_of(candidate) == account_id:
-            return candidate, None
+    # "Switched" is defined against the row that is ACTUALLY SERVING READS, not
+    # against whichever row sorts first. Superseded rows stay candidates on purpose
+    # (so re-auth can reclaim them), which broke both of the naive readings:
+    #   - matching any candidate meant reconnecting a previously-superseded account
+    #     while a different one was active looked like a no-op -- no audit, no
+    #     warning page -- while the active row was silently demoted underneath;
+    #   - taking candidates[0] meant `switched_from` could name a stale duplicate
+    #     rather than the account whose reads were actually being taken away.
+    active_rows = [c for c in candidates if c.status in ACTIVE_CONNECTION_STATUSES]
 
-    # Otherwise fall back to the most recent row and keep the singleton invariant.
-    connection = candidates[0]
-    previous = account_of(connection)
-    # Rows predating metadata_json.account_id name no account, so we cannot claim
-    # what they switched from -- adopt them rather than fabricate an audit record.
-    return connection, previous if previous and previous != account_id else None
+    # Land on the row already bound to this account whatever its status, so a
+    # reclaimed row is reused instead of duplicated.
+    selected = next((c for c in candidates if account_of(c) == account_id), None)
+    if selected is None:
+        selected = active_rows[0] if active_rows else candidates[0]
+
+    if any(account_of(c) == account_id for c in active_rows):
+        # This account is already serving reads. Not a switch -- and in the
+        # pathological two-active-rows case, naming "the other" active row as the
+        # previous account would be arbitrary, since which one served any given
+        # read was exactly the nondeterminism being repaired.
+        switched_from = None
+    else:
+        # Rows predating metadata_json.account_id name no account, so we cannot
+        # claim what they switched from -- adopt them rather than fabricate an
+        # audit record.
+        previous = account_of(active_rows[0]) if active_rows else None
+        switched_from = previous if previous and previous != account_id else None
+
+    return selected, switched_from
 
 
 def _supersede_other_connections(
