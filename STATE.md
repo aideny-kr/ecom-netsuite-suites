@@ -36,7 +36,7 @@ Updated at the end of every task, not "later".
 |---|---|---|---|
 | `feat/dev-loop-and-harness` | T2 | 21 commits, process only — gated ×3, blockers fixed, **frozen** | nothing |
 | `feat/agent-graph-operating-model` | T2 | Track O (22 majors) + reject action, **ungated** | needs Track O decision |
-| `feat/rolling-period` | T2 | Stage 1 of 2. T1-T5 all done @ `b8a4f17b`; `verify.sh` (full) PASS — 5642 passed head vs 5587 baseline, 0 new failures; eyeball/multi-angle review/T2 gate/PR still pending | **093 collides with recon-reject — see OPEN** |
+| `feat/rolling-period` | T2 | Stage 1 **built + eyeball-approved**, ungated. Last full verify RED on 2 auth tests (see OPEN) | **093 collides with recon-reject** · needs 1 clean verify before gating |
 
 Contents of that branch, honestly:
 
@@ -227,6 +227,22 @@ Written so the next session does not re-litigate these.
 - **Don't add a rule to CLAUDE.md when a docstring next to the code would carry it.**
 
 ## OPEN — needs a human, blocking something
+
+- **`feat/rolling-period`'s last full `verify.sh` is RED — on two auth tests this branch
+  does not touch.** `test_auth_security.py::TestLoginRateLimit::test_rate_limit_blocks_after_10`
+  and `test_auth.py::TestLogin::test_login_creates_audit_event`. Evidence it is NOT a
+  regression from this branch: (a) the SAME code passed full verify twice earlier
+  (after Task 4 and Task 5, 5642 passed / 0 new failures each time) and failed on the
+  third run; (b) both tests pass in isolation and as an ordered pair; (c) the branch
+  contains zero auth/rate-limiter changes; (d) my tests cannot pollute them — the audit
+  assertion is scoped to its own tenant and action, and nothing here touches limiter state.
+  There is no `pytest-randomly`/`xdist`, so ordering is deterministic — which makes the
+  intermittency *more* suspicious, not less: it points at shared limiter state or a
+  time-window boundary crossed on a slow run. **This is very likely the risk already
+  logged as NEXT #9** (nothing globally prevents `rate_limit`/`redis_lock` from building a
+  live client from `settings.REDIS_URL`). Do not gate or land this branch on a red
+  record: get ONE clean full run, and if it recurs, treat it as the NEXT #9 investigation
+  rather than a rolling-period defect.
 
 - **TWO migrations are both numbered `093` off parent `092`, on different branches.**
   `feat/rolling-period` has `093_report_series`; `feat/recon-reject-action` (and
