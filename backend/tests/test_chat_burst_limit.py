@@ -101,8 +101,14 @@ def _clean_limiter_state():
 
 @pytest.fixture
 def no_redis(monkeypatch):
-    """Force the in-memory fallback path."""
+    """Force the in-memory fallback path, single-process.
+
+    WEB_CONCURRENCY=1 makes this process's share equal the fleet-wide limit, so
+    these tests read as "the cap is the cap". The multi-worker split has its own
+    test below.
+    """
     monkeypatch.setattr(rl, "_get_redis", lambda: None)
+    monkeypatch.setattr(rl.settings, "WEB_CONCURRENCY", 1)
 
 
 @pytest.fixture
@@ -277,3 +283,43 @@ def test_redis_unreachable_at_connect_still_degrades_to_the_local_window(no_redi
     """
     tenant, user = str(uuid.uuid4()), str(uuid.uuid4())
     assert rl.check_chat_burst_limit(tenant, user) is True
+
+
+# ---------------------------------------------------------------------------
+# Fleet-wide limits must not be multiplied by the worker count on the fallback
+# ---------------------------------------------------------------------------
+
+
+def test_fallback_enforces_this_process_share_not_the_whole_fleet_limit(monkeypatch):
+    """A Redis outage must not quietly hand every worker the full fleet ceiling.
+
+    Limits are fleet-wide by construction (TOOL_CONFIGS was multiplied by the
+    worker count on 2026-08-06 so the shared window enforces the real number).
+    Giving that same number to a per-process counter multiplies it straight back:
+    netsuite.suiteql would allow ~480/min across 4 workers during an outage,
+    against ~120/min before any of this work -- the outage would end up 4x looser
+    than the bug we set out to fix.
+    """
+    monkeypatch.setattr(rl, "_get_redis", lambda: None)
+    monkeypatch.setattr(rl.settings, "WEB_CONCURRENCY", 4)
+
+    tenant, user = str(uuid.uuid4()), str(uuid.uuid4())
+    share = rl.settings.CHAT_BURST_PER_MINUTE // 4
+
+    for _ in range(share):
+        assert rl.check_chat_burst_limit(tenant, user) is True
+    assert rl.check_chat_burst_limit(tenant, user) is False, (
+        "one worker must only get its share, so 4 workers total the fleet limit"
+    )
+
+
+def test_per_process_limit_never_rounds_down_to_zero(monkeypatch):
+    """A tool capped at 2/min with 4 workers must still allow 1, not deadlock at 0."""
+    monkeypatch.setattr(rl.settings, "WEB_CONCURRENCY", 4)
+    assert rl._per_process_limit(2) == 1
+    assert rl._per_process_limit(1) == 1
+
+
+def test_per_process_limit_is_identity_for_a_single_worker(monkeypatch):
+    monkeypatch.setattr(rl.settings, "WEB_CONCURRENCY", 1)
+    assert rl._per_process_limit(120) == 120

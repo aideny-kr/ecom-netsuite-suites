@@ -96,7 +96,7 @@ def check_chat_burst_limit(tenant_id: str, user_id: str) -> bool:
     Keyed by both so one noisy user cannot starve their colleagues, and one
     tenant cannot starve another.
     """
-    return check_limit(f"{_CHAT_PREFIX}{tenant_id}:{user_id}", CHAT_BURST_PER_MINUTE, WINDOW_SECONDS)
+    return check_limit(f"{_CHAT_PREFIX}{tenant_id}:{user_id}", settings.CHAT_BURST_PER_MINUTE, WINDOW_SECONDS)
 
 
 def check_mcp_tool_limit(tenant_id: str, tool_name: str, limit: int) -> bool:
@@ -138,9 +138,22 @@ def _check_redis(r: redis.Redis, key: str, limit: int, window_seconds: int) -> b
     return True
 
 
+def _per_process_limit(limit: int) -> int:
+    """Split a FLEET-WIDE limit into this process's share.
+
+    Every caller's `limit` is fleet-wide: the 2026-08-06 re-baseline multiplied
+    TOOL_CONFIGS by the worker count precisely so the shared Redis window enforces
+    the real ceiling. Handing that same number to a per-process counter multiplies
+    it right back by the worker count -- during a Redis outage netsuite.suiteql
+    would allow ~480/min across 4 workers against a pre-re-baseline effective
+    ~120/min, i.e. the outage would be 4x LOOSER than before any of this work.
+    """
+    return max(1, limit // max(1, settings.WEB_CONCURRENCY))
+
+
 def _check_fallback(key: str, limit: int, window_seconds: int) -> bool:
-    """In-memory fallback. Per-process, so it under-counts across replicas --
-    correct behaviour is still 'deny past the limit', just measured locally."""
+    """In-memory fallback, enforcing this process's share of the fleet-wide limit."""
+    limit = _per_process_limit(limit)
     now = time.monotonic()
     cutoff = now - window_seconds
     with _fallback_lock:
@@ -168,8 +181,9 @@ def reset_rate_limits(prefix: str = _KEY_ROOT) -> None:
                 if cursor == 0:
                     break
         except Exception:
-            pass
-    for key in [k for k in _fallback if k.startswith(prefix)]:
-        del _fallback[key]
+            logger.warning("rate_limit.reset_scan_failed prefix=%s", prefix)
+    with _fallback_lock:
+        for key in [k for k in _fallback if k.startswith(prefix)]:
+            del _fallback[key]
     if prefix == _KEY_ROOT:
         _redis = None

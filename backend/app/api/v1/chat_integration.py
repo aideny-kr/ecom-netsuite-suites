@@ -1,5 +1,6 @@
 """External Chat Integration API — API key authenticated."""
 
+import asyncio
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -8,7 +9,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.api_key_auth import ApiKeyContext, get_api_key_context
+from app.core.config import settings
 from app.core.database import get_db
+from app.core.rate_limit import check_chat_burst_limit
 from app.models.chat import ChatMessage, ChatSession
 from app.services.audit_service import log_event
 from app.services.chat.orchestrator import run_chat_turn
@@ -62,6 +65,18 @@ async def integration_chat(
     db: AsyncSession = Depends(get_db),
 ):
     """Send a chat message via API key auth."""
+    # Same cost guardrail as the interactive endpoint: this path reaches the same
+    # platform-billed model, and an API key is the MORE likely thing to be driven
+    # by a script. Keyed by the key itself so one integration cannot starve another.
+    # Tenant-wide, not per-key: ApiKeyContext carries only tenant_id and scopes,
+    # so there is no key identity to bucket on here. ChatApiKey.rate_limit_per_minute
+    # exists for that and is still unwired -- tracked separately.
+    if not await asyncio.to_thread(check_chat_burst_limit, str(ctx.tenant_id), "apikey"):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Too many messages. Limit is {settings.CHAT_BURST_PER_MINUTE} per minute.",
+        )
+
     if "chat" not in ctx.scopes:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

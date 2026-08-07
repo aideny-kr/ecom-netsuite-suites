@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import uuid
 
@@ -10,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_user, require_entitlement, require_permission
+from app.core.rate_limit import check_chat_burst_limit
 from app.models.chat import ChatSession
 from app.models.tenant import TenantConfig
 from app.models.user import User
@@ -277,6 +279,15 @@ async def start_onboarding_chat(
     )
     db.add(session)
     await db.flush()
+
+    # Third door to run_chat_turn (chat.py and chat_integration.py are the others).
+    # One greeting per signup, so the cap is never reached legitimately -- it is here
+    # so the guardrail covers every entry point rather than most of them.
+    if not await asyncio.to_thread(check_chat_burst_limit, str(user.tenant_id), str(user.id)):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many requests. Please wait a moment and try again.",
+        )
 
     # Trigger the first AI greeting by consuming the async generator
     try:

@@ -23,6 +23,7 @@ from app.api.v1.netsuite_auth import (
     CALLBACK_HTML,
     _js_string,
     _select_connection_for_account,
+    _supersede_other_connections,
 )
 from app.models.connection import Connection
 
@@ -164,3 +165,51 @@ def test_switch_page_escapes_the_account_id_in_both_contexts():
     # In the JS context json.dumps must have escaped the quote and the closing tag
     # cannot terminate the <script> element early.
     assert '"><script>' not in rendered
+
+
+# ---------------------------------------------------------------------------
+# The singleton the module assumes must be ENFORCED, not trusted
+# ---------------------------------------------------------------------------
+
+
+def test_unselected_rows_are_superseded_so_only_one_stays_active():
+    """Two active rows make every downstream `.first()` nondeterministic.
+
+    Consumers resolve the connection with no order_by (netsuite_suiteql.py:367,
+    netsuite_connectivity.py:31, suitescript_sync_tool.py:28), so a stray second
+    active row means SuiteQL can silently read the wrong NetSuite account.
+    """
+    keeper = _conn(PROD)
+    stray = _conn(SANDBOX)
+
+    superseded = _supersede_other_connections([keeper, stray], keeper, PROD)
+
+    assert superseded == [stray]
+    assert stray.status == "superseded"
+    assert PROD in (stray.error_reason or "")
+    assert keeper.status == "active", "the selected row must be left alone"
+
+
+def test_supersede_is_not_revoke_so_the_row_can_be_reclaimed():
+    """Revoking would strand the row: the callback only considers non-revoked
+    candidates, so a later re-auth of that account would create a duplicate."""
+    keeper, stray = _conn(PROD), _conn(SANDBOX)
+
+    _supersede_other_connections([keeper, stray], keeper, PROD)
+
+    assert stray.status != "revoked"
+    reselected, _ = _select_connection_for_account([stray], SANDBOX)
+    assert reselected is stray, "a superseded row must still be selectable on re-auth"
+
+
+def test_already_revoked_rows_are_left_alone():
+    revoked = _conn(SANDBOX)
+    revoked.status = "revoked"
+    keeper = _conn(PROD)
+
+    assert _supersede_other_connections([keeper, revoked], keeper, PROD) == []
+    assert revoked.status == "revoked"
+
+
+def test_nothing_to_supersede_on_a_first_connect():
+    assert _supersede_other_connections([], None, PROD) == []

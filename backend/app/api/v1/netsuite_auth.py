@@ -79,6 +79,32 @@ def _select_connection_for_account(
     return connection, previous if previous and previous != account_id else None
 
 
+def _supersede_other_connections(
+    candidates: Sequence[Connection], selected: Connection | None, account_id: str
+) -> list[Connection]:
+    """Demote every NetSuite row this callback did NOT select. Returns those demoted.
+
+    Enforces the singleton the rest of this module assumes rather than trusting it.
+    Selecting one row leaves any sibling still `status == "active"`, and the
+    consumers listed in `_select_connection_for_account` resolve "the" connection
+    with `.first()` and NO order_by -- so two active rows make which NetSuite
+    account they read nondeterministic.
+
+    Duplicates are reachable today, not only via a race: connection_service's
+    create_connection() inserts an active row for any provider with no dedupe
+    against existing ones.
+
+    Demoted to "superseded", not "revoked", so the row is still a candidate if the
+    tenant later re-authorizes that account -- revoking would strand it and force a
+    duplicate on the next connect.
+    """
+    superseded = [c for c in candidates if c is not selected and c.status != "revoked"]
+    for stale in superseded:
+        stale.status = "superseded"
+        stale.error_reason = f"Superseded by NetSuite account {account_id}"
+    return superseded
+
+
 CALLBACK_HTML = """<!DOCTYPE html>
 <html>
 <head>
@@ -337,7 +363,17 @@ async def callback(
         )
         .order_by(Connection.updated_at.desc())
     )
-    connection, switched_from = _select_connection_for_account(result.scalars().all(), account_id)
+    candidates = list(result.scalars().all())
+    connection, switched_from = _select_connection_for_account(candidates, account_id)
+
+    superseded = _supersede_other_connections(candidates, connection, account_id)
+    for stale in superseded:
+        logger.warning(
+            "netsuite.oauth2.connection_superseded",
+            tenant_id=str(tenant_id),
+            superseded_connection_id=str(stale.id),
+            account_id=account_id,
+        )
 
     metadata_json = {"account_id": account_id, "auth_type": "oauth2"}
     if restlet_url:
