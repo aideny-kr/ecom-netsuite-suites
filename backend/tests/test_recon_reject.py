@@ -24,7 +24,6 @@ computed by replaying today's rules over yesterday's rows would silently
 re-baseline itself. History not captured now is blank forever.
 """
 
-from datetime import datetime, timezone
 
 import pytest
 from sqlalchemy import select
