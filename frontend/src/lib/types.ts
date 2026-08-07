@@ -919,6 +919,13 @@ export interface ReconResult {
   approved_at: string | null;
   created_at: string;
   bucket?: string;
+  // Reject disposition (mirrors ReconResultResponse). counts_as_false_positive is
+  // intentionally absent: it is the metric the corpus feeds, and a reviewer who can
+  // see which reasons score against the matcher can pick the number they want.
+  reject_reason?: string | null;
+  reject_note?: string | null;
+  rejected_by?: string | null;
+  rejected_at?: string | null;
 }
 
 export interface ReconBucketCount {

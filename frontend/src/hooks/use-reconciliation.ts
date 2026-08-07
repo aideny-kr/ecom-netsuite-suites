@@ -72,6 +72,36 @@ export function useApproveResult() {
   });
 }
 
+/** Record that a matched row is WRONG (or right but unactionable).
+ *
+ * The negative half of the review loop. Approve-only feedback cannot tell a row a
+ * human walked away from from one never reviewed, so without this the matcher's
+ * false-positive rate has no numerator — and unattended posting is gated on that rate.
+ */
+export function useRejectResult() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { result_id: string; reason: string; note?: string }) =>
+      apiClient.patch<ReconResult>(
+        `/api/v1/reconciliation/results/${data.result_id}/reject`,
+        // Only reason and note go in the body. `result_id` is the path param — the
+        // endpoint deliberately does not accept it in the body (the older approve
+        // schema does, then ignores it), because two sources for one identity invites
+        // a request whose path and body disagree. `note` is omitted rather than sent
+        // as "" so that "not supplied" stays distinguishable from "supplied blank",
+        // which is the case reason='other' is refused on.
+        data.note ? { reason: data.reason, note: data.note } : { reason: data.reason }
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["recon-results"] });
+      // A reject moves the row out of its bucket and changes the period readiness the
+      // CloseChecklist gates on — same reason approve invalidates all three.
+      queryClient.invalidateQueries({ queryKey: ["recon-bucket-summary"] });
+      queryClient.invalidateQueries({ queryKey: ["recon-close-readiness"] });
+    },
+  });
+}
+
 export function useClosePeriod() {
   const queryClient = useQueryClient();
   return useMutation({
