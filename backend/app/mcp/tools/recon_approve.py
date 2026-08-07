@@ -91,6 +91,13 @@ async def execute(params: dict, **kwargs) -> dict:
             "error": f"Result cannot be approved (status={recon_result.status})",
         }
 
+    # Snapshot BEFORE the status mutation — see recon_decision.record_decision_snapshot.
+    # This path exists precisely because approve has more than one caller, which is the
+    # drift the shared helper is here to prevent.
+    from app.services.reconciliation import recon_decision
+
+    recon_decision.record_decision_snapshot(recon_result)
+
     recon_result.status = "approved"
     recon_result.approved_by = uuid.UUID(str(user_id)) if user_id else None
     recon_result.approved_at = datetime.now(timezone.utc)

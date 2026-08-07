@@ -179,7 +179,19 @@ async def approve_group_core(
     # this batch's unique correlation_id, so the subquery re-derives the same set.
     if approved_ids:
         result_status = "carried_forward" if action == "carry_forward" else "approved"
-        values = {"status": result_status}
+        # Both dispositions are DECISIONS, so both snapshot eligibility. carry_forward
+        # says the match is right but timing blocks it — evidence the matcher was
+        # correct, so it belongs in the denominator and never the numerator, exactly
+        # like a `not_actionable` reject. Set-based, so the SQL form of the ladder;
+        # evaluated pre-update, and the WHERE already excludes terminal statuses.
+        from sqlalchemy import case
+
+        from app.services.reconciliation.recon_decision import eligible_sql
+
+        values = {
+            "status": result_status,
+            "envelope_eligible_at_decision": case((eligible_sql(), True), else_=False),
+        }
         if result_status == "approved":
             values.update(approved_by=actor_id, approved_at=now)
         approved_result_ids = select(P.result_id).where(
