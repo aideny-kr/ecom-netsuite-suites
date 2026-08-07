@@ -180,9 +180,21 @@ else
                "same count on $BASE, so not introduced here — but fix the environment (is Postgres up?) before claiming done"
         fi
         new="$(comm -23 "$TMP/head.ids" "$TMP/base.ids")"
-        fixed="$(comm -13 "$TMP/head.ids" "$TMP/base.ids" | grep -c . || true)"
+        fixedids="$(comm -13 "$TMP/head.ids" "$TMP/base.ids")"
+        fixed="$(printf '%s' "$fixedids" | grep -c . || true)"
         if [[ -z "$new" ]]; then
           pass "no NEW failing tests vs $BASE (${fixed} pre-existing now fixed)"
+          # NAME them. A test that fails on the base and passes here is one of three
+          # things — you fixed it, it is FLAKY, or it depends on ambient state — and
+          # only the first is good news. Reporting a bare count reads as the first.
+          # Observed 2026-08-07: a branch touching only scripts/ reported "1
+          # pre-existing now fixed", which it cannot possibly have fixed; without the
+          # id there was nothing to chase, and a flaky baseline quietly makes every
+          # future comparison noisy in both directions.
+          if [[ -n "$fixedids" ]]; then
+            note "these FAILED on $BASE but pass here — verify each is really a fix, not flake:"
+            printf '        %s\n' $fixedids | head -8
+          fi
         else
           fail "NEW failing tests vs $BASE — these are yours" "$(echo "$new" | head -8)"
         fi
