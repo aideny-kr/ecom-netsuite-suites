@@ -18,7 +18,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import and_, exists, func, insert, not_, or_, select, update
+from sqlalchemy import and_, case, exists, func, insert, not_, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -55,7 +55,7 @@ from app.schemas.reconciliation import (
     ResolutionSummaryResponse,
 )
 from app.services import audit_service
-from app.services.reconciliation import recon_reject
+from app.services.reconciliation import recon_decision, recon_reject
 from app.services.reconciliation.close_scope import (
     closeable_runs_conditions,
     left_for_review_conditions,
@@ -588,6 +588,12 @@ async def approve_result(
             detail=f"Result cannot be approved (status={recon_result.status})",
         )
 
+    # BEFORE the status mutation: the ladder's first rung reads status, so flipping it
+    # to a terminal value first makes every row ineligible and silently zeroes the
+    # metric. An approval means the human AGREED with the matcher, so it is evidence
+    # the envelope was right — denominator, never numerator.
+    recon_decision.record_decision_snapshot(recon_result)
+
     recon_result.status = "approved"
     recon_result.approved_by = user.id
     recon_result.approved_at = datetime.now(timezone.utc)
@@ -737,7 +743,17 @@ async def approve_bucket(
     upd = (
         update(ReconciliationResult)
         .where(*base_filter, ReconciliationResult.status.notin_(_SKIP_STATUSES))
-        .values(status="approved", approved_by=user.id, approved_at=now)
+        .values(
+            status="approved",
+            approved_by=user.id,
+            approved_at=now,
+            # Set-based, so there is no ORM object to hand the Python helper — the
+            # ladder has to be SQL here. Both forms come from one rung list in
+            # recon_decision, and a test crosses every rung to prove they agree.
+            # Evaluated against the PRE-update row, which is what "at decision time"
+            # means; the WHERE already excludes terminal statuses.
+            envelope_eligible_at_decision=case((recon_decision.eligible_sql(), True), else_=False),
+        )
         .returning(ReconciliationResult.id)
     )
     approved_ids = (await db.execute(upd)).scalars().all()

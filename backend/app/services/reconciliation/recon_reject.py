@@ -34,11 +34,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from decimal import Decimal
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.reconciliation import recon_decision
 from app.services.reconciliation.four_bucket_classifier import (
     CLOSED_RUN_STATUSES,
     TERMINAL_RESULT_STATUSES,
@@ -70,30 +70,11 @@ class RejectNotAllowedError(Exception):
     """The reject was refused. Message is safe to surface to the caller."""
 
 
-def _is_envelope_eligible(result: Any) -> bool:
-    """Would the autonomy envelope have admitted this row?
-
-    Mirrors ``autonomy_envelope.evaluate``'s admission ladder deliberately rather
-    than importing it: this is a HISTORICAL snapshot of what was true now, and it
-    must not silently change meaning when the envelope's rules are widened.
-    If the two ever diverge intentionally, that divergence is the point.
-    """
-    if result.status in TERMINAL_RESULT_STATUSES:
-        return False
-    if result.bucket != "matches":
-        return False
-    if result.match_type != "deterministic":
-        return False
-    # `evaluate` excludes amount-unknown rows explicitly ("must not be $0-blessed"),
-    # and this ladder dropped that rung. stripe_amount is nullable, so a row the
-    # envelope refuses outright was being snapshotted as eligible and then counted
-    # as a false positive AGAINST the envelope — an error charged to a decision it
-    # never made. Reproduced: evaluate() reported excluded={"amount_unknown": 1}
-    # for a row this function called eligible.
-    if getattr(result, "stripe_amount", None) is None:
-        return False
-    variance = result.variance_amount
-    return variance is not None and Decimal(variance) == Decimal("0")
+# The ladder lives in recon_decision — ONE owner. It used to be duplicated here and
+# immediately drifted: the amount-unknown rung was missing, so rows the envelope
+# refuses outright were snapshotted eligible and counted as errors against a decision
+# it never made.
+_is_envelope_eligible = recon_decision.is_envelope_eligible
 
 
 async def reject_result(
@@ -140,15 +121,13 @@ async def reject_result(
     # Snapshot BEFORE mutating status — _is_envelope_eligible reads status, and
     # setting it to 'rejected' first would make every row ineligible and quietly
     # zero out the metric this whole module exists to produce.
-    eligible = _is_envelope_eligible(result)
+    eligible = recon_decision.record_decision_snapshot(result, false_positive=reason in FALSE_POSITIVE_REASONS)
 
     result.status = "rejected"
     result.rejected_by = user.id
     result.rejected_at = datetime.now(timezone.utc)
     result.reject_reason = reason
     result.reject_note = (note or "").strip() or None
-    result.envelope_eligible_at_decision = eligible
-    result.counts_as_false_positive = eligible and reason in FALSE_POSITIVE_REASONS
 
     from app.services import audit_service
 
