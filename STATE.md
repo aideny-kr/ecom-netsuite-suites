@@ -36,7 +36,7 @@ Updated at the end of every task, not "later".
 |---|---|---|---|
 | `feat/dev-loop-and-harness` | T2 | 21 commits, process only — gated ×3, blockers fixed, **frozen** | nothing |
 | `feat/agent-graph-operating-model` | T2 | Track O (22 majors) + reject action, **ungated** | needs Track O decision |
-| `feat/rolling-period` | T2 | Stage 1 of 2. T1 resolver, T2 series/093, T3 tracking compose, T4 dashboard-follows-series/094 done; T5 (FE) + final gates pending | **093 collides with recon-reject — see OPEN** |
+| `feat/rolling-period` | T2 | Stage 1 of 2. T1-T5 all done @ `b8a4f17b`; `verify.sh` (full) PASS — 5642 passed head vs 5587 baseline, 0 new failures; eyeball/multi-angle review/T2 gate/PR still pending | **093 collides with recon-reject — see OPEN** |
 
 Contents of that branch, honestly:
 
