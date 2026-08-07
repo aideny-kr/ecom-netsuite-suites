@@ -34,6 +34,17 @@ logger = structlog.get_logger()
 router = APIRouter(prefix="/connections/netsuite", tags=["netsuite-oauth"])
 
 
+def _js_string(value: str) -> str:
+    """JSON-encode a value for embedding inside an inline <script> block.
+
+    json.dumps alone is NOT enough here: it escapes quotes but leaves `<` and `>`
+    untouched, so a value containing `</script>` closes the element early and
+    everything after it is parsed as HTML. Escaping the angle brackets (and `&`)
+    to \\u00xx keeps the string inert wherever it lands.
+    """
+    return json.dumps(value).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+
+
 def _select_connection_for_account(
     candidates: Sequence[Connection], account_id: str
 ) -> tuple[Connection | None, str | None]:
@@ -413,8 +424,8 @@ async def callback(
             ACCOUNT_SWITCHED_HTML.format(
                 previous_account_id=html.escape(switched_from),
                 new_account_id=html.escape(account_id),
-                previous_account_id_js=json.dumps(switched_from),
-                new_account_id_js=json.dumps(account_id),
+                previous_account_id_js=_js_string(switched_from),
+                new_account_id_js=_js_string(account_id),
             )
         )
 

@@ -15,11 +15,13 @@ sync silently followed the sandbox with nothing in the UI to say so.
 
 from __future__ import annotations
 
+import html as html_mod
 import uuid
 
 from app.api.v1.netsuite_auth import (
     ACCOUNT_SWITCHED_HTML,
     CALLBACK_HTML,
+    _js_string,
     _select_connection_for_account,
 )
 from app.models.connection import Connection
@@ -118,23 +120,47 @@ def test_switch_is_not_reported_when_previous_account_matches():
 # ---------------------------------------------------------------------------
 
 
+def _render(previous: str = PROD, new: str = SANDBOX) -> str:
+    """Render the switch page the way the callback does -- escaped for both contexts."""
+    return ACCOUNT_SWITCHED_HTML.format(
+        previous_account_id=html_mod.escape(previous),
+        new_account_id=html_mod.escape(new),
+        previous_account_id_js=_js_string(previous),
+        new_account_id_js=_js_string(new),
+    )
+
+
 def test_switch_page_does_not_self_close():
     """The generic callback page self-closes after ~1s. That is not a way to tell
     somebody their reporting just moved to another NetSuite account."""
     assert "window.close" in CALLBACK_HTML, "baseline: the generic page does self-close"
 
-    html = ACCOUNT_SWITCHED_HTML.format(previous_account_id=PROD, new_account_id=SANDBOX)
+    rendered = _render()
 
-    assert "window.close" not in html
-    assert "setTimeout" not in html
+    assert "window.close" not in rendered
+    assert "setTimeout" not in rendered
 
 
 def test_switch_page_names_both_accounts_and_keeps_the_opener_contract():
-    html = ACCOUNT_SWITCHED_HTML.format(previous_account_id=PROD, new_account_id=SANDBOX)
+    rendered = _render()
 
-    assert PROD in html and SANDBOX in html
+    assert PROD in rendered and SANDBOX in rendered
     # The frontend keys off event.data.type only (settings/page.tsx,
     # step-connection.tsx), so the switch page must still post the success type
     # or the connection UI never refreshes.
-    assert "NETSUITE_AUTH_SUCCESS" in html
-    assert "accountSwitchedFrom" in html
+    assert "NETSUITE_AUTH_SUCCESS" in rendered
+    assert "accountSwitchedFrom" in rendered
+
+
+def test_switch_page_escapes_the_account_id_in_both_contexts():
+    """account_id is user-supplied: it arrives as a query param on /authorize and
+    rides through Redis unchanged, so it reaches this template untrusted."""
+    hostile = '"><script>alert(1)</script>'
+
+    rendered = _render(previous=hostile)
+
+    assert "<script>alert(1)</script>" not in rendered, "raw payload reached the HTML body"
+    assert "&lt;script&gt;" in rendered, "payload should be HTML-escaped, not stripped"
+    # In the JS context json.dumps must have escaped the quote and the closing tag
+    # cannot terminate the <script> element early.
+    assert '"><script>' not in rendered
