@@ -9,7 +9,7 @@ import pytest_asyncio
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.mcp.governance import check_rate_limit, governed_execute, reset_rate_limit
+from app.mcp.governance import TOOL_CONFIGS, check_rate_limit, governed_execute, reset_rate_limit
 from app.mcp.registry import TOOL_REGISTRY
 from app.models.audit import AuditEvent
 from app.models.workspace import WorkspacePatch
@@ -300,11 +300,14 @@ async def test_apply_patch_denied_for_readonly(db, tenant, readonly_user, user, 
 
 @pytest.mark.asyncio
 async def test_apply_patch_rate_limit():
-    """6th call in 60s returns False for workspace.apply_patch (limit=5)."""
+    """The call after the cap returns False for workspace.apply_patch."""
     test_tenant = str(uuid.uuid4())
     reset_rate_limit(test_tenant)
 
-    for _ in range(5):
+    # Read the cap rather than hardcode it: the limits were re-baselined x4 on
+    # 2026-08-06 and every hardcoded copy of them broke.
+    limit = TOOL_CONFIGS["workspace.apply_patch"]["rate_limit_per_minute"]
+    for _ in range(limit):
         assert check_rate_limit(test_tenant, "workspace.apply_patch") is True
 
     assert check_rate_limit(test_tenant, "workspace.apply_patch") is False
@@ -374,11 +377,11 @@ def test_rate_limit_enforcement():
     # Clear any existing rate limits
     reset_rate_limit(test_tenant)
 
-    # workspace.propose_patch has rate_limit_per_minute=10
-    for i in range(10):
+    limit = TOOL_CONFIGS["workspace.propose_patch"]["rate_limit_per_minute"]
+    for _i in range(limit):
         assert check_rate_limit(test_tenant, "workspace.propose_patch") is True
 
-    # 11th call should be denied
+    # the next call should be denied
     assert check_rate_limit(test_tenant, "workspace.propose_patch") is False
 
     # Clean up

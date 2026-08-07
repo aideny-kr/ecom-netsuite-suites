@@ -229,3 +229,51 @@ def test_limits_still_enforced_when_redis_is_down(no_redis):
     for _ in range(limit):
         assert check_rate_limit(tenant, tool) is True
     assert check_rate_limit(tenant, tool) is False
+
+
+def test_redis_raising_mid_call_denies_instead_of_granting_a_fresh_window(monkeypatch):
+    """A reachable-but-erroring Redis must DENY, not fall through to a zeroed counter.
+
+    The first version of this module caught the exception and called
+    `_check_fallback`, whose `_fallback[key]` starts empty and is completely
+    disjoint from the count Redis already holds. A client sitting at the cap got
+    handed a full fresh window on any transient error -- the cap lifted during
+    exactly the flakiness the module promises it will not lift for.
+    """
+    fake = FakeRedis()
+    monkeypatch.setattr(rl, "_get_redis", lambda: fake)
+
+    tenant, user = str(uuid.uuid4()), str(uuid.uuid4())
+    for _ in range(rl.CHAT_BURST_PER_MINUTE):
+        assert rl.check_chat_burst_limit(tenant, user) is True
+    assert rl.check_chat_burst_limit(tenant, user) is False
+
+    # Same client, now with Redis erroring mid-pipeline. The local counter is
+    # empty, so a fallback would say "allowed".
+    monkeypatch.setattr(rl, "_get_redis", lambda: _ErroringRedis())
+    assert rl.check_chat_burst_limit(tenant, user) is False, (
+        "a mid-call Redis error must deny, not grant a fresh in-memory window"
+    )
+    assert not _fallback_has(rl, tenant, user), "the denied call must not seed the fallback counter"
+
+
+class _ErroringRedis:
+    def ping(self):
+        return True
+
+    def pipeline(self):
+        raise ConnectionError("transient redis blip")
+
+
+def _fallback_has(module, tenant: str, user: str) -> bool:
+    return bool(module._fallback.get(f"ratelimit:chat:{tenant}:{user}"))
+
+
+def test_redis_unreachable_at_connect_still_degrades_to_the_local_window(no_redis):
+    """The other failure mode keeps working: absent Redis degrades, it does not deny.
+
+    Distinguishing the two matters -- denying forever on a genuinely absent Redis
+    would be an outage, and granting a fresh window on a blip would be the bug above.
+    """
+    tenant, user = str(uuid.uuid4()), str(uuid.uuid4())
+    assert rl.check_chat_burst_limit(tenant, user) is True

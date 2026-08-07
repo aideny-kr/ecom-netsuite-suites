@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import html
+import json
 import uuid
 from collections.abc import Sequence
 from typing import Annotated
@@ -134,8 +136,8 @@ ACCOUNT_SWITCHED_HTML = """<!DOCTYPE html>
           {{
             type: "NETSUITE_AUTH_SUCCESS",
             error: "",
-            accountSwitchedFrom: "{previous_account_id}",
-            accountId: "{new_account_id}"
+            accountSwitchedFrom: {previous_account_id_js},
+            accountId: {new_account_id_js}
           }},
           "*"
         );
@@ -337,9 +339,13 @@ async def callback(
         connection.status = "active"
         connection.error_reason = None
         connection.metadata_json = metadata_json
-        # Refresh the label unconditionally. It used to be written only on create,
-        # so a row that changed accounts kept advertising the old one.
-        connection.label = f"NetSuite {account_id}"
+        # Only on a genuine account switch. The label used to be written on create
+        # only, so a row that changed accounts kept advertising the old one -- but
+        # rewriting it on EVERY callback clobbers a name the user set through
+        # PATCH /connections/{id}, and a plain token re-auth has no business
+        # renaming their connection.
+        if switched_from:
+            connection.label = f"NetSuite {account_id}"
     else:
         connection = Connection(
             tenant_id=tenant_id,
@@ -400,10 +406,15 @@ async def callback(
         # Deliberately NOT the auto-closing template: this window stays up until
         # the operator dismisses it. The generic one self-closes after a second,
         # which is not a way to tell somebody their reporting just moved accounts.
+        # account_id originates from a user-supplied query param on /authorize and
+        # rides through Redis unchanged, so it is untrusted here: escape for the
+        # HTML body and JSON-encode for the <script> context.
         return HTMLResponse(
             ACCOUNT_SWITCHED_HTML.format(
-                previous_account_id=switched_from,
-                new_account_id=account_id,
+                previous_account_id=html.escape(switched_from),
+                new_account_id=html.escape(account_id),
+                previous_account_id_js=json.dumps(switched_from),
+                new_account_id_js=json.dumps(account_id),
             )
         )
 

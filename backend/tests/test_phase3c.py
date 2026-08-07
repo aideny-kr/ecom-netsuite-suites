@@ -615,7 +615,7 @@ class TestMcpToolRegistration:
         from app.mcp.governance import TOOL_CONFIGS
 
         config = TOOL_CONFIGS["workspace.run_suiteql_assertions"]
-        assert config["rate_limit_per_minute"] == 5
+        assert config["rate_limit_per_minute"] == 20
         assert config["requires_entitlement"] == "workspace"
         assert "changeset_id" in config["allowlisted_params"]
         assert "assertions" in config["allowlisted_params"]
@@ -628,7 +628,7 @@ class TestMcpToolRegistration:
         # one-click endpoint that's now 410). Confirm step is a
         # separate tool — see test_workspace_tools_deploy.py.
         config = TOOL_CONFIGS["workspace.deploy_sandbox"]
-        assert config["rate_limit_per_minute"] == 2
+        assert config["rate_limit_per_minute"] == 8
         assert config["requires_entitlement"] == "workspace"
         assert "changeset_id" in config["allowlisted_params"]
         assert "sandbox_id" in config["allowlisted_params"]

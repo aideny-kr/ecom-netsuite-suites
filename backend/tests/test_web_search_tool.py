@@ -164,7 +164,7 @@ class TestWebSearchRegistration:
 
         assert "web.search" in TOOL_CONFIGS
         config = TOOL_CONFIGS["web.search"]
-        assert config["rate_limit_per_minute"] == 10
+        assert config["rate_limit_per_minute"] == 40
         assert config["timeout_seconds"] == 15
         assert "query" in config["allowlisted_params"]
 

@@ -12,6 +12,8 @@ limiter can never consume another's window (a chat flood must not lock the same
 user out of logging in).
 """
 
+import logging
+import threading
 import time
 from collections import defaultdict
 
@@ -19,8 +21,14 @@ import redis
 
 from app.core.config import settings
 
+logger = logging.getLogger(__name__)
+
 _redis: redis.Redis | None = None
 _fallback: dict[str, list[float]] = defaultdict(list)
+# The fallback's read-modify-write is not atomic, and callers now reach it from
+# worker threads (asyncio.to_thread at the chat and MCP call sites), so concurrent
+# checks could each observe a count below the cap and all be admitted.
+_fallback_lock = threading.Lock()
 
 WINDOW_SECONDS = 60
 MAX_ATTEMPTS = 10
@@ -50,15 +58,32 @@ def _get_redis() -> redis.Redis | None:
 
 
 def check_limit(key: str, limit: int, window_seconds: int = WINDOW_SECONDS) -> bool:
-    """Return True if the request is allowed, False if rate-limited."""
+    """Return True if the request is allowed, False if rate-limited.
+
+    Two different Redis failures, two different answers:
+
+    * **Unreachable at connect** -- Redis is simply absent (dev, or a full outage
+      we already know about). Degrade to the per-process window: it under-counts
+      across replicas but still enforces.
+    * **Reachable but the call raised** -- Redis holds a count we could not read.
+      DENY. Falling back here would score the request against `_fallback[key]`,
+      a counter starting at zero and completely disjoint from what Redis already
+      has, handing a client at the cap a fresh full window. That is the cap being
+      lifted during flakiness, which is precisely what this module promises not
+      to do, and it is how a runaway loop escapes. We also drop the cached client
+      so the next call re-attempts and, if Redis is genuinely gone, degrades to
+      the fallback cleanly instead of denying forever.
+    """
+    global _redis
     r = _get_redis()
-    if r:
-        try:
-            return _check_redis(r, key, limit, window_seconds)
-        except Exception:
-            # A Redis hiccup degrades to the local window rather than lifting the cap.
-            return _check_fallback(key, limit, window_seconds)
-    return _check_fallback(key, limit, window_seconds)
+    if r is None:
+        return _check_fallback(key, limit, window_seconds)
+    try:
+        return _check_redis(r, key, limit, window_seconds)
+    except Exception:
+        logger.warning("rate_limit.redis_error_denying key_prefix=%s", key.split(":", 2)[:2])
+        _redis = None
+        return False
 
 
 def check_login_rate_limit(ip: str) -> bool:
@@ -118,14 +143,15 @@ def _check_fallback(key: str, limit: int, window_seconds: int) -> bool:
     correct behaviour is still 'deny past the limit', just measured locally."""
     now = time.monotonic()
     cutoff = now - window_seconds
-    _fallback[key] = [t for t in _fallback[key] if t > cutoff]
-    attempts = _fallback[key]
+    with _fallback_lock:
+        _fallback[key] = [t for t in _fallback[key] if t > cutoff]
+        attempts = _fallback[key]
 
-    if len(attempts) >= limit:
-        return False
+        if len(attempts) >= limit:
+            return False
 
-    attempts.append(now)
-    return True
+        attempts.append(now)
+        return True
 
 
 def reset_rate_limits(prefix: str = _KEY_ROOT) -> None:

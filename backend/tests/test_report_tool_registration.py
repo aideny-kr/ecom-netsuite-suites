@@ -26,7 +26,7 @@ def test_report_compose_has_governance_entry():
     deleted when the tool was renamed; this re-establishes the per-tool governance."""
     assert "report.export" not in TOOL_CONFIGS
     cfg = TOOL_CONFIGS["report.compose"]
-    assert cfg["rate_limit_per_minute"] == 10
+    assert cfg["rate_limit_per_minute"] == 40
     assert cfg["requires_entitlement"] == "mcp_tools"
     assert cfg["timeout_seconds"] == 60
     assert cfg["default_limit"] is None

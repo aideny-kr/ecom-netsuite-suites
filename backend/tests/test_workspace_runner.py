@@ -599,7 +599,7 @@ class TestMcpTools:
 
         assert "workspace.run_validate" in TOOL_CONFIGS
         assert "workspace.run_unit_tests" in TOOL_CONFIGS
-        assert TOOL_CONFIGS["workspace.run_validate"]["rate_limit_per_minute"] == 5
+        assert TOOL_CONFIGS["workspace.run_validate"]["rate_limit_per_minute"] == 20
 
 
 # --- TestIdempotency ---
