@@ -284,7 +284,8 @@ async def send_message(
     # tenants spend the platform Anthropic key, so an unbounded retry loop or a
     # scripted client costs real money until a human notices. Burst-only: a heavy
     # recon/report session is legitimate and must not hit a daily ceiling.
-    if not check_chat_burst_limit(str(user.tenant_id), str(user.id)):
+    # Off the loop -- sync redis client against a remote Redis (see governance.py).
+    if not await asyncio.to_thread(check_chat_burst_limit, str(user.tenant_id), str(user.id)):
         # stdlib logger here, not structlog -- %s args, never kwargs.
         logger.warning(
             "chat.burst_limit_exceeded tenant_id=%s user_id=%s limit_per_minute=%s",
