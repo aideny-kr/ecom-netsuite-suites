@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from typing import Annotated
 
 import redis.asyncio as aioredis
@@ -29,6 +30,41 @@ from app.services.netsuite_oauth_service import (
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/connections/netsuite", tags=["netsuite-oauth"])
+
+
+def _select_connection_for_account(
+    candidates: Sequence[Connection], account_id: str
+) -> tuple[Connection | None, str | None]:
+    """Pick which existing NetSuite row an OAuth callback should land on.
+
+    Returns (connection, switched_from). `connection` is None when the tenant has
+    no NetSuite row yet. `switched_from` is the previous account id when this
+    callback repoints the tenant at a DIFFERENT NetSuite account -- the caller
+    audits that, because it silently changes which account every SuiteQL query,
+    pivot, report and sync reads from.
+
+    `candidates` is ordered newest-first. Taking candidates[0] unconditionally --
+    the pre-2026-08-06 behaviour -- meant re-authorizing prod could overwrite a
+    sandbox row, and connecting a sandbox could overwrite prod under prod's label.
+    """
+    if not candidates:
+        return None, None
+
+    def account_of(conn: Connection) -> str | None:
+        return (conn.metadata_json or {}).get("account_id")
+
+    # Prefer the row already bound to this account, wherever it sorts.
+    for candidate in candidates:
+        if account_of(candidate) == account_id:
+            return candidate, None
+
+    # Otherwise fall back to the most recent row and keep the singleton invariant.
+    connection = candidates[0]
+    previous = account_of(connection)
+    # Rows predating metadata_json.account_id name no account, so we cannot claim
+    # what they switched from -- adopt them rather than fabricate an audit record.
+    return connection, previous if previous and previous != account_id else None
+
 
 CALLBACK_HTML = """<!DOCTYPE html>
 <html>
@@ -61,6 +97,50 @@ CALLBACK_HTML = """<!DOCTYPE html>
     }} catch (e) {{
       window.location.href = "/";
     }}
+  </script>
+</body>
+</html>"""
+
+
+# Shown when a callback repoints the tenant's single NetSuite connection at a
+# different account. Same event_type as the success page so the opener's existing
+# handlers still refresh -- but this one does not self-close, and it carries the
+# account ids in the postMessage payload for a future toast.
+ACCOUNT_SWITCHED_HTML = """<!DOCTYPE html>
+<html>
+<head>
+  <title>NetSuite Authentication</title>
+  <style>
+    body {{ font-family: system-ui, sans-serif; padding: 2rem; text-align: center; }}
+    .warn {{ color: #92400e; background: #fef3c7; border: 1px solid #f59e0b;
+             border-radius: 8px; padding: 1rem; max-width: 34rem; margin: 0 auto; }}
+    code {{ background: rgba(0,0,0,0.06); padding: 0.1rem 0.3rem; border-radius: 4px; }}
+  </style>
+</head>
+<body>
+  <h3>Connected — NetSuite account changed</h3>
+  <div class="warn">
+    <p>This tenant was connected to <code>{previous_account_id}</code> and now uses
+    <code>{new_account_id}</code>.</p>
+    <p><strong>Reports, SuiteQL queries, pivots and syncs will read from
+    {new_account_id} from now on.</strong> If that was not intended, reconnect
+    <code>{previous_account_id}</code>.</p>
+  </div>
+  <p>Close this window when you have read the above.</p>
+  <script>
+    try {{
+      if (window.opener) {{
+        window.opener.postMessage(
+          {{
+            type: "NETSUITE_AUTH_SUCCESS",
+            error: "",
+            accountSwitchedFrom: "{previous_account_id}",
+            accountId: "{new_account_id}"
+          }},
+          "*"
+        );
+      }}
+    }} catch (e) {{}}
   </script>
 </body>
 </html>"""
@@ -228,7 +308,13 @@ async def callback(
         "account_id": account_id,
     }
 
-    # Upsert: update existing netsuite connection (any non-revoked status) or create new one
+    # Upsert. The tenant's NetSuite REST connection is a singleton by design: every
+    # consumer resolves it as provider=="netsuite" AND status=="active" -> first()
+    # (netsuite_suiteql, pivot_tool, cross_source_tool, netsuite_connectivity,
+    # suitescript_sync_tool, suitescript_sync). Adding a row per account would leave
+    # those call sites choosing between accounts arbitrarily, so we update in place
+    # and let _select_connection_for_account decide WHICH row and whether the tenant
+    # just repointed itself at a different NetSuite account.
     result = await db.execute(
         select(Connection)
         .where(
@@ -237,9 +323,8 @@ async def callback(
             Connection.status != "revoked",
         )
         .order_by(Connection.updated_at.desc())
-        .limit(1)
     )
-    connection = result.scalars().first()
+    connection, switched_from = _select_connection_for_account(result.scalars().all(), account_id)
 
     metadata_json = {"account_id": account_id, "auth_type": "oauth2"}
     if restlet_url:
@@ -252,6 +337,9 @@ async def callback(
         connection.status = "active"
         connection.error_reason = None
         connection.metadata_json = metadata_json
+        # Refresh the label unconditionally. It used to be written only on create,
+        # so a row that changed accounts kept advertising the old one.
+        connection.label = f"NetSuite {account_id}"
     else:
         connection = Connection(
             tenant_id=tenant_id,
@@ -278,7 +366,46 @@ async def callback(
         resource_id=str(connection.id),
         payload={"provider": "netsuite", "account_id": account_id},
     )
+
+    if switched_from:
+        # The tenant just repointed its single NetSuite connection at another
+        # account. Everything downstream -- SuiteQL, pivots, reports, syncs --
+        # follows it, so this gets its own audit action rather than hiding inside
+        # the generic authorize event.
+        logger.warning(
+            "netsuite.oauth2.account_switched",
+            tenant_id=str(tenant_id),
+            connection_id=str(connection.id),
+            previous_account_id=switched_from,
+            new_account_id=account_id,
+        )
+        await audit_service.log_event(
+            db=db,
+            tenant_id=tenant_id,
+            category="connection",
+            action="connection.account_switched",
+            actor_id=user_id,
+            resource_type="connection",
+            resource_id=str(connection.id),
+            payload={
+                "provider": "netsuite",
+                "previous_account_id": switched_from,
+                "new_account_id": account_id,
+            },
+        )
+
     await db.commit()
+
+    if switched_from:
+        # Deliberately NOT the auto-closing template: this window stays up until
+        # the operator dismisses it. The generic one self-closes after a second,
+        # which is not a way to tell somebody their reporting just moved accounts.
+        return HTMLResponse(
+            ACCOUNT_SWITCHED_HTML.format(
+                previous_account_id=switched_from,
+                new_account_id=account_id,
+            )
+        )
 
     return HTMLResponse(
         CALLBACK_HTML.format(
