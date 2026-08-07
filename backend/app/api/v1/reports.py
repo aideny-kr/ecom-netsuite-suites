@@ -3,7 +3,6 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response
-from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,7 +11,7 @@ from app.core.dependencies import get_current_user
 from app.models.report import Report
 from app.models.report_version import ReportVersion
 from app.models.user import User
-from app.schemas.report import ReportResponse, ReportSettingsUpdate, ReportVersionResponse
+from app.schemas.report import PlaybookComposeRequest, ReportResponse, ReportSettingsUpdate, ReportVersionResponse
 from app.services import audit_service
 from app.services.report import refresh_service
 from app.services.report.playbooks import PLAYBOOKS, compose_playbook_report
@@ -37,6 +36,8 @@ def _to_response(r: Report) -> ReportResponse:
         auto_refresh_paused_at=r.auto_refresh_paused_at,
         created_by=str(r.created_by) if r.created_by else None,
         dashboard_pinned_at=r.dashboard_pinned_at,
+        period=r.period,
+        series_id=str(r.series_id) if r.series_id else None,
     )
 
 
@@ -58,10 +59,6 @@ async def list_reports(
         .all()
     )
     return [_to_response(r) for r in rows]
-
-
-class PlaybookComposeRequest(BaseModel):
-    params: dict[str, str] = {}
 
 
 @router.get("/playbooks")
@@ -90,6 +87,7 @@ async def compose_playbook_endpoint(
             params=request.params,
             tenant_id=user.tenant_id,
             actor_id=user.id,
+            mode=request.mode,
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e

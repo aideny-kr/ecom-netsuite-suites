@@ -180,7 +180,24 @@ class ReportResponse(BaseModel):
     # Task 2 (reports UX trio): set when pinned to the dashboard landing page; the FE
     # sorts pinned reports newest-first by this column. None = not pinned.
     dashboard_pinned_at: datetime | None = None
+    # Rolling-period Stage 1 (Task 3): the canonical "Mon YYYY" period this report
+    # covers, set for BOTH compose modes; series_id only for a mode="tracking" compose
+    # (None = a one-off snapshot, not linked into any lineage — every pre-093 row too).
+    period: str | None = None
+    series_id: str | None = None
     model_config = {"from_attributes": True}
+
+
+class PlaybookComposeRequest(BaseModel):
+    """POST /reports/playbooks/{key}. ``mode="period"`` (default): today's behaviour —
+    the caller types the period in ``params``, unchanged for every existing caller.
+    ``mode="tracking"`` (Task 3, rolling-period Stage 1): the period is resolved
+    server-side from NetSuite's own close state — any ``params["period"]`` the caller
+    sends is ignored — and the compose links into the tenant's tracking series for this
+    playbook. See ``playbooks.compose_playbook_report``."""
+
+    params: dict[str, str] = {}
+    mode: Literal["period", "tracking"] = "period"
 
 
 class ReportSettingsUpdate(BaseModel):

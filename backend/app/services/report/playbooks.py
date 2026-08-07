@@ -12,6 +12,8 @@ import re
 import uuid
 from datetime import datetime, timezone
 
+from app.services.report.period_resolver import PeriodUnavailableReason
+
 # NetSuite period name: "Jun 2026". NOT the SuiteQL injection boundary — it's a
 # fail-fast pre-check so a malformed period 400s here instead of burning a tool round
 # trip. netsuite_financial_report.build_period_filter independently re-validates every
@@ -129,6 +131,37 @@ def trailing_periods(period: str, count: int) -> str:
     return ",".join(reversed(periods))
 
 
+class PeriodUnavailableError(ValueError):
+    """``mode="tracking"`` compose (Task 3, rolling-period Stage 1) could not resolve a
+    closed period to compose against. A ``ValueError`` subclass on purpose: the
+    endpoint's existing ``except ValueError`` -> 400 branch handles it with zero
+    endpoint-level changes, and ``str(error)`` is already the operator-facing message
+    that reaches the launcher UI. ``.reason`` carries the underlying
+    ``PeriodUnavailableReason`` for callers that want to distinguish WHY without
+    parsing the message string.
+    """
+
+    # Written for the operator viewing the launcher, not a developer reading logs —
+    # never leak the bare enum value (see period_resolver.PeriodUnavailableReason).
+    _MESSAGES: dict[PeriodUnavailableReason, str] = {
+        PeriodUnavailableReason.NO_CLOSED_PERIOD: (
+            "NetSuite doesn't have a closed accounting period yet — there's nothing to track."
+        ),
+        PeriodUnavailableReason.UNSUPPORTED_PERIOD_NAME: (
+            "The last closed period's name doesn't match NetSuite's standard 'Mon YYYY' "
+            "format, so it can't be tracked automatically yet."
+        ),
+        PeriodUnavailableReason.UNREACHABLE: (
+            "Couldn't reach NetSuite to check which period is closed — try again shortly."
+        ),
+    }
+
+    def __init__(self, reason: PeriodUnavailableReason):
+        self.reason = reason
+        message = self._MESSAGES.get(reason, "Couldn't determine the last closed accounting period.")
+        super().__init__(message)
+
+
 PLAYBOOKS: dict[str, dict] = {
     "income_statement": {
         "name": "Income Statement",
@@ -203,14 +236,28 @@ def build_playbook_recipe(playbook_key: str, params: dict[str, str]) -> tuple[st
     return title, recipe
 
 
-async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_id):
+async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_id, mode="period"):
     """Deterministic compose: recipe template → fail-closed source execution →
     frozen HTML → normal Report row. Reuses the refresh engine's execution seam
     on purpose — identical validation, identical failure semantics, and the
-    resulting report auto-refreshes like any composed one."""
+    resulting report auto-refreshes like any composed one.
+
+    ``mode="period"`` (default): exactly the pre-Task-3 behaviour — ``params["period"]``
+    is whatever the caller typed. ``mode="tracking"`` (rolling-period Stage 1, Task 3):
+    the period is resolved server-side from NetSuite's own close state instead —
+    ``params["period"]`` is ignored — and the resulting report links into a per-tenant,
+    per-playbook ``ReportSeries`` (get-or-created) via ``series_id``. Composing tracking
+    twice for the same already-covered period is a no-op that returns the existing
+    report: a series+period pair is looked up deliberately BEFORE doing any work, never
+    inferred from catching the partial unique index's IntegrityError (that index is a
+    backstop invariant, not the control-flow mechanism)."""
+    from sqlalchemy import select
+
     from app.core.database import set_tenant_context
     from app.models.report import Report
+    from app.models.report_series import ReportSeries
     from app.services import audit_service
+    from app.services.report.period_resolver import resolve_last_closed_period
     from app.services.report.refresh_service import RefreshError, _execute_sources, _validated_sources
     from app.services.report.report_html import build_provenance, render_report_html
     from app.services.report.report_service import (
@@ -221,7 +268,45 @@ async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_
         spec_json_safe,
     )
 
+    if mode not in ("period", "tracking"):
+        raise ValueError(f"mode must be 'period' or 'tracking' (got {mode!r})")
+
+    series: ReportSeries | None = None
+    if mode == "tracking":
+        closed = await resolve_last_closed_period(db, tenant_id)
+        if not closed.resolved:
+            raise PeriodUnavailableError(closed.reason)
+        # Tracking mode resolves the period server-side — anything the caller typed
+        # in params["period"] is ignored, never blended with the resolved value.
+        params = {"period": closed.name}
+
+        # report_series / reports are FORCE-RLS'd — establish tenant context before
+        # touching either. Nothing between here and _execute_sources below commits, so
+        # this one SET LOCAL also covers that call (which re-establishes it again
+        # regardless right before the Report insert — see the "tool calls may commit"
+        # comment below).
+        await set_tenant_context(db, str(tenant_id))
+        series = (
+            await db.execute(
+                select(ReportSeries).where(
+                    ReportSeries.tenant_id == tenant_id,
+                    ReportSeries.playbook_key == playbook_key,
+                )
+            )
+        ).scalar_one_or_none()
+        if series is None:
+            series = ReportSeries(tenant_id=tenant_id, playbook_key=playbook_key, created_by=actor_id)
+            db.add(series)
+            await db.flush()  # need series.id before the idempotency check / Report insert below
+
+        existing = (
+            await db.execute(select(Report).where(Report.series_id == series.id, Report.period == closed.name))
+        ).scalar_one_or_none()
+        if existing is not None:
+            return existing
+
     title, recipe = build_playbook_recipe(playbook_key, params)
+    period = recipe["sections"][0]["period"]
     correlation_id = f"report-playbook:{playbook_key}:{uuid.uuid4().hex[:8]}"
 
     await set_tenant_context(db, str(tenant_id))
@@ -270,9 +355,17 @@ async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_
         rendered_html=html,
         created_by=actor_id,
         recipe_json=recipe,
+        # Rolling-period Stage 1 (Task 3): period is set in BOTH modes (the canonical
+        # "Mon YYYY" this report covers); series_id only for a tracking compose — a
+        # mode="period" report stays a one-off snapshot, not linked into any lineage.
+        period=period,
+        series_id=series.id if series is not None else None,
     )
     db.add(report)
     await db.flush()
+    audit_payload = {"playbook": playbook_key, "source_count": len(recipe["sources"])}
+    if series is not None:
+        audit_payload["series_id"] = str(series.id)
     await audit_service.log_event(
         db=db,
         tenant_id=tenant_id,
@@ -283,7 +376,7 @@ async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_
         resource_type="report",
         resource_id=str(report.id),
         correlation_id=correlation_id,
-        payload={"playbook": playbook_key, "source_count": len(recipe["sources"])},
+        payload=audit_payload,
     )
     await db.commit()
     await set_tenant_context(db, str(tenant_id))

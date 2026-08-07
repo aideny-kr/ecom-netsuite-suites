@@ -7,14 +7,19 @@ statement-grade GL aggregates, not ad-hoc reconstructions.
 from __future__ import annotations
 
 import json
+from datetime import date
 
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import select
 
+from app.models.audit import AuditEvent
 from app.models.report import Report
+from app.models.report_series import ReportSeries
+from app.services.report.period_resolver import ClosedPeriod, PeriodUnavailableReason
 from app.services.report.playbooks import (
     PLAYBOOKS,
+    PeriodUnavailableError,
     build_playbook_recipe,
     compose_playbook_report,
     normalize_period,
@@ -749,3 +754,266 @@ async def test_compose_playbook_endpoint_tool_failure_passes_through_refresh_err
 # exactly-one <h1>, statement content) returns once Task 3/4 land the renderer and
 # assembly seam — assemble_spec cannot produce rendered_html for this section type yet
 # (see test_compose_playbook_income_statement_pending_renderer_fails_closed above).
+
+
+# ---------------------------------------------------------------------------
+# mode="tracking" (Task 3, rolling-period Stage 1): the period is resolved from
+# NetSuite's own close state (period_resolver.resolve_last_closed_period) instead of
+# being typed, and the compose links into a per-tenant, per-playbook ReportSeries.
+# mode="period" (the default) stays today's behaviour end to end — those existing
+# tests above are untouched — plus persisting `period` on the row.
+# ---------------------------------------------------------------------------
+
+
+def _patch_resolver(monkeypatch, closed: ClosedPeriod):
+    """Fake ``resolve_last_closed_period``. Patched at the period_resolver module
+    boundary (not app.services.report.playbooks) because compose_playbook_report
+    imports it lazily inside the function body -- a `from X import Y` executed at
+    call time reads the CURRENT `X.Y`, so patching the source module is what a
+    monkeypatch set up before the call actually reaches."""
+
+    async def fake_resolve(db, tenant_id):
+        return closed
+
+    monkeypatch.setattr("app.services.report.period_resolver.resolve_last_closed_period", fake_resolve)
+
+
+_JUN_CLOSED = ClosedPeriod(name="Jun 2026", enddate=date(2026, 6, 30))
+_JUL_CLOSED = ClosedPeriod(name="Jul 2026", enddate=date(2026, 7, 31))
+
+
+def _trial_balance_by_params_for(period: str, prior: str, *, r1=None, r2=None) -> dict:
+    """Like ``_trial_balance_by_params`` but for an arbitrary (period, prior) pair --
+    needed to compose a SECOND tracking report a month later without re-fixturing the
+    whole income_statement 4-source shape."""
+    payloads = fx.trial_balance_payloads()
+    return {
+        ("trial_balance", period): r1 or _raw_tool_result(payloads["r1"]),
+        ("trial_balance", prior): r2 or _raw_tool_result(payloads["r2"]),
+    }
+
+
+async def test_compose_playbook_tracking_ignores_caller_supplied_period(db, monkeypatch):
+    """Tracking mode resolves the period server-side -- a caller-supplied
+    params["period"] must never leak through and get composed instead."""
+    tenant = await create_test_tenant(db, name="TrackingIgnoresParamCorp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_resolver(monkeypatch, _JUN_CLOSED)
+    calls = _patch_executor(monkeypatch, by_params=_income_statement_by_params())
+
+    report = await compose_playbook_report(
+        db,
+        playbook_key="income_statement",
+        params={"period": "Dec 1999"},  # must be ignored entirely
+        tenant_id=tenant.id,
+        actor_id=user.id,
+        mode="tracking",
+    )
+
+    assert report.period == "Jun 2026"
+    assert calls[0]["params"]["period"] == "Jun 2026"
+
+
+async def test_compose_playbook_tracking_resolves_period_and_creates_series(db, monkeypatch):
+    tenant = await create_test_tenant(db, name="TrackingCorp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_resolver(monkeypatch, _JUN_CLOSED)
+    calls = _patch_executor(monkeypatch, by_params=_income_statement_by_params())
+
+    report = await compose_playbook_report(
+        db,
+        playbook_key="income_statement",
+        params={},
+        tenant_id=tenant.id,
+        actor_id=user.id,
+        mode="tracking",
+    )
+
+    assert len(calls) == 4  # composed exactly like today for the resolved period
+    assert report.period == "Jun 2026"
+    assert report.series_id is not None
+    series = (await db.execute(select(ReportSeries).where(ReportSeries.tenant_id == tenant.id))).scalar_one()
+    assert series.id == report.series_id
+    assert series.playbook_key == "income_statement"
+    assert series.created_by == user.id
+
+
+async def test_compose_playbook_tracking_second_compose_same_period_is_idempotent(db, monkeypatch):
+    tenant = await create_test_tenant(db, name="TrackingIdempotentCorp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_resolver(monkeypatch, _JUN_CLOSED)
+    calls = _patch_executor(monkeypatch, by_params=_income_statement_by_params())
+
+    first = await compose_playbook_report(
+        db, playbook_key="income_statement", params={}, tenant_id=tenant.id, actor_id=user.id, mode="tracking"
+    )
+    second = await compose_playbook_report(
+        db, playbook_key="income_statement", params={}, tenant_id=tenant.id, actor_id=user.id, mode="tracking"
+    )
+
+    assert second.id == first.id
+    assert len(calls) == 4  # the second compose never redispatched a single source
+    series_rows = (await db.execute(select(ReportSeries).where(ReportSeries.tenant_id == tenant.id))).scalars().all()
+    assert len(series_rows) == 1  # get-or-create, not a second series
+    report_rows = (await db.execute(select(Report).where(Report.tenant_id == tenant.id))).scalars().all()
+    assert len(report_rows) == 1  # no duplicate report for the same (series, period)
+
+
+async def test_compose_playbook_tracking_new_closed_period_rolls_the_series_forward(db, monkeypatch):
+    """A later tracking compose, once NetSuite closes the NEXT period, creates a new
+    report but reuses the SAME series -- the series tracks the playbook, not one period."""
+    tenant = await create_test_tenant(db, name="TrackingRollCorp")
+    user, _ = await create_test_user(db, tenant)
+
+    _patch_resolver(monkeypatch, _JUN_CLOSED)
+    _patch_executor(monkeypatch, by_params=_trial_balance_by_params_for("Jun 2026", "May 2026"))
+    june = await compose_playbook_report(
+        db, playbook_key="trial_balance", params={}, tenant_id=tenant.id, actor_id=user.id, mode="tracking"
+    )
+
+    _patch_resolver(monkeypatch, _JUL_CLOSED)
+    _patch_executor(monkeypatch, by_params=_trial_balance_by_params_for("Jul 2026", "Jun 2026"))
+    july = await compose_playbook_report(
+        db, playbook_key="trial_balance", params={}, tenant_id=tenant.id, actor_id=user.id, mode="tracking"
+    )
+
+    assert july.id != june.id
+    assert june.period == "Jun 2026" and july.period == "Jul 2026"
+    assert july.series_id == june.series_id
+    series_rows = (await db.execute(select(ReportSeries).where(ReportSeries.tenant_id == tenant.id))).scalars().all()
+    assert len(series_rows) == 1
+
+
+async def test_compose_playbook_period_mode_sets_period_column_but_no_series(db, monkeypatch):
+    """mode="period" (the default -- omitted here, exactly like every pre-Task-3
+    caller) keeps composing against the TYPED period; the only Task-3 change is that
+    `period` now persists on the row, and no series is ever touched."""
+    tenant = await create_test_tenant(db, name="PeriodModeCorp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_executor(monkeypatch, by_params=_income_statement_by_params())
+
+    report = await compose_playbook_report(
+        db, playbook_key="income_statement", params={"period": "Jun 2026"}, tenant_id=tenant.id, actor_id=user.id
+    )
+
+    assert report.period == "Jun 2026"
+    assert report.series_id is None
+    series_rows = (await db.execute(select(ReportSeries).where(ReportSeries.tenant_id == tenant.id))).scalars().all()
+    assert series_rows == []
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        PeriodUnavailableReason.NO_CLOSED_PERIOD,
+        PeriodUnavailableReason.UNSUPPORTED_PERIOD_NAME,
+        PeriodUnavailableReason.UNREACHABLE,
+    ],
+)
+async def test_compose_playbook_tracking_unresolved_period_raises_named_reason(db, monkeypatch, reason):
+    tenant = await create_test_tenant(db, name=f"Unresolved{reason.value}Corp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_resolver(monkeypatch, ClosedPeriod(name=None, enddate=None, reason=reason))
+    calls = _patch_executor(monkeypatch)
+
+    with pytest.raises(PeriodUnavailableError) as exc:
+        await compose_playbook_report(
+            db, playbook_key="income_statement", params={}, tenant_id=tenant.id, actor_id=user.id, mode="tracking"
+        )
+
+    assert exc.value.reason == reason
+    assert str(exc.value)  # a real message, never composed for a guessed period
+    assert calls == []  # never dispatches a single source when the period can't be resolved
+    rows = (await db.execute(select(Report).where(Report.tenant_id == tenant.id))).scalars().all()
+    assert rows == []
+    series_rows = (await db.execute(select(ReportSeries).where(ReportSeries.tenant_id == tenant.id))).scalars().all()
+    assert series_rows == []  # never gets far enough to get-or-create a series either
+
+
+async def test_compose_playbook_tracking_audit_log_includes_series_id(db, monkeypatch):
+    tenant = await create_test_tenant(db, name="AuditSeriesCorp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_resolver(monkeypatch, _JUN_CLOSED)
+    _patch_executor(monkeypatch, by_params=_income_statement_by_params())
+
+    report = await compose_playbook_report(
+        db, playbook_key="income_statement", params={}, tenant_id=tenant.id, actor_id=user.id, mode="tracking"
+    )
+
+    event = (
+        await db.execute(
+            select(AuditEvent).where(
+                AuditEvent.tenant_id == tenant.id,
+                AuditEvent.action == "report.compose",
+                AuditEvent.resource_id == str(report.id),
+            )
+        )
+    ).scalar_one()
+    assert event.payload["series_id"] == str(report.series_id)
+
+
+async def test_compose_playbook_period_mode_audit_log_has_no_series_id(db, monkeypatch):
+    tenant = await create_test_tenant(db, name="AuditNoSeriesCorp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_executor(monkeypatch, by_params=_income_statement_by_params())
+
+    report = await compose_playbook_report(
+        db, playbook_key="income_statement", params={"period": "Jun 2026"}, tenant_id=tenant.id, actor_id=user.id
+    )
+
+    event = (
+        await db.execute(
+            select(AuditEvent).where(
+                AuditEvent.tenant_id == tenant.id,
+                AuditEvent.action == "report.compose",
+                AuditEvent.resource_id == str(report.id),
+            )
+        )
+    ).scalar_one()
+    assert "series_id" not in event.payload
+
+
+async def test_compose_playbook_endpoint_tracking_returns_period_and_series_id(db, monkeypatch):
+    from app.api.v1.reports import PlaybookComposeRequest, compose_playbook_endpoint
+
+    tenant = await create_test_tenant(db, name="EndpointTrackingCorp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_resolver(monkeypatch, _JUN_CLOSED)
+    _patch_executor(monkeypatch, by_params=_income_statement_by_params())
+
+    response = await compose_playbook_endpoint(
+        "income_statement", PlaybookComposeRequest(mode="tracking"), user=user, db=db
+    )
+
+    assert response.period == "Jun 2026"
+    assert response.series_id is not None
+
+
+async def test_compose_playbook_endpoint_tracking_unresolved_period_is_400_naming_reason(db, monkeypatch):
+    from app.api.v1.reports import PlaybookComposeRequest, compose_playbook_endpoint
+
+    tenant = await create_test_tenant(db, name="Unresolved400Corp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_resolver(monkeypatch, ClosedPeriod(name=None, enddate=None, reason=PeriodUnavailableReason.NO_CLOSED_PERIOD))
+    _patch_executor(monkeypatch)
+
+    with pytest.raises(HTTPException) as exc:
+        await compose_playbook_endpoint(
+            "income_statement",
+            PlaybookComposeRequest(mode="tracking"),
+            user=user,
+            db=db,
+        )
+
+    assert exc.value.status_code == 400
+    # An operator-facing message, not a bare enum/reason code leaking to the UI.
+    assert exc.value.detail
+    assert "no_closed_period" not in exc.value.detail
+    assert "NO_CLOSED_PERIOD" not in exc.value.detail
+
+
+def test_playbook_compose_request_mode_defaults_to_period():
+    from app.schemas.report import PlaybookComposeRequest
+
+    assert PlaybookComposeRequest(params={"period": "Jun 2026"}).mode == "period"
+    assert PlaybookComposeRequest(params={"period": "Jun 2026"}, mode="tracking").mode == "tracking"
