@@ -16,7 +16,7 @@ The load-bearing design decision is the reason taxonomy. A reject that means
 "this match is wrong" and a reject that means "the match is right but I can't
 action it" are opposite evidence. Conflating them makes the false-positive rate
 worse than useless — it produces a confidently wrong number. Only
-FALSE_POSITIVE_REASONS count against the envelope.
+ENVELOPE_ERROR_REASONS count against the envelope.
 
 Second decision: `envelope_eligible_at_decision` is snapshotted at reject time
 rather than recomputed later. The envelope's admission rules WILL change; a rate
@@ -29,7 +29,7 @@ from sqlalchemy import select
 
 from app.models.audit import AuditEvent
 from app.services.reconciliation.recon_reject import (
-    FALSE_POSITIVE_REASONS,
+    ENVELOPE_ERROR_REASONS,
     REJECT_REASONS,
     RejectNotAllowedError,
     reject_result,
@@ -60,13 +60,13 @@ def test_reason_taxonomy_separates_false_positives_from_unactionable():
     """A reject meaning 'this match is wrong' and one meaning 'the match is
     right but I cannot action it' are opposite evidence. If every reason counted
     against the envelope, operational friction would masquerade as model error."""
-    assert FALSE_POSITIVE_REASONS, "at least one reason must mark a genuine false positive"
-    assert set(FALSE_POSITIVE_REASONS).issubset(set(REJECT_REASONS))
+    assert ENVELOPE_ERROR_REASONS, "at least one reason must mark a genuine false positive"
+    assert set(ENVELOPE_ERROR_REASONS).issubset(set(REJECT_REASONS))
     # not_actionable is the canonical NON-false-positive: the match was correct.
     assert "not_actionable" in REJECT_REASONS
-    assert "not_actionable" not in FALSE_POSITIVE_REASONS
+    assert "not_actionable" not in ENVELOPE_ERROR_REASONS
     # wrong_match is the canonical false positive: not the same money.
-    assert "wrong_match" in FALSE_POSITIVE_REASONS
+    assert "wrong_match" in ENVELOPE_ERROR_REASONS
 
 
 async def test_reject_records_who_when_why(db, tenant_a, user_a):
@@ -118,7 +118,7 @@ async def test_snapshots_envelope_eligibility_for_an_admissible_row(db, tenant_a
     await reject_result(db, result=r, user=user_a, reason="wrong_match", note=None, run=run)
 
     assert r.envelope_eligible_at_decision is True
-    assert r.counts_as_false_positive is True
+    assert r.counts_as_envelope_error is True
 
 
 async def test_snapshots_ineligibility_for_a_variance_row(db, tenant_a, user_a):
@@ -137,7 +137,7 @@ async def test_snapshots_ineligibility_for_a_variance_row(db, tenant_a, user_a):
 
     assert r.envelope_eligible_at_decision is False
     # still a false-positive REASON, but not against the envelope
-    assert r.counts_as_false_positive is False
+    assert r.counts_as_envelope_error is False
 
 
 async def test_not_actionable_never_counts_against_the_envelope(db, tenant_a, user_a):
@@ -155,7 +155,7 @@ async def test_not_actionable_never_counts_against_the_envelope(db, tenant_a, us
     await reject_result(db, result=r, user=user_a, reason="not_actionable", note="waiting on bank", run=run)
 
     assert r.envelope_eligible_at_decision is True
-    assert r.counts_as_false_positive is False, "operational friction is not model error"
+    assert r.counts_as_envelope_error is False, "operational friction is not model error"
 
 
 # --- the invariants reject must inherit from approve ----------------------
@@ -261,7 +261,7 @@ async def test_amount_unknown_row_is_not_envelope_eligible(db, tenant_a, user_a)
     await reject_result(db, result=row, user=user_a, reason="wrong_match", note=None, run=run)
     await db.flush()
     assert row.envelope_eligible_at_decision is False
-    assert row.counts_as_false_positive is False
+    assert row.counts_as_envelope_error is False
 
 
 async def test_run_is_required_so_the_freeze_cannot_be_skipped(db, tenant_a, user_a):

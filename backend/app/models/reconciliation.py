@@ -82,7 +82,7 @@ class ReconciliationResult(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # Eligible AND rejected for a reason that means the matcher was wrong.
     # `not_actionable` is excluded on purpose — the match was correct, and
     # counting it would report operational friction as model error.
-    counts_as_false_positive: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    counts_as_envelope_error: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
 
 # Proposal statuses that occupy the one-active-per-result slot (partial unique

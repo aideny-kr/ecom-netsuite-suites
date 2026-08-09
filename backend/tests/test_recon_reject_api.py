@@ -74,7 +74,7 @@ async def test_reject_snapshots_envelope_eligibility_as_false_positive(client, d
 
     await db.refresh(res)
     assert res.envelope_eligible_at_decision is True
-    assert res.counts_as_false_positive is True
+    assert res.counts_as_envelope_error is True
 
 
 async def test_not_actionable_is_not_a_false_positive(client, db, finance_user):
@@ -100,7 +100,7 @@ async def test_not_actionable_is_not_a_false_positive(client, db, finance_user):
 
     await db.refresh(res)
     assert res.envelope_eligible_at_decision is True
-    assert res.counts_as_false_positive is False
+    assert res.counts_as_envelope_error is False
 
 
 async def test_reason_other_requires_a_note(client, db, finance_user):
@@ -210,7 +210,7 @@ async def test_reject_writes_an_audit_event_with_the_snapshot(client, db, financ
     assert event.payload["reason"] == "duplicate"
     assert event.payload["note"] == "already applied on deposit 8812"
     assert event.payload["envelope_eligible_at_decision"] is True
-    assert event.payload["counts_as_false_positive"] is True
+    assert event.payload["counts_as_envelope_error"] is True
     assert event.actor_id == user.id
 
 

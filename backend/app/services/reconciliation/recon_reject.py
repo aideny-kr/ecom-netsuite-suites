@@ -3,22 +3,35 @@
 Every disposition the system has ever recorded is positive. `approved` is set in
 two places (`api/v1/reconciliation.py`, `mcp/tools/recon_approve.py`); `rejected`
 is set in none, despite being a declared `ResultStatus` and already treated as
-terminal by `TERMINAL_RESULT_STATUSES`. So a wrong match leaves no trace, and the
-false-positive rate of the autonomy envelope is unmeasurable *by construction* —
-not hard to measure, impossible.
+terminal by `TERMINAL_RESULT_STATUSES`. So a wrong match leaves no trace.
 
-That matters because Rung 3 (unattended posting) rests entirely on the claim that
-deterministic zero-variance matches are wrong rarely enough to post without a
-human. This module is what makes that claim checkable. It has months of lead time
-before the data is worth anything, which is why it ships long before posting does.
+WHICH QUANTITY THIS FEEDS, AND WHICH IT DOES NOT.
+
+A false-POSITIVE rate is P(auto-post | the match is actually wrong). Its denominator
+covers rows the envelope did NOT select, which nothing here ever verifies — that term
+is structurally unidentifiable and no estimator recovers it. It is also not the number
+the autonomy decision needs.
+
+The number Rung 3 needs is the other conditional: of the rows we WOULD post
+unattended, what fraction are wrong. That is 1 - precision — the false DISCOVERY
+rate — and it IS estimable, from a sample drawn entirely INSIDE the envelope. The two
+differ by ~50x in worked examples. Everything here is named for the second.
+
+⚠️ These labels alone cannot produce that number, and it would be dishonest to imply
+otherwise. Rejects are missing-not-at-random BY CONSTRUCTION: a human acts precisely
+BECAUSE a row looks wrong. Measured 2026-08-09 on real data — 348,909 results, zero
+dispositions of any kind, so the first reject would have read as a 100% error rate.
+The rate requires a PLANNED RANDOM SAMPLE inside the envelope; these labels are the
+recording mechanism for that sample, plus a useful detection signal on their own.
+Never the rate.
 
 Two decisions carry the whole design:
 
-1. NOT EVERY REJECT IS A FALSE POSITIVE. "These are not the same money" and "the
+1. NOT EVERY REJECT IS AN ENVELOPE ERROR. "These are not the same money" and "the
    match is right but I can't action it yet" are opposite evidence. Counting both
    against the envelope would let operational friction masquerade as model error
    and produce a confidently wrong number — worse than no number, because a
-   number gets acted on. Only ``FALSE_POSITIVE_REASONS`` count.
+   number gets acted on. Only ``ENVELOPE_ERROR_REASONS`` count.
 
 2. ELIGIBILITY IS SNAPSHOTTED, NOT RECOMPUTED. The envelope's admission rules
    will change as the ladder is climbed. A rate computed by replaying today's
@@ -59,7 +72,7 @@ REJECT_REASONS: tuple[str, ...] = (
 # error rate with operational friction. `other` is excluded because an
 # uncategorised reject cannot be assumed to be a model error — it is reviewed by
 # a human and re-filed, not silently counted.
-FALSE_POSITIVE_REASONS: tuple[str, ...] = (
+ENVELOPE_ERROR_REASONS: tuple[str, ...] = (
     "wrong_match",
     "wrong_amount",
     "duplicate",
@@ -148,7 +161,7 @@ async def reject_result(
     result.reject_reason = reason
     result.reject_note = (note or "").strip() or None
     result.envelope_eligible_at_decision = eligible
-    result.counts_as_false_positive = eligible and reason in FALSE_POSITIVE_REASONS
+    result.counts_as_envelope_error = eligible and reason in ENVELOPE_ERROR_REASONS
 
     from app.services import audit_service
 
@@ -166,7 +179,7 @@ async def reject_result(
             "reason": reason,
             "note": result.reject_note,
             "envelope_eligible_at_decision": eligible,
-            "counts_as_false_positive": result.counts_as_false_positive,
+            "counts_as_envelope_error": result.counts_as_envelope_error,
             # Frozen alongside the decision so the label stays interpretable even
             # if the row is later re-classified.
             "bucket": result.bucket,
