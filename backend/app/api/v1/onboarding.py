@@ -271,6 +271,17 @@ async def start_onboarding_chat(
             )
 
     # Create new onboarding session
+    # Third door to run_chat_turn (chat.py and chat_integration.py are the others).
+    # One greeting per signup, so the cap is never reached legitimately -- it is here
+    # so the guardrail covers every entry point rather than most of them.
+    # Checked BEFORE the session row is created, like the other two sites -- a
+    # rejected request must not leave an orphan ChatSession behind.
+    if not await asyncio.to_thread(check_chat_burst_limit, str(user.tenant_id), str(user.id)):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many requests. Please wait a moment and try again.",
+        )
+
     session = ChatSession(
         tenant_id=user.tenant_id,
         user_id=user.id,
@@ -279,15 +290,6 @@ async def start_onboarding_chat(
     )
     db.add(session)
     await db.flush()
-
-    # Third door to run_chat_turn (chat.py and chat_integration.py are the others).
-    # One greeting per signup, so the cap is never reached legitimately -- it is here
-    # so the guardrail covers every entry point rather than most of them.
-    if not await asyncio.to_thread(check_chat_burst_limit, str(user.tenant_id), str(user.id)):
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many requests. Please wait a moment and try again.",
-        )
 
     # Trigger the first AI greeting by consuming the async generator
     try:

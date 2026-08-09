@@ -68,6 +68,15 @@ async def integration_chat(
     # Same cost guardrail as the interactive endpoint: this path reaches the same
     # platform-billed model, and an API key is the MORE likely thing to be driven
     # by a script. Keyed by the key itself so one integration cannot starve another.
+    if "chat" not in ctx.scopes:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="API key does not have 'chat' scope",
+        )
+
+    # AFTER the scope check: an authenticated key without chat scope must not be able
+    # to burn the tenant's shared burst window and 429 a legitimate chat-scoped key.
+    # Also the cheap in-memory check before the Redis round-trip.
     # Tenant-wide, not per-key: ApiKeyContext carries only tenant_id and scopes,
     # so there is no key identity to bucket on here. ChatApiKey.rate_limit_per_minute
     # exists for that and is still unwired -- tracked separately.
@@ -75,12 +84,6 @@ async def integration_chat(
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"Too many messages. Limit is {settings.CHAT_BURST_PER_MINUTE} per minute.",
-        )
-
-    if "chat" not in ctx.scopes:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="API key does not have 'chat' scope",
         )
 
     # Get or create session

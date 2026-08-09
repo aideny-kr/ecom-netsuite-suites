@@ -127,6 +127,13 @@ def check_mcp_tool_limit(tenant_id: str, tool_name: str, limit: int) -> bool:
     """
     # Fleet-wide: TOOL_CONFIGS was multiplied by the worker count on 2026-08-06
     # precisely so the shared window enforces the real ceiling.
+    #
+    # Behaviour change worth knowing: the old per-process dict did NOT record a denied
+    # call, so a capped tool recovered as soon as the original burst aged out. The Redis
+    # path records denials (the penalty box), so a client that keeps retrying keeps the
+    # window full. Kept deliberately -- for a cost guardrail, "retrying while capped
+    # extends the cap" is the behaviour we want. It does mean the Redis and fallback
+    # paths differ under sustained overload; documented in _check_redis.
     return check_limit(f"{_MCP_PREFIX}{tenant_id}:{tool_name}", limit, WINDOW_SECONDS, fleet_wide=True)
 
 

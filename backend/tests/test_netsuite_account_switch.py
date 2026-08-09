@@ -25,7 +25,12 @@ from app.api.v1.netsuite_auth import (
     _select_connection_for_account,
     _supersede_other_connections,
 )
-from app.models.connection import Connection
+from app.models.connection import (
+    ACTIVE_CONNECTION_STATUSES,
+    DISPATCHABLE_CONNECTION_STATUSES,
+    RETIRED_CONNECTION_STATUSES,
+    Connection,
+)
 
 PROD = "1234567"
 SANDBOX = "1234567-sb1"
@@ -280,3 +285,32 @@ def test_no_active_row_at_all_is_adopted_not_reported_as_a_switch():
 
     assert selected is orphan
     assert switched_from is None
+
+
+# ---------------------------------------------------------------------------
+# A new status value must be registered with the workers that branch on status
+# ---------------------------------------------------------------------------
+
+
+def test_superseded_is_registered_as_retired_not_left_for_the_workers_to_guess():
+    """Gate round 4, major. Introducing "superseded" without telling the workers.
+
+    connection_health filtered `status != "revoked"`, so it picked up superseded rows,
+    found their (never-refreshed, so eventually always stale) token expired, flipped
+    them to "error" and overwrote the "Superseded by ..." reason -- the only record of
+    why the row was demoted. proactive_token_refresh then queries
+    status.in_(["active","error"]), so the row became eligible for refresh again
+    against a connection deliberately retired.
+    """
+    keeper, stray = _conn(PROD), _conn(SANDBOX)
+    _supersede_other_connections([keeper, stray], keeper, PROD)
+
+    # The literal the callback writes must be the one the workers exclude. Asserting
+    # the link, not the string, is what makes this survive a rename.
+    assert stray.status in RETIRED_CONNECTION_STATUSES
+    assert stray.status not in ACTIVE_CONNECTION_STATUSES, "must not serve reads"
+    assert stray.status not in DISPATCHABLE_CONNECTION_STATUSES, "must not be dispatched by fan-outs"
+
+
+def test_retired_statuses_cover_revoked_too():
+    assert "revoked" in RETIRED_CONNECTION_STATUSES
