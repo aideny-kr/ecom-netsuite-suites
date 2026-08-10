@@ -69,7 +69,7 @@ REJECT_REASONS: tuple[str, ...] = (
 
 # The subset that is genuine evidence the matcher was WRONG. `not_actionable`
 # is deliberately excluded: the match was right, so counting it would inflate the
-# error rate with operational friction. `other` is excluded because an
+# envelope error rate with operational friction. `other` is excluded because an
 # uncategorised reject cannot be assumed to be a model error — it is reviewed by
 # a human and re-filed, not silently counted.
 ENVELOPE_ERROR_REASONS: tuple[str, ...] = (

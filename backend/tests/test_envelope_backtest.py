@@ -99,7 +99,11 @@ async def test_zero_contradictions_reports_a_bound_not_a_zero_rate(db, tenant_a,
 
     out = await envelope_self_contradiction(db, tenant_id=tenant_a.id)
     assert out["contradictions"] == 0
-    assert out["upper_bound_95_if_zero"] == pytest.approx(3.0)  # 3/1
+    # Rule of three is a large-n approximation and its output is a PROBABILITY.
+    # Unclamped at n=1 it returned 3.0 — "a 300% upper bound" — from the one module
+    # whose entire premise is that no caller may over-read the number. Below the
+    # floor it now says nothing, which is the honest answer.
+    assert out["upper_bound_95_if_zero"] is None, "n=1 is far below the rule-of-three floor"
     assert out["is_lower_bound"] is True
     assert "not correctness" in out["not_a_correctness_measure"]
 
@@ -146,6 +150,57 @@ async def test_windows_must_match_to_be_compared(db, tenant_a, deposit_a, deposi
     r2 = await _run_over(db, tenant_a.id, df=date(2026, 5, 1), dt=date(2026, 5, 31))
     await _row(db, tenant_a.id, r1, "FW-6", deposit_a.id)
     await _row(db, tenant_a.id, r2, "FW-6", deposit_b.id)
+
+    out = await envelope_self_contradiction(db, tenant_id=tenant_a.id)
+    assert out["contradictions"] == 0
+
+
+async def test_a_split_order_in_one_run_is_not_a_contradiction(db, tenant_a, deposit_a, deposit_b):
+    """The blocker this file failed to catch the first time.
+
+    A split/partial-capture order legitimately produces 2 charges + 2 deposits in a
+    SINGLE run — equal counts, full confidence, explicitly not ambiguous
+    (`_match_same_ref_group` step 1). The first version counted distinct
+    envelope-grade deposits across the whole (window, order) group, so one CORRECT
+    run satisfied "more than one graded deposit" by itself and was charged with a
+    contradiction it never made. Comparing per-run SETS is the fix: both runs answer
+    {A, B}, which is agreement.
+    """
+    r1 = await _run_over(db, tenant_a.id)
+    r2 = await _run_over(db, tenant_a.id)
+    for run in (r1, r2):
+        await _row(db, tenant_a.id, run, "FW-SPLIT", deposit_a.id)
+        await _row(db, tenant_a.id, run, "FW-SPLIT", deposit_b.id)
+
+    out = await envelope_self_contradiction(db, tenant_id=tenant_a.id)
+    assert out["contradictions"] == 0, "identical split answers are agreement, not conflict"
+
+
+async def test_runs_scoped_to_different_subsidiaries_are_not_compared(db, tenant_a, deposit_a, deposit_b):
+    """A subsidiary-scoped run sees a different deposit population by design
+    (_fetch_deposits filters on subsidiary_id), so a different answer is the CORRECT
+    answer to a different question — not a contradiction."""
+    r1 = await _run_over(db, tenant_a.id)
+    r2 = await _run_over(db, tenant_a.id)
+    r1.subsidiary_id, r2.subsidiary_id = "1", "2"
+    await db.flush()
+    await _row(db, tenant_a.id, r1, "FW-SUB", deposit_a.id)
+    await _row(db, tenant_a.id, r2, "FW-SUB", deposit_b.id)
+
+    out = await envelope_self_contradiction(db, tenant_id=tenant_a.id)
+    assert out["contradictions"] == 0
+
+
+async def test_results_from_a_failed_run_are_not_an_envelope_claim(db, tenant_a, deposit_a, deposit_b):
+    """_store_results commits BEFORE run.status is set, and the error path then writes
+    status='failed' — so a crashed run leaves rows behind. Partial output is not a
+    claim that the envelope stood behind those matches."""
+    r1 = await _run_over(db, tenant_a.id)
+    r2 = await _run_over(db, tenant_a.id)
+    r2.status = "failed"
+    await db.flush()
+    await _row(db, tenant_a.id, r1, "FW-FAIL", deposit_a.id)
+    await _row(db, tenant_a.id, r2, "FW-FAIL", deposit_b.id)
 
     out = await envelope_self_contradiction(db, tenant_id=tenant_a.id)
     assert out["contradictions"] == 0
