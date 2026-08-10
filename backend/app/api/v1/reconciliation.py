@@ -181,7 +181,33 @@ async def get_data_status(
             "deposit_count": deposit_count,
         }
 
-    return {"stripe": stripe_info, "netsuite": netsuite_info}
+    # The envelope self-contradiction back-test, READ from the last scheduled run.
+    # Never computed here: it is a full-table aggregate — 4,776 ms and a 31 MB disk
+    # spill against live data — and this endpoint is loaded by the recon UI. The
+    # weekly `tasks.envelope_backtest` computes it; this is a single indexed row.
+    latest = (
+        await db.execute(
+            select(Job)
+            .where(
+                Job.tenant_id == user.tenant_id,
+                Job.job_type == "envelope_backtest",
+                Job.status == "completed",
+            )
+            .order_by(Job.completed_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+    # `computed_at` travels with the number, always. A bound that quietly stopped
+    # refreshing is worse than none — it reads as current while describing a matcher
+    # that has since changed, and absence of a failure is not evidence it ran.
+    envelope_info: dict = {"available": False, "reason": "not computed yet"}
+    if latest and latest.result_summary:
+        mine = (latest.result_summary.get("per_tenant") or {}).get(str(user.tenant_id))
+        if mine:
+            envelope_info = {"available": True, "computed_at": latest.completed_at, **mine}
+
+    return {"stripe": stripe_info, "netsuite": netsuite_info, "envelope_backtest": envelope_info}
 
 
 # ---------------------------------------------------------------------------

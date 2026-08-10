@@ -48,6 +48,7 @@ celery_app.conf.include = [
     "app.workers.tasks.netsuite_deposit_sync_all",
     "app.workers.tasks.reconciliation_run",
     "app.workers.tasks.recon_scheduled_run_all",
+    "app.workers.tasks.envelope_backtest_task",
     "app.workers.tasks.recon_envelope_dry_run",
     "app.workers.tasks.recon_resolution_agent",
     "app.workers.tasks.report_auto_refresh",
@@ -62,6 +63,13 @@ celery_app.conf.beat_schedule = {
     "sync-metered-billing": {
         "task": "tasks.billing_sync",
         "schedule": 3600.0,  # hourly
+    },
+    # Weekly, not nightly: the input only changes when a window is re-reconciled,
+    # and the query is a ~5s full scan (measured on live data). Sunday 05:00 keeps it
+    # clear of the nightly recon runs whose output it reads.
+    "envelope-backtest": {
+        "task": "tasks.envelope_backtest",
+        "schedule": crontab(hour=5, minute=0, day_of_week=0),
     },
     "check-connection-health": {
         "task": "tasks.connection_health",
