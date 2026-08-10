@@ -93,7 +93,11 @@ describe("reject action", () => {
     fireEvent.click(screen.getByRole("button", { name: /reject match/i }));
 
     const text = container.textContent ?? "";
+    // Post-rename a leak would read "envelope error", which matched none of the
+    // original three patterns — the guard had quietly stopped covering the
+    // vocabulary the product actually uses.
     expect(text).not.toMatch(/false.positive/i);
+    expect(text).not.toMatch(/envelope.error/i);
     expect(text).not.toMatch(/error rate/i);
     expect(text).not.toMatch(/counts against/i);
   });

@@ -919,7 +919,7 @@ export interface ReconResult {
   approved_at: string | null;
   created_at: string;
   bucket?: string;
-  // Reject disposition (mirrors ReconResultResponse). counts_as_false_positive is
+  // Reject disposition (mirrors ReconResultResponse). counts_as_envelope_error is
   // intentionally absent: it is the metric the corpus feeds, and a reviewer who can
   // see which reasons score against the matcher can pick the number they want.
   reject_reason?: string | null;
