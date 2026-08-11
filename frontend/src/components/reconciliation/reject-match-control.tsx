@@ -39,6 +39,12 @@ export const REASON_LABEL: Record<string, string> = Object.fromEntries(
   REJECT_REASONS.map((r) => [r.value, r.label])
 );
 
+// Rendered height of the picker in Chromium (five reasons + note + buttons),
+// measured 2026-08-10. Only used to decide which way to open; the maxHeight clamp
+// on the dialog is what actually guarantees it stays inside the viewport, so a
+// drift in this constant degrades placement rather than breaking it.
+const PICKER_HEIGHT_PX = 432;
+
 // Mirrors backend TERMINAL_RESULT_STATUSES. A terminal row is immutable, so offering
 // a control the API will refuse teaches the operator that the UI lies.
 export const TERMINAL_STATUSES = new Set(["approved", "rejected", "locked", "carried_forward"]);
@@ -60,8 +66,11 @@ export function RejectMatchControl({ resultId, disabled, variant = "icon" }: Rej
   const [reason, setReason] = useState("");
   const [note, setNote] = useState("");
   // Where to paint the picker. Captured from the button because the picker is
-  // PORTALLED to <body> — see the render for why.
-  const [anchor, setAnchor] = useState<{ top: number; right: number } | null>(null);
+  // PORTALLED to <body> — see the render for why. Either `top` (opens downward) or
+  // `bottom` (flipped upward), never both.
+  const [anchor, setAnchor] = useState<{ top?: number; bottom?: number; right: number } | null>(
+    null
+  );
   const triggerRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
 
@@ -102,8 +111,20 @@ export function RejectMatchControl({ resultId, disabled, variant = "icon" }: Rej
   const toggle = (el: HTMLElement) => {
     if (open) return close();
     const r = el.getBoundingClientRect();
+    // The picker is ~432px tall in Chromium. Anchored unconditionally below the
+    // trigger it runs off the bottom of the viewport for any row in the lower half
+    // of the page — measured at 1440x900 on the needs-human worksheet, the dialog
+    // ended 94px past the fold with the note field and both buttons unreachable.
+    // That is the SAME failure the portal was introduced to fix, in the other axis,
+    // and jsdom cannot see it: it has no layout engine, so every unit test here
+    // passes either way. Flip above the trigger when there is more room there.
+    const spaceBelow = window.innerHeight - r.bottom;
+    const flip = spaceBelow < PICKER_HEIGHT_PX && r.top > spaceBelow;
     setOpen(true);
-    setAnchor({ top: r.bottom + 6, right: window.innerWidth - r.right });
+    setAnchor({
+      right: window.innerWidth - r.right,
+      ...(flip ? { bottom: window.innerHeight - r.top + 6 } : { top: r.bottom + 6 }),
+    });
   };
 
   // 'other' with a blank note is a 400 from the service. Enforcing it here means the
@@ -140,8 +161,14 @@ export function RejectMatchControl({ resultId, disabled, variant = "icon" }: Rej
               )
         )}
       >
+        {/* Visible text is the short "Reject" while the accessible name stays the
+            precise "Reject match" (aria-label above wins for both screen readers and
+            getByRole). The long label needed ~120px, which pushed this row's two
+            buttons past the actions column and made them paint over the narrative in
+            the next column. "Reject" alone is unambiguous now that the group-level
+            control reads "Discard plan" rather than "Reject". */}
         <X className={variant === "icon" ? "h-4 w-4" : "h-3.5 w-3.5"} />
-        {variant === "inline" && "Reject match"}
+        {variant === "inline" && "Reject"}
       </button>
 
       {/* PORTALLED to <body>, not rendered in the cell.
@@ -158,7 +185,18 @@ export function RejectMatchControl({ resultId, disabled, variant = "icon" }: Rej
             ref={dialogRef}
             role="dialog"
             aria-label="Reject this match"
-            style={{ position: "fixed", top: anchor.top, right: anchor.right }}
+            style={{
+              position: "fixed",
+              top: anchor.top,
+              bottom: anchor.bottom,
+              right: anchor.right,
+              // Belt and braces to the flip above: on a short viewport NEITHER
+              // direction fits, and a picker taller than the window is unusable in
+              // both. Clamping + scrolling means the control degrades to "scroll a
+              // little" instead of "the Reject button does not exist".
+              maxHeight: "calc(100vh - 16px)",
+              overflowY: "auto",
+            }}
             className="z-50 w-72 rounded-lg border bg-card p-3 text-left shadow-lg"
           >
             <p className="text-xs font-semibold">Why is this wrong?</p>

@@ -96,6 +96,17 @@ describe("reject on the expanded group's item list", () => {
     expect(screen.getByRole("button", { name: /reject match/i })).toBeInTheDocument();
   });
 
+  it("shows short visible text but keeps the precise accessible name", () => {
+    // Load-bearing for LAYOUT, not just wording. The long "Reject match" label pushed
+    // this row's two buttons past the actions column, and under table-fixed the
+    // overflow paints over the neighbouring narrative rather than pushing it —
+    // reproduced in Chromium at 1440/1280/1152. Screen readers and getByRole still get
+    // "Reject match" from aria-label, so shortening the visible text costs nothing.
+    render(<ResolutionGroupItems {...itemsProps} />);
+    const btn = screen.getByRole("button", { name: /^reject match$/i });
+    expect(btn).toHaveTextContent(/^Reject$/);
+  });
+
   it("submits the item's result_id, never the proposal id", () => {
     // The load-bearing assertion. PATCH /results/{id}/reject keys on the
     // ReconciliationResult; posting the proposal's own id would 404 at best and

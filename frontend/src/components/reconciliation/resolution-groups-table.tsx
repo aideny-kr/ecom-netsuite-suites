@@ -441,13 +441,20 @@ export function NeedsHumanWorksheet({
           <Table className="table-fixed">
             <TableHeader>
               <TableRow>
-                <TableHead className="w-[11%] px-3 py-2">Order ref</TableHead>
-                <TableHead className="w-[15%] px-3 py-2">Stripe charge</TableHead>
+                {/* Widths sum to 100% and are load-bearing: this is table-fixed, so a
+                    cell whose content exceeds its share does NOT push its neighbour —
+                    it paints on top of it. Adding the reject control put two buttons in
+                    the actions column and they overflowed left across "Why held" at
+                    every width tested (1440/1280/1152). Verified in Chromium against a
+                    deliberately-starved column first, because two earlier versions of
+                    that geometry check reported CLEAN on a visibly broken layout. */}
+                <TableHead className="w-[10%] px-3 py-2">Order ref</TableHead>
+                <TableHead className="w-[13%] px-3 py-2">Stripe charge</TableHead>
                 <TableHead className="w-[13%] px-3 py-2">NetSuite ID</TableHead>
                 <TableHead className="w-[9%] px-3 py-2 text-right">Amount</TableHead>
                 <TableHead className="w-[12%] px-3 py-2">Root cause</TableHead>
-                <TableHead className="w-[24%] px-3 py-2">Why held</TableHead>
-                <TableHead className="w-[16%] px-3 py-2 sr-only">Row actions</TableHead>
+                <TableHead className="w-[20%] px-3 py-2">Why held</TableHead>
+                <TableHead className="w-[23%] px-3 py-2 sr-only">Row actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>

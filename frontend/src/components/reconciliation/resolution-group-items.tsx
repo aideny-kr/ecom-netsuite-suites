@@ -200,7 +200,13 @@ export function ResolutionGroupItems({
                   {p.narrative}
                 </TableCell>
                 <TableCell className="text-right">
-                  <div className="flex items-center justify-end gap-1.5">
+                  {/* min-w-max: this table is auto-layout, so the column sizes to its
+                      content's MIN-content width — and a flex row whose buttons may
+                      wrap their text reports a min-content far narrower than the
+                      buttons actually render at. The column then came out too narrow
+                      and the shrink-0 buttons overflowed left onto the Narrative
+                      column. min-w-max makes the column claim the width it will use. */}
+                  <div className="flex min-w-max items-center justify-end gap-1.5">
                     {p.action === "needs_human" && (
                       <button
                         type="button"
