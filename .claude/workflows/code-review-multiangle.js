@@ -43,21 +43,53 @@ REPO-SPECIFIC INVARIANTS — flag any place the diff could violate one:
 - SuiteQL dialect: local REST supports customrecord_*; external MCP only standard tables.
 - Recon HITL: approve writes one audit row per line, never auto-posts to NetSuite, and a closed/locked run rejects approve (hard freeze).`
 
-// ----- arg validation (fail-closed on hostile/huge input) ------------------
+// --- BEGIN arg-resolution (extracted verbatim by gate-args.test.mjs) -------
+// Kept as one pure function with no workflow globals so the test can eval it
+// standalone. Everything about WHICH DIFF GETS REVIEWED is decided here, which is
+// why it is the one part of this gate with its own test.
 function asArg(v, name, max) {
   if (v == null) return null
   if (typeof v !== 'string') throw new Error(`args.${name} must be a string`)
   if (v.length > max) throw new Error(`args.${name} too long (${v.length} > ${max})`)
   return v
 }
-let targetSpec, baseArg, providedDiff
-try {
-  targetSpec = asArg(args && args.target, 'target', 200)
-  baseArg = asArg(args && args.base, 'base', 200)
-  providedDiff = asArg(args && args.diff, 'diff', 2_000_000)
-  for (const [v, n] of [[targetSpec, 'target'], [baseArg, 'base']]) {
+function resolveArgs(args) {
+  // `args` arrives JSON-ENCODED AS A STRING, not as an object — and passing an object
+  // from the caller does not help, the harness stringifies in transit. Reading
+  // `.target` off a string yields undefined, targetSpec falls back to "the current
+  // branch HEAD", and the gate reviews whatever worktree the caller happened to be in
+  // while still returning status:OK. Twice on 2026-08-11 (wf_4e37835d, wf_4061fdb2),
+  // 9.7M tokens, with ZERO files of the actual PR examined.
+  const supplied = args !== undefined && args !== null && args !== ''
+  let a = args
+  if (typeof a === 'string') {
+    try { a = JSON.parse(a) } catch { a = null }
+  }
+  if (a !== null && a !== undefined && typeof a !== 'object') a = null
+
+  const target = asArg(a && a.target, 'target', 200)
+  const base = asArg(a && a.base, 'base', 200)
+  const diff = asArg(a && a.diff, 'diff', 2_000_000)
+
+  // FAIL CLOSED. The caller asked for something specific and none of it survived —
+  // reviewing the current checkout instead and reporting OK is the one outcome this
+  // gate must never produce. No args at all is different, and still allowed.
+  if (supplied && !target && !base && !diff) {
+    throw new Error(
+      `args were supplied but no target/base/diff could be read from them (got ${typeof args}); ` +
+      'refusing to fall back to the current checkout'
+    )
+  }
+  for (const [v, n] of [[target, 'target'], [base, 'base']]) {
     if (v && /[\n\r]/.test(v)) throw new Error(`args.${n} must not contain newlines`)
   }
+  return { target, base, diff }
+}
+// --- END arg-resolution ----------------------------------------------------
+
+let targetSpec, baseArg, providedDiff
+try {
+  ({ target: targetSpec, base: baseArg, diff: providedDiff } = resolveArgs(args))
 } catch (e) {
   return { status: 'INVALID_ARGS', error: String(e.message || e), findings: [] }
 }
