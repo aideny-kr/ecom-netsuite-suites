@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/table";
 import { useGroupProposals } from "@/hooks/use-resolution";
 import { fxChip, money } from "@/components/reconciliation/format";
+import { RejectMatchControl } from "@/components/reconciliation/reject-match-control";
 import type { ReconResolutionProposal } from "@/lib/types";
 
 // Statuses that reach this worksheet are "proposed" (awaiting a decision) or
@@ -79,6 +80,10 @@ interface ResolutionGroupItemsProps {
   tickedAboveIds: string[];
   onTickAbove: (proposalId: string, ticked: boolean) => void;
   onInvestigate: (proposal: ReconResolutionProposal) => void;
+  // Closed run / recon disabled — same freeze the group's Approve honours. The
+  // reject endpoint refuses a closed period server-side, so the control is not
+  // rendered rather than offered and then refused.
+  disabled?: boolean;
 }
 
 export function ResolutionGroupItems({
@@ -88,6 +93,7 @@ export function ResolutionGroupItems({
   tickedAboveIds,
   onTickAbove,
   onInvestigate,
+  disabled,
 }: ResolutionGroupItemsProps) {
   const { data: proposals, isLoading } = useGroupProposals(runId, groupKey, currency);
   if (isLoading) {
@@ -194,16 +200,27 @@ export function ResolutionGroupItems({
                   {p.narrative}
                 </TableCell>
                 <TableCell className="text-right">
-                  {p.action === "needs_human" && (
-                    <button
-                      type="button"
-                      onClick={() => onInvestigate(p)}
-                      className="inline-flex shrink-0 items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
-                    >
-                      <MessageSquare className="h-3.5 w-3.5" />
-                      Investigate in chat
-                    </button>
-                  )}
+                  <div className="flex items-center justify-end gap-1.5">
+                    {p.action === "needs_human" && (
+                      <button
+                        type="button"
+                        onClick={() => onInvestigate(p)}
+                        className="inline-flex shrink-0 items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+                      >
+                        <MessageSquare className="h-3.5 w-3.5" />
+                        Investigate in chat
+                      </button>
+                    )}
+                    {/* Targets the RESULT, not this proposal — the two ids sit side by
+                        side on `p` and only result_id is what PATCH /results/{id}/reject
+                        keys on. Gated on the proposal still being undecided: group
+                        approve flips the underlying result to 'approved', which is
+                        terminal, and the proposal's own status is the only signal this
+                        surface carries about that. */}
+                    {p.status === "proposed" && (
+                      <RejectMatchControl resultId={p.result_id} disabled={disabled} variant="inline" />
+                    )}
+                  </div>
                 </TableCell>
               </TableRow>
             );

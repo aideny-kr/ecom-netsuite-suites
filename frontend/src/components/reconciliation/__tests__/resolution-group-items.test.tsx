@@ -88,6 +88,14 @@ const proposals: ReconResolutionProposal[] = [
   },
 ];
 
+// Each row now hosts a RejectMatchControl, which calls useRejectResult() —
+// a react-query mutation. Unmocked it throws for want of a QueryClientProvider.
+// Reject behaviour itself is covered in reject-on-resolution-surface.test.tsx.
+vi.mock("@/hooks/use-reconciliation", () => ({
+  useApproveResult: () => ({ mutate: vi.fn(), isPending: false }),
+  useRejectResult: () => ({ mutate: vi.fn(), isPending: false }),
+}));
+
 const useGroupProposals = vi.fn(
   (_runId?: string | null, _groupKey?: string | null, _currency?: string | null) => ({
     data: proposals,

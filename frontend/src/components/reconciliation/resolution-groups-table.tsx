@@ -13,6 +13,7 @@ import {
 import { ResolutionGroupItems } from "@/components/reconciliation/resolution-group-items";
 import { ExportMenu } from "@/components/reconciliation/export-menu";
 import { fxChip, money } from "@/components/reconciliation/format";
+import { RejectMatchControl } from "@/components/reconciliation/reject-match-control";
 import { NEEDS_HUMAN_PROPOSALS_LIMIT } from "@/hooks/use-resolution";
 import type { ReconResolutionGroup, ReconResolutionProposal } from "@/lib/types";
 
@@ -253,14 +254,23 @@ export function ResolutionGroupsTable({
                       : `Approve ${oneClickCount}`}
                 </button>
               );
-              const rejectButton = (
+              // "Discard plan", not "Reject". This button and the per-item reject in
+              // the panel below it mean OPPOSITE things and sit inches apart:
+              // POST .../resolution-groups/{key}/reject discards the planner's proposed
+              // booking and is documented "Results are untouched", while
+              // PATCH /results/{id}/reject records that the MATCH itself is wrong. Under
+              // one shared word, a reviewer who means "this match is wrong" clicks here,
+              // gets no label and no error, and the negative-label corpus stays empty —
+              // which is one plausible reason it still was, after reject shipped.
+              const discardPlanButton = (
                 <button
                   type="button"
                   onClick={() => onReject(group)}
                   disabled={disabled || isApproving}
+                  title="Discard the proposed booking for this group. The underlying matches are left alone."
                   className="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  Reject
+                  Discard plan
                 </button>
               );
 
@@ -354,7 +364,7 @@ export function ResolutionGroupsTable({
                                 placeholder="Optional note for the audit trail (e.g. month-end close)"
                                 className="min-w-0 flex-1 rounded-md border bg-background px-3 py-1.5 text-[13px] text-foreground placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50"
                               />
-                              {rejectButton}
+                              {discardPlanButton}
                               <ExportMenu
                                 runId={runId}
                                 params={{ section: "proposals", group_key: group.group_key, currency: group.currency }}
@@ -368,6 +378,7 @@ export function ResolutionGroupsTable({
                             tickedAboveIds={includedAboveIds}
                             onTickAbove={(id, ticked) => onTickAbove(cardKey, id, ticked)}
                             onInvestigate={onInvestigate}
+                            disabled={disabled}
                           />
                         </div>
                       </TableCell>
@@ -388,9 +399,17 @@ interface NeedsHumanWorksheetProps {
   proposals: ReconResolutionProposal[] | undefined;
   isLoading: boolean;
   onInvestigate: (proposal: ReconResolutionProposal) => void;
+  // Closed run / recon disabled — same freeze the groups worksheet honours.
+  disabled?: boolean;
 }
 
-export function NeedsHumanWorksheet({ runId, proposals, isLoading, onInvestigate }: NeedsHumanWorksheetProps) {
+export function NeedsHumanWorksheet({
+  runId,
+  proposals,
+  isLoading,
+  onInvestigate,
+  disabled,
+}: NeedsHumanWorksheetProps) {
   // The fetch requests NEEDS_HUMAN_PROPOSALS_LIMIT rows; a returned count
   // that reaches the limit means the run may have more the operator can't
   // see in this worksheet — the export always carries the complete list.
@@ -484,14 +503,23 @@ export function NeedsHumanWorksheet({ runId, proposals, isLoading, onInvestigate
                     {p.narrative}
                   </TableCell>
                   <TableCell className="px-3 py-2 text-right">
-                    <button
-                      type="button"
-                      onClick={() => onInvestigate(p)}
-                      className="inline-flex shrink-0 items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
-                    >
-                      <MessageSquare className="h-3.5 w-3.5" />
-                      Investigate in chat
-                    </button>
+                    <div className="flex items-center justify-end gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => onInvestigate(p)}
+                        className="inline-flex shrink-0 items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+                      >
+                        <MessageSquare className="h-3.5 w-3.5" />
+                        Investigate in chat
+                      </button>
+                      {/* Targets p.result_id (the match), never p.id (the proposal).
+                          Investigate-in-chat is the only other exit from this worksheet,
+                          so without this a reviewer who has decided the match is wrong
+                          has nowhere to record it. */}
+                      {p.status === "proposed" && (
+                        <RejectMatchControl resultId={p.result_id} disabled={disabled} variant="inline" />
+                      )}
+                    </div>
                   </TableCell>
                 </TableRow>
                 );
