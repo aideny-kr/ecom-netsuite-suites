@@ -61,10 +61,25 @@ test('unparseable args are REFUSED, never silently downgraded to the current che
 
 test('no args at all is still allowed — reviewing the current branch is a legitimate use', () => {
   const resolveArgs = loadResolveArgs()
-  for (const empty of [undefined, null]) {
+  // An empty-but-present object is the case the first version of this guard got
+  // wrong: `Workflow({name: 'code-review-multiangle', args: {}})` threw INVALID_ARGS,
+  // contradicting the code's own comment and breaking the documented default. Found
+  // by running this gate against its own PR (#198), not by these tests.
+  for (const empty of [undefined, null, '', {}, '{}']) {
     const out = resolveArgs(empty)
-    assert.equal(out.target, null, 'no target means "current branch HEAD", which is fine when nothing was asked for')
+    assert.equal(out.target, null,
+      `${JSON.stringify(empty)} asks for nothing, so "current branch HEAD" is correct — not INVALID_ARGS`)
   }
+})
+
+test('a request that asked for something unusable is still refused', () => {
+  const resolveArgs = loadResolveArgs()
+  // The distinction that makes the above safe: key PRESENCE means the caller wanted
+  // something specific. If none of it yields a usable target, falling back to the
+  // current checkout would be the original silent-wrong-review bug.
+  assert.throws(() => resolveArgs({ targt: '198' }), /refus|could not be read/i, "typo'd key")
+  assert.throws(() => resolveArgs({ target: '' }), /refus|could not be read/i, 'empty target from an unset variable')
+  assert.throws(() => resolveArgs('{"target": ""}'), /refus|could not be read/i, 'same, stringified')
 })
 
 test('hostile input is still rejected (pre-existing guards survive the refactor)', () => {

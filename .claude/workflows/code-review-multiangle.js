@@ -60,21 +60,40 @@ function resolveArgs(args) {
   // branch HEAD", and the gate reviews whatever worktree the caller happened to be in
   // while still returning status:OK. Twice on 2026-08-11 (wf_4e37835d, wf_4061fdb2),
   // 9.7M tokens, with ZERO files of the actual PR examined.
-  const supplied = args !== undefined && args !== null && args !== ''
   let a = args
+  let parseFailed = false
   if (typeof a === 'string') {
-    try { a = JSON.parse(a) } catch { a = null }
+    if (a.trim() === '') {
+      a = null // an empty string asks for nothing
+    } else {
+      try { a = JSON.parse(a) } catch { a = null; parseFailed = true }
+    }
   }
-  if (a !== null && a !== undefined && typeof a !== 'object') a = null
+  if (a !== null && a !== undefined && typeof a !== 'object') { a = null; parseFailed = true }
+  a = a || {}
 
-  const target = asArg(a && a.target, 'target', 200)
-  const base = asArg(a && a.base, 'base', 200)
-  const diff = asArg(a && a.diff, 'diff', 2_000_000)
+  const target = asArg(a.target, 'target', 200)
+  const base = asArg(a.base, 'base', 200)
+  const diff = asArg(a.diff, 'diff', 2_000_000)
 
-  // FAIL CLOSED. The caller asked for something specific and none of it survived —
-  // reviewing the current checkout instead and reporting OK is the one outcome this
-  // gate must never produce. No args at all is different, and still allowed.
-  if (supplied && !target && !base && !diff) {
+  // FAIL CLOSED — but only when the caller actually asked for something. Reviewing
+  // the current checkout and reporting OK when a specific target was requested is the
+  // one outcome this gate must never produce.
+  //
+  // "Asked for something" is key-presence, not truthiness. An earlier version keyed
+  // off `args !== undefined && args !== null && args !== ''`, which made an
+  // empty-but-present object — `Workflow({name: 'code-review-multiangle', args: {}})`,
+  // a very plausible call — throw INVALID_ARGS, flatly contradicting this comment and
+  // breaking the documented "review the current branch" default. Caught by running
+  // this gate against its own PR (#198).
+  //
+  // Still refused, deliberately: a non-empty string that will not parse (the
+  // catastrophic case — a real target lost in transit), a non-object, and an object
+  // carrying keys none of which yield a usable target/base/diff (a typo'd key, or an
+  // empty target interpolated from an unset variable). Those all mean the caller
+  // wanted something specific that did not arrive.
+  const askedForSomething = Object.keys(a).length > 0
+  if ((parseFailed || askedForSomething) && !target && !base && !diff) {
     throw new Error(
       `args were supplied but no target/base/diff could be read from them (got ${typeof args}); ` +
       'refusing to fall back to the current checkout'
