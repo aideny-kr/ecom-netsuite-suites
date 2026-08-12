@@ -856,6 +856,19 @@ async def _fetch_group_summaries(
     aggregation, single source of truth (do not re-derive)."""
     P = ReconResolutionProposal
     live = (P.run_id == run_uuid, P.tenant_id == tenant_id, P.status.notin_(("superseded", "rejected")))
+    # "Still actionable" is a fact about the RESULT, not the proposal. reject_result
+    # mutates the result and never touches the proposal, so counting P.status alone
+    # left a rejected row inside proposed_count forever: the worksheet's
+    # oneClickCount = proposed_count - above_materiality_count + ticked kept offering
+    # "Approve N" for a row the API can only refuse, and the proposal stayed
+    # 'proposed' with no path out. Nothing corrupts — approve is refused server-side —
+    # but the number the whole surface is steered by drifts further wrong with every
+    # reject. NULL (no result row) counts as actionable so a proposal never silently
+    # disappears from its group.
+    _result_actionable = or_(
+        ReconciliationResult.status.is_(None),
+        ReconciliationResult.status.notin_(TERMINAL_RESULT_STATUSES),
+    )
 
     group_rows = (
         await db.execute(
@@ -866,12 +879,21 @@ async def _fetch_group_summaries(
                 P.group_key,
                 P.currency,
                 func.count(P.id).label("count"),
-                func.count(P.id).filter(P.status == "proposed").label("proposed_count"),
+                func.count(P.id).filter(P.status == "proposed", _result_actionable).label("proposed_count"),
                 func.count(P.id).filter(P.status == "approved").label("approved_count"),
                 func.coalesce(func.sum(P.proposed_amount), 0).label("total_amount"),
                 func.count(P.id)
-                .filter(P.above_materiality.is_(True), P.status == "proposed")
+                .filter(P.above_materiality.is_(True), P.status == "proposed", _result_actionable)
                 .label("above_materiality_count"),
+            )
+            # LEFT JOIN so a proposal whose result is somehow absent still counts
+            # rather than silently vanishing from the group.
+            .outerjoin(
+                ReconciliationResult,
+                and_(
+                    ReconciliationResult.id == P.result_id,
+                    ReconciliationResult.tenant_id == tenant_id,
+                ),
             )
             .where(*live)
             .group_by(P.root_cause, P.action, P.booking_vehicle, P.group_key, P.currency)

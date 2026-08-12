@@ -68,6 +68,14 @@ export function useApproveResult() {
       // invalidates every run's summary / every period's readiness).
       queryClient.invalidateQueries({ queryKey: ["recon-bucket-summary"] });
       queryClient.invalidateQueries({ queryKey: ["recon-close-readiness"] });
+      // Approve makes a result terminal exactly as reject does, and the resolution
+      // surfaces gate their reject control on that terminal status. Giving these keys
+      // to reject alone left an approve taken on the classic table showing a stale
+      // pending row over there — still offering Reject, whose every click is then a
+      // guaranteed 400. Same staleness, opposite verb.
+      queryClient.invalidateQueries({ queryKey: ["recon-group-proposals"] });
+      queryClient.invalidateQueries({ queryKey: ["recon-needs-human-proposals"] });
+      queryClient.invalidateQueries({ queryKey: ["recon-resolution-summary"] });
     },
   });
 }
@@ -170,6 +178,12 @@ export function useApproveBucket(runId: string) {
       // Bulk approve drains suggested/left_for_review — the period readiness
       // the CloseChecklist gates on must refetch (prefix: every period).
       queryClient.invalidateQueries({ queryKey: ["recon-close-readiness"] });
+      // Same reason as the single-row approve: a bulk approve makes many results
+      // terminal at once, and the resolution surfaces gate their reject control on
+      // that. This is the worst version of the stale-row problem, not the mildest.
+      queryClient.invalidateQueries({ queryKey: ["recon-group-proposals"] });
+      queryClient.invalidateQueries({ queryKey: ["recon-needs-human-proposals"] });
+      queryClient.invalidateQueries({ queryKey: ["recon-resolution-summary"] });
     },
   });
 }

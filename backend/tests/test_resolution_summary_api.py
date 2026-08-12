@@ -11,7 +11,7 @@ from app.api.v1.reconciliation import (
     plan_resolutions,
     reject_resolution_group,
 )
-from app.models.reconciliation import ReconResolutionProposal
+from app.models.reconciliation import ReconciliationResult, ReconResolutionProposal
 from app.schemas.reconciliation import ResolutionGroupApprove
 from tests.conftest import (
     create_test_netsuite_posting,
@@ -628,3 +628,50 @@ async def test_summary_agent_job_lookup_normalizes_run_id(db, tenant_a):
 
     assert out.agent_job is not None
     assert out.agent_job.status == "running"
+
+
+async def test_group_counts_drop_a_row_whose_result_was_rejected(db, tenant_a):
+    """Rejecting an item must shrink its group's approve count.
+
+    `reject_result` mutates the RESULT and never the proposal, and the group
+    aggregation counted `P.status == 'proposed'` alone — so a rejected row stayed in
+    proposed_count forever. The worksheet's
+    `oneClickCount = proposed_count - above_materiality_count + ticked` therefore kept
+    offering "Approve N" for a row that can never be approved (the API refuses a
+    terminal result), and the proposal itself is stuck at 'proposed' with no path out.
+
+    Nothing corrupts — the backend refuses the approve — but the operator is told a
+    group has more actionable work than it does, permanently, and the count only ever
+    drifts further as rejects accumulate. That is the number this whole surface is
+    steered by.
+    """
+    user, run = await _seed(db, tenant_a)
+
+    out = await get_resolution_summary(str(run.id), user=user, db=db)
+    fees = next(g for g in out.groups if g.root_cause == "fees")
+    assert fees.proposed_count == 2, "baseline: both fee proposals are actionable"
+
+    # Reject the underlying RESULT of one proposal, exactly as the UI's reject does.
+    fee_proposal = (
+        (
+            await db.execute(
+                select(ReconResolutionProposal).where(
+                    ReconResolutionProposal.run_id == run.id,
+                    ReconResolutionProposal.root_cause == "fees",
+                    ReconResolutionProposal.above_materiality.is_(False),
+                )
+            )
+        )
+        .scalars()
+        .first()
+    )
+    result = await db.get(ReconciliationResult, fee_proposal.result_id)
+    result.status = "rejected"
+    await db.flush()
+
+    out = await get_resolution_summary(str(run.id), user=user, db=db)
+    fees = next(g for g in out.groups if g.root_cause == "fees")
+    assert fees.proposed_count == 1, (
+        "a rejected result still counted as actionable — 'Approve N' overstates the "
+        "group forever, and the proposal is stranded at 'proposed'"
+    )

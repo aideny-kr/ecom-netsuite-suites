@@ -113,7 +113,14 @@ export function ReconResultsTable({ results, onInvestigate, disabled }: ReconRes
               </td>
               <td className="relative px-4 py-3 text-center">
                 <div className="flex items-center justify-center gap-1">
-                  {result.status === "suggested" && (
+                  {/* `disabled` guards Approve as well as Reject. Threading the freeze
+                      into only the reject control left this row showing a live Approve
+                      on a closed run while Reject correctly vanished — the same "UI
+                      lies to the operator" asymmetry the reject gating exists to avoid,
+                      just pointed the other way. The backend hard-freeze refuses it, so
+                      nothing could be corrupted; the operator was simply told they
+                      could act when they could not. */}
+                  {result.status === "suggested" && !disabled && (
                     <button
                       onClick={() => approveResult.mutate({ result_id: result.id })}
                       className="rounded p-1 text-green-600 hover:bg-green-50 transition-colors"
