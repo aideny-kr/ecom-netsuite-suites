@@ -77,9 +77,39 @@ test('a request that asked for something unusable is still refused', () => {
   // The distinction that makes the above safe: key PRESENCE means the caller wanted
   // something specific. If none of it yields a usable target, falling back to the
   // current checkout would be the original silent-wrong-review bug.
-  assert.throws(() => resolveArgs({ targt: '198' }), /refus|could not be read/i, "typo'd key")
+  assert.throws(() => resolveArgs({ targt: '198' }), /unrecognised|refus/i, "typo'd key")
   assert.throws(() => resolveArgs({ target: '' }), /refus|could not be read/i, 'empty target from an unset variable')
   assert.throws(() => resolveArgs('{"target": ""}'), /refus|could not be read/i, 'same, stringified')
+})
+
+test('a typo\'d target alongside a VALID base is refused, not silently downgraded', () => {
+  // The hole the all-blank check left open, and the one that mattered most: every
+  // invocation in this repo passes `base`, so a single typo'd target kept `base`
+  // truthy, `!target && !base && !diff` stayed false, nothing threw, and the gate
+  // reviewed the CURRENT CHECKOUT against origin/main while reporting OK — the exact
+  // failure this function exists to prevent, alive inside its own fix. Found by
+  // running the gate against its own PR (#198), not by the earlier tests.
+  const resolveArgs = loadResolveArgs()
+  assert.throws(() => resolveArgs({ targt: '198', base: 'origin/main' }), /unrecognised/i)
+  assert.throws(() => resolveArgs('{"targt": "198", "base": "origin/main"}'), /unrecognised/i)
+})
+
+test('base alone is still legitimate — review the current branch against a given base', () => {
+  // Must NOT be caught by the unknown-key rule: this is a real, supported invocation
+  // and over-refusing would push callers back to passing nothing at all.
+  const resolveArgs = loadResolveArgs()
+  const out = resolveArgs({ base: 'origin/main' })
+  assert.equal(out.base, 'origin/main')
+  assert.equal(out.target, null)
+})
+
+test('an explicitly empty diff reaches the EMPTY_DIFF status instead of INVALID_ARGS', () => {
+  // This file already implements a dedicated EMPTY_DIFF outcome for "nothing to
+  // review". Throwing INVALID_ARGS first made that branch unreachable and told the
+  // caller their args were malformed when they were simply empty.
+  const resolveArgs = loadResolveArgs()
+  const out = resolveArgs({ diff: '' })
+  assert.equal(out.diff, '', 'let it through so the downstream EMPTY_DIFF check can fire')
 })
 
 test('hostile input is still rejected (pre-existing guards survive the refactor)', () => {

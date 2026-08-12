@@ -92,8 +92,37 @@ function resolveArgs(args) {
   // carrying keys none of which yield a usable target/base/diff (a typo'd key, or an
   // empty target interpolated from an unset variable). Those all mean the caller
   // wanted something specific that did not arrive.
+  if (parseFailed) {
+    throw new Error(
+      `args were supplied but could not be parsed (got ${typeof args}); ` +
+      'refusing to fall back to the current checkout'
+    )
+  }
+
+  // UNRECOGNISED KEYS ARE A HARD ERROR, checked BEFORE the all-blank test.
+  // The all-blank test alone is not enough: `{targt: '198', base: 'origin/main'}` — a
+  // single typo'd target alongside a perfectly good base — left `base` truthy, so
+  // `!target && !base && !diff` was false, nothing threw, and the gate reviewed the
+  // CURRENT CHECKOUT against origin/main while reporting OK. That is precisely the
+  // silent-wrong-review failure (wf_4e37835d / wf_4061fdb2) this whole function
+  // exists to prevent, surviving inside its own fix. Every invocation in this repo
+  // passes `base`, so one typo'd target was all it took.
+  // Found by running this gate against its own PR (#198).
+  const RECOGNISED = new Set(['target', 'base', 'diff'])
+  const unknown = Object.keys(a).filter((k) => !RECOGNISED.has(k))
+  if (unknown.length) {
+    throw new Error(
+      `unrecognised args: ${unknown.join(', ')} — expected target/base/diff. ` +
+      'Refusing rather than reviewing the current checkout with the keys that did parse.'
+    )
+  }
+
+  // An explicitly-supplied empty `diff` is "there is nothing to review", which this
+  // file already has a dedicated status for a few lines below (EMPTY_DIFF). Let it
+  // through so that status can fire, instead of mislabelling it as malformed args.
+  const suppliedEmptyDiff = Object.prototype.hasOwnProperty.call(a, 'diff')
   const askedForSomething = Object.keys(a).length > 0
-  if ((parseFailed || askedForSomething) && !target && !base && !diff) {
+  if (askedForSomething && !target && !base && !diff && !suppliedEmptyDiff) {
     throw new Error(
       `args were supplied but no target/base/diff could be read from them (got ${typeof args}); ` +
       'refusing to fall back to the current checkout'
