@@ -132,7 +132,15 @@ export function ResolutionGroupItems({
             return (
               <TableRow key={p.id}>
                 <TableCell>
-                  {p.above_materiality && p.status === "proposed" && (
+                  {/* Gated on result_status too, for the same reason the reject control
+                      is: a rejected row keeps proposal.status === "proposed" forever, so
+                      this checkbox stayed visible AND ticked on a row that can no longer
+                      be approved. The server refuses it (approve_group_core filters on
+                      a non-terminal result), so nothing is double-processed — but
+                      oneClickCount = proposed_count - above_materiality_count +
+                      includedAboveIds.length kept counting it, and "Approve N"
+                      overstated what would actually succeed. */}
+                  {p.above_materiality && p.status === "proposed" && !isTerminal(p.result_status) && (
                     <input
                       type="checkbox"
                       checked={tickedAboveIds.includes(p.id)}
@@ -232,7 +240,20 @@ export function ResolutionGroupItems({
                         {DISPOSITION_LABEL[p.result_status ?? ""] ?? p.result_status}
                       </span>
                     ) : (
-                      <RejectMatchControl resultId={p.result_id} disabled={disabled} variant="inline" />
+                      <RejectMatchControl
+                        resultId={p.result_id}
+                        disabled={disabled}
+                        variant="inline"
+                        // Hiding the checkbox is not enough: the parent's ticked set
+                        // still holds this id, and oneClickCount adds its length
+                        // regardless of whether the row is still shown. Un-tick on
+                        // success so the count drops with the row.
+                        onRejected={() => onTickAbove(p.id, false)}
+                        // Hiding the checkbox is not enough: the parent's ticked set
+                        // still holds this id, and oneClickCount adds its length
+                        // regardless of whether the row is still shown. Un-tick on
+                        // success so the count drops with the row.
+                      />
                     )}
                   </div>
                 </TableCell>

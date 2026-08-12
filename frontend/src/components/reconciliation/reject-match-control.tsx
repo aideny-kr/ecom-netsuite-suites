@@ -74,9 +74,19 @@ interface RejectMatchControlProps {
   /** `icon` for the classic table's tight actions column; `inline` for the resolution
    *  worksheets, where it sits beside the text-and-icon "Investigate in chat". */
   variant?: "icon" | "inline";
+  /** Called after the reject is accepted, before the picker closes. The row's own
+   *  state is not the only thing a reject invalidates — an above-materiality item
+   *  that was ticked for group approval has to be un-ticked, or "Approve N" keeps
+   *  counting a row that can no longer be approved. */
+  onRejected?: () => void;
 }
 
-export function RejectMatchControl({ resultId, disabled, variant = "icon" }: RejectMatchControlProps) {
+export function RejectMatchControl({
+  resultId,
+  disabled,
+  variant = "icon",
+  onRejected,
+}: RejectMatchControlProps) {
   const rejectResult = useRejectResult();
   const [open, setOpen] = useState(false);
   const [reason, setReason] = useState("");
@@ -84,9 +94,12 @@ export function RejectMatchControl({ resultId, disabled, variant = "icon" }: Rej
   // Where to paint the picker. Captured from the button because the picker is
   // PORTALLED to <body> — see the render for why. Either `top` (opens downward) or
   // `bottom` (flipped upward), never both.
-  const [anchor, setAnchor] = useState<{ top?: number; bottom?: number; right: number } | null>(
-    null
-  );
+  const [anchor, setAnchor] = useState<{
+    top?: number;
+    bottom?: number;
+    right: number;
+    maxAvailable: number;
+  } | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
 
@@ -131,12 +144,19 @@ export function RejectMatchControl({ resultId, disabled, variant = "icon" }: Rej
     };
     document.addEventListener("keydown", onKey);
     document.addEventListener("pointerdown", onPointerDown, true);
+    // Keyboard activation (Enter/Space on a trigger) dispatches click but NOT
+    // pointerdown, so without this a Tab-and-Enter user could open a second
+    // picker while the first stayed on screen — two "Reject this match" dialogs
+    // targeting different results at once. The old row-keyed state made that
+    // structurally impossible; per-instance state has to enforce it.
+    document.addEventListener("click", onPointerDown as EventListener, true);
     window.addEventListener("scroll", onScroll, true);
     // resize legitimately invalidates the anchor no matter where it came from.
     window.addEventListener("resize", close);
     return () => {
       document.removeEventListener("keydown", onKey);
       document.removeEventListener("pointerdown", onPointerDown, true);
+      document.removeEventListener("click", onPointerDown as EventListener, true);
       window.removeEventListener("scroll", onScroll, true);
       window.removeEventListener("resize", close);
     };
@@ -160,6 +180,13 @@ export function RejectMatchControl({ resultId, disabled, variant = "icon" }: Rej
     setAnchor({
       right: window.innerWidth - r.right,
       ...(flip ? { bottom: window.innerHeight - r.top + 6 } : { top: r.bottom + 6 }),
+      // Clamp to the space on the side actually chosen. The flip decision only asks
+      // which side has MORE room, not whether that side has ENOUGH — so on a short
+      // viewport it could flip upward into a gap still smaller than the picker, and
+      // a `bottom`-anchored box taller than the space above extends past y=0, where
+      // its own internal scroll cannot rescue it (that scrolls content, not the
+      // fixed box). Clamping here means whichever side is chosen, the picker fits.
+      maxAvailable: Math.max(160, (flip ? r.top : spaceBelow) - 12),
     });
   };
 
@@ -182,7 +209,12 @@ export function RejectMatchControl({ resultId, disabled, variant = "icon" }: Rej
         reason,
         ...(note.trim() ? { note: note.trim() } : {}),
       },
-      { onSuccess: () => close() }
+      {
+        onSuccess: () => {
+          onRejected?.();
+          close();
+        },
+      }
     );
   };
   const errorText =
@@ -244,7 +276,7 @@ export function RejectMatchControl({ resultId, disabled, variant = "icon" }: Rej
               // direction fits, and a picker taller than the window is unusable in
               // both. Clamping + scrolling means the control degrades to "scroll a
               // little" instead of "the Reject button does not exist".
-              maxHeight: "calc(100vh - 16px)",
+              maxHeight: `min(calc(100vh - 16px), ${anchor.maxAvailable}px)`,
               overflowY: "auto",
             }}
             className="z-50 w-72 rounded-lg border bg-card p-3 text-left shadow-lg"

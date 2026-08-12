@@ -170,6 +170,31 @@ describe("reject on the expanded group's item list", () => {
     expect(within(cells[cells.length - 1] as HTMLElement).getByText(/^Rejected$/)).toBeInTheDocument();
   });
 
+  it("un-ticks an above-materiality row when its match is rejected", () => {
+    // Tick-then-reject on the same row. The checkbox is gated on the PROPOSAL's status,
+    // which a reject never changes, so it stayed visible and checked on a row that can
+    // no longer be approved — and the parent's ticked set still held the id, so
+    // oneClickCount = proposed_count - above_materiality_count + includedAboveIds.length
+    // recomputed to the SAME number after the server-side counts dropped. "Approve N"
+    // overstated what would succeed, permanently. The server refuses the terminal row,
+    // so nothing is double-processed; the number was simply a lie.
+    const onTickAbove = vi.fn();
+    groupProposals = [makeProposal({ above_materiality: true })];
+    rejectMutate.mockImplementation((_vars, opts) => opts?.onSuccess?.());
+
+    render(<ResolutionGroupItems {...itemsProps} tickedAboveIds={["p1"]} onTickAbove={onTickAbove} />);
+    fireEvent.click(screen.getByRole("button", { name: /reject match/i }));
+    pickAndSubmit(/not the same money/i);
+
+    expect(onTickAbove).toHaveBeenCalledWith("p1", false);
+  });
+
+  it("hides the approval checkbox once the row's result is terminal", () => {
+    groupProposals = [makeProposal({ above_materiality: true, result_status: "rejected" })];
+    render(<ResolutionGroupItems {...itemsProps} />);
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+  });
+
   it("offers no reject control once a group approve has decided the row", () => {
     // Group approve flips the underlying RESULT to 'approved', which is terminal, so
     // the API refuses the reject. The signal is result_status — the proposal also
