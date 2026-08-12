@@ -280,7 +280,28 @@ async def _seed_netsuite_connection(db, tenant_id) -> Connection:
     return connection
 
 
-def _patch_netsuite_boundary(*, connection: Connection, suiteql_rows: list[dict]):
+class _ExistingSessionCM:
+    """Async context manager that yields an ALREADY-OPEN session and does not close it.
+
+    The cursor write deliberately runs on its own session (``async_session_factory``)
+    so that no failure of it can touch the caller's transaction. That isolation is the
+    whole point of the fix — and it also means the write escapes this suite's
+    transactional fixture, so a test could neither see the row nor avoid leaking it
+    into the real database. Substituting the test's own session keeps the production
+    code path intact while staying inside the fixture's rollback.
+    """
+
+    def __init__(self, session):
+        self._session = session
+
+    async def __aenter__(self):
+        return self._session
+
+    async def __aexit__(self, *_exc):
+        return False
+
+
+def _patch_netsuite_boundary(*, connection: Connection, suiteql_rows: list[dict], db=None):
     """Patch the NetSuite network boundary of sync_netsuite_deposits.
 
     Returns a list of patch context managers. The DB (pattern load, posting
@@ -289,8 +310,17 @@ def _patch_netsuite_boundary(*, connection: Connection, suiteql_rows: list[dict]
     ``get_netsuite_rest_connection`` so ``connection.id`` satisfies the
     cursor_states FK. ``suiteql_rows`` are returned as dict rows (the sync handles
     both list-rows + dict-rows; dicts keep the test column-order-independent).
+
+    ``db``: when given, the cursor write's own-session factory is redirected at this
+    session so the write stays inside the fixture's transaction (see
+    ``_ExistingSessionCM``). Omit it for tests that do not care about the cursor.
     """
-    return [
+    extra = (
+        [patch.object(netsuite_deposit_sync, "async_session_factory", lambda: _ExistingSessionCM(db))]
+        if db is not None
+        else []
+    )
+    return extra + [
         patch.object(
             netsuite_deposit_sync,
             "get_netsuite_rest_connection",
@@ -317,7 +347,7 @@ def _patch_netsuite_boundary(*, connection: Connection, suiteql_rows: list[dict]
 async def _run_sync_and_read_back(db, tenant_id, *, internal_id: str, rows: list[dict]):
     """Run sync_netsuite_deposits with the network patched, return the stored row."""
     connection = await _seed_netsuite_connection(db, tenant_id)
-    patches = _patch_netsuite_boundary(connection=connection, suiteql_rows=rows)
+    patches = _patch_netsuite_boundary(connection=connection, suiteql_rows=rows, db=db)
     for p in patches:
         p.start()
     try:
@@ -741,7 +771,7 @@ class TestSyncDepositsMaintainsFreshnessCursor:
         date_from = date(2026, 3, 1)
         date_to = date(2026, 3, 31)
 
-        patches = _patch_netsuite_boundary(connection=connection, suiteql_rows=rows)
+        patches = _patch_netsuite_boundary(connection=connection, suiteql_rows=rows, db=db)
         for p in patches:
             p.start()
         try:
@@ -805,7 +835,7 @@ class TestSyncDepositsMaintainsFreshnessCursor:
         date_from = date(2026, 3, 1)
         date_to = date(2026, 3, 31)
 
-        patches = _patch_netsuite_boundary(connection=connection, suiteql_rows=rows)
+        patches = _patch_netsuite_boundary(connection=connection, suiteql_rows=rows, db=db)
         # Patch save_cursor_async (as imported/used by the service) to blow up.
         patches.append(
             patch.object(
@@ -886,7 +916,7 @@ class TestSyncDepositsMaintainsFreshnessCursor:
                 "sales_order_ref": "",
             }
         ]
-        patches = _patch_netsuite_boundary(connection=connection, suiteql_rows=rows)
+        patches = _patch_netsuite_boundary(connection=connection, suiteql_rows=rows, db=db)
         # A transient cursor failure: Supabase statement timeout (the documented reason
         # for the 10-row batch commits above), serialization error, dropped connection.
         patches.append(
@@ -980,6 +1010,11 @@ class TestSyncDepositsMaintainsFreshnessCursor:
         async def failing_cursor_write(session, *_a, **_kw):
             await session.execute(_sql_text("SELECT 1/0"))
 
+        # NOT db=db here, deliberately. This test is about the cursor write failing on
+        # its OWN session, so it must genuinely have one. Substituting the fixture's
+        # session would let `SELECT 1/0` poison the very session the assertions below
+        # query — a harness artifact, not production behaviour. Nothing leaks either:
+        # the write fails, so that separate session commits nothing.
         patches = _patch_netsuite_boundary(connection=connection, suiteql_rows=rows)
         patches.append(patch.object(netsuite_deposit_sync, "save_cursor_async", new=failing_cursor_write))
         for p in patches:

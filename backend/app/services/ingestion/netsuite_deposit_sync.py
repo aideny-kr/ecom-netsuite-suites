@@ -15,6 +15,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.database import async_session_factory
 from app.core.encryption import decrypt_credentials
 from app.models.canonical import NetsuitePosting
 from app.models.connection import Connection
@@ -346,38 +347,41 @@ async def sync_netsuite_deposits(
         if result.records_synced % 10 == 0:
             await db.commit()
 
+    await db.commit()
+
     # Bump the freshness cursor so the recon data-status banner reflects this run. The
     # nightly Celery task calls this service directly (not the manual trigger
-    # endpoint), so the cursor MUST be written here for ALL callers. cursor_value uses
-    # the 'YYYY-MM-DD' format the manual path established.
+    # endpoint) and never commits afterwards — `async with async_session_factory() as
+    # db:` exits without committing — so the cursor MUST be written AND committed here
+    # for all callers. cursor_value uses the 'YYYY-MM-DD' format the manual path
+    # established.
     #
-    # Written BEFORE the final deposit commit, inside a SAVEPOINT, so that one commit
-    # persists both. That ordering is the whole design:
+    # ON ITS OWN SESSION, which is the only arrangement with no trade-off. Three
+    # earlier shapes each fixed one failure by creating another, all because the cursor
+    # shared the caller's transaction:
     #
-    #   - a cursor-write failure rolls back only its savepoint. The deposits are
-    #     untouched, the caller's session is untouched, and the sync still succeeds —
-    #     the cursor is freshness metadata and must never fail a sync.
-    #   - there is NO second commit, so there is no second commit to fail. Earlier
-    #     versions committed the cursor separately and had to decide what to do when
-    #     THAT commit failed; every answer was wrong. A bare `db.rollback()` expires the
-    #     caller's whole identity map (`_restore_snapshot` runs with
-    #     dirty_only=transaction.nested, so at the outermost level everything is
-    #     expired; `expire_on_commit=False` does not apply to rollback), and
-    #     `trigger_netsuite_deposit_sync` then reads `user.tenant_id`/`user.id` for its
-    #     audit event at connector_status.py:463-470 — outside the try/except that
-    #     closes at 456 — giving MissingGreenlet, a 500 on a sync that SUCCEEDED, no
-    #     audit row, and a Job stranded at 'running'. Omitting the rollback instead
-    #     leaves the session in 'prepared' state and the next statement raises
-    #     PendingRollbackError. Verified both against local Postgres.
+    #   bare `db.rollback()` on failure — expires the caller's entire identity map
+    #     (`_restore_snapshot` with dirty_only=transaction.nested; expire_on_commit
+    #     does not apply to rollback), so trigger_netsuite_deposit_sync's audit read of
+    #     `user.tenant_id` at connector_status.py:463-470 — outside the try/except that
+    #     closes at 456 — raises MissingGreenlet: a 500 on a sync that SUCCEEDED.
+    #   omit the rollback — session left in 'prepared' state, next statement raises
+    #     PendingRollbackError. Same 500, different exception.
+    #   savepoint + share the deposits' commit — removes the second commit, but then a
+    #     commit failure takes the trailing (<10-record) deposit batch down with the
+    #     cursor, weakening deposit durability to protect freshness metadata.
     #
-    # Deleting the second commit deletes that dilemma rather than picking a side.
+    # All three verified against local Postgres. A separate short-lived session has
+    # none of them: the deposits are already committed above, and every failure mode of
+    # the cursor write — including a dropped connection, where even ROLLBACK TO
+    # SAVEPOINT would fail — is confined to a session nobody else holds. The cursor is
+    # freshness metadata; it must never be able to touch the sync or its caller.
     try:
-        async with db.begin_nested():
-            await save_cursor_async(db, connection.id, "netsuite_deposits", date_to.isoformat())
+        async with async_session_factory() as cursor_db:
+            await save_cursor_async(cursor_db, connection.id, "netsuite_deposits", date_to.isoformat())
+            await cursor_db.commit()
     except Exception as e:
         logger.warning("netsuite_deposit_sync.cursor_write_failed", tenant_id=tenant_id, error=str(e))
-
-    await db.commit()
 
     logger.info(
         "netsuite_deposit_sync.complete",
