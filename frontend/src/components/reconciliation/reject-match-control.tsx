@@ -95,6 +95,12 @@ export function RejectMatchControl({ resultId, disabled, variant = "icon" }: Rej
     setReason("");
     setNote("");
     setAnchor(null);
+    // The mutation's error outlives the picker otherwise. This component instance is
+    // reused across open/close cycles — which is exactly why reason and note have to
+    // be cleared by hand — so a refusal from an earlier attempt would render its
+    // banner the instant the picker reopened, telling the operator that a form they
+    // have not yet filled in has already failed.
+    rejectResult.reset();
   };
 
   // Escape, outside-click, and scroll all close. Scroll matters because the picker is

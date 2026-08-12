@@ -132,6 +132,14 @@ export function useClosePeriod() {
       queryClient.invalidateQueries({ queryKey: ["recon-results"] });
       queryClient.invalidateQueries({ queryKey: ["recon-bucket-summary"] });
       queryClient.invalidateQueries({ queryKey: ["recon-close-readiness"] });
+      // 'locked' is terminal, so close is the FOURTH mutation of this family —
+      // approve, bulk approve, reject, close — and the last one I missed. A worksheet
+      // open in another tab when the period closes would keep showing live Reject
+      // buttons on rows the API can now only refuse. Every mutation that can make a
+      // result terminal has to invalidate these three; there are no others.
+      queryClient.invalidateQueries({ queryKey: ["recon-group-proposals"] });
+      queryClient.invalidateQueries({ queryKey: ["recon-needs-human-proposals"] });
+      queryClient.invalidateQueries({ queryKey: ["recon-resolution-summary"] });
     },
   });
 }

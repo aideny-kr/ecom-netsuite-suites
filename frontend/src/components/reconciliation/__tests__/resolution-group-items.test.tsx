@@ -99,7 +99,7 @@ const proposals: ReconResolutionProposal[] = [
 // Reject behaviour itself is covered in reject-on-resolution-surface.test.tsx.
 vi.mock("@/hooks/use-reconciliation", () => ({
   useApproveResult: () => ({ mutate: vi.fn(), isPending: false }),
-  useRejectResult: () => ({ mutate: vi.fn(), isPending: false }),
+  useRejectResult: () => ({ mutate: vi.fn(), isPending: false, reset: vi.fn() }),
 }));
 
 const useGroupProposals = vi.fn(

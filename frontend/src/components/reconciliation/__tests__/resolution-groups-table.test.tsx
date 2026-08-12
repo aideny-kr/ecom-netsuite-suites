@@ -21,7 +21,7 @@ vi.mock("@/components/reconciliation/resolution-group-items", () => ({
 // reject-on-resolution-surface.test.tsx.
 vi.mock("@/hooks/use-reconciliation", () => ({
   useApproveResult: () => ({ mutate: vi.fn(), isPending: false }),
-  useRejectResult: () => ({ mutate: vi.fn(), isPending: false }),
+  useRejectResult: () => ({ mutate: vi.fn(), isPending: false, reset: vi.fn() }),
 }));
 
 const feeGroup: ReconResolutionGroup = {

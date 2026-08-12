@@ -6,7 +6,7 @@ import type { ReconResult } from "@/lib/types";
 const rejectMutate = vi.fn();
 vi.mock("@/hooks/use-reconciliation", () => ({
   useApproveResult: () => ({ mutate: vi.fn(), isPending: false }),
-  useRejectResult: () => ({ mutate: rejectMutate, isPending: false }),
+  useRejectResult: () => ({ mutate: rejectMutate, isPending: false, reset: vi.fn() }),
 }));
 
 function makeResult(over: Partial<ReconResult> = {}): ReconResult {

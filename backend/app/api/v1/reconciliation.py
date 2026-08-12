@@ -878,6 +878,19 @@ async def _fetch_group_summaries(
                 P.booking_vehicle,
                 P.group_key,
                 P.currency,
+                # `count` and `total_amount` are deliberately NOT filtered by
+                # _result_actionable, unlike the two below. They describe the group as
+                # PLANNED — how many items the planner grouped and what they were
+                # worth — while proposed_count/above_materiality_count describe what is
+                # still actionable. A fully-rejected group therefore reads "212 items,
+                # $1,284.55, Approve 0", which is the honest summary of a group that
+                # existed and is now settled, not a contradiction.
+                #
+                # Filtering them was considered and rejected: both are columns of the
+                # `section=groups` export that accountants keep, so redefining them to
+                # mean "actionable only" would silently change the meaning of saved
+                # sheets — a bigger harm than the inconsistency it would remove, and
+                # not a call to make inside a PR about reject reachability.
                 func.count(P.id).label("count"),
                 func.count(P.id).filter(P.status == "proposed", _result_actionable).label("proposed_count"),
                 func.count(P.id).filter(P.status == "approved").label("approved_count"),
