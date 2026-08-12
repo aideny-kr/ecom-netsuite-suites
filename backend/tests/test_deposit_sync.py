@@ -930,47 +930,30 @@ class TestSyncDepositsMaintainsFreshnessCursor:
         ).scalar_one()
         assert posting is not None
 
-    async def test_a_failed_commit_leaves_the_session_usable_not_poisoned(self, db, tenant_a):
-        """The other half of the fix, and the half the first version missed.
+    async def test_a_failed_cursor_write_still_commits_the_deposits(self, db, tenant_a):
+        """The risk created by writing the cursor BEFORE the final deposit commit.
 
-        Wrapping the cursor WRITE in a savepoint protects the caller when
-        save_cursor_async raises. It does nothing when the outer ``db.commit()``
-        itself fails — and a failed COMMIT leaves the session unusable. Verified
-        against local Postgres: the next statement raises "This session is in
-        'prepared' state; no further SQL can be emitted", and only an explicit
-        rollback restores it.
+        Earlier versions committed the cursor separately, after the deposits. That
+        second commit was the problem: when IT failed there was no good answer —
+        `db.rollback()` expires the caller's whole identity map (MissingGreenlet in
+        connector_status.py), and omitting it leaves the session in 'prepared' state
+        (PendingRollbackError on the next statement). Both verified against local
+        Postgres. Two gate rounds went into picking between them before it became clear
+        the second commit should not exist at all.
 
-        The first version of this fix deleted the rollback outright, so that path left
-        the caller's session poisoned and connector_status.py's next statement would
-        raise PendingRollbackError — the same 500 this PR set out to remove, through a
-        door the savepoint does not cover. Here rollback IS the correct move: the outer
-        transaction is already lost, and an expired-but-usable session beats a dead one.
+        Moving the cursor write ahead of the single existing commit removes that
+        dilemma — but introduces this one: the cursor write now shares a transaction
+        with the deposits, so a savepoint that failed to contain itself would take the
+        deposits down with it. That is what this asserts.
         """
         connection = await _seed_netsuite_connection(db, tenant_a.id)
 
         rollback_calls: list[int] = []
         original_rollback = db.rollback
-        original_commit = db.commit
 
         async def spy_rollback():
             rollback_calls.append(1)
             return await original_rollback()
-
-        # Fail only the CURSOR commit. Indexing commit calls is brittle (the deposit
-        # loop's batch commits depend on row count), so key off the cursor write
-        # actually having happened — that is the commit under test by definition.
-        cursor_written = {"yes": False}
-        real_save_cursor = netsuite_deposit_sync.save_cursor_async
-
-        async def tracking_save_cursor(*a, **kw):
-            out = await real_save_cursor(*a, **kw)
-            cursor_written["yes"] = True
-            return out
-
-        async def failing_commit():
-            if cursor_written["yes"]:
-                raise RuntimeError("connection reset during COMMIT")
-            return await original_commit()
 
         rows = [
             {
@@ -987,12 +970,21 @@ class TestSyncDepositsMaintainsFreshnessCursor:
                 "sales_order_ref": "",
             }
         ]
+        # The failure must emit SQL that ABORTS the transaction, not just raise in
+        # Python. An AsyncMock(side_effect=...) raises before touching the database, so
+        # removing the savepoint changes nothing and the test passes either way — I
+        # verified that by mutation and it did exactly that. A real failing statement is
+        # what makes the savepoint load-bearing.
+        from sqlalchemy import text as _sql_text
+
+        async def failing_cursor_write(session, *_a, **_kw):
+            await session.execute(_sql_text("SELECT 1/0"))
+
         patches = _patch_netsuite_boundary(connection=connection, suiteql_rows=rows)
-        patches.append(patch.object(netsuite_deposit_sync, "save_cursor_async", new=tracking_save_cursor))
+        patches.append(patch.object(netsuite_deposit_sync, "save_cursor_async", new=failing_cursor_write))
         for p in patches:
             p.start()
         db.rollback = spy_rollback  # type: ignore[method-assign]
-        db.commit = failing_commit  # type: ignore[method-assign]
         try:
             result = await sync_netsuite_deposits(
                 db=db,
@@ -1002,15 +994,23 @@ class TestSyncDepositsMaintainsFreshnessCursor:
             )
         finally:
             db.rollback = original_rollback  # type: ignore[method-assign]
-            db.commit = original_commit  # type: ignore[method-assign]
             for p in patches:
                 p.stop()
 
         # The sync still reports success — a cursor problem is not a sync failure.
         assert not result.errors, result.errors
-        # And the session was reset rather than left in the unusable post-failed-commit
-        # state, so the caller's next statement does not blow up.
-        assert rollback_calls, (
-            "a failed COMMIT left the session poisoned; the caller's next statement "
-            "would raise PendingRollbackError instead of writing its audit row"
-        )
+        assert result.records_synced > 0
+
+        # THE ASSERTION: the deposits survived a cursor write that failed inside the
+        # savepoint they now share a transaction with.
+        posting = (
+            await db.execute(
+                select(NetsuitePosting).where(
+                    NetsuitePosting.tenant_id == tenant_a.id,
+                    NetsuitePosting.netsuite_internal_id == "910004",
+                )
+            )
+        ).scalar_one()
+        assert posting is not None, "the savepoint rollback took the deposits with it"
+        # And still no rollback of the caller's transaction, in either failure mode.
+        assert not rollback_calls
