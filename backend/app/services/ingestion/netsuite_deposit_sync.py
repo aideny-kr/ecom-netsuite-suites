@@ -376,6 +376,13 @@ async def sync_netsuite_deposits(
     # the cursor write — including a dropped connection, where even ROLLBACK TO
     # SAVEPOINT would fail — is confined to a session nobody else holds. The cursor is
     # freshness metadata; it must never be able to touch the sync or its caller.
+    # A session of its own, from the app's own factory. Binding to the CALLER's bind
+    # instead was tried and reverted: `db.get_bind()` returns the SYNC Connection, which
+    # AsyncSession refuses ("AsyncEngine expected"), so the cursor write failed silently
+    # inside this very try/except — the feature would have stopped working in production
+    # while every deposit test stayed green. `db.bind` fixes that but then shares the
+    # caller's connection under the test fixture, which is the opposite of the isolation
+    # this is for. The factory gives a genuinely independent connection in both.
     try:
         async with async_session_factory() as cursor_db:
             await save_cursor_async(cursor_db, connection.id, "netsuite_deposits", date_to.isoformat())
