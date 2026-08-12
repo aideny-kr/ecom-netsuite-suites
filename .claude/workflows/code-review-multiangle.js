@@ -117,16 +117,32 @@ function resolveArgs(args) {
     )
   }
 
-  // An explicitly-supplied empty `diff` is "there is nothing to review", which this
-  // file already has a dedicated status for a few lines below (EMPTY_DIFF). Let it
-  // through so that status can fire, instead of mislabelling it as malformed args.
-  const suppliedEmptyDiff = Object.prototype.hasOwnProperty.call(a, 'diff')
-  const askedForSomething = Object.keys(a).length > 0
-  if (askedForSomething && !target && !base && !diff && !suppliedEmptyDiff) {
-    throw new Error(
-      `args were supplied but no target/base/diff could be read from them (got ${typeof args}); ` +
-      'refusing to fall back to the current checkout'
-    )
+  // EVERY SUPPLIED KEY MUST CARRY A USABLE VALUE. One rule, replacing an all-blank
+  // check that three separate gate rounds picked holes in:
+  //
+  //   round 2: `{targt:'198', base:'origin/main'}` — truthy base kept `!target &&
+  //            !base && !diff` false, so nothing threw and the current checkout got
+  //            reviewed. Fixed by the unrecognised-key check above.
+  //   round 3: `{target:'', base:'origin/main'}` — same escape, but through a
+  //            CORRECTLY-named key holding an empty value (an unset variable
+  //            interpolated into the args), so the key check could not see it.
+  //   round 3: `{diff:''}` — I had carved this out believing it would reach the
+  //            EMPTY_DIFF status below. It does not: line ~149 is `if (!diff)`, and
+  //            '' is falsy, so an explicitly-empty diff fell into the git-resolution
+  //            branch and reviewed the current checkout. That carve-out is removed —
+  //            it was written on a misreading and made things worse.
+  //
+  // Every one of those was the same failure the file exists to prevent, reached by a
+  // different door. Requiring each supplied key to resolve closes the corridor rather
+  // than the doors: an argument that was worth passing is worth passing correctly.
+  for (const key of Object.keys(a)) {
+    const resolved = { target, base, diff }[key]
+    if (!resolved) {
+      throw new Error(
+        `args.${key} was supplied but is empty; refusing to fall back to the current ` +
+        'checkout. Omit the key entirely to review the current branch.'
+      )
+    }
   }
   for (const [v, n] of [[target, 'target'], [base, 'base']]) {
     if (v && /[\n\r]/.test(v)) throw new Error(`args.${n} must not contain newlines`)

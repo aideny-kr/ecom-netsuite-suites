@@ -103,13 +103,24 @@ test('base alone is still legitimate — review the current branch against a giv
   assert.equal(out.target, null)
 })
 
-test('an explicitly empty diff reaches the EMPTY_DIFF status instead of INVALID_ARGS', () => {
-  // This file already implements a dedicated EMPTY_DIFF outcome for "nothing to
-  // review". Throwing INVALID_ARGS first made that branch unreachable and told the
-  // caller their args were malformed when they were simply empty.
+test('a correctly-named but EMPTY key is refused even when another key is valid', () => {
+  // Round 3's finding, and the one the unrecognised-key check could not catch: the key
+  // name is right, the value is an unset variable. `base` being truthy kept the old
+  // all-blank guard from firing, so the gate reviewed the current checkout.
   const resolveArgs = loadResolveArgs()
-  const out = resolveArgs({ diff: '' })
-  assert.equal(out.diff, '', 'let it through so the downstream EMPTY_DIFF check can fire')
+  assert.throws(() => resolveArgs({ target: '', base: 'origin/main' }), /empty|refus/i)
+  assert.throws(() => resolveArgs('{"target": "", "base": "origin/main"}'), /empty|refus/i)
+})
+
+test('an explicitly empty diff is refused, NOT quietly passed through', () => {
+  // I previously carved this out believing it would reach the EMPTY_DIFF status a few
+  // lines below. It would not: that check is `if (!diff)`, and '' is falsy, so an
+  // explicitly-empty diff fell into the agent git-resolution branch and reviewed
+  // whatever happened to be checked out. The carve-out created the bug it was meant to
+  // avoid. A caller holding an empty diff should not invoke the gate at all — which is
+  // exactly what build-with-review.template.js already does with its non-empty guard.
+  const resolveArgs = loadResolveArgs()
+  assert.throws(() => resolveArgs({ diff: '' }), /empty|refus/i)
 })
 
 test('hostile input is still rejected (pre-existing guards survive the refactor)', () => {
