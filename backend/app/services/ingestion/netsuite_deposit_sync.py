@@ -356,11 +356,28 @@ async def sync_netsuite_deposits(
     # Best-effort: the cursor is freshness metadata only, intentionally isolated
     # from the deposit commit (deposits are already committed above + in-loop) so
     # a transient cursor failure can't fail the sync or 500 the manual endpoint.
+    # SAVEPOINT, not a bare rollback on the caller's session. The previous version
+    # called `await db.rollback()` here, which rolls back the caller's TRANSACTION and
+    # therefore expires SQLAlchemy's entire identity map — `_restore_snapshot` runs
+    # with dirty_only=transaction.nested, so at the outermost level every persistent
+    # object is expired. `expire_on_commit=False` does not apply to rollback.
+    #
+    # That broke the very promise stated above. `trigger_netsuite_deposit_sync` reads
+    # `user.tenant_id`/`user.id` to write the audit event at connector_status.py:463-470,
+    # OUTSIDE the try/except that closes at line 456, and `user` was loaded on this same
+    # request-scoped session (Depends(get_db) is cached per request). Expired, that read
+    # becomes a lazy refresh in plain coroutine context -> MissingGreenlet -> HTTP 500
+    # for a sync that actually succeeded, no audit row, and the Job row stranded at
+    # 'running' because `job.status = "completed"` (line 441) is never committed.
+    #
+    # begin_nested() confines the failure: rolling back a savepoint expires only the
+    # objects dirtied inside it, so the caller's pre-loaded objects stay usable. The
+    # outer commit then persists the cursor if the savepoint succeeded.
     try:
-        await save_cursor_async(db, connection.id, "netsuite_deposits", date_to.isoformat())
+        async with db.begin_nested():
+            await save_cursor_async(db, connection.id, "netsuite_deposits", date_to.isoformat())
         await db.commit()
     except Exception as e:
-        await db.rollback()  # clear the aborted txn so the session stays usable
         logger.warning("netsuite_deposit_sync.cursor_write_failed", tenant_id=tenant_id, error=str(e))
 
     logger.info(

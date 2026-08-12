@@ -842,3 +842,90 @@ class TestSyncDepositsMaintainsFreshnessCursor:
             )
         ).scalar_one()
         assert posting is not None
+
+    async def test_cursor_write_failure_does_not_roll_back_the_caller_s_session(self, db, tenant_a):
+        """The best-effort cursor write must not roll back a session it does not own.
+
+        WHY THIS ASSERTS THE CALL AND NOT THE SYMPTOM. The real damage is that
+        `await db.rollback()` on the CALLER-OWNED session expires SQLAlchemy's entire
+        identity map (`_restore_snapshot(dirty_only=transaction.nested)` with
+        nested=False), so the manual endpoint's next ORM read — `user.tenant_id` at
+        connector_status.py:465, outside the try/except that closes at 456 — becomes a
+        lazy refresh in coroutine context and raises MissingGreenlet: HTTP 500 for a
+        sync that succeeded, no audit row, and the Job stranded at 'running'.
+
+        That symptom CANNOT be reproduced in this suite. conftest's `db` fixture uses
+        join_transaction_mode="create_savepoint", so every service-level rollback is a
+        SAVEPOINT rollback, which expires only dirty objects and leaves the identity
+        map intact. A symptom-based test here passes against the broken code — I wrote
+        one first and it did exactly that. Asserting the CALL is what this harness can
+        actually see, and it is the invariant that matters: a shared service must not
+        roll back a caller's transaction.
+        """
+        connection = await _seed_netsuite_connection(db, tenant_a.id)
+
+        rollback_calls: list[int] = []
+        original_rollback = db.rollback
+
+        async def spy_rollback():
+            rollback_calls.append(1)
+            return await original_rollback()
+
+        rows = [
+            {
+                "internal_id": "910003",
+                "document_number": "DEP-CUR-3",
+                "transaction_date": "2026-03-16",
+                "record_type": "Deposit",
+                "memo": "bank deposit",
+                "amount": "100.00",
+                "currency_name": "USD",
+                "account_id": "10",
+                "account_name": "Bank",
+                "subsidiary_id": "1",
+                "sales_order_ref": "",
+            }
+        ]
+        patches = _patch_netsuite_boundary(connection=connection, suiteql_rows=rows)
+        # A transient cursor failure: Supabase statement timeout (the documented reason
+        # for the 10-row batch commits above), serialization error, dropped connection.
+        patches.append(
+            patch.object(
+                netsuite_deposit_sync,
+                "save_cursor_async",
+                new=AsyncMock(side_effect=RuntimeError("statement timeout")),
+            )
+        )
+        for p in patches:
+            p.start()
+        db.rollback = spy_rollback  # type: ignore[method-assign]
+        try:
+            result = await sync_netsuite_deposits(
+                db=db,
+                tenant_id=str(tenant_a.id),
+                date_from=date(2026, 3, 1),
+                date_to=date(2026, 3, 31),
+            )
+        finally:
+            db.rollback = original_rollback  # type: ignore[method-assign]
+            for p in patches:
+                p.stop()
+
+        assert not rollback_calls, (
+            "the cursor write rolled back the CALLER's session; in the manual endpoint "
+            "that expires `user` and the audit read at connector_status.py:465 raises "
+            "MissingGreenlet -> 500 on a sync that succeeded"
+        )
+        # The best-effort contract still holds: the sync succeeded and the deposits
+        # are committed despite the cursor failure.
+        assert not result.errors, result.errors
+        assert result.records_synced > 0
+        posting = (
+            await db.execute(
+                select(NetsuitePosting).where(
+                    NetsuitePosting.tenant_id == tenant_a.id,
+                    NetsuitePosting.netsuite_internal_id == "910003",
+                )
+            )
+        ).scalar_one()
+        assert posting is not None
