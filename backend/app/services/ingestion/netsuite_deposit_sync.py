@@ -373,12 +373,35 @@ async def sync_netsuite_deposits(
     # begin_nested() confines the failure: rolling back a savepoint expires only the
     # objects dirtied inside it, so the caller's pre-loaded objects stay usable. The
     # outer commit then persists the cursor if the savepoint succeeded.
+    # TWO failure modes, and they need opposite handling — collapsing them is what the
+    # first version of this fix got wrong.
+    cursor_written = False
     try:
         async with db.begin_nested():
             await save_cursor_async(db, connection.id, "netsuite_deposits", date_to.isoformat())
-        await db.commit()
+        cursor_written = True
     except Exception as e:
+        # The savepoint has already rolled ITSELF back, which expires only what was
+        # dirtied inside it. The caller's session is untouched and still usable — that
+        # is the whole point, and this is the common, reachable case.
         logger.warning("netsuite_deposit_sync.cursor_write_failed", tenant_id=tenant_id, error=str(e))
+
+    if cursor_written:
+        try:
+            await db.commit()
+        except Exception as e:
+            # A failure of COMMIT ITSELF is different in kind: the session is left
+            # unusable and nothing else can reset it. Verified against local Postgres —
+            # the next statement raises "This session is in 'prepared' state; no further
+            # SQL can be emitted", and only an explicit rollback restores it.
+            #
+            # So rollback here is mandatory, not optional, even though it expires the
+            # caller's identity map. Leaving it out (the first version of this fix) is
+            # strictly worse: the caller then hits PendingRollbackError on its very next
+            # statement instead of merely having to re-read its objects. The outer
+            # transaction is already lost either way at this point.
+            logger.warning("netsuite_deposit_sync.cursor_commit_failed", tenant_id=tenant_id, error=str(e))
+            await db.rollback()
 
     logger.info(
         "netsuite_deposit_sync.complete",
