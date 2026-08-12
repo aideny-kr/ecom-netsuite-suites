@@ -245,8 +245,7 @@ async def test_group_proposals_carry_the_result_status_the_api_actually_enforces
     assert len(page) == 1, "the proposal is untouched, so the row is still returned"
     assert page[0].status == "proposed", "proposal status genuinely did not change"
     assert page[0].result_status == "rejected", (
-        "the reject is invisible on this surface — this is exactly the blindness the "
-        "reject feature exists to remove"
+        "the reject is invisible on this surface — this is exactly the blindness the reject feature exists to remove"
     )
 
 
