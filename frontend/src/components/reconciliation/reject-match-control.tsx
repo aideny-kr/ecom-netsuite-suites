@@ -49,6 +49,22 @@ const PICKER_HEIGHT_PX = 432;
 // a control the API will refuse teaches the operator that the UI lies.
 export const TERMINAL_STATUSES = new Set(["approved", "rejected", "locked", "carried_forward"]);
 
+/** True when the RESULT is already decided. Takes `string | null` because the
+ *  resolution surfaces carry result_status nullable — an unknown status must not
+ *  read as terminal, or the control silently disappears for live rows. */
+export function isTerminal(resultStatus: string | null | undefined): boolean {
+  return !!resultStatus && TERMINAL_STATUSES.has(resultStatus);
+}
+
+/** Operator-facing wording for a decided row, so a reviewer is never left asking
+ *  why the control vanished. */
+export const DISPOSITION_LABEL: Record<string, string> = {
+  approved: "Approved",
+  rejected: "Rejected",
+  locked: "Locked (period closed)",
+  carried_forward: "Carried forward",
+};
+
 interface RejectMatchControlProps {
   /** ReconciliationResult id — NOT a proposal id. PATCH /results/{id}/reject keys on
    *  the result; the resolution surface holds both ids side by side on one object. */
@@ -94,14 +110,28 @@ export function RejectMatchControl({ resultId, disabled, variant = "icon" }: Rej
       if (dialogRef.current?.contains(t) || triggerRef.current?.contains(t)) return;
       close();
     };
+    // Scroll is CAPTURE-phase on window, which is the only way to see scrolls in
+    // nested containers — and therefore also fires for scrolls originating INSIDE
+    // this dialog: its own overflowY:auto box, and the note textarea. Closing on
+    // those destroyed the operator's chosen reason and half-typed note mid-sentence,
+    // on the one reason ('other') the component itself makes a note mandatory for.
+    // It also nullified the maxHeight clamp added below for short viewports: that
+    // clamp exists so the picker "degrades to scroll a little", and scrolling it
+    // deleted it. Only scrolls that actually move the trigger invalidate the
+    // position:fixed anchor.
+    const onScroll = (e: Event) => {
+      if (dialogRef.current?.contains(e.target as Node)) return;
+      close();
+    };
     document.addEventListener("keydown", onKey);
     document.addEventListener("pointerdown", onPointerDown, true);
-    window.addEventListener("scroll", close, true);
+    window.addEventListener("scroll", onScroll, true);
+    // resize legitimately invalidates the anchor no matter where it came from.
     window.addEventListener("resize", close);
     return () => {
       document.removeEventListener("keydown", onKey);
       document.removeEventListener("pointerdown", onPointerDown, true);
-      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("scroll", onScroll, true);
       window.removeEventListener("resize", close);
     };
   }, [open]);
@@ -132,15 +162,29 @@ export function RejectMatchControl({ resultId, disabled, variant = "icon" }: Rej
   const noteRequired = reason === "other";
   const canSubmit = reason !== "" && (!noteRequired || note.trim() !== "");
 
+  // Close only on SUCCESS. Firing and closing unconditionally discarded every
+  // refusal the backend deliberately writes to be human-readable ("run is closed —
+  // the period is frozen", "result cannot be rejected (status=approved)") along with
+  // the note the operator had just typed. A failed reject then looked identical to a
+  // successful one, so the reviewer repeats it — and on a feature whose whole product
+  // is the label, a silently dropped label is the worst possible failure.
   const submit = () => {
-    if (!canSubmit) return;
-    rejectResult.mutate({
-      result_id: resultId,
-      reason,
-      ...(note.trim() ? { note: note.trim() } : {}),
-    });
-    close();
+    if (!canSubmit || rejectResult.isPending) return;
+    rejectResult.mutate(
+      {
+        result_id: resultId,
+        reason,
+        ...(note.trim() ? { note: note.trim() } : {}),
+      },
+      { onSuccess: () => close() }
+    );
   };
+  const errorText =
+    rejectResult.error instanceof Error
+      ? rejectResult.error.message
+      : rejectResult.isError
+        ? "The reject was refused. Nothing was recorded."
+        : null;
 
   return (
     <>
@@ -245,6 +289,14 @@ export function RejectMatchControl({ resultId, disabled, variant = "icon" }: Rej
               placeholder="What did you see?"
               className="mt-1 min-h-[48px] w-full resize-y rounded border bg-background p-2 text-xs"
             />
+            {errorText && (
+              <p
+                role="alert"
+                className="mt-2 rounded border border-red-300 bg-red-50 px-2 py-1.5 text-[11px] leading-snug text-red-800 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300"
+              >
+                {errorText}
+              </p>
+            )}
             <div className="mt-2 flex justify-end gap-2">
               <button
                 type="button"
@@ -256,10 +308,10 @@ export function RejectMatchControl({ resultId, disabled, variant = "icon" }: Rej
               <button
                 type="button"
                 onClick={submit}
-                disabled={!canSubmit}
+                disabled={!canSubmit || rejectResult.isPending}
                 className="rounded bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:brightness-110 disabled:opacity-40"
               >
-                Reject
+                {rejectResult.isPending ? "Rejecting…" : "Reject"}
               </button>
             </div>
           </div>,

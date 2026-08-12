@@ -12,7 +12,11 @@ import {
 } from "@/components/ui/table";
 import { useGroupProposals } from "@/hooks/use-resolution";
 import { fxChip, money } from "@/components/reconciliation/format";
-import { RejectMatchControl } from "@/components/reconciliation/reject-match-control";
+import {
+  DISPOSITION_LABEL,
+  RejectMatchControl,
+  isTerminal,
+} from "@/components/reconciliation/reject-match-control";
 import type { ReconResolutionProposal } from "@/lib/types";
 
 // Statuses that reach this worksheet are "proposed" (awaiting a decision) or
@@ -217,13 +221,17 @@ export function ResolutionGroupItems({
                         Investigate in chat
                       </button>
                     )}
-                    {/* Targets the RESULT, not this proposal — the two ids sit side by
-                        side on `p` and only result_id is what PATCH /results/{id}/reject
-                        keys on. Gated on the proposal still being undecided: group
-                        approve flips the underlying result to 'approved', which is
-                        terminal, and the proposal's own status is the only signal this
-                        surface carries about that. */}
-                    {p.status === "proposed" && (
+                    {/* Gated on the RESULT's status, not the proposal's. reject_result
+                        never touches the proposal row, so a proposal-status gate could
+                        not observe the very action this control performs: a rejected
+                        row kept offering Reject forever (even after a reload), while an
+                        already-terminal result got a button whose every click is a
+                        guaranteed 400. */}
+                    {isTerminal(p.result_status) ? (
+                      <span className="text-xs text-muted-foreground">
+                        {DISPOSITION_LABEL[p.result_status ?? ""] ?? p.result_status}
+                      </span>
+                    ) : (
                       <RejectMatchControl resultId={p.result_id} disabled={disabled} variant="inline" />
                     )}
                   </div>

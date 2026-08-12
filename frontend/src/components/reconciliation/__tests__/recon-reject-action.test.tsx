@@ -63,7 +63,8 @@ describe("reject action", () => {
     fireEvent.click(screen.getByRole("button", { name: /^reject$/i }));
 
     expect(rejectMutate).toHaveBeenCalledWith(
-      expect.objectContaining({ result_id: "res-1", reason: "wrong_match" })
+      expect.objectContaining({ result_id: "res-1", reason: "wrong_match" }),
+      expect.anything()
     );
   });
 
@@ -81,7 +82,8 @@ describe("reject action", () => {
     fireEvent.click(screen.getByRole("button", { name: /^reject$/i }));
 
     expect(rejectMutate).toHaveBeenCalledWith(
-      expect.objectContaining({ reason: "other", note: "vendor said to hold" })
+      expect.objectContaining({ reason: "other", note: "vendor said to hold" }),
+      expect.anything()
     );
   });
 
@@ -89,10 +91,15 @@ describe("reject action", () => {
     // Deliberate: 3 of 5 reasons feed the false-positive rate. If a reviewer can see
     // the weighting they can pick the reason that produces the number they want, and
     // the corpus stops being evidence about the matcher.
-    const { container } = render(<ReconResultsTable results={[makeResult()]} />);
+    // Reads the DIALOG, not render()'s `container` — the picker is portalled to
+    // document.body, so the original form of this guard inspected a subtree the
+    // picker was never in and could not fail. Proven: with the leak text injected
+    // verbatim into the picker, 21/21 tests stayed green.
+    render(<ReconResultsTable results={[makeResult()]} />);
     fireEvent.click(screen.getByRole("button", { name: /reject match/i }));
 
-    const text = container.textContent ?? "";
+    const text = screen.getByRole("dialog", { name: /reject this match/i }).textContent ?? "";
+    expect(text).toMatch(/not the same money/i); // anchor: reading the real picker
     // Post-rename a leak would read "envelope error", which matched none of the
     // original three patterns — the guard had quietly stopped covering the
     // vocabulary the product actually uses.

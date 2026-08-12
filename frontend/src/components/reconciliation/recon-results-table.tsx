@@ -13,6 +13,10 @@ import {
 interface ReconResultsTableProps {
   results: ReconResult[];
   onInvestigate?: (result: ReconResult) => void;
+  // Closed run / recon disabled. Without this the classic table was the ONE call
+  // site that never received the freeze the other two enforce — it kept offering
+  // reject on a closed run for any row not yet flipped to a terminal status.
+  disabled?: boolean;
 }
 
 const statusColors: Record<string, string> = {
@@ -28,7 +32,7 @@ const statusColors: Record<string, string> = {
   carried_forward: "bg-amber-100 text-amber-800",
 };
 
-export function ReconResultsTable({ results, onInvestigate }: ReconResultsTableProps) {
+export function ReconResultsTable({ results, onInvestigate, disabled }: ReconResultsTableProps) {
   const approveResult = useApproveResult();
 
   if (results.length === 0) {
@@ -119,7 +123,7 @@ export function ReconResultsTable({ results, onInvestigate }: ReconResultsTableP
                     </button>
                   )}
                   {!TERMINAL_STATUSES.has(result.status) && (
-                    <RejectMatchControl resultId={result.id} />
+                    <RejectMatchControl resultId={result.id} disabled={disabled} />
                   )}
                   {(result.status === "pending" || result.status === "suggested") && onInvestigate && (
                     <button

@@ -289,6 +289,7 @@ describe("ReconciliationPage investigate-proposal prefill", () => {
     deposit_transaction_currency: null,
     deposit_foreign_amount: null,
     deposit_exchange_rate: null,
+    result_status: "pending",
   };
 
   const mockGroup: ReconResolutionGroup = {

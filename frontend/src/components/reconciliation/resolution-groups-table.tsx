@@ -13,7 +13,11 @@ import {
 import { ResolutionGroupItems } from "@/components/reconciliation/resolution-group-items";
 import { ExportMenu } from "@/components/reconciliation/export-menu";
 import { fxChip, money } from "@/components/reconciliation/format";
-import { RejectMatchControl } from "@/components/reconciliation/reject-match-control";
+import {
+  DISPOSITION_LABEL,
+  RejectMatchControl,
+  isTerminal,
+} from "@/components/reconciliation/reject-match-control";
 import { NEEDS_HUMAN_PROPOSALS_LIMIT } from "@/hooks/use-resolution";
 import type { ReconResolutionGroup, ReconResolutionProposal } from "@/lib/types";
 
@@ -519,11 +523,17 @@ export function NeedsHumanWorksheet({
                         <MessageSquare className="h-3.5 w-3.5" />
                         Investigate in chat
                       </button>
-                      {/* Targets p.result_id (the match), never p.id (the proposal).
-                          Investigate-in-chat is the only other exit from this worksheet,
-                          so without this a reviewer who has decided the match is wrong
-                          has nowhere to record it. */}
-                      {p.status === "proposed" && (
+                      {/* Targets p.result_id (the match), never p.id (the proposal),
+                          and gates on the RESULT's status for the same reason: a
+                          reject never touches the proposal, so a proposal-status gate
+                          could not see it. Investigate-in-chat is the only other exit
+                          from this worksheet, so without this a reviewer who has
+                          decided the match is wrong has nowhere to record it. */}
+                      {isTerminal(p.result_status) ? (
+                        <span className="text-xs text-muted-foreground">
+                          {DISPOSITION_LABEL[p.result_status ?? ""] ?? p.result_status}
+                        </span>
+                      ) : (
                         <RejectMatchControl resultId={p.result_id} disabled={disabled} variant="inline" />
                       )}
                     </div>

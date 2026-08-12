@@ -1003,9 +1003,14 @@ def _proposal_response_with_enrichment(
     deposit_transaction_currency: str | None = None,
     deposit_foreign_amount: Decimal | None = None,
     deposit_exchange_rate: Decimal | None = None,
+    # Appended last, and keyword-only in practice: every caller passes these
+    # positionally off a SELECT tuple, and reordering a SELECT without reordering the
+    # unpack has already silently swapped two plausible values in this codebase.
+    result_status: str | None = None,
 ) -> ResolutionProposalResponse:
     return ResolutionProposalResponse.model_validate(proposal).model_copy(
         update={
+            "result_status": result_status,
             "order_reference": order_reference,
             "stripe_charge_id": proposal.charge_source_id,
             "netsuite_internal_id": netsuite_internal_id,
@@ -1040,6 +1045,7 @@ async def _enrich_proposal_response(
                 NetsuitePosting.transaction_currency,
                 NetsuitePosting.foreign_amount,
                 NetsuitePosting.exchange_rate,
+                ReconciliationResult.status,
             )
             .select_from(ReconciliationResult)
             .outerjoin(
@@ -1065,7 +1071,8 @@ async def _enrich_proposal_response(
         transaction_currency,
         foreign_amount,
         exchange_rate,
-    ) = row or (None, None, None, None, None, None, None, None, None)
+        result_status,
+    ) = row or (None, None, None, None, None, None, None, None, None, None)
     return _proposal_response_with_enrichment(
         proposal,
         order_reference,
@@ -1077,6 +1084,7 @@ async def _enrich_proposal_response(
         transaction_currency,
         foreign_amount,
         exchange_rate,
+        result_status,
     )
 
 
@@ -1120,6 +1128,11 @@ def _build_proposal_query(
             NetsuitePosting.transaction_currency,
             NetsuitePosting.foreign_amount,
             NetsuitePosting.exchange_rate,
+            # LAST, because line ~1185 splats this row positionally onto
+            # _proposal_response_with_enrichment. Appending keeps every existing
+            # position stable; inserting in the middle would silently shift the
+            # amounts by one, and they are all plausible Decimals.
+            ReconciliationResult.status,
         )
         .join(
             ReconciliationResult,
@@ -1557,7 +1570,15 @@ def _proposals_export_row(
     transaction_currency: str | None,
     foreign_amount: Decimal | None,
     exchange_rate: Decimal | None,
+    # Accepted because this row is splatted from the same select as the API response,
+    # which now carries the result's status for the reject control. Deliberately NOT
+    # added to _PROPOSALS_HEADERS: the export's column set is a contract with the
+    # accountants who keep these sheets, and widening it is a separate decision from
+    # making reject reachable. Named rather than swallowed by *_ so the next person
+    # sees it is available.
+    result_status: str | None = None,
 ) -> list:
+    del result_status
     return [
         order_reference,
         p.charge_source_id,

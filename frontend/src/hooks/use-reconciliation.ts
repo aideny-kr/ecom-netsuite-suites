@@ -98,6 +98,16 @@ export function useRejectResult() {
       // CloseChecklist gates on — same reason approve invalidates all three.
       queryClient.invalidateQueries({ queryKey: ["recon-bucket-summary"] });
       queryClient.invalidateQueries({ queryKey: ["recon-close-readiness"] });
+      // The resolution surfaces render from their OWN keys, and this hook is now
+      // shared by all three. Without these a reject taken on the summary-first
+      // surface changed nothing on screen — not on refetch, not on a full reload,
+      // because the proposals endpoint filters on proposal status while the reject
+      // only touches the result. The reviewer could not tell rejected from
+      // unrejected on the one surface they use, which is the exact blindness this
+      // feature exists to remove.
+      queryClient.invalidateQueries({ queryKey: ["recon-group-proposals"] });
+      queryClient.invalidateQueries({ queryKey: ["recon-needs-human-proposals"] });
+      queryClient.invalidateQueries({ queryKey: ["recon-resolution-summary"] });
     },
   });
 }

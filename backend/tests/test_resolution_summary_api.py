@@ -202,6 +202,54 @@ async def test_group_proposals_listing_includes_identifiers_when_matched(db, ten
     assert item.netsuite_record_type == "custdep"
 
 
+async def test_group_proposals_carry_the_result_status_the_api_actually_enforces(db, tenant_a):
+    """The resolution surface offers "Reject match", which mutates the RESULT.
+
+    Without the result's status on the row, the UI can only gate on the PROPOSAL's
+    status — and reject_result never touches the proposal. That made the control
+    inert in both directions: a rejected row kept offering Reject forever (even after
+    a reload, since this endpoint filters on proposal status alone), and a result that
+    was already terminal still got a Reject button whose every click is a guaranteed
+    400. Measured 2026-08-10: 354,827 results, zero dispositions — a reviewer could
+    not tell rejected from unrejected on the only surface they use.
+    """
+    user, _ = await create_test_user(db, tenant_a)
+    await enable_feature_flag(db, tenant_a.id, "recon_resolution_ui")
+    run = await create_test_recon_run(db, tenant_a.id, status="completed")
+    result = await create_test_recon_result(
+        db,
+        tenant_a.id,
+        run.id,
+        status="pending",
+        bucket="auto_classifications",
+        match_type="deterministic",
+        variance_type="fees",
+        variance_amount=Decimal("9.00"),
+        stripe_amount=Decimal("1000"),
+        netsuite_amount=Decimal("991"),
+        evidence={"charge_source_id": "ch_status", "order_reference": "R-STATUS"},
+    )
+    run.matches_count = 0
+    await db.flush()
+    await plan_resolutions(str(run.id), user=user, db=db)
+
+    page = await list_group_proposals(str(run.id), group_key="fees:book_fee_line:deposit", user=user, db=db)
+    assert len(page) == 1
+    assert page[0].result_status == "pending", "the row must carry the result's own disposition"
+
+    # The whole point: after the result is rejected the row must SAY so, without the
+    # proposal having changed at all.
+    result.status = "rejected"
+    await db.flush()
+    page = await list_group_proposals(str(run.id), group_key="fees:book_fee_line:deposit", user=user, db=db)
+    assert len(page) == 1, "the proposal is untouched, so the row is still returned"
+    assert page[0].status == "proposed", "proposal status genuinely did not change"
+    assert page[0].result_status == "rejected", (
+        "the reject is invisible on this surface — this is exactly the blindness the "
+        "reject feature exists to remove"
+    )
+
+
 async def test_group_proposals_listing_omits_identifiers_when_unmatched(db, tenant_a):
     """A1: an unmatched result (no deposit_id) surfaces order ref + charge id
     but leaves the NetSuite fields None rather than erroring the join."""

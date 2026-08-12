@@ -469,6 +469,7 @@ describe("NeedsHumanWorksheet", () => {
     id: "p1",
     run_id: "r1",
     result_id: "res1",
+    result_status: "pending",
     root_cause: "chargeback",
     action: "needs_human",
     booking_vehicle: "none",

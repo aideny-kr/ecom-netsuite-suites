@@ -307,6 +307,7 @@ export default function ReconciliationPage() {
         <ReconResultsTable
           results={results || []}
           onInvestigate={handleInvestigate}
+          disabled={!reconEnabled || isRunClosed}
         />
       </>
     );
