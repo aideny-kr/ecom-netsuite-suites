@@ -280,7 +280,28 @@ async def _seed_netsuite_connection(db, tenant_id) -> Connection:
     return connection
 
 
-def _patch_netsuite_boundary(*, connection: Connection, suiteql_rows: list[dict]):
+class _ExistingSessionCM:
+    """Async context manager that yields an ALREADY-OPEN session and does not close it.
+
+    The cursor write deliberately runs on its own session (``async_session_factory``)
+    so that no failure of it can touch the caller's transaction. That isolation is the
+    whole point of the fix — and it also means the write escapes this suite's
+    transactional fixture, so a test could neither see the row nor avoid leaking it
+    into the real database. Substituting the test's own session keeps the production
+    code path intact while staying inside the fixture's rollback.
+    """
+
+    def __init__(self, session):
+        self._session = session
+
+    async def __aenter__(self):
+        return self._session
+
+    async def __aexit__(self, *_exc):
+        return False
+
+
+def _patch_netsuite_boundary(*, connection: Connection, suiteql_rows: list[dict], db=None):
     """Patch the NetSuite network boundary of sync_netsuite_deposits.
 
     Returns a list of patch context managers. The DB (pattern load, posting
@@ -289,8 +310,17 @@ def _patch_netsuite_boundary(*, connection: Connection, suiteql_rows: list[dict]
     ``get_netsuite_rest_connection`` so ``connection.id`` satisfies the
     cursor_states FK. ``suiteql_rows`` are returned as dict rows (the sync handles
     both list-rows + dict-rows; dicts keep the test column-order-independent).
+
+    ``db``: when given, the cursor write's own-session factory is redirected at this
+    session so the write stays inside the fixture's transaction (see
+    ``_ExistingSessionCM``). Omit it for tests that do not care about the cursor.
     """
-    return [
+    extra = (
+        [patch.object(netsuite_deposit_sync, "async_session_factory", lambda: _ExistingSessionCM(db))]
+        if db is not None
+        else []
+    )
+    return extra + [
         patch.object(
             netsuite_deposit_sync,
             "get_netsuite_rest_connection",
@@ -317,7 +347,7 @@ def _patch_netsuite_boundary(*, connection: Connection, suiteql_rows: list[dict]
 async def _run_sync_and_read_back(db, tenant_id, *, internal_id: str, rows: list[dict]):
     """Run sync_netsuite_deposits with the network patched, return the stored row."""
     connection = await _seed_netsuite_connection(db, tenant_id)
-    patches = _patch_netsuite_boundary(connection=connection, suiteql_rows=rows)
+    patches = _patch_netsuite_boundary(connection=connection, suiteql_rows=rows, db=db)
     for p in patches:
         p.start()
     try:
@@ -741,7 +771,7 @@ class TestSyncDepositsMaintainsFreshnessCursor:
         date_from = date(2026, 3, 1)
         date_to = date(2026, 3, 31)
 
-        patches = _patch_netsuite_boundary(connection=connection, suiteql_rows=rows)
+        patches = _patch_netsuite_boundary(connection=connection, suiteql_rows=rows, db=db)
         for p in patches:
             p.start()
         try:
@@ -805,7 +835,7 @@ class TestSyncDepositsMaintainsFreshnessCursor:
         date_from = date(2026, 3, 1)
         date_to = date(2026, 3, 31)
 
-        patches = _patch_netsuite_boundary(connection=connection, suiteql_rows=rows)
+        patches = _patch_netsuite_boundary(connection=connection, suiteql_rows=rows, db=db)
         # Patch save_cursor_async (as imported/used by the service) to blow up.
         patches.append(
             patch.object(
@@ -842,3 +872,180 @@ class TestSyncDepositsMaintainsFreshnessCursor:
             )
         ).scalar_one()
         assert posting is not None
+
+    async def test_cursor_write_failure_does_not_roll_back_the_caller_s_session(self, db, tenant_a):
+        """The best-effort cursor write must not roll back a session it does not own.
+
+        WHY THIS ASSERTS THE CALL AND NOT THE SYMPTOM. The real damage is that
+        `await db.rollback()` on the CALLER-OWNED session expires SQLAlchemy's entire
+        identity map (`_restore_snapshot(dirty_only=transaction.nested)` with
+        nested=False), so the manual endpoint's next ORM read — `user.tenant_id` at
+        connector_status.py:465, outside the try/except that closes at 456 — becomes a
+        lazy refresh in coroutine context and raises MissingGreenlet: HTTP 500 for a
+        sync that succeeded, no audit row, and the Job stranded at 'running'.
+
+        That symptom CANNOT be reproduced in this suite. conftest's `db` fixture uses
+        join_transaction_mode="create_savepoint", so every service-level rollback is a
+        SAVEPOINT rollback, which expires only dirty objects and leaves the identity
+        map intact. A symptom-based test here passes against the broken code — I wrote
+        one first and it did exactly that. Asserting the CALL is what this harness can
+        actually see, and it is the invariant that matters: a shared service must not
+        roll back a caller's transaction.
+        """
+        connection = await _seed_netsuite_connection(db, tenant_a.id)
+
+        rollback_calls: list[int] = []
+        original_rollback = db.rollback
+
+        async def spy_rollback():
+            rollback_calls.append(1)
+            return await original_rollback()
+
+        rows = [
+            {
+                "internal_id": "910003",
+                "document_number": "DEP-CUR-3",
+                "transaction_date": "2026-03-16",
+                "record_type": "Deposit",
+                "memo": "bank deposit",
+                "amount": "100.00",
+                "currency_name": "USD",
+                "account_id": "10",
+                "account_name": "Bank",
+                "subsidiary_id": "1",
+                "sales_order_ref": "",
+            }
+        ]
+        patches = _patch_netsuite_boundary(connection=connection, suiteql_rows=rows, db=db)
+        # A transient cursor failure: Supabase statement timeout (the documented reason
+        # for the 10-row batch commits above), serialization error, dropped connection.
+        patches.append(
+            patch.object(
+                netsuite_deposit_sync,
+                "save_cursor_async",
+                new=AsyncMock(side_effect=RuntimeError("statement timeout")),
+            )
+        )
+        for p in patches:
+            p.start()
+        db.rollback = spy_rollback  # type: ignore[method-assign]
+        try:
+            result = await sync_netsuite_deposits(
+                db=db,
+                tenant_id=str(tenant_a.id),
+                date_from=date(2026, 3, 1),
+                date_to=date(2026, 3, 31),
+            )
+        finally:
+            db.rollback = original_rollback  # type: ignore[method-assign]
+            for p in patches:
+                p.stop()
+
+        assert not rollback_calls, (
+            "the cursor write rolled back the CALLER's session; in the manual endpoint "
+            "that expires `user` and the audit read at connector_status.py:465 raises "
+            "MissingGreenlet -> 500 on a sync that succeeded"
+        )
+        # The best-effort contract still holds: the sync succeeded and the deposits
+        # are committed despite the cursor failure.
+        assert not result.errors, result.errors
+        assert result.records_synced > 0
+        posting = (
+            await db.execute(
+                select(NetsuitePosting).where(
+                    NetsuitePosting.tenant_id == tenant_a.id,
+                    NetsuitePosting.netsuite_internal_id == "910003",
+                )
+            )
+        ).scalar_one()
+        assert posting is not None
+
+    async def test_a_failed_cursor_write_still_commits_the_deposits(self, db, tenant_a):
+        """The risk created by writing the cursor BEFORE the final deposit commit.
+
+        Earlier versions committed the cursor separately, after the deposits. That
+        second commit was the problem: when IT failed there was no good answer —
+        `db.rollback()` expires the caller's whole identity map (MissingGreenlet in
+        connector_status.py), and omitting it leaves the session in 'prepared' state
+        (PendingRollbackError on the next statement). Both verified against local
+        Postgres. Two gate rounds went into picking between them before it became clear
+        the second commit should not exist at all.
+
+        Moving the cursor write ahead of the single existing commit removes that
+        dilemma — but introduces this one: the cursor write now shares a transaction
+        with the deposits, so a savepoint that failed to contain itself would take the
+        deposits down with it. That is what this asserts.
+        """
+        connection = await _seed_netsuite_connection(db, tenant_a.id)
+
+        rollback_calls: list[int] = []
+        original_rollback = db.rollback
+
+        async def spy_rollback():
+            rollback_calls.append(1)
+            return await original_rollback()
+
+        rows = [
+            {
+                "internal_id": "910004",
+                "document_number": "DEP-CUR-4",
+                "transaction_date": "2026-03-16",
+                "record_type": "Deposit",
+                "memo": "bank deposit",
+                "amount": "100.00",
+                "currency_name": "USD",
+                "account_id": "10",
+                "account_name": "Bank",
+                "subsidiary_id": "1",
+                "sales_order_ref": "",
+            }
+        ]
+        # The failure must emit SQL that ABORTS the transaction, not just raise in
+        # Python. An AsyncMock(side_effect=...) raises before touching the database, so
+        # removing the savepoint changes nothing and the test passes either way — I
+        # verified that by mutation and it did exactly that. A real failing statement is
+        # what makes the savepoint load-bearing.
+        from sqlalchemy import text as _sql_text
+
+        async def failing_cursor_write(session, *_a, **_kw):
+            await session.execute(_sql_text("SELECT 1/0"))
+
+        # NOT db=db here, deliberately. This test is about the cursor write failing on
+        # its OWN session, so it must genuinely have one. Substituting the fixture's
+        # session would let `SELECT 1/0` poison the very session the assertions below
+        # query — a harness artifact, not production behaviour. Nothing leaks either:
+        # the write fails, so that separate session commits nothing.
+        patches = _patch_netsuite_boundary(connection=connection, suiteql_rows=rows)
+        patches.append(patch.object(netsuite_deposit_sync, "save_cursor_async", new=failing_cursor_write))
+        for p in patches:
+            p.start()
+        db.rollback = spy_rollback  # type: ignore[method-assign]
+        try:
+            result = await sync_netsuite_deposits(
+                db=db,
+                tenant_id=str(tenant_a.id),
+                date_from=date(2026, 3, 1),
+                date_to=date(2026, 3, 31),
+            )
+        finally:
+            db.rollback = original_rollback  # type: ignore[method-assign]
+            for p in patches:
+                p.stop()
+
+        # The sync still reports success — a cursor problem is not a sync failure.
+        assert not result.errors, result.errors
+        assert result.records_synced > 0
+
+        # THE ASSERTION: the deposits survived a cursor write that failed inside the
+        # savepoint they now share a transaction with.
+        posting = (
+            await db.execute(
+                select(NetsuitePosting).where(
+                    NetsuitePosting.tenant_id == tenant_a.id,
+                    NetsuitePosting.netsuite_internal_id == "910004",
+                )
+            )
+        ).scalar_one()
+        assert posting is not None, "the savepoint rollback took the deposits with it"
+        # And still no rollback of the caller's transaction, in either failure mode.
+        assert not rollback_calls
