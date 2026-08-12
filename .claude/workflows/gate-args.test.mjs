@@ -123,6 +123,31 @@ test('an explicitly empty diff is refused, NOT quietly passed through', () => {
   assert.throws(() => resolveArgs({ diff: '' }), /empty|refus/i)
 })
 
+test('an array payload is refused — typeof [] is "object"', () => {
+  // Round 4. `args: '[]'` parsed cleanly, carried no keys for either key-check to
+  // catch, and returned "no target" — the silent fall-back class one more time, since
+  // typeof [] === 'object' slipped past the non-object guard.
+  const resolveArgs = loadResolveArgs()
+  assert.throws(() => resolveArgs('[]'), /array/i)
+  assert.throws(() => resolveArgs([]), /array/i)
+})
+
+test('the refusal says which problem it actually found', () => {
+  // Round 4, both diagnostic-quality findings. These do not change WHETHER the gate
+  // refuses — only whether the message sends a reader somewhere real. On a function
+  // whose entire job is explaining a refusal, that is the function's job.
+  const resolveArgs = loadResolveArgs()
+
+  // `args: false` never reaches JSON.parse, so "could not be parsed" invented a JSON
+  // syntax error to go looking for.
+  assert.throws(() => resolveArgs(false), /must be an object/i)
+  assert.throws(() => resolveArgs('nope'), /not valid JSON/i)
+
+  // A typo'd key next to a wrong-typed value: report the typo, which is the cause,
+  // not the type error, which is the symptom.
+  assert.throws(() => resolveArgs({ targt: '198', base: 42 }), /unrecognised args: targt/i)
+})
+
 test('hostile input is still rejected (pre-existing guards survive the refactor)', () => {
   const resolveArgs = loadResolveArgs()
   assert.throws(() => resolveArgs({ target: 'a\nb' }), /newline/i, 'newline injection')

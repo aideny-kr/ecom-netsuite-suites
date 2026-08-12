@@ -69,12 +69,15 @@ function resolveArgs(args) {
       try { a = JSON.parse(a) } catch { a = null; parseFailed = true }
     }
   }
-  if (a !== null && a !== undefined && typeof a !== 'object') { a = null; parseFailed = true }
+  // Array.isArray, because `typeof [] === 'object'`. Without it `args: '[]'` parsed
+  // cleanly, carried no keys for either check below to catch, and returned "no target"
+  // — the silent fall-back-to-the-current-checkout class, reached one more way.
+  let badShape = null
+  if (a !== null && a !== undefined && (typeof a !== 'object' || Array.isArray(a))) {
+    badShape = Array.isArray(a) ? 'array' : typeof a
+    a = null
+  }
   a = a || {}
-
-  const target = asArg(a.target, 'target', 200)
-  const base = asArg(a.base, 'base', 200)
-  const diff = asArg(a.diff, 'diff', 2_000_000)
 
   // FAIL CLOSED — but only when the caller actually asked for something. Reviewing
   // the current checkout and reporting OK when a specific target was requested is the
@@ -92,12 +95,34 @@ function resolveArgs(args) {
   // carrying keys none of which yield a usable target/base/diff (a typo'd key, or an
   // empty target interpolated from an unset variable). Those all mean the caller
   // wanted something specific that did not arrive.
-  if (parseFailed) {
+  // Say which of the two actually happened. `args: false` never reaches JSON.parse, so
+  // reporting "could not be parsed" sent a reader hunting for a JSON syntax error that
+  // does not exist.
+  if (parseFailed || badShape) {
     throw new Error(
-      `args were supplied but could not be parsed (got ${typeof args}); ` +
-      'refusing to fall back to the current checkout'
+      (parseFailed
+        ? 'args were supplied as a string that is not valid JSON'
+        : `args must be an object of target/base/diff, got ${badShape}`) +
+      '; refusing to fall back to the current checkout'
     )
   }
+
+  // UNRECOGNISED KEYS ARE CHECKED BEFORE per-field type validation. `{targt:'198',
+  // base:42}` used to report "args.base must be a string" and never mention the typo'd
+  // key that was the real problem — the wrong one of two simultaneously-true errors,
+  // on a function whose entire job is explaining why it refused.
+  const RECOGNISED_KEYS = new Set(['target', 'base', 'diff'])
+  const unknownKeys = Object.keys(a).filter((k) => !RECOGNISED_KEYS.has(k))
+  if (unknownKeys.length) {
+    throw new Error(
+      `unrecognised args: ${unknownKeys.join(', ')} — expected target/base/diff. ` +
+      'Refusing rather than reviewing the current checkout with the keys that did parse.'
+    )
+  }
+
+  const target = asArg(a.target, 'target', 200)
+  const base = asArg(a.base, 'base', 200)
+  const diff = asArg(a.diff, 'diff', 2_000_000)
 
   // UNRECOGNISED KEYS ARE A HARD ERROR, checked BEFORE the all-blank test.
   // The all-blank test alone is not enough: `{targt: '198', base: 'origin/main'}` — a
@@ -108,14 +133,6 @@ function resolveArgs(args) {
   // exists to prevent, surviving inside its own fix. Every invocation in this repo
   // passes `base`, so one typo'd target was all it took.
   // Found by running this gate against its own PR (#198).
-  const RECOGNISED = new Set(['target', 'base', 'diff'])
-  const unknown = Object.keys(a).filter((k) => !RECOGNISED.has(k))
-  if (unknown.length) {
-    throw new Error(
-      `unrecognised args: ${unknown.join(', ')} — expected target/base/diff. ` +
-      'Refusing rather than reviewing the current checkout with the keys that did parse.'
-    )
-  }
 
   // EVERY SUPPLIED KEY MUST CARRY A USABLE VALUE. One rule, replacing an all-blank
   // check that three separate gate rounds picked holes in:
