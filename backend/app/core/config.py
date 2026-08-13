@@ -43,10 +43,17 @@ class Settings(BaseSettings):
     # legitimate heavy recon/report session for the day.
     CHAT_BURST_PER_MINUTE: int = 20
 
-    # Web worker count (backend/Dockerfile: uvicorn --workers 4). Rate limits are
-    # expressed fleet-wide; the in-memory fallback divides by this so a Redis
-    # outage does not multiply every ceiling by the worker count.
-    WEB_CONCURRENCY: int = 4
+    # Web worker count. Rate limits are expressed fleet-wide; the in-memory fallback
+    # divides by this so a Redis outage does not multiply every ceiling by the worker
+    # count. BOTH images set it explicitly (ENV WEB_CONCURRENCY next to their
+    # --workers), so this default only applies outside a container.
+    #
+    # It tracks the PRODUCTION image (Dockerfile.prod: --workers 2), not the dev one.
+    # It previously defaulted to 4 citing backend/Dockerfile, while production ran 2
+    # and neither image set the env var -- so every production fallback ceiling was
+    # divided by a worker count that did not exist. Pinned by
+    # tests/test_worker_concurrency_config.py.
+    WEB_CONCURRENCY: int = 2
 
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_MODEL: str = "claude-sonnet-5"

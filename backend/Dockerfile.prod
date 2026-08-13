@@ -64,5 +64,11 @@ USER appuser
 
 EXPOSE 8000
 
+# Must equal --workers below: rate limits are fleet-wide, and the limiter's
+# in-memory fallback divides them by WEB_CONCURRENCY. This image runs 2 workers
+# while the dev image runs 4, so leaving it to the default silently mis-scaled
+# every production ceiling. Pinned by tests/test_worker_concurrency_config.py.
+ENV WEB_CONCURRENCY=2
+
 # Default: run FastAPI with production settings
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
