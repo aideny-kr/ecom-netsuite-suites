@@ -11,7 +11,7 @@ from app.api.v1.reconciliation import (
     plan_resolutions,
     reject_resolution_group,
 )
-from app.models.reconciliation import ReconResolutionProposal
+from app.models.reconciliation import ReconciliationResult, ReconResolutionProposal
 from app.schemas.reconciliation import ResolutionGroupApprove
 from tests.conftest import (
     create_test_netsuite_posting,
@@ -200,6 +200,53 @@ async def test_group_proposals_listing_includes_identifiers_when_matched(db, ten
     assert item.stripe_charge_id == "ch_matched"
     assert item.netsuite_internal_id == "98765"
     assert item.netsuite_record_type == "custdep"
+
+
+async def test_group_proposals_carry_the_result_status_the_api_actually_enforces(db, tenant_a):
+    """The resolution surface offers "Reject match", which mutates the RESULT.
+
+    Without the result's status on the row, the UI can only gate on the PROPOSAL's
+    status — and reject_result never touches the proposal. That made the control
+    inert in both directions: a rejected row kept offering Reject forever (even after
+    a reload, since this endpoint filters on proposal status alone), and a result that
+    was already terminal still got a Reject button whose every click is a guaranteed
+    400. Measured 2026-08-10: 354,827 results, zero dispositions — a reviewer could
+    not tell rejected from unrejected on the only surface they use.
+    """
+    user, _ = await create_test_user(db, tenant_a)
+    await enable_feature_flag(db, tenant_a.id, "recon_resolution_ui")
+    run = await create_test_recon_run(db, tenant_a.id, status="completed")
+    result = await create_test_recon_result(
+        db,
+        tenant_a.id,
+        run.id,
+        status="pending",
+        bucket="auto_classifications",
+        match_type="deterministic",
+        variance_type="fees",
+        variance_amount=Decimal("9.00"),
+        stripe_amount=Decimal("1000"),
+        netsuite_amount=Decimal("991"),
+        evidence={"charge_source_id": "ch_status", "order_reference": "R-STATUS"},
+    )
+    run.matches_count = 0
+    await db.flush()
+    await plan_resolutions(str(run.id), user=user, db=db)
+
+    page = await list_group_proposals(str(run.id), group_key="fees:book_fee_line:deposit", user=user, db=db)
+    assert len(page) == 1
+    assert page[0].result_status == "pending", "the row must carry the result's own disposition"
+
+    # The whole point: after the result is rejected the row must SAY so, without the
+    # proposal having changed at all.
+    result.status = "rejected"
+    await db.flush()
+    page = await list_group_proposals(str(run.id), group_key="fees:book_fee_line:deposit", user=user, db=db)
+    assert len(page) == 1, "the proposal is untouched, so the row is still returned"
+    assert page[0].status == "proposed", "proposal status genuinely did not change"
+    assert page[0].result_status == "rejected", (
+        "the reject is invisible on this surface — this is exactly the blindness the reject feature exists to remove"
+    )
 
 
 async def test_group_proposals_listing_omits_identifiers_when_unmatched(db, tenant_a):
@@ -581,3 +628,50 @@ async def test_summary_agent_job_lookup_normalizes_run_id(db, tenant_a):
 
     assert out.agent_job is not None
     assert out.agent_job.status == "running"
+
+
+async def test_group_counts_drop_a_row_whose_result_was_rejected(db, tenant_a):
+    """Rejecting an item must shrink its group's approve count.
+
+    `reject_result` mutates the RESULT and never the proposal, and the group
+    aggregation counted `P.status == 'proposed'` alone — so a rejected row stayed in
+    proposed_count forever. The worksheet's
+    `oneClickCount = proposed_count - above_materiality_count + ticked` therefore kept
+    offering "Approve N" for a row that can never be approved (the API refuses a
+    terminal result), and the proposal itself is stuck at 'proposed' with no path out.
+
+    Nothing corrupts — the backend refuses the approve — but the operator is told a
+    group has more actionable work than it does, permanently, and the count only ever
+    drifts further as rejects accumulate. That is the number this whole surface is
+    steered by.
+    """
+    user, run = await _seed(db, tenant_a)
+
+    out = await get_resolution_summary(str(run.id), user=user, db=db)
+    fees = next(g for g in out.groups if g.root_cause == "fees")
+    assert fees.proposed_count == 2, "baseline: both fee proposals are actionable"
+
+    # Reject the underlying RESULT of one proposal, exactly as the UI's reject does.
+    fee_proposal = (
+        (
+            await db.execute(
+                select(ReconResolutionProposal).where(
+                    ReconResolutionProposal.run_id == run.id,
+                    ReconResolutionProposal.root_cause == "fees",
+                    ReconResolutionProposal.above_materiality.is_(False),
+                )
+            )
+        )
+        .scalars()
+        .first()
+    )
+    result = await db.get(ReconciliationResult, fee_proposal.result_id)
+    result.status = "rejected"
+    await db.flush()
+
+    out = await get_resolution_summary(str(run.id), user=user, db=db)
+    fees = next(g for g in out.groups if g.root_cause == "fees")
+    assert fees.proposed_count == 1, (
+        "a rejected result still counted as actionable — 'Approve N' overstates the "
+        "group forever, and the proposal is stranded at 'proposed'"
+    )

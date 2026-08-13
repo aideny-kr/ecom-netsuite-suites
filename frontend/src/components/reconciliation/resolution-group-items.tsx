@@ -12,6 +12,11 @@ import {
 } from "@/components/ui/table";
 import { useGroupProposals } from "@/hooks/use-resolution";
 import { fxChip, money } from "@/components/reconciliation/format";
+import {
+  DISPOSITION_LABEL,
+  RejectMatchControl,
+  isTerminal,
+} from "@/components/reconciliation/reject-match-control";
 import type { ReconResolutionProposal } from "@/lib/types";
 
 // Statuses that reach this worksheet are "proposed" (awaiting a decision) or
@@ -79,6 +84,10 @@ interface ResolutionGroupItemsProps {
   tickedAboveIds: string[];
   onTickAbove: (proposalId: string, ticked: boolean) => void;
   onInvestigate: (proposal: ReconResolutionProposal) => void;
+  // Closed run / recon disabled — same freeze the group's Approve honours. The
+  // reject endpoint refuses a closed period server-side, so the control is not
+  // rendered rather than offered and then refused.
+  disabled?: boolean;
 }
 
 export function ResolutionGroupItems({
@@ -88,6 +97,7 @@ export function ResolutionGroupItems({
   tickedAboveIds,
   onTickAbove,
   onInvestigate,
+  disabled,
 }: ResolutionGroupItemsProps) {
   const { data: proposals, isLoading } = useGroupProposals(runId, groupKey, currency);
   if (isLoading) {
@@ -122,7 +132,15 @@ export function ResolutionGroupItems({
             return (
               <TableRow key={p.id}>
                 <TableCell>
-                  {p.above_materiality && p.status === "proposed" && (
+                  {/* Gated on result_status too, for the same reason the reject control
+                      is: a rejected row keeps proposal.status === "proposed" forever, so
+                      this checkbox stayed visible AND ticked on a row that can no longer
+                      be approved. The server refuses it (approve_group_core filters on
+                      a non-terminal result), so nothing is double-processed — but
+                      oneClickCount = proposed_count - above_materiality_count +
+                      includedAboveIds.length kept counting it, and "Approve N"
+                      overstated what would actually succeed. */}
+                  {p.above_materiality && p.status === "proposed" && !isTerminal(p.result_status) && (
                     <input
                       type="checkbox"
                       checked={tickedAboveIds.includes(p.id)}
@@ -194,16 +212,50 @@ export function ResolutionGroupItems({
                   {p.narrative}
                 </TableCell>
                 <TableCell className="text-right">
-                  {p.action === "needs_human" && (
-                    <button
-                      type="button"
-                      onClick={() => onInvestigate(p)}
-                      className="inline-flex shrink-0 items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
-                    >
-                      <MessageSquare className="h-3.5 w-3.5" />
-                      Investigate in chat
-                    </button>
-                  )}
+                  {/* min-w-max: this table is auto-layout, so the column sizes to its
+                      content's MIN-content width — and a flex row whose buttons may
+                      wrap their text reports a min-content far narrower than the
+                      buttons actually render at. The column then came out too narrow
+                      and the shrink-0 buttons overflowed left onto the Narrative
+                      column. min-w-max makes the column claim the width it will use. */}
+                  <div className="flex min-w-max items-center justify-end gap-1.5">
+                    {p.action === "needs_human" && (
+                      <button
+                        type="button"
+                        onClick={() => onInvestigate(p)}
+                        className="inline-flex shrink-0 items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs text-muted-foreground transition-colors hover:text-foreground"
+                      >
+                        <MessageSquare className="h-3.5 w-3.5" />
+                        Investigate in chat
+                      </button>
+                    )}
+                    {/* Gated on the RESULT's status, not the proposal's. reject_result
+                        never touches the proposal row, so a proposal-status gate could
+                        not observe the very action this control performs: a rejected
+                        row kept offering Reject forever (even after a reload), while an
+                        already-terminal result got a button whose every click is a
+                        guaranteed 400. */}
+                    {isTerminal(p.result_status) ? (
+                      <span className="text-xs text-muted-foreground">
+                        {DISPOSITION_LABEL[p.result_status ?? ""] ?? p.result_status}
+                      </span>
+                    ) : (
+                      <RejectMatchControl
+                        resultId={p.result_id}
+                        disabled={disabled}
+                        variant="inline"
+                        // Hiding the checkbox is not enough: the parent's ticked set
+                        // still holds this id, and oneClickCount adds its length
+                        // regardless of whether the row is still shown. Un-tick on
+                        // success so the count drops with the row.
+                        onRejected={() => onTickAbove(p.id, false)}
+                        // Hiding the checkbox is not enough: the parent's ticked set
+                        // still holds this id, and oneClickCount adds its length
+                        // regardless of whether the row is still shown. Un-tick on
+                        // success so the count drops with the row.
+                      />
+                    )}
+                  </div>
                 </TableCell>
               </TableRow>
             );

@@ -384,6 +384,14 @@ class ResolutionProposalResponse(BaseModel):
     deposit_transaction_currency: str | None = None
     deposit_foreign_amount: Decimal | None = None
     deposit_exchange_rate: Decimal | None = None
+    # The matched ReconciliationResult's OWN disposition — distinct from `status`
+    # above, which is the proposal's. The resolution surface offers "Reject match",
+    # and that mutates the result while leaving the proposal untouched, so gating
+    # that control on the proposal's status made it inert in both directions: a
+    # rejected row kept offering Reject forever (this endpoint filters on proposal
+    # status alone, so a reload did not help), and an already-terminal result still
+    # got a button whose every click is a guaranteed 400.
+    result_status: str | None = None
 
     model_config = {"from_attributes": True}
 

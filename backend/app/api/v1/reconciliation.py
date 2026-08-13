@@ -856,6 +856,19 @@ async def _fetch_group_summaries(
     aggregation, single source of truth (do not re-derive)."""
     P = ReconResolutionProposal
     live = (P.run_id == run_uuid, P.tenant_id == tenant_id, P.status.notin_(("superseded", "rejected")))
+    # "Still actionable" is a fact about the RESULT, not the proposal. reject_result
+    # mutates the result and never touches the proposal, so counting P.status alone
+    # left a rejected row inside proposed_count forever: the worksheet's
+    # oneClickCount = proposed_count - above_materiality_count + ticked kept offering
+    # "Approve N" for a row the API can only refuse, and the proposal stayed
+    # 'proposed' with no path out. Nothing corrupts — approve is refused server-side —
+    # but the number the whole surface is steered by drifts further wrong with every
+    # reject. NULL (no result row) counts as actionable so a proposal never silently
+    # disappears from its group.
+    _result_actionable = or_(
+        ReconciliationResult.status.is_(None),
+        ReconciliationResult.status.notin_(TERMINAL_RESULT_STATUSES),
+    )
 
     group_rows = (
         await db.execute(
@@ -865,13 +878,35 @@ async def _fetch_group_summaries(
                 P.booking_vehicle,
                 P.group_key,
                 P.currency,
+                # `count` and `total_amount` are deliberately NOT filtered by
+                # _result_actionable, unlike the two below. They describe the group as
+                # PLANNED — how many items the planner grouped and what they were
+                # worth — while proposed_count/above_materiality_count describe what is
+                # still actionable. A fully-rejected group therefore reads "212 items,
+                # $1,284.55, Approve 0", which is the honest summary of a group that
+                # existed and is now settled, not a contradiction.
+                #
+                # Filtering them was considered and rejected: both are columns of the
+                # `section=groups` export that accountants keep, so redefining them to
+                # mean "actionable only" would silently change the meaning of saved
+                # sheets — a bigger harm than the inconsistency it would remove, and
+                # not a call to make inside a PR about reject reachability.
                 func.count(P.id).label("count"),
-                func.count(P.id).filter(P.status == "proposed").label("proposed_count"),
+                func.count(P.id).filter(P.status == "proposed", _result_actionable).label("proposed_count"),
                 func.count(P.id).filter(P.status == "approved").label("approved_count"),
                 func.coalesce(func.sum(P.proposed_amount), 0).label("total_amount"),
                 func.count(P.id)
-                .filter(P.above_materiality.is_(True), P.status == "proposed")
+                .filter(P.above_materiality.is_(True), P.status == "proposed", _result_actionable)
                 .label("above_materiality_count"),
+            )
+            # LEFT JOIN so a proposal whose result is somehow absent still counts
+            # rather than silently vanishing from the group.
+            .outerjoin(
+                ReconciliationResult,
+                and_(
+                    ReconciliationResult.id == P.result_id,
+                    ReconciliationResult.tenant_id == tenant_id,
+                ),
             )
             .where(*live)
             .group_by(P.root_cause, P.action, P.booking_vehicle, P.group_key, P.currency)
@@ -1003,9 +1038,14 @@ def _proposal_response_with_enrichment(
     deposit_transaction_currency: str | None = None,
     deposit_foreign_amount: Decimal | None = None,
     deposit_exchange_rate: Decimal | None = None,
+    # Appended last, and keyword-only in practice: every caller passes these
+    # positionally off a SELECT tuple, and reordering a SELECT without reordering the
+    # unpack has already silently swapped two plausible values in this codebase.
+    result_status: str | None = None,
 ) -> ResolutionProposalResponse:
     return ResolutionProposalResponse.model_validate(proposal).model_copy(
         update={
+            "result_status": result_status,
             "order_reference": order_reference,
             "stripe_charge_id": proposal.charge_source_id,
             "netsuite_internal_id": netsuite_internal_id,
@@ -1040,6 +1080,7 @@ async def _enrich_proposal_response(
                 NetsuitePosting.transaction_currency,
                 NetsuitePosting.foreign_amount,
                 NetsuitePosting.exchange_rate,
+                ReconciliationResult.status,
             )
             .select_from(ReconciliationResult)
             .outerjoin(
@@ -1065,7 +1106,8 @@ async def _enrich_proposal_response(
         transaction_currency,
         foreign_amount,
         exchange_rate,
-    ) = row or (None, None, None, None, None, None, None, None, None)
+        result_status,
+    ) = row or (None, None, None, None, None, None, None, None, None, None)
     return _proposal_response_with_enrichment(
         proposal,
         order_reference,
@@ -1077,6 +1119,7 @@ async def _enrich_proposal_response(
         transaction_currency,
         foreign_amount,
         exchange_rate,
+        result_status,
     )
 
 
@@ -1120,6 +1163,11 @@ def _build_proposal_query(
             NetsuitePosting.transaction_currency,
             NetsuitePosting.foreign_amount,
             NetsuitePosting.exchange_rate,
+            # LAST, because line ~1185 splats this row positionally onto
+            # _proposal_response_with_enrichment. Appending keeps every existing
+            # position stable; inserting in the middle would silently shift the
+            # amounts by one, and they are all plausible Decimals.
+            ReconciliationResult.status,
         )
         .join(
             ReconciliationResult,
@@ -1557,7 +1605,15 @@ def _proposals_export_row(
     transaction_currency: str | None,
     foreign_amount: Decimal | None,
     exchange_rate: Decimal | None,
+    # Accepted because this row is splatted from the same select as the API response,
+    # which now carries the result's status for the reject control. Deliberately NOT
+    # added to _PROPOSALS_HEADERS: the export's column set is a contract with the
+    # accountants who keep these sheets, and widening it is a separate decision from
+    # making reject reachable. Named rather than swallowed by *_ so the next person
+    # sees it is available.
+    result_status: str | None = None,
 ) -> list:
+    del result_status
     return [
         order_reference,
         p.charge_source_id,

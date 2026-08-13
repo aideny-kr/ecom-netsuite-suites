@@ -16,6 +16,7 @@ const proposals: ReconResolutionProposal[] = [
     netsuite_internal_id: "12345", netsuite_record_type: "custdep",
     stripe_amount: "3.20", netsuite_amount: "3.15", variance_amount: "0.05",
     deposit_transaction_currency: null, deposit_foreign_amount: null, deposit_exchange_rate: null,
+    result_status: "pending",
   },
   {
     id: "p2", run_id: "r1", result_id: "res2",
@@ -29,6 +30,7 @@ const proposals: ReconResolutionProposal[] = [
     netsuite_internal_id: null, netsuite_record_type: null,
     stripe_amount: "120.00", netsuite_amount: null, variance_amount: null,
     deposit_transaction_currency: null, deposit_foreign_amount: null, deposit_exchange_rate: null,
+    result_status: "pending",
   },
   {
     id: "p3", run_id: "r1", result_id: "res3",
@@ -42,6 +44,7 @@ const proposals: ReconResolutionProposal[] = [
     netsuite_internal_id: null, netsuite_record_type: null,
     stripe_amount: "45.00", netsuite_amount: null, variance_amount: null,
     deposit_transaction_currency: null, deposit_foreign_amount: null, deposit_exchange_rate: null,
+    result_status: "pending",
   },
   {
     id: "p4", run_id: "r1", result_id: "res4",
@@ -55,6 +58,7 @@ const proposals: ReconResolutionProposal[] = [
     netsuite_internal_id: "44444", netsuite_record_type: "custdep",
     stripe_amount: "1000.00", netsuite_amount: "991.00", variance_amount: "9.00",
     deposit_transaction_currency: "EUR", deposit_foreign_amount: "827.00", deposit_exchange_rate: "0.9231",
+    result_status: "pending",
   },
   {
     id: "p5", run_id: "r1", result_id: "res5",
@@ -72,6 +76,7 @@ const proposals: ReconResolutionProposal[] = [
     // 4782.06 / 6722.37 = 0.7114 — a regression to the old formula fails this.
     stripe_amount: "5000.00", netsuite_amount: "4782.06", variance_amount: "217.94",
     deposit_transaction_currency: "EUR", deposit_foreign_amount: "6722.37", deposit_exchange_rate: null,
+    result_status: "pending",
   },
   {
     id: "p6", run_id: "r1", result_id: "res6",
@@ -85,8 +90,17 @@ const proposals: ReconResolutionProposal[] = [
     netsuite_internal_id: "66666", netsuite_record_type: "custdep",
     stripe_amount: "500.00", netsuite_amount: "495.00", variance_amount: "5.00",
     deposit_transaction_currency: "EUR", deposit_foreign_amount: "495.00", deposit_exchange_rate: "1.000000",
+    result_status: "pending",
   },
 ];
+
+// Each row now hosts a RejectMatchControl, which calls useRejectResult() —
+// a react-query mutation. Unmocked it throws for want of a QueryClientProvider.
+// Reject behaviour itself is covered in reject-on-resolution-surface.test.tsx.
+vi.mock("@/hooks/use-reconciliation", () => ({
+  useApproveResult: () => ({ mutate: vi.fn(), isPending: false }),
+  useRejectResult: () => ({ mutate: vi.fn(), isPending: false, reset: vi.fn() }),
+}));
 
 const useGroupProposals = vi.fn(
   (_runId?: string | null, _groupKey?: string | null, _currency?: string | null) => ({

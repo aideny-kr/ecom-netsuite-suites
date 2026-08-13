@@ -8,7 +8,7 @@ vi.mock("@/hooks/use-reconciliation", () => ({
   useApproveResult: () => ({ mutate: vi.fn(), isPending: false }),
   // The table now also calls useRejectResult; a partial mock returns undefined and
   // every render throws.
-  useRejectResult: () => ({ mutate: vi.fn(), isPending: false }),
+  useRejectResult: () => ({ mutate: vi.fn(), isPending: false, reset: vi.fn() }),
 }));
 
 const autoMatchedResult: ReconResult = {
