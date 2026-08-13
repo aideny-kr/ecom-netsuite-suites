@@ -24,6 +24,16 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 _redis: redis.Redis | None = None
+# Consecutive Redis COMMAND failures (connect failures are a different thing -- those
+# return None from _get_redis and degrade immediately). A reachable-but-erroring Redis
+# re-connects and re-pings fine on every call, so without this counter the error path
+# repeated forever and `check_limit` denied every request until the process restarted.
+_redis_error_streak: int = 0
+# Deny this many consecutive command failures before concluding the fault is not a
+# blip and degrading to the in-memory window. Denying the blip is deliberate: falling
+# back on the first error hands a client sitting at the cap a fresh empty counter.
+# Denying indefinitely is not -- that is an outage, not a guardrail.
+REDIS_ERROR_DEGRADE_AFTER = 3
 _fallback: dict[str, list[float]] = defaultdict(list)
 # The fallback's read-modify-write is not atomic, and callers now reach it from
 # worker threads (asyncio.to_thread at the chat and MCP call sites), so concurrent
@@ -49,7 +59,18 @@ def _get_redis() -> redis.Redis | None:
     if _redis is not None:
         return _redis
     try:
-        _redis = redis.from_url(settings.REDIS_URL, decode_responses=True)
+        # Timeouts are mandatory here, not tuning. This module sits on the hot path of
+        # every chat turn and every MCP tool call, and redis-py defaults to blocking
+        # forever -- so a blackholed endpoint (SG change, dead NAT, Upstash incident)
+        # is an indefinite hang, not a slow call. The asyncio.to_thread wrappers at the
+        # call sites do not save us: they relocate the hang into the shared default
+        # executor, which has only min(32, cpu+4) threads for the whole process.
+        _redis = redis.from_url(
+            settings.REDIS_URL,
+            decode_responses=True,
+            socket_connect_timeout=settings.REDIS_CONNECT_TIMEOUT_SECONDS,
+            socket_timeout=settings.REDIS_SOCKET_TIMEOUT_SECONDS,
+        )
         _redis.ping()
         return _redis
     except Exception:
@@ -57,7 +78,14 @@ def _get_redis() -> redis.Redis | None:
         return None
 
 
-def check_limit(key: str, limit: int, window_seconds: int = WINDOW_SECONDS, *, fleet_wide: bool = False) -> bool:
+def check_limit(
+    key: str,
+    limit: int,
+    window_seconds: int = WINDOW_SECONDS,
+    *,
+    fleet_wide: bool = False,
+    deny_on_error: bool = True,
+) -> bool:
     """Return True if the request is allowed, False if rate-limited.
 
     `fleet_wide` says whether `limit` is a whole-fleet number or a per-process one,
@@ -71,24 +99,47 @@ def check_limit(key: str, limit: int, window_seconds: int = WINDOW_SECONDS, *, f
       we already know about). Degrade to the per-process window: it under-counts
       across replicas but still enforces.
     * **Reachable but the call raised** -- Redis holds a count we could not read.
-      DENY. Falling back here would score the request against `_fallback[key]`,
-      a counter starting at zero and completely disjoint from what Redis already
-      has, handing a client at the cap a fresh full window. That is the cap being
-      lifted during flakiness, which is precisely what this module promises not
-      to do, and it is how a runaway loop escapes. We also drop the cached client
-      so the next call re-attempts and, if Redis is genuinely gone, degrades to
-      the fallback cleanly instead of denying forever.
+      DENY, but only while the fault still looks transient. Falling back on the
+      first error would score the request against `_fallback[key]`, a counter
+      starting at zero and completely disjoint from what Redis already has,
+      handing a client at the cap a fresh full window -- the cap lifted during
+      exactly the flakiness this module promises it will not lift for.
+
+      After REDIS_ERROR_DEGRADE_AFTER consecutive command failures we stop calling
+      it transient and degrade to the per-process window. The previous version
+      promised that dropping the cached client would "degrade cleanly instead of
+      denying forever", but that only held when Redis was UNREACHABLE: a reachable
+      Redis whose commands fail (quota, OOM, MISCONF, ACL) re-connects and re-pings
+      successfully every single time, so the error path repeated forever and every
+      request was denied until the process restarted. Degraded enforcement beats a
+      fleet-wide outage.
+
+    `deny_on_error` is the availability decision, and it belongs to the CALLER, not
+    to this function. A cost guardrail may reasonably deny a burst it cannot price.
+    Authentication may not: denying there turns a cache fault into a total login
+    outage, so login degrades on the first error instead.
     """
-    global _redis
+    global _redis, _redis_error_streak
     r = _get_redis()
     if r is None:
         return _check_fallback(key, limit, window_seconds, fleet_wide=fleet_wide)
     try:
-        return _check_redis(r, key, limit, window_seconds)
+        allowed = _check_redis(r, key, limit, window_seconds)
     except Exception:
-        logger.warning("rate_limit.redis_error_denying key_prefix=%s", key.split(":", 2)[:2])
+        _redis_error_streak += 1
         _redis = None
+        degraded = not deny_on_error or _redis_error_streak > REDIS_ERROR_DEGRADE_AFTER
+        logger.warning(
+            "rate_limit.redis_error key_prefix=%s streak=%d action=%s",
+            key.split(":", 2)[:2],
+            _redis_error_streak,
+            "degrade" if degraded else "deny",
+        )
+        if degraded:
+            return _check_fallback(key, limit, window_seconds, fleet_wide=fleet_wide)
         return False
+    _redis_error_streak = 0
+    return allowed
 
 
 def check_login_rate_limit(ip: str) -> bool:
@@ -98,8 +149,20 @@ def check_login_rate_limit(ip: str) -> bool:
     part of the 2026-08-06 MCP re-baseline. Dividing it would have silently cut login
     lockout from 10 attempts to 2 during a Redis outage -- a quiet change to brute-force
     semantics, which this work explicitly promised not to make.
+
+    `deny_on_error=False` for the same reason. When this module gained a fail-closed
+    error branch for chat COST, login silently inherited it -- so any Redis fault
+    would have returned False here and locked every user out of authenticating. A
+    cache must not be able to take down auth. Degrading to the per-process counter
+    still enforces the lockout (test_rate_limit_redis_failure.py pins both halves).
     """
-    return check_limit(f"{_LOGIN_PREFIX}{ip}", MAX_ATTEMPTS, WINDOW_SECONDS, fleet_wide=False)
+    return check_limit(
+        f"{_LOGIN_PREFIX}{ip}",
+        MAX_ATTEMPTS,
+        WINDOW_SECONDS,
+        fleet_wide=False,
+        deny_on_error=False,
+    )
 
 
 def check_chat_burst_limit(tenant_id: str, user_id: str) -> bool:
@@ -111,11 +174,15 @@ def check_chat_burst_limit(tenant_id: str, user_id: str) -> bool:
     # Fleet-wide: the cap means "N turns a minute for this user", not "N per worker".
     # Caveat: with sticky routing a user pinned to one worker sees only their share
     # during a Redis outage. Fleet-correct beats worker-correct for a cost guardrail.
+    # deny_on_error: this is a spend guardrail, so an unreadable count is worth a 429
+    # while the fault looks transient. It stops being worth it once the fault is
+    # sustained -- see check_limit.
     return check_limit(
         f"{_CHAT_PREFIX}{tenant_id}:{user_id}",
         settings.CHAT_BURST_PER_MINUTE,
         WINDOW_SECONDS,
         fleet_wide=True,
+        deny_on_error=True,
     )
 
 
@@ -134,7 +201,13 @@ def check_mcp_tool_limit(tenant_id: str, tool_name: str, limit: int) -> bool:
     # window full. Kept deliberately -- for a cost guardrail, "retrying while capped
     # extends the cap" is the behaviour we want. It does mean the Redis and fallback
     # paths differ under sustained overload; documented in _check_redis.
-    return check_limit(f"{_MCP_PREFIX}{tenant_id}:{tool_name}", limit, WINDOW_SECONDS, fleet_wide=True)
+    return check_limit(
+        f"{_MCP_PREFIX}{tenant_id}:{tool_name}",
+        limit,
+        WINDOW_SECONDS,
+        fleet_wide=True,
+        deny_on_error=True,
+    )
 
 
 def _check_redis(r: redis.Redis, key: str, limit: int, window_seconds: int) -> bool:
@@ -199,7 +272,7 @@ def _check_fallback(key: str, limit: int, window_seconds: int, *, fleet_wide: bo
 
 def reset_rate_limits(prefix: str = _KEY_ROOT) -> None:
     """Clear rate limit state. Used in tests, and by governance's per-tenant reset."""
-    global _redis
+    global _redis, _redis_error_streak
     r = _get_redis()
     if r:
         try:
@@ -217,3 +290,9 @@ def reset_rate_limits(prefix: str = _KEY_ROOT) -> None:
             del _fallback[key]
     if prefix == _KEY_ROOT:
         _redis = None
+        # The degrade counter is limiter state too. Leaving it set meant a full reset
+        # did not actually restore the module: a process (or a test) that had already
+        # tripped REDIS_ERROR_DEGRADE_AFTER stayed in degraded mode against a healthy
+        # Redis, and the very next check took the fallback rather than the shared
+        # window.
+        _redis_error_streak = 0

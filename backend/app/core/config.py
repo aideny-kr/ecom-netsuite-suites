@@ -38,6 +38,14 @@ class Settings(BaseSettings):
     MCP_SERVER_PORT: int = 8001
     MCP_RATE_LIMIT_PER_MINUTE: int = 60
 
+    # Rate-limiter Redis socket budget. The limiter is on the hot path of every chat
+    # turn and every MCP tool call, and redis-py blocks forever by default, so an
+    # unreachable-but-not-refusing endpoint would hang the request rather than slow
+    # it. Small on purpose: exceeding these degrades to the in-memory window, which
+    # still enforces.
+    REDIS_CONNECT_TIMEOUT_SECONDS: float = 0.5
+    REDIS_SOCKET_TIMEOUT_SECONDS: float = 1.0
+
     # Chat turns per user per minute. Burst-only: bounds runaway retry loops and
     # scripted clients spending the platform Anthropic key, without capping a
     # legitimate heavy recon/report session for the day.
