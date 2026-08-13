@@ -71,3 +71,24 @@ def test_default_matches_the_production_image():
     assert Settings.model_fields["WEB_CONCURRENCY"].default == prod_workers, (
         f"WEB_CONCURRENCY's default should track the production image (--workers {prod_workers}), not the dev one"
     )
+
+
+def test_mcp_rebaseline_factor_matches_the_production_image():
+    """Gate round 6, major. The MCP re-baseline was scaled off the wrong image.
+
+    On 2026-08-06 every TOOL_CONFIGS rate_limit_per_minute was multiplied to convert
+    a per-process ceiling into a fleet-wide one, on the stated basis that "uvicorn
+    runs --workers 4 (backend/Dockerfile)". Production is not built from that file --
+    it is built from Dockerfile.prod, which runs 2. So the shared-Redis ceilings
+    shipped ~2x looser than anything production ever actually enforced.
+
+    That is the very defect this work exists to end: the number in TOOL_CONFIGS not
+    being the number enforced. Pinned to the image so it cannot drift again.
+    """
+    from app.mcp.governance import MCP_REBASELINE_FACTOR
+
+    prod_workers = _workers_in_cmd((BACKEND / "Dockerfile.prod").read_text())
+    assert MCP_REBASELINE_FACTOR == prod_workers, (
+        f"TOOL_CONFIGS were scaled by {MCP_REBASELINE_FACTOR} but production runs "
+        f"{prod_workers} workers — the enforced ceiling is not the historical one"
+    )

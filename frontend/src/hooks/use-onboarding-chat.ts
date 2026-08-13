@@ -20,6 +20,7 @@ export function useOnboardingChat() {
   const [isLoading, setIsLoading] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
   const [isComplete, setIsComplete] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [wizardStep, setWizardStep] = useState<string | null>(null);
   const startedRef = useRef(false);
 
@@ -88,8 +89,17 @@ export function useOnboardingChat() {
         }
       } catch (err) {
         console.error("Failed to send message:", err);
-        // Remove optimistic message on error
-        setMessages((prev) => prev.filter((m) => m.id !== userMsg.id));
+        // Do NOT delete the optimistic message. The backend now enforces a per-minute
+        // chat burst cap, so 429 is an ordinary outcome on a healthy session -- and
+        // deleting the bubble made what the user just typed vanish with no
+        // explanation, during onboarding, the first thing they ever do here. A rate
+        // limit means "wait a moment", not "that never happened": keep the message on
+        // screen and say why it did not send.
+        setError(
+          err instanceof Error
+            ? err.message
+            : "Failed to send message. Please try again.",
+        );
       } finally {
         setIsLoading(false);
       }
@@ -104,6 +114,7 @@ export function useOnboardingChat() {
     isLoading,
     isStarting,
     isComplete,
+    error,
     sessionId,
     wizardStep,
     setWizardStep,

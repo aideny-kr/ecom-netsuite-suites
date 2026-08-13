@@ -19,7 +19,11 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.dependencies import require_permission
 from app.core.encryption import encrypt_credentials, get_current_key_version
-from app.models.connection import RETIRED_CONNECTION_STATUSES, Connection
+from app.models.connection import (
+    ACTIVE_CONNECTION_STATUSES,
+    RETIRED_CONNECTION_STATUSES,
+    Connection,
+)
 from app.models.user import User
 from app.services import audit_service
 from app.services.netsuite_oauth_service import (
@@ -43,6 +47,36 @@ def _js_string(value: str) -> str:
     to \\u00xx keeps the string inert wherever it lands.
     """
     return json.dumps(value).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+
+
+def _render_callback(*, status: str, heading: str, message: str, event_type: str, error_detail: str) -> str:
+    """Render CALLBACK_HTML with BOTH of its interpolation contexts escaped.
+
+    A single funnel on purpose. Five call sites render this template and several
+    interpolate untrusted values -- the `error` query param, and `str(exc)[:200]` --
+    into an HTML body AND a JavaScript string literal. Escaping at the call sites
+    means any one of them forgetting is a reflected XSS; escaping here means none of
+    them can.
+
+    Why this is worth more than a normal reflected XSS (gate round 6, blocker):
+    `/callback` has no auth dependency, and its `if error or not code:` branch runs
+    before any state or Redis validation, so the payload needs no session and no
+    valid state. There is no CSP on the API origin (SecurityHeadersMiddleware sets
+    nosniff/X-Frame-Options/Referrer-Policy/HSTS only). The refresh cookie is
+    host-only on that origin with `path=/api/v1/auth` and SameSite=lax, so injected
+    script can POST /api/v1/auth/refresh same-origin and read a fresh access token
+    out of the JSON body -- HttpOnly is no defence against same-origin script.
+
+    `error_detail` is emitted by `_js_string`, which supplies its own quotes, so the
+    template must NOT wrap it in quotes of its own.
+    """
+    return CALLBACK_HTML.format(
+        status=html.escape(status),
+        heading=html.escape(heading),
+        message=html.escape(message),
+        event_type=html.escape(event_type),
+        error_detail_js=_js_string(error_detail),
+    )
 
 
 def _select_connection_for_account(
@@ -87,15 +121,32 @@ def _select_connection_for_account(
     # else still names the account the tenant is bound to.
     live_rows = [c for c in candidates if c.status not in RETIRED_CONNECTION_STATUSES]
 
+    # Two DIFFERENT questions, two different populations -- conflating them is what
+    # gate round 6 caught, and it was a regression from round 5's own fix:
+    #
+    #   "is this account already the binding?"  -> only rows that actually SERVE reads
+    #   "which account is losing reads?"        -> those, else any non-retired row
+    #
+    # Round 5 widened both to live_rows so a switch off an `error` row would be
+    # reported. That fixed the second question and broke the first: with prod active
+    # and a stale sandbox row in `error`, re-authorizing sandbox matched the error
+    # row, declared "already bound", and returned None -- while supersede demoted the
+    # prod row underneath and every read moved to sandbox. The silent repoint again.
+    #
+    # `incumbents` falls back to live_rows precisely so the round-5 case still works:
+    # when nothing is active, an `error` row IS the tenant's binding.
+    serving_rows = [c for c in candidates if c.status in ACTIVE_CONNECTION_STATUSES]
+    incumbents = serving_rows or live_rows
+
     # Land on the row already bound to this account whatever its status, so a
     # reclaimed row is reused instead of duplicated.
     selected = next((c for c in candidates if account_of(c) == account_id), None)
     if selected is None:
         selected = live_rows[0] if live_rows else candidates[0]
 
-    if any(account_of(c) == account_id for c in live_rows):
+    if any(account_of(c) == account_id for c in incumbents):
         # This account is already the tenant's binding. Not a switch -- and in the
-        # pathological two-live-rows case, naming "the other" row as the previous
+        # pathological two-serving-rows case, naming "the other" row as the previous
         # account would be arbitrary, since which one served any given read was
         # exactly the nondeterminism being repaired.
         switched_from = None
@@ -103,7 +154,7 @@ def _select_connection_for_account(
         # Rows predating metadata_json.account_id name no account, so we cannot
         # claim what they switched from -- adopt them rather than fabricate an
         # audit record.
-        previous = account_of(live_rows[0]) if live_rows else None
+        previous = account_of(incumbents[0]) if incumbents else None
         switched_from = previous if previous and previous != account_id else None
 
     return selected, switched_from
@@ -156,7 +207,7 @@ CALLBACK_HTML = """<!DOCTYPE html>
     try {{
       if (window.opener) {{
         window.opener.postMessage(
-          {{ type: "{event_type}", error: "{error_detail}" }},
+          {{ type: "{event_type}", error: {error_detail_js} }},
           "*"
         );
         setTimeout(function() {{ window.close(); }}, 1000);
@@ -272,7 +323,7 @@ async def callback(
     if error or not code:
         logger.warning("netsuite.oauth2.callback_error", error=error, state=state)
         return HTMLResponse(
-            CALLBACK_HTML.format(
+            _render_callback(
                 status="error",
                 heading="Authentication Failed",
                 message=f"NetSuite returned an error: {error or 'no authorization code received'}. "
@@ -299,7 +350,7 @@ async def callback(
         except Exception as exc:
             logger.error("netsuite.mcp_callback_delegation_failed", error=str(exc))
             return HTMLResponse(
-                CALLBACK_HTML.format(
+                _render_callback(
                     status="error",
                     heading="Authentication Failed",
                     message=f"MCP connector creation failed: {str(exc)[:200]}",
@@ -315,7 +366,7 @@ async def callback(
 
     if not stored:
         return HTMLResponse(
-            CALLBACK_HTML.format(
+            _render_callback(
                 status="error",
                 heading="Authentication Failed",
                 message="Invalid or expired state parameter. Please try again.",
@@ -356,7 +407,7 @@ async def callback(
     except Exception as exc:
         logger.error("netsuite.oauth2.exchange_failed", error=str(exc))
         return HTMLResponse(
-            CALLBACK_HTML.format(
+            _render_callback(
                 status="error",
                 heading="Authentication Failed",
                 message="Token exchange failed. Please try again.",
@@ -496,7 +547,7 @@ async def callback(
         )
 
     return HTMLResponse(
-        CALLBACK_HTML.format(
+        _render_callback(
             status="success",
             heading="Authentication Successful",
             message="You can close this window now.",

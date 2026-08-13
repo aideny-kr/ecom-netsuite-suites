@@ -595,11 +595,11 @@ class TestMcpTools:
         assert "workspace.run_unit_tests" in TOOL_REGISTRY
 
     def test_governance_configs_exist(self):
-        from app.mcp.governance import TOOL_CONFIGS
+        from app.mcp.governance import MCP_REBASELINE_FACTOR, TOOL_CONFIGS
 
         assert "workspace.run_validate" in TOOL_CONFIGS
         assert "workspace.run_unit_tests" in TOOL_CONFIGS
-        assert TOOL_CONFIGS["workspace.run_validate"]["rate_limit_per_minute"] == 20
+        assert TOOL_CONFIGS["workspace.run_validate"]["rate_limit_per_minute"] == 5 * MCP_REBASELINE_FACTOR
 
 
 # --- TestIdempotency ---

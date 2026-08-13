@@ -612,23 +612,23 @@ class TestMcpToolRegistration:
         assert "workspace.deploy_sandbox" in TOOL_REGISTRY
 
     def test_assertions_governance_config(self):
-        from app.mcp.governance import TOOL_CONFIGS
+        from app.mcp.governance import MCP_REBASELINE_FACTOR, TOOL_CONFIGS
 
         config = TOOL_CONFIGS["workspace.run_suiteql_assertions"]
-        assert config["rate_limit_per_minute"] == 20
+        assert config["rate_limit_per_minute"] == 5 * MCP_REBASELINE_FACTOR
         assert config["requires_entitlement"] == "workspace"
         assert "changeset_id" in config["allowlisted_params"]
         assert "assertions" in config["allowlisted_params"]
 
     def test_deploy_governance_config(self):
-        from app.mcp.governance import TOOL_CONFIGS
+        from app.mcp.governance import MCP_REBASELINE_FACTOR, TOOL_CONFIGS
 
         # workspace.deploy_sandbox is now the preview-only tool (no
         # override_reason; the legacy override path lived on the old
         # one-click endpoint that's now 410). Confirm step is a
         # separate tool — see test_workspace_tools_deploy.py.
         config = TOOL_CONFIGS["workspace.deploy_sandbox"]
-        assert config["rate_limit_per_minute"] == 8
+        assert config["rate_limit_per_minute"] == 2 * MCP_REBASELINE_FACTOR
         assert config["requires_entitlement"] == "workspace"
         assert "changeset_id" in config["allowlisted_params"]
         assert "sandbox_id" in config["allowlisted_params"]

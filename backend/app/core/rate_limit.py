@@ -15,7 +15,7 @@ user out of logging in).
 import logging
 import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 
 import redis
 
@@ -24,16 +24,30 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 _redis: redis.Redis | None = None
-# Consecutive Redis COMMAND failures (connect failures are a different thing -- those
-# return None from _get_redis and degrade immediately). A reachable-but-erroring Redis
-# re-connects and re-pings fine on every call, so without this counter the error path
-# repeated forever and `check_limit` denied every request until the process restarted.
-_redis_error_streak: int = 0
-# Deny this many consecutive command failures before concluding the fault is not a
-# blip and degrading to the in-memory window. Denying the blip is deliberate: falling
-# back on the first error hands a client sitting at the cap a fresh empty counter.
-# Denying indefinitely is not -- that is an outage, not a guardrail.
+
+# Redis health, judged by error RATE in a window -- NOT by a consecutive-error streak.
+# The streak version (2026-08-13, first attempt) reset on every success, so a Redis
+# failing only SOME commands never reached the threshold: it denied the failing half
+# of every request forever while reporting a streak of 1. Timestamps age out on their
+# own, so an interleaved success no longer erases the evidence.
+_redis_error_times: deque[float] = deque()
+# Monotonic deadline. While in the future, callers skip Redis ENTIRELY. That is also
+# the fix for the reconnect storm: the error path drops the cached client, so without
+# this every subsequent request re-paid a full connect+PING against a Redis already
+# known to be sick, on the hottest path in the app.
+_redis_degraded_until: float = 0.0
+_health_lock = threading.Lock()
+
+# Errors within REDIS_ERROR_WINDOW_SECONDS before we stop calling it a blip.
+# Denying the blip is deliberate: falling back on the first error hands a client
+# sitting at the cap a fresh empty counter. Denying indefinitely is not -- that is an
+# outage, not a guardrail.
 REDIS_ERROR_DEGRADE_AFTER = 3
+REDIS_ERROR_WINDOW_SECONDS = 10.0
+# How long to stay on the in-memory window before trying Redis again. Bounded so a
+# transient incident cannot permanently abandon the shared window.
+REDIS_DEGRADE_COOLDOWN_SECONDS = 30.0
+
 _fallback: dict[str, list[float]] = defaultdict(list)
 # The fallback's read-modify-write is not atomic, and callers now reach it from
 # worker threads (asyncio.to_thread at the chat and MCP call sites), so concurrent
@@ -105,41 +119,62 @@ def check_limit(
       handing a client at the cap a fresh full window -- the cap lifted during
       exactly the flakiness this module promises it will not lift for.
 
-      After REDIS_ERROR_DEGRADE_AFTER consecutive command failures we stop calling
-      it transient and degrade to the per-process window. The previous version
-      promised that dropping the cached client would "degrade cleanly instead of
-      denying forever", but that only held when Redis was UNREACHABLE: a reachable
-      Redis whose commands fail (quota, OOM, MISCONF, ACL) re-connects and re-pings
-      successfully every single time, so the error path repeated forever and every
-      request was denied until the process restarted. Degraded enforcement beats a
-      fleet-wide outage.
+      Once REDIS_ERROR_DEGRADE_AFTER errors land inside REDIS_ERROR_WINDOW_SECONDS
+      we stop calling it transient and degrade to the per-process window for
+      REDIS_DEGRADE_COOLDOWN_SECONDS, dialling Redis again after that.
+
+      Two earlier versions of this branch got it wrong in different ways, and both
+      are worth remembering. The first promised that dropping the cached client
+      would "degrade cleanly instead of denying forever" -- true only when Redis is
+      UNREACHABLE; a reachable Redis whose commands fail (quota, OOM, MISCONF, ACL)
+      re-connects and re-pings successfully every time, so it denied every request
+      until the process restarted. The second counted CONSECUTIVE errors and reset
+      on success, which a partial fault defeats: at a 50% error rate the streak
+      never passed 1, so half of all traffic was denied indefinitely. Hence a rate
+      in a window -- a success does not erase the evidence.
 
     `deny_on_error` is the availability decision, and it belongs to the CALLER, not
     to this function. A cost guardrail may reasonably deny a burst it cannot price.
     Authentication may not: denying there turns a cache fault into a total login
     outage, so login degrades on the first error instead.
     """
-    global _redis, _redis_error_streak
+    global _redis, _redis_degraded_until
+
+    # Already known sick: use the in-memory window and do not dial Redis at all.
+    if time.monotonic() < _redis_degraded_until:
+        return _check_fallback(key, limit, window_seconds, fleet_wide=fleet_wide)
+
     r = _get_redis()
     if r is None:
         return _check_fallback(key, limit, window_seconds, fleet_wide=fleet_wide)
     try:
-        allowed = _check_redis(r, key, limit, window_seconds)
+        return _check_redis(r, key, limit, window_seconds)
     except Exception:
-        _redis_error_streak += 1
+        now = time.monotonic()
+        with _health_lock:
+            _redis_error_times.append(now)
+            cutoff = now - REDIS_ERROR_WINDOW_SECONDS
+            while _redis_error_times and _redis_error_times[0] < cutoff:
+                _redis_error_times.popleft()
+            tripped = len(_redis_error_times) >= REDIS_ERROR_DEGRADE_AFTER
+            if tripped:
+                _redis_degraded_until = now + REDIS_DEGRADE_COOLDOWN_SECONDS
+                _redis_error_times.clear()
+            recent = len(_redis_error_times)
         _redis = None
-        degraded = not deny_on_error or _redis_error_streak > REDIS_ERROR_DEGRADE_AFTER
         logger.warning(
-            "rate_limit.redis_error key_prefix=%s streak=%d action=%s",
+            "rate_limit.redis_error key_prefix=%s recent_errors=%d action=%s",
             key.split(":", 2)[:2],
-            _redis_error_streak,
-            "degrade" if degraded else "deny",
+            recent,
+            "degrade" if (tripped or not deny_on_error) else "deny",
         )
-        if degraded:
+        # Every caller's errors feed the SAME health window on purpose: there is one
+        # Redis, so a login failure is evidence chat's next call will fail too, and
+        # pooling the signal detects the fault sooner. What must not be shared is a
+        # counter a success can reset -- that was the bug.
+        if tripped or not deny_on_error:
             return _check_fallback(key, limit, window_seconds, fleet_wide=fleet_wide)
         return False
-    _redis_error_streak = 0
-    return allowed
 
 
 def check_login_rate_limit(ip: str) -> bool:
@@ -272,7 +307,7 @@ def _check_fallback(key: str, limit: int, window_seconds: int, *, fleet_wide: bo
 
 def reset_rate_limits(prefix: str = _KEY_ROOT) -> None:
     """Clear rate limit state. Used in tests, and by governance's per-tenant reset."""
-    global _redis, _redis_error_streak
+    global _redis, _redis_degraded_until
     r = _get_redis()
     if r:
         try:
@@ -290,9 +325,9 @@ def reset_rate_limits(prefix: str = _KEY_ROOT) -> None:
             del _fallback[key]
     if prefix == _KEY_ROOT:
         _redis = None
-        # The degrade counter is limiter state too. Leaving it set meant a full reset
-        # did not actually restore the module: a process (or a test) that had already
-        # tripped REDIS_ERROR_DEGRADE_AFTER stayed in degraded mode against a healthy
-        # Redis, and the very next check took the fallback rather than the shared
-        # window.
-        _redis_error_streak = 0
+        # Health state is limiter state too. Leaving it set meant a full reset did not
+        # actually restore the module: a process (or a test) that had already tripped
+        # the degrade threshold stayed on the fallback against a healthy Redis.
+        with _health_lock:
+            _redis_error_times.clear()
+            _redis_degraded_until = 0.0

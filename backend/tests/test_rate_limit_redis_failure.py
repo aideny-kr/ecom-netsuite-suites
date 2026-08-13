@@ -121,23 +121,97 @@ def test_degraded_chat_still_enforces_the_cap(monkeypatch):
     )
 
 
-def test_a_successful_call_resets_the_error_streak(monkeypatch):
-    """Otherwise a slow drip of unrelated errors eventually degrades a healthy Redis."""
+class _FlakyRedis:
+    """Reachable, and fails every OTHER command — the realistic partial fault.
+
+    This is the shape a consecutive-error counter cannot see: any interleaved success
+    resets it, so the streak never reaches the degrade threshold and the failing half
+    of the traffic is denied indefinitely.
+    """
+
+    def __init__(self):
+        self.n = 0
+
+    def ping(self):
+        return True
+
+    def pipeline(self):
+        self.n += 1
+        if self.n % 2 == 0:
+            return _OkPipeline()
+        raise ConnectionError("flaky")
+
+
+def test_an_intermittent_fault_still_degrades(monkeypatch):
+    """Gate round 6, major — a regression from round 5's own fix.
+
+    The first version counted CONSECUTIVE errors and reset on every success. Against
+    a Redis failing 50% of commands the streak never got past 1, so it never degraded
+    and denied half of every tenant's chat turns for as long as the fault lasted.
+    Health is now judged by error RATE inside a time window, which a success does not
+    erase.
+    """
+    monkeypatch.setattr(rl, "_get_redis", lambda: _FlakyRedis())
+    tenant, user = str(uuid.uuid4()), str(uuid.uuid4())
+
+    verdicts = [rl.check_chat_burst_limit(tenant, user) for _ in range(12)]
+
+    assert verdicts[0] is False, "the first error must still deny — it may be a blip"
+    assert verdicts[-1] is True, "a persistent intermittent fault must end in the degraded window, not deny forever"
+
+
+def test_degraded_mode_stops_touching_redis_at_all(monkeypatch):
+    """Also gate round 6: the error path dropped the cached client every time.
+
+    With no negative caching, every subsequent request re-paid a full connect+PING
+    against a Redis already known to be unwell — on the hot path of every chat turn
+    and every MCP tool call. Once degraded we must not dial it again until the
+    cooldown expires.
+    """
     erroring = _ErroringRedis()
     monkeypatch.setattr(rl, "_get_redis", lambda: erroring)
     tenant, user = str(uuid.uuid4()), str(uuid.uuid4())
 
+    for _ in range(rl.REDIS_ERROR_DEGRADE_AFTER + 1):
+        rl.check_chat_burst_limit(tenant, user)
+    calls_when_degraded = erroring.pipeline_calls
+
+    for _ in range(5):
+        rl.check_chat_burst_limit(tenant, user)
+
+    assert erroring.pipeline_calls == calls_when_degraded, (
+        "degraded mode must skip Redis entirely, not reconnect on every call"
+    )
+
+
+def test_the_degraded_window_expires_so_a_recovered_redis_is_used_again(monkeypatch):
+    """Degrading must be temporary, or a blip permanently abandons the shared window."""
+    monkeypatch.setattr(rl, "_get_redis", lambda: _ErroringRedis())
+    tenant, user = str(uuid.uuid4()), str(uuid.uuid4())
+    for _ in range(rl.REDIS_ERROR_DEGRADE_AFTER + 1):
+        rl.check_chat_burst_limit(tenant, user)
+    assert rl._redis_degraded_until > 0, "should be in the degraded window"
+
+    # Pretend the cooldown elapsed, and Redis came back.
+    monkeypatch.setattr(rl, "_redis_degraded_until", 0.0)
+    healthy = _HealthyRedis()
+    monkeypatch.setattr(rl, "_get_redis", lambda: healthy)
+
     rl.check_chat_burst_limit(tenant, user)
-    assert rl._redis_error_streak > 0
 
-    class _HealthyRedis(_ErroringRedis):
-        def pipeline(self):
-            return _OkPipeline()
+    assert healthy.pipeline_calls == 1, "must dial the shared window again once recovered"
 
-    monkeypatch.setattr(rl, "_get_redis", lambda: _HealthyRedis())
-    rl.check_chat_burst_limit(tenant, user)
 
-    assert rl._redis_error_streak == 0, "a healthy call must clear the streak"
+class _HealthyRedis:
+    def __init__(self):
+        self.pipeline_calls = 0
+
+    def ping(self):
+        return True
+
+    def pipeline(self):
+        self.pipeline_calls += 1
+        return _OkPipeline()
 
 
 class _OkPipeline:

