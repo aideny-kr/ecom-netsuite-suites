@@ -314,3 +314,78 @@ def test_superseded_is_registered_as_retired_not_left_for_the_workers_to_guess()
 
 def test_retired_statuses_cover_revoked_too():
     assert "revoked" in RETIRED_CONNECTION_STATUSES
+
+
+# ---------------------------------------------------------------------------
+# A connection in `error` is the state users actually re-authorize FROM
+# ---------------------------------------------------------------------------
+
+
+def test_switching_away_from_an_error_row_is_still_a_switch():
+    """Gate round 5, blocker. The whole point of this change is "overwrite, but
+    loudly" -- and it was silent in the single most likely real-world path.
+
+    NetSuite refresh tokens are single-use, so a connection whose refresh died sits
+    at status="error" (workers/tasks/connection_health.py flips it there). That is
+    precisely the state a tenant is in when someone goes to re-authorize. Judging
+    "switched" against ACTIVE_CONNECTION_STATUSES = ("active","healthy") excluded
+    those rows, so `switched_from` came back None and the callback skipped ALL
+    THREE of its safeguards: no connection.account_switched audit event, no
+    ACCOUNT_SWITCHED_HTML warning page (the operator got the 1-second self-closing
+    success page), and no label rewrite -- leaving the row reading "NetSuite <prod>"
+    while every SuiteQL query, pivot, report and sync now hits the sandbox.
+
+    That is verbatim the defect this module's docstring says the change fixes.
+    """
+    dead_prod = _conn(PROD)
+    dead_prod.status = "error"
+    dead_prod.error_reason = "token refresh failed"
+
+    selected, switched_from = _select_connection_for_account([dead_prod], SANDBOX)
+
+    assert selected is dead_prod, "reuse the row rather than duplicating it"
+    assert switched_from == PROD, (
+        "an error-state row is the account losing reads — it must be audited, "
+        "surfaced and relabelled just like an active one"
+    )
+
+
+def test_error_row_is_not_treated_as_retired():
+    """Pins the classification itself, so the fix survives a rename.
+
+    `error` must count as a row still bound to an account (it is dispatched by
+    fan-outs), NOT as retired like revoked/superseded.
+    """
+    assert "error" not in RETIRED_CONNECTION_STATUSES
+    assert "error" in DISPATCHABLE_CONNECTION_STATUSES
+
+
+def test_reauth_of_the_same_account_in_error_is_not_a_switch():
+    """Recovering a dead token for the SAME account must stay silent."""
+    dead_prod = _conn(PROD)
+    dead_prod.status = "error"
+
+    selected, switched_from = _select_connection_for_account([dead_prod], PROD)
+
+    assert selected is dead_prod
+    assert switched_from is None
+
+
+def test_switch_prefers_a_live_error_row_over_a_superseded_one():
+    """`error` outranks `superseded` when naming the account losing reads.
+
+    A superseded row was deliberately retired; an error row is the tenant's real
+    current binding. Naming the superseded one would put a false account id in the
+    audit trail -- the round-3 defect, re-entered through the error path.
+    """
+    retired_sandbox = _conn(SANDBOX)
+    retired_sandbox.status = "superseded"
+    dead_prod = _conn(PROD)
+    dead_prod.status = "error"
+
+    selected, switched_from = _select_connection_for_account(
+        [retired_sandbox, dead_prod], "7654321"
+    )
+
+    assert switched_from == PROD, "must name the live (error) row, not the retired one"
+    assert selected is dead_prod
