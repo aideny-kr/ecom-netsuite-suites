@@ -383,9 +383,7 @@ def test_switch_prefers_a_live_error_row_over_a_superseded_one():
     dead_prod = _conn(PROD)
     dead_prod.status = "error"
 
-    selected, switched_from = _select_connection_for_account(
-        [retired_sandbox, dead_prod], "7654321"
-    )
+    selected, switched_from = _select_connection_for_account([retired_sandbox, dead_prod], "7654321")
 
     assert switched_from == PROD, "must name the live (error) row, not the retired one"
     assert selected is dead_prod

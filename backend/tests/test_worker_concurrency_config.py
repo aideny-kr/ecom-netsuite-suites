@@ -69,6 +69,5 @@ def test_default_matches_the_production_image():
 
     prod_workers = _workers_in_cmd((BACKEND / "Dockerfile.prod").read_text())
     assert Settings.model_fields["WEB_CONCURRENCY"].default == prod_workers, (
-        "WEB_CONCURRENCY's default should track the production image "
-        f"(--workers {prod_workers}), not the dev one"
+        f"WEB_CONCURRENCY's default should track the production image (--workers {prod_workers}), not the dev one"
     )
