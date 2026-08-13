@@ -210,7 +210,7 @@ class ReconResultResponse(BaseModel):
     approved_at: datetime | None = None
     # Reject disposition. Surfaced so a rejected row can show WHY on the review table —
     # a terminal row with no visible reason forces the reviewer back to the audit log.
-    # `counts_as_false_positive` is deliberately NOT exposed: it is the metric the
+    # `counts_as_envelope_error` is deliberately NOT exposed: it is the metric the
     # corpus feeds, and showing a reviewer which reasons score against the matcher lets
     # them pick the reason that produces the number they want.
     reject_reason: str | None = None
@@ -384,6 +384,14 @@ class ResolutionProposalResponse(BaseModel):
     deposit_transaction_currency: str | None = None
     deposit_foreign_amount: Decimal | None = None
     deposit_exchange_rate: Decimal | None = None
+    # The matched ReconciliationResult's OWN disposition — distinct from `status`
+    # above, which is the proposal's. The resolution surface offers "Reject match",
+    # and that mutates the result while leaving the proposal untouched, so gating
+    # that control on the proposal's status made it inert in both directions: a
+    # rejected row kept offering Reject forever (this endpoint filters on proposal
+    # status alone, so a reload did not help), and an already-terminal result still
+    # got a button whose every click is a guaranteed 400.
+    result_status: str | None = None
 
     model_config = {"from_attributes": True}
 
