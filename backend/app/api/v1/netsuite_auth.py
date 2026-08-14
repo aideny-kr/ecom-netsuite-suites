@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import html
-import json
+import re
 import uuid
 from collections.abc import Sequence
 from typing import Annotated
@@ -15,6 +15,7 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.oauth_callback_page import js_string, render_callback
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.dependencies import require_permission
@@ -33,50 +34,56 @@ from app.services.netsuite_oauth_service import (
     get_valid_token,
 )
 
+# Re-exported under the module-private names this file and its tests already use.
+# The template and its escaping now live in oauth_callback_page so the MCP callback
+# -- reached from THIS endpoint -- shares them instead of carrying a second copy.
+_js_string = js_string
+_render_callback = render_callback
+
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/connections/netsuite", tags=["netsuite-oauth"])
 
 
-def _js_string(value: str) -> str:
-    """JSON-encode a value for embedding inside an inline <script> block.
+_ACCOUNT_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
-    json.dumps alone is NOT enough here: it escapes quotes but leaves `<` and `>`
-    untouched, so a value containing `</script>` closes the element early and
-    everything after it is parsed as HTML. Escaping the angle brackets (and `&`)
-    to \\u00xx keeps the string inert wherever it lands.
+
+def _validate_account_id(account_id: str) -> str:
+    """Reject any account id that could shift the OAuth state's positional parse.
+
+    Gate round 8, BLOCKER -- cross-tenant takeover. /authorize packs
+    `f"{verifier}:{account_id}:{tenant_id}:{user_id}|{restlet_url}|{client_id}"` into
+    Redis, and /callback pulls it apart with `split(":", maxsplit=3)`. Nothing
+    validated account_id, so a colon inside it shifted every following field: an admin
+    of their OWN tenant could pass
+
+        account_id = "1234567:<victim tenant uuid>:<their own user id>"
+
+    and the UNAUTHENTICATED callback then read tenant_id as the victim's, while
+    account_id still parsed clean ("1234567") so the NetSuite token exchange succeeded
+    against the attacker's account and nothing looked out of place.
+
+    That was always wrong, but this change set raises the stakes:
+    `_supersede_other_connections` demotes EVERY NetSuite row belonging to the parsed
+    tenant, and RETIRED_CONNECTION_STATUSES deliberately excludes those rows from
+    health-check, proactive refresh and worker dispatch -- so the victim's real
+    connection is not overwritten once, it stays permanently dead while every SuiteQL
+    query, pivot, report and recon sync reads the attacker's NetSuite account.
+
+    Validating at the entry point is the fix rather than escaping at the parse: the
+    delimiter cannot be smuggled if the field cannot contain it. Commit ea3a5b84 moved
+    restlet_url and client_id onto `|` for exactly this reason and left account_id
+    behind; this closes that gap.
+
+    Real NetSuite account ids are alphanumeric with `-`/`_` (`1234567`, `1234567-sb1`,
+    `TSTDRV1234567`), so this rejects nothing legitimate.
     """
-    return json.dumps(value).replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
-
-
-def _render_callback(*, status: str, heading: str, message: str, event_type: str, error_detail: str) -> str:
-    """Render CALLBACK_HTML with BOTH of its interpolation contexts escaped.
-
-    A single funnel on purpose. Five call sites render this template and several
-    interpolate untrusted values -- the `error` query param, and `str(exc)[:200]` --
-    into an HTML body AND a JavaScript string literal. Escaping at the call sites
-    means any one of them forgetting is a reflected XSS; escaping here means none of
-    them can.
-
-    Why this is worth more than a normal reflected XSS (gate round 6, blocker):
-    `/callback` has no auth dependency, and its `if error or not code:` branch runs
-    before any state or Redis validation, so the payload needs no session and no
-    valid state. There is no CSP on the API origin (SecurityHeadersMiddleware sets
-    nosniff/X-Frame-Options/Referrer-Policy/HSTS only). The refresh cookie is
-    host-only on that origin with `path=/api/v1/auth` and SameSite=lax, so injected
-    script can POST /api/v1/auth/refresh same-origin and read a fresh access token
-    out of the JSON body -- HttpOnly is no defence against same-origin script.
-
-    `error_detail` is emitted by `_js_string`, which supplies its own quotes, so the
-    template must NOT wrap it in quotes of its own.
-    """
-    return CALLBACK_HTML.format(
-        status=html.escape(status),
-        heading=html.escape(heading),
-        message=html.escape(message),
-        event_type=html.escape(event_type),
-        error_detail_js=_js_string(error_detail),
-    )
+    if not account_id or not _ACCOUNT_ID_RE.match(account_id):
+        raise ValueError(
+            "account_id must be alphanumeric with optional - or _ "
+            "(NetSuite account ids look like 1234567 or 1234567-sb1)"
+        )
+    return account_id
 
 
 def _select_connection_for_account(
@@ -186,42 +193,6 @@ def _supersede_other_connections(
     return superseded
 
 
-CALLBACK_HTML = """<!DOCTYPE html>
-<html>
-<head>
-  <title>NetSuite Authentication</title>
-  <style>
-    body {{ font-family: system-ui, sans-serif; padding: 2rem; text-align: center; }}
-    .success {{ color: green; }}
-    .error {{ color: red; }}
-    a {{ color: #0066cc; text-decoration: none; }}
-    a:hover {{ text-decoration: underline; }}
-  </style>
-</head>
-<body>
-  <h3 class="{status}">
-    {heading}
-  </h3>
-  <p>{message}</p>
-  <script>
-    try {{
-      if (window.opener) {{
-        window.opener.postMessage(
-          {{ type: "{event_type}", error: {error_detail_js} }},
-          "*"
-        );
-        setTimeout(function() {{ window.close(); }}, 1000);
-      }} else {{
-        setTimeout(function() {{ window.location.href = "/"; }}, 2000);
-      }}
-    }} catch (e) {{
-      window.location.href = "/";
-    }}
-  </script>
-</body>
-</html>"""
-
-
 # Shown when a callback repoints the tenant's single NetSuite connection at a
 # different account. Same event_type as the success page so the opener's existing
 # handlers still refresh -- but this one does not self-close, and it carries the
@@ -282,6 +253,11 @@ async def authorize(
     Each connection requires its own client_id from a NetSuite Integration Record.
     Falls back to settings.NETSUITE_OAUTH_CLIENT_ID only for backwards compatibility.
     """
+    try:
+        account_id = _validate_account_id(account_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
     resolved_client_id = client_id or settings.NETSUITE_OAUTH_CLIENT_ID
     if not resolved_client_id:
         raise HTTPException(

@@ -18,14 +18,17 @@ from __future__ import annotations
 import html as html_mod
 import uuid
 
+import pytest
+
 from app.api.v1.netsuite_auth import (
     ACCOUNT_SWITCHED_HTML,
-    CALLBACK_HTML,
     _js_string,
     _render_callback,
     _select_connection_for_account,
     _supersede_other_connections,
+    _validate_account_id,
 )
+from app.api.v1.oauth_callback_page import CALLBACK_HTML
 from app.models.connection import (
     ACTIVE_CONNECTION_STATUSES,
     DISPATCHABLE_CONNECTION_STATUSES,
@@ -477,3 +480,53 @@ def test_callback_page_escaping_survives_a_script_close():
 
     assert "</script><script>" not in rendered
     assert "\\u003c" in rendered, "angle brackets should be \\u-escaped in the JS context"
+
+
+# ---------------------------------------------------------------------------
+# The OAuth state blob is positionally parsed -- its fields must be unambiguous
+# ---------------------------------------------------------------------------
+
+
+def test_account_id_with_a_delimiter_is_rejected():
+    """Gate round 8, BLOCKER. Cross-tenant takeover via the state delimiter.
+
+    /authorize packs `f"{verifier}:{account_id}:{tenant_id}:{user_id}|..."` into Redis
+    and /callback parses it positionally with `split(":", maxsplit=3)`. A colon inside
+    the caller-supplied account_id shifts every following field, so an admin of their
+    OWN tenant can pass
+
+        account_id = "1234567:<victim tenant uuid>:<their user id>"
+
+    and the UNAUTHENTICATED callback then parses tenant_id as the victim's. account_id
+    still parses clean ("1234567"), so the token exchange succeeds against the
+    attacker's own NetSuite account and nothing looks wrong.
+
+    This PR turns that from bad into much worse: _supersede_other_connections demotes
+    EVERY NetSuite row of the parsed tenant, and RETIRED_CONNECTION_STATUSES makes
+    those rows skip health-check, refresh and dispatch -- so the victim's real
+    connection is not merely overwritten, it stays permanently dead while their
+    SuiteQL, pivots, reports and recon syncs all read the attacker's account.
+
+    Commit ea3a5b84 already fixed this delimiter class for restlet_url and client_id
+    (that is why they use `|`) and left account_id behind.
+    """
+    for hostile in (
+        "1234567:bf92d059-4f45-492d-b920-d0390f6fb77a:1111",
+        "1234567|evil",
+        "1234567:",
+        ":1234567",
+    ):
+        with pytest.raises(ValueError):
+            _validate_account_id(hostile)
+
+
+def test_real_netsuite_account_ids_are_accepted():
+    """Production, sandbox and TSTDRV shapes must all still work."""
+    for good in ("1234567", "1234567-sb1", "TSTDRV1234567", "1234567_SB2"):
+        assert _validate_account_id(good) == good
+
+
+def test_account_id_cannot_smuggle_whitespace_or_be_empty():
+    for hostile in ("", "   ", "12345 67", "1234567\n:x"):
+        with pytest.raises(ValueError):
+            _validate_account_id(hostile)
