@@ -26,6 +26,7 @@ export function ChatCopilotPanel({ wizardStep }: ChatCopilotPanelProps) {
     isLoading,
     isStarting,
     setWizardStep,
+    error,
   } = useOnboardingChat();
 
   useEffect(() => {
@@ -66,6 +67,11 @@ export function ChatCopilotPanel({ wizardStep }: ChatCopilotPanelProps) {
       </div>
 
       {/* Input */}
+      {error && (
+        <p role="alert" className="px-4 pb-2 text-sm text-amber-600">
+          {error}
+        </p>
+      )}
       {!isStarting && <ChatInput onSend={sendMessage} isLoading={isLoading} />}
     </div>
   );

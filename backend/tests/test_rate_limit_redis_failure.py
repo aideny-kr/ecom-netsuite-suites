@@ -253,3 +253,62 @@ def test_redis_client_is_built_with_socket_timeouts(monkeypatch):
 
     assert captured.get("socket_connect_timeout"), "no socket_connect_timeout set"
     assert captured.get("socket_timeout"), "no socket_timeout set"
+
+
+# ---------------------------------------------------------------------------
+# Round 8: two holes the round-7 breaker left open
+# ---------------------------------------------------------------------------
+
+
+def test_a_redis_that_is_unreachable_at_connect_also_trips_the_breaker(monkeypatch):
+    """Gate round 8, major. The breaker only covered ONE of the two failure modes.
+
+    A reachable-but-erroring Redis raises inside `_check_redis` and was handled. A
+    Redis that is simply unreachable fails inside `_get_redis()`, which swallows the
+    exception and returns None -- so it recorded no error, never armed the cooldown,
+    and every single request re-paid a full TCP connect + PING against a dead endpoint
+    before falling back. With socket_connect_timeout=0.5s that is half a second added
+    to every chat turn and every MCP tool call, forever.
+    """
+    connects = {"n": 0}
+
+    def dead_connect():
+        connects["n"] += 1
+        return None
+
+    monkeypatch.setattr(rl, "_get_redis", dead_connect)
+    tenant, user = str(uuid.uuid4()), str(uuid.uuid4())
+
+    for _ in range(8):
+        rl.check_chat_burst_limit(tenant, user)
+
+    assert connects["n"] <= rl.REDIS_ERROR_DEGRADE_AFTER + 1, (
+        f"re-dialled a dead Redis {connects['n']} times in 8 requests — the breaker "
+        "must stop the retry storm, not just the deny storm"
+    )
+
+
+def test_low_traffic_errors_still_degrade(monkeypatch):
+    """Gate round 8, major. Deny-forever survived round 7 at low request rates.
+
+    The trip condition was an absolute count inside a window (3 errors / 10s). A
+    reachable-but-erroring Redis on a quiet tenant produces errors further apart than
+    the window, so they aged out before three ever accumulated: the count never
+    reached the threshold and every chat turn was denied indefinitely -- exactly the
+    bug round 7 set out to remove, hiding below the traffic threshold.
+
+    A sustained fault must degrade on consecutive failures regardless of how slowly
+    they arrive.
+    """
+    monkeypatch.setattr(rl, "_get_redis", lambda: _ErroringRedis())
+    tenant, user = str(uuid.uuid4()), str(uuid.uuid4())
+
+    verdicts = []
+    for _ in range(6):
+        verdicts.append(rl.check_chat_burst_limit(tenant, user))
+        # Errors arriving far enough apart that the rate window prunes them.
+        with rl._health_lock:
+            rl._redis_error_times.clear()
+
+    assert verdicts[0] is False, "the first error must still deny — it may be a blip"
+    assert verdicts[-1] is True, "a sustained fault must degrade even when errors arrive slower than the rate window"

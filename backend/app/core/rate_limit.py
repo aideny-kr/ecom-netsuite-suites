@@ -25,12 +25,23 @@ logger = logging.getLogger(__name__)
 
 _redis: redis.Redis | None = None
 
-# Redis health, judged by error RATE in a window -- NOT by a consecutive-error streak.
-# The streak version (2026-08-13, first attempt) reset on every success, so a Redis
-# failing only SOME commands never reached the threshold: it denied the failing half
-# of every request forever while reporting a streak of 1. Timestamps age out on their
-# own, so an interleaved success no longer erases the evidence.
+# Redis health, trip condition ONE: error RATE inside a window. A streak-only version
+# (first attempt) reset on every success, so a Redis failing only SOME commands never
+# reached the threshold -- it denied the failing half of every request forever while
+# reporting a streak of 1. These timestamps age out on their own, so an interleaved
+# success does not erase the evidence.
 _redis_error_times: deque[float] = deque()
+# Consecutive failures, reset by any success. This is the SECOND trip condition, and
+# it exists because the rate window alone has a blind spot: on a quiet tenant a
+# sustained fault produces errors further apart than the window, so they age out
+# before the threshold is reached and every request is denied indefinitely -- the
+# deny-forever bug, hiding below a traffic threshold (gate round 8).
+#
+# Neither condition subsumes the other. The rate catches an INTERMITTENT fault that a
+# consecutive counter cannot see (a success resets it); the consecutive count catches
+# a SUSTAINED fault at a request rate the window cannot see. Both, or one of the two
+# real failure modes goes unhandled.
+_redis_consecutive_errors: int = 0
 # Monotonic deadline. While in the future, callers skip Redis ENTIRELY. That is also
 # the fix for the reconnect storm: the error path drops the cached client, so without
 # this every subsequent request re-paid a full connect+PING against a Redis already
@@ -119,62 +130,114 @@ def check_limit(
       handing a client at the cap a fresh full window -- the cap lifted during
       exactly the flakiness this module promises it will not lift for.
 
-      Once REDIS_ERROR_DEGRADE_AFTER errors land inside REDIS_ERROR_WINDOW_SECONDS
-      we stop calling it transient and degrade to the per-process window for
-      REDIS_DEGRADE_COOLDOWN_SECONDS, dialling Redis again after that.
+      We stop calling it transient once EITHER trip condition fires (see
+      `_record_redis_failure`: a burst rate, or a run of consecutive failures), then
+      degrade to the per-process window for REDIS_DEGRADE_COOLDOWN_SECONDS and dial
+      Redis again after that. Both the connect-failure and command-failure paths feed
+      the breaker, so a dead endpoint stops being re-dialled as well as stops denying.
 
-      Two earlier versions of this branch got it wrong in different ways, and both
-      are worth remembering. The first promised that dropping the cached client
-      would "degrade cleanly instead of denying forever" -- true only when Redis is
-      UNREACHABLE; a reachable Redis whose commands fail (quota, OOM, MISCONF, ACL)
-      re-connects and re-pings successfully every time, so it denied every request
-      until the process restarted. The second counted CONSECUTIVE errors and reset
-      on success, which a partial fault defeats: at a 50% error rate the streak
-      never passed 1, so half of all traffic was denied indefinitely. Hence a rate
-      in a window -- a success does not erase the evidence.
+      Three earlier versions of this branch got it wrong in three different ways, and
+      the sequence is the argument for the current shape:
+        1. Dropping the cached client "degrades cleanly instead of denying forever" --
+           true only when Redis is UNREACHABLE. A reachable Redis whose commands fail
+           (quota, OOM, MISCONF, ACL) re-connects and re-pings fine every time, so it
+           denied every request until the process restarted.
+        2. Counting CONSECUTIVE errors, reset on success -- defeated by a partial
+           fault: at a 50% error rate the streak never passed 1, so half of all
+           traffic was denied indefinitely.
+        3. Counting the error RATE alone -- defeated by low traffic: on a quiet
+           tenant a sustained fault produces errors further apart than the window, so
+           they aged out before the threshold and deny-forever came back below a
+           traffic threshold.
+      Each fix removed one failure mode and left another, which is why the breaker now
+      carries both conditions rather than the "better" one.
 
     `deny_on_error` is the availability decision, and it belongs to the CALLER, not
     to this function. A cost guardrail may reasonably deny a burst it cannot price.
     Authentication may not: denying there turns a cache fault into a total login
     outage, so login degrades on the first error instead.
     """
-    global _redis, _redis_degraded_until
-
+    global _redis
     # Already known sick: use the in-memory window and do not dial Redis at all.
     if time.monotonic() < _redis_degraded_until:
         return _check_fallback(key, limit, window_seconds, fleet_wide=fleet_wide)
 
     r = _get_redis()
     if r is None:
+        # UNREACHABLE at connect. This must feed the breaker too, or it becomes a
+        # retry storm: _get_redis swallows the exception, so without recording the
+        # failure every subsequent request re-paid a full TCP connect + PING against
+        # a dead endpoint -- half a second each, on the hot path of every chat turn
+        # and MCP tool call, forever (gate round 8). The ANSWER here is unchanged
+        # (degrade); what changes is that we stop dialling.
+        _record_redis_failure(key, denying=False)
         return _check_fallback(key, limit, window_seconds, fleet_wide=fleet_wide)
     try:
-        return _check_redis(r, key, limit, window_seconds)
+        allowed = _check_redis(r, key, limit, window_seconds)
     except Exception:
-        now = time.monotonic()
-        with _health_lock:
-            _redis_error_times.append(now)
-            cutoff = now - REDIS_ERROR_WINDOW_SECONDS
-            while _redis_error_times and _redis_error_times[0] < cutoff:
-                _redis_error_times.popleft()
-            tripped = len(_redis_error_times) >= REDIS_ERROR_DEGRADE_AFTER
-            if tripped:
-                _redis_degraded_until = now + REDIS_DEGRADE_COOLDOWN_SECONDS
-                _redis_error_times.clear()
-            recent = len(_redis_error_times)
+        # Reachable but the command failed. Deny while it still looks transient --
+        # every caller's errors feed the SAME breaker on purpose, since there is one
+        # Redis and a login failure is evidence chat's next call will fail too.
+        degraded = _record_redis_failure(key, denying=deny_on_error)
         _redis = None
-        logger.warning(
-            "rate_limit.redis_error key_prefix=%s recent_errors=%d action=%s",
-            key.split(":", 2)[:2],
-            recent,
-            "degrade" if (tripped or not deny_on_error) else "deny",
-        )
-        # Every caller's errors feed the SAME health window on purpose: there is one
-        # Redis, so a login failure is evidence chat's next call will fail too, and
-        # pooling the signal detects the fault sooner. What must not be shared is a
-        # counter a success can reset -- that was the bug.
-        if tripped or not deny_on_error:
+        if degraded or not deny_on_error:
             return _check_fallback(key, limit, window_seconds, fleet_wide=fleet_wide)
         return False
+    _mark_redis_healthy()
+    return allowed
+
+
+def _record_redis_failure(key: str, *, denying: bool) -> bool:
+    """Record a Redis failure and report whether the breaker is now open.
+
+    TWO trip conditions, because neither covers the other's failure mode:
+
+    * **rate** -- REDIS_ERROR_DEGRADE_AFTER errors inside REDIS_ERROR_WINDOW_SECONDS.
+      Catches an INTERMITTENT fault, which a consecutive counter cannot see because
+      the interleaved successes keep resetting it.
+    * **consecutive** -- the same number of failures in a row, however slowly they
+      arrive. Catches a SUSTAINED fault on a quiet tenant, which the rate window
+      cannot see because the errors age out before three accumulate. That gap is how
+      deny-forever survived round 7 below a traffic threshold.
+    """
+    global _redis_degraded_until, _redis_consecutive_errors
+    now = time.monotonic()
+    with _health_lock:
+        _redis_error_times.append(now)
+        cutoff = now - REDIS_ERROR_WINDOW_SECONDS
+        while _redis_error_times and _redis_error_times[0] < cutoff:
+            _redis_error_times.popleft()
+        _redis_consecutive_errors += 1
+        by_rate = len(_redis_error_times) >= REDIS_ERROR_DEGRADE_AFTER
+        by_streak = _redis_consecutive_errors >= REDIS_ERROR_DEGRADE_AFTER
+        tripped = by_rate or by_streak
+        if tripped:
+            _redis_degraded_until = now + REDIS_DEGRADE_COOLDOWN_SECONDS
+            _redis_error_times.clear()
+            _redis_consecutive_errors = 0
+        recent, streak = len(_redis_error_times), _redis_consecutive_errors
+    logger.warning(
+        "rate_limit.redis_error key_prefix=%s recent=%d streak=%d action=%s%s",
+        key.split(":", 2)[:2],
+        recent,
+        streak,
+        "degrade" if (tripped or not denying) else "deny",
+        f" trip={'rate' if by_rate else 'streak'}" if tripped else "",
+    )
+    return tripped
+
+
+def _mark_redis_healthy() -> None:
+    """Clear the consecutive counter after a good call.
+
+    Only the streak resets. The rate window ages out on its own and deliberately
+    survives a success -- erasing it there is what blinded the first version of this
+    breaker to intermittent faults.
+    """
+    global _redis_consecutive_errors
+    if _redis_consecutive_errors:
+        with _health_lock:
+            _redis_consecutive_errors = 0
 
 
 def check_login_rate_limit(ip: str) -> bool:
@@ -307,7 +370,7 @@ def _check_fallback(key: str, limit: int, window_seconds: int, *, fleet_wide: bo
 
 def reset_rate_limits(prefix: str = _KEY_ROOT) -> None:
     """Clear rate limit state. Used in tests, and by governance's per-tenant reset."""
-    global _redis, _redis_degraded_until
+    global _redis, _redis_degraded_until, _redis_consecutive_errors
     r = _get_redis()
     if r:
         try:
@@ -331,3 +394,4 @@ def reset_rate_limits(prefix: str = _KEY_ROOT) -> None:
         with _health_lock:
             _redis_error_times.clear()
             _redis_degraded_until = 0.0
+            _redis_consecutive_errors = 0

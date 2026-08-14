@@ -46,6 +46,12 @@ export function useOnboardingChat() {
     } catch (err) {
       console.error("Failed to start onboarding chat:", err);
       startedRef.current = false;
+      // POST /onboarding/chat/start is rate-limited too now, so this can fail 429 on
+      // a healthy account. Nothing re-invokes startSession, so without surfacing it
+      // the user sits in front of an onboarding panel that silently never starts.
+      setError(
+        err instanceof Error ? err.message : "Could not start onboarding. Please try again.",
+      );
     } finally {
       setIsStarting(false);
     }
