@@ -34,29 +34,50 @@ Updated at the end of every task, not "later".
 
 | branch | tier | state | blocked on |
 |---|---|---|---|
-| `fix/ns-account-switch-and-chat-burst` | T2 | **PR #194 open**, CI green, gated ×5 — round 5 found 5 majors, all fixed | re-gate rounds 6+ |
 | `feat/dev-loop-and-harness` | T2 | 21 commits, process only — gated ×3, blockers fixed, **frozen** | nothing |
 | `feat/agent-graph-operating-model` | T2 | Track O (22 majors) + reject action, **ungated** | needs Track O decision |
 
-**`fix/ns-account-switch-and-chat-burst` was invisible here for six days and read as
-"stalled, 2 days idle" when it was one gate round from landing.** It was never in this
-table — that omission IS the failure mode this file exists to prevent, so it goes in
-before anything else. Ticket 86bba299w (urgent). Three fixes in one branch: the OAuth
-silent account repoint, the chat burst cap, and the replica-safe MCP limiter.
+**SHIPPED 2026-08-17 — `fix/ns-account-switch-and-chat-burst` → PR #194, squashed to
+`54729804`, deployed and live-verified on staging.** Ticket 86bba299w closed. It had
+been invisible in this table for six days and read as "stalled, 2 days idle" when it
+was one gate round from landing — that omission IS the failure mode this file exists to
+prevent, which is why the entry went in before anything else.
 
-Two things worth carrying forward from its round-5 gate:
+Delivered: the OAuth silent account repoint (overwrite, but loudly), the chat burst cap
+on all three entry points, the replica-safe MCP limiter — plus two blocker-grade
+security defects the gate surfaced, both pre-existing and both AMPLIFIED by this
+branch's own supersede logic, so they were pulled in rather than deferred: an
+unauthenticated reflected XSS on the API origin, and a cross-tenant takeover via the
+OAuth state's positional parse.
 
-- **81.9 KB is past the ~30 KB the gate can chew.** Four path-chunks (27.3 / 14.8 /
-  22.3 / 17.6 KB) reviewed as four separate runs, proven lossless: every changed file
-  in exactly one chunk, byte-identical to the branch. The cost is that no single run
-  sees a cross-chunk seam; reviewers partly covered it anyway by citing files outside
-  their chunk.
-- **`args` passed to `Workflow` arrive JSON-STRINGIFIED, so `args.target` reads
-  `undefined` and the gate silently reviews the CURRENT checkout instead** — status
-  still `OK`, findings still plausible, all about the wrong branch. Drive the gate
-  from a wrapper script (`workflow('code-review-multiangle', {target})` inside the
-  script body is a real object) and ALWAYS check the returned `target`/`base` before
-  reading findings. One run burned 4.6M tokens reviewing an unrelated branch.
+What to carry forward — the process lessons cost more than the code did:
+
+- **Nine gate rounds, and rounds 5→8 were mostly fixing the previous round's fixes.**
+  Three fixes were half-applied (callback template, escaping funnel, state validator):
+  each correct, each applied to one of N call sites. The two that stuck removed the
+  possibility instead — `render_callback()` (one template, no site can forget) and
+  `encode_state()` (JSON, so no field can shift another). Ask "what makes this
+  unrepresentable?" before "where else does this appear?".
+- **~30 KB is the gate's practical ceiling.** 81.9 KB had to be split into path-chunks,
+  proven lossless (every changed file in exactly one chunk, byte-identical). The cost
+  is that no single run sees a cross-chunk seam.
+- **`args` passed to `Workflow` arrive JSON-STRINGIFIED even when written as a proper
+  object**, so `args.target` reads `undefined` and the gate silently reviews the
+  CURRENT checkout — status still `OK`, findings plausible, all about the wrong branch.
+  Drive it from a wrapper script and ALWAYS check the returned `target`/`base` first.
+  Cost 4.6M tokens on an unrelated branch before the check caught it.
+- **`failed_angles` counts FINDER angles only.** The last round lost all 163 verifier
+  agents to the weekly rate limit and still reported `failed_angles: []` — a clean-
+  looking pass with an entirely unadjudicated verify stage. Fail closed on the
+  UNVERIFIED count too. **~161 of that round's findings remain unadjudicated; two were
+  hand-checked and both were real blockers, so this is a genuine gap, not noise.** A
+  fresh round on the merged diff is owed once quota resets.
+
+Live-measured after deploy (30d of `audit_events`, staging): peak MCP tool rate is
+9/min (`netsuite.suiteql`) against a 60/min ceiling — 6.7× headroom, and nothing else
+is within 6× either. **`recon.approve_group` has ZERO calls in 30 days**, so its
+40→20/min halving is untested by real usage; a close-week bulk-approval burst is the
+one thing that data cannot see. Watch `mcp_rate_limit_rejections_total`.
 
 Contents of that branch, honestly:
 
