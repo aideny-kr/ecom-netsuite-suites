@@ -1,5 +1,5 @@
 # backend/tests/test_report_tool_registration.py
-from app.mcp.governance import TOOL_CONFIGS
+from app.mcp.governance import MCP_REBASELINE_FACTOR, TOOL_CONFIGS
 from app.mcp.registry import TOOL_REGISTRY
 from app.services.chat.nodes import ALLOWED_CHAT_TOOLS
 from app.services.chat.tool_categories import categorize
@@ -26,7 +26,7 @@ def test_report_compose_has_governance_entry():
     deleted when the tool was renamed; this re-establishes the per-tool governance."""
     assert "report.export" not in TOOL_CONFIGS
     cfg = TOOL_CONFIGS["report.compose"]
-    assert cfg["rate_limit_per_minute"] == 10
+    assert cfg["rate_limit_per_minute"] == 10 * MCP_REBASELINE_FACTOR
     assert cfg["requires_entitlement"] == "mcp_tools"
     assert cfg["timeout_seconds"] == 60
     assert cfg["default_limit"] is None

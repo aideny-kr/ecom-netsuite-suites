@@ -42,6 +42,17 @@ ACTIVE_CONNECTION_STATUSES = ("active", "healthy")
 # would just spam failures for a connection nobody intends to reactivate.
 DISPATCHABLE_CONNECTION_STATUSES = ACTIVE_CONNECTION_STATUSES + ("error",)
 
+# Intentionally dead: nothing should refresh, health-check, or dispatch these.
+# `superseded` is set by the NetSuite OAuth callback when a newer authorization takes
+# over the tenant's single connection (2026-08-07). It is NOT `revoked` -- the row
+# stays selectable so a later re-auth of that account reclaims it instead of creating
+# a duplicate. Filter on THIS, not on `status != "revoked"`: the health audit used the
+# latter, so it flipped superseded rows to `error` (their tokens are never refreshed,
+# so they always eventually look expired), overwrote the "Superseded by ..." reason
+# that is the only record of why the row was demoted, and thereby made them eligible
+# for proactive refresh again -- against a connection deliberately retired.
+RETIRED_CONNECTION_STATUSES = ("revoked", "superseded")
+
 
 class Connection(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "connections"

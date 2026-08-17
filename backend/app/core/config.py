@@ -38,6 +38,31 @@ class Settings(BaseSettings):
     MCP_SERVER_PORT: int = 8001
     MCP_RATE_LIMIT_PER_MINUTE: int = 60
 
+    # Rate-limiter Redis socket budget. The limiter is on the hot path of every chat
+    # turn and every MCP tool call, and redis-py blocks forever by default, so an
+    # unreachable-but-not-refusing endpoint would hang the request rather than slow
+    # it. Small on purpose: exceeding these degrades to the in-memory window, which
+    # still enforces.
+    REDIS_CONNECT_TIMEOUT_SECONDS: float = 0.5
+    REDIS_SOCKET_TIMEOUT_SECONDS: float = 1.0
+
+    # Chat turns per user per minute. Burst-only: bounds runaway retry loops and
+    # scripted clients spending the platform Anthropic key, without capping a
+    # legitimate heavy recon/report session for the day.
+    CHAT_BURST_PER_MINUTE: int = 20
+
+    # Web worker count. Rate limits are expressed fleet-wide; the in-memory fallback
+    # divides by this so a Redis outage does not multiply every ceiling by the worker
+    # count. BOTH images set it explicitly (ENV WEB_CONCURRENCY next to their
+    # --workers), so this default only applies outside a container.
+    #
+    # It tracks the PRODUCTION image (Dockerfile.prod: --workers 2), not the dev one.
+    # It previously defaulted to 4 citing backend/Dockerfile, while production ran 2
+    # and neither image set the env var -- so every production fallback ceiling was
+    # divided by a worker count that did not exist. Pinned by
+    # tests/test_worker_concurrency_config.py.
+    WEB_CONCURRENCY: int = 2
+
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_MODEL: str = "claude-sonnet-5"
     # OpenRouter gateway — env only, never a shell export (key-billing leak risk).

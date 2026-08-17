@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 def check_connection_health():
     """Audit OAuth token health for all NetSuite connections across tenants."""
     from app.core.encryption import decrypt_credentials
-    from app.models.connection import Connection
+    from app.models.connection import RETIRED_CONNECTION_STATUSES, Connection
     from app.models.mcp_connector import McpConnector
     from app.workers.base_task import sync_engine
 
@@ -36,7 +36,7 @@ def check_connection_health():
             db.execute(
                 select(Connection).where(
                     Connection.provider == "netsuite",
-                    Connection.status != "revoked",
+                    Connection.status.notin_(RETIRED_CONNECTION_STATUSES),
                 )
             )
             .scalars()

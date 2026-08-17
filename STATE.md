@@ -34,8 +34,29 @@ Updated at the end of every task, not "later".
 
 | branch | tier | state | blocked on |
 |---|---|---|---|
+| `fix/ns-account-switch-and-chat-burst` | T2 | **PR #194 open**, CI green, gated ×5 — round 5 found 5 majors, all fixed | re-gate rounds 6+ |
 | `feat/dev-loop-and-harness` | T2 | 21 commits, process only — gated ×3, blockers fixed, **frozen** | nothing |
 | `feat/agent-graph-operating-model` | T2 | Track O (22 majors) + reject action, **ungated** | needs Track O decision |
+
+**`fix/ns-account-switch-and-chat-burst` was invisible here for six days and read as
+"stalled, 2 days idle" when it was one gate round from landing.** It was never in this
+table — that omission IS the failure mode this file exists to prevent, so it goes in
+before anything else. Ticket 86bba299w (urgent). Three fixes in one branch: the OAuth
+silent account repoint, the chat burst cap, and the replica-safe MCP limiter.
+
+Two things worth carrying forward from its round-5 gate:
+
+- **81.9 KB is past the ~30 KB the gate can chew.** Four path-chunks (27.3 / 14.8 /
+  22.3 / 17.6 KB) reviewed as four separate runs, proven lossless: every changed file
+  in exactly one chunk, byte-identical to the branch. The cost is that no single run
+  sees a cross-chunk seam; reviewers partly covered it anyway by citing files outside
+  their chunk.
+- **`args` passed to `Workflow` arrive JSON-STRINGIFIED, so `args.target` reads
+  `undefined` and the gate silently reviews the CURRENT checkout instead** — status
+  still `OK`, findings still plausible, all about the wrong branch. Drive the gate
+  from a wrapper script (`workflow('code-review-multiangle', {target})` inside the
+  script body is a real object) and ALWAYS check the returned `target`/`base` before
+  reading findings. One run burned 4.6M tokens reviewing an unrelated branch.
 
 Contents of that branch, honestly:
 

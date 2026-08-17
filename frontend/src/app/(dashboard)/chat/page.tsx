@@ -486,6 +486,21 @@ export default function ChatPage() {
         // AbortController.abort() throws — this is expected on session switch, not an error
         if (err instanceof DOMException && err.name === "AbortError") return;
         if (err instanceof Error && err.message.includes("aborted")) return;
+        // Any other failure ENDS the turn, so the streaming state has to come down
+        // with it. Without this the composer stays disabled and the optimistic
+        // bubble hangs forever behind a "thinking" indicator for a turn that never
+        // started — recoverable only by reloading the page. The session-creation
+        // failure path above already did this; this one did not, and the new 429
+        // burst cap made it reachable on a completely healthy session.
+        isStreamingRef.current = false;
+        setIsStreaming(false);
+        // Deliberately NOT setPendingMessage(null). ChatInput clears its own textbox
+        // on submit (chat-input.tsx), so the optimistic bubble is the only remaining
+        // copy of what the user typed — dropping it here loses their message
+        // outright, which is exactly the failure being fixed one file over in
+        // use-onboarding-chat. Keep it on screen next to the error so a throttled
+        // turn can be retried; it is optimistic-only state and the next successful
+        // send reconciles it.
         const message = err instanceof Error ? err.message : "Failed to send message. Please try again.";
         if (message.includes("already in progress")) {
           setError("A response is already in progress for this session. Please wait or stop it first.");

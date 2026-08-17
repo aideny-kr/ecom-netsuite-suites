@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
+from app.api.v1.oauth_state import encode_state
 from app.core.database import get_db
 from app.core.dependencies import require_permission
 from app.core.encryption import decrypt_credentials, encrypt_credentials
@@ -342,7 +343,13 @@ async def reconnect_connection(
         await r.setex(
             f"netsuite_oauth:{state}",
             600,
-            f"{code_verifier}:{account_id}:{user.tenant_id}:{user.id}:{restlet_url}",
+            encode_state(
+                code_verifier=code_verifier,
+                account_id=account_id,
+                tenant_id=str(user.tenant_id),
+                user_id=str(user.id),
+                restlet_url=restlet_url,
+            ),
         )
         await r.aclose()
 

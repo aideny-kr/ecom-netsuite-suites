@@ -18,6 +18,7 @@ export function OnboardingOverlay({ onComplete }: OnboardingOverlayProps) {
     isLoading,
     isStarting,
     isComplete,
+    error,
   } = useOnboardingChat();
   const [isExiting, setIsExiting] = useState(false);
   const [currentPhase, setCurrentPhase] = useState(0);
@@ -144,6 +145,15 @@ export function OnboardingOverlay({ onComplete }: OnboardingOverlayProps) {
             />
           )}
         </div>
+
+        {/* Sits OUTSIDE the input's conditional on purpose: a failed startSession
+            leaves isStarting false with no messages, and that is exactly when the
+            user most needs to be told why nothing happened. */}
+        {error && (
+          <p role="alert" className="px-6 pb-2 text-sm text-amber-600">
+            {error}
+          </p>
+        )}
 
         {/* Input */}
         {!isComplete && !isStarting && (
