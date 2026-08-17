@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.oauth_callback_page import render_callback
+from app.api.v1.oauth_state import decode_state, encode_state
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.dependencies import require_permission
@@ -104,7 +105,14 @@ async def netsuite_mcp_authorize(
     await r.setex(
         f"netsuite_mcp_oauth:{state}",
         600,
-        f"{code_verifier}:{account_id}:{client_id}:{user.tenant_id}:{user.id}:{label}",
+        encode_state(
+            code_verifier=code_verifier,
+            account_id=account_id,
+            client_id=client_id,
+            tenant_id=str(user.tenant_id),
+            user_id=str(user.id),
+            label=label,
+        ),
     )
     await r.aclose()
 
@@ -146,16 +154,21 @@ async def netsuite_mcp_callback(
         )
 
     try:
-        parts = stored.split(":")
-        code_verifier = parts[0]
-        account_id = parts[1]
-        client_id = parts[2]
-        tenant_id = uuid.UUID(parts[3])
-        user_id = uuid.UUID(parts[4])
-        label = parts[5] if len(parts) > 5 else ""
-        # Check for re-authorization mode
-        is_reauth = len(parts) >= 8 and parts[6] == "reauth"
-        reauth_connector_id = uuid.UUID(parts[7]) if is_reauth else None
+        # No positional parse. `is_reauth` used to be `parts[6] == "reauth"`, with the
+        # user-supplied `label` sitting at parts[5] -- so a label ending in
+        # ":reauth:<uuid>" forged the flag and repointed an existing connector, in
+        # whatever tenant a colon in account_id had already selected. Both are
+        # structurally impossible against a JSON object.
+        state_data = decode_state(stored)
+        code_verifier = state_data["code_verifier"]
+        account_id = state_data["account_id"]
+        client_id = state_data.get("client_id", "")
+        tenant_id = uuid.UUID(state_data["tenant_id"])
+        user_id = uuid.UUID(state_data["user_id"])
+        label = state_data.get("label", "")
+        reauth_raw = state_data.get("reauth_connector_id")
+        is_reauth = bool(reauth_raw)
+        reauth_connector_id = uuid.UUID(reauth_raw) if reauth_raw else None
     except Exception as exc:
         logger.error("netsuite_mcp.oauth2.state_parse_failed", error=str(exc), stored_length=len(stored))
         return HTMLResponse(
@@ -305,7 +318,15 @@ async def reauthorize_mcp_connector(
     await r.setex(
         f"netsuite_mcp_oauth:{state}",
         600,
-        f"{code_verifier}:{account_id}:{client_id}:{user.tenant_id}:{user.id}:{connector.label}:reauth:{connector_id}",
+        encode_state(
+            code_verifier=code_verifier,
+            account_id=account_id,
+            client_id=client_id,
+            tenant_id=str(user.tenant_id),
+            user_id=str(user.id),
+            label=connector.label,
+            reauth_connector_id=str(connector_id),
+        ),
     )
     await r.aclose()
 

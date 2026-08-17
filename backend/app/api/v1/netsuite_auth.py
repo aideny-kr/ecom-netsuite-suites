@@ -16,6 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.oauth_callback_page import js_string, render_callback
+from app.api.v1.oauth_state import InvalidOAuthStateError, decode_state, encode_state
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.dependencies import require_permission
@@ -274,7 +275,14 @@ async def authorize(
     await r.setex(
         f"netsuite_oauth:{state}",
         600,
-        f"{code_verifier}:{account_id}:{user.tenant_id}:{user.id}|{restlet_url}|{resolved_client_id}",
+        encode_state(
+            code_verifier=code_verifier,
+            account_id=account_id,
+            tenant_id=str(user.tenant_id),
+            user_id=str(user.id),
+            restlet_url=restlet_url,
+            client_id=resolved_client_id,
+        ),
     )
     await r.aclose()
 
@@ -352,25 +360,31 @@ async def callback(
             status_code=400,
         )
 
-    # Parse: verifier:account_id:tenant_id:user_id|restlet_url|client_id
-    # First split on colon (max 4 parts) for the fixed fields, then pipe for URL-safe fields
-    colon_parts = stored.split(":", maxsplit=3)
-    code_verifier = colon_parts[0]
-    account_id = colon_parts[1]
-    tenant_id_str = colon_parts[2]
-    remainder = colon_parts[3] if len(colon_parts) > 3 else ""
+    # No positional parse. This endpoint is UNAUTHENTICATED, so whatever the state says
+    # the tenant is, is the tenant we write to -- which made every delimiter in every
+    # field a cross-tenant primitive. A JSON object cannot be shifted by its own values.
+    # Pre-2026-08-16 blobs (TTL 600s) deliberately fail here rather than being parsed.
+    try:
+        state_data = decode_state(stored)
+    except InvalidOAuthStateError as exc:
+        logger.warning("netsuite.oauth2.state_undecodable", error=str(exc))
+        return HTMLResponse(
+            _render_callback(
+                status="error",
+                heading="Authentication Failed",
+                message="Invalid or expired state parameter. Please try again.",
+                event_type="NETSUITE_AUTH_ERROR",
+                error_detail="Invalid state",
+            ),
+            status_code=400,
+        )
 
-    # remainder = "user_id|restlet_url|client_id" or "user_id:restlet_url" (legacy)
-    pipe_parts = remainder.split("|")
-    user_id_str = pipe_parts[0]
-    restlet_url = pipe_parts[1] if len(pipe_parts) > 1 else ""
-    stored_client_id = pipe_parts[2] if len(pipe_parts) > 2 else ""
-
-    # Legacy fallback: old format was "user_id:restlet_url" with colon
-    if not restlet_url and ":" in user_id_str:
-        legacy_parts = user_id_str.split(":", maxsplit=1)
-        user_id_str = legacy_parts[0]
-        restlet_url = legacy_parts[1] if len(legacy_parts) > 1 else ""
+    code_verifier = state_data["code_verifier"]
+    account_id = state_data["account_id"]
+    tenant_id_str = state_data["tenant_id"]
+    user_id_str = state_data["user_id"]
+    restlet_url = state_data.get("restlet_url", "")
+    stored_client_id = state_data.get("client_id", "")
 
     tenant_id = uuid.UUID(tenant_id_str)
     user_id = uuid.UUID(user_id_str)

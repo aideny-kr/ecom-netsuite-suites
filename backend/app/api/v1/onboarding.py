@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.oauth_state import encode_state
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_user, require_entitlement, require_permission
@@ -572,7 +573,14 @@ async def onboarding_netsuite_mcp_authorize(
     await r.setex(
         f"netsuite_mcp_oauth:{state}",
         600,
-        f"{code_verifier}:{account_id}:{client_id}:{user.tenant_id}:{user.id}:{label}",
+        encode_state(
+            code_verifier=code_verifier,
+            account_id=account_id,
+            client_id=client_id,
+            tenant_id=str(user.tenant_id),
+            user_id=str(user.id),
+            label=label,
+        ),
     )
     await r.aclose()
 
@@ -611,7 +619,13 @@ async def onboarding_netsuite_oauth_authorize(
     await r.setex(
         f"netsuite_oauth:{state}",
         600,
-        f"{code_verifier}:{account_id}:{user.tenant_id}:{user.id}:{restlet_url}",
+        encode_state(
+            code_verifier=code_verifier,
+            account_id=account_id,
+            tenant_id=str(user.tenant_id),
+            user_id=str(user.id),
+            restlet_url=restlet_url,
+        ),
     )
     await r.aclose()
 
