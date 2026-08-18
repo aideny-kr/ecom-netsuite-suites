@@ -252,6 +252,29 @@ run; existing rows are never deleted on purge.
 - Script viewer: source + "used by N flows" (deduped), with the attachment site for each.
 - Data layer: `frontend/src/hooks/use-celigo.ts`, TanStack Query over `apiClient`. Never raw `fetch`.
 
+**Approved mockup (acceptance reference):**
+<https://claude.ai/code/artifact/0c482ad7-6e46-461c-969f-711221e7c69f> — five screens
+(connect · flow map · flow detail · script · recon root cause), rendered against the real
+design tokens and populated with live account data. Approved 2026-08-18. Acceptance for the
+frontend work is "matches this artifact", not merely green tests.
+
+**Naming — user-facing vocabulary is not Celigo's vocabulary.** Fixed here so it is not
+re-litigated per component:
+
+| Celigo term | We say | Why |
+|---|---|---|
+| `pageGenerator` | **Source** | Nobody outside Celigo knows what a page generator is |
+| `pageProcessor` | **Destination** (or **Lookup** when `type: "export"`) | Describes the job, not the engine |
+| `disabled: true` | **Paused** | Reversible state, not a broken one |
+| `numOpenError` | **Open errors** | Already the term used in recon |
+| `aiDescription` | **Summary** | Its origin is an implementation detail |
+| script `content` | **Source** (code) | Shown read-only; never "run" or "execute" in UI copy |
+
+Screen 02 leads with open-error count because that is what brings someone to the page; scripts
+are deduplicated before render (§3.5). Screen 04 must display the **attachment site** per usage
+(`transform.script` vs `hooks.preSavePage`) — the mockup shows one script attached both ways,
+which is the visible proof of why §3.2 walks recursively.
+
 ### 5.6 Chat-side wiring (G6)
 
 The generic external-MCP path already works: `mcp_client_service._build_headers()` handles
