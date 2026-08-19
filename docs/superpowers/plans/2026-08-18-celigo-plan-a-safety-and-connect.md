@@ -18,7 +18,15 @@
 Every task's requirements implicitly include this section.
 
 - **Worktree:** all work happens in `/Users/aidenyi/projects/ecom-netsuite-suites/.claude/worktrees/celigo-mcp` on branch `feat/celigo-mcp-connector`. Never `cd` to the main checkout.
-- **Running pytest:** `cd` into the worktree's `backend/` *first*, then `.venv/bin/python -m pytest`. The worktree venv's `.pth` resolves to the main checkout otherwise, and you will silently test the wrong code.
+- **Running pytest:** the worktree has **no** `.venv` of its own. Use the main checkout's interpreter, but with the working directory inside the *worktree's* `backend/` — pytest puts the rootdir on `sys.path`, so imports then resolve to the worktree:
+  ```bash
+  cd /Users/aidenyi/projects/ecom-netsuite-suites/.claude/worktrees/celigo-mcp/backend
+  /Users/aidenyi/projects/ecom-netsuite-suites/backend/.venv/bin/python -m pytest tests/<file> -v
+  ```
+  **Verified 2026-08-19**, not assumed: `app.services.chat.celigo_tool_policy.__file__` resolves under `/worktrees/celigo-mcp/`. If you ever run this from another directory you will silently test the main checkout's code. Confirm with:
+  ```bash
+  ... /backend/.venv/bin/python -c "import app.services.chat.mutation_guard as g; print(g.__file__)"
+  ```
 - **Running vitest:** from the worktree's `frontend/`, `npx vitest run <path>`.
 - **TDD is mandatory.** Write the failing test, run it, watch it fail for the *right reason*, then implement. A test never observed red is not a test.
 - **Read-only.** No code path in this plan may call a Celigo write tool: `upsert_*`, `patch_flow`, `delete_resource`, `delete_lookup_cache_data`, `run_flow`, `deploy_template`, `manage_user`, `cancel_job`, `cancel_storage_upload`, `restore_storage_item`, `triage_flow_errors`, `update_edi_fa_status`, `update_flow_error_retry_data`.
