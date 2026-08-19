@@ -17,12 +17,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.dependencies import require_any_permission, require_permission
-from app.core.encryption import decrypt_credentials, encrypt_credentials
+from app.core.encryption import decrypt_credentials, encrypt_credentials, get_current_key_version
 from app.models.canonical import NetsuitePosting, Payout, PayoutLine
 from app.models.connection import Connection
+from app.models.mcp_connector import McpConnector
 from app.models.pipeline import CursorState
 from app.models.user import User
-from app.services import audit_service
+from app.services import audit_service, mcp_connector_service
 from app.services.celigo.client import CeligoAuthError, CeligoError, verify_token
 
 logger = structlog.get_logger()
@@ -78,6 +79,7 @@ class CeligoStatusResponse(BaseModel):
     account_name: str | None = None
     region: str | None = None
     status: str | None = None
+    agent_access: bool = False
 
 
 class CeligoTestRequest(BaseModel):
@@ -95,6 +97,10 @@ class CeligoConnectRequest(BaseModel):
     token: str
     region: str = "us"
     label: str = "Celigo"
+    # Optional -- lets the chat agent read Celigo flows/scripts/errors via a
+    # separate celigo_mcp MCP connector row (Task 10). Omitting it must behave
+    # exactly like the REST-only connect that existed before this field.
+    agent_token: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -526,15 +532,97 @@ async def _get_celigo_connection(db: AsyncSession, tenant_id) -> Connection | No
     return result.scalar_one_or_none()
 
 
+# Celigo's hosted MCP server -- a fixed URL, not tenant-configurable (Plan A).
+CELIGO_MCP_SERVER_URL = "https://api.integrator.io/celigo-mcp"
+
+
+async def _celigo_agent_access(db: AsyncSession, tenant_id) -> bool:
+    """Whether the tenant has a live celigo_mcp connector giving the chat agent
+    read-only Celigo tools.
+
+    Reuses the generic active-connector lookup (rather than a bespoke query) so
+    this stays correct if "active" is ever redefined.
+    """
+    connectors = await mcp_connector_service.get_active_connectors_for_tenant(db, tenant_id)
+    return any(c.provider == "celigo_mcp" for c in connectors)
+
+
+async def _upsert_celigo_mcp_connector(
+    db: AsyncSession,
+    tenant_id,
+    agent_token: str,
+    created_by,
+) -> McpConnector:
+    """Create (or reactivate) the celigo_mcp connector that gives the chat agent
+    read-only Celigo tools -- Tasks 1-3's guards enforce the read-only boundary
+    once this row exists.
+
+    Reuses ``mcp_connector_service.create_mcp_connector`` for the actual
+    construction rather than a second hand-rolled ``McpConnector(...)`` site.
+    Reactivating an existing (possibly revoked) row is not something that
+    generic helper does, so it's handled inline here -- mirroring how
+    ``connect_celigo`` itself reactivates a revoked Connection row.
+    """
+    existing_result = await db.execute(
+        select(McpConnector).where(
+            McpConnector.tenant_id == tenant_id,
+            McpConnector.provider == "celigo_mcp",
+        )
+    )
+    existing = existing_result.scalar_one_or_none()
+
+    if existing:
+        existing.encrypted_credentials = encrypt_credentials({"token": agent_token})
+        existing.encryption_key_version = get_current_key_version()
+        existing.auth_type = "bearer"
+        existing.server_url = CELIGO_MCP_SERVER_URL
+        existing.status = "active"
+        existing.is_enabled = True
+        existing.error_reason = None
+        connector = existing
+    else:
+        connector = await mcp_connector_service.create_mcp_connector(
+            db=db,
+            tenant_id=tenant_id,
+            provider="celigo_mcp",
+            label="Celigo (agent access)",
+            server_url=CELIGO_MCP_SERVER_URL,
+            auth_type="bearer",
+            credentials={"token": agent_token},
+            created_by=created_by,
+        )
+
+    # Best-effort tool discovery -- must not fail the connector row itself.
+    # The read-only guards (Tasks 1-3) apply on whatever discovered_tools ends
+    # up holding, so a failure here just means the agent picks up tools on the
+    # next test/reconnect rather than immediately.
+    try:
+        from app.services.mcp_client_service import discover_tools
+
+        tools = await discover_tools(connector, db)
+        connector.discovered_tools = tools
+    except Exception:
+        logger.warning(
+            "celigo_mcp_connector.tool_discovery_failed",
+            tenant_id=str(tenant_id),
+            exc_info=True,
+        )
+
+    await db.flush()
+    return connector
+
+
 @router.get("/celigo", response_model=CeligoStatusResponse)
 async def get_celigo_status(
     user: Annotated[User, Depends(require_permission("connections.view"))],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Get Celigo connector status."""
+    agent_access = await _celigo_agent_access(db, user.tenant_id)
+
     connection = await _get_celigo_connection(db, user.tenant_id)
     if not connection:
-        return CeligoStatusResponse(connected=False)
+        return CeligoStatusResponse(connected=False, agent_access=agent_access)
 
     metadata = connection.metadata_json or {}
     return CeligoStatusResponse(
@@ -542,6 +630,7 @@ async def get_celigo_status(
         account_name=metadata.get("account_name"),
         region=metadata.get("region"),
         status=connection.status,
+        agent_access=agent_access,
     )
 
 
@@ -571,7 +660,11 @@ async def connect_celigo(
     """Create (or reactivate) a Celigo connection.
 
     Verifies the token BEFORE any database write -- an invalid token must
-    never create a row.
+    never create a row. When ``agent_token`` is supplied, also creates or
+    reactivates a read-only celigo_mcp MCP connector so the chat agent gets
+    Celigo tools -- but that side is best-effort: a failure there must never
+    fail the REST connection (agent access is a bonus, not a requirement of
+    "connected").
     """
     try:
         info = await verify_token(request.token, request.region)
@@ -644,11 +737,52 @@ async def connect_celigo(
     await db.commit()
     await db.refresh(connection)
 
+    # Agent access (celigo_mcp) is a separate, best-effort concern from here on --
+    # the REST connection above is already committed and must stand regardless
+    # of what happens next. Scoped to its own SAVEPOINT (db.begin_nested()) rather
+    # than a bare try/except around a plain db.rollback(): a full session rollback
+    # expires EVERY object the session has loaded -- including the caller's own
+    # `user` and `connection` -- and touching them afterward (even just to read
+    # connection.status for the response below) throws MissingGreenlet outside
+    # the request's async context. A SAVEPOINT rollback only unwinds what this
+    # block itself touched.
+    agent_access = False
+    if request.agent_token:
+        try:
+            async with db.begin_nested():
+                mcp_connector = await _upsert_celigo_mcp_connector(
+                    db=db,
+                    tenant_id=user.tenant_id,
+                    agent_token=request.agent_token,
+                    created_by=user.id,
+                )
+                await audit_service.log_event(
+                    db=db,
+                    tenant_id=user.tenant_id,
+                    category="mcp_connector",
+                    action="mcp_connector.create",
+                    actor_id=user.id,
+                    resource_type="mcp_connector",
+                    resource_id=str(mcp_connector.id),
+                    payload={"provider": "celigo_mcp"},
+                )
+            await db.commit()
+            agent_access = mcp_connector.is_enabled
+        except Exception as exc:
+            logger.warning(
+                "celigo.agent_connector_create_failed",
+                tenant_id=str(user.tenant_id),
+                error=str(exc),
+            )
+    else:
+        agent_access = await _celigo_agent_access(db, user.tenant_id)
+
     return CeligoStatusResponse(
         connected=True,
         account_name=metadata["account_name"],
         region=metadata["region"],
         status=connection.status,
+        agent_access=agent_access,
     )
 
 
@@ -657,7 +791,12 @@ async def disconnect_celigo(
     user: Annotated[User, Depends(require_permission("connections.manage"))],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Soft-delete the Celigo connection (matches connections.py's convention)."""
+    """Soft-delete the Celigo connection (matches connections.py's convention).
+
+    Also revokes the celigo_mcp connector, if one exists -- leaving the agent
+    with live Celigo tools after the user disconnected Celigo would be a real
+    defect (Task 10).
+    """
     connection = await _get_celigo_connection(db, user.tenant_id)
     if not connection:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No Celigo connection found")
@@ -673,4 +812,26 @@ async def disconnect_celigo(
         resource_type="connection",
         resource_id=str(connection.id),
     )
+
+    mcp_result = await db.execute(
+        select(McpConnector).where(
+            McpConnector.tenant_id == user.tenant_id,
+            McpConnector.provider == "celigo_mcp",
+            McpConnector.status != "revoked",
+        )
+    )
+    mcp_connector = mcp_result.scalar_one_or_none()
+    if mcp_connector:
+        mcp_connector.status = "revoked"
+        mcp_connector.is_enabled = False
+        await audit_service.log_event(
+            db=db,
+            tenant_id=user.tenant_id,
+            category="mcp_connector",
+            action="mcp_connector.delete",
+            actor_id=user.id,
+            resource_type="mcp_connector",
+            resource_id=str(mcp_connector.id),
+        )
+
     await db.commit()
