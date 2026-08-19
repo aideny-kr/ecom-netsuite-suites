@@ -977,7 +977,7 @@ _BALANCED_TYPES: frozenset[str] = frozenset({"journalEntry"})
 _DATE_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}\Z")
 
 
-class _AmountUnreadable(ValueError):
+class _AmountUnreadableError(ValueError):
     """A debit/credit value could not be read as a number."""
 
 
@@ -994,7 +994,7 @@ def _to_decimal(value: Any) -> Decimal:
     try:
         return Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:
-        raise _AmountUnreadable(str(value)) from exc
+        raise _AmountUnreadableError(str(value)) from exc
 
 
 def _check_balanced(payload: NormalizedPayload) -> list[str]:
@@ -1004,7 +1004,7 @@ def _check_balanced(payload: NormalizedPayload) -> list[str]:
         for key, bucket in (("debit", "debits"), ("credit", "credits")):
             try:
                 amount = _to_decimal(line.get(key))
-            except _AmountUnreadable as exc:
+            except _AmountUnreadableError as exc:
                 return [
                     f"Journal entry line {idx} has an unreadable {key} amount: {exc}. "
                     "The entry cannot be confirmed to balance."
