@@ -7,7 +7,9 @@ but auth comes from ``admin_user`` -> ``(User, headers_dict)`` and the DB
 session fixture is plain ``db`` (see ``tests/conftest.py``).
 """
 
-from app.services.celigo.client import CeligoAuthError
+import httpx
+
+from app.services.celigo.client import CeligoAuthError, CeligoError
 
 
 class TestCeligoStatus:
@@ -56,6 +58,18 @@ class TestCeligoTest:
         assert r.status_code == 200
         assert r.json()["ok"] is False
         assert "Invalid token" in r.json()["error"]
+
+    async def test_requires_connections_manage_not_just_view(self, client, readonly_user):
+        """A viewer (connections.view only, no connections.manage) must not be able to
+        use /test as an oracle to probe arbitrary Celigo tokens."""
+        _, headers = readonly_user
+
+        r = await client.post(
+            "/api/v1/connector-status/celigo/test",
+            headers=headers,
+            json={"token": "tok", "region": "us"},
+        )
+        assert r.status_code == 403
 
 
 class TestCeligoConnect:
@@ -121,6 +135,69 @@ class TestCeligoConnect:
             )
         ).scalar_one_or_none()
         assert row is None, "invalid token must never create a connection row"
+
+    async def test_connect_returns_502_on_celigo_error_not_500(self, client, admin_user, db, monkeypatch):
+        """A Celigo-side 5xx/429/unexpected-status must surface as an actionable 502,
+        not an opaque 500 -- and must not persist a row."""
+        user, headers = admin_user
+
+        async def _outage(token, region="us", **kw):
+            raise CeligoError("Celigo returned 503")
+
+        monkeypatch.setattr("app.api.v1.connector_status.verify_token", _outage, raising=False)
+
+        r = await client.post(
+            "/api/v1/connector-status/celigo/connect",
+            headers=headers,
+            json={"token": "tok", "region": "us", "label": "x"},
+        )
+        assert r.status_code == 502, r.text
+        assert "Celigo returned 503" in r.json()["detail"]
+
+        from sqlalchemy import select
+
+        from app.models.connection import Connection
+
+        row = (
+            await db.execute(
+                select(Connection).where(
+                    Connection.tenant_id == user.tenant_id,
+                    Connection.provider == "celigo",
+                )
+            )
+        ).scalar_one_or_none()
+        assert row is None, "an upstream outage must never create a connection row"
+
+    async def test_connect_returns_502_on_network_failure_not_500(self, client, admin_user, db, monkeypatch):
+        """A raw httpx transport failure (timeout/DNS/connect-refused) -- unwrapped by
+        the Celigo client -- must also surface as 502, not crash to 500."""
+        user, headers = admin_user
+
+        async def _timeout(token, region="us", **kw):
+            raise httpx.ConnectTimeout("connect timed out")
+
+        monkeypatch.setattr("app.api.v1.connector_status.verify_token", _timeout, raising=False)
+
+        r = await client.post(
+            "/api/v1/connector-status/celigo/connect",
+            headers=headers,
+            json={"token": "tok", "region": "us", "label": "x"},
+        )
+        assert r.status_code == 502, r.text
+
+        from sqlalchemy import select
+
+        from app.models.connection import Connection
+
+        row = (
+            await db.execute(
+                select(Connection).where(
+                    Connection.tenant_id == user.tenant_id,
+                    Connection.provider == "celigo",
+                )
+            )
+        ).scalar_one_or_none()
+        assert row is None, "a network failure must never create a connection row"
 
 
 class TestCeligoDisconnect:

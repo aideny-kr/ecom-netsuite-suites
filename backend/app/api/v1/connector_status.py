@@ -8,6 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Annotated
 
+import httpx
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
@@ -22,7 +23,7 @@ from app.models.connection import Connection
 from app.models.pipeline import CursorState
 from app.models.user import User
 from app.services import audit_service
-from app.services.celigo.client import CeligoAuthError, verify_token
+from app.services.celigo.client import CeligoAuthError, CeligoError, verify_token
 
 logger = structlog.get_logger()
 
@@ -575,7 +576,20 @@ async def connect_celigo(
     try:
         info = await verify_token(request.token, request.region)
     except CeligoAuthError as exc:
+        # The token itself was rejected -- this is genuinely the operator's mistake.
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except (CeligoError, httpx.HTTPError) as exc:
+        # Celigo is unreachable or returned an unexpected non-2xx (5xx/429/etc), or the
+        # request itself failed at the transport level (timeout/DNS/connection refused
+        # -- verify_token does not wrap these, so httpx's own exceptions reach here).
+        # Deliberately 502, not 400 like the auth-error branch above: a 400 tells the
+        # operator they did something wrong, which is false when the failure is on
+        # Celigo's side -- and a spike of 400s reads as user error in monitoring while
+        # a spike of 502s correctly reads as an upstream outage.
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not reach Celigo: {exc}",
+        )
 
     metadata = {
         "region": request.region,
