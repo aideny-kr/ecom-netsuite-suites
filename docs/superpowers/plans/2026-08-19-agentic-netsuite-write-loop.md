@@ -1408,7 +1408,29 @@ def build_confirmation_payload(
 ```python
         editable_slots=list(validation.editable_slots) if validation else [],
         unvalidated=bool(validation.unvalidated) if validation else False,
+        unfillable_line_fields=list(validation.missing_line_required) if validation else [],
 ```
+
+**Line-level fields are validated but NOT fillable** (operator decision, 2026-08-19).
+`validate_write` produces `editable_slots` only for missing *header* fields — a
+missing line field is reported in `missing_line_required` with no slot, because a
+line-level form needs nested UI and a merge path that writes back into the right
+line, which is out of scope here.
+
+So a card must never render a form that cannot actually complete the write. Add to
+`WriteConfirmationPayload`:
+
+```python
+    unfillable_line_fields: list[str] = []
+```
+
+Contract for Task 9: when `unfillable_line_fields` is non-empty the card is
+**terminal** — it names the missing line fields, renders no slot inputs, and shows
+no Approve button, exactly as if it had failed. A half-form the human can fill in
+and approve, that then fails at NetSuite anyway, is worse than an honest stop.
+Header-only gaps still render the form as designed.
+
+Follow-up ticket for line-level slots: ClickUp 86bbgznjr.
 
 Now wire Task 6's stashed result through. In `base_agent.py`, extend the existing
 `build_confirmation_payload(...)` call (line 1277) with:
