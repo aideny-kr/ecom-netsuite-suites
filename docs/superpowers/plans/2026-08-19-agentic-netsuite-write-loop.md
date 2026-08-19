@@ -592,7 +592,7 @@ async def get_record_metadata(
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `backend/.venv/bin/python -m pytest backend/tests/test_record_metadata_service.py -v`
-Expected: PASS (3 tests)
+Expected: PASS (9 tests — 3 from Step 1, plus the error-branch, absent-vs-null, and 4 parametrised malformed-shape tests added in fix round 1)
 
 - [ ] **Step 5: Commit**
 
