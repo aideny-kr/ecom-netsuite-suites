@@ -551,3 +551,126 @@ class TestCeligoMcpGuardIntegration:
         )
         assert "error" in result
         assert "read-only" in result["error"].lower()
+
+
+class TestCeligoTenantContextAfterCommit:
+    """Whole-branch review fix: `db.commit()` inside connect_celigo (the REST
+    connection write) is a REAL commit on the request-scoped session, and
+    ``SET LOCAL app.current_tenant_id`` is transaction-scoped -- it dies at that
+    commit. Everything connect_celigo does afterward (db.refresh(connection),
+    the celigo_mcp upsert + its audit log, or -- when no agent_token is given --
+    the `_celigo_agent_access` lookup) runs with NO tenant context unless it is
+    re-established first.
+
+    Not broken today only because mcp_connectors/audit_logs aren't FORCE-RLS'd
+    and every query here also filters by tenant_id in application code. It
+    activates silently (inside the `except Exception` around the celigo_mcp
+    block) the moment either table is FORCE-RLS'd.
+
+    Per tests/conftest.py's fixture note: the SAVEPOINT-based test transaction
+    means a service-internal commit here is a RELEASE SAVEPOINT, not a real
+    COMMIT, so it does NOT actually clear the GUC in this harness -- asserting
+    GUC state would false-pass. These tests instead assert CALL ORDERING of
+    set_tenant_context against commit/refresh/the agent-access read, mirroring
+    test_report_refresh.py's ctx-spy pattern.
+    """
+
+    def _spy(self, monkeypatch, db):
+        from app.core import database as database_module
+
+        events: list = []
+        real_commit = db.commit
+        real_refresh = db.refresh
+        real_set_ctx = database_module.set_tenant_context
+
+        async def spy_ctx(session, tenant_id):
+            events.append("ctx")
+            await real_set_ctx(session, tenant_id)
+
+        async def spy_commit():
+            events.append("commit")
+            await real_commit()
+
+        async def spy_refresh(*a, **kw):
+            events.append("refresh")
+            return await real_refresh(*a, **kw)
+
+        # raising=False: the pre-fix module doesn't import set_tenant_context at
+        # all, so this attribute doesn't exist yet -- that must fail the ordering
+        # assertions below (no "ctx" event), not an unrelated AttributeError.
+        monkeypatch.setattr("app.api.v1.connector_status.set_tenant_context", spy_ctx, raising=False)
+        monkeypatch.setattr(db, "commit", spy_commit)
+        monkeypatch.setattr(db, "refresh", spy_refresh)
+        return events
+
+    async def test_context_reestablished_before_refresh_and_mcp_work(self, client, admin_user, db, monkeypatch):
+        """agent_token path: ctx must be re-set between the connection commit and
+        BOTH db.refresh(connection) and the celigo_mcp upsert/audit block."""
+        user, headers = admin_user
+        events = self._spy(monkeypatch, db)
+
+        async def _ok(token, region="us", **kw):
+            return {"account_name": "Framework", "user_email": "ops@frame.work"}
+
+        async def _discover(connector, db=None):
+            return []
+
+        monkeypatch.setattr("app.api.v1.connector_status.verify_token", _ok, raising=False)
+        monkeypatch.setattr("app.services.mcp_client_service.discover_tools", _discover, raising=False)
+
+        r = await client.post(
+            "/api/v1/connector-status/celigo/connect",
+            headers=headers,
+            json={"token": "s3cret", "region": "us", "label": "Celigo", "agent_token": "agent-tok"},
+        )
+        assert r.status_code == 201, r.text
+
+        assert "commit" in events
+        first_commit = events.index("commit")
+        assert "ctx" in events[first_commit:], (
+            "tenant context must be re-established after the connection commit"
+        )
+        ctx_after_commit = events.index("ctx", first_commit)
+        assert "refresh" in events[ctx_after_commit:], (
+            "db.refresh(connection) must run under the re-established context"
+        )
+        refresh_idx = events.index("refresh", ctx_after_commit)
+        assert ctx_after_commit < refresh_idx, "context must be re-set BEFORE db.refresh, not after"
+
+    async def test_context_reestablished_before_agent_access_read_without_agent_token(
+        self, client, admin_user, db, monkeypatch
+    ):
+        """No agent_token: the `else` branch's `_celigo_agent_access` SELECT is
+        also DB work after the same commit and needs the same re-establishment."""
+        from app.services import mcp_connector_service
+
+        user, headers = admin_user
+        events = self._spy(monkeypatch, db)
+        real_get_active = mcp_connector_service.get_active_connectors_for_tenant
+
+        async def spy_get_active(db, tenant_id):
+            events.append("agent_access_read")
+            return await real_get_active(db, tenant_id)
+
+        monkeypatch.setattr(
+            "app.api.v1.connector_status.mcp_connector_service.get_active_connectors_for_tenant",
+            spy_get_active,
+        )
+
+        async def _ok(token, region="us", **kw):
+            return {"account_name": "Framework", "user_email": "ops@frame.work"}
+
+        monkeypatch.setattr("app.api.v1.connector_status.verify_token", _ok, raising=False)
+
+        r = await client.post(
+            "/api/v1/connector-status/celigo/connect",
+            headers=headers,
+            json={"token": "s3cret", "region": "us", "label": "Celigo"},
+        )
+        assert r.status_code == 201, r.text
+
+        assert "commit" in events
+        first_commit = events.index("commit")
+        ctx_after_commit = events.index("ctx", first_commit)
+        read_idx = events.index("agent_access_read")
+        assert ctx_after_commit < read_idx, "tenant context must be re-set before the agent-access read"

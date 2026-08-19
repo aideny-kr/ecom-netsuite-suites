@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import get_db
+from app.core.database import get_db, set_tenant_context
 from app.core.dependencies import require_any_permission, require_permission
 from app.core.encryption import decrypt_credentials, encrypt_credentials, get_current_key_version
 from app.models.canonical import NetsuitePosting, Payout, PayoutLine
@@ -735,6 +735,12 @@ async def connect_celigo(
         resource_id=str(connection.id),
     )
     await db.commit()
+    # SET LOCAL app.current_tenant_id is transaction-scoped and the commit above
+    # just cleared it -- re-establish before ANY further DB work. That covers
+    # db.refresh(connection) right below, the celigo_mcp upsert + audit log in
+    # the `if request.agent_token` branch, and the `_celigo_agent_access` SELECT
+    # in the `else` branch -- all of it runs after this same commit.
+    await set_tenant_context(db, str(user.tenant_id))
     await db.refresh(connection)
 
     # Agent access (celigo_mcp) is a separate, best-effort concern from here on --
