@@ -1743,7 +1743,11 @@ Finally, gate and wire the Approve button (replace the existing confirm button):
           type="button"
           disabled={disabled || !allSlotsFilled}
           onClick={() => onConfirm(slotValues)}
-          className="… existing classes … disabled:opacity-40 disabled:cursor-not-allowed"
+          className={cn(
+            "h-8 rounded-lg px-3 text-[13px] font-medium",
+            "bg-primary text-primary-foreground",
+            "disabled:opacity-40 disabled:cursor-not-allowed",
+          )}
         >
           Approve
         </button>
