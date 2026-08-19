@@ -22,6 +22,7 @@ from app.services.chat.mutation_guard import (
     is_record_type_allowed,
     verify_confirmation_token,
 )
+from app.services.chat.write_payload import PayloadParseError, normalize_write_payload
 
 # ---------------------------------------------------------------------------
 # Schema
@@ -40,6 +41,7 @@ class WriteConfirmationPayload(BaseModel):
     record_type: str
     record_id: str | None = None
     proposed_fields: dict[str, Any]
+    proposed_lines: list[dict[str, Any]] = []
     current_record: dict[str, Any] | None = None
     tool_name: str
     tool_input: dict[str, Any]
@@ -104,13 +106,12 @@ def build_confirmation_payload(
     if not is_record_type_allowed(record_type):
         return None
 
-    body: dict[str, Any] = tool_input.get("body", {}) or {}
-    proposed_fields: dict[str, Any] = body
-
-    # Prefer top-level ``id`` (update/delete) then fall back to ``body.id``
-    record_id: str | None = tool_input.get("id") or body.get("id") or None
-    if record_id is not None:
-        record_id = str(record_id)
+    try:
+        normalized = normalize_write_payload(tool_input)
+    except PayloadParseError:
+        # Fail closed: an unrenderable payload must not become an
+        # approvable card. Returning None makes the caller surface an error.
+        return None
 
     payload_json = _build_payload_json(tool_name, tool_input)
     confirmation_token = generate_confirmation_token(session_id, payload_json)
@@ -118,8 +119,9 @@ def build_confirmation_payload(
     return WriteConfirmationPayload(
         mutation_type=mutation_type,
         record_type=record_type,
-        record_id=record_id,
-        proposed_fields=proposed_fields,
+        record_id=normalized.record_id,
+        proposed_fields=normalized.fields,
+        proposed_lines=normalized.lines,
         current_record=current_record,
         tool_name=tool_name,
         tool_input=tool_input,

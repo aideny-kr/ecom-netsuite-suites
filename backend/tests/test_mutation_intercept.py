@@ -186,7 +186,7 @@ class TestInterceptResultStrAllowed:
 
     def test_delete_customer_result_str(self):
         tool_name = _ext("ns_deleteRecord")
-        tool_input = {"recordType": "customer", "id": "CUST-1"}
+        tool_input = {"recordType": "customer", "id": "CUST-1", "data": "{}"}
         result_str = _build_intercept_result_str(tool_name, tool_input, _SESSION_ID)
         parsed = json.loads(result_str)
         assert parsed["confirmation_required"] is True

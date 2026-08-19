@@ -198,6 +198,10 @@ class TestBuildConfirmationPayloadCreate:
         assert result.tool_input == tool_input
 
     def test_empty_body_yields_empty_proposed_fields(self):
+        """When tool_input lacks both 'body' and 'data', fail closed (return None).
+
+        The old behavior (return empty dict) was the bug — no empty-but-approvable cards.
+        """
         tool_name = _ext("ns_createRecord")
         tool_input = {"recordType": "salesOrder"}
         result = build_confirmation_payload(
@@ -207,7 +211,7 @@ class TestBuildConfirmationPayloadCreate:
             tool_input=tool_input,
             session_id=_SESSION_ID,
         )
-        assert result.proposed_fields == {}
+        assert result is None
 
 
 # ---------------------------------------------------------------------------
@@ -511,3 +515,54 @@ class TestValidateAndExtractConfirmation:
         assert is_valid is True
         assert extracted_tool_name == tool_name
         assert extracted_input == tool_input
+
+
+# ---------------------------------------------------------------------------
+# Normalizer integration — fix the live MCP shape (data as JSON string)
+# ---------------------------------------------------------------------------
+
+
+def test_proposed_fields_populated_for_live_mcp_shape():
+    """Regression: the card rendered empty for every NetSuite write.
+
+    `tool_input` uses `data` (a JSON string); the old code read `body`.
+    """
+    payload = build_confirmation_payload(
+        mutation_type="create",
+        record_type="customer",
+        tool_name="ext__" + "a" * 32 + "__ns_createRecord",
+        tool_input={
+            "recordType": "customer",
+            "data": '{"companyname": "test ai customer"}',
+        },
+        session_id="11111111-1111-1111-1111-111111111111",
+    )
+    assert payload is not None
+    assert payload.proposed_fields == {"companyname": "test ai customer"}
+
+
+def test_lines_surface_on_the_card():
+    payload = build_confirmation_payload(
+        mutation_type="create",
+        record_type="journalEntry",
+        tool_name="ext__" + "a" * 32 + "__ns_createRecord",
+        tool_input={
+            "recordType": "journalEntry",
+            "data": '{"subsidiary": "1", "line": [{"account": "10", "debit": 5}]}',
+        },
+        session_id="11111111-1111-1111-1111-111111111111",
+    )
+    assert payload is not None
+    assert payload.proposed_lines == [{"account": "10", "debit": 5}]
+
+
+def test_unparseable_payload_blocks_the_write():
+    """Fail closed — no empty-but-approvable card."""
+    payload = build_confirmation_payload(
+        mutation_type="create",
+        record_type="customer",
+        tool_name="ext__" + "a" * 32 + "__ns_createRecord",
+        tool_input={"recordType": "customer", "data": "{not json"},
+        session_id="11111111-1111-1111-1111-111111111111",
+    )
+    assert payload is None
