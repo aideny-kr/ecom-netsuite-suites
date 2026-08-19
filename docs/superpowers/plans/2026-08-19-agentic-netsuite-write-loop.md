@@ -1345,11 +1345,11 @@ Then in the mutation intercept, immediately after `mutation_type = classify_muta
                                 tool_calls_log.append(
                                     build_tool_call_log_entry(
                                         step=step,
-                                        tool=block.name,
+                                        tool_name=block.name,
                                         params=block.input,
-                                        result_summary=result_str,
+                                        result_str=result_str,
                                         duration_ms=elapsed_ms,
-                                        agent=self.agent_name,
+                                        agent_name=self.agent_name,
                                     )
                                 )
                                 tool_results_content.append(
