@@ -183,6 +183,9 @@ async def test_repair_loop_feeds_error_back_without_crashing_the_stream():
     tool_ends = [p for t, p in events if t == "tool_end" and p.get("tool_name") == tool_name]
     assert len(tool_ends) == 1
     assert tool_ends[0]["success"] is False
+    # The summary must name what actually failed — diagnosable after the
+    # fact from the tool-call log, not a generic "something went wrong".
+    assert "subsidiary" in tool_ends[0]["result_summary"]
 
     responses_events = [p for t, p in events if t == "response"]
     assert len(responses_events) == 1

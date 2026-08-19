@@ -1324,6 +1324,25 @@ class BaseSpecialistAgent(abc.ABC):
                                 # the model's next attempt, not an SSE event.
                                 result_str = json.dumps(validation.as_model_error())
                                 elapsed_ms = int((time.monotonic() - t0) * 1000)
+                                # success MUST be False here — a repair round that
+                                # logs as a success would make the whole loop
+                                # invisible in the tool-call log. The summary
+                                # names what actually failed (not exit_reason:
+                                # that field stays None on this branch by design
+                                # — the loop hasn't exited, it's mid-repair —
+                                # so it would misreport rather than diagnose).
+                                _failure_bits = [
+                                    f"missing required: {', '.join(validation.missing_required)}"
+                                    if validation.missing_required
+                                    else None,
+                                    f"missing line fields: {', '.join(validation.missing_line_required)}"
+                                    if validation.missing_line_required
+                                    else None,
+                                    f"invariant violations: {'; '.join(validation.invariant_errors)}"
+                                    if validation.invariant_errors
+                                    else None,
+                                ]
+                                _failure_detail = "; ".join(b for b in _failure_bits if b) or "validation failed"
                                 yield (
                                     "tool_end",
                                     {
@@ -1331,7 +1350,7 @@ class BaseSpecialistAgent(abc.ABC):
                                         "step": step,
                                         "duration_ms": elapsed_ms,
                                         "success": False,
-                                        "result_summary": "Write validation failed — repair requested",
+                                        "result_summary": f"Write repair requested ({_failure_detail})",
                                     },
                                 )
                                 tool_calls_log.append(
