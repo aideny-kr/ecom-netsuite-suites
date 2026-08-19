@@ -68,6 +68,24 @@ class WriteRepairState:
         return True
 
 
+def _validation_failure_detail(validation: ValidationResult) -> str:
+    """Human-readable summary of what a ``ValidationResult`` got wrong.
+
+    Shared by the repair loop's "requesting another attempt" log entry and
+    the confirmation-card log entry for a card shown despite an unresolved
+    failure (repair exhausted) — both need to name which categories failed,
+    not just that something did.
+    """
+    bits = [
+        f"missing required: {', '.join(validation.missing_required)}" if validation.missing_required else None,
+        f"missing line fields: {', '.join(validation.missing_line_required)}"
+        if validation.missing_line_required
+        else None,
+        f"invariant violations: {'; '.join(validation.invariant_errors)}" if validation.invariant_errors else None,
+    ]
+    return "; ".join(b for b in bits if b) or "validation failed"
+
+
 def _build_learned_rules_block(learned_rules: list) -> str:
     """Render the tenant <learned_rules> block, XML-escaping each rule so admin
     rule text containing markup can't break out of the block or inject prompt
@@ -1331,18 +1349,7 @@ class BaseSpecialistAgent(abc.ABC):
                                 # that field stays None on this branch by design
                                 # — the loop hasn't exited, it's mid-repair —
                                 # so it would misreport rather than diagnose).
-                                _failure_bits = [
-                                    f"missing required: {', '.join(validation.missing_required)}"
-                                    if validation.missing_required
-                                    else None,
-                                    f"missing line fields: {', '.join(validation.missing_line_required)}"
-                                    if validation.missing_line_required
-                                    else None,
-                                    f"invariant violations: {'; '.join(validation.invariant_errors)}"
-                                    if validation.invariant_errors
-                                    else None,
-                                ]
-                                _failure_detail = "; ".join(b for b in _failure_bits if b) or "validation failed"
+                                _failure_detail = _validation_failure_detail(validation)
                                 yield (
                                     "tool_end",
                                     {
@@ -1479,16 +1486,29 @@ class BaseSpecialistAgent(abc.ABC):
                                 ),
                             },
                         )
-                        tool_calls_log.append(
-                            build_tool_call_log_entry(
-                                step=step,
-                                agent_name=self.agent_name,
-                                tool_name=block.name,
-                                params=block.input,
-                                result_str=result_str,
-                                duration_ms=elapsed_ms,
-                            )
+                        _log_entry = build_tool_call_log_entry(
+                            step=step,
+                            agent_name=self.agent_name,
+                            tool_name=block.name,
+                            params=block.input,
+                            result_str=result_str,
+                            duration_ms=elapsed_ms,
                         )
+                        _last_validation = getattr(self, "_last_validation", None)
+                        if payload is not None and _last_validation is not None and not _last_validation.ok:
+                            # The repair loop gave up (exit_reason "stall" or
+                            # "budget", not "done") and this card is being shown
+                            # despite a still-invalid payload. Without this, the
+                            # persisted trail cannot distinguish "validated clean
+                            # on the first attempt" from "failed repeatedly, we
+                            # gave up, and showed a human an invalid payload
+                            # anyway" — very different events on a financial
+                            # write path. SSE/card behavior is unchanged; this
+                            # only annotates the persisted tool_calls_log entry.
+                            _log_entry["validation_failed_before_confirmation"] = _validation_failure_detail(
+                                _last_validation
+                            )
+                        tool_calls_log.append(_log_entry)
                         tool_results_content.append(
                             {
                                 "type": "tool_result",
