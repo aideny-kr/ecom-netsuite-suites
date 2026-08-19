@@ -92,3 +92,59 @@ async def test_malformed_trandate_never_reaches_the_query(monkeypatch):
     )
     assert calls == []
     assert errors == []
+
+
+@pytest.mark.asyncio
+async def test_unreadable_debit_and_credit_does_not_report_balanced(monkeypatch):
+    # Coercing an unreadable amount to Decimal(0) would let a line whose debit
+    # AND credit are both garbage compare 0 == 0 and report itself balanced —
+    # a silent pass in the one check that exists to protect the ledger.
+    async def no_period(**kwargs):
+        return json.dumps({"items": []})
+
+    monkeypatch.setattr(pi, "execute_tool_call", no_period)
+    errors = await pi.check_posting_invariants(
+        payload=NormalizedPayload(
+            fields={},
+            lines=[{"debit": "garbage", "credit": "also-garbage"}],
+        ),
+        record_type="journalEntry",
+        **KW,
+    )
+    assert errors != []
+    assert not any("does not balance" in e.lower() for e in errors)
+    assert any("unreadable" in e.lower() for e in errors)
+
+
+@pytest.mark.asyncio
+async def test_one_unreadable_amount_among_balanced_lines_is_rejected(monkeypatch):
+    async def no_period(**kwargs):
+        return json.dumps({"items": []})
+
+    monkeypatch.setattr(pi, "execute_tool_call", no_period)
+    errors = await pi.check_posting_invariants(
+        payload=NormalizedPayload(
+            fields={},
+            lines=[{"debit": 100, "credit": 100}, {"debit": "N/A"}],
+        ),
+        record_type="journalEntry",
+        **KW,
+    )
+    assert any("unreadable" in e.lower() for e in errors)
+
+
+@pytest.mark.asyncio
+async def test_absent_and_empty_amounts_are_still_treated_as_zero(monkeypatch):
+    async def no_period(**kwargs):
+        return json.dumps({"items": []})
+
+    monkeypatch.setattr(pi, "execute_tool_call", no_period)
+    errors = await pi.check_posting_invariants(
+        payload=NormalizedPayload(
+            fields={},
+            lines=[{"debit": 100}, {"credit": 100, "debit": ""}, {}],
+        ),
+        record_type="journalEntry",
+        **KW,
+    )
+    assert errors == []
