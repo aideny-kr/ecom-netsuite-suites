@@ -38,7 +38,7 @@ SharedDriveId = Annotated[str | None, AfterValidator(_coerce_drive_id)]
 
 
 class McpConnectorCreate(BaseModel):
-    provider: str = Field(pattern=r"^(netsuite_mcp|shopify_mcp|stripe_mcp|custom)$")
+    provider: str = Field(pattern=r"^(netsuite_mcp|shopify_mcp|stripe_mcp|celigo_mcp|custom)$")
     label: str = Field(min_length=1, max_length=255)
     server_url: str = Field(default="", max_length=1024)
     auth_type: str = Field(default="none", pattern=r"^(bearer|api_key|none|oauth2)$")
