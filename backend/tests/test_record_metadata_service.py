@@ -86,3 +86,90 @@ async def test_fetch_failure_returns_none_not_empty(monkeypatch):
         session_id="s",
     )
     assert meta is None
+
+
+@pytest.mark.asyncio
+async def test_error_response_returns_none(monkeypatch):
+    """A well-formed JSON error envelope is a failure, not empty metadata."""
+
+    async def fake_exec(**kwargs):
+        return json.dumps({"error": "record type not found"})
+
+    monkeypatch.setattr(svc, "execute_tool_call", fake_exec)
+    meta = await svc.get_record_metadata(
+        record_type="customer",
+        mutation_tool_name=EXT,
+        tenant_id=None,
+        actor_id=None,
+        correlation_id="c",
+        db=None,
+        session_id="s",
+    )
+    assert meta is None
+
+
+@pytest.mark.asyncio
+async def test_missing_sublists_key_is_no_line_items_not_unknown(monkeypatch):
+    """A genuinely absent 'sublists' key is a valid 'no line items' shape.
+
+    Distinct from ``test_malformed_metadata_shape_returns_none_not_empty``'s
+    ``sublists_none`` case, where the key is present but explicitly null —
+    that is malformed and must be ``None``. Here the key is never sent at
+    all, which real record types with no sublists are expected to do.
+    """
+
+    async def fake_exec(**kwargs):
+        return json.dumps({"fields": [{"name": "companyname", "label": "Company Name", "mandatory": False}]})
+
+    monkeypatch.setattr(svc, "execute_tool_call", fake_exec)
+    meta = await svc.get_record_metadata(
+        record_type="customer",
+        mutation_tool_name=EXT,
+        tenant_id=None,
+        actor_id=None,
+        correlation_id="c",
+        db=None,
+        session_id="s",
+    )
+    assert meta is not None
+    assert meta.line_fields == []
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        {"fields": None, "sublists": []},
+        {"fields": ["not-a-dict"], "sublists": []},
+        {"fields": [], "sublists": ["nope"]},
+        {"fields": [], "sublists": None},
+    ],
+    ids=[
+        "fields_none",
+        "fields_contains_non_dict",
+        "sublists_contains_non_dict",
+        "sublists_none",
+    ],
+)
+@pytest.mark.asyncio
+async def test_malformed_metadata_shape_returns_none_not_empty(monkeypatch, malformed):
+    """Present-but-wrong-type payload shapes are 'unknown', never 'empty'.
+
+    A response that parses as JSON but doesn't match the expected shape must
+    not silently report "no required fields" — that reads as a validated,
+    complete payload when the requirements were never actually read.
+    """
+
+    async def fake_exec(**kwargs):
+        return json.dumps(malformed)
+
+    monkeypatch.setattr(svc, "execute_tool_call", fake_exec)
+    meta = await svc.get_record_metadata(
+        record_type="customer",
+        mutation_tool_name=EXT,
+        tenant_id=None,
+        actor_id=None,
+        correlation_id="c",
+        db=None,
+        session_id="s",
+    )
+    assert meta is None

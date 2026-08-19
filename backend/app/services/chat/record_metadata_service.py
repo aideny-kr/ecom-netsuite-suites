@@ -95,23 +95,48 @@ async def get_record_metadata(
             session_id=session_id,
         )
         data = json.loads(raw)
+
+        if not isinstance(data, dict) or data.get("error"):
+            return None
+
+        raw_fields = data.get("fields")
+        has_sublists_key = "sublists" in data
+        raw_sublists = data.get("sublists")
+
+        # Present-but-wrong-type is "unknown", not "empty" — a malformed shape
+        # must not be reported as "this record type has no required fields".
+        # A genuinely *absent* "sublists" key is a valid "no line items" shape
+        # and must not be conflated with a present-but-null/wrong-type one —
+        # `.get()` returns None for both, so the presence check is required to
+        # tell them apart.
+        if not isinstance(raw_fields, list):
+            return None
+        if has_sublists_key and not isinstance(raw_sublists, list):
+            return None
+
+        line_fields: list[FieldSpec] = []
+        for sub in raw_sublists or []:
+            if not isinstance(sub, dict):
+                return None
+            sub_fields = sub.get("fields", [])
+            if not isinstance(sub_fields, list):
+                return None
+            for raw_field in sub_fields:
+                if not isinstance(raw_field, dict):
+                    return None
+                line_fields.append(_parse_field(raw_field))
+
+        fields: list[FieldSpec] = []
+        for raw_field in raw_fields:
+            if not isinstance(raw_field, dict):
+                return None
+            fields.append(_parse_field(raw_field))
+
+        meta = RecordMetadata(record_type=record_type, fields=fields, line_fields=line_fields)
     except Exception:
         logger.warning("record_metadata: lookup failed for %s", record_type, exc_info=True)
         return None
 
-    if not isinstance(data, dict) or data.get("error"):
-        return None
-
-    sublists = data.get("sublists") or []
-    line_fields: list[FieldSpec] = []
-    for sub in sublists:
-        for raw_field in (sub or {}).get("fields", []):
-            line_fields.append(_parse_field(raw_field))
-
-    meta = RecordMetadata(
-        record_type=record_type,
-        fields=[_parse_field(f) for f in data.get("fields", [])],
-        line_fields=line_fields,
-    )
+    # Cache only on the success path — a failed lookup must not be cached.
     _cache[key] = (time.monotonic(), meta)
     return meta
