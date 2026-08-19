@@ -136,7 +136,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel
 
 # Keys that hold the record payload, in precedence order.
 _PAYLOAD_KEYS = ("data", "body")
@@ -447,7 +447,7 @@ import logging
 import time
 from typing import Any
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel
 
 from app.services.chat.tools import execute_tool_call
 
