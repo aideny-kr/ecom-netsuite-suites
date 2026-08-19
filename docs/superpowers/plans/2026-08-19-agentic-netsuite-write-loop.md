@@ -1144,7 +1144,9 @@ git commit -m "feat(chat): period-open and journal-balance posting invariants"
 
 **Interfaces:**
 - Consumes: everything from Tasks 1, 3, 4, 5.
-- Produces: repair state on the agent instance — `self._write_repair_attempts: dict[str, int]` and `self._write_repair_fingerprints: dict[str, str]`, keyed by record_type. Exit reason recorded in `self._write_repair_exit: str | None` with values `done | budget | stall | error`.
+- Produces: repair state on the agent instance as a single `self._write_repair: WriteRepairState`, lazily created on first mutation in the turn. It holds per-record-type attempt counts and failure fingerprints internally, and exposes `should_repair(record_type, validation) -> bool` plus `exit_reason: str | None` with values `done | budget | stall | error`.
+  Also stashed for Task 7: `self._last_validation: ValidationResult | None`.
+  (An earlier draft of this line named three flat attributes — `_write_repair_attempts`, `_write_repair_fingerprints`, `_write_repair_exit` — which never matched Step 3's code. The single-object shape above is what ships; Task 7 should look for that.)
 
 **Repair budget: 2 attempts.** A repeated fingerprint exits `stall` immediately rather than consuming the budget.
 
