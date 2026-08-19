@@ -62,6 +62,7 @@ import { JobsSection } from "@/components/settings/jobs-section";
 import { NetSuiteConnectionsSection } from "@/components/settings/netsuite-connections-section";
 import { BigQueryConnectionSection } from "@/components/settings/bigquery-connection-section";
 import { DataSourceConnectorsSection } from "@/components/settings/data-source-connectors-section";
+import CeligoConnectorCard from "@/components/settings/celigo-connector-card";
 
 import { usePermissions } from "@/hooks/use-permissions";
 import { useAuth } from "@/providers/auth-provider";
@@ -2810,6 +2811,7 @@ class SectionErrorBoundary extends Component<
 
 export default function SettingsPage() {
   const showBranding = useFeature("custom_branding");
+  const showCeligo = useFeature("celigo");
   const { isAdmin } = usePermissions();
   const { user } = useAuth();
 
@@ -2901,6 +2903,11 @@ export default function SettingsPage() {
           <SectionErrorBoundary name="Governance Policy">
             <GovernancePolicySection />
           </SectionErrorBoundary>
+          {showCeligo && (
+            <SectionErrorBoundary name="Celigo">
+              <CeligoConnectorCard />
+            </SectionErrorBoundary>
+          )}
         </>
       )}
 
