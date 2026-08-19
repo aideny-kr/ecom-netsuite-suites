@@ -64,14 +64,38 @@ class WriteConfirmationPayload(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _build_payload_json(tool_name: str, tool_input: dict[str, Any]) -> str:
+def _build_payload_json(
+    tool_name: str,
+    tool_input: dict[str, Any],
+    editable_slots: list[dict[str, Any]],
+) -> str:
     """Canonical JSON representation used for HMAC signing.
 
-    ``sort_keys=True`` and ``default=str`` ensure deterministic output across
-    Python versions regardless of dict insertion order.
+    ``editable_slots`` is inside the signed envelope alongside
+    ``tool_name``/``tool_input``: it decides which fields a client may write
+    on approve and with which values, so it is an authorization surface, not
+    display data. Every mint site and every verify site must call this with
+    the SAME slots the card actually carries — a slot appended, or an
+    ``allowed`` list loosened, after minting must invalidate the token
+    exactly like a tampered ``tool_input`` does.
+
+    ``editable_slots`` must already be plain dicts (e.g. via
+    ``EditableSlot.model_dump()`` on the mint side; a persisted
+    ``ChatMessage.structured_output["editable_slots"]`` is already dicts on
+    the verify side) — never raw pydantic model instances. ``default=str``
+    would serialize a pydantic object to its repr string, which differs from
+    the JSON serialization of the same data as a dict, so signing objects
+    directly on one side and dicts on the other would mean no token ever
+    verifies.
+
+    ``sort_keys=True`` orders keys *within* each slot dict but not the slot
+    *list* itself, so the slots are additionally sorted by ``name`` here —
+    two logically identical slot sets must sign to the same string
+    regardless of the order they happen to arrive in.
     """
+    sorted_slots = sorted(editable_slots, key=lambda slot: slot.get("name", ""))
     return json.dumps(
-        {"tool_name": tool_name, "tool_input": tool_input},
+        {"tool_name": tool_name, "tool_input": tool_input, "editable_slots": sorted_slots},
         sort_keys=True,
         default=str,
     )
@@ -143,7 +167,11 @@ def build_confirmation_payload(
         record_id: str | None = tool_input.get("id")
         if record_id is not None:
             record_id = str(record_id)
-        payload_json = _build_payload_json(tool_name, tool_input)
+        # Compute the slots FIRST so the token is signed over the exact
+        # slots the card carries — editable_slots is inside the HMAC
+        # envelope now (an authorization surface, not just display data).
+        editable_slots = list(validation.editable_slots) if validation else []
+        payload_json = _build_payload_json(tool_name, tool_input, [s.model_dump() for s in editable_slots])
         confirmation_token = generate_confirmation_token(session_id, payload_json)
         return WriteConfirmationPayload(
             mutation_type=mutation_type,
@@ -155,7 +183,7 @@ def build_confirmation_payload(
             tool_name=tool_name,
             tool_input=tool_input,
             confirmation_token=confirmation_token,
-            editable_slots=list(validation.editable_slots) if validation else [],
+            editable_slots=editable_slots,
             unvalidated=bool(validation.unvalidated) if validation else False,
             unfillable_line_fields=list(validation.missing_line_required) if validation else [],
         )
@@ -170,7 +198,8 @@ def build_confirmation_payload(
     except PayloadParseError:
         return None
 
-    payload_json = _build_payload_json(tool_name, tool_input)
+    editable_slots = list(validation.editable_slots) if validation else []
+    payload_json = _build_payload_json(tool_name, tool_input, [s.model_dump() for s in editable_slots])
     confirmation_token = generate_confirmation_token(session_id, payload_json)
 
     return WriteConfirmationPayload(
@@ -183,7 +212,7 @@ def build_confirmation_payload(
         tool_name=tool_name,
         tool_input=tool_input,
         confirmation_token=confirmation_token,
-        editable_slots=list(validation.editable_slots) if validation else [],
+        editable_slots=editable_slots,
         unvalidated=bool(validation.unvalidated) if validation else False,
         unfillable_line_fields=list(validation.missing_line_required) if validation else [],
     )
@@ -224,7 +253,10 @@ def build_recon_group_confirmation(
         # omit rather than guess/fabricate a number the user would see.
     }
 
-    payload_json = _build_payload_json("recon.approve_group", tool_input)
+    # No slots on this card — pass an empty list explicitly so signing here
+    # stays consistent with every other mint site now that editable_slots is
+    # part of the signed envelope.
+    payload_json = _build_payload_json("recon.approve_group", tool_input, [])
     confirmation_token = generate_confirmation_token(session_id, payload_json)
 
     return WriteConfirmationPayload(
@@ -245,8 +277,14 @@ def validate_and_extract_confirmation(
 ) -> tuple[bool, str, dict[str, Any]]:
     """Validate a confirmation payload received from the frontend.
 
-    Rebuilds the original ``payload_json`` from the ``tool_name`` and
-    ``tool_input`` fields in *structured_output* and verifies the HMAC token.
+    Rebuilds the original ``payload_json`` from the ``tool_name``,
+    ``tool_input``, and ``editable_slots`` fields in *structured_output* and
+    verifies the HMAC token. ``editable_slots`` is inside the signed
+    envelope: a slot appended, or an ``allowed`` list loosened, since minting
+    must invalidate the token exactly like a tampered ``tool_input`` does —
+    see ``_build_payload_json``. The stored slot list is already plain dicts
+    (round-tripped through ``ChatMessage.structured_output``, a JSON
+    column), so no ``.model_dump()`` is needed here.
 
     Returns
     -------
@@ -258,11 +296,41 @@ def validate_and_extract_confirmation(
     token: str = structured_output.get("confirmation_token", "")
     tool_name: str = structured_output.get("tool_name", "")
     tool_input: dict[str, Any] = structured_output.get("tool_input", {})
+    editable_slots: list[dict[str, Any]] = structured_output.get("editable_slots", [])
 
-    payload_json = _build_payload_json(tool_name, tool_input)
+    payload_json = _build_payload_json(tool_name, tool_input, editable_slots)
     is_valid = verify_confirmation_token(token, session_id, payload_json)
 
     return is_valid, tool_name, tool_input
+
+
+# Values a human-filled form field could actually produce. A dict/list/None
+# is never something a form emits for a single slot — rejecting them keeps
+# a slot from becoming a channel for arbitrary structured data.
+_SCALAR_TYPES = (str, int, float, bool)
+
+
+def _is_scalar(value: Any) -> bool:
+    return isinstance(value, _SCALAR_TYPES)
+
+
+def mint_confirmation_token(
+    tool_name: str,
+    tool_input: dict[str, Any],
+    editable_slots: list[dict[str, Any]],
+    session_id: str,
+) -> str:
+    """Compute a fresh HMAC confirmation token for ``(tool_name, tool_input,
+    editable_slots)``.
+
+    Used after ``merge_slot_values`` merges human-supplied field values into
+    a payload: the persisted card and the executed write must show the SAME
+    payload, so the token has to be re-minted over the merged result rather
+    than reusing the pre-merge token. ``editable_slots`` is unchanged by a
+    merge (only the values filled into ``tool_input`` change) — callers pass
+    the same slot list the card already carries.
+    """
+    return generate_confirmation_token(session_id, _build_payload_json(tool_name, tool_input, editable_slots))
 
 
 def merge_slot_values(
@@ -276,13 +344,15 @@ def merge_slot_values(
     (``structured_output["editable_slots"]``), and only values inside each
     slot's ``allowed`` set when one exists. This is what stops a manipulated
     client authoring an ERP write: it can fill declared blanks with allowed
-    values and nothing else — any other key, or a value outside an
-    allowlist, is rejected before the payload ever reaches
+    values and nothing else — any other key, a non-scalar value, or a value
+    outside an allowlist, is rejected before the payload ever reaches
     ``execute_tool_call``.
 
     ``structured_output`` is expected to be server-trusted (e.g. loaded from
     a persisted ``ChatMessage.structured_output``, never accepted verbatim
-    from the client) — only ``slot_values`` is attacker-controlled input.
+    from the client) — only ``slot_values`` is attacker-controlled input, and
+    it can be any JSON value (not necessarily a dict), so its shape is
+    checked before ``.items()`` is ever called on it.
 
     Returns ``(is_valid, tool_name, merged_tool_input, error)``. ``error`` is
     ``""`` on success.
@@ -297,11 +367,24 @@ def merge_slot_values(
         is_valid, name, original = validate_and_extract_confirmation(structured_output, session_id)
         return is_valid, name, original, "" if is_valid else "invalid token"
 
+    if not isinstance(slot_values, dict):
+        return False, tool_name, {}, "slot_values must be an object mapping field name to value."
+
     for key, value in slot_values.items():
         if key not in slots:
             return False, tool_name, {}, f"Field '{key}' is not editable."
+        if not _is_scalar(value):
+            return False, tool_name, {}, f"'{key}' must be a plain text, number, or boolean value."
         allowed = slots[key].get("allowed")
-        if allowed:
+        if allowed is not None:
+            # An explicitly empty allowlist means the server could not
+            # constrain this slot (e.g. a lookup returned zero options) —
+            # fail closed, the same as every other "can't constrain this"
+            # case in this plan, rather than degrading to unconstrained
+            # free text. `allowed is None` (no allowlist declared at all)
+            # is the only case that permits an arbitrary scalar.
+            if not allowed:
+                return False, tool_name, {}, f"'{key}' has no allowed values and cannot be filled."
             permitted = {str(opt.get("value")) for opt in allowed}
             if str(value) not in permitted:
                 return False, tool_name, {}, f"'{value}' is not an allowed value for '{key}'."
@@ -311,14 +394,22 @@ def merge_slot_values(
     except PayloadParseError as exc:
         return False, tool_name, {}, f"stored payload unparseable: {exc}"
 
-    merged_fields = {**normalized.fields, **slot_values}
+    # Merge into the RAW record (fields + line-sublists together, exactly as
+    # normalize_write_payload read it) and write back under the SAME key it
+    # was read from. Merging only `.fields` and reassembling `.lines` under
+    # a guessed key would silently drop every line item — `.lines` is a
+    # flattened list with no way back to its original sublist name
+    # (`line`/`item`/`expense`/...). Branching write-back on key PRESENCE
+    # (`"data" in tool_input`) rather than which key actually coerced also
+    # produced two conflicting payloads for a present-but-null `data` next
+    # to a populated `body`; writing back to `normalized.payload_key`
+    # resolves both by construction.
+    merged_record = {**normalized.record, **slot_values}
     merged_input = dict(tool_input)
-    # Write back in the shape the tool actually expects — the Oracle
-    # NetSuite MCP sends `data` as a JSON string; older/other schemas use a
-    # `body` dict (see write_payload.py's `_PAYLOAD_KEYS`).
-    if "data" in merged_input:
-        merged_input["data"] = json.dumps(merged_fields)
+    original_value = tool_input.get(normalized.payload_key)
+    if isinstance(original_value, str):
+        merged_input[normalized.payload_key] = json.dumps(merged_record)
     else:
-        merged_input["body"] = merged_fields
+        merged_input[normalized.payload_key] = merged_record
 
     return True, tool_name, merged_input, ""

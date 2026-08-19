@@ -29,6 +29,17 @@ class NormalizedPayload(BaseModel):
     fields: dict[str, Any]
     lines: list[dict[str, Any]]
     record_id: str | None = None
+    # The raw, UNSPLIT record (fields + line-sublists together, exactly as
+    # read) and which `tool_input` key it came from ("data" or "body").
+    # `normalize_write_payload()` always populates both — a merge that wants
+    # to add a field without losing line items has to merge into `record`
+    # and write back under `payload_key`, not reassemble `fields`/`lines`
+    # under a guessed key (`.lines` alone has no way back to its original
+    # sublist name — `line`/`item`/`expense`/...). The defaults below exist
+    # only so existing direct constructions elsewhere (validator/invariants
+    # tests, which only read `.fields`/`.lines`) don't have to pass them.
+    record: dict[str, Any] = {}
+    payload_key: str = ""
 
 
 def _coerce(raw: Any) -> dict[str, Any] | None:
@@ -48,26 +59,30 @@ def _coerce(raw: Any) -> dict[str, Any] | None:
 def normalize_write_payload(tool_input: dict[str, Any]) -> NormalizedPayload:
     """Return the canonical payload, or raise :class:`PayloadParseError`."""
     record: dict[str, Any] | None = None
+    payload_key: str | None = None
     for key in _PAYLOAD_KEYS:
         if key in tool_input:
-            record = _coerce(tool_input[key])
-            if record is not None:
+            coerced = _coerce(tool_input[key])
+            if coerced is not None:
+                record, payload_key = coerced, key
                 break
 
-    if record is None:
+    if record is None or payload_key is None:
         raise PayloadParseError("tool_input carried no 'data' or 'body' payload")
 
     lines: list[dict[str, Any]] = []
     fields: dict[str, Any] = {}
-    for key, value in record.items():
-        if key in _LINE_KEYS and isinstance(value, list):
+    for line_key, value in record.items():
+        if line_key in _LINE_KEYS and isinstance(value, list):
             lines.extend(item for item in value if isinstance(item, dict))
         else:
-            fields[key] = value
+            fields[line_key] = value
 
     record_id = tool_input.get("id") or record.get("id")
     return NormalizedPayload(
         fields=fields,
         lines=lines,
         record_id=str(record_id) if record_id is not None else None,
+        record=record,
+        payload_key=payload_key,
     )

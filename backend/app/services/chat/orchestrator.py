@@ -1721,6 +1721,7 @@ async def run_chat_turn(
 
             from app.services.chat.write_confirmation_service import (
                 merge_slot_values,
+                mint_confirmation_token,
                 validate_and_extract_confirmation,
             )
 
@@ -1755,11 +1756,24 @@ async def run_chat_turn(
                 # here, after the token check above, so a tampered slot
                 # submission never reaches `execute_tool_call`.
                 _slot_values = write_confirm.get("slot_values") or {}
+                _merged_confirmation_token: str | None = None
                 if _slot_values:
                     is_valid, tool_name, tool_input, _merge_err = merge_slot_values(_so, _slot_values, str(session.id))
                     if not is_valid:
                         yield {"type": "error", "error": _merge_err or "Confirmation token is invalid or tampered."}
                         return
+                    # The contract: the token is re-minted over the merged
+                    # payload. The persisted card must show what was actually
+                    # written, not the agent's pre-merge payload — otherwise
+                    # the card would permanently misrepresent what got sent
+                    # to NetSuite (the audit log below still has the merged
+                    # truth regardless, via `tool_input` in its payload).
+                    # `editable_slots` is unchanged by the merge (only the
+                    # filled-in values change) — sign with the same slots
+                    # `_so` already carries.
+                    _merged_confirmation_token = mint_confirmation_token(
+                        tool_name, tool_input, _so.get("editable_slots", []), str(session.id)
+                    )
 
                 _exec_result_str = await execute_tool_call(
                     tool_name=tool_name,
@@ -1788,6 +1802,12 @@ async def run_chat_turn(
 
                 _updated_so = dict(_so)
                 _updated_so["status"] = "approved" if _exec_succeeded else "pending"
+                if _merged_confirmation_token is not None:
+                    # A slot merge happened above — persist what was
+                    # actually written and the token minted over it, so the
+                    # stored card agrees with the executed write.
+                    _updated_so["tool_input"] = tool_input
+                    _updated_so["confirmation_token"] = _merged_confirmation_token
                 _confirm_msg.structured_output = _updated_so
                 _wc_flag_modified(_confirm_msg, "structured_output")
 
