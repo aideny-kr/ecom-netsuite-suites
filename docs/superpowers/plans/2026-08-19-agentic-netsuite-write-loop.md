@@ -541,12 +541,21 @@ async def get_record_metadata(
             return None
 
         raw_fields = data.get("fields")
+        has_sublists_key = "sublists" in data
         raw_sublists = data.get("sublists")
 
         # Present-but-wrong-type is "unknown", not "empty".
         if not isinstance(raw_fields, list):
             return None
-        if raw_sublists is not None and not isinstance(raw_sublists, list):
+
+        # `dict.get()` cannot tell "key absent" from "key present as null", and
+        # the two mean opposite things here. An ABSENT "sublists" key is a valid
+        # shape for a record with no line items. A key present as null is a
+        # malformed response and must degrade to None — writing this as
+        # `raw_sublists is not None and not isinstance(...)` silently exempts
+        # exactly that case and lets an empty RecordMetadata through, which is
+        # the failure this guard exists to prevent.
+        if has_sublists_key and not isinstance(raw_sublists, list):
             return None
 
         line_fields: list[FieldSpec] = []
