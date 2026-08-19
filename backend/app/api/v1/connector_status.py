@@ -22,6 +22,7 @@ from app.models.connection import Connection
 from app.models.pipeline import CursorState
 from app.models.user import User
 from app.services import audit_service
+from app.services.celigo.client import CeligoAuthError, verify_token
 
 logger = structlog.get_logger()
 
@@ -69,6 +70,30 @@ class DepositSyncStatusResponse(BaseModel):
     last_sync_at: str | None = None
     deposits_count: int = 0
     error_message: str | None = None
+
+
+class CeligoStatusResponse(BaseModel):
+    connected: bool
+    account_name: str | None = None
+    region: str | None = None
+    status: str | None = None
+
+
+class CeligoTestRequest(BaseModel):
+    token: str
+    region: str = "us"
+
+
+class CeligoTestResponse(BaseModel):
+    ok: bool
+    account_name: str | None = None
+    error: str | None = None
+
+
+class CeligoConnectRequest(BaseModel):
+    token: str
+    region: str = "us"
+    label: str = "Celigo"
 
 
 # ---------------------------------------------------------------------------
@@ -482,3 +507,156 @@ async def trigger_netsuite_deposit_sync(
         "records_updated": result.records_updated,
         "job_id": str(job.id),
     }
+
+
+# ---------------------------------------------------------------------------
+# Celigo endpoints (read-only connector -- Plan A: connect/test/disconnect only)
+# ---------------------------------------------------------------------------
+
+
+async def _get_celigo_connection(db: AsyncSession, tenant_id) -> Connection | None:
+    result = await db.execute(
+        select(Connection).where(
+            Connection.tenant_id == tenant_id,
+            Connection.provider == "celigo",
+            Connection.status != "revoked",
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+@router.get("/celigo", response_model=CeligoStatusResponse)
+async def get_celigo_status(
+    user: Annotated[User, Depends(require_permission("connections.view"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Get Celigo connector status."""
+    connection = await _get_celigo_connection(db, user.tenant_id)
+    if not connection:
+        return CeligoStatusResponse(connected=False)
+
+    metadata = connection.metadata_json or {}
+    return CeligoStatusResponse(
+        connected=True,
+        account_name=metadata.get("account_name"),
+        region=metadata.get("region"),
+        status=connection.status,
+    )
+
+
+@router.post("/celigo/test", response_model=CeligoTestResponse)
+async def test_celigo_connection(
+    request: CeligoTestRequest,
+    user: Annotated[User, Depends(require_permission("connections.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Validate a Celigo token without persisting it."""
+    try:
+        info = await verify_token(request.token, request.region)
+    except CeligoAuthError as exc:
+        return CeligoTestResponse(ok=False, error=str(exc))
+    except Exception as exc:
+        return CeligoTestResponse(ok=False, error=f"Connection failed: {exc}")
+
+    return CeligoTestResponse(ok=True, account_name=info.get("account_name"))
+
+
+@router.post("/celigo/connect", response_model=CeligoStatusResponse, status_code=status.HTTP_201_CREATED)
+async def connect_celigo(
+    request: CeligoConnectRequest,
+    user: Annotated[User, Depends(require_permission("connections.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Create (or reactivate) a Celigo connection.
+
+    Verifies the token BEFORE any database write -- an invalid token must
+    never create a row.
+    """
+    try:
+        info = await verify_token(request.token, request.region)
+    except CeligoAuthError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    metadata = {
+        "region": request.region,
+        "account_name": info.get("account_name"),
+        "environment_scope": "all",
+    }
+    encrypted = encrypt_credentials({"token": request.token})
+    now = datetime.now(timezone.utc)
+
+    # Include revoked rows so a reconnect reactivates the same row instead of
+    # violating a one-connection-per-provider-per-tenant expectation.
+    existing_result = await db.execute(
+        select(Connection).where(
+            Connection.tenant_id == user.tenant_id,
+            Connection.provider == "celigo",
+        )
+    )
+    existing = existing_result.scalar_one_or_none()
+
+    if existing:
+        existing.encrypted_credentials = encrypted
+        existing.status = "active"
+        existing.error_reason = None
+        existing.last_health_check_at = now
+        existing.label = request.label
+        existing.metadata_json = metadata
+        connection = existing
+    else:
+        connection = Connection(
+            tenant_id=user.tenant_id,
+            provider="celigo",
+            label=request.label,
+            status="active",
+            auth_type="api_key",
+            encrypted_credentials=encrypted,
+            created_by=user.id,
+            last_health_check_at=now,
+            metadata_json=metadata,
+        )
+        db.add(connection)
+        await db.flush()
+
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="connection",
+        action="connection.create",
+        actor_id=user.id,
+        resource_type="connection",
+        resource_id=str(connection.id),
+    )
+    await db.commit()
+    await db.refresh(connection)
+
+    return CeligoStatusResponse(
+        connected=True,
+        account_name=metadata["account_name"],
+        region=metadata["region"],
+        status=connection.status,
+    )
+
+
+@router.delete("/celigo", status_code=status.HTTP_204_NO_CONTENT)
+async def disconnect_celigo(
+    user: Annotated[User, Depends(require_permission("connections.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Soft-delete the Celigo connection (matches connections.py's convention)."""
+    connection = await _get_celigo_connection(db, user.tenant_id)
+    if not connection:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No Celigo connection found")
+
+    connection.status = "revoked"
+
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="connection",
+        action="connection.delete",
+        actor_id=user.id,
+        resource_type="connection",
+        resource_id=str(connection.id),
+    )
+    await db.commit()
