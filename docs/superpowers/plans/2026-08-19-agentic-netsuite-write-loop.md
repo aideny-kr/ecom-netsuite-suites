@@ -974,21 +974,46 @@ _BALANCED_TYPES: frozenset[str] = frozenset({"journalEntry"})
 # Exact ISO date. `trandate` reaches this module from an LLM-composed write
 # payload and is interpolated into a raw SuiteQL string, so it is validated
 # before use rather than escaped after.
-_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_DATE_RE = re.compile(r"\A\d{4}-\d{2}-\d{2}\Z")
+
+
+class _AmountUnreadable(ValueError):
+    """A debit/credit value could not be read as a number."""
 
 
 def _to_decimal(value: Any) -> Decimal:
+    """Absent is zero; unreadable is an error.
+
+    Coercing a garbage amount to Decimal(0) would let a journal entry whose
+    debit AND credit are both unreadable compare 0 == 0 and report itself as
+    BALANCED — a silent pass in the one check that exists to protect the
+    ledger. Absent/empty is genuinely zero; anything else must surface.
+    """
     if value in (None, ""):
         return Decimal(0)
     try:
         return Decimal(str(value))
-    except (InvalidOperation, ValueError):
-        return Decimal(0)
+    except (InvalidOperation, ValueError) as exc:
+        raise _AmountUnreadable(str(value)) from exc
 
 
 def _check_balanced(payload: NormalizedPayload) -> list[str]:
-    debits = sum(_to_decimal(line.get("debit")) for line in payload.lines)
-    credits = sum(_to_decimal(line.get("credit")) for line in payload.lines)
+    debits = Decimal(0)
+    credits = Decimal(0)
+    for idx, line in enumerate(payload.lines):
+        for key, bucket in (("debit", "debits"), ("credit", "credits")):
+            try:
+                amount = _to_decimal(line.get(key))
+            except _AmountUnreadable as exc:
+                return [
+                    f"Journal entry line {idx} has an unreadable {key} amount: {exc}. "
+                    "The entry cannot be confirmed to balance."
+                ]
+            if bucket == "debits":
+                debits += amount
+            else:
+                credits += amount
+
     if debits != credits:
         return [
             f"Journal entry does not balance: debits {debits} != credits {credits}."
