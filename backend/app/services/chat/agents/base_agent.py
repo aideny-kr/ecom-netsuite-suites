@@ -20,7 +20,9 @@ from xml.sax.saxutils import escape as _xml_escape
 
 from app.services.chat import thinking
 from app.services.chat.llm_adapter import BaseLLMAdapter, LLMResponse, TokenUsage
+from app.services.chat.posting_invariants import check_posting_invariants
 from app.services.chat.prompt_cache import split_system_prompt
+from app.services.chat.record_metadata_service import get_record_metadata
 from app.services.chat.tool_call_results import (
     build_tool_call_log_entry,
     tool_call_had_error,
@@ -28,6 +30,42 @@ from app.services.chat.tool_call_results import (
 )
 from app.services.chat.tool_categories import categorize
 from app.services.chat.write_confirmation_service import build_confirmation_payload
+from app.services.chat.write_payload import PayloadParseError, normalize_write_payload
+from app.services.chat.write_validator import ValidationResult, validate_write
+
+
+class WriteRepairState:
+    """Bounded repair budget for write validation, held in run state.
+
+    A cap the model is asked to respect is a request; a counter that persists
+    and decrements is a guarantee. Exits carry a reason, never a bare boolean.
+    """
+
+    def __init__(self, max_attempts: int = 2) -> None:
+        self.max_attempts = max_attempts
+        self._attempts: dict[str, int] = {}
+        self._fingerprints: dict[str, str] = {}
+        self.exit_reason: str | None = None
+
+    def should_repair(self, record_type: str, result: ValidationResult) -> bool:
+        if result.ok:
+            self.exit_reason = "done"
+            return False
+
+        fingerprint = result.fingerprint()
+        if self._fingerprints.get(record_type) == fingerprint:
+            # Same failure as last time — recomposing will not help.
+            self.exit_reason = "stall"
+            return False
+
+        attempts = self._attempts.get(record_type, 0)
+        if attempts >= self.max_attempts:
+            self.exit_reason = "budget"
+            return False
+
+        self._attempts[record_type] = attempts + 1
+        self._fingerprints[record_type] = fingerprint
+        return True
 
 
 def _build_learned_rules_block(learned_rules: list) -> str:
@@ -1237,6 +1275,88 @@ class BaseSpecialistAgent(abc.ABC):
                     mutation_type = classify_mutation(block.name)
                     if mutation_type is not None:
                         record_type = block.input.get("recordType", "unknown")
+
+                        # ── Write validation + bounded repair ──
+                        if not hasattr(self, "_write_repair"):
+                            self._write_repair = WriteRepairState(max_attempts=2)
+
+                        validation = None
+                        try:
+                            normalized = normalize_write_payload(block.input)
+                        except PayloadParseError as exc:
+                            result_str = json.dumps({"error": f"Write payload could not be parsed: {exc}"})
+                            normalized = None
+
+                        if normalized is not None:
+                            meta = await get_record_metadata(
+                                record_type=record_type,
+                                mutation_tool_name=block.name,
+                                tenant_id=self.tenant_id,
+                                actor_id=self.user_id,
+                                correlation_id=self.correlation_id,
+                                db=db,
+                                session_id=session_id or str(self.tenant_id),
+                            )
+                            invariants = await check_posting_invariants(
+                                payload=normalized,
+                                record_type=record_type,
+                                mutation_tool_name=block.name,
+                                tenant_id=self.tenant_id,
+                                actor_id=self.user_id,
+                                correlation_id=self.correlation_id,
+                                db=db,
+                                session_id=session_id or str(self.tenant_id),
+                            )
+                            validation = validate_write(
+                                payload=normalized,
+                                metadata=meta,
+                                record_type=record_type,
+                                mutation_type=mutation_type,
+                                invariant_errors=invariants,
+                            )
+
+                            if self._write_repair.should_repair(record_type, validation):
+                                # Hand the model a structured error INSTEAD of a
+                                # card. The human never sees an invalid payload.
+                                # Same "feed error back to agent, retry within
+                                # the turn" shape as the Plan Mode InterceptError
+                                # branch above — result_str is what recomposes
+                                # the model's next attempt, not an SSE event.
+                                result_str = json.dumps(validation.as_model_error())
+                                elapsed_ms = int((time.monotonic() - t0) * 1000)
+                                yield (
+                                    "tool_end",
+                                    {
+                                        "tool_name": block.name,
+                                        "step": step,
+                                        "duration_ms": elapsed_ms,
+                                        "success": False,
+                                        "result_summary": "Write validation failed — repair requested",
+                                    },
+                                )
+                                tool_calls_log.append(
+                                    build_tool_call_log_entry(
+                                        step=step,
+                                        agent_name=self.agent_name,
+                                        tool_name=block.name,
+                                        params=block.input,
+                                        result_str=result_str,
+                                        duration_ms=elapsed_ms,
+                                    )
+                                )
+                                tool_results_content.append(
+                                    {
+                                        "type": "tool_result",
+                                        "tool_use_id": block.id,
+                                        "content": result_str,
+                                        "is_error": True,
+                                    }
+                                )
+                                continue
+
+                        # Consumed by Task 7 when the card learns about slots.
+                        self._last_validation = validation
+                        # ── End write validation + bounded repair ──
 
                         # For updates/upserts: pre-fetch current record for
                         # before/after diff display (capped at 5s to avoid
