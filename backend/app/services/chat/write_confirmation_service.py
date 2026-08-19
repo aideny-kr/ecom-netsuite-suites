@@ -22,7 +22,7 @@ from app.services.chat.mutation_guard import (
     is_record_type_allowed,
     verify_confirmation_token,
 )
-from app.services.chat.write_payload import normalize_write_payload
+from app.services.chat.write_payload import PayloadParseError, normalize_write_payload
 
 # ---------------------------------------------------------------------------
 # Schema
@@ -82,13 +82,23 @@ def build_confirmation_payload(
 ) -> WriteConfirmationPayload | None:
     """Build a ``WriteConfirmationPayload`` for a pending write operation.
 
-    Returns ``None`` if *record_type* is not on the mutation allowlist (either
-    explicitly blocked or simply unknown — deny by default).
+    Returns ``None`` in two distinct cases the caller must not conflate:
 
-    Raises ``PayloadParseError`` if the payload is present but malformed on an
-    allowed record type. Deletes with no payload are treated as valid with
-    empty fields. Create/update/upsert operations without payload are treated
-    as parse errors.
+    1. *record_type* is not on the mutation allowlist (either explicitly
+       blocked or simply unknown — deny by default).
+    2. *record_type* is allowed, but the payload is missing or unparseable
+       for a create/update/upsert (``normalize_write_payload`` raised
+       ``PayloadParseError``, caught here so this function never raises).
+
+    Callers that need to tell these apart — to show an accurate error
+    message — should re-check ``is_record_type_allowed(record_type)``: if it
+    is ``True`` and this function returned ``None``, the payload was the
+    problem, not the record type.
+
+    Deletes legitimately carry no field payload — only ``{recordType, id}``
+    — so they are never subject to the parse-error case and always return a
+    payload (with empty ``proposed_fields``/``proposed_lines``) once the
+    record type is allowed.
 
     Parameters
     ----------
@@ -131,10 +141,15 @@ def build_confirmation_payload(
             confirmation_token=confirmation_token,
         )
 
-    # For create/update/upsert, require a parseable payload.
-    # Let PayloadParseError propagate to the caller so it can distinguish
-    # from a blocked record type.
-    normalized = normalize_write_payload(tool_input)
+    # For create/update/upsert, require a parseable payload. Fail closed:
+    # a missing or malformed payload must never produce an empty-but-
+    # approvable card, so an unparseable payload returns None here — same
+    # as a blocked record type — rather than raising into the caller's
+    # streaming loop. See the docstring for how callers distinguish the two.
+    try:
+        normalized = normalize_write_payload(tool_input)
+    except PayloadParseError:
+        return None
 
     payload_json = _build_payload_json(tool_name, tool_input)
     confirmation_token = generate_confirmation_token(session_id, payload_json)

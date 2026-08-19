@@ -198,23 +198,15 @@ class TestBuildConfirmationPayloadCreate:
         assert result.tool_input == tool_input
 
     def test_missing_payload_fails_closed(self):
-        """Create operation without 'body' or 'data' raises PayloadParseError.
-
-        The normalizer raises PayloadParseError, which propagates so the caller
-        can distinguish from a blocked record type.
-        """
-        from app.services.chat.write_payload import PayloadParseError
-
-        tool_name = _ext("ns_createRecord")
         tool_input = {"recordType": "salesOrder"}
-        with pytest.raises(PayloadParseError):
-            build_confirmation_payload(
-                mutation_type="create",
-                record_type="salesOrder",
-                tool_name=tool_name,
-                tool_input=tool_input,
-                session_id=_SESSION_ID,
-            )
+        result = build_confirmation_payload(
+            mutation_type="create",
+            record_type="salesOrder",
+            tool_name=_ext("ns_createRecord"),
+            tool_input=tool_input,
+            session_id=_SESSION_ID,
+        )
+        assert result is None
 
 
 # ---------------------------------------------------------------------------
@@ -601,18 +593,11 @@ def test_lines_surface_on_the_card():
 
 
 def test_unparseable_payload_blocks_the_write():
-    """Fail closed — no empty-but-approvable card.
-
-    Malformed payload raises PayloadParseError, which propagates so the caller
-    can distinguish from a blocked record type.
-    """
-    from app.services.chat.write_payload import PayloadParseError
-
-    with pytest.raises(PayloadParseError):
-        build_confirmation_payload(
-            mutation_type="create",
-            record_type="customer",
-            tool_name="ext__" + "a" * 32 + "__ns_createRecord",
-            tool_input={"recordType": "customer", "data": "{not json"},
-            session_id="11111111-1111-1111-1111-111111111111",
-        )
+    payload = build_confirmation_payload(
+        mutation_type="create",
+        record_type="customer",
+        tool_name="ext__" + "a" * 32 + "__ns_createRecord",
+        tool_input={"recordType": "customer", "data": "{not json"},
+        session_id="11111111-1111-1111-1111-111111111111",
+    )
+    assert payload is None

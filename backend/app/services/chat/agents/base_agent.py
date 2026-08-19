@@ -1283,15 +1283,32 @@ class BaseSpecialistAgent(abc.ABC):
                             current_record=current_record,
                         )
 
+                        payload_unparseable = False
                         if payload is None:
-                            # Blocked or unknown record type
-                            result_str = json.dumps(
-                                {
-                                    "error": f"Record type '{record_type}' is not allowed for "
-                                    f"AI-initiated {mutation_type} operations.",
-                                    "blocked": True,
-                                }
-                            )
+                            # `build_confirmation_payload` returns None for two distinct
+                            # reasons: the record type is blocked/unknown, or the record
+                            # type is allowed but the write payload could not be parsed.
+                            # Re-check the allowlist to report the right one to the model.
+                            from app.services.chat.mutation_guard import is_record_type_allowed
+
+                            if is_record_type_allowed(record_type):
+                                payload_unparseable = True
+                                result_str = json.dumps(
+                                    {
+                                        "error": f"The write payload for this {mutation_type} operation on "
+                                        f"{record_type} could not be read (missing or malformed data). "
+                                        f"The write was NOT sent to NetSuite.",
+                                        "blocked": True,
+                                    }
+                                )
+                            else:
+                                result_str = json.dumps(
+                                    {
+                                        "error": f"Record type '{record_type}' is not allowed for "
+                                        f"AI-initiated {mutation_type} operations.",
+                                        "blocked": True,
+                                    }
+                                )
                         else:
                             yield ("confirmation_required", payload.model_dump())
                             result_str = json.dumps(
@@ -1316,7 +1333,9 @@ class BaseSpecialistAgent(abc.ABC):
                                 "duration_ms": elapsed_ms,
                                 "success": payload is not None,
                                 "result_summary": (
-                                    "Confirmation required" if payload is not None else "Blocked record type"
+                                    "Confirmation required"
+                                    if payload is not None
+                                    else ("Unparseable write payload" if payload_unparseable else "Blocked record type")
                                 ),
                             },
                         )
