@@ -1719,7 +1719,10 @@ async def run_chat_turn(
             from sqlalchemy import select as _wc_select
             from sqlalchemy.orm.attributes import flag_modified as _wc_flag_modified
 
-            from app.services.chat.write_confirmation_service import validate_and_extract_confirmation
+            from app.services.chat.write_confirmation_service import (
+                merge_slot_values,
+                validate_and_extract_confirmation,
+            )
 
             _confirm_result = await db.execute(
                 _wc_select(ChatMessage).where(
@@ -1743,6 +1746,20 @@ async def run_chat_turn(
                 if not is_valid:
                     yield {"type": "error", "error": "Confirmation token is invalid or tampered."}
                     return
+
+                # Server-declared editable slots (Task 7): the client may only
+                # submit values for fields `_so["editable_slots"]` names, and
+                # only values inside a slot's `allowed` set when one exists.
+                # `_so` is the DB-loaded, server-trusted card — only
+                # `slot_values` is client-controlled input. Merge happens
+                # here, after the token check above, so a tampered slot
+                # submission never reaches `execute_tool_call`.
+                _slot_values = write_confirm.get("slot_values") or {}
+                if _slot_values:
+                    is_valid, tool_name, tool_input, _merge_err = merge_slot_values(_so, _slot_values, str(session.id))
+                    if not is_valid:
+                        yield {"type": "error", "error": _merge_err or "Confirmation token is invalid or tampered."}
+                        return
 
                 _exec_result_str = await execute_tool_call(
                     tool_name=tool_name,

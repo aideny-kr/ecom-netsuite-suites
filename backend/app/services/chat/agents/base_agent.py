@@ -1420,6 +1420,7 @@ class BaseSpecialistAgent(abc.ABC):
                             tool_input=block.input,
                             session_id=session_id if session_id else str(self.tenant_id),
                             current_record=current_record,
+                            validation=getattr(self, "_last_validation", None),
                         )
 
                         payload_unparseable = False

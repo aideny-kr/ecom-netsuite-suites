@@ -23,6 +23,7 @@ from app.services.chat.mutation_guard import (
     verify_confirmation_token,
 )
 from app.services.chat.write_payload import PayloadParseError, normalize_write_payload
+from app.services.chat.write_validator import EditableSlot, ValidationResult
 
 # ---------------------------------------------------------------------------
 # Schema
@@ -46,7 +47,16 @@ class WriteConfirmationPayload(BaseModel):
     tool_name: str
     tool_input: dict[str, Any]
     confirmation_token: str
-    status: Literal["pending", "approved", "rejected"] = "pending"
+    status: Literal["pending", "approved", "rejected", "failed"] = "pending"
+    editable_slots: list[EditableSlot] = []
+    unvalidated: bool = False
+    # Missing *line*-level required fields have no slot to fill (line-level
+    # editing needs nested UI + a merge path that writes back into the right
+    # line — out of scope here; see ClickUp 86bbgznjr). When non-empty, the
+    # card is terminal: it names these fields and renders no form — a
+    # half-form the human could approve, that then fails at NetSuite anyway,
+    # is worse than an honest stop.
+    unfillable_line_fields: list[str] = []
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +89,7 @@ def build_confirmation_payload(
     tool_input: dict[str, Any],
     session_id: str,
     current_record: dict[str, Any] | None = None,
+    validation: "ValidationResult | None" = None,
 ) -> WriteConfirmationPayload | None:
     """Build a ``WriteConfirmationPayload`` for a pending write operation.
 
@@ -117,6 +128,11 @@ def build_confirmation_payload(
     current_record:
         Optional snapshot of the record's current state (used for before/after
         diff display in the frontend confirmation dialog).
+    validation:
+        Optional ``ValidationResult`` from ``validate_write`` (Task 6). Its
+        ``editable_slots``, ``unvalidated``, and ``missing_line_required``
+        flow onto the card so the human sees exactly what the server will
+        accept back, and Task 9 can render — or refuse to render — a form.
     """
     if not is_record_type_allowed(record_type):
         return None
@@ -139,6 +155,9 @@ def build_confirmation_payload(
             tool_name=tool_name,
             tool_input=tool_input,
             confirmation_token=confirmation_token,
+            editable_slots=list(validation.editable_slots) if validation else [],
+            unvalidated=bool(validation.unvalidated) if validation else False,
+            unfillable_line_fields=list(validation.missing_line_required) if validation else [],
         )
 
     # For create/update/upsert, require a parseable payload. Fail closed:
@@ -164,6 +183,9 @@ def build_confirmation_payload(
         tool_name=tool_name,
         tool_input=tool_input,
         confirmation_token=confirmation_token,
+        editable_slots=list(validation.editable_slots) if validation else [],
+        unvalidated=bool(validation.unvalidated) if validation else False,
+        unfillable_line_fields=list(validation.missing_line_required) if validation else [],
     )
 
 
@@ -241,3 +263,62 @@ def validate_and_extract_confirmation(
     is_valid = verify_confirmation_token(token, session_id, payload_json)
 
     return is_valid, tool_name, tool_input
+
+
+def merge_slot_values(
+    structured_output: dict[str, Any],
+    slot_values: dict[str, Any],
+    session_id: str,
+) -> tuple[bool, str, dict[str, Any], str]:
+    """Merge human-supplied values for server-declared editable slots.
+
+    The client may only supply values for names the SERVER declared editable
+    (``structured_output["editable_slots"]``), and only values inside each
+    slot's ``allowed`` set when one exists. This is what stops a manipulated
+    client authoring an ERP write: it can fill declared blanks with allowed
+    values and nothing else — any other key, or a value outside an
+    allowlist, is rejected before the payload ever reaches
+    ``execute_tool_call``.
+
+    ``structured_output`` is expected to be server-trusted (e.g. loaded from
+    a persisted ``ChatMessage.structured_output``, never accepted verbatim
+    from the client) — only ``slot_values`` is attacker-controlled input.
+
+    Returns ``(is_valid, tool_name, merged_tool_input, error)``. ``error`` is
+    ``""`` on success.
+    """
+    tool_name: str = structured_output.get("tool_name", "")
+    tool_input: dict[str, Any] = dict(structured_output.get("tool_input", {}))
+    slots = {s["name"]: s for s in structured_output.get("editable_slots", [])}
+
+    if not slot_values:
+        # Pure passthrough — still validates the original token so a
+        # no-op approve carries exactly the same guarantee it always has.
+        is_valid, name, original = validate_and_extract_confirmation(structured_output, session_id)
+        return is_valid, name, original, "" if is_valid else "invalid token"
+
+    for key, value in slot_values.items():
+        if key not in slots:
+            return False, tool_name, {}, f"Field '{key}' is not editable."
+        allowed = slots[key].get("allowed")
+        if allowed:
+            permitted = {str(opt.get("value")) for opt in allowed}
+            if str(value) not in permitted:
+                return False, tool_name, {}, f"'{value}' is not an allowed value for '{key}'."
+
+    try:
+        normalized = normalize_write_payload(tool_input)
+    except PayloadParseError as exc:
+        return False, tool_name, {}, f"stored payload unparseable: {exc}"
+
+    merged_fields = {**normalized.fields, **slot_values}
+    merged_input = dict(tool_input)
+    # Write back in the shape the tool actually expects — the Oracle
+    # NetSuite MCP sends `data` as a JSON string; older/other schemas use a
+    # `body` dict (see write_payload.py's `_PAYLOAD_KEYS`).
+    if "data" in merged_input:
+        merged_input["data"] = json.dumps(merged_fields)
+    else:
+        merged_input["body"] = merged_fields
+
+    return True, tool_name, merged_input, ""
