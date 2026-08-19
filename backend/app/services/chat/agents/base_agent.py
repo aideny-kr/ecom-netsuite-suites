@@ -1248,31 +1248,35 @@ class BaseSpecialistAgent(abc.ABC):
                                 from app.services.chat.tools import _make_ext_tool_name, parse_external_tool_name
 
                                 _parsed = parse_external_tool_name(block.name)
-                                get_tool_name = (
-                                    _make_ext_tool_name(_parsed[0], "ns_getRecord") if _parsed else block.name
-                                )
-                                try:
-                                    import asyncio as _aio
+                                # The pre-fetch only exists for NetSuite's ns_getRecord
+                                # sibling tool. A non-NetSuite connector (e.g. Celigo) has
+                                # no such tool, so skip the call instead of wasting up to
+                                # 5s against the live MCP server before the except below
+                                # would silently swallow the failure anyway.
+                                if _parsed and _parsed[1].startswith("ns_"):
+                                    get_tool_name = _make_ext_tool_name(_parsed[0], "ns_getRecord")
+                                    try:
+                                        import asyncio as _aio
 
-                                    get_result_str = await _aio.wait_for(
-                                        execute_tool_call(
-                                            tool_name=get_tool_name,
-                                            tool_input={"recordType": record_type, "id": str(record_id)},
-                                            tenant_id=self.tenant_id,
-                                            actor_id=self.user_id,
-                                            correlation_id=self.correlation_id,
-                                            db=db,
-                                            session_id=session_id,
-                                        ),
-                                        timeout=5.0,
-                                    )
-                                    current_record = json.loads(get_result_str)
-                                except Exception:
-                                    logger.warning(
-                                        "mutation_intercept: failed to pre-fetch %s/%s",
-                                        record_type,
-                                        record_id,
-                                    )
+                                        get_result_str = await _aio.wait_for(
+                                            execute_tool_call(
+                                                tool_name=get_tool_name,
+                                                tool_input={"recordType": record_type, "id": str(record_id)},
+                                                tenant_id=self.tenant_id,
+                                                actor_id=self.user_id,
+                                                correlation_id=self.correlation_id,
+                                                db=db,
+                                                session_id=session_id,
+                                            ),
+                                            timeout=5.0,
+                                        )
+                                        current_record = json.loads(get_result_str)
+                                    except Exception:
+                                        logger.warning(
+                                            "mutation_intercept: failed to pre-fetch %s/%s",
+                                            record_type,
+                                            record_id,
+                                        )
 
                         payload = build_confirmation_payload(
                             mutation_type=mutation_type,
