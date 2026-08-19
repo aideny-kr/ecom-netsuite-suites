@@ -519,6 +519,12 @@ async def get_record_metadata(
         return hit[1]
 
     tool = _make_ext_tool_name(connector_id, "ns_getRecordTypeMetadata")
+
+    # The ENTIRE fetch-and-parse body is guarded. A malformed-but-valid-JSON
+    # response must degrade to None ("requirements unknown"), never raise and
+    # never yield an empty RecordMetadata — an empty result would tell the
+    # validator "nothing is required" and wave an invalid write straight
+    # through, which is the exact bug this service exists to prevent.
     try:
         raw = await execute_tool_call(
             tool_name=tool,
@@ -530,24 +536,46 @@ async def get_record_metadata(
             session_id=session_id,
         )
         data = json.loads(raw)
+
+        if not isinstance(data, dict) or data.get("error"):
+            return None
+
+        raw_fields = data.get("fields")
+        raw_sublists = data.get("sublists")
+
+        # Present-but-wrong-type is "unknown", not "empty".
+        if not isinstance(raw_fields, list):
+            return None
+        if raw_sublists is not None and not isinstance(raw_sublists, list):
+            return None
+
+        line_fields: list[FieldSpec] = []
+        for sub in raw_sublists or []:
+            if not isinstance(sub, dict):
+                return None
+            sub_fields = sub.get("fields", [])
+            if not isinstance(sub_fields, list):
+                return None
+            for raw_field in sub_fields:
+                if not isinstance(raw_field, dict):
+                    return None
+                line_fields.append(_parse_field(raw_field))
+
+        fields: list[FieldSpec] = []
+        for raw_field in raw_fields:
+            if not isinstance(raw_field, dict):
+                return None
+            fields.append(_parse_field(raw_field))
+
+        meta = RecordMetadata(
+            record_type=record_type,
+            fields=fields,
+            line_fields=line_fields,
+        )
     except Exception:
         logger.warning("record_metadata: lookup failed for %s", record_type, exc_info=True)
         return None
 
-    if not isinstance(data, dict) or data.get("error"):
-        return None
-
-    sublists = data.get("sublists") or []
-    line_fields: list[FieldSpec] = []
-    for sub in sublists:
-        for raw_field in (sub or {}).get("fields", []):
-            line_fields.append(_parse_field(raw_field))
-
-    meta = RecordMetadata(
-        record_type=record_type,
-        fields=[_parse_field(f) for f in data.get("fields", [])],
-        line_fields=line_fields,
-    )
     _cache[key] = (time.monotonic(), meta)
     return meta
 ```
@@ -952,6 +980,14 @@ async def _check_period_open(
         f"AND enddate >= TO_DATE('{tran_date}', 'YYYY-MM-DD') "
         "AND isquarter = 'F' AND isyear = 'F'"
     )
+    # Same guarantee as record_metadata_service: the ENTIRE fetch-and-parse
+    # body is guarded, so a malformed-but-valid-JSON response cannot raise out
+    # of an invariant check. Note the asymmetry with metadata lookup — here an
+    # indeterminate result returns [] (no invariant violation asserted), because
+    # fabricating a "period is closed" error from a parse failure would block
+    # legitimate writes. The tradeoff is deliberate: we never invent a
+    # violation, and a period we could not read is reported by the card's
+    # unvalidated marker rather than by a false error here.
     try:
         raw = await execute_tool_call(
             tool_name=_make_ext_tool_name(parsed[0], "ns_runCustomSuiteQL"),
@@ -963,16 +999,25 @@ async def _check_period_open(
             session_id=kw["session_id"],
         )
         data = json.loads(raw)
+
+        if not isinstance(data, dict):
+            return []
+        rows = data.get("items") or data.get("data") or []
+        if not isinstance(rows, list):
+            return []
+
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            closed = str(row.get("closed", "")).strip().upper()
+            if closed in ("T", "TRUE", "YES"):
+                name = row.get("periodname", tran_date)
+                return [f"Accounting period '{name}' is closed — posting is not permitted."]
     except Exception:
         # Cannot determine period state — do not fabricate a pass or a fail.
         logger.warning("posting_invariants: period lookup failed", exc_info=True)
         return []
 
-    for row in (data.get("items") or data.get("data") or []):
-        closed = str(row.get("closed", "")).strip().upper()
-        if closed in ("T", "TRUE", "YES"):
-            name = row.get("periodname", tran_date)
-            return [f"Accounting period '{name}' is closed — posting is not permitted."]
     return []
 
 
