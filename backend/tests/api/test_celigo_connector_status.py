@@ -24,6 +24,47 @@ class TestCeligoStatus:
         assert r.status_code in (401, 403)
 
 
+class TestCeligoRegionValidation:
+    """CeligoTestRequest/CeligoConnectRequest.region were bare `str`, and
+    client.base_url() silently falls back to US on any unknown value. So
+    region="EU" (capitalized) routed to the US host, the EU token got rejected,
+    and the operator saw a 400 "invalid token" -- blaming them for a routing
+    bug. Constraining to Literal["us", "eu"] turns a bad value into a clear
+    422 at the boundary instead."""
+
+    async def test_test_endpoint_rejects_invalid_region(self, client, admin_user):
+        _, headers = admin_user
+        r = await client.post(
+            "/api/v1/connector-status/celigo/test",
+            headers=headers,
+            json={"token": "tok", "region": "EU"},
+        )
+        assert r.status_code == 422, r.text
+
+    async def test_connect_endpoint_rejects_invalid_region(self, client, admin_user, db):
+        user, headers = admin_user
+        r = await client.post(
+            "/api/v1/connector-status/celigo/connect",
+            headers=headers,
+            json={"token": "tok", "region": "EU", "label": "x"},
+        )
+        assert r.status_code == 422, r.text
+
+        from sqlalchemy import select
+
+        from app.models.connection import Connection
+
+        row = (
+            await db.execute(
+                select(Connection).where(
+                    Connection.tenant_id == user.tenant_id,
+                    Connection.provider == "celigo",
+                )
+            )
+        ).scalar_one_or_none()
+        assert row is None, "a rejected region must never create a connection row"
+
+
 class TestCeligoTest:
     async def test_valid_token_reports_account(self, client, admin_user, monkeypatch):
         _, headers = admin_user
@@ -627,9 +668,7 @@ class TestCeligoTenantContextAfterCommit:
 
         assert "commit" in events
         first_commit = events.index("commit")
-        assert "ctx" in events[first_commit:], (
-            "tenant context must be re-established after the connection commit"
-        )
+        assert "ctx" in events[first_commit:], "tenant context must be re-established after the connection commit"
         ctx_after_commit = events.index("ctx", first_commit)
         assert "refresh" in events[ctx_after_commit:], (
             "db.refresh(connection) must run under the re-established context"

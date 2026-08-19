@@ -6,7 +6,7 @@ Covers: Stripe connector status/test, NetSuite deposit sync status.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Annotated
+from typing import Annotated, Literal
 
 import httpx
 import structlog
@@ -84,7 +84,11 @@ class CeligoStatusResponse(BaseModel):
 
 class CeligoTestRequest(BaseModel):
     token: str
-    region: str = "us"
+    # Literal, not bare str: client.base_url() silently falls back to US on
+    # any unknown value, so region="EU" (capitalized) used to route to the US
+    # host, the EU token got rejected, and the operator saw a 400 "invalid
+    # token" -- blaming them for what was actually a routing bug.
+    region: Literal["us", "eu"] = "us"
 
 
 class CeligoTestResponse(BaseModel):
@@ -95,7 +99,7 @@ class CeligoTestResponse(BaseModel):
 
 class CeligoConnectRequest(BaseModel):
     token: str
-    region: str = "us"
+    region: Literal["us", "eu"] = "us"
     label: str = "Celigo"
     # Optional -- lets the chat agent read Celigo flows/scripts/errors via a
     # separate celigo_mcp MCP connector row (Task 10). Omitting it must behave
