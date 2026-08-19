@@ -1304,12 +1304,60 @@ Then in the mutation intercept, immediately after `mutation_type = classify_muta
                             if self._write_repair.should_repair(record_type, validation):
                                 # Hand the model a structured error INSTEAD of a
                                 # card. The human never sees an invalid payload.
+                                #
+                                # Follow the EXISTING pattern used by the Plan Mode
+                                # clarify `InterceptError` branch earlier in this same
+                                # method — same intent (feed a structured error back to
+                                # the model, let it retry within the turn).
+                                #
+                                # `run_streaming` yields 2-TUPLES `(event_type, payload)`;
+                                # `orchestrator.py:3013` unpacks exactly two values. A bare
+                                # dict here raises `ValueError: too many values to unpack`
+                                # and kills the streaming generator mid-turn. Note that
+                                # none of this task's named regression suites drive
+                                # `run_streaming` end-to-end, so that crash would go green
+                                # in CI and only surface live — write an integration-level
+                                # test that exercises the intercept, not just
+                                # `WriteRepairState` in isolation.
+                                #
+                                # What reaches the MODEL is the tool_result content block
+                                # appended to `tool_results_content`, not an SSE event.
+                                # The `tool_end` yield is telemetry only, and must report
+                                # `success: False` with the exit reason so a repair round
+                                # is diagnosable in the tool-call log rather than invisible.
                                 result_str = json.dumps(validation.as_model_error())
-                                yield {
-                                    "type": "tool_result",
-                                    "tool": block.name,
-                                    "result": result_str,
-                                }
+                                elapsed_ms = int((time.monotonic() - t0) * 1000)
+                                yield (
+                                    "tool_end",
+                                    {
+                                        "tool_name": block.name,
+                                        "step": step,
+                                        "duration_ms": elapsed_ms,
+                                        "success": False,
+                                        "result_summary": (
+                                            "Write validation failed "
+                                            f"({self._write_repair.exit_reason or 'repair'})"
+                                        ),
+                                    },
+                                )
+                                tool_calls_log.append(
+                                    build_tool_call_log_entry(
+                                        step=step,
+                                        tool=block.name,
+                                        params=block.input,
+                                        result_summary=result_str,
+                                        duration_ms=elapsed_ms,
+                                        agent=self.agent_name,
+                                    )
+                                )
+                                tool_results_content.append(
+                                    {
+                                        "type": "tool_result",
+                                        "tool_use_id": block.id,
+                                        "content": result_str,
+                                        "is_error": True,
+                                    }
+                                )
                                 continue
 ```
 
