@@ -8,6 +8,7 @@ export interface CeligoStatus {
   account_name: string | null;
   region: string | null;
   status: string | null;
+  agent_access: boolean;
 }
 
 export function useCeligoStatus() {
@@ -39,6 +40,7 @@ interface CeligoConnectPayload {
   token: string;
   region: string;
   label?: string;
+  agent_token?: string;
 }
 
 export function useCeligoConnect() {

@@ -79,7 +79,13 @@ export default function CeligoConnectorCard() {
 
   async function handleConnect() {
     try {
-      await connectMutation.mutateAsync({ token, region, label: "Celigo" });
+      const trimmedAgentToken = agentToken.trim();
+      await connectMutation.mutateAsync({
+        token,
+        region,
+        label: "Celigo",
+        ...(trimmedAgentToken ? { agent_token: trimmedAgentToken } : {}),
+      });
       setToken("");
       setAgentToken("");
       setTestResult(null);
@@ -152,6 +158,21 @@ export default function CeligoConnectorCard() {
           <div className="flex items-center gap-1.5 text-[12px] text-muted-foreground">
             <ShieldCheck className="h-3.5 w-3.5 text-green-600" />
             Read-only connection — the agent cannot edit, run, or delete anything in Celigo.
+          </div>
+
+          <div className="flex items-center gap-1.5 text-[12px] text-muted-foreground">
+            {status?.agent_access ? (
+              <>
+                <CheckCircle2 className="h-3.5 w-3.5 text-green-600" />
+                Agent access enabled — the assistant can read your Celigo flows and scripts.
+              </>
+            ) : (
+              <>
+                <XCircle className="h-3.5 w-3.5 text-muted-foreground" />
+                Agent access not enabled — reconnect with an agent token to let the assistant
+                read Celigo.
+              </>
+            )}
           </div>
 
           <div className="flex items-center justify-end">
