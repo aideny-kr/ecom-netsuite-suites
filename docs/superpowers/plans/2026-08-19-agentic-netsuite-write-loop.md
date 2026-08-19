@@ -951,6 +951,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -969,6 +970,11 @@ _TRANSACTION_TYPES: frozenset[str] = frozenset(
 )
 
 _BALANCED_TYPES: frozenset[str] = frozenset({"journalEntry"})
+
+# Exact ISO date. `trandate` reaches this module from an LLM-composed write
+# payload and is interpolated into a raw SuiteQL string, so it is validated
+# before use rather than escaped after.
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _to_decimal(value: Any) -> Decimal:
@@ -994,7 +1000,15 @@ async def _check_period_open(
     payload: NormalizedPayload, **kw: Any
 ) -> list[str]:
     tran_date = payload.fields.get("trandate") or payload.fields.get("tranDate")
-    if not tran_date:
+
+    # `trandate` comes out of the write payload this function is validating —
+    # i.e. it is LLM-composed, caller-influenced input, and it gets interpolated
+    # into a raw SuiteQL string below. A value like
+    #     2026-08-19') OR ('1'='1
+    # breaks out of the string literal. Require an exact ISO date before the
+    # value is allowed anywhere near the query; anything else is treated as
+    # "cannot determine the period", the same as a failed lookup.
+    if not tran_date or not _DATE_RE.match(str(tran_date)):
         return []
 
     from app.services.chat.tools import _make_ext_tool_name, parse_external_tool_name
