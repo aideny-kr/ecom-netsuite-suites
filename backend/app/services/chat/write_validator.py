@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from app.services.chat.record_metadata_service import RecordMetadata
 from app.services.chat.write_payload import NormalizedPayload
@@ -30,6 +30,26 @@ class ValidationResult(BaseModel):
     missing_line_required: list[str] = []
     invariant_errors: list[str] = []
     editable_slots: list[EditableSlot] = []
+
+    @model_validator(mode="after")
+    def _ok_must_agree_with_its_own_lists(self) -> "ValidationResult":
+        """`ok` is the flag Task 6's repair loop and Task 9's card gate on.
+
+        It summarises the three lists, so it must never disagree with them.
+        Deriving it here means a future caller cannot construct a result that
+        claims `ok=True` while carrying missing fields — the failure would be
+        silent and would wave an invalid write through to a human as if it
+        had been checked.
+        """
+        derived = not (self.missing_required or self.missing_line_required or self.invariant_errors)
+        if self.ok != derived:
+            raise ValueError(
+                f"ValidationResult.ok={self.ok} disagrees with its contents "
+                f"(missing_required={self.missing_required}, "
+                f"missing_line_required={self.missing_line_required}, "
+                f"invariant_errors={self.invariant_errors})"
+            )
+        return self
 
     def fingerprint(self) -> str:
         """Stable identity of *what is wrong*, for stall detection."""

@@ -1,6 +1,9 @@
+import pytest
+from pydantic import ValidationError
+
 from app.services.chat.record_metadata_service import FieldSpec, RecordMetadata
 from app.services.chat.write_payload import NormalizedPayload
-from app.services.chat.write_validator import validate_write
+from app.services.chat.write_validator import ValidationResult, validate_write
 
 META = RecordMetadata(
     record_type="customer",
@@ -95,3 +98,28 @@ def test_fingerprint_is_stable_and_distinguishing():
     )
     assert a.fingerprint() == b.fingerprint()
     assert a.fingerprint() != c.fingerprint()
+
+
+def test_ok_true_with_missing_required_is_rejected():
+    """A future caller must not be able to hand-construct a lying result."""
+    with pytest.raises(ValidationError):
+        ValidationResult(ok=True, missing_required=["subsidiary"])
+
+
+def test_ok_consistent_with_empty_lists_still_constructs():
+    result = ValidationResult(ok=True)
+    assert result.ok is True
+    assert result.missing_required == []
+
+
+def test_no_metadata_with_invariant_errors_is_not_ok():
+    """Unknown field requirements PLUS a known invariant violation: still unvalidated, but not ok."""
+    result = validate_write(
+        payload=NormalizedPayload(fields={"companyname": "x"}, lines=[]),
+        metadata=None,
+        record_type="customer",
+        mutation_type="create",
+        invariant_errors=["debits must equal credits"],
+    )
+    assert result.unvalidated is True
+    assert result.ok is False
