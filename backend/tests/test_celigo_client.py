@@ -3,7 +3,7 @@
 import httpx
 import pytest
 
-from app.services.celigo.client import CELIGO_BASE_URLS, CeligoAuthError, verify_token
+from app.services.celigo.client import CELIGO_BASE_URLS, CeligoAuthError, CeligoError, verify_token
 
 
 def _client(handler) -> httpx.AsyncClient:
@@ -82,6 +82,22 @@ class TestAuth:
         async with _client(handler) as c:
             with pytest.raises(CeligoAuthError):
                 await verify_token("scoped-too-tight", client=c)
+
+
+class TestExceptionHierarchy:
+    def test_auth_error_is_not_a_subclass_of_celigo_error(self):
+        """connector_status.connect_celigo catches CeligoAuthError BEFORE
+        (CeligoError, httpx.HTTPError) so a bad token returns 400 (operator
+        error) rather than 502 (upstream outage). That ordering is safe ONLY
+        because the two are siblings, both inheriting directly from Exception.
+
+        Making CeligoAuthError(CeligoError) is an entirely natural-looking
+        future refactor ("auth errors ARE Celigo errors") -- and it would
+        silently reclassify every bad-token 400 as a 502, with the test suite
+        staying green because each except branch is exercised through a
+        different mock. This assertion is the tripwire for that refactor.
+        """
+        assert issubclass(CeligoAuthError, CeligoError) is False
 
 
 class TestSuccess:
