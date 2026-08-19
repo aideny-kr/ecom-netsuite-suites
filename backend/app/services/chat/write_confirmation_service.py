@@ -22,7 +22,7 @@ from app.services.chat.mutation_guard import (
     is_record_type_allowed,
     verify_confirmation_token,
 )
-from app.services.chat.write_payload import PayloadParseError, normalize_write_payload
+from app.services.chat.write_payload import normalize_write_payload
 
 # ---------------------------------------------------------------------------
 # Schema
@@ -85,6 +85,11 @@ def build_confirmation_payload(
     Returns ``None`` if *record_type* is not on the mutation allowlist (either
     explicitly blocked or simply unknown — deny by default).
 
+    Raises ``PayloadParseError`` if the payload is present but malformed on an
+    allowed record type. Deletes with no payload are treated as valid with
+    empty fields. Create/update/upsert operations without payload are treated
+    as parse errors.
+
     Parameters
     ----------
     mutation_type:
@@ -106,12 +111,30 @@ def build_confirmation_payload(
     if not is_record_type_allowed(record_type):
         return None
 
-    try:
-        normalized = normalize_write_payload(tool_input)
-    except PayloadParseError:
-        # Fail closed: an unrenderable payload must not become an
-        # approvable card. Returning None makes the caller surface an error.
-        return None
+    # Delete operations legitimately have no field payload — only the record ID.
+    # Create/update/upsert require a payload.
+    if mutation_type == "delete":
+        record_id: str | None = tool_input.get("id")
+        if record_id is not None:
+            record_id = str(record_id)
+        payload_json = _build_payload_json(tool_name, tool_input)
+        confirmation_token = generate_confirmation_token(session_id, payload_json)
+        return WriteConfirmationPayload(
+            mutation_type=mutation_type,
+            record_type=record_type,
+            record_id=record_id,
+            proposed_fields={},
+            proposed_lines=[],
+            current_record=current_record,
+            tool_name=tool_name,
+            tool_input=tool_input,
+            confirmation_token=confirmation_token,
+        )
+
+    # For create/update/upsert, require a parseable payload.
+    # Let PayloadParseError propagate to the caller so it can distinguish
+    # from a blocked record type.
+    normalized = normalize_write_payload(tool_input)
 
     payload_json = _build_payload_json(tool_name, tool_input)
     confirmation_token = generate_confirmation_token(session_id, payload_json)

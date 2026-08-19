@@ -197,21 +197,24 @@ class TestBuildConfirmationPayloadCreate:
         )
         assert result.tool_input == tool_input
 
-    def test_empty_body_yields_empty_proposed_fields(self):
-        """When tool_input lacks both 'body' and 'data', fail closed (return None).
+    def test_missing_payload_fails_closed(self):
+        """Create operation without 'body' or 'data' raises PayloadParseError.
 
-        The old behavior (return empty dict) was the bug — no empty-but-approvable cards.
+        The normalizer raises PayloadParseError, which propagates so the caller
+        can distinguish from a blocked record type.
         """
+        from app.services.chat.write_payload import PayloadParseError
+
         tool_name = _ext("ns_createRecord")
         tool_input = {"recordType": "salesOrder"}
-        result = build_confirmation_payload(
-            mutation_type="create",
-            record_type="salesOrder",
-            tool_name=tool_name,
-            tool_input=tool_input,
-            session_id=_SESSION_ID,
-        )
-        assert result is None
+        with pytest.raises(PayloadParseError):
+            build_confirmation_payload(
+                mutation_type="create",
+                record_type="salesOrder",
+                tool_name=tool_name,
+                tool_input=tool_input,
+                session_id=_SESSION_ID,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -328,6 +331,47 @@ class TestBuildConfirmationPayloadUpdate:
             session_id=_SESSION_ID,
         )
         assert result.mutation_type == "update"
+
+
+# ---------------------------------------------------------------------------
+# build_confirmation_payload — delete (no payload required)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildConfirmationPayloadDelete:
+    def test_delete_with_no_payload_is_valid(self):
+        """Delete legitimately has no field payload — only record ID.
+
+        Deletes should not fail closed on missing payload like other mutations.
+        """
+        tool_name = _ext("ns_deleteRecord")
+        tool_input = {"recordType": "customer", "id": "CUST-42"}
+        result = build_confirmation_payload(
+            mutation_type="delete",
+            record_type="customer",
+            tool_name=tool_name,
+            tool_input=tool_input,
+            session_id=_SESSION_ID,
+        )
+        assert result is not None
+        assert result.record_id == "CUST-42"
+        assert result.proposed_fields == {}
+        assert result.proposed_lines == []
+        assert result.mutation_type == "delete"
+
+    def test_delete_record_id_extracted_from_tool_input(self):
+        """Delete extracts record_id from top-level 'id' field."""
+        tool_name = _ext("ns_deleteRecord")
+        tool_input = {"recordType": "invoice", "id": "INV-999"}
+        result = build_confirmation_payload(
+            mutation_type="delete",
+            record_type="invoice",
+            tool_name=tool_name,
+            tool_input=tool_input,
+            session_id=_SESSION_ID,
+        )
+        assert result is not None
+        assert result.record_id == "INV-999"
 
 
 # ---------------------------------------------------------------------------
@@ -557,12 +601,18 @@ def test_lines_surface_on_the_card():
 
 
 def test_unparseable_payload_blocks_the_write():
-    """Fail closed — no empty-but-approvable card."""
-    payload = build_confirmation_payload(
-        mutation_type="create",
-        record_type="customer",
-        tool_name="ext__" + "a" * 32 + "__ns_createRecord",
-        tool_input={"recordType": "customer", "data": "{not json"},
-        session_id="11111111-1111-1111-1111-111111111111",
-    )
-    assert payload is None
+    """Fail closed — no empty-but-approvable card.
+
+    Malformed payload raises PayloadParseError, which propagates so the caller
+    can distinguish from a blocked record type.
+    """
+    from app.services.chat.write_payload import PayloadParseError
+
+    with pytest.raises(PayloadParseError):
+        build_confirmation_payload(
+            mutation_type="create",
+            record_type="customer",
+            tool_name="ext__" + "a" * 32 + "__ns_createRecord",
+            tool_input={"recordType": "customer", "data": "{not json"},
+            session_id="11111111-1111-1111-1111-111111111111",
+        )
