@@ -79,8 +79,8 @@ def is_celigo_provider(provider: str) -> bool:
 def is_read_only_celigo_tool(raw_tool_name: str) -> bool:
     """Return True if *raw_tool_name* is a Celigo read tool.
 
-    Fails closed: an unrecognised name is denied. Write tools are never readable,
-    even if a future Celigo release names one `list_something`.
+    Fails closed: an unrecognised name is denied. Enumerated write tools are never
+    readable, even if a future Celigo release names one `list_something`.
     """
     if not raw_tool_name:
         return False

@@ -75,6 +75,21 @@ class TestReadOnlyAllowlist:
         """'list_' must anchor at the start — a write tool must not sneak through."""
         assert is_read_only_celigo_tool("delete_list_item") is False
 
+    def test_write_check_precedes_read_rules(self, monkeypatch):
+        """The write-list check must run BEFORE the list_/exact read checks.
+
+        Regression guard: with no real write tool named list_*, deleting the
+        write-list check leaves every other test green. This test fails if the
+        ordering is ever inverted or the check removed.
+        """
+        import app.services.chat.celigo_tool_policy as policy
+
+        monkeypatch.setitem(policy.CELIGO_WRITE_VERBS, "list_and_purge_flows", "delete")
+        assert policy.is_read_only_celigo_tool("list_and_purge_flows") is False
+
+        monkeypatch.setitem(policy.CELIGO_WRITE_VERBS, "get_schema", "update")
+        assert policy.is_read_only_celigo_tool("get_schema") is False
+
 
 class TestWriteVerbs:
     def test_every_write_tool_has_a_verb(self):
