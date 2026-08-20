@@ -194,6 +194,30 @@ describe("WriteConfirmationCard — write loop states", () => {
     expect(onConfirm).toHaveBeenCalledWith({ memo: "revised" });
   });
 
+  it("keeps Approve disabled when a required slot is whitespace-only", () => {
+    const data: WriteConfirmationData = {
+      ...base,
+      editable_slots: [{ name: "memo", label: "Memo", type: "text", allowed: null }],
+    };
+    render(<WriteConfirmationCard data={data} onConfirm={vi.fn()} onReject={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("Memo"), { target: { value: "   " } });
+    // A space is not a value — a human typing a space must not be told the
+    // field is complete when it isn't.
+    expect(screen.getByRole("button", { name: /approve/i })).toBeDisabled();
+  });
+
+  it("sends a padded slot value trimmed, not verbatim", () => {
+    const onConfirm = vi.fn();
+    const data: WriteConfirmationData = {
+      ...base,
+      editable_slots: [{ name: "memo", label: "Memo", type: "text", allowed: null }],
+    };
+    render(<WriteConfirmationCard data={data} onConfirm={onConfirm} onReject={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText("Memo"), { target: { value: "  revised  " } });
+    fireEvent.click(screen.getByRole("button", { name: /approve/i }));
+    expect(onConfirm).toHaveBeenCalledWith({ memo: "revised" });
+  });
+
   it("renders the failed state with the NetSuite error and no Approve button", () => {
     const data: WriteConfirmationData = {
       ...base,

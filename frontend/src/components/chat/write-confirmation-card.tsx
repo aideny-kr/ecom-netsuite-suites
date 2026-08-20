@@ -59,7 +59,12 @@ export function WriteConfirmationCard({
   // (the recon-group-confirmation shape, and a fully-resolved payload) never
   // reaches this — those cards render exactly as they did before this.
   const showSlotForm = isPending && slots.length > 0 && !isLineTerminal;
-  const allSlotsFilled = slots.every((slot) => (slotValues[slot.name] ?? "") !== "");
+  // .trim() — a space is not a value. Without it a human can type a single
+  // space into a required slot, watch Approve light up, and believe they
+  // supplied the field when they didn't. The server would reject an
+  // untrimmed value against its allowlist anyway (compares via `str(value)`),
+  // so accepting whitespace here only buys a confusing server-side rejection.
+  const allSlotsFilled = slots.every((slot) => (slotValues[slot.name] ?? "").trim() !== "");
 
   const visibleProposedFields = Object.entries(data.proposed_fields).filter(
     ([key]) => !METADATA_KEYS.has(key),
@@ -82,6 +87,16 @@ export function WriteConfirmationCard({
 
   function handleSlotChange(name: string, value: string) {
     setSlotValues((prev) => ({ ...prev, [name]: value }));
+  }
+
+  // Trim on send, not just on the filled-check: what reaches onConfirm (and
+  // from there write_confirm.slot_values) must be what the card told the
+  // human it captured — never "  2  " silently mismatching a trimmed check.
+  function handleApprove() {
+    const trimmed = Object.fromEntries(
+      Object.entries(slotValues).map(([name, value]) => [name, value.trim()]),
+    );
+    onConfirm(trimmed);
   }
 
   return (
@@ -229,7 +244,7 @@ export function WriteConfirmationCard({
           )}
           <button
             type="button"
-            onClick={() => onConfirm(slotValues)}
+            onClick={handleApprove}
             disabled={disabled || (showSlotForm && !allSlotsFilled)}
             className={cn(
               "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors",
