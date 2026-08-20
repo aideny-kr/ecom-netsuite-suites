@@ -7,9 +7,12 @@ the start of run_chat_turn.
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime, timezone
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from app.models.chat import ChatMessage, ChatSession
 
@@ -62,6 +65,56 @@ def _make_confirmation_msg(session_id, tool_name, tool_input, status="pending"):
 
 def _ext(tool_name: str) -> str:
     return f"ext__{_HEX_32}__{tool_name}"
+
+
+def _make_real_confirmation_msg(session_id, tool_name, tool_input, status="pending"):
+    """Like ``_make_confirmation_msg`` but a REAL ``ChatMessage`` instance.
+
+    Tests that actually drive ``run_chat_turn``'s approve branch need this —
+    it calls ``sqlalchemy.orm.attributes.flag_modified(_confirm_msg,
+    "structured_output")``, which reads ``_sa_instance_state``, an attribute
+    only SQLAlchemy-instrumented instances have. ``MagicMock(spec=ChatMessage)``
+    (what ``_make_confirmation_msg`` above returns) raises ``AttributeError``
+    there — see the same note in ``test_write_slot_merge.py``.
+    """
+    from app.services.chat.write_confirmation_service import build_confirmation_payload
+
+    payload = build_confirmation_payload(
+        mutation_type="create",
+        record_type="salesOrder",
+        tool_name=tool_name,
+        tool_input=tool_input,
+        session_id=str(session_id),
+    )
+    assert payload is not None
+
+    msg = ChatMessage(
+        tenant_id=_TENANT_ID,
+        session_id=session_id,
+        role="assistant",
+        content="",
+        structured_output={**payload.model_dump(), "status": status},
+        created_at=datetime.now(timezone.utc),
+    )
+    msg.id = uuid.uuid4()
+    return msg
+
+
+class _FakeScalarResult:
+    def __init__(self, msg):
+        self._msg = msg
+
+    def scalar_one_or_none(self):
+        return self._msg
+
+
+def _make_db(confirm_msg):
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=_FakeScalarResult(confirm_msg))
+    db.commit = AsyncMock()
+    db.refresh = AsyncMock()
+    db.add = MagicMock()
+    return db
 
 
 # ---------------------------------------------------------------------------
@@ -285,3 +338,176 @@ class TestChatPipelinePassthrough:
 
         sig = inspect.signature(_run_chat_background)
         assert "write_confirm" in sig.parameters
+
+
+# ---------------------------------------------------------------------------
+# H) Orchestrator: a failed write becomes TERMINAL, never reverts to pending
+#
+# Task 8 (fixes 86bbgnw9g): before this, a NetSuite write that failed after
+# approval flipped structured_output.status back to "pending" — forever.
+# There was no terminal state and no error surfaced, so the card looked like
+# it was still hanging rather than telling the human it failed. These tests
+# drive the REAL run_chat_turn approve branch (not source inspection like
+# the classes above) so they'd actually catch a regression to "pending".
+# ---------------------------------------------------------------------------
+
+
+class TestWriteConfirmFailedFlow:
+    @pytest.mark.asyncio
+    async def test_failed_write_gets_terminal_status_and_error(self):
+        """Regression for 86bbgnw9g: a failed write must never revert to
+        'pending' — it must become 'failed' and carry the NetSuite error."""
+        from app.services.chat.orchestrator import run_chat_turn
+
+        session_id = uuid.uuid4()
+        tool_name = _ext("ns_createRecord")
+        tool_input = {"recordType": "customer", "data": '{"companyname": "test ai customer"}'}
+        confirm_msg = _make_real_confirmation_msg(session_id, tool_name, tool_input)
+        db = _make_db(confirm_msg)
+        session = _make_session(session_id=str(session_id))
+
+        mock_execute_tool_call = AsyncMock(
+            return_value=json.dumps({"error": "HTTP 400: Please enter value(s) for: Primary Subsidiary."})
+        )
+        mock_log_event = AsyncMock(return_value=None)
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", mock_log_event),
+        ):
+            events = [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="approve",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={"action": "approve", "confirmation_id": str(confirm_msg.id)},
+                )
+            ]
+
+        so = confirm_msg.structured_output
+        assert so["status"] == "failed"
+        assert "Primary Subsidiary" in so["error"]
+
+        message_events = [e for e in events if e.get("type") == "message"]
+        assert message_events
+        assert "failed" in message_events[-1]["message"]["content"].lower()
+
+    @pytest.mark.asyncio
+    async def test_failed_card_cannot_be_re_approved(self):
+        """Terminal means terminal — the existing pending-only gate must
+        refuse a second approve against an already-'failed' card. (Not a new
+        behavior — the gate at the top of the write_confirm block already
+        checks status == "pending" unconditionally; this proves the new
+        'failed' status is covered by it, same as 'approved'/'rejected'.)"""
+        from app.services.chat.orchestrator import run_chat_turn
+
+        session_id = uuid.uuid4()
+        tool_name = _ext("ns_createRecord")
+        tool_input = {"recordType": "customer", "data": '{"companyname": "test ai customer"}'}
+        confirm_msg = _make_real_confirmation_msg(session_id, tool_name, tool_input, status="failed")
+        confirm_msg.structured_output = {**confirm_msg.structured_output, "error": "boom"}
+        db = _make_db(confirm_msg)
+        session = _make_session(session_id=str(session_id))
+
+        mock_execute_tool_call = AsyncMock()
+
+        with patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call):
+            events = [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="approve",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={"action": "approve", "confirmation_id": str(confirm_msg.id)},
+                )
+            ]
+
+        mock_execute_tool_call.assert_not_awaited()
+        error_events = [e for e in events if e.get("type") == "error"]
+        assert error_events
+        assert "not in a pending state" in error_events[0]["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_failed_write_after_slot_merge_still_persists_merged_payload(self):
+        """Task 7's merge-then-persist block must keep running on the failure
+        path too: the card should show what was actually attempted (the
+        merged payload + re-minted token), not the agent's pre-merge guess,
+        even when NetSuite rejects the write. This is the block Task 8 was
+        told NOT to touch — this test guards against accidentally breaking it
+        while wiring up the terminal status right above it."""
+        from app.services.chat.mutation_guard import generate_confirmation_token
+        from app.services.chat.orchestrator import run_chat_turn
+        from app.services.chat.write_confirmation_service import _build_payload_json
+
+        session_id = uuid.uuid4()
+        tool_name = _ext("ns_createRecord")
+        tool_input = {"recordType": "customer", "data": '{"companyname": "test ai customer"}'}
+        slots = [
+            {
+                "name": "subsidiary",
+                "label": "Primary Subsidiary",
+                "type": "select",
+                "allowed": [{"value": "1", "label": "Framework Inc"}, {"value": "2", "label": "Framework EU"}],
+            }
+        ]
+        structured_output = {
+            "type": "write_confirmation",
+            "mutation_type": "create",
+            "record_type": "customer",
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+            "editable_slots": slots,
+            "proposed_fields": {"companyname": "test ai customer"},
+            "proposed_lines": [],
+            "confirmation_token": generate_confirmation_token(
+                str(session_id), _build_payload_json(tool_name, tool_input, slots)
+            ),
+            "status": "pending",
+        }
+        confirm_msg = ChatMessage(
+            tenant_id=_TENANT_ID,
+            session_id=session_id,
+            role="assistant",
+            content="",
+            structured_output=structured_output,
+            created_at=datetime.now(timezone.utc),
+        )
+        confirm_msg.id = uuid.uuid4()
+        db = _make_db(confirm_msg)
+        session = _make_session(session_id=str(session_id))
+
+        mock_execute_tool_call = AsyncMock(return_value=json.dumps({"error": "Invalid field value."}))
+        mock_log_event = AsyncMock(return_value=None)
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", mock_log_event),
+        ):
+            events = [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="approve",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={
+                        "action": "approve",
+                        "confirmation_id": str(confirm_msg.id),
+                        "slot_values": {"subsidiary": "2"},
+                    },
+                )
+            ]
+
+        assert not [e for e in events if e.get("type") == "error"]
+        so = confirm_msg.structured_output
+        assert so["status"] == "failed"
+        assert so["error"] == "Invalid field value."
+        merged_data = json.loads(so["tool_input"]["data"])
+        assert merged_data["subsidiary"] == "2"
+        assert so["proposed_fields"]["subsidiary"] == "2"

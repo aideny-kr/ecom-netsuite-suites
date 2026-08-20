@@ -1790,10 +1790,12 @@ async def run_chat_turn(
                 _record_type = _so.get("record_type", "record")
 
                 _exec_succeeded = False
+                _exec_error: str | None = None
                 try:
                     _exec_result = json.loads(_exec_result_str)
                     if isinstance(_exec_result, dict) and _exec_result.get("error"):
-                        _confirm_content = f"The operation failed: {_exec_result['error']}"
+                        _exec_error = str(_exec_result["error"])
+                        _confirm_content = f"The operation failed: {_exec_error}"
                     else:
                         _exec_succeeded = True
                         _confirm_content = f"Done — the {_record_type} {_mutation_type} has been executed successfully."
@@ -1802,7 +1804,18 @@ async def run_chat_turn(
                     _confirm_content = f"The {_mutation_type} operation has been executed."
 
                 _updated_so = dict(_so)
-                _updated_so["status"] = "approved" if _exec_succeeded else "pending"
+                if _exec_succeeded:
+                    _updated_so["status"] = "approved"
+                else:
+                    # Terminal — a failed write must never revert to
+                    # "pending": that stranded the card with no way forward
+                    # (86bbgnw9g). `_exec_error` is only ever set on this
+                    # branch (see the try block above), so it's always a str
+                    # here — captured separately from `_confirm_content`
+                    # rather than stripped back out of that human-readable
+                    # sentence.
+                    _updated_so["status"] = "failed"
+                    _updated_so["error"] = _exec_error
                 if _merged_confirmation_token is not None:
                     # A slot merge happened above — persist what was
                     # actually written and the token minted over it, so the
