@@ -85,3 +85,14 @@ class TestNetSuiteWritesProfile:
         fragment = profile.prompt_fragment
         assert "ns_getRecordTypeMetadata" in fragment
         assert "required" in fragment.lower()
+
+    def test_write_profile_orders_metadata_lookup_before_the_tool_call(self):
+        # Presence alone survives a rewording into its opposite (e.g. "you don't
+        # need to call ns_getRecordTypeMetadata unless required is unclear" still
+        # contains both substrings). Assert the precondition relationship instead:
+        # the instruction to look up metadata FIRST must precede the tool name it
+        # is telling the model to call.
+        profile = next(p for p in load_all_profiles() if p.profile_id == "netsuite_writes")
+        fragment = profile.prompt_fragment
+        assert "BEFORE composing" in fragment
+        assert fragment.index("BEFORE composing") < fragment.index("ns_getRecordTypeMetadata")
