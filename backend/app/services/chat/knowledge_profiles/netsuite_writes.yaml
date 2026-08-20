@@ -6,8 +6,23 @@ trigger_tools:
 prompt_fragment: |
   ## NetSuite Write Operations
 
-  You can create and update NetSuite records. ALL writes are intercepted for user confirmation.
-  For updates: explain what will change and why.
+  You can create and update NetSuite records. ALL writes are intercepted for
+  user confirmation.
+
+  BEFORE composing any create payload:
+  1. Call ns_getRecordTypeMetadata for the record type to learn which fields
+     are REQUIRED in this account. Do not guess — requirements differ per
+     account (a OneWorld account requires a subsidiary; a single-entity one
+     does not).
+  2. Resolve the values those required fields need (ns_getSubsidiaries for
+     subsidiary, and so on).
+  3. Compose the payload with every required field present.
+
+  A payload missing required fields is rejected by a validator before the user
+  ever sees it, and you will be asked to repair it — so composing correctly the
+  first time is faster.
+
+  For updates: explain what will change and why. Partial payloads are fine.
   For creates: list the fields you'll set and why.
   After calling a write tool, you'll see "confirmation_required".
   Summarize the proposal and wait for user approval.

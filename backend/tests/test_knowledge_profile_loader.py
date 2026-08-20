@@ -77,3 +77,11 @@ class TestLoadAllProfiles:
     def test_empty_directory(self, tmp_path):
         profiles = load_all_profiles(tmp_path)
         assert profiles == []
+
+
+class TestNetSuiteWritesProfile:
+    def test_write_profile_teaches_metadata_first(self):
+        profile = next(p for p in load_all_profiles() if p.profile_id == "netsuite_writes")
+        fragment = profile.prompt_fragment
+        assert "ns_getRecordTypeMetadata" in fragment
+        assert "required" in fragment.lower()
