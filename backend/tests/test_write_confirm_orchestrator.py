@@ -433,6 +433,41 @@ class TestWriteConfirmFailedFlow:
         assert "not in a pending state" in error_events[0]["error"].lower()
 
     @pytest.mark.asyncio
+    async def test_failed_card_cannot_be_re_rejected(self):
+        """Mirror of test_failed_card_cannot_be_re_approved on the reject
+        side — the same status != "pending" gate sits before BOTH branches
+        (it's checked once, before the approve/reject dispatch), so reject
+        must be refused against an already-'failed' card too, and the
+        stored status must stay 'failed' rather than getting silently
+        flipped to 'rejected'."""
+        from app.services.chat.orchestrator import run_chat_turn
+
+        session_id = uuid.uuid4()
+        tool_name = _ext("ns_createRecord")
+        tool_input = {"recordType": "customer", "data": '{"companyname": "test ai customer"}'}
+        confirm_msg = _make_real_confirmation_msg(session_id, tool_name, tool_input, status="failed")
+        confirm_msg.structured_output = {**confirm_msg.structured_output, "error": "boom"}
+        db = _make_db(confirm_msg)
+        session = _make_session(session_id=str(session_id))
+
+        events = [
+            event
+            async for event in run_chat_turn(
+                db=db,
+                session=session,
+                user_message="reject",
+                user_id=_USER_ID,
+                tenant_id=_TENANT_ID,
+                write_confirm={"action": "reject", "confirmation_id": str(confirm_msg.id)},
+            )
+        ]
+
+        error_events = [e for e in events if e.get("type") == "error"]
+        assert error_events
+        assert "not in a pending state" in error_events[0]["error"].lower()
+        assert confirm_msg.structured_output["status"] == "failed"
+
+    @pytest.mark.asyncio
     async def test_failed_write_after_slot_merge_still_persists_merged_payload(self):
         """Task 7's merge-then-persist block must keep running on the failure
         path too: the card should show what was actually attempted (the
