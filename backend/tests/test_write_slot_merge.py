@@ -28,6 +28,7 @@ from app.models.chat import ChatMessage, ChatSession
 from app.services.chat.mutation_guard import generate_confirmation_token
 from app.services.chat.write_confirmation_service import (
     _build_payload_json,
+    build_confirmation_payload,
     merge_slot_values,
     validate_and_extract_confirmation,
 )
@@ -45,6 +46,11 @@ def _pending(slots):
         "tool_name": TOOL,
         "tool_input": tool_input,
         "editable_slots": slots,
+        # A real card always carries these (build_confirmation_payload sets
+        # them from the ORIGINAL, pre-merge payload) — present here so tests
+        # can assert whether an approve-with-slots recomputes them.
+        "proposed_fields": {"companyname": "test ai customer"},
+        "proposed_lines": [],
         # editable_slots is inside the HMAC envelope (review round 2) — sign
         # with the SAME slots this card carries, or every test built on this
         # helper would mint a token that never validates.
@@ -172,6 +178,122 @@ def test_slot_order_does_not_affect_validation():
     }
     is_valid, _, _ = validate_and_extract_confirmation(reordered, SESSION)
     assert is_valid is True
+
+
+def test_production_mint_path_round_trips_for_a_card_carrying_slots():
+    """Re-review Important B: every signing test above hand-mints via
+    `_build_payload_json(TOOL, tool_input, slots)` with plain dicts on both
+    sides. None of them exercises the REAL mint path — a `ValidationResult`
+    carrying `EditableSlot` pydantic objects flowing through
+    `build_confirmation_payload` — end to end through a DB-shaped JSON
+    round-trip and back through `validate_and_extract_confirmation`.
+
+    That's exactly the path the module's own docstring warns about: mint
+    signs `[EditableSlot.model_dump()]`, verify reads back JSONB dicts. If
+    those ever diverge, no card carrying slots would validate at all — every
+    slot-fill approval would break simultaneously, and nothing else in this
+    file would notice."""
+    from app.services.chat.write_validator import EditableSlot, ValidationResult
+
+    validation = ValidationResult(
+        ok=False,
+        missing_required=["subsidiary"],
+        editable_slots=[
+            EditableSlot(
+                name="subsidiary",
+                label="Primary Subsidiary",
+                type="select",
+                allowed=[{"value": "1", "label": "Framework Inc"}],
+            )
+        ],
+    )
+    tool_input = {"recordType": "customer", "data": '{"companyname": "test ai customer"}'}
+    payload = build_confirmation_payload(
+        mutation_type="create",
+        record_type="customer",
+        tool_name=TOOL,
+        tool_input=tool_input,
+        session_id=SESSION,
+        validation=validation,
+    )
+    assert payload is not None
+
+    # Simulate the DB round-trip: a JSON column serializes and deserializes
+    # exactly what `ChatMessage.structured_output` does — pydantic objects
+    # do NOT survive that round-trip, only their JSON-compatible values do.
+    structured_output = json.loads(json.dumps(payload.model_dump()))
+    is_valid, _, _ = validate_and_extract_confirmation(structured_output, SESSION)
+    assert is_valid is True
+
+
+# ---------------------------------------------------------------------------
+# Re-review Minor 1 — a malformed stored `editable_slots` must not crash the
+# unconditional token-check path. Not client-reachable (this field is only
+# ever written by `EditableSlot.model_dump()`), but a corrupted or
+# unexpectedly-shaped stored value must fail closed — return False/an error
+# — rather than raise inside the SSE generator. Same shape as round-1 #5,
+# one level up; `validate_and_extract_confirmation` and `merge_slot_values`
+# both read `structured_output["editable_slots"]` unguarded.
+# ---------------------------------------------------------------------------
+
+
+def test_editable_slots_none_does_not_crash_validate():
+    pending = _pending(SLOTS)
+    tampered = dict(pending)
+    tampered["editable_slots"] = None
+    is_valid, _, _ = validate_and_extract_confirmation(tampered, SESSION)
+    assert is_valid is False
+
+
+def test_editable_slots_list_of_strings_does_not_crash_validate():
+    pending = _pending(SLOTS)
+    tampered = dict(pending)
+    tampered["editable_slots"] = ["subsidiary"]
+    is_valid, _, _ = validate_and_extract_confirmation(tampered, SESSION)
+    assert is_valid is False
+
+
+def test_editable_slots_none_does_not_crash_merge():
+    pending = _pending(SLOTS)
+    tampered = dict(pending)
+    tampered["editable_slots"] = None
+    ok, _, _, err = merge_slot_values(tampered, {"subsidiary": "2"}, SESSION)
+    assert ok is False
+    assert err
+
+
+def test_editable_slots_list_of_strings_does_not_crash_merge():
+    pending = _pending(SLOTS)
+    tampered = dict(pending)
+    tampered["editable_slots"] = ["subsidiary"]
+    ok, _, _, err = merge_slot_values(tampered, {"subsidiary": "2"}, SESSION)
+    assert ok is False
+    assert err
+
+
+# ---------------------------------------------------------------------------
+# Re-review Minor 2 — sorting by `name` alone is stable but not canonical
+# when two slots share a name: two logically identical slot sets whose
+# duplicate-named slots merely arrive in a different relative order would
+# sign to different strings. No security consequence (fails closed — it
+# would only mis-reject a legitimate approval), but still a correctness bug
+# worth closing in the same round.
+# ---------------------------------------------------------------------------
+
+
+def test_duplicate_slot_names_sign_identically_regardless_of_order():
+    dup_slots_a = [
+        {"name": "line", "label": "B", "type": "text", "allowed": None},
+        {"name": "line", "label": "A", "type": "text", "allowed": None},
+    ]
+    dup_slots_b = [
+        {"name": "line", "label": "A", "type": "text", "allowed": None},
+        {"name": "line", "label": "B", "type": "text", "allowed": None},
+    ]
+    tool_input = {"recordType": "customer", "data": '{"companyname": "test ai customer"}'}
+    json_a = _build_payload_json(TOOL, tool_input, dup_slots_a)
+    json_b = _build_payload_json(TOOL, tool_input, dup_slots_b)
+    assert json_a == json_b
 
 
 # ---------------------------------------------------------------------------
@@ -572,6 +694,91 @@ class TestOrchestratorApproveWithSlotValues:
         # stored alongside — the card and the write agree.
         is_valid, _, _ = validate_and_extract_confirmation(persisted, SESSION)
         assert is_valid is True
+
+    @pytest.mark.asyncio
+    async def test_approve_recomputes_proposed_fields_from_the_merged_payload(self):
+        """Re-review Important A: proposed_fields/proposed_lines are the
+        ONLY thing the confirmation card renders (write-confirmation-card.tsx
+        reads data.proposed_fields; tool_input appears nowhere in that
+        component). Persisting the merged tool_input + fresh token without
+        also recomputing proposed_fields means the card flips to "approved"
+        while still SHOWING the payload without the value the human typed —
+        round-1 #4's complaint, relocated: the machine-readable half agrees
+        with the write, the human-readable half does not."""
+        from app.services.chat.orchestrator import run_chat_turn
+
+        confirm_msg = _make_confirm_message(_pending(SLOTS))
+        db = _make_db(confirm_msg)
+        session = _make_session()
+
+        mock_execute_tool_call = AsyncMock(return_value=json.dumps({"id": "999"}))
+        mock_log_event = AsyncMock(return_value=None)
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", mock_log_event),
+        ):
+            events = [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="approve",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={
+                        "action": "approve",
+                        "confirmation_id": str(confirm_msg.id),
+                        "slot_values": {"subsidiary": "2"},
+                    },
+                )
+            ]
+
+        assert not [e for e in events if e.get("type") == "error"]
+        persisted = confirm_msg.structured_output
+        # This is what the card actually renders — must show the value the
+        # human typed, not the agent's pre-merge payload.
+        assert persisted["proposed_fields"]["subsidiary"] == "2"
+        assert persisted["proposed_fields"]["companyname"] == "test ai customer"
+        assert persisted["proposed_lines"] == []
+
+    @pytest.mark.asyncio
+    async def test_approve_with_no_slot_values_does_not_touch_proposed_fields(self):
+        """The no-op passthrough path must not spuriously recompute
+        proposed_fields either — nothing changed, so nothing should."""
+        from app.services.chat.orchestrator import run_chat_turn
+
+        pending = _pending([])
+        confirm_msg = _make_confirm_message(pending)
+        db = _make_db(confirm_msg)
+        session = _make_session()
+
+        mock_execute_tool_call = AsyncMock(return_value=json.dumps({"id": "999"}))
+        mock_log_event = AsyncMock(return_value=None)
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", mock_log_event),
+        ):
+            events = [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="approve",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={
+                        "action": "approve",
+                        "confirmation_id": str(confirm_msg.id),
+                    },
+                )
+            ]
+
+        assert not [e for e in events if e.get("type") == "error"]
+        persisted = confirm_msg.structured_output
+        assert persisted["proposed_fields"] == pending["proposed_fields"]
+        assert persisted["proposed_lines"] == pending["proposed_lines"]
 
     @pytest.mark.asyncio
     async def test_approve_with_no_slot_values_does_not_re_mint_the_token(self):

@@ -89,16 +89,33 @@ def _build_payload_json(
     verifies.
 
     ``sort_keys=True`` orders keys *within* each slot dict but not the slot
-    *list* itself, so the slots are additionally sorted by ``name`` here —
-    two logically identical slot sets must sign to the same string
-    regardless of the order they happen to arrive in.
+    *list* itself, so the slots are additionally sorted here — by
+    ``(name, label)`` rather than ``name`` alone, since ``sorted()`` is
+    stable and two slots sharing a ``name`` would otherwise sign differently
+    depending on which arrived first. Two logically identical slot sets must
+    sign to the same string regardless of the order they happen to arrive
+    in.
     """
-    sorted_slots = sorted(editable_slots, key=lambda slot: slot.get("name", ""))
+    sorted_slots = sorted(editable_slots, key=lambda slot: (slot.get("name", ""), slot.get("label", "")))
     return json.dumps(
         {"tool_name": tool_name, "tool_input": tool_input, "editable_slots": sorted_slots},
         sort_keys=True,
         default=str,
     )
+
+
+def _is_valid_editable_slots_shape(value: Any) -> bool:
+    """A stored ``editable_slots`` value must be a list of dicts.
+
+    Not client-reachable — this field is only ever written by
+    ``EditableSlot.model_dump()`` — but it sits on the unconditional
+    token-check path (``validate_and_extract_confirmation``) and the merge
+    path (``merge_slot_values``), both of which iterate it. A corrupted or
+    unexpectedly-shaped stored value (``None``, a list of strings, ...) must
+    fail closed — return ``False`` — rather than raise inside an SSE
+    generator.
+    """
+    return isinstance(value, list) and all(isinstance(slot, dict) for slot in value)
 
 
 # ---------------------------------------------------------------------------
@@ -296,7 +313,12 @@ def validate_and_extract_confirmation(
     token: str = structured_output.get("confirmation_token", "")
     tool_name: str = structured_output.get("tool_name", "")
     tool_input: dict[str, Any] = structured_output.get("tool_input", {})
-    editable_slots: list[dict[str, Any]] = structured_output.get("editable_slots", [])
+    editable_slots: Any = structured_output.get("editable_slots", [])
+
+    # A malformed stored value (None, a list of strings, ...) must fail
+    # closed here rather than raise inside _build_payload_json's sort.
+    if not _is_valid_editable_slots_shape(editable_slots):
+        return False, tool_name, tool_input
 
     payload_json = _build_payload_json(tool_name, tool_input, editable_slots)
     is_valid = verify_confirmation_token(token, session_id, payload_json)
@@ -359,16 +381,24 @@ def merge_slot_values(
     """
     tool_name: str = structured_output.get("tool_name", "")
     tool_input: dict[str, Any] = dict(structured_output.get("tool_input", {}))
-    slots = {s["name"]: s for s in structured_output.get("editable_slots", [])}
+    raw_slots: Any = structured_output.get("editable_slots", [])
 
     if not slot_values:
         # Pure passthrough — still validates the original token so a
         # no-op approve carries exactly the same guarantee it always has.
+        # Doesn't touch raw_slots at all: validate_and_extract_confirmation
+        # has its own malformed-shape guard.
         is_valid, name, original = validate_and_extract_confirmation(structured_output, session_id)
         return is_valid, name, original, "" if is_valid else "invalid token"
 
     if not isinstance(slot_values, dict):
         return False, tool_name, {}, "slot_values must be an object mapping field name to value."
+
+    # A malformed stored value (None, a list of strings, ...) must fail
+    # closed here rather than raise building `slots` below.
+    if not _is_valid_editable_slots_shape(raw_slots):
+        return False, tool_name, {}, "stored editable_slots is malformed."
+    slots = {s["name"]: s for s in raw_slots}
 
     for key, value in slot_values.items():
         if key not in slots:

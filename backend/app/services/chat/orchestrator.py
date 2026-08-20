@@ -1724,6 +1724,7 @@ async def run_chat_turn(
                 mint_confirmation_token,
                 validate_and_extract_confirmation,
             )
+            from app.services.chat.write_payload import normalize_write_payload
 
             _confirm_result = await db.execute(
                 _wc_select(ChatMessage).where(
@@ -1805,9 +1806,22 @@ async def run_chat_turn(
                 if _merged_confirmation_token is not None:
                     # A slot merge happened above — persist what was
                     # actually written and the token minted over it, so the
-                    # stored card agrees with the executed write.
+                    # stored card agrees with the executed write. Also
+                    # recompute proposed_fields/proposed_lines: those are
+                    # the ONLY thing the confirmation card renders (the
+                    # frontend never reads tool_input) — leaving them at
+                    # the pre-merge values would flip the card to
+                    # "approved" while it still displays the payload
+                    # without the value the human typed and that was
+                    # actually written. `tool_input` is guaranteed
+                    # re-parseable here: merge_slot_values already proved
+                    # it by constructing it FROM a normalize_write_payload
+                    # call on the pre-merge payload.
+                    _merged_normalized = normalize_write_payload(tool_input)
                     _updated_so["tool_input"] = tool_input
                     _updated_so["confirmation_token"] = _merged_confirmation_token
+                    _updated_so["proposed_fields"] = _merged_normalized.fields
+                    _updated_so["proposed_lines"] = _merged_normalized.lines
                 _confirm_msg.structured_output = _updated_so
                 _wc_flag_modified(_confirm_msg, "structured_output")
 
