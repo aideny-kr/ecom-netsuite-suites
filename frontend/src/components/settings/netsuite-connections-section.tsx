@@ -384,8 +384,15 @@ export function NetSuiteConnectionsSection() {
   const oauthConns = (connections ?? []).filter(
     (c) => c.provider === "netsuite" && c.status !== "revoked",
   );
+  // Allowlist, not denylist: this section is NetSuite-only UI (Reauthorize
+  // fires an OAuth popup against a bearer connector, "Client ID" PATCHes
+  // credentials, Delete hard-revokes). A denylist ("not bigquery") already
+  // let a second non-NetSuite provider (celigo_mcp) through once -- for a
+  // tenant that connected Celigo after NetSuite, `.find(active) ?? [0]` then
+  // picked the Celigo row as `activeMcp`, so editing "Client ID" here wrote
+  // to Celigo's credentials while showing "MCP Client ID updated".
   const mcpConns = (mcpConnectors ?? []).filter(
-    (c) => c.status !== "revoked" && c.provider !== "bigquery",
+    (c) => c.status !== "revoked" && c.provider === "netsuite_mcp",
   );
 
   // Derive client IDs and restlet URL from first active connection metadata

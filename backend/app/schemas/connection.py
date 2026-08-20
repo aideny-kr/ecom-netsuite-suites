@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 
 
 class ConnectionCreate(BaseModel):
-    provider: str = Field(pattern=r"^(shopify|stripe|netsuite)$")
+    provider: str = Field(pattern=r"^(shopify|stripe|netsuite|celigo)$")
     label: str = Field(min_length=1, max_length=255)
     credentials: dict
 
