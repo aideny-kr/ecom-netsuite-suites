@@ -832,17 +832,48 @@ export interface FeatureFlagsResponse {
 // of shape `{ type: "drive_sources", data: DriveSourcesMap }`.
 export type DriveSourcesMap = Record<string, string>;
 
+// A field the server (not the client) has declared fillable — one gap the
+// agent could not resolve itself. `allowed` is the closed set of values NetSuite
+// metadata permits (rendered as a <select>); null/absent means free text.
+// The server enforces this allowlist independently on submit (write_validator.py
+// EditableSlot / write_confirmation_service.py merge_slot_values) — this type
+// only drives what the human is offered, not what's actually accepted.
+export interface EditableSlot {
+  name: string;
+  label: string;
+  type: string;
+  allowed?: { value: string; label: string }[] | null;
+}
+
 export interface WriteConfirmationData {
   type: "write_confirmation";
   mutation_type: "create" | "update" | "delete" | "upsert";
   record_type: string;
   record_id: string | null;
   proposed_fields: Record<string, unknown>;
+  // Transaction line items (sales orders, invoices, ...). Absent/empty for
+  // header-only record types (e.g. customer).
+  proposed_lines?: Record<string, unknown>[];
   current_record: Record<string, unknown> | null;
   tool_name: string;
   tool_input: Record<string, unknown>;
   confirmation_token: string;
-  status: "pending" | "approved" | "rejected";
+  // Header-field gaps the human can fill in and submit. Empty for both a
+  // fully-resolved payload AND a recon group confirmation (which never has
+  // slots) — those render identically to today.
+  editable_slots?: EditableSlot[];
+  // Line-item fields the validator flagged as missing but that have no
+  // fill-in-the-blank UI (deferred: ClickUp 86bbgznjr). Non-empty makes the
+  // card terminal — name the gaps, no slot inputs, no Approve.
+  unfillable_line_fields?: string[];
+  // True when NetSuite's field-requirement metadata was unavailable, so the
+  // payload was never checked against it. The two posting invariants (period
+  // freeze, debits=credits) still ran — this only means field validation was
+  // skipped. Approval is still allowed; the human is the control.
+  unvalidated?: boolean;
+  // NetSuite's own rejection message, set only when status is "failed".
+  error?: string;
+  status: "pending" | "approved" | "rejected" | "failed";
 }
 
 // ---------------------------------------------------------------------------

@@ -648,7 +648,10 @@ interface MessageListProps {
   onRemoveTemplate?: () => void;
   templateFile?: { id: string; filename: string } | null;
   onImportanceOverride?: (messageId: string, newTier: number) => void;
-  onWriteConfirm?: (messageId: string, action: "approve" | "reject") => void;
+  // slotValues carries any human-filled editable_slots (Task 9) — only ever
+  // populated on an "approve" action; the orchestrator reads it as
+  // write_confirm.slot_values.
+  onWriteConfirm?: (messageId: string, action: "approve" | "reject", slotValues?: Record<string, string>) => void;
   onClarificationChoose?: (messageId: string, optionId: "A" | "B" | "C") => void;
   // Manual clarification typed inside the card (dogfood follow-up 2026-04-30).
   // Returns a Promise so the card can await it and clear/preserve text.
@@ -1165,7 +1168,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   onChangesetAction?: () => void;
   isStreamingPreview?: boolean;
   onImportanceOverride?: (messageId: string, newTier: number) => void;
-  onWriteConfirm?: (messageId: string, action: "approve" | "reject") => void;
+  onWriteConfirm?: (messageId: string, action: "approve" | "reject", slotValues?: Record<string, string>) => void;
   onClarificationChoose?: (messageId: string, optionId: "A" | "B" | "C") => void;
   onClarificationManual?: (messageId: string, manualText: string) => Promise<void>;
   financialReportData?: FinancialReportData | null;
@@ -1212,7 +1215,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
           )}
           <WriteConfirmationCard
             data={structuredOutput as unknown as WriteConfirmationData}
-            onConfirm={() => onWriteConfirm?.(message.id, "approve")}
+            onConfirm={(slotValues) => onWriteConfirm?.(message.id, "approve", slotValues)}
             onReject={() => onWriteConfirm?.(message.id, "reject")}
           />
         </div>
