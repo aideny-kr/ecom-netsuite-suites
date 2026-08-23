@@ -1749,6 +1749,49 @@ async def run_chat_turn(
                     yield {"type": "error", "error": "Confirmation token is invalid or tampered."}
                     return
 
+                # Terminal-condition gate (operator ruling): a card that
+                # carries a proven posting-invariant violation
+                # (`invariant_errors` — unbalanced journal entry, closed
+                # accounting period) or an unfillable line-level required
+                # field (`unfillable_line_fields`) must never be approved —
+                # not by a human, not by a modified client, not by a
+                # replayed request. The frontend already renders both
+                # conditions terminal (no Approve button), but that is a
+                # caller-side guard; this is the choke point
+                # (`.claude/rules/agent-graph.md` #3: guard here, not at the
+                # caller). Checked AFTER the HMAC/integrity check above, on
+                # purpose — a tampered card must fail on integrity grounds
+                # first, and these markers are only trustworthy once the
+                # card is proven untampered. Neither field is inside the
+                # signed envelope (see `_build_payload_json` — only
+                # `tool_name`/`tool_input`/`editable_slots` are signed), but
+                # that is fine here: both can only make this gate MORE
+                # restrictive, never less, so there is nothing for a tamperer
+                # to gain by adding or forging them. Do NOT add them to the
+                # signed payload — that would invalidate every already-
+                # pending card's token for no security benefit.
+                _invariant_errors = _so.get("invariant_errors") or []
+                _unfillable_line_fields = _so.get("unfillable_line_fields") or []
+                if _invariant_errors:
+                    yield {
+                        "type": "error",
+                        "error": (
+                            "This write cannot be approved — it violates a posting invariant: "
+                            + "; ".join(_invariant_errors)
+                        ),
+                    }
+                    return
+                if _unfillable_line_fields:
+                    yield {
+                        "type": "error",
+                        "error": (
+                            "This write cannot be approved — required line-level field(s) could "
+                            f"not be filled: {', '.join(_unfillable_line_fields)}. Ask the agent to "
+                            "retry with a complete payload."
+                        ),
+                    }
+                    return
+
                 # Server-declared editable slots (Task 7): the client may only
                 # submit values for fields `_so["editable_slots"]` names, and
                 # only values inside a slot's `allowed` set when one exists.

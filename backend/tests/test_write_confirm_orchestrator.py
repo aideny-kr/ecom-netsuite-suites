@@ -100,6 +100,50 @@ def _make_real_confirmation_msg(session_id, tool_name, tool_input, status="pendi
     return msg
 
 
+def _make_terminal_confirmation_msg(
+    session_id,
+    tool_name,
+    tool_input,
+    *,
+    invariant_errors=None,
+    unfillable_line_fields=None,
+    status="pending",
+):
+    """Like ``_make_real_confirmation_msg`` but carries a populated
+    ``ValidationResult`` so the card's ``invariant_errors`` /
+    ``unfillable_line_fields`` are set — a REAL ``ChatMessage`` instance
+    (needed for ``flag_modified`` in the orchestrator's approve branch, same
+    as ``_make_real_confirmation_msg``)."""
+    from app.services.chat.write_confirmation_service import build_confirmation_payload
+    from app.services.chat.write_validator import ValidationResult
+
+    validation = ValidationResult(
+        ok=not (invariant_errors or unfillable_line_fields),
+        missing_line_required=list(unfillable_line_fields or []),
+        invariant_errors=list(invariant_errors or []),
+    )
+    payload = build_confirmation_payload(
+        mutation_type="create",
+        record_type="salesOrder",
+        tool_name=tool_name,
+        tool_input=tool_input,
+        session_id=str(session_id),
+        validation=validation,
+    )
+    assert payload is not None
+
+    msg = ChatMessage(
+        tenant_id=_TENANT_ID,
+        session_id=session_id,
+        role="assistant",
+        content="",
+        structured_output={**payload.model_dump(), "status": status},
+        created_at=datetime.now(timezone.utc),
+    )
+    msg.id = uuid.uuid4()
+    return msg
+
+
 class _FakeScalarResult:
     def __init__(self, msg):
         self._msg = msg
@@ -543,6 +587,227 @@ class TestWriteConfirmFailedFlow:
         so = confirm_msg.structured_output
         assert so["status"] == "failed"
         assert so["error"] == "Invalid field value."
+        merged_data = json.loads(so["tool_input"]["data"])
+        assert merged_data["subsidiary"] == "2"
+        assert so["proposed_fields"]["subsidiary"] == "2"
+
+
+# ---------------------------------------------------------------------------
+# I) Orchestrator: a terminal card (invariant_errors / unfillable_line_fields)
+#    must never reach execute_tool_call, no matter who sends the approve.
+#
+# Operator ruling: a card carrying a proven posting-invariant violation
+# (unbalanced journal entry, closed accounting period) or an unfillable
+# line-level required field is TERMINAL. That shipped as "no Approve button"
+# on the frontend only — the server accepted the approve anyway. These tests
+# drive the REAL run_chat_turn approve branch so a regression that lets the
+# write through would actually be caught, not just inferred from the card
+# rendering no button.
+# ---------------------------------------------------------------------------
+
+
+class TestWriteConfirmTerminalMarkersBlockApproval:
+    @pytest.mark.asyncio
+    async def test_invariant_errors_refuses_approve_and_never_executes(self):
+        """A card with invariant_errors must be refused; execute_tool_call
+        must never be called (the property that matters — not just that an
+        error event was yielded)."""
+        from app.services.chat.orchestrator import run_chat_turn
+
+        session_id = uuid.uuid4()
+        tool_name = _ext("ns_createRecord")
+        tool_input = {"recordType": "journalEntry", "data": '{"memo": "unbalanced JE"}'}
+        confirm_msg = _make_terminal_confirmation_msg(
+            session_id,
+            tool_name,
+            tool_input,
+            invariant_errors=["Journal entry lines are not balanced: debit 100.00 != credit 80.00"],
+        )
+        db = _make_db(confirm_msg)
+        session = _make_session(session_id=str(session_id))
+
+        # execute_tool_call returns a harmless success shape here — if the
+        # gate fails to block the approve, the turn must not blow up on an
+        # unrelated mock gap; the assertions below are what prove the block.
+        mock_execute_tool_call = AsyncMock(return_value=json.dumps({"id": "999", "success": True}))
+        mock_log_event = AsyncMock(return_value=None)
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", mock_log_event),
+        ):
+            events = [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="approve",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={"action": "approve", "confirmation_id": str(confirm_msg.id)},
+                )
+            ]
+
+        mock_execute_tool_call.assert_not_called()
+        error_events = [e for e in events if e.get("type") == "error"]
+        assert error_events
+        assert "not balanced" in error_events[0]["error"]
+        # The card must not have been silently flipped to "approved".
+        assert confirm_msg.structured_output["status"] == "pending"
+
+    @pytest.mark.asyncio
+    async def test_unfillable_line_fields_refuses_approve_and_never_executes(self):
+        """Mirror of the invariant_errors test for unfillable_line_fields —
+        same terminal standing per the operator's ruling."""
+        from app.services.chat.orchestrator import run_chat_turn
+
+        session_id = uuid.uuid4()
+        tool_name = _ext("ns_createRecord")
+        tool_input = {"recordType": "salesOrder", "data": '{"entity": "123"}'}
+        confirm_msg = _make_terminal_confirmation_msg(
+            session_id,
+            tool_name,
+            tool_input,
+            unfillable_line_fields=["line[0].item"],
+        )
+        db = _make_db(confirm_msg)
+        session = _make_session(session_id=str(session_id))
+
+        mock_execute_tool_call = AsyncMock(return_value=json.dumps({"id": "999", "success": True}))
+        mock_log_event = AsyncMock(return_value=None)
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", mock_log_event),
+        ):
+            events = [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="approve",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={"action": "approve", "confirmation_id": str(confirm_msg.id)},
+                )
+            ]
+
+        mock_execute_tool_call.assert_not_called()
+        error_events = [e for e in events if e.get("type") == "error"]
+        assert error_events
+        assert "line[0].item" in error_events[0]["error"]
+        assert confirm_msg.structured_output["status"] == "pending"
+
+    @pytest.mark.asyncio
+    async def test_clean_card_still_executes_normally(self):
+        """A clean pending card (no invariant_errors, no
+        unfillable_line_fields) must still execute exactly as before the
+        gate was added — the negative tests alone wouldn't catch a guard
+        placed too aggressively."""
+        from app.services.chat.orchestrator import run_chat_turn
+
+        session_id = uuid.uuid4()
+        tool_name = _ext("ns_createRecord")
+        tool_input = {"recordType": "customer", "data": '{"companyname": "clean co"}'}
+        confirm_msg = _make_real_confirmation_msg(session_id, tool_name, tool_input)
+        db = _make_db(confirm_msg)
+        session = _make_session(session_id=str(session_id))
+
+        mock_execute_tool_call = AsyncMock(return_value=json.dumps({"id": "999", "success": True}))
+        mock_log_event = AsyncMock(return_value=None)
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", mock_log_event),
+        ):
+            events = [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="approve",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={"action": "approve", "confirmation_id": str(confirm_msg.id)},
+                )
+            ]
+
+        mock_execute_tool_call.assert_awaited_once()
+        assert not [e for e in events if e.get("type") == "error"]
+        assert confirm_msg.structured_output["status"] == "approved"
+
+    @pytest.mark.asyncio
+    async def test_clean_card_with_slot_values_still_merges_and_executes(self):
+        """Task 7's slot-merge path on a clean card must be untouched by the
+        new gate."""
+        from app.services.chat.mutation_guard import generate_confirmation_token
+        from app.services.chat.orchestrator import run_chat_turn
+        from app.services.chat.write_confirmation_service import _build_payload_json
+
+        session_id = uuid.uuid4()
+        tool_name = _ext("ns_createRecord")
+        tool_input = {"recordType": "customer", "data": '{"companyname": "test ai customer"}'}
+        slots = [
+            {
+                "name": "subsidiary",
+                "label": "Primary Subsidiary",
+                "type": "select",
+                "allowed": [{"value": "1", "label": "Framework Inc"}, {"value": "2", "label": "Framework EU"}],
+            }
+        ]
+        structured_output = {
+            "type": "write_confirmation",
+            "mutation_type": "create",
+            "record_type": "customer",
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+            "editable_slots": slots,
+            "proposed_fields": {"companyname": "test ai customer"},
+            "proposed_lines": [],
+            "confirmation_token": generate_confirmation_token(
+                str(session_id), _build_payload_json(tool_name, tool_input, slots)
+            ),
+            "status": "pending",
+        }
+        confirm_msg = ChatMessage(
+            tenant_id=_TENANT_ID,
+            session_id=session_id,
+            role="assistant",
+            content="",
+            structured_output=structured_output,
+            created_at=datetime.now(timezone.utc),
+        )
+        confirm_msg.id = uuid.uuid4()
+        db = _make_db(confirm_msg)
+        session = _make_session(session_id=str(session_id))
+
+        mock_execute_tool_call = AsyncMock(return_value=json.dumps({"id": "999", "success": True}))
+        mock_log_event = AsyncMock(return_value=None)
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", mock_log_event),
+        ):
+            events = [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="approve",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={
+                        "action": "approve",
+                        "confirmation_id": str(confirm_msg.id),
+                        "slot_values": {"subsidiary": "2"},
+                    },
+                )
+            ]
+
+        mock_execute_tool_call.assert_awaited_once()
+        assert not [e for e in events if e.get("type") == "error"]
+        so = confirm_msg.structured_output
+        assert so["status"] == "approved"
         merged_data = json.loads(so["tool_input"]["data"])
         assert merged_data["subsidiary"] == "2"
         assert so["proposed_fields"]["subsidiary"] == "2"
