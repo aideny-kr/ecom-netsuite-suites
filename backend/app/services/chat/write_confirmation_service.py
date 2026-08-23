@@ -57,6 +57,16 @@ class WriteConfirmationPayload(BaseModel):
     # half-form the human could approve, that then fails at NetSuite anyway,
     # is worse than an honest stop.
     unfillable_line_fields: list[str] = []
+    # ValidationResult.invariant_errors — populated when validate_write proved
+    # the payload violates a posting invariant (unbalanced journal entry, a
+    # closed accounting period). Operator ruling: non-empty makes the card
+    # terminal, with the SAME standing as unfillable_line_fields. Unlike
+    # `unvalidated` ("we could not check" — the human is still the control,
+    # Approve stays enabled), this means "we checked and it IS wrong". Must
+    # be populated at BOTH build sites below (delete, and create/update/
+    # upsert) — a payload that fails an invariant check is exactly as
+    # dangerous to approve blind on a delete as on a create.
+    invariant_errors: list[str] = []
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +213,7 @@ def build_confirmation_payload(
             editable_slots=editable_slots,
             unvalidated=bool(validation.unvalidated) if validation else False,
             unfillable_line_fields=list(validation.missing_line_required) if validation else [],
+            invariant_errors=list(validation.invariant_errors) if validation else [],
         )
 
     # For create/update/upsert, require a parseable payload. Fail closed:
@@ -232,6 +243,7 @@ def build_confirmation_payload(
         editable_slots=editable_slots,
         unvalidated=bool(validation.unvalidated) if validation else False,
         unfillable_line_fields=list(validation.missing_line_required) if validation else [],
+        invariant_errors=list(validation.invariant_errors) if validation else [],
     )
 
 

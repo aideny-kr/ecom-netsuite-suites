@@ -283,4 +283,57 @@ describe("WriteConfirmationCard — write loop states", () => {
     render(<WriteConfirmationCard data={data} onConfirm={vi.fn()} onReject={vi.fn()} />);
     expect(screen.getByRole("button", { name: /approve/i })).toBeEnabled();
   });
+
+  // MF-1 (final whole-branch review): the server has PROVED the payload
+  // invalid (unbalanced JE, closed period) — invariant_errors must reach the
+  // human with the same terminal treatment as unfillable_line_fields, not
+  // render as nothing.
+  it("makes the card terminal when invariant_errors is non-empty — no slot inputs, no Approve", () => {
+    const data: WriteConfirmationData = {
+      ...base,
+      editable_slots: [
+        {
+          name: "subsidiary",
+          label: "Primary Subsidiary",
+          type: "select",
+          allowed: [{ value: "1", label: "Framework Inc" }],
+        },
+      ],
+      invariant_errors: ["Journal entry does not balance: debits 100.00 != credits 90.00."],
+    };
+    render(<WriteConfirmationCard data={data} onConfirm={vi.fn()} onReject={vi.fn()} />);
+    expect(screen.getByText(/does not balance/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText("Primary Subsidiary")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /approve/i })).not.toBeInTheDocument();
+    // Rejecting is still safe — nothing was submitted to NetSuite.
+    expect(screen.getByRole("button", { name: /reject/i })).toBeInTheDocument();
+  });
+
+  it("renders a closed-period invariant error the same way", () => {
+    const data: WriteConfirmationData = {
+      ...base,
+      invariant_errors: ["Accounting period 'Jan 2026' is closed — posting is not permitted."],
+    };
+    render(<WriteConfirmationCard data={data} onConfirm={vi.fn()} onReject={vi.fn()} />);
+    expect(screen.getByText(/is closed/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /approve/i })).not.toBeInTheDocument();
+  });
+
+  it("renders BOTH invariant_errors and unfillable_line_fields when both are present — neither hides the other", () => {
+    const data: WriteConfirmationData = {
+      ...base,
+      unfillable_line_fields: ["rate"],
+      invariant_errors: ["Accounting period 'Jan 2026' is closed — posting is not permitted."],
+    };
+    render(<WriteConfirmationCard data={data} onConfirm={vi.fn()} onReject={vi.fn()} />);
+    expect(screen.getByText(/rate/i)).toBeInTheDocument();
+    expect(screen.getByText(/is closed/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /approve/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /reject/i })).toBeInTheDocument();
+  });
+
+  it("does not render an invariant panel when invariant_errors is absent", () => {
+    render(<WriteConfirmationCard data={base} onConfirm={vi.fn()} onReject={vi.fn()} />);
+    expect(screen.getByRole("button", { name: /approve/i })).toBeEnabled();
+  });
 });

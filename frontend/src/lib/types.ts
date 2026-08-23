@@ -866,6 +866,14 @@ export interface WriteConfirmationData {
   // fill-in-the-blank UI (deferred: ClickUp 86bbgznjr). Non-empty makes the
   // card terminal — name the gaps, no slot inputs, no Approve.
   unfillable_line_fields?: string[];
+  // ValidationResult.invariant_errors — the server CHECKED this payload
+  // against a posting invariant (debits=credits, accounting period open)
+  // and it failed. Distinct from `unvalidated` ("we could not check" — the
+  // human is still the control, Approve stays enabled): this means "we
+  // checked and it IS wrong", so non-empty makes the card terminal with the
+  // same standing as `unfillable_line_fields` — no slot inputs, no Approve.
+  // Both can be non-empty at once; render both, never let one hide the other.
+  invariant_errors?: string[];
   // True when NetSuite's field-requirement metadata was unavailable, so the
   // payload was never checked against it. The two posting invariants (period
   // freeze, debits=credits) still ran — this only means field validation was

@@ -10,6 +10,7 @@ from app.services.chat.write_confirmation_service import (
     build_confirmation_payload,
     validate_and_extract_confirmation,
 )
+from app.services.chat.write_validator import ValidationResult
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -601,3 +602,113 @@ def test_unparseable_payload_blocks_the_write():
         session_id="11111111-1111-1111-1111-111111111111",
     )
     assert payload is None
+
+
+# ---------------------------------------------------------------------------
+# MF-1 — ValidationResult.invariant_errors must reach the card. Populated at
+# BOTH build sites: create/update/upsert AND delete — a prior task nearly
+# missed the delete branch, per the review.
+# ---------------------------------------------------------------------------
+
+
+class TestBuildConfirmationPayloadInvariantErrors:
+    def test_invariant_errors_populated_for_create(self):
+        validation = ValidationResult(
+            ok=False,
+            invariant_errors=["Journal entry does not balance: debits 100.00 != credits 90.00."],
+        )
+        result = build_confirmation_payload(
+            mutation_type="create",
+            record_type="journalEntry",
+            tool_name=_ext("ns_createRecord"),
+            tool_input={"recordType": "journalEntry", "body": {"subsidiary": "1"}},
+            session_id=_SESSION_ID,
+            validation=validation,
+        )
+        assert result is not None
+        assert result.invariant_errors == ["Journal entry does not balance: debits 100.00 != credits 90.00."]
+
+    def test_invariant_errors_populated_for_update(self):
+        validation = ValidationResult(
+            ok=False,
+            invariant_errors=["Accounting period 'Jan 2026' is closed — posting is not permitted."],
+        )
+        result = build_confirmation_payload(
+            mutation_type="update",
+            record_type="journalEntry",
+            tool_name=_ext("ns_updateRecord"),
+            tool_input={"recordType": "journalEntry", "id": "JE-1", "body": {"memo": "x"}},
+            session_id=_SESSION_ID,
+            validation=validation,
+        )
+        assert result is not None
+        assert result.invariant_errors == ["Accounting period 'Jan 2026' is closed — posting is not permitted."]
+
+    def test_invariant_errors_populated_for_delete(self):
+        """The delete branch is a separate code path — easy to miss (per the review)."""
+        validation = ValidationResult(
+            ok=False,
+            invariant_errors=["Accounting period 'Jan 2026' is closed — posting is not permitted."],
+        )
+        result = build_confirmation_payload(
+            mutation_type="delete",
+            record_type="journalEntry",
+            tool_name=_ext("ns_deleteRecord"),
+            tool_input={"recordType": "journalEntry", "id": "JE-1"},
+            session_id=_SESSION_ID,
+            validation=validation,
+        )
+        assert result is not None
+        assert result.invariant_errors == ["Accounting period 'Jan 2026' is closed — posting is not permitted."]
+
+    def test_invariant_errors_default_empty_without_validation(self):
+        """No `validation` passed at all — must not be dropped as None/missing."""
+        result = build_confirmation_payload(
+            mutation_type="create",
+            record_type="salesOrder",
+            tool_name=_ext("ns_createRecord"),
+            tool_input={"recordType": "salesOrder", "body": {"memo": "test"}},
+            session_id=_SESSION_ID,
+        )
+        assert result is not None
+        assert result.invariant_errors == []
+
+    def test_invariant_errors_empty_when_validation_clean(self):
+        validation = ValidationResult(ok=True)
+        result = build_confirmation_payload(
+            mutation_type="create",
+            record_type="salesOrder",
+            tool_name=_ext("ns_createRecord"),
+            tool_input={"recordType": "salesOrder", "body": {"memo": "test"}},
+            session_id=_SESSION_ID,
+            validation=validation,
+        )
+        assert result is not None
+        assert result.invariant_errors == []
+
+    def test_confirmation_token_still_validates_alongside_invariant_errors(self):
+        """`invariant_errors` is server-computed display data (like
+        `unfillable_line_fields`) — never resubmitted by the client on
+        approve, so it is not part of the signed envelope. Adding it to the
+        payload model must not disturb the existing token round trip."""
+        validation = ValidationResult(
+            ok=False,
+            invariant_errors=["Journal entry does not balance: debits 100.00 != credits 90.00."],
+        )
+        payload = build_confirmation_payload(
+            mutation_type="create",
+            record_type="journalEntry",
+            tool_name=_ext("ns_createRecord"),
+            tool_input={"recordType": "journalEntry", "body": {"subsidiary": "1"}},
+            session_id=_SESSION_ID,
+            validation=validation,
+        )
+        assert payload is not None
+        structured_output = {
+            "confirmation_token": payload.confirmation_token,
+            "tool_name": payload.tool_name,
+            "tool_input": payload.tool_input,
+            "editable_slots": [s.model_dump() for s in payload.editable_slots],
+        }
+        is_valid, _, _ = validate_and_extract_confirmation(structured_output, _SESSION_ID)
+        assert is_valid is True

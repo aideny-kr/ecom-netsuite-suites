@@ -74,7 +74,20 @@ def normalize_write_payload(tool_input: dict[str, Any]) -> NormalizedPayload:
     fields: dict[str, Any] = {}
     for line_key, value in record.items():
         if line_key in _LINE_KEYS and isinstance(value, list):
-            lines.extend(item for item in value if isinstance(item, dict))
+            # A non-dict entry must fail closed, not be silently dropped.
+            # Dropping it would desync the confirmation card (built from
+            # `.lines`) from `tool_input` (what `execute_tool_call` actually
+            # sends) — the card would render fewer lines than what executes,
+            # and a human approving the short card would have no way to know
+            # the extra entries existed. Raising here routes through the same
+            # "the write payload could not be read … NOT sent to NetSuite"
+            # path every other unparseable payload already takes.
+            for item in value:
+                if not isinstance(item, dict):
+                    raise PayloadParseError(
+                        f"'{line_key}' contains a non-object entry ({item!r}) — line items must be objects"
+                    )
+            lines.extend(value)
         else:
             fields[line_key] = value
 

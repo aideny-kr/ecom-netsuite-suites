@@ -49,16 +49,25 @@ export function WriteConfirmationCard({
 
   const slots = data.editable_slots ?? [];
   const unfillableLineFields = data.unfillable_line_fields ?? [];
+  const invariantErrors = data.invariant_errors ?? [];
   // Non-empty unfillable_line_fields makes the card terminal (operator
   // decision, plan Task 9): a half-form the human can fill in and approve,
   // which then fails at NetSuite anyway, is worse than an honest stop. Line-
   // level slots are deferred — ClickUp 86bbgznjr.
   const isLineTerminal = unfillableLineFields.length > 0;
+  // Non-empty invariant_errors means the server CHECKED this payload against
+  // a posting invariant (debits=credits, period open) and it failed — same
+  // terminal standing as unfillable_line_fields (operator ruling, MF-1: "we
+  // checked and it IS wrong" carries the same weight as a missing required
+  // field). Kept as its own flag rather than folded into isLineTerminal so
+  // both panels can render independently when both are present.
+  const hasInvariantErrors = invariantErrors.length > 0;
+  const isTerminal = isLineTerminal || hasInvariantErrors;
   // A slot-fill form only renders when there IS something fillable and the
-  // card isn't already terminal for a line-level reason. editable_slots: []
-  // (the recon-group-confirmation shape, and a fully-resolved payload) never
-  // reaches this — those cards render exactly as they did before this.
-  const showSlotForm = isPending && slots.length > 0 && !isLineTerminal;
+  // card isn't already terminal. editable_slots: [] (the recon-group-
+  // confirmation shape, and a fully-resolved payload) never reaches this —
+  // those cards render exactly as they did before this.
+  const showSlotForm = isPending && slots.length > 0 && !isTerminal;
   // .trim() — a space is not a value. Without it a human can type a single
   // space into a required slot, watch Approve light up, and believe they
   // supplied the field when they didn't. The server would reject an
@@ -77,13 +86,15 @@ export function WriteConfirmationCard({
   // No badge for a plain pending card — that's the recon-group-confirmation
   // shape (and any fully-resolved payload) and must keep rendering exactly
   // as it does today.
-  const pendingBadgeLabel = isLineTerminal
-    ? "Incomplete"
-    : showSlotForm
-      ? "Needs input"
-      : data.unvalidated
-        ? "Unvalidated"
-        : null;
+  const pendingBadgeLabel = hasInvariantErrors
+    ? "Blocked"
+    : isLineTerminal
+      ? "Incomplete"
+      : showSlotForm
+        ? "Needs input"
+        : data.unvalidated
+          ? "Unvalidated"
+          : null;
 
   function handleSlotChange(name: string, value: string) {
     setSlotValues((prev) => ({ ...prev, [name]: value }));
@@ -205,6 +216,22 @@ export function WriteConfirmationCard({
         </div>
       )}
 
+      {isPending && hasInvariantErrors && (
+        <div className="space-y-1 rounded-lg border border-amber-400/40 bg-amber-500/[0.04] p-3">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-amber-600 dark:text-amber-400">
+            Posting rules violated
+          </p>
+          {invariantErrors.map((message) => (
+            <p key={message} className="text-[12px] leading-snug text-muted-foreground">
+              {message}
+            </p>
+          ))}
+          <p className="text-[12px] leading-snug text-muted-foreground">
+            NetSuite would reject this write. Reject it here and ask again with a corrected payload.
+          </p>
+        </div>
+      )}
+
       {isPending && isLineTerminal && (
         <div className="space-y-1 rounded-lg border border-amber-400/40 bg-amber-500/[0.04] p-3">
           <p className="text-[11px] font-semibold uppercase tracking-wide text-amber-600 dark:text-amber-400">
@@ -235,7 +262,7 @@ export function WriteConfirmationCard({
       )}
 
       {/* Action Buttons */}
-      {isPending && !isLineTerminal && (
+      {isPending && !isTerminal && (
         <div className="flex items-center gap-2 pt-1">
           {showSlotForm && !allSlotsFilled && (
             <span className="mr-auto text-[11px] italic text-muted-foreground">
@@ -271,7 +298,7 @@ export function WriteConfirmationCard({
         </div>
       )}
 
-      {isPending && isLineTerminal && (
+      {isPending && isTerminal && (
         <div className="flex items-center gap-2 pt-1">
           <span className="mr-auto text-[11px] italic text-muted-foreground">
             This write can&apos;t be completed here.

@@ -96,3 +96,33 @@ def test_payload_key_resolves_to_the_key_that_actually_coerced():
     result = normalize_write_payload({"data": None, "body": {"companyname": "x"}})
     assert result.payload_key == "body"
     assert result.record == {"companyname": "x"}
+
+
+# ---------------------------------------------------------------------------
+# MF-2 — a `_LINE_KEYS` sublist entry that isn't an object must never be
+# silently dropped. The old behaviour filtered non-dict entries out of
+# `.lines` and never returned them to `.fields`, so they vanished from the
+# confirmation card while `tool_input` — what actually executes — still
+# carried them. Fail closed instead: raise, exactly like an unparseable
+# payload, so the card is never built from a payload it can't fully show.
+# ---------------------------------------------------------------------------
+
+
+def test_line_list_of_bare_scalars_raises():
+    """`{"item": ["1", "2"]}` — a scalar array is not renderable as lines."""
+    with pytest.raises(PayloadParseError):
+        normalize_write_payload({"recordType": "salesOrder", "data": '{"entity": "5", "item": ["1", "2"]}'})
+
+
+def test_line_list_with_one_non_dict_entry_among_dicts_raises():
+    """A mix of good and bad entries must still fail closed, not just drop the bad one."""
+    with pytest.raises(PayloadParseError):
+        normalize_write_payload(
+            {
+                "recordType": "salesOrder",
+                "body": {
+                    "entity": "5",
+                    "item": [{"item": "1", "quantity": 1}, {"item": "2", "quantity": 1}, "ghost"],
+                },
+            }
+        )
