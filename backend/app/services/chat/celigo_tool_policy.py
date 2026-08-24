@@ -25,9 +25,45 @@ from __future__ import annotations
 # Providers whose tools are governed by this policy.
 CELIGO_PROVIDERS: frozenset[str] = frozenset({"celigo_mcp"})
 
-# Read tools: everything Celigo exposes as `list_*`, plus these two explicit reads.
-_READ_PREFIX = "list_"
-_READ_EXACT: frozenset[str] = frozenset({"get_schema", "search_knowledge_base"})
+# Read tools: the enumerated real Celigo read catalog, matched EXACTLY -- not a
+# `list_` prefix rule. A prefix rule looked equivalent when every known read
+# tool happened to start with `list_`, but the tool NAME here is reported by
+# whatever server answers for a given celigo_mcp connector's server_url. A
+# prefix check trusts that name; enumeration does not, so a remote tool named
+# e.g. `list_delete_everything` is denied like any other unrecognised name.
+_READ_TOOLS: frozenset[str] = frozenset(
+    {
+        "list_integrations",
+        "list_flows",
+        "list_exports",
+        "list_imports",
+        "list_connections",
+        "list_scripts",
+        "list_flow_errors",
+        "list_jobs",
+        "list_current_jobs",
+        "list_execution_logs",
+        "list_audit_log_entries",
+        "list_tags",
+        "list_users",
+        "list_environments",
+        "list_apis",
+        "list_iclients",
+        "list_file_definitions",
+        "list_lookup_caches",
+        "list_lookup_cache_data",
+        "list_edi_profiles",
+        "list_edi_transactions",
+        "list_storage_items",
+        "list_marketplace",
+        "list_mcp_servers",
+        "list_tools",
+        "list_ai_agents",
+        "list_guardrails",
+        "get_schema",
+        "search_knowledge_base",
+    }
+)
 
 # Celigo write tools → mutation verb.
 #
@@ -79,13 +115,13 @@ def is_celigo_provider(provider: str) -> bool:
 def is_read_only_celigo_tool(raw_tool_name: str) -> bool:
     """Return True if *raw_tool_name* is a Celigo read tool.
 
-    Fails closed: an unrecognised name is denied. Enumerated write tools are never
-    readable, even if a future Celigo release names one `list_something`.
+    Fails closed: an unrecognised name is denied, including one that merely
+    LOOKS like a read tool (e.g. `list_delete_everything`). Matching is exact
+    against `_READ_TOOLS`, not a `list_` prefix check -- enumerated write tools
+    are checked first and are never readable either way.
     """
     if not raw_tool_name:
         return False
     if raw_tool_name in CELIGO_WRITE_VERBS:
         return False
-    if raw_tool_name in _READ_EXACT:
-        return True
-    return raw_tool_name.startswith(_READ_PREFIX)
+    return raw_tool_name in _READ_TOOLS
