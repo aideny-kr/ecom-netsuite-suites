@@ -133,6 +133,58 @@ class TestCeligoRegionValidation:
         assert row is None, "a rejected region must never create a connection row"
 
 
+class TestCeligoLabelValidation:
+    """MINOR (T2 gate on PR #202): CeligoTestRequest/CeligoConnectRequest.label
+    had no length bound, unlike ConnectionCreate.label
+    (Field(min_length=1, max_length=255)) elsewhere in the same request/response
+    surface."""
+
+    def test_celigo_connect_request_rejects_empty_label(self):
+        from pydantic import ValidationError
+
+        from app.api.v1.connector_status import CeligoConnectRequest
+
+        with pytest.raises(ValidationError):
+            CeligoConnectRequest(token="tok", region="us", label="")
+
+    def test_celigo_connect_request_rejects_oversized_label(self):
+        from pydantic import ValidationError
+
+        from app.api.v1.connector_status import CeligoConnectRequest
+
+        with pytest.raises(ValidationError):
+            CeligoConnectRequest(token="tok", region="us", label="x" * 256)
+
+    def test_celigo_connect_request_accepts_a_normal_label(self):
+        from app.api.v1.connector_status import CeligoConnectRequest
+
+        req = CeligoConnectRequest(token="tok", region="us", label="Celigo Production")
+        assert req.label == "Celigo Production"
+
+    async def test_connect_endpoint_rejects_oversized_label(self, client, admin_user, db):
+        user, headers = admin_user
+        r = await client.post(
+            "/api/v1/connector-status/celigo/connect",
+            headers=headers,
+            json={"token": "tok", "region": "us", "label": "x" * 256},
+        )
+        assert r.status_code == 422, r.text
+
+        from sqlalchemy import select
+
+        from app.models.connection import Connection
+
+        row = (
+            await db.execute(
+                select(Connection).where(
+                    Connection.tenant_id == user.tenant_id,
+                    Connection.provider == "celigo",
+                )
+            )
+        ).scalar_one_or_none()
+        assert row is None, "an oversized label must never create a connection row"
+
+
 class TestCeligoTest:
     async def test_valid_token_reports_account(self, client, admin_user, monkeypatch):
         _, headers = admin_user

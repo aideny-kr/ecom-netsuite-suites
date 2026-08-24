@@ -11,7 +11,7 @@ from typing import Annotated, Literal
 import httpx
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -105,7 +105,9 @@ class CeligoTestResponse(BaseModel):
 class CeligoConnectRequest(BaseModel):
     token: str
     region: Literal["us", "eu"] = "us"
-    label: str = "Celigo"
+    # Bounded like ConnectionCreate.label (app/schemas/connection.py) -- this
+    # schema had no bound at all, unlike every other label field on this surface.
+    label: str = Field(default="Celigo", min_length=1, max_length=255)
     # Optional -- lets the chat agent read Celigo flows/scripts/errors via a
     # separate celigo_mcp MCP connector row (Task 10). Omitting it must behave
     # exactly like the REST-only connect that existed before this field.
