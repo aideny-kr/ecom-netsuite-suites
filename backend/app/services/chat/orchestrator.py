@@ -1722,9 +1722,11 @@ async def run_chat_turn(
             from app.services.chat.write_confirmation_service import (
                 merge_slot_values,
                 mint_confirmation_token,
+                uncovered_slot_names,
                 validate_and_extract_confirmation,
             )
-            from app.services.chat.write_payload import normalize_write_payload
+            from app.services.chat.write_payload import PayloadParseError, normalize_write_payload
+            from app.services.chat.write_validation import validate_mutation
 
             _confirm_result = await db.execute(
                 _wc_select(ChatMessage).where(
@@ -1818,6 +1820,96 @@ async def run_chat_turn(
                     _merged_confirmation_token = mint_confirmation_token(
                         tool_name, tool_input, _so.get("editable_slots", []), str(session.id)
                     )
+
+                # Finding D (T2 gate wave): a card carrying non-empty
+                # editable_slots names field(s) the server itself proved
+                # missing — every declared slot must be COVERED by
+                # slot_values before this approve is allowed through, or a
+                # client that simply omits slot_values (or supplies only
+                # some of them) could approve an incomplete payload; the
+                # frontend disabling Approve is a caller-side guard only.
+                # Checked AFTER merge_slot_values's own per-key rejections
+                # above (undeclared key / value outside an allowlist) so
+                # those keep their specific error text — this only fires
+                # when the submission was otherwise legitimate but
+                # incomplete. Uses the RAW `_slot_values` the human actually
+                # submitted (not the merged tool_input), since coverage is
+                # about what the human supplied. Runs regardless of whether
+                # a merge happened above — an empty/omitted slot_values on a
+                # slotted card never enters the `if _slot_values:` branch at
+                # all, which is exactly the gap this closes.
+                _uncovered_slots = uncovered_slot_names(_so.get("editable_slots") or [], _slot_values)
+                if _uncovered_slots:
+                    yield {
+                        "type": "error",
+                        "error": (
+                            "This write cannot be approved — required field(s) were not "
+                            f"provided: {', '.join(_uncovered_slots)}. Fill in every field on the card."
+                        ),
+                    }
+                    return
+
+                # Finding B (T2 gate wave): a slot merge changes the payload
+                # about to execute — the pre-merge `_invariant_errors` check
+                # above was computed against a DIFFERENT payload (the
+                # agent's pre-merge proposal), which is exactly why a
+                # missing trandate could never trip `_check_period_open` at
+                # build time. Re-validate the MERGED payload here, right
+                # before it executes, so the payload that runs is the
+                # payload that was checked. Only runs when a merge actually
+                # happened (`_merged_confirmation_token is not None`) — a
+                # no-merge approve executes bytes identical to what the
+                # intercept already validated; re-checking the staleness
+                # window (a period closing between mint and approve) on
+                # EVERY approve is a named follow-up, not this fix.
+                if _merged_confirmation_token is not None:
+                    try:
+                        _merged_validation = await validate_mutation(
+                            tool_name=tool_name,
+                            tool_input=tool_input,
+                            mutation_type=_so.get("mutation_type", "update"),
+                            record_type=_so.get("record_type", "record"),
+                            tenant_id=tenant_id,
+                            actor_id=user_id,
+                            correlation_id=correlation_id,
+                            db=db,
+                            session_id=str(session.id),
+                        )
+                    except PayloadParseError as exc:
+                        # Should not normally happen — merge_slot_values
+                        # already proved tool_input re-parses via
+                        # normalize_write_payload — but fail closed rather
+                        # than execute an unvalidated payload.
+                        yield {
+                            "type": "error",
+                            "error": f"The merged write payload could not be validated: {exc}",
+                        }
+                        return
+                    if _merged_validation.invariant_errors or _merged_validation.missing_required:
+                        _problems = list(_merged_validation.invariant_errors) + [
+                            f"missing required field: {f}" for f in _merged_validation.missing_required
+                        ]
+                        yield {
+                            "type": "error",
+                            "error": (
+                                "This write cannot be approved — the merged payload failed "
+                                "validation: " + "; ".join(_problems)
+                            ),
+                        }
+                        return
+                    # `_merged_validation.unvalidated` (metadata could not be
+                    # fetched) is deliberately NOT a refusal here — same
+                    # "requirements unknown, human is the control" default
+                    # as everywhere else in this plan. An infra failure
+                    # inside check_posting_invariants/get_record_metadata
+                    # fails OPEN by inheritance (both already catch their
+                    # own exceptions internally and return the "no violation
+                    # asserted" / "requirements unknown" defaults, so no
+                    # exception ever reaches here) — a human explicitly
+                    # approved this payload, and blocking every approve
+                    # during an MCP outage on a payload the human is looking
+                    # at is worse than the small residual risk. Pinned by
+                    # test_infra_failure_during_revalidation_fails_open_and_still_executes.
 
                 _exec_result_str = await execute_tool_call(
                     tool_name=tool_name,

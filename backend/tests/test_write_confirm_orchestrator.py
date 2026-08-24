@@ -811,3 +811,293 @@ class TestWriteConfirmTerminalMarkersBlockApproval:
         merged_data = json.loads(so["tool_input"]["data"])
         assert merged_data["subsidiary"] == "2"
         assert so["proposed_fields"]["subsidiary"] == "2"
+
+
+# ---------------------------------------------------------------------------
+# Finding B — the MERGED, slot-filled payload must be re-validated against
+# live invariants before execute_tool_call runs. The pre-merge
+# invariant_errors check (7d04b6fe) was computed against the AGENT'S
+# pre-merge proposal — exactly why a missing trandate could never trip
+# _check_period_open at build time. Only runs when a merge actually
+# happened (a no-merge approve executes bytes identical to what the
+# intercept already validated).
+# ---------------------------------------------------------------------------
+
+
+def _make_journal_entry_card_with_trandate_slot(session_id):
+    """A journalEntry create card whose trandate was ABSENT at build time —
+    so _check_period_open honestly returned [] (nothing to check), NOT a
+    pre-seeded violation. That's the realistic repair-exhaustion shape this
+    finding is about."""
+    from app.services.chat.mutation_guard import generate_confirmation_token
+    from app.services.chat.write_confirmation_service import _build_payload_json
+
+    tool_name = _ext("ns_createRecord")
+    fields = {"memo": "Q3 accrual", "subsidiary": "1"}
+    tool_input = {"recordType": "journalEntry", "data": json.dumps(fields)}
+    slots = [{"name": "trandate", "label": "Transaction Date", "type": "text", "allowed": None}]
+    structured_output = {
+        "type": "write_confirmation",
+        "mutation_type": "create",
+        "record_type": "journalEntry",
+        "tool_name": tool_name,
+        "tool_input": tool_input,
+        "editable_slots": slots,
+        "proposed_fields": fields,
+        "proposed_lines": [],
+        "confirmation_token": generate_confirmation_token(
+            str(session_id), _build_payload_json(tool_name, tool_input, slots)
+        ),
+        "invariant_errors": [],
+        "unfillable_line_fields": [],
+        "unvalidated": False,
+        "status": "pending",
+    }
+    msg = ChatMessage(
+        tenant_id=_TENANT_ID,
+        session_id=session_id,
+        role="assistant",
+        content="",
+        structured_output=structured_output,
+        created_at=datetime.now(timezone.utc),
+    )
+    msg.id = uuid.uuid4()
+    return msg, tool_name
+
+
+async def _fake_metadata_none(**kwargs):
+    return None
+
+
+def _fake_invariants_closed_on(closed_date: str):
+    async def _fake(*, payload, **kwargs):
+        if payload.fields.get("trandate") == closed_date:
+            return ["Accounting period is closed — posting is not permitted."]
+        return []
+
+    return _fake
+
+
+class TestPostMergeReValidation:
+    @pytest.mark.asyncio
+    async def test_merged_trandate_in_closed_period_is_refused_and_never_executes(self):
+        """B1: the proof case — a merged trandate landing in a closed period
+        must refuse the approve, even though the pre-merge card was clean
+        (because trandate was absent, not because the period was checked and
+        passed)."""
+        from app.services.chat.orchestrator import run_chat_turn
+
+        session_id = uuid.uuid4()
+        confirm_msg, _tool_name = _make_journal_entry_card_with_trandate_slot(session_id)
+        db = _make_db(confirm_msg)
+        session = _make_session(session_id=str(session_id))
+
+        mock_execute_tool_call = AsyncMock(return_value=json.dumps({"id": "999"}))
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", AsyncMock(return_value=None)),
+            patch("app.services.chat.write_validation.get_record_metadata", _fake_metadata_none),
+            patch(
+                "app.services.chat.write_validation.check_posting_invariants", _fake_invariants_closed_on("2026-07-15")
+            ),
+        ):
+            events = [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="approve",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={
+                        "action": "approve",
+                        "confirmation_id": str(confirm_msg.id),
+                        "slot_values": {"trandate": "2026-07-15"},
+                    },
+                )
+            ]
+
+        mock_execute_tool_call.assert_not_called()
+        error_events = [e for e in events if e.get("type") == "error"]
+        assert error_events
+        assert "closed" in error_events[0]["error"].lower()
+        assert confirm_msg.structured_output["status"] == "pending"
+
+    @pytest.mark.asyncio
+    async def test_merged_trandate_in_open_period_executes(self):
+        """B2: mirror positive — an open period lets the merged write
+        through."""
+        from app.services.chat.orchestrator import run_chat_turn
+
+        session_id = uuid.uuid4()
+        confirm_msg, _tool_name = _make_journal_entry_card_with_trandate_slot(session_id)
+        db = _make_db(confirm_msg)
+        session = _make_session(session_id=str(session_id))
+
+        mock_execute_tool_call = AsyncMock(return_value=json.dumps({"id": "999"}))
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", AsyncMock(return_value=None)),
+            patch("app.services.chat.write_validation.get_record_metadata", _fake_metadata_none),
+            patch(
+                "app.services.chat.write_validation.check_posting_invariants", _fake_invariants_closed_on("2026-07-15")
+            ),
+        ):
+            events = [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="approve",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={
+                        "action": "approve",
+                        "confirmation_id": str(confirm_msg.id),
+                        "slot_values": {"trandate": "2026-01-15"},
+                    },
+                )
+            ]
+
+        assert not [e for e in events if e.get("type") == "error"]
+        mock_execute_tool_call.assert_awaited_once()
+        sent_tool_input = mock_execute_tool_call.await_args.kwargs["tool_input"]
+        assert json.loads(sent_tool_input["data"])["trandate"] == "2026-01-15"
+        assert confirm_msg.structured_output["status"] == "approved"
+
+    @pytest.mark.asyncio
+    async def test_revalidation_is_invoked_against_the_merged_trandate_specifically(self):
+        """B3: proves re-validation runs against the MERGED payload, not
+        that a coincidentally stale result happened to refuse."""
+        from app.services.chat.orchestrator import run_chat_turn
+
+        session_id = uuid.uuid4()
+        confirm_msg, _tool_name = _make_journal_entry_card_with_trandate_slot(session_id)
+        db = _make_db(confirm_msg)
+        session = _make_session(session_id=str(session_id))
+
+        captured_trandates = []
+
+        async def spy_invariants(*, payload, **kwargs):
+            captured_trandates.append(payload.fields.get("trandate"))
+            return []
+
+        mock_execute_tool_call = AsyncMock(return_value=json.dumps({"id": "999"}))
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", AsyncMock(return_value=None)),
+            patch("app.services.chat.write_validation.get_record_metadata", _fake_metadata_none),
+            patch("app.services.chat.write_validation.check_posting_invariants", spy_invariants),
+        ):
+            events = [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="approve",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={
+                        "action": "approve",
+                        "confirmation_id": str(confirm_msg.id),
+                        "slot_values": {"trandate": "2026-03-03"},
+                    },
+                )
+            ]
+
+        assert not [e for e in events if e.get("type") == "error"]
+        assert captured_trandates == ["2026-03-03"]
+
+    @pytest.mark.asyncio
+    async def test_infra_failure_during_revalidation_fails_open_and_still_executes(self):
+        """B4 (fail-open pin): an infra failure inside the REAL
+        check_posting_invariants (an MCP outage reaching its own
+        execute_tool_call) must not block the write — a human explicitly
+        approved this payload, and check_posting_invariants already fails
+        open by its own internal contract (never fabricate a violation).
+        Pins the deliberate choice so a future 'fail closed on outage'
+        change, or a silent 'skip re-validation' regression, both go red."""
+        from app.services.chat import posting_invariants as pi
+        from app.services.chat.orchestrator import run_chat_turn
+
+        session_id = uuid.uuid4()
+        confirm_msg, _tool_name = _make_journal_entry_card_with_trandate_slot(session_id)
+        db = _make_db(confirm_msg)
+        session = _make_session(session_id=str(session_id))
+
+        async def outage(**kwargs):
+            raise RuntimeError("MCP outage")
+
+        mock_execute_tool_call = AsyncMock(return_value=json.dumps({"id": "999"}))
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", AsyncMock(return_value=None)),
+            patch("app.services.chat.write_validation.get_record_metadata", _fake_metadata_none),
+            # check_posting_invariants itself is REAL here — only its own
+            # internal execute_tool_call is broken — proving the fail-open
+            # behavior comes from the real function's own contract, not from
+            # a try/except this wave adds around it.
+            patch.object(pi, "execute_tool_call", outage),
+        ):
+            events = [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="approve",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={
+                        "action": "approve",
+                        "confirmation_id": str(confirm_msg.id),
+                        "slot_values": {"trandate": "2026-03-03"},
+                    },
+                )
+            ]
+
+        assert not [e for e in events if e.get("type") == "error"]
+        mock_execute_tool_call.assert_awaited_once()
+        assert confirm_msg.structured_output["status"] == "approved"
+
+    @pytest.mark.asyncio
+    async def test_no_slot_values_on_a_slot_free_card_skips_revalidation_entirely(self):
+        """B5: a no-merge approve executes bytes identical to what the
+        intercept already validated — validate_mutation must not be
+        invoked."""
+        from app.services.chat.orchestrator import run_chat_turn
+
+        session_id = uuid.uuid4()
+        tool_name = _ext("ns_createRecord")
+        tool_input = {"recordType": "customer", "data": '{"companyname": "clean co"}'}
+        confirm_msg = _make_real_confirmation_msg(session_id, tool_name, tool_input)
+        db = _make_db(confirm_msg)
+        session = _make_session(session_id=str(session_id))
+
+        mock_execute_tool_call = AsyncMock(return_value=json.dumps({"id": "999", "success": True}))
+        validate_mutation_spy = AsyncMock()
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", AsyncMock(return_value=None)),
+            patch("app.services.chat.write_validation.validate_mutation", validate_mutation_spy),
+        ):
+            events = [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="approve",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={"action": "approve", "confirmation_id": str(confirm_msg.id)},
+                )
+            ]
+
+        validate_mutation_spy.assert_not_called()
+        mock_execute_tool_call.assert_awaited_once()
+        assert not [e for e in events if e.get("type") == "error"]
+        assert confirm_msg.structured_output["status"] == "approved"

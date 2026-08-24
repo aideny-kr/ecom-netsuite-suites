@@ -123,3 +123,29 @@ def test_no_metadata_with_invariant_errors_is_not_ok():
     )
     assert result.unvalidated is True
     assert result.ok is False
+
+
+def test_missing_line_required_fields_never_become_editable_slots():
+    """Finding B6: line-level required fields (debit/credit) must remain
+    structurally unreachable via slot_values — editable_slots is built ONLY
+    from top-level `missing`, never from `missing_line_required`. This is
+    what keeps the merge-then-execute path (Finding B/D) from becoming a
+    balance-bypass channel: a human can never fill a missing line field
+    through the slot mechanism, only through the agent re-composing the
+    write with a complete payload."""
+    meta = RecordMetadata(
+        record_type="journalEntry",
+        fields=[FieldSpec(name="subsidiary", label="Subsidiary", required=True)],
+        line_fields=[FieldSpec(name="account", label="Account", required=True)],
+    )
+    result = validate_write(
+        payload=NormalizedPayload(fields={}, lines=[{"debit": 5}]),
+        metadata=meta,
+        record_type="journalEntry",
+        mutation_type="create",
+    )
+    assert result.missing_required == ["subsidiary"]
+    assert "line[0].account" in result.missing_line_required
+    # The line-level miss is terminal (unfillable_line_fields on the card),
+    # NOT a slot — only "subsidiary" (top-level) may ever appear here.
+    assert [s.name for s in result.editable_slots] == ["subsidiary"]

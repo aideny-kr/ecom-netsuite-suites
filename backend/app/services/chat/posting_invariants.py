@@ -108,15 +108,21 @@ async def _check_period_open(payload: NormalizedPayload, **kw: Any) -> list[str]
     # Same guarantee as record_metadata_service: the ENTIRE fetch-and-parse
     # body is guarded, so a malformed-but-valid-JSON response cannot raise out
     # of an invariant check. Note the asymmetry with metadata lookup — here an
-    # indeterminate result returns [] (no invariant violation asserted), because
-    # fabricating a "period is closed" error from a parse failure would block
-    # legitimate writes. The tradeoff is deliberate: we never invent a
-    # violation, and a period we could not read is reported by the card's
-    # unvalidated marker rather than by a false error here.
+    # indeterminate result returns [] (no invariant violation asserted),
+    # because fabricating a "period is closed" error from a parse failure
+    # would block legitimate writes. The tradeoff is deliberate: we never
+    # invent a violation. UNLIKE metadata lookup, though, there is currently
+    # no first-class channel that reports "the period check could not run" to
+    # the human — the card's `unvalidated` marker covers ONLY `metadata is
+    # None` (write_validator.py), not an indeterminate invariant lookup. An
+    # error-shaped or malformed response here returns [] silently to the
+    # caller (see the loud warning log below, which makes it visible in ops,
+    # but not on the card). Threading indeterminacy up to the confirmation
+    # card is a real follow-up, not something already covered here.
     try:
         raw = await execute_tool_call(
             tool_name=_make_ext_tool_name(parsed[0], "ns_runCustomSuiteQL"),
-            tool_input={"query": query},
+            tool_input={"sqlQuery": query, "description": "posting-invariant period lookup"},
             tenant_id=kw["tenant_id"],
             actor_id=kw["actor_id"],
             correlation_id=kw["correlation_id"],
@@ -126,6 +132,19 @@ async def _check_period_open(payload: NormalizedPayload, **kw: Any) -> list[str]
         data = json.loads(raw)
 
         if not isinstance(data, dict):
+            return []
+        if data.get("error"):
+            # Historically this fell through to `rows = []` with ZERO log
+            # records — indistinguishable from "queried successfully, zero
+            # matching periods". Make it loud: a disabled connector, an
+            # expired OAuth token, or an MCP timeout must be visible in ops,
+            # even though the invariant still correctly fails open (returns
+            # [], never fabricates a violation).
+            logger.warning(
+                "posting_invariants: period lookup returned an error for %s: %s",
+                kw.get("mutation_tool_name"),
+                data.get("error"),
+            )
             return []
         rows = data.get("items") or data.get("data") or []
         if not isinstance(rows, list):

@@ -367,6 +367,43 @@ def mint_confirmation_token(
     return generate_confirmation_token(session_id, _build_payload_json(tool_name, tool_input, editable_slots))
 
 
+def uncovered_slot_names(editable_slots: list[dict[str, Any]], slot_values: Any) -> list[str]:
+    """Names of declared ``editable_slots`` NOT covered by ``slot_values``.
+
+    Coverage enforcement only — value-level validation (scalar shape,
+    membership in a slot's ``allowed`` set) stays in ``merge_slot_values``,
+    unchanged. This exists because ``merge_slot_values`` iterates
+    ``slot_values.items()``, never the declared slot names, so it is
+    structurally unable to notice a declared slot that was never supplied at
+    all (an omitted key, an empty dict, or a partial submission that covers
+    only SOME of the declared slots) — every one of those merges cleanly and
+    would otherwise reach ``execute_tool_call`` still missing a field the
+    server itself proved required.
+
+    A declared slot is covered only if ``slot_values`` — when it is a dict;
+    any other shape counts as zero coverage — contains that slot's ``name``
+    mapped to a value that is not ``None`` and, for ``str`` values only, not
+    blank after ``.strip()``. Falsy-but-legitimate scalars (``0``, ``0.0``,
+    ``False``) are NOT treated as missing — only ``None`` and blank/
+    whitespace-only strings are.
+    """
+    values = slot_values if isinstance(slot_values, dict) else {}
+    uncovered: list[str] = []
+    for slot in editable_slots:
+        name = slot.get("name")
+        if not name:
+            continue
+        if name not in values:
+            uncovered.append(name)
+            continue
+        value = values[name]
+        if value is None:
+            uncovered.append(name)
+        elif isinstance(value, str) and not value.strip():
+            uncovered.append(name)
+    return uncovered
+
+
 def merge_slot_values(
     structured_output: dict[str, Any],
     slot_values: dict[str, Any],

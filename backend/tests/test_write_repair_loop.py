@@ -157,7 +157,7 @@ async def test_repair_loop_feeds_error_back_without_crashing_the_stream():
     with (
         patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
         patch(
-            "app.services.chat.agents.base_agent.get_record_metadata",
+            "app.services.chat.write_validation.get_record_metadata",
             new_callable=AsyncMock,
             return_value=metadata,
         ),
@@ -258,7 +258,7 @@ async def test_persisted_log_flags_a_card_shown_after_repair_is_exhausted():
     with (
         patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
         patch(
-            "app.services.chat.agents.base_agent.get_record_metadata",
+            "app.services.chat.write_validation.get_record_metadata",
             new_callable=AsyncMock,
             return_value=metadata,
         ),

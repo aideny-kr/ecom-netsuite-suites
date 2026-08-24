@@ -8,6 +8,7 @@ import pytest
 from app.services.chat.write_confirmation_service import (
     WriteConfirmationPayload,
     build_confirmation_payload,
+    uncovered_slot_names,
     validate_and_extract_confirmation,
 )
 from app.services.chat.write_validator import ValidationResult
@@ -712,3 +713,54 @@ class TestBuildConfirmationPayloadInvariantErrors:
         }
         is_valid, _, _ = validate_and_extract_confirmation(structured_output, _SESSION_ID)
         assert is_valid is True
+
+
+# ---------------------------------------------------------------------------
+# Finding D (D8) — uncovered_slot_names: the pure coverage-check helper the
+# orchestrator's approve gate uses to refuse an approve that doesn't cover
+# every server-declared editable slot.
+# ---------------------------------------------------------------------------
+
+_TRANDATE_SLOT = {"name": "trandate", "label": "Transaction Date", "type": "text", "allowed": None}
+_SUBSIDIARY_SLOT = {"name": "subsidiary", "label": "Subsidiary", "type": "select", "allowed": None}
+
+
+class TestUncoveredSlotNames:
+    def test_no_declared_slots_is_always_covered(self):
+        assert uncovered_slot_names([], {}) == []
+        assert uncovered_slot_names([], {"anything": "x"}) == []
+
+    def test_fully_covered_slots_return_empty(self):
+        assert (
+            uncovered_slot_names(
+                [_TRANDATE_SLOT, _SUBSIDIARY_SLOT],
+                {"trandate": "2026-01-15", "subsidiary": "1"},
+            )
+            == []
+        )
+
+    def test_absent_slot_values_key_is_uncovered(self):
+        assert uncovered_slot_names([_TRANDATE_SLOT], None) == ["trandate"]
+
+    def test_empty_dict_is_uncovered(self):
+        assert uncovered_slot_names([_TRANDATE_SLOT], {}) == ["trandate"]
+
+    def test_non_dict_slot_values_treated_as_zero_coverage(self):
+        assert uncovered_slot_names([_TRANDATE_SLOT], "trandate") == ["trandate"]
+        assert uncovered_slot_names([_TRANDATE_SLOT], ["trandate"]) == ["trandate"]
+        assert uncovered_slot_names([_TRANDATE_SLOT], 42) == ["trandate"]
+
+    def test_partial_coverage_names_only_the_uncovered_field(self):
+        assert uncovered_slot_names([_TRANDATE_SLOT, _SUBSIDIARY_SLOT], {"trandate": "2026-01-15"}) == ["subsidiary"]
+
+    def test_none_value_is_uncovered(self):
+        assert uncovered_slot_names([_TRANDATE_SLOT], {"trandate": None}) == ["trandate"]
+
+    def test_whitespace_only_string_is_uncovered(self):
+        assert uncovered_slot_names([_TRANDATE_SLOT], {"trandate": "   "}) == ["trandate"]
+
+    def test_falsy_scalars_are_not_treated_as_missing(self):
+        """0 / 0.0 / False are legitimate scalar values, not "missing"."""
+        assert uncovered_slot_names([_SUBSIDIARY_SLOT], {"subsidiary": 0}) == []
+        assert uncovered_slot_names([_SUBSIDIARY_SLOT], {"subsidiary": 0.0}) == []
+        assert uncovered_slot_names([_SUBSIDIARY_SLOT], {"subsidiary": False}) == []

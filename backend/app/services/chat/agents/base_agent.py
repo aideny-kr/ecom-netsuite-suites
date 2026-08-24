@@ -20,9 +20,7 @@ from xml.sax.saxutils import escape as _xml_escape
 
 from app.services.chat import thinking
 from app.services.chat.llm_adapter import BaseLLMAdapter, LLMResponse, TokenUsage
-from app.services.chat.posting_invariants import check_posting_invariants
 from app.services.chat.prompt_cache import split_system_prompt
-from app.services.chat.record_metadata_service import get_record_metadata
 from app.services.chat.tool_call_results import (
     build_tool_call_log_entry,
     tool_call_had_error,
@@ -30,8 +28,9 @@ from app.services.chat.tool_call_results import (
 )
 from app.services.chat.tool_categories import categorize
 from app.services.chat.write_confirmation_service import build_confirmation_payload
-from app.services.chat.write_payload import PayloadParseError, normalize_write_payload
-from app.services.chat.write_validator import ValidationResult, validate_write
+from app.services.chat.write_payload import PayloadParseError
+from app.services.chat.write_validation import validate_mutation
+from app.services.chat.write_validator import ValidationResult
 
 
 class WriteRepairState:
@@ -1298,41 +1297,33 @@ class BaseSpecialistAgent(abc.ABC):
                         if not hasattr(self, "_write_repair"):
                             self._write_repair = WriteRepairState(max_attempts=2)
 
+                        # validate_mutation() is the single entry point that
+                        # owns normalize -> get_record_metadata ->
+                        # check_posting_invariants -> validate_write,
+                        # INCLUDING the delete shape (`{recordType, id}`, no
+                        # `data`/`body` key) — a delete used to raise
+                        # PayloadParseError out of normalize_write_payload, a
+                        # function whose contract it was never meant to
+                        # meet, which silently skipped this entire block for
+                        # every delete. See write_validation.py.
                         validation = None
                         try:
-                            normalized = normalize_write_payload(block.input)
+                            validation = await validate_mutation(
+                                tool_name=block.name,
+                                tool_input=block.input,
+                                mutation_type=mutation_type,
+                                record_type=record_type,
+                                tenant_id=self.tenant_id,
+                                actor_id=self.user_id,
+                                correlation_id=self.correlation_id,
+                                db=db,
+                                session_id=session_id or str(self.tenant_id),
+                            )
                         except PayloadParseError as exc:
                             result_str = json.dumps({"error": f"Write payload could not be parsed: {exc}"})
-                            normalized = None
+                            validation = None
 
-                        if normalized is not None:
-                            meta = await get_record_metadata(
-                                record_type=record_type,
-                                mutation_tool_name=block.name,
-                                tenant_id=self.tenant_id,
-                                actor_id=self.user_id,
-                                correlation_id=self.correlation_id,
-                                db=db,
-                                session_id=session_id or str(self.tenant_id),
-                            )
-                            invariants = await check_posting_invariants(
-                                payload=normalized,
-                                record_type=record_type,
-                                mutation_tool_name=block.name,
-                                tenant_id=self.tenant_id,
-                                actor_id=self.user_id,
-                                correlation_id=self.correlation_id,
-                                db=db,
-                                session_id=session_id or str(self.tenant_id),
-                            )
-                            validation = validate_write(
-                                payload=normalized,
-                                metadata=meta,
-                                record_type=record_type,
-                                mutation_type=mutation_type,
-                                invariant_errors=invariants,
-                            )
-
+                        if validation is not None:
                             if self._write_repair.should_repair(record_type, validation):
                                 # Hand the model a structured error INSTEAD of a
                                 # card. The human never sees an invalid payload.

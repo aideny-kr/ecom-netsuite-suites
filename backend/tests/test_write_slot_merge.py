@@ -819,3 +819,298 @@ class TestOrchestratorApproveWithSlotValues:
         persisted = confirm_msg.structured_output
         assert persisted["confirmation_token"] == original_token
         assert persisted["tool_input"] == pending["tool_input"]
+
+
+# ---------------------------------------------------------------------------
+# Finding D — the server must REQUIRE slot_values to cover every declared
+# editable_slot, not just validate the keys it happens to receive. Placed in
+# the SAME terminal-condition gate as the invariant_errors/
+# unfillable_line_fields checks (7d04b6fe), checked AFTER merge_slot_values's
+# own per-key rejections so those keep their specific error text (a card
+# submitting an undeclared key or an out-of-allowlist value is still
+# rejected for THAT reason, not reframed as "missing coverage") — this gate
+# only fires when the submission was otherwise legitimate but incomplete.
+# ---------------------------------------------------------------------------
+
+TWO_SLOTS = [
+    {
+        "name": "subsidiary",
+        "label": "Primary Subsidiary",
+        "type": "select",
+        "allowed": [{"value": "1", "label": "Framework Inc"}, {"value": "2", "label": "Framework EU"}],
+    },
+    {
+        "name": "department",
+        "label": "Department",
+        "type": "text",
+        "allowed": None,
+    },
+]
+
+ONE_FREE_TEXT_SLOT = [
+    {"name": "quantity", "label": "Quantity", "type": "number", "allowed": None},
+]
+
+
+class TestServerEnforcesDeclaredSlotCoverage:
+    @pytest.mark.asyncio
+    async def test_missing_slot_values_key_entirely_is_refused(self):
+        """D1: a declared slot exists, but write_confirm carries no
+        slot_values key at all."""
+        from app.services.chat.orchestrator import run_chat_turn
+
+        confirm_msg = _make_confirm_message(_pending(SLOTS))
+        db = _make_db(confirm_msg)
+        session = _make_session()
+
+        mock_execute_tool_call = AsyncMock(return_value=json.dumps({"id": "999"}))
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", AsyncMock(return_value=None)),
+        ):
+            events = [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="approve",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={"action": "approve", "confirmation_id": str(confirm_msg.id)},
+                )
+            ]
+
+        mock_execute_tool_call.assert_not_called()
+        error_events = [e for e in events if e.get("type") == "error"]
+        assert error_events
+        assert "subsidiary" in error_events[0]["error"]
+        assert confirm_msg.structured_output["status"] == "pending"
+
+    @pytest.mark.asyncio
+    async def test_explicit_empty_slot_values_dict_is_refused(self):
+        """D2: both spellings of "nothing supplied" are closed."""
+        from app.services.chat.orchestrator import run_chat_turn
+
+        confirm_msg = _make_confirm_message(_pending(SLOTS))
+        db = _make_db(confirm_msg)
+        session = _make_session()
+
+        mock_execute_tool_call = AsyncMock(return_value=json.dumps({"id": "999"}))
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", AsyncMock(return_value=None)),
+        ):
+            events = [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="approve",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={
+                        "action": "approve",
+                        "confirmation_id": str(confirm_msg.id),
+                        "slot_values": {},
+                    },
+                )
+            ]
+
+        mock_execute_tool_call.assert_not_called()
+        error_events = [e for e in events if e.get("type") == "error"]
+        assert error_events
+        assert "subsidiary" in error_events[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_partial_coverage_of_two_declared_slots_is_refused(self):
+        """D3: 2 declared slots, only 1 supplied — error names the specific
+        uncovered field."""
+        from app.services.chat.orchestrator import run_chat_turn
+
+        confirm_msg = _make_confirm_message(_pending(TWO_SLOTS))
+        db = _make_db(confirm_msg)
+        session = _make_session()
+
+        mock_execute_tool_call = AsyncMock(return_value=json.dumps({"id": "999"}))
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", AsyncMock(return_value=None)),
+        ):
+            events = [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="approve",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={
+                        "action": "approve",
+                        "confirmation_id": str(confirm_msg.id),
+                        "slot_values": {"subsidiary": "2"},
+                    },
+                )
+            ]
+
+        mock_execute_tool_call.assert_not_called()
+        error_events = [e for e in events if e.get("type") == "error"]
+        assert error_events
+        assert "department" in error_events[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_full_coverage_of_two_declared_slots_executes(self):
+        """D4: 2 declared slots, both supplied — executes with the fully
+        merged tool_input."""
+        from app.services.chat.orchestrator import run_chat_turn
+
+        confirm_msg = _make_confirm_message(_pending(TWO_SLOTS))
+        db = _make_db(confirm_msg)
+        session = _make_session()
+
+        mock_execute_tool_call = AsyncMock(return_value=json.dumps({"id": "999"}))
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", AsyncMock(return_value=None)),
+        ):
+            events = [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="approve",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={
+                        "action": "approve",
+                        "confirmation_id": str(confirm_msg.id),
+                        "slot_values": {"subsidiary": "2", "department": "Ops"},
+                    },
+                )
+            ]
+
+        assert not [e for e in events if e.get("type") == "error"]
+        mock_execute_tool_call.assert_awaited_once()
+        merged = json.loads(mock_execute_tool_call.await_args.kwargs["tool_input"]["data"])
+        assert merged["subsidiary"] == "2"
+        assert merged["department"] == "Ops"
+        assert confirm_msg.structured_output["status"] == "approved"
+
+    @pytest.mark.asyncio
+    async def test_whitespace_only_slot_value_is_refused(self):
+        """D5: the server does not rely on the frontend's client-side trim
+        (2f8b6362) for this invariant."""
+        from app.services.chat.orchestrator import run_chat_turn
+
+        confirm_msg = _make_confirm_message(_pending(ONE_FREE_TEXT_SLOT))
+        db = _make_db(confirm_msg)
+        session = _make_session()
+
+        mock_execute_tool_call = AsyncMock(return_value=json.dumps({"id": "999"}))
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", AsyncMock(return_value=None)),
+        ):
+            events = [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="approve",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={
+                        "action": "approve",
+                        "confirmation_id": str(confirm_msg.id),
+                        "slot_values": {"quantity": "   "},
+                    },
+                )
+            ]
+
+        mock_execute_tool_call.assert_not_called()
+        error_events = [e for e in events if e.get("type") == "error"]
+        assert error_events
+        assert "quantity" in error_events[0]["error"]
+
+    @pytest.mark.asyncio
+    async def test_falsy_scalar_slot_value_still_executes(self):
+        """D6: a naive `if not value` coverage check would wrongly reject a
+        legitimate 0 — only None/blank strings count as uncovered."""
+        from app.services.chat.orchestrator import run_chat_turn
+
+        confirm_msg = _make_confirm_message(_pending(ONE_FREE_TEXT_SLOT))
+        db = _make_db(confirm_msg)
+        session = _make_session()
+
+        mock_execute_tool_call = AsyncMock(return_value=json.dumps({"id": "999"}))
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", AsyncMock(return_value=None)),
+        ):
+            events = [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="approve",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={
+                        "action": "approve",
+                        "confirmation_id": str(confirm_msg.id),
+                        "slot_values": {"quantity": 0},
+                    },
+                )
+            ]
+
+        assert not [e for e in events if e.get("type") == "error"]
+        mock_execute_tool_call.assert_awaited_once()
+        assert confirm_msg.structured_output["status"] == "approved"
+
+    @pytest.mark.asyncio
+    async def test_undeclared_key_rejection_still_fires_before_the_coverage_gate(self):
+        """Regression pin: the pre-existing test_approve_rejects_undeclared_
+        slot_before_executing scenario (a submission naming ONLY an
+        undeclared key, leaving the real declared slot uncovered too) must
+        still surface merge_slot_values's specific "not editable" error, not
+        the new coverage gate's generic message — the coverage gate is
+        checked AFTER merge_slot_values's own per-key rejection, by design,
+        so ordering doesn't change existing client-facing error text for
+        this already-covered case."""
+        from app.services.chat.orchestrator import run_chat_turn
+
+        confirm_msg = _make_confirm_message(_pending(SLOTS))
+        db = _make_db(confirm_msg)
+        session = _make_session()
+
+        mock_execute_tool_call = AsyncMock(return_value=json.dumps({"id": "999"}))
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", AsyncMock(return_value=None)),
+        ):
+            events = [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="approve",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={
+                        "action": "approve",
+                        "confirmation_id": str(confirm_msg.id),
+                        "slot_values": {"companyname": "evil"},
+                    },
+                )
+            ]
+
+        mock_execute_tool_call.assert_not_awaited()
+        error_events = [e for e in events if e.get("type") == "error"]
+        assert error_events
+        assert "not editable" in error_events[0]["error"]
