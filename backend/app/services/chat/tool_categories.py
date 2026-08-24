@@ -86,11 +86,25 @@ def categorize(tool_name: str) -> Category:
         return _EXACT[tool_name]
 
     if tool_name.startswith("ext__"):
-        # Lazy import to avoid circular dependency.
+        # Lazy imports to avoid circular dependency (tools.py pulls in the MCP
+        # registry/server; mutation_guard.py itself lazy-imports tools.py for
+        # the same reason).
+        from app.services.chat.celigo_tool_policy import is_read_only_celigo_tool
         from app.services.chat.mutation_guard import is_mutation_tool
+        from app.services.chat.tools import parse_external_tool_name
 
         if is_mutation_tool(tool_name):
             return "mutation"
+
+        # Celigo's enumerated read catalog (celigo_tool_policy._READ_TOOLS via
+        # is_read_only_celigo_tool -- the single source of truth, not a second
+        # hardcoded list here) returns row data the same shape SuiteQL does.
+        # Without this, these tools fall through to "other", skip
+        # _intercept_tool_result entirely, and the LLM restates raw counts
+        # from the tool's JSON in prose (feedback_no_llm_numbers).
+        parsed = parse_external_tool_name(tool_name)
+        if parsed is not None and is_read_only_celigo_tool(parsed[1]):
+            return "data_table"
 
         lowered = tool_name.lower()
         if "runreport" in lowered:
