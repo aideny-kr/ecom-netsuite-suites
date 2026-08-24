@@ -614,6 +614,202 @@ class TestWriteConfirmFailedFlow:
 
 
 # ---------------------------------------------------------------------------
+# H2) Orchestrator: a PARSEABLE result that self-declares `success: false`
+#     with NO `error` key must still be reported as failed.
+#
+# T2 gate round-2 finding: the old check was `_exec_result.get("error")`
+# only — a dict with `success: false` and no `error` key fell through to the
+# "success" branch and told the human "Done ... executed successfully".
+# Every other success/failure predicate in the repo (tool_call_results.py
+# :462/:589, orchestrator.py's own sibling SSE-intercept guard at ~852)
+# already treats `success is False` as failure even with no `error` key —
+# this is precedent, not a new rule. The one real recorded write failure in
+# `audit_events` happened to also carry an `error` string, so this exact gap
+# was never yet hit live — these tests close it before it is.
+#
+# Scope boundary: the `except (json.JSONDecodeError, TypeError)` branch
+# (an UNPARSEABLE result reported as success) is explicitly NOT touched
+# here — that is ClickUp 86bbhmxd1, a separate "genuinely indeterminate
+# outcome" problem that needs its own status threaded to the frontend.
+# ---------------------------------------------------------------------------
+
+
+class TestWriteConfirmSuccessFalseWithoutErrorKey:
+    @pytest.mark.asyncio
+    async def test_success_false_no_error_key_is_reported_as_failed(self):
+        """{"success": false} with no error key must set status 'failed',
+        must NOT tell the human the write succeeded, and must carry an
+        error string the human can act on (not None / empty)."""
+        from app.services.chat.orchestrator import run_chat_turn
+
+        session_id = uuid.uuid4()
+        tool_name = _ext("ns_createRecord")
+        tool_input = {"recordType": "customer", "data": '{"companyname": "test ai customer"}'}
+        confirm_msg = _make_real_confirmation_msg(session_id, tool_name, tool_input)
+        db = _make_db(confirm_msg)
+        session = _make_session(session_id=str(session_id))
+
+        mock_execute_tool_call = AsyncMock(return_value=json.dumps({"success": False}))
+        mock_log_event = AsyncMock(return_value=None)
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", mock_log_event),
+        ):
+            events = [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="approve",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={"action": "approve", "confirmation_id": str(confirm_msg.id)},
+                )
+            ]
+
+        so = confirm_msg.structured_output
+        assert so["status"] == "failed"
+        assert so["error"]  # non-empty — not left as None just because there was no `error` key
+        assert "netsuite" in so["error"].lower(), (
+            f"a no-error-key failure must say something specific enough to act on, got: {so['error']!r}"
+        )
+
+        message_events = [e for e in events if e.get("type") == "message"]
+        assert message_events
+        content = message_events[-1]["message"]["content"].lower()
+        assert "executed successfully" not in content
+        assert "failed" in content
+
+        # The audit log must record the failure, not a false approval.
+        log_call = mock_log_event.await_args
+        assert log_call.kwargs["action"] == "record.create.failed"
+
+    @pytest.mark.asyncio
+    async def test_success_false_with_error_key_still_failed(self):
+        """Regression: success:false + a populated error key must still
+        fail, with the error text preserved verbatim (the new success:false
+        check must not swallow or override an actual error message)."""
+        from app.services.chat.orchestrator import run_chat_turn
+
+        session_id = uuid.uuid4()
+        tool_name = _ext("ns_createRecord")
+        tool_input = {"recordType": "customer", "data": '{"companyname": "test ai customer"}'}
+        confirm_msg = _make_real_confirmation_msg(session_id, tool_name, tool_input)
+        db = _make_db(confirm_msg)
+        session = _make_session(session_id=str(session_id))
+
+        mock_execute_tool_call = AsyncMock(
+            return_value=json.dumps({"success": False, "error": "HTTP 400: bad subsidiary value"})
+        )
+        mock_log_event = AsyncMock(return_value=None)
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", mock_log_event),
+        ):
+            events = [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="approve",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={"action": "approve", "confirmation_id": str(confirm_msg.id)},
+                )
+            ]
+
+        so = confirm_msg.structured_output
+        assert so["status"] == "failed"
+        assert so["error"] == "HTTP 400: bad subsidiary value"
+
+        message_events = [e for e in events if e.get("type") == "message"]
+        assert "executed successfully" not in message_events[-1]["message"]["content"].lower()
+
+    @pytest.mark.asyncio
+    async def test_success_true_with_id_still_approved(self):
+        """Regression: the ordinary success shape ({"success": true, "id":
+        "..."}) must be unaffected by the new failure check — still
+        'approved' with the unchanged success message."""
+        from app.services.chat.orchestrator import run_chat_turn
+
+        session_id = uuid.uuid4()
+        tool_name = _ext("ns_createRecord")
+        tool_input = {"recordType": "customer", "data": '{"companyname": "test ai customer"}'}
+        confirm_msg = _make_real_confirmation_msg(session_id, tool_name, tool_input)
+        db = _make_db(confirm_msg)
+        session = _make_session(session_id=str(session_id))
+
+        mock_execute_tool_call = AsyncMock(return_value=json.dumps({"success": True, "id": "1"}))
+        mock_log_event = AsyncMock(return_value=None)
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", mock_log_event),
+        ):
+            events = [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="approve",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={"action": "approve", "confirmation_id": str(confirm_msg.id)},
+                )
+            ]
+
+        so = confirm_msg.structured_output
+        assert so["status"] == "approved"
+        message_events = [e for e in events if e.get("type") == "message"]
+        assert "executed successfully" in message_events[-1]["message"]["content"]
+
+    @pytest.mark.asyncio
+    async def test_result_without_success_key_still_approved(self):
+        """A bare shape with no `success` key at all (e.g. `{"id": "123"}`)
+        must still count as success. This is the deliberate choice from the
+        survey: the predicate must be `success is False`, not `success is
+        not True` — matching every other site in the repo
+        (tool_call_results.py:462/589, orchestrator.py's sibling intercept
+        guard at ~852). `ns_createRecord`'s ordinary response only ever
+        returns an `id`, with no explicit `success` flag — `is not True`
+        would turn that common shape into a false failure."""
+        from app.services.chat.orchestrator import run_chat_turn
+
+        session_id = uuid.uuid4()
+        tool_name = _ext("ns_createRecord")
+        tool_input = {"recordType": "customer", "data": '{"companyname": "test ai customer"}'}
+        confirm_msg = _make_real_confirmation_msg(session_id, tool_name, tool_input)
+        db = _make_db(confirm_msg)
+        session = _make_session(session_id=str(session_id))
+
+        mock_execute_tool_call = AsyncMock(return_value=json.dumps({"id": "123"}))
+        mock_log_event = AsyncMock(return_value=None)
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", mock_log_event),
+        ):
+            events = [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="approve",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={"action": "approve", "confirmation_id": str(confirm_msg.id)},
+                )
+            ]
+
+        so = confirm_msg.structured_output
+        assert so["status"] == "approved"
+        message_events = [e for e in events if e.get("type") == "message"]
+        assert "executed successfully" in message_events[-1]["message"]["content"]
+
+
+# ---------------------------------------------------------------------------
 # I) Orchestrator: a terminal card (invariant_errors / unfillable_line_fields)
 #    must never reach execute_tool_call, no matter who sends the approve.
 #

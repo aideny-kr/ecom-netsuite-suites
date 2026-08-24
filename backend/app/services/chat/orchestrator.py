@@ -2065,13 +2065,40 @@ async def run_chat_turn(
                 _exec_error: str | None = None
                 try:
                     _exec_result = json.loads(_exec_result_str)
-                    if isinstance(_exec_result, dict) and _exec_result.get("error"):
-                        _exec_error = str(_exec_result["error"])
+                    # T2 gate round-2 finding: `.get("error")` alone missed a
+                    # PARSEABLE result that self-declares `success: false` with
+                    # no `error` key — the external MCP write tools share the
+                    # exact same transport/parsing path as ns_runReport, which
+                    # is already CONFIRMED (T2 re-review #1) to drop `error`
+                    # while still sending `success: false`. Reuse the repo's
+                    # existing, precedented predicate instead of inventing a
+                    # third variant — identical to extract_result_payload
+                    # (tool_call_results.py:462) and this file's own sibling
+                    # SSE-intercept guard (~line 852): `is False`, not `is not
+                    # True`, so a bare `{"id": "123"}` shape with no `success`
+                    # key at all (ns_createRecord's ordinary response) still
+                    # counts as success.
+                    if isinstance(_exec_result, dict) and (
+                        _extract_error_message(_exec_result) or _exec_result.get("success") is False
+                    ):
+                        _exec_error = _extract_error_message(_exec_result) or (
+                            f"NetSuite reported this {_mutation_type} failed but returned no further "
+                            f"detail — check the {_record_type} record directly in NetSuite to confirm "
+                            "whether it was created or changed."
+                        )
                         _confirm_content = f"The operation failed: {_exec_error}"
                     else:
                         _exec_succeeded = True
                         _confirm_content = f"Done — the {_record_type} {_mutation_type} has been executed successfully."
                 except (json.JSONDecodeError, TypeError):
+                    # UNPARSEABLE result reported as success — deliberately
+                    # deferred, out of scope here. This is genuinely a
+                    # different problem (we cannot even determine success vs.
+                    # failure, let alone which), tracked as ClickUp
+                    # 86bbhmxd1: it needs an indeterminate outcome ("we
+                    # cannot confirm — check NetSuite") plus a new status
+                    # threaded to the frontend card, not a fold into the
+                    # failure branch above.
                     _exec_succeeded = True
                     _confirm_content = f"The {_mutation_type} operation has been executed."
 
