@@ -79,6 +79,8 @@ def _build_role_prompt(connectors: list | None, brand_name: str) -> str:
             providers.add("Shopify")
         elif c.provider == "stripe_mcp":
             providers.add("Stripe")
+        elif c.provider == "celigo_mcp":
+            providers.add("Celigo")
         elif c.provider == "custom":
             providers.add(c.label)
 
