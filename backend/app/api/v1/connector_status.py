@@ -554,11 +554,35 @@ async def _celigo_agent_access(db: AsyncSession, tenant_id) -> bool:
     return any(c.provider == "celigo_mcp" for c in connectors)
 
 
+def _celigo_accounts_match(rest_identity: dict, agent_identity: dict) -> bool:
+    """Best-effort proof the REST token and the agent token belong to the SAME
+    Celigo account -- not merely that both tokens are individually valid.
+
+    KNOWN LIMITATION: Celigo's ``/v1/tokenInfo`` exposes only ``account_name``
+    (``name``) and ``user_email`` (``email``) -- no account id. ``account_name``
+    is the only account-level signal of the two: ``user_email`` is USER-level
+    and legitimately differs when two different Celigo users on the SAME
+    account each mint their own token (one for the REST connection, one for
+    agent access), so requiring email equality would reject that entirely
+    normal case. ``account_name`` is therefore the strongest signal available
+    here, but Celigo does not guarantee it is unique across customers -- this
+    is NOT a cryptographic proof of account identity, only the best this API
+    response can offer. Ambiguous input (either side missing account_name)
+    fails closed -- there is nothing to compare, so sameness is not proven.
+    """
+    rest_name = (rest_identity.get("account_name") or "").strip()
+    agent_name = (agent_identity.get("account_name") or "").strip()
+    if not rest_name or not agent_name:
+        return False
+    return rest_name == agent_name
+
+
 async def _upsert_celigo_mcp_connector(
     db: AsyncSession,
     tenant_id,
     agent_token: str,
     region: str,
+    rest_identity: dict,
     created_by,
 ) -> McpConnector:
     """Create (or reactivate) the celigo_mcp connector that gives the chat agent
@@ -570,6 +594,12 @@ async def _upsert_celigo_mcp_connector(
     in connect_celigo) -- an EU tenant's agent_token must be discovered
     against the EU MCP host, never the US one, or discovery fails and
     agent_access silently ends up False.
+
+    *rest_identity* is the account identity ``verify_token`` already returned
+    for the REST token in ``connect_celigo``. Without comparing the agent
+    token's identity against it, a tenant could end up with a REST connection
+    reading account A's flows while the agent silently reads account B's --
+    with the UI reporting one healthy Celigo connection.
 
     Reuses ``mcp_connector_service.create_mcp_connector`` for the actual
     construction rather than a second hand-rolled ``McpConnector(...)`` site.
@@ -604,12 +634,47 @@ async def _upsert_celigo_mcp_connector(
             region=region,
         )
 
+    # Identity check FIRST, before tool discovery -- a token that proves out
+    # to be the wrong Celigo account must never even attempt discover_tools,
+    # both because discovery against the wrong account is itself a leak
+    # surface and because the resulting error_reason must say WHY access was
+    # denied ("wrong account"), not the misleading "tool discovery failed".
+    try:
+        agent_identity = await verify_token(agent_token, region)
+    except CeligoAuthError as exc:
+        identity_error: str | None = f"Agent token was rejected by Celigo: {exc}"
+    except CeligoError as exc:
+        identity_error = f"Could not verify the agent token: {exc}"
+    else:
+        if _celigo_accounts_match(rest_identity, agent_identity):
+            identity_error = None
+        else:
+            rest_name = rest_identity.get("account_name") or "unknown"
+            agent_name = agent_identity.get("account_name") or "unknown"
+            identity_error = (
+                "Agent token belongs to a different Celigo account than the REST "
+                f"connection (REST account: {rest_name!r}, agent account: {agent_name!r})"
+            )
+
+    if identity_error is not None:
+        logger.warning(
+            "celigo_mcp_connector.agent_identity_mismatch",
+            tenant_id=str(tenant_id),
+            reason=identity_error,
+        )
+        connector.discovered_tools = None
+        connector.is_enabled = False
+        connector.status = "error"
+        connector.error_reason = identity_error
+        await db.flush()
+        return connector
+
     # Best-effort tool discovery -- must not fail the connector row itself.
     # But "must not fail the row" is not the same as "must report success":
-    # agent_token is never verified on its own (unlike the REST token, which
-    # goes through verify_token before any write) -- discover_tools actually
-    # reaching the server and returning tools is the ONLY proof this token is
-    # good for anything. `is_enabled` is what `agent_access`
+    # discover_tools actually reaching the server and returning tools is the
+    # ONLY proof this token is good for anything BEYOND identifying an
+    # account (the identity check above proves WHICH account, not that the
+    # token can enumerate tools). `is_enabled` is what `agent_access`
     # (both the API field and _celigo_agent_access, via
     # get_active_connectors_for_tenant) key off, so it must reflect that proof
     # rather than "a row exists". A failure also resets discovered_tools --
@@ -796,6 +861,7 @@ async def connect_celigo(
                     tenant_id=user.tenant_id,
                     agent_token=request.agent_token,
                     region=request.region,
+                    rest_identity=info,
                     created_by=user.id,
                 )
                 await audit_service.log_event(

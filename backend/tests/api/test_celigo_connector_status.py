@@ -904,6 +904,182 @@ class TestCeligoAgentAccessRegion:
         assert rows[0].server_url == "https://api.eu.integrator.io/celigo-mcp"
 
 
+class TestCeligoAccountsMatchHelper:
+    """Unit coverage for the identity-comparison helper itself, isolated from
+    the HTTP/DB plumbing exercised in TestCeligoAgentAccessIdentity below.
+    """
+
+    def test_matching_account_names(self):
+        from app.api.v1.connector_status import _celigo_accounts_match
+
+        assert (
+            _celigo_accounts_match(
+                {"account_name": "Acme Corp", "user_email": "a@acme.com"},
+                {"account_name": "Acme Corp", "user_email": "b@acme.com"},
+            )
+            is True
+        )
+
+    def test_different_account_names(self):
+        from app.api.v1.connector_status import _celigo_accounts_match
+
+        assert (
+            _celigo_accounts_match(
+                {"account_name": "Acme Corp", "user_email": "a@acme.com"},
+                {"account_name": "Widgets Inc", "user_email": "a@acme.com"},
+            )
+            is False
+        )
+
+    def test_missing_account_name_on_either_side_fails_closed(self):
+        # tokenInfo guarantees at least one of name/email, not both -- if
+        # account_name is absent on either side there is no account-level
+        # signal to compare, and ambiguity must resolve to "not proven same".
+        from app.api.v1.connector_status import _celigo_accounts_match
+
+        assert (
+            _celigo_accounts_match(
+                {"account_name": "", "user_email": "a@acme.com"},
+                {"account_name": "Acme Corp", "user_email": "a@acme.com"},
+            )
+            is False
+        )
+        assert (
+            _celigo_accounts_match(
+                {"account_name": "Acme Corp", "user_email": "a@acme.com"},
+                {"account_name": "", "user_email": "a@acme.com"},
+            )
+            is False
+        )
+
+
+class TestCeligoAgentAccessIdentity:
+    """FIX 3 (T2 gate round 3, PR #202): the REST token and the agent_token
+    were never checked for belonging to the SAME Celigo account -- a tenant
+    could end up with agent_access=True while the agent silently read a
+    DIFFERENT Celigo account's flows than the REST connection reads, with the
+    UI reporting one healthy Celigo connection.
+    """
+
+    async def test_mismatched_account_leaves_agent_access_false_with_reason(self, client, admin_user, db, monkeypatch):
+        user, headers = admin_user
+
+        async def _verify(token, region="us", **kw):
+            if token == "rest-tok":
+                return {"account_name": "Acme Corp", "user_email": "rest@acme.com"}
+            return {"account_name": "Different Co", "user_email": "agent@different.com"}
+
+        async def _discover(connector, db=None):
+            return [{"name": "list_flows", "description": "List flows"}]
+
+        monkeypatch.setattr("app.api.v1.connector_status.verify_token", _verify, raising=False)
+        monkeypatch.setattr("app.services.mcp_client_service.discover_tools", _discover, raising=False)
+
+        r = await client.post(
+            "/api/v1/connector-status/celigo/connect",
+            headers=headers,
+            json={"token": "rest-tok", "region": "us", "label": "Celigo", "agent_token": "agent-tok"},
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["connected"] is True, "the REST connection must still succeed"
+        assert r.json()["agent_access"] is False, "a mismatched agent token must not enable agent access"
+
+        from sqlalchemy import select
+
+        from app.models.mcp_connector import McpConnector
+
+        row = (
+            await db.execute(
+                select(McpConnector).where(
+                    McpConnector.tenant_id == user.tenant_id,
+                    McpConnector.provider == "celigo_mcp",
+                )
+            )
+        ).scalar_one()
+        assert row.is_enabled is False
+        assert row.status != "active"
+        assert row.error_reason, "a clear reason must be recorded for the mismatch"
+        assert not row.discovered_tools, "discover_tools must never run for a token proven to be the wrong account"
+
+    async def test_matching_account_enables_agent_access(self, client, admin_user, db, monkeypatch):
+        user, headers = admin_user
+
+        async def _verify(token, region="us", **kw):
+            # Same account, different token strings -- a REST admin and an
+            # agent-token-minting admin can be different Celigo USERS on the
+            # SAME account, so identity must key on the account, not the raw
+            # token or the user email.
+            return {"account_name": "Acme Corp", "user_email": f"{token}@acme.com"}
+
+        async def _discover(connector, db=None):
+            return [{"name": "list_flows", "description": "List flows"}]
+
+        monkeypatch.setattr("app.api.v1.connector_status.verify_token", _verify, raising=False)
+        monkeypatch.setattr("app.services.mcp_client_service.discover_tools", _discover, raising=False)
+
+        r = await client.post(
+            "/api/v1/connector-status/celigo/connect",
+            headers=headers,
+            json={"token": "rest-tok", "region": "us", "label": "Celigo", "agent_token": "agent-tok"},
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["agent_access"] is True
+
+        from sqlalchemy import select
+
+        from app.models.mcp_connector import McpConnector
+
+        row = (
+            await db.execute(
+                select(McpConnector).where(
+                    McpConnector.tenant_id == user.tenant_id,
+                    McpConnector.provider == "celigo_mcp",
+                )
+            )
+        ).scalar_one()
+        assert row.is_enabled is True
+        assert row.status == "active"
+
+    async def test_agent_token_rejected_by_celigo_leaves_agent_access_false_with_reason(
+        self, client, admin_user, db, monkeypatch
+    ):
+        """The agent token itself can be bad (revoked/typo'd) independent of
+        account matching -- must fail the same way (disabled + reason), not a
+        500, and must never be silently treated as verified."""
+        user, headers = admin_user
+
+        async def _verify(token, region="us", **kw):
+            if token == "rest-tok":
+                return {"account_name": "Acme Corp", "user_email": "rest@acme.com"}
+            raise CeligoAuthError("Invalid token")
+
+        monkeypatch.setattr("app.api.v1.connector_status.verify_token", _verify, raising=False)
+
+        r = await client.post(
+            "/api/v1/connector-status/celigo/connect",
+            headers=headers,
+            json={"token": "rest-tok", "region": "us", "label": "Celigo", "agent_token": "bad-agent-tok"},
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["connected"] is True
+        assert r.json()["agent_access"] is False
+
+        from sqlalchemy import select
+
+        from app.models.mcp_connector import McpConnector
+
+        row = (
+            await db.execute(
+                select(McpConnector).where(
+                    McpConnector.tenant_id == user.tenant_id,
+                    McpConnector.provider == "celigo_mcp",
+                )
+            )
+        ).scalar_one()
+        assert row.is_enabled is False
+        assert row.error_reason
+
+
 class TestCeligoMcpGuardIntegration:
     """End-to-end proof that Tasks 1-3's read-only guards protect the real
     celigo_mcp connector Task 10 creates, not just a hypothetical one."""
