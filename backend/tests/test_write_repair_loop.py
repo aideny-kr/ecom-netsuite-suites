@@ -62,6 +62,73 @@ def test_state_is_per_record_type():
     assert state.should_repair("invoice", r) is True
 
 
+def test_stall_detection_still_works_within_one_repair_cycle():
+    """Regression guard for the budget-reset fix below: resetting a
+    record_type's attempts/fingerprint on exit must not weaken stall
+    detection WITHIN a still-open cycle. The fingerprint comparison that
+    detects a stall runs BEFORE any reset — against the fingerprint left by
+    the previous call in this same cycle — so two identical failures in a
+    row for the same record_type must still exit "stall" with budget to
+    spare (1 of 2 attempts used), not be silently granted a third attempt."""
+    from app.services.chat.agents.base_agent import WriteRepairState
+
+    state = WriteRepairState(max_attempts=2)
+    result = ValidationResult(ok=False, missing_required=["subsidiary"])
+    assert state.should_repair("journalEntry", result) is True
+    assert state.should_repair("journalEntry", result) is False
+    assert state.exit_reason_for("journalEntry") == "stall"
+
+
+def test_second_distinct_write_of_same_record_type_gets_its_own_budget():
+    """The reported bug: the model creates a journalEntry and exhausts its 2
+    repair attempts (-> budget), then proposes a second, unrelated
+    journalEntry missing a DIFFERENT field later in the SAME turn. Without
+    resetting the budget on exit, the second write would inherit the first
+    write's exhausted attempt count and get zero repair attempts of its own.
+    """
+    from app.services.chat.agents.base_agent import WriteRepairState
+
+    state = WriteRepairState(max_attempts=2)
+    assert state.should_repair("journalEntry", ValidationResult(ok=False, missing_required=["subsidiary"])) is True
+    assert state.should_repair("journalEntry", ValidationResult(ok=False, missing_required=["account"])) is True
+    # Third DISTINCT failure for the same cycle -> budget exhausted.
+    assert state.should_repair("journalEntry", ValidationResult(ok=False, missing_required=["memo"])) is False
+    assert state.exit_reason_for("journalEntry") == "budget"
+
+    # A second, unrelated journalEntry write, later in the same turn,
+    # missing a completely different field -> must get its own fresh budget,
+    # not immediately exit "budget" again with zero attempts granted.
+    assert state.should_repair("journalEntry", ValidationResult(ok=False, missing_required=["currency"])) is True
+    # That second write's cycle can still reach its own, independent exit —
+    # proving the state isn't just permanently pinned to "budget".
+    assert state.should_repair("journalEntry", ValidationResult(ok=True)) is False
+    assert state.exit_reason_for("journalEntry") == "done"
+
+
+def test_exit_reason_for_one_record_type_is_not_polluted_by_another():
+    """exit_reason_for() is scoped per record_type. Record type A exits
+    "stall"; record type B is touched later in the same turn and is still
+    mid-repair (never exited). B's own exit reason must read None, not A's
+    stale "stall" bleeding across types."""
+    from app.services.chat.agents.base_agent import WriteRepairState
+
+    state = WriteRepairState(max_attempts=2)
+    stall_result = ValidationResult(ok=False, missing_required=["subsidiary"])
+    state.should_repair("journalEntry", stall_result)
+    assert state.should_repair("journalEntry", stall_result) is False
+    assert state.exit_reason_for("journalEntry") == "stall"
+
+    # record type B has never been touched -- must not see A's reason.
+    assert state.exit_reason_for("customer") is None
+
+    # B enters its own repair cycle and is granted an attempt -- still
+    # mid-cycle, hasn't exited yet.
+    assert state.should_repair("customer", ValidationResult(ok=False, missing_required=["email"])) is True
+    assert state.exit_reason_for("customer") is None
+    # A's reason is unchanged by B's activity.
+    assert state.exit_reason_for("journalEntry") == "stall"
+
+
 # ---------------------------------------------------------------------------
 # Integration: the repair loop wired into run_streaming's mutation intercept.
 #

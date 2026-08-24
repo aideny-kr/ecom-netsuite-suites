@@ -38,33 +38,79 @@ class WriteRepairState:
 
     A cap the model is asked to respect is a request; a counter that persists
     and decrements is a guarantee. Exits carry a reason, never a bare boolean.
+
+    Everything here is keyed by `record_type`, never by tool-call id. Stall
+    detection needs the failure fingerprint to persist ACROSS separate tool
+    calls within one repair cycle: the model reproposes a rejected write as a
+    brand-new tool_use block (a new `block.id`) after each rejection, so
+    keying on call id would make every repair attempt look like a fresh
+    write and stall detection would never fire.
+
+    Keying by `record_type` alone has its own failure mode: a turn that
+    creates one journalEntry (exhausting its repair budget) and later
+    proposes a second, unrelated journalEntry of the same type must not
+    inherit the first write's exhausted attempts. `should_repair` resets a
+    record_type's attempt count and fingerprint the moment its repair cycle
+    ends (done/stall/budget) — see `_finish_cycle` — so the NEXT logical
+    write of that type starts with a full budget. That reset only ever runs
+    AFTER a cycle has already been decided, so it cannot weaken stall
+    detection within a still-open cycle: the fingerprint comparison that
+    detects a stall runs earlier in the same call, against the fingerprint
+    left by the PREVIOUS call in that same cycle, before any reset happens.
     """
 
     def __init__(self, max_attempts: int = 2) -> None:
         self.max_attempts = max_attempts
         self._attempts: dict[str, int] = {}
         self._fingerprints: dict[str, str] = {}
+        self._exit_reasons: dict[str, str | None] = {}
+        # Legacy single-value mirror of the last exit reason set by ANY
+        # record_type's should_repair() call. Nothing in production reads
+        # this field today (only tests predating per-record-type scoping);
+        # it goes stale in exactly the way this class now fixes for
+        # exit_reason_for() — a stall on record type A reads through while
+        # record type B is still mid-repair. New callers MUST use
+        # exit_reason_for(record_type), never this field.
         self.exit_reason: str | None = None
 
     def should_repair(self, record_type: str, result: ValidationResult) -> bool:
         if result.ok:
-            self.exit_reason = "done"
+            self._finish_cycle(record_type, "done")
             return False
 
         fingerprint = result.fingerprint()
         if self._fingerprints.get(record_type) == fingerprint:
             # Same failure as last time — recomposing will not help.
-            self.exit_reason = "stall"
+            self._finish_cycle(record_type, "stall")
             return False
 
         attempts = self._attempts.get(record_type, 0)
         if attempts >= self.max_attempts:
-            self.exit_reason = "budget"
+            self._finish_cycle(record_type, "budget")
             return False
 
         self._attempts[record_type] = attempts + 1
         self._fingerprints[record_type] = fingerprint
         return True
+
+    def _finish_cycle(self, record_type: str, reason: str) -> None:
+        """Record why `record_type`'s repair cycle ended, then clear its
+        attempt count and fingerprint so a later, distinct write of the same
+        type starts fresh instead of inheriting this cycle's exhausted
+        budget (the reported bug)."""
+        self._exit_reasons[record_type] = reason
+        self.exit_reason = reason
+        self._attempts.pop(record_type, None)
+        self._fingerprints.pop(record_type, None)
+
+    def exit_reason_for(self, record_type: str) -> str | None:
+        """Why `record_type`'s most recently DECIDED repair cycle ended.
+
+        `None` covers both "never seen" and "mid-cycle, still repairing".
+        Scoped per record_type so a caller checking record type B's outcome
+        never sees record type A's stale reason — unlike the flat
+        `.exit_reason` attribute, which is shared across every call."""
+        return self._exit_reasons.get(record_type)
 
 
 def _validation_failure_detail(validation: ValidationResult) -> str:
