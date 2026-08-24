@@ -1887,10 +1887,29 @@ async def run_chat_turn(
                             "error": f"The merged write payload could not be validated: {exc}",
                         }
                         return
-                    if _merged_validation.invariant_errors or _merged_validation.missing_required:
-                        _problems = list(_merged_validation.invariant_errors) + [
-                            f"missing required field: {f}" for f in _merged_validation.missing_required
-                        ]
+                    if (
+                        _merged_validation.invariant_errors
+                        or _merged_validation.missing_required
+                        or _merged_validation.missing_line_required
+                    ):
+                        # `missing_line_required` entries arrive pre-formatted
+                        # as `line[<idx>].<field>` (see `validate_write` in
+                        # write_validator.py), so "missing required line
+                        # field: line[0].account" reads correctly — unlike
+                        # the header-field phrasing above, which needs the
+                        # "field: " prefix because its entries are bare
+                        # names. Without this branch, the post-merge gate
+                        # applied a narrower completeness bar than the
+                        # pre-merge gate it exists to replicate (which
+                        # treats missing_line_required as a hard block via
+                        # `_unfillable_line_fields` above) — a payload that
+                        # became line-incomplete only after the merge would
+                        # pass here and execute.
+                        _problems = (
+                            list(_merged_validation.invariant_errors)
+                            + [f"missing required field: {f}" for f in _merged_validation.missing_required]
+                            + [f"missing required line field: {f}" for f in _merged_validation.missing_line_required]
+                        )
                         yield {
                             "type": "error",
                             "error": (

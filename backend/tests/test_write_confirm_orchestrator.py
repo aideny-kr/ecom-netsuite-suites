@@ -899,6 +899,83 @@ def _fake_invariants_closed_on(closed_date: str):
     return _fake
 
 
+def _fake_metadata_requiring_header_field(field_name: str):
+    """Record-type metadata that marks a single HEADER field required —
+    used to prove the merged-payload re-check still refuses on
+    `missing_required` (existing behaviour, protected against regression)."""
+    from app.services.chat.record_metadata_service import FieldSpec, RecordMetadata
+
+    async def _fake(**kwargs):
+        return RecordMetadata(
+            record_type="journalEntry",
+            fields=[FieldSpec(name=field_name, label=field_name, required=True)],
+            line_fields=[],
+        )
+
+    return _fake
+
+
+def _fake_metadata_requiring_line_field(field_name: str):
+    """Record-type metadata that marks a single LINE field required — the
+    realistic shape for the gap this wave closes: the metadata cache (1h
+    TTL) refetches between card build and approve and a line field becomes
+    required only at merge time."""
+    from app.services.chat.record_metadata_service import FieldSpec, RecordMetadata
+
+    async def _fake(**kwargs):
+        return RecordMetadata(
+            record_type="journalEntry",
+            fields=[],
+            line_fields=[FieldSpec(name=field_name, label=field_name, required=True)],
+        )
+
+    return _fake
+
+
+def _make_journal_entry_card_with_trandate_slot_and_incomplete_line(session_id):
+    """Like `_make_journal_entry_card_with_trandate_slot` but carries one
+    line item. `unfillable_line_fields: []` mirrors the honest pre-merge
+    result at build time — the metadata that will (at merge time) mark a
+    line field required hasn't been fetched yet, so the pre-merge gate had
+    nothing to flag. This is the realistic staleness-window shape the T2
+    finding describes, not a pre-seeded violation."""
+    from app.services.chat.mutation_guard import generate_confirmation_token
+    from app.services.chat.write_confirmation_service import _build_payload_json
+
+    tool_name = _ext("ns_createRecord")
+    fields = {"memo": "Q3 accrual", "subsidiary": "1"}
+    lines = [{"debit": "100"}]
+    tool_input = {"recordType": "journalEntry", "data": json.dumps({**fields, "line": lines})}
+    slots = [{"name": "trandate", "label": "Transaction Date", "type": "text", "allowed": None}]
+    structured_output = {
+        "type": "write_confirmation",
+        "mutation_type": "create",
+        "record_type": "journalEntry",
+        "tool_name": tool_name,
+        "tool_input": tool_input,
+        "editable_slots": slots,
+        "proposed_fields": fields,
+        "proposed_lines": lines,
+        "confirmation_token": generate_confirmation_token(
+            str(session_id), _build_payload_json(tool_name, tool_input, slots)
+        ),
+        "invariant_errors": [],
+        "unfillable_line_fields": [],
+        "unvalidated": False,
+        "status": "pending",
+    }
+    msg = ChatMessage(
+        tenant_id=_TENANT_ID,
+        session_id=session_id,
+        role="assistant",
+        content="",
+        structured_output=structured_output,
+        created_at=datetime.now(timezone.utc),
+    )
+    msg.id = uuid.uuid4()
+    return msg, tool_name
+
+
 class TestPostMergeReValidation:
     @pytest.mark.asyncio
     async def test_merged_trandate_in_closed_period_is_refused_and_never_executes(self):
@@ -1083,6 +1160,103 @@ class TestPostMergeReValidation:
         assert not [e for e in events if e.get("type") == "error"]
         mock_execute_tool_call.assert_awaited_once()
         assert confirm_msg.structured_output["status"] == "approved"
+
+    @pytest.mark.asyncio
+    async def test_merged_payload_missing_required_header_field_still_refused(self):
+        """Existing behaviour, protected against regression: `missing_required`
+        (a header field) must still refuse the merged approve. The pre-merge
+        card is clean — trandate is the only slot merged in; a different
+        header field (`approvalstatus`) becomes required only once the
+        merge-time metadata fetch runs."""
+        from app.services.chat.orchestrator import run_chat_turn
+
+        session_id = uuid.uuid4()
+        confirm_msg, _tool_name = _make_journal_entry_card_with_trandate_slot(session_id)
+        db = _make_db(confirm_msg)
+        session = _make_session(session_id=str(session_id))
+
+        mock_execute_tool_call = AsyncMock(return_value=json.dumps({"id": "999"}))
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", AsyncMock(return_value=None)),
+            patch(
+                "app.services.chat.write_validation.get_record_metadata",
+                _fake_metadata_requiring_header_field("approvalstatus"),
+            ),
+            patch("app.services.chat.write_validation.check_posting_invariants", AsyncMock(return_value=[])),
+        ):
+            events = [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="approve",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={
+                        "action": "approve",
+                        "confirmation_id": str(confirm_msg.id),
+                        "slot_values": {"trandate": "2026-03-03"},
+                    },
+                )
+            ]
+
+        mock_execute_tool_call.assert_not_called()
+        error_events = [e for e in events if e.get("type") == "error"]
+        assert error_events
+        assert "missing required field: approvalstatus" in error_events[0]["error"]
+        assert confirm_msg.structured_output["status"] == "pending"
+
+    @pytest.mark.asyncio
+    async def test_merged_payload_missing_line_required_is_refused_and_never_executes(self):
+        """The defect this wave fixes: the post-merge re-check omitted
+        `missing_line_required` from its refusal condition, even though the
+        pre-merge gate treats it as a hard block (`_unfillable_line_fields`,
+        whose own comment says such a payload 'must never be approved'). A
+        payload that becomes line-incomplete only after the merge — e.g. the
+        record-type metadata cache refetched between card build and approve
+        and a line field became required — must be refused here too, not
+        executed."""
+        from app.services.chat.orchestrator import run_chat_turn
+
+        session_id = uuid.uuid4()
+        confirm_msg, _tool_name = _make_journal_entry_card_with_trandate_slot_and_incomplete_line(session_id)
+        db = _make_db(confirm_msg)
+        session = _make_session(session_id=str(session_id))
+
+        mock_execute_tool_call = AsyncMock(return_value=json.dumps({"id": "999"}))
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", AsyncMock(return_value=None)),
+            patch(
+                "app.services.chat.write_validation.get_record_metadata",
+                _fake_metadata_requiring_line_field("account"),
+            ),
+            patch("app.services.chat.write_validation.check_posting_invariants", AsyncMock(return_value=[])),
+        ):
+            events = [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="approve",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={
+                        "action": "approve",
+                        "confirmation_id": str(confirm_msg.id),
+                        "slot_values": {"trandate": "2026-03-03"},
+                    },
+                )
+            ]
+
+        mock_execute_tool_call.assert_not_called()
+        error_events = [e for e in events if e.get("type") == "error"]
+        assert error_events
+        assert "missing required line field: line[0].account" in error_events[0]["error"]
+        assert confirm_msg.structured_output["status"] == "pending"
 
     @pytest.mark.asyncio
     async def test_no_slot_values_on_a_slot_free_card_skips_revalidation_entirely(self):
