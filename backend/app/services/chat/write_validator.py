@@ -76,6 +76,26 @@ class ValidationResult(BaseModel):
         }
 
 
+def _is_empty(value: Any) -> bool:
+    """A required field is missing if it is absent OR its value is empty.
+
+    Empty means ``None``, an empty string, or a whitespace-only string.
+    Deliberately NOT bare falsiness: ``0``, ``0.0`` and ``False`` are
+    legitimate NetSuite field values (an account internal id of 0, a zero
+    amount, a false checkbox) and must pass through untouched. An empty
+    list/dict is treated as a present, non-empty value here — this
+    function only judges scalar required fields; `[]`/`{}` would need a
+    type-aware rule (e.g. a required multi-select) that this validator
+    does not model today, so leaving them alone is the deliberate choice
+    rather than folding them into "empty" by accident.
+    """
+    if value is None:
+        return True
+    if isinstance(value, str) and value.strip() == "":
+        return True
+    return False
+
+
 def validate_write(
     *,
     payload: NormalizedPayload,
@@ -99,10 +119,10 @@ def validate_write(
     # Only creates must carry every required field. An update legitimately
     # sends a partial payload — demanding the full set would break renames.
     if mutation_type in ("create", "upsert"):
-        missing = [n for n in metadata.required_field_names() if n not in payload.fields]
+        missing = [n for n in metadata.required_field_names() if _is_empty(payload.fields.get(n))]
         for idx, line in enumerate(payload.lines):
             for name in metadata.required_line_field_names():
-                if name not in line:
+                if _is_empty(line.get(name)):
                     missing_lines.append(f"line[{idx}].{name}")
 
     slots: list[EditableSlot] = []

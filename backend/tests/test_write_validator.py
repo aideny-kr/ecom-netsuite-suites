@@ -125,6 +125,94 @@ def test_no_metadata_with_invariant_errors_is_not_ok():
     assert result.ok is False
 
 
+@pytest.mark.parametrize("empty_value", ["", "   ", None])
+def test_missing_required_header_field_flagged_when_value_is_empty(empty_value):
+    """Key presence alone must not satisfy a required field — the agent can
+    otherwise send `{"subsidiary": ""}` and clear the missing-field check
+    without ever supplying a usable value."""
+    result = validate_write(
+        payload=NormalizedPayload(fields={"companyname": "test ai customer", "subsidiary": empty_value}, lines=[]),
+        metadata=META,
+        record_type="customer",
+        mutation_type="create",
+    )
+    assert result.ok is False
+    assert result.missing_required == ["subsidiary"]
+
+
+@pytest.mark.parametrize("falsy_but_valid", [0, 0.0, False])
+def test_missing_required_header_field_not_flagged_for_falsy_values(falsy_but_valid):
+    """0, 0.0 and False are legitimate NetSuite field values and must not be
+    treated as missing — regression guard against bare `if not value`."""
+    result = validate_write(
+        payload=NormalizedPayload(fields={"companyname": "test ai customer", "subsidiary": falsy_but_valid}, lines=[]),
+        metadata=META,
+        record_type="customer",
+        mutation_type="create",
+    )
+    assert result.ok is True
+    assert result.missing_required == []
+
+
+def test_missing_required_header_field_not_flagged_for_real_value():
+    result = validate_write(
+        payload=NormalizedPayload(fields={"companyname": "x", "subsidiary": "1"}, lines=[]),
+        metadata=META,
+        record_type="customer",
+        mutation_type="create",
+    )
+    assert result.ok is True
+    assert result.missing_required == []
+
+
+@pytest.mark.parametrize("empty_value", ["", "   ", None])
+def test_missing_line_required_field_flagged_when_value_is_empty(empty_value):
+    meta = RecordMetadata(
+        record_type="journalEntry",
+        fields=[],
+        line_fields=[FieldSpec(name="account", label="Account", required=True)],
+    )
+    result = validate_write(
+        payload=NormalizedPayload(fields={}, lines=[{"debit": 5, "account": empty_value}]),
+        metadata=meta,
+        record_type="journalEntry",
+        mutation_type="create",
+    )
+    assert result.ok is False
+    assert "line[0].account" in result.missing_line_required
+
+
+@pytest.mark.parametrize("falsy_but_valid", [0, 0.0, False])
+def test_missing_line_required_field_not_flagged_for_falsy_values(falsy_but_valid):
+    meta = RecordMetadata(
+        record_type="journalEntry",
+        fields=[],
+        line_fields=[FieldSpec(name="account", label="Account", required=True)],
+    )
+    result = validate_write(
+        payload=NormalizedPayload(fields={}, lines=[{"debit": 5, "account": falsy_but_valid}]),
+        metadata=meta,
+        record_type="journalEntry",
+        mutation_type="create",
+    )
+    assert result.ok is True
+    assert result.missing_line_required == []
+
+
+def test_update_with_empty_required_field_still_skips_sweep_entirely():
+    """An update legitimately sends a partial payload — even an explicitly
+    empty value on a required field must not trigger the sweep, because
+    demanding the full set would break a simple rename."""
+    result = validate_write(
+        payload=NormalizedPayload(fields={"companyname": "renamed", "subsidiary": ""}, lines=[], record_id="7"),
+        metadata=META,
+        record_type="customer",
+        mutation_type="update",
+    )
+    assert result.ok is True
+    assert result.missing_required == []
+
+
 def test_missing_line_required_fields_never_become_editable_slots():
     """Finding B6: line-level required fields (debit/credit) must remain
     structurally unreachable via slot_values — editable_slots is built ONLY
