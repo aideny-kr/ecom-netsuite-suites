@@ -812,6 +812,98 @@ class TestCeligoAgentAccess:
         assert row.is_enabled is False
 
 
+class TestCeligoAgentAccessRegion:
+    """FIX 2 (T2 gate round 3, PR #202): the celigo_mcp connector's server_url
+    was pinned to a single hardcoded US host regardless of the connection's
+    region -- so an EU tenant's agent_token got authenticated against the US
+    MCP host, discovery failed, and agent_access silently ended up False even
+    though the REST connection (which correctly threads region into
+    verify_token) reported success.
+    """
+
+    async def test_eu_region_connects_agent_to_eu_mcp_host(self, client, admin_user, db, monkeypatch):
+        user, headers = admin_user
+
+        async def _ok(token, region="us", **kw):
+            return {"account_name": "Framework EU", "user_email": "ops@frame.work"}
+
+        async def _discover(connector, db=None):
+            return [{"name": "list_flows", "description": "List flows"}]
+
+        monkeypatch.setattr("app.api.v1.connector_status.verify_token", _ok, raising=False)
+        monkeypatch.setattr("app.services.mcp_client_service.discover_tools", _discover, raising=False)
+
+        r = await client.post(
+            "/api/v1/connector-status/celigo/connect",
+            headers=headers,
+            json={"token": "s3cret", "region": "eu", "label": "Celigo", "agent_token": "agent-tok"},
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["agent_access"] is True
+
+        from sqlalchemy import select
+
+        from app.models.mcp_connector import McpConnector
+
+        row = (
+            await db.execute(
+                select(McpConnector).where(
+                    McpConnector.tenant_id == user.tenant_id,
+                    McpConnector.provider == "celigo_mcp",
+                )
+            )
+        ).scalar_one()
+        assert row.server_url == "https://api.eu.integrator.io/celigo-mcp"
+
+    async def test_reconnect_updates_server_url_when_region_changes(self, client, admin_user, db, monkeypatch):
+        """A reconnect with a different region must repoint the existing
+        celigo_mcp row's server_url, not leave it stuck on the region from the
+        first connect."""
+        user, headers = admin_user
+
+        async def _ok(token, region="us", **kw):
+            return {"account_name": "Framework", "user_email": "ops@frame.work"}
+
+        async def _discover(connector, db=None):
+            return [{"name": "list_flows", "description": "List flows"}]
+
+        monkeypatch.setattr("app.api.v1.connector_status.verify_token", _ok, raising=False)
+        monkeypatch.setattr("app.services.mcp_client_service.discover_tools", _discover, raising=False)
+
+        first = await client.post(
+            "/api/v1/connector-status/celigo/connect",
+            headers=headers,
+            json={"token": "s3cret", "region": "us", "label": "Celigo", "agent_token": "agent-tok"},
+        )
+        assert first.status_code == 201, first.text
+
+        second = await client.post(
+            "/api/v1/connector-status/celigo/connect",
+            headers=headers,
+            json={"token": "s3cret2", "region": "eu", "label": "Celigo", "agent_token": "agent-tok2"},
+        )
+        assert second.status_code == 201, second.text
+
+        from sqlalchemy import select
+
+        from app.models.mcp_connector import McpConnector
+
+        rows = (
+            (
+                await db.execute(
+                    select(McpConnector).where(
+                        McpConnector.tenant_id == user.tenant_id,
+                        McpConnector.provider == "celigo_mcp",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(rows) == 1, "reconnect must reactivate the existing row, not create a duplicate"
+        assert rows[0].server_url == "https://api.eu.integrator.io/celigo-mcp"
+
+
 class TestCeligoMcpGuardIntegration:
     """End-to-end proof that Tasks 1-3's read-only guards protect the real
     celigo_mcp connector Task 10 creates, not just a hypothetical one."""

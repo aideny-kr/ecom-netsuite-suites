@@ -21,11 +21,18 @@ CELIGO_BASE_URLS: dict[str, str] = {
     "eu": "https://api.eu.integrator.io",
 }
 
-# Celigo's hosted MCP server -- a fixed URL, not tenant-configurable (Plan A).
-# Lives here (not in connector_status.py, its original home) so
-# mcp_connector_service.create_mcp_connector can import it without a circular
-# import (connector_status.py already imports mcp_connector_service).
-CELIGO_MCP_SERVER_URL = "https://api.integrator.io/celigo-mcp"
+# Celigo's hosted MCP server -- a fixed URL per region, not tenant-configurable
+# (Plan A). Derived from CELIGO_BASE_URLS (never a second hardcoded map) so
+# the MCP host and the REST host can't drift apart: EU accounts are fully
+# isolated (see module docstring), and the MCP server follows the exact same
+# region split as the REST API. Lives here (not in connector_status.py, its
+# original home) so mcp_connector_service.create_mcp_connector can import it
+# without a circular import (connector_status.py already imports
+# mcp_connector_service).
+CELIGO_MCP_SERVER_URLS: dict[str, str] = {region: f"{url}/celigo-mcp" for region, url in CELIGO_BASE_URLS.items()}
+
+# Backward-compatible single-URL constant (US only). Prefer mcp_server_url(region).
+CELIGO_MCP_SERVER_URL = CELIGO_MCP_SERVER_URLS["us"]
 
 _TIMEOUT = httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=30.0)
 
@@ -41,6 +48,17 @@ class CeligoError(Exception):
 def base_url(region: str) -> str:
     """Return the API base URL for *region*, defaulting to US on an unknown value."""
     return CELIGO_BASE_URLS.get(region, CELIGO_BASE_URLS["us"])
+
+
+def mcp_server_url(region: str) -> str:
+    """Return Celigo's fixed hosted MCP server URL for *region*.
+
+    Defaults to US on an unrecognized value -- mirrors base_url() exactly, so
+    a caller-supplied region that fails validation upstream (or an unfamiliar
+    value) never routes to "no URL" but always to a well-defined trusted
+    constant.
+    """
+    return CELIGO_MCP_SERVER_URLS.get(region, CELIGO_MCP_SERVER_URLS["us"])
 
 
 def _auth_message(response: httpx.Response) -> str:

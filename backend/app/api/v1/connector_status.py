@@ -25,9 +25,9 @@ from app.models.pipeline import CursorState
 from app.models.user import User
 from app.services import audit_service, mcp_connector_service
 from app.services.celigo.client import (
-    CELIGO_MCP_SERVER_URL,
     CeligoAuthError,
     CeligoError,
+    mcp_server_url,
     verify_token,
 )
 
@@ -558,11 +558,18 @@ async def _upsert_celigo_mcp_connector(
     db: AsyncSession,
     tenant_id,
     agent_token: str,
+    region: str,
     created_by,
 ) -> McpConnector:
     """Create (or reactivate) the celigo_mcp connector that gives the chat agent
     read-only Celigo tools -- Tasks 1-3's guards enforce the read-only boundary
     once this row exists.
+
+    *region* pins server_url to the SAME Celigo region the REST connection's
+    token was verified against (verify_token(request.token, request.region)
+    in connect_celigo) -- an EU tenant's agent_token must be discovered
+    against the EU MCP host, never the US one, or discovery fails and
+    agent_access silently ends up False.
 
     Reuses ``mcp_connector_service.create_mcp_connector`` for the actual
     construction rather than a second hand-rolled ``McpConnector(...)`` site.
@@ -582,7 +589,7 @@ async def _upsert_celigo_mcp_connector(
         existing.encrypted_credentials = encrypt_credentials({"token": agent_token})
         existing.encryption_key_version = get_current_key_version()
         existing.auth_type = "bearer"
-        existing.server_url = CELIGO_MCP_SERVER_URL
+        existing.server_url = mcp_server_url(region)
         connector = existing
     else:
         connector = await mcp_connector_service.create_mcp_connector(
@@ -590,10 +597,11 @@ async def _upsert_celigo_mcp_connector(
             tenant_id=tenant_id,
             provider="celigo_mcp",
             label="Celigo (agent access)",
-            server_url=CELIGO_MCP_SERVER_URL,
+            server_url=mcp_server_url(region),
             auth_type="bearer",
             credentials={"token": agent_token},
             created_by=created_by,
+            region=region,
         )
 
     # Best-effort tool discovery -- must not fail the connector row itself.
@@ -787,6 +795,7 @@ async def connect_celigo(
                     db=db,
                     tenant_id=user.tenant_id,
                     agent_token=request.agent_token,
+                    region=request.region,
                     created_by=user.id,
                 )
                 await audit_service.log_event(

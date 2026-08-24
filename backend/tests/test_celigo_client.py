@@ -3,7 +3,13 @@
 import httpx
 import pytest
 
-from app.services.celigo.client import CELIGO_BASE_URLS, CeligoAuthError, CeligoError, verify_token
+from app.services.celigo.client import (
+    CELIGO_BASE_URLS,
+    CeligoAuthError,
+    CeligoError,
+    mcp_server_url,
+    verify_token,
+)
 
 
 def _client(handler) -> httpx.AsyncClient:
@@ -41,6 +47,27 @@ class TestRegionRouting:
             await verify_token("tok", client=c)
 
         assert seen["url"].startswith("https://api.integrator.io/v1/tokenInfo")
+
+
+class TestMcpServerUrlRegionRouting:
+    """FIX 2 (T2 gate round 3, PR #202): the celigo_mcp connector's server_url
+    used to be a single hardcoded US host regardless of the connection's
+    region, so an EU tenant's agent token got authenticated against the wrong
+    MCP host and discovery silently failed. mcp_server_url() mirrors
+    base_url()'s region → host derivation exactly, off the same
+    CELIGO_BASE_URLS constant, so the two can never drift apart again.
+    """
+
+    def test_us_region_returns_us_mcp_host(self):
+        assert mcp_server_url("us") == "https://api.integrator.io/celigo-mcp"
+
+    def test_eu_region_returns_eu_mcp_host(self):
+        assert mcp_server_url("eu") == "https://api.eu.integrator.io/celigo-mcp"
+
+    def test_unknown_region_falls_back_to_us_mcp_host(self):
+        # Mirrors base_url()'s own fallback -- an unrecognized region must
+        # never silently resolve to no URL at all.
+        assert mcp_server_url("mars") == "https://api.integrator.io/celigo-mcp"
 
 
 class TestAuth:
