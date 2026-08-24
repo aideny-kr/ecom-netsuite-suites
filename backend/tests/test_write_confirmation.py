@@ -645,8 +645,18 @@ class TestBuildConfirmationPayloadInvariantErrors:
         assert result is not None
         assert result.invariant_errors == ["Accounting period 'Jan 2026' is closed — posting is not permitted."]
 
-    def test_invariant_errors_populated_for_delete(self):
-        """The delete branch is a separate code path — easy to miss (per the review)."""
+    def test_delete_branch_carries_a_hand_built_invariant_violation_to_the_card(self):
+        """The delete branch is a separate code path — easy to miss (per the
+        review). This ValidationResult is hand-built, standing in for
+        whatever check_posting_invariants would produce — it does NOT prove
+        a real delete can produce a non-empty invariant_errors. It cannot
+        today: normalize_for_validation gives every delete fields={} and
+        lines=[], so the real check_posting_invariants can only return []
+        for a delete (no trandate for the period query; 0 == 0 always reads
+        as balanced). Resolving the period from the record being deleted is
+        tracked as ClickUp 86bbk2580, not done here. What this test DOES
+        prove: build_confirmation_payload's delete branch is not dead code —
+        if invariant_errors ever is populated, it reaches the card."""
         validation = ValidationResult(
             ok=False,
             invariant_errors=["Accounting period 'Jan 2026' is closed — posting is not permitted."],

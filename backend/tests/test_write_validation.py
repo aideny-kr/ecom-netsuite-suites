@@ -158,7 +158,16 @@ class TestValidateMutationWiring:
             )
 
     @pytest.mark.asyncio
-    async def test_invariant_violation_surfaces_on_the_result(self):
+    async def test_delete_mocked_invariant_violation_reaches_validation_result(self):
+        """Proves the PLUMBING only: check_posting_invariants is mocked here
+        to return a violation, and that value is carried through
+        validate_mutation to the ValidationResult. A REAL delete can never
+        produce this input — normalize_for_validation gives every delete
+        fields={} and lines=[] (see its docstring), so the real
+        check_posting_invariants can only ever return [] for a delete:
+        _check_period_open has no trandate to query, and _check_balanced
+        reads 0 == 0 as balanced. Resolving the period from the record being
+        deleted is tracked as ClickUp 86bbk2580, not done here."""
         invariants_spy = AsyncMock(return_value=["Accounting period 'Jul 2026' is closed — posting is not permitted."])
         with (
             patch("app.services.chat.write_validation.get_record_metadata", AsyncMock(return_value=None)),
@@ -308,13 +317,21 @@ class TestDeletePayloadFlowsThroughValidation:
         assert len(confirmations) == 1
 
     @pytest.mark.asyncio
-    async def test_delete_with_invariant_violation_carries_it_on_the_card_and_is_blocked_on_approve(self):
-        """C4 — end to end: a delete run through the intercept with
-        check_posting_invariants mocked to return a closed-period violation
-        must produce a confirmation card whose invariant_errors is non-empty,
-        and the orchestrator's existing (7d04b6fe) approve gate must refuse
-        it — proving Finding C's fix plus the already-shipped gate close the
-        delete loop with ZERO changes to orchestrator.py."""
+    async def test_delete_mocked_invariant_violation_reaches_card_and_blocks_approve(self):
+        """C4 — end to end, PLUMBING only: check_posting_invariants is
+        mocked here to return a closed-period violation; this proves that
+        IF it ever returns one for a delete, the card carries
+        invariant_errors and the orchestrator's existing (7d04b6fe) approve
+        gate refuses it — Finding C's fix plus the already-shipped gate close
+        the delete loop with ZERO changes to orchestrator.py.
+
+        It does NOT prove a real closed-period delete is caught. It cannot
+        be: normalize_for_validation gives every delete fields={} and
+        lines=[], so the real check_posting_invariants can only return []
+        for a delete (_check_period_open has no trandate to query;
+        _check_balanced reads 0 == 0 as balanced). Resolving the period from
+        the record being deleted is tracked as ClickUp 86bbk2580, not done
+        here."""
         metadata_spy = AsyncMock(return_value=None)
         invariants_spy = AsyncMock(return_value=["Accounting period 'Jul 2026' is closed — posting is not permitted."])
         session_id = str(uuid.uuid4())
@@ -388,3 +405,49 @@ class TestDeletePayloadFlowsThroughValidation:
         assert error_events
         assert "closed" in error_events[0]["error"].lower()
         assert confirm_msg.structured_output["status"] == "pending"
+
+
+# ---------------------------------------------------------------------------
+# ClickUp 86bbk2580 — honest pin of the current gap. Every delete test above
+# mocks check_posting_invariants (or hand-builds its result) to prove the
+# PLUMBING carries a violation through — none of them prove a real delete is
+# protected, because none can: normalize_for_validation's delete stand-in
+# has fields={} and lines=[]. This test drives the REAL
+# check_posting_invariants (not mocked) against the REAL payload shape
+# normalize_for_validation produces for a delete, and proves both that it
+# returns [] AND that the period query is never attempted — the empty
+# result is not a coincidence of a lenient period lookup, the lookup never
+# fires. The period-lookup stub below reports a CLOSED period on purpose: if
+# the query were ever sent, this test would catch a real violation and fail.
+# When 86bbk2580 resolves the period from the record being deleted, this
+# test must fail and force a deliberate update — that is its job.
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteInvariantGapIsPinned:
+    @pytest.mark.asyncio
+    async def test_real_delete_payload_never_trips_posting_invariants(self, monkeypatch):
+        from app.services.chat import posting_invariants as pi
+
+        calls = []
+
+        async def tracking_closed_period(**kwargs):
+            calls.append(kwargs)
+            return json.dumps({"items": [{"periodname": "Jul 2026", "closed": True}]})
+
+        monkeypatch.setattr(pi, "execute_tool_call", tracking_closed_period)
+
+        payload = normalize_for_validation("delete", {"recordType": "journalEntry", "id": "4021"})
+        errors = await pi.check_posting_invariants(
+            payload=payload,
+            record_type="journalEntry",
+            mutation_tool_name=_ext("ns_deleteRecord"),
+            tenant_id=uuid.uuid4(),
+            actor_id=uuid.uuid4(),
+            correlation_id="c",
+            db=None,
+            session_id="s",
+        )
+
+        assert errors == []
+        assert calls == [], "the period query must never even be attempted for a delete today (86bbk2580)"

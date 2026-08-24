@@ -37,6 +37,26 @@ def normalize_for_validation(mutation_type: str, tool_input: dict[str, Any]) -> 
     data/body payload or raise") was never built to accept. Route it to a
     trivial stand-in instead of forcing it through that contract.
 
+    What this achieves: a delete now reaches ``validate_mutation()`` at all
+    — before this, an unparseable delete raised ``PayloadParseError`` before
+    ``get_record_metadata``/``check_posting_invariants`` ever ran, so
+    ``self._last_validation`` stayed ``None`` and the confirmation card's
+    delete branch never received real data (it was dead code).
+
+    What this does NOT achieve — read before assuming a delete is protected:
+    the stand-in has ``fields={}`` and ``lines=[]``, which leaves BOTH
+    posting invariants structurally incapable of firing for a delete.
+    ``_check_period_open`` (``posting_invariants.py``) reads
+    ``payload.fields.get("trandate")``; it is always absent here, so the
+    function returns ``[]`` before it ever attempts the period query.
+    ``_check_balanced`` sums ``payload.lines``; it is always ``[]`` here, so
+    debits and credits are both zero and it reports BALANCED. Concretely: a
+    delete of a journal entry in a closed period is NOT caught today.
+    Resolving the period from the record being deleted (e.g. via
+    ``ns_getRecord`` before the delete) is real work needing live-connector
+    response-shape verification — tracked as ClickUp 86bbk2580, deliberately
+    out of scope here.
+
     Every other mutation type keeps today's fail-closed behavior exactly:
     an unparseable create/update/upsert payload still raises
     ``PayloadParseError``, propagated to the caller unchanged.
