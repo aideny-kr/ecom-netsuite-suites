@@ -117,6 +117,18 @@ describe("WriteConfirmationCard", () => {
     expect(screen.getByRole("button", { name: /approve/i })).toBeDisabled();
     expect(screen.getByRole("button", { name: /reject/i })).toBeDisabled();
   });
+
+  it("shows an in-flight state and hides both buttons when status is executing", () => {
+    // 'executing' is the atomic-claim window (the pending->executing
+    // compare-and-swap won, the write is in flight against NetSuite) — a
+    // card in this state must render as non-actionable: no Approve, no
+    // Reject, just an in-progress treatment.
+    const executing: WriteConfirmationData = { ...baseCreate, status: "executing" };
+    render(<WriteConfirmationCard data={executing} onConfirm={() => {}} onReject={() => {}} />);
+    expect(screen.getByText(/writing to netsuite/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /approve/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /reject/i })).not.toBeInTheDocument();
+  });
 });
 
 // ── Write loop states (Task 9): editable slots, failed, unvalidated,

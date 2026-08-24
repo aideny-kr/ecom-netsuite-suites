@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Plus, Pencil, Trash2, AlertTriangle, Check, X } from "lucide-react";
+import { Plus, Pencil, Trash2, AlertTriangle, Check, X, Loader2 } from "lucide-react";
 import type { WriteConfirmationData, EditableSlot } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -43,6 +43,7 @@ export function WriteConfirmationCard({
 
   const MutationIcon = MUTATION_ICONS[data.mutation_type];
   const isPending = data.status === "pending";
+  const isExecuting = data.status === "executing";
   const isApproved = data.status === "approved";
   const isRejected = data.status === "rejected";
   const isFailed = data.status === "failed";
@@ -115,6 +116,7 @@ export function WriteConfirmationCard({
       className={cn(
         "rounded-xl border p-4 space-y-3 transition-colors",
         isPending && "border-amber-400/60 bg-amber-500/[0.02]",
+        isExecuting && "border-blue-400/60 bg-blue-500/[0.02]",
         isApproved && "border-emerald-500/60 bg-emerald-500/[0.02]",
         isRejected && "border-red-400/60 bg-red-500/[0.02]",
         isFailed && "border-red-400/60 bg-red-500/[0.02]",
@@ -126,11 +128,13 @@ export function WriteConfirmationCard({
           className={cn(
             "flex h-7 w-7 shrink-0 items-center justify-center rounded-lg",
             isPending && "bg-amber-500/10",
+            isExecuting && "bg-blue-500/10",
             isApproved && "bg-emerald-500/10",
             (isRejected || isFailed) && "bg-red-500/10",
           )}
         >
           {isPending && <AlertTriangle className="h-4 w-4 text-amber-500" />}
+          {isExecuting && <Loader2 className="h-4 w-4 animate-spin text-blue-500" />}
           {isApproved && <Check className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />}
           {(isRejected || isFailed) && <X className="h-4 w-4 text-red-500" />}
         </div>
@@ -140,6 +144,7 @@ export function WriteConfirmationCard({
             className={cn(
               "h-3.5 w-3.5",
               isPending && "text-amber-600 dark:text-amber-400",
+              isExecuting && "text-blue-600 dark:text-blue-400",
               isApproved && "text-emerald-600 dark:text-emerald-400",
               (isRejected || isFailed) && "text-red-500",
             )}
@@ -153,6 +158,12 @@ export function WriteConfirmationCard({
         </div>
 
         <div className="ml-auto">
+          {isExecuting && (
+            <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium text-blue-700 bg-blue-500/10 dark:text-blue-400">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              Writing to NetSuite…
+            </span>
+          )}
           {isApproved && (
             <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium text-emerald-700 bg-emerald-500/10 dark:text-emerald-400">
               <Check className="h-3 w-3" />
@@ -258,6 +269,18 @@ export function WriteConfirmationCard({
               onChange={(value) => handleSlotChange(slot.name, value)}
             />
           ))}
+        </div>
+      )}
+
+      {/* In-flight: claim won, write is executing against NetSuite. No
+          Approve/Reject — the claim already took the row past the point
+          where either action makes sense. */}
+      {isExecuting && (
+        <div className="flex items-center gap-2 pt-1">
+          <span className="flex items-center gap-1.5 text-[11px] italic text-muted-foreground">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            This may take a few seconds.
+          </span>
         </div>
       )}
 

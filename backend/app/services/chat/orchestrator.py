@@ -1717,8 +1717,10 @@ async def run_chat_turn(
 
         if _wc_action in ("approve", "reject") and _wc_confirmation_id:
             from sqlalchemy import select as _wc_select
+            from sqlalchemy import update as _wc_update
             from sqlalchemy.orm.attributes import flag_modified as _wc_flag_modified
 
+            from app.core.database import set_tenant_context
             from app.services.chat.write_confirmation_service import (
                 merge_slot_values,
                 mint_confirmation_token,
@@ -1911,6 +1913,60 @@ async def run_chat_turn(
                     # at is worse than the small residual risk. Pinned by
                     # test_infra_failure_during_revalidation_fails_open_and_still_executes.
 
+                # T2 gate finding #9 — atomic claim, compare-and-swap
+                # 'pending' -> 'executing'. Sits after EVERY gate above
+                # (pending-status, HMAC, terminal markers, slot coverage,
+                # post-merge re-validation) and immediately before the
+                # external NetSuite call. Without this, two concurrent
+                # approve requests for the same confirmation_id both read
+                # status='pending' at the top of this block, both pass every
+                # gate above, and both would reach execute_tool_call — the
+                # race window is the NetSuite HTTP call itself (seconds, not
+                # microseconds) — producing a double-posted journal entry or
+                # a duplicate customer deposit. `rowcount == 0` means another
+                # request already won the claim between our read at the top
+                # of this block and here; refuse rather than execute.
+                #
+                # Deliberately NOT a `SELECT ... FOR UPDATE` held across the
+                # write: Supabase enforces a 2-minute statement timeout, and
+                # pinning a connection through a multi-second external call
+                # is how you exhaust the pool. Claim-then-release — commit
+                # the transition, then make the call on a connection
+                # returned to the pool — is the safe shape. Same
+                # compare-and-swap pattern as handle_plan_mode_choice's CAS
+                # in plan_mode/short_circuit.py.
+                _cas_result = await db.execute(
+                    _wc_update(ChatMessage)
+                    .where(
+                        ChatMessage.id == _confirm_msg.id,
+                        ChatMessage.structured_output["status"].astext == "pending",
+                    )
+                    .values(structured_output={**_so, "status": "executing"})
+                )
+                if _cas_result.rowcount == 0:
+                    yield {
+                        "type": "error",
+                        "error": "This confirmation is already being processed by another request.",
+                    }
+                    return
+                await db.commit()
+                # The commit above clears `SET LOCAL app.current_tenant_id`
+                # (transaction-scoped — dies at the first COMMIT, see
+                # set_tenant_context's docstring; bitten twice already in
+                # this repo). Re-establish it before the next statement on
+                # this session: execute_tool_call reads tenant-scoped rows
+                # (e.g. the NetSuite connection record), and the audit log +
+                # final message write below are tenant-scoped writes.
+                await set_tenant_context(db, str(tenant_id))
+
+                # A crash between the claim above and the status write below
+                # (process kill, OOM, deploy) deliberately leaves this row
+                # at status='executing' forever — no automatic recovery.
+                # That is correct, not a bug: we genuinely do not know
+                # whether NetSuite received the write, and guessing (auto-
+                # retry, auto-revert-to-pending) risks a SECOND post for a
+                # write NetSuite already accepted. A human must check the
+                # NetSuite record and resolve it manually.
                 _exec_result_str = await execute_tool_call(
                     tool_name=tool_name,
                     tool_input=tool_input,

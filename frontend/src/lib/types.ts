@@ -881,7 +881,14 @@ export interface WriteConfirmationData {
   unvalidated?: boolean;
   // NetSuite's own rejection message, set only when status is "failed".
   error?: string;
-  status: "pending" | "approved" | "rejected" | "failed";
+  // "executing" — the atomic pending->executing claim (a compare-and-swap
+  // committed before the NetSuite call, so a concurrent second approve of
+  // the same confirmation can't also execute it) won and the write is
+  // in flight. Non-actionable: no Approve/Reject render for it. A row can
+  // be stuck here after a server crash mid-write — see the claim site in
+  // orchestrator.py — which is deliberate: a human resolves it manually
+  // rather than the client guessing at a retry.
+  status: "pending" | "approved" | "rejected" | "failed" | "executing";
 }
 
 // ---------------------------------------------------------------------------

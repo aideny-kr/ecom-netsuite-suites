@@ -7,6 +7,7 @@ the start of run_chat_turn.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
@@ -152,9 +153,29 @@ class _FakeScalarResult:
         return self._msg
 
 
-def _make_db(confirm_msg):
+def _make_db(confirm_msg, cas_rowcount: int = 1):
+    """Build a mock AsyncSession.
+
+    ``db.execute`` branches on statement shape: the approve path's initial
+    SELECT (by confirmation id) returns ``confirm_msg``; the atomic
+    pending->executing CAS claim (an UPDATE) returns ``cas_rowcount`` —
+    defaults to 1 (claim succeeds) so every single-approve test using this
+    helper doesn't need to know the CAS exists. Pass ``cas_rowcount=0`` to
+    simulate "another request already claimed it". A raw ``text()`` call
+    (``set_tenant_context``, re-established right after the CAS commit)
+    falls through to the SELECT-shaped branch — its return value is
+    discarded by the caller, so any harmless object works there too.
+    """
+    from sqlalchemy import Update
+
     db = MagicMock()
-    db.execute = AsyncMock(return_value=_FakeScalarResult(confirm_msg))
+
+    async def _execute(stmt, *args, **kwargs):
+        if isinstance(stmt, Update):
+            return MagicMock(rowcount=cas_rowcount)
+        return _FakeScalarResult(confirm_msg)
+
+    db.execute = _execute
     db.commit = AsyncMock()
     db.refresh = AsyncMock()
     db.add = MagicMock()
@@ -1101,3 +1122,204 @@ class TestPostMergeReValidation:
         mock_execute_tool_call.assert_awaited_once()
         assert not [e for e in events if e.get("type") == "error"]
         assert confirm_msg.structured_output["status"] == "approved"
+
+
+# ---------------------------------------------------------------------------
+# J) Atomic claim — T2 gate finding #9. The old code re-read status='pending'
+# at the top of the write_confirm block and only wrote 'approved'/'failed'
+# AFTER execute_tool_call returned — no row lock, no compare-and-swap. Two
+# concurrent approves of the same confirmation_id both pass every gate (both
+# read 'pending' before either commits) and BOTH would post to NetSuite: a
+# double-posted journal entry or duplicate customer deposit. The fix claims
+# the row (pending -> executing) via an atomic UPDATE ... WHERE status =
+# 'pending', committed BEFORE the external call, immediately before
+# execute_tool_call and after every other gate.
+# ---------------------------------------------------------------------------
+
+
+class TestWriteConfirmAtomicClaim:
+    @pytest.mark.asyncio
+    async def test_concurrent_approves_execute_tool_call_exactly_once(self):
+        """Two requests approving the SAME confirmation, genuinely racing —
+        both pass every gate above (both would read status='pending' before
+        either commits, exactly like two live HTTP requests) — must still
+        result in execute_tool_call being awaited exactly ONCE. That is the
+        property that matters, not merely that one side reports an error: a
+        caller could satisfy 'yields an error' while STILL having executed
+        first. The loser must get a clear error and the row must end in a
+        single coherent terminal state.
+
+        Real concurrency, not a sequential double-call: `execute_tool_call`
+        genuinely suspends (`await asyncio.sleep(0)`) before returning —
+        standing in for the multi-second NetSuite HTTP call that IS the race
+        window in production ("seconds, not microseconds" per the report).
+        Without a genuine suspension SOMEWHERE in this fully-mocked flow,
+        `asyncio.gather` on two mock-backed generators never actually
+        interleaves — nothing else here yields to the event loop — so one
+        drain would run to full completion before the other even started,
+        which would "pass" this test even against the OLD, unfixed code, not
+        because the race is closed but because there was no race to begin
+        with. Putting the suspension inside `execute_tool_call` itself (the
+        one call that's genuinely slow in reality) is what makes the second
+        request reach its OWN claim attempt while the first request's write
+        is still in flight — exactly the reported failure mode.
+        """
+        from sqlalchemy import Update
+
+        from app.services.chat.orchestrator import run_chat_turn
+
+        session_id = uuid.uuid4()
+        tool_name = _ext("ns_createRecord")
+        tool_input = {"recordType": "customer", "data": '{"companyname": "race co"}'}
+        confirm_msg = _make_real_confirmation_msg(session_id, tool_name, tool_input)
+        session = _make_session(session_id=str(session_id))
+
+        # The shared "row" both requests' CAS checks against — analogous to
+        # the one Postgres row two real connections would race on.
+        row_state = {"status": "pending"}
+
+        async def _execute(stmt, *args, **kwargs):
+            if isinstance(stmt, Update):
+                # Single-threaded asyncio makes this check-then-mutate
+                # atomic with respect to the other task — nothing awaits
+                # between reading and writing row_state.
+                if row_state["status"] == "pending":
+                    row_state["status"] = "executing"
+                    return MagicMock(rowcount=1)
+                return MagicMock(rowcount=0)
+            # The initial SELECT, and a text() call (set_tenant_context,
+            # re-established after the claim commit — its return value is
+            # discarded by the caller).
+            return _FakeScalarResult(confirm_msg)
+
+        def _make_racy_db():
+            db = MagicMock()
+            db.execute = _execute
+            db.commit = AsyncMock()
+            db.refresh = AsyncMock()
+            db.add = MagicMock()
+            return db
+
+        # Two separate mock sessions — two separate requests would hold two
+        # separate DB connections in reality — wired to the SAME row_state
+        # so the race is real, not simulated by sharing one mock.
+        db_a = _make_racy_db()
+        db_b = _make_racy_db()
+
+        async def _racy_execute_tool_call(**kwargs):
+            await asyncio.sleep(0)  # the multi-second NetSuite call, standing in
+            return json.dumps({"id": "999", "success": True})
+
+        mock_execute_tool_call = AsyncMock(side_effect=_racy_execute_tool_call)
+        mock_log_event = AsyncMock(return_value=None)
+
+        async def _drain(db):
+            return [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="approve",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={"action": "approve", "confirmation_id": str(confirm_msg.id)},
+                )
+            ]
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", mock_log_event),
+        ):
+            events_a, events_b = await asyncio.gather(_drain(db_a), _drain(db_b))
+
+        # The property that matters — not "an error was yielded somewhere".
+        mock_execute_tool_call.assert_awaited_once()
+
+        all_events = events_a + events_b
+        error_events = [e for e in all_events if e.get("type") == "error"]
+        message_events = [e for e in all_events if e.get("type") == "message"]
+        assert len(error_events) == 1, f"expected exactly one refusal, got {error_events}"
+        assert "already being processed" in error_events[0]["error"].lower()
+        assert len(message_events) == 1, f"expected exactly one success message, got {message_events}"
+
+        # The row ends in ONE coherent terminal state — approved, from the
+        # winner's execute_tool_call succeeding. Never stuck at 'executing'
+        # (that only happens on a genuine crash between claim and write —
+        # see the comment at the claim site) and never double-applied.
+        assert confirm_msg.structured_output["status"] == "approved"
+
+    @pytest.mark.asyncio
+    async def test_approve_against_executing_row_is_refused(self):
+        """A confirmation already claimed (status='executing' — e.g. the
+        winner of a prior race, still mid-flight against NetSuite) must be
+        refused by the same pending-only gate that already blocks 'approved'
+        / 'failed' / 'rejected' — 'executing' is just one more status that
+        isn't 'pending'."""
+        from app.services.chat.orchestrator import run_chat_turn
+
+        session_id = uuid.uuid4()
+        tool_name = _ext("ns_createRecord")
+        tool_input = {"recordType": "customer", "data": '{"companyname": "test ai customer"}'}
+        confirm_msg = _make_real_confirmation_msg(session_id, tool_name, tool_input, status="executing")
+        db = _make_db(confirm_msg)
+        session = _make_session(session_id=str(session_id))
+
+        mock_execute_tool_call = AsyncMock()
+
+        with patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call):
+            events = [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="approve",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={"action": "approve", "confirmation_id": str(confirm_msg.id)},
+                )
+            ]
+
+        mock_execute_tool_call.assert_not_awaited()
+        error_events = [e for e in events if e.get("type") == "error"]
+        assert error_events
+        assert "not in a pending state" in error_events[0]["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_claim_loses_yields_clear_error_without_executing(self):
+        """Unit-level mirror of the concurrent test above, at the CAS
+        boundary itself: when the UPDATE ... WHERE status='pending' returns
+        rowcount=0 (another request already won), this request must refuse
+        cleanly — never call execute_tool_call, never touch the stored
+        status itself (the winner owns that transition)."""
+        from app.services.chat.orchestrator import run_chat_turn
+
+        session_id = uuid.uuid4()
+        tool_name = _ext("ns_createRecord")
+        tool_input = {"recordType": "customer", "data": '{"companyname": "clean co"}'}
+        confirm_msg = _make_real_confirmation_msg(session_id, tool_name, tool_input)
+        db = _make_db(confirm_msg, cas_rowcount=0)
+        session = _make_session(session_id=str(session_id))
+
+        mock_execute_tool_call = AsyncMock()
+        mock_log_event = AsyncMock(return_value=None)
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", mock_log_event),
+        ):
+            events = [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="approve",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={"action": "approve", "confirmation_id": str(confirm_msg.id)},
+                )
+            ]
+
+        mock_execute_tool_call.assert_not_awaited()
+        error_events = [e for e in events if e.get("type") == "error"]
+        assert error_events
+        assert "already being processed" in error_events[0]["error"].lower()

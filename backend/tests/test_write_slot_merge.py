@@ -472,8 +472,26 @@ def _make_confirm_message(structured_output: dict) -> ChatMessage:
 
 
 def _make_db(confirm_msg: ChatMessage) -> MagicMock:
+    """The approve path's initial SELECT (by confirmation id) returns
+    ``confirm_msg``. The atomic pending->executing CAS claim (an UPDATE,
+    inserted right before ``execute_tool_call`` — see
+    ``orchestrator.py``'s write_confirm approve branch) returns
+    ``rowcount=1`` (claim succeeds) so every test in this file that reaches
+    that far doesn't need to know the CAS exists. A raw ``text()`` call
+    (``set_tenant_context``, re-established right after the claim commit)
+    falls through to the SELECT-shaped branch too — its return value is
+    discarded by the caller.
+    """
+    from sqlalchemy import Update
+
     db = MagicMock()
-    db.execute = AsyncMock(return_value=_FakeResult(confirm_msg))
+
+    async def _execute(stmt, *args, **kwargs):
+        if isinstance(stmt, Update):
+            return MagicMock(rowcount=1)
+        return _FakeResult(confirm_msg)
+
+    db.execute = _execute
     db.commit = AsyncMock()
     db.refresh = AsyncMock()
     db.add = MagicMock()

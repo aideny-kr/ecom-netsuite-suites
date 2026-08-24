@@ -47,7 +47,7 @@ class WriteConfirmationPayload(BaseModel):
     tool_name: str
     tool_input: dict[str, Any]
     confirmation_token: str
-    status: Literal["pending", "approved", "rejected", "failed"] = "pending"
+    status: Literal["pending", "approved", "rejected", "failed", "executing"] = "pending"
     editable_slots: list[EditableSlot] = []
     unvalidated: bool = False
     # Missing *line*-level required fields have no slot to fill (line-level
