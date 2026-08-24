@@ -21,7 +21,7 @@ def test_first_failure_requests_repair():
     state = WriteRepairState(max_attempts=2)
     result = ValidationResult(ok=False, missing_required=["subsidiary"])
     assert state.should_repair("customer", result) is True
-    assert state.exit_reason is None
+    assert state.exit_reason_for("customer") is None
 
 
 def test_identical_failure_twice_exits_stall():
@@ -31,7 +31,7 @@ def test_identical_failure_twice_exits_stall():
     result = ValidationResult(ok=False, missing_required=["subsidiary"])
     state.should_repair("customer", result)
     assert state.should_repair("customer", result) is False
-    assert state.exit_reason == "stall"
+    assert state.exit_reason_for("customer") == "stall"
 
 
 def test_budget_exhausts_after_max_attempts():
@@ -41,7 +41,7 @@ def test_budget_exhausts_after_max_attempts():
     state.should_repair("customer", ValidationResult(ok=False, missing_required=["a"]))
     state.should_repair("customer", ValidationResult(ok=False, missing_required=["b"]))
     assert state.should_repair("customer", ValidationResult(ok=False, missing_required=["c"])) is False
-    assert state.exit_reason == "budget"
+    assert state.exit_reason_for("customer") == "budget"
 
 
 def test_success_records_done():
@@ -50,7 +50,7 @@ def test_success_records_done():
     state = WriteRepairState(max_attempts=2)
     state.should_repair("customer", ValidationResult(ok=False, missing_required=["a"]))
     assert state.should_repair("customer", ValidationResult(ok=True)) is False
-    assert state.exit_reason == "done"
+    assert state.exit_reason_for("customer") == "done"
 
 
 def test_state_is_per_record_type():
@@ -260,7 +260,7 @@ async def test_repair_loop_feeds_error_back_without_crashing_the_stream():
 
     # The repair budget was consumed (attempt 1 of 2) but the loop has not
     # exited terminally — it fed the error back and let the model retry.
-    assert agent._write_repair.exit_reason is None
+    assert agent._write_repair.exit_reason_for("customer") is None
 
     # _last_validation is only stashed on the fall-through path (Task 7's
     # consumer); the repair `continue` must skip it for a rejected payload.
@@ -347,7 +347,7 @@ async def test_persisted_log_flags_a_card_shown_after_repair_is_exhausted():
             events.append((event_type, payload))
 
     # Precondition: repair really did exhaust via "stall", not "done".
-    assert agent._write_repair.exit_reason == "stall"
+    assert agent._write_repair.exit_reason_for("customer") == "stall"
     assert agent._last_validation is not None
     assert agent._last_validation.ok is False
 

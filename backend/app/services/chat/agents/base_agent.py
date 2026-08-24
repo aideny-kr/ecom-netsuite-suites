@@ -57,6 +57,11 @@ class WriteRepairState:
     detection within a still-open cycle: the fingerprint comparison that
     detects a stall runs earlier in the same call, against the fingerprint
     left by the PREVIOUS call in that same cycle, before any reset happens.
+
+    Exit reasons are ALSO keyed by record_type (`exit_reason_for`) rather
+    than living on one instance-wide field — a turn that repairs record_type
+    A and then touches record_type B must never let A's exit reason read
+    through as B's.
     """
 
     def __init__(self, max_attempts: int = 2) -> None:
@@ -64,14 +69,6 @@ class WriteRepairState:
         self._attempts: dict[str, int] = {}
         self._fingerprints: dict[str, str] = {}
         self._exit_reasons: dict[str, str | None] = {}
-        # Legacy single-value mirror of the last exit reason set by ANY
-        # record_type's should_repair() call. Nothing in production reads
-        # this field today (only tests predating per-record-type scoping);
-        # it goes stale in exactly the way this class now fixes for
-        # exit_reason_for() — a stall on record type A reads through while
-        # record type B is still mid-repair. New callers MUST use
-        # exit_reason_for(record_type), never this field.
-        self.exit_reason: str | None = None
 
     def should_repair(self, record_type: str, result: ValidationResult) -> bool:
         if result.ok:
@@ -99,7 +96,6 @@ class WriteRepairState:
         type starts fresh instead of inheriting this cycle's exhausted
         budget (the reported bug)."""
         self._exit_reasons[record_type] = reason
-        self.exit_reason = reason
         self._attempts.pop(record_type, None)
         self._fingerprints.pop(record_type, None)
 
@@ -108,8 +104,7 @@ class WriteRepairState:
 
         `None` covers both "never seen" and "mid-cycle, still repairing".
         Scoped per record_type so a caller checking record type B's outcome
-        never sees record type A's stale reason — unlike the flat
-        `.exit_reason` attribute, which is shared across every call."""
+        never reads record type A's exit reason."""
         return self._exit_reasons.get(record_type)
 
 
