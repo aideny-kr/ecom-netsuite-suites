@@ -1,12 +1,13 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { render, screen, fireEvent } from "@testing-library/react";
+import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { McpConnector } from "@/lib/types";
 
 const mocks = vi.hoisted(() => ({
   connections: vi.fn(),
   mcpConnectors: vi.fn(),
   health: vi.fn(),
+  updateMcpClientId: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-connection-health", () => ({
@@ -27,7 +28,7 @@ vi.mock("@/hooks/use-mcp-connectors", () => ({
   useDeleteMcpConnector: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useReauthorizeMcpConnector: () => ({ mutateAsync: vi.fn(), isPending: false }),
   useTestMcpConnector: () => ({ mutateAsync: vi.fn(), isPending: false }),
-  useUpdateMcpClientId: () => ({ mutate: vi.fn(), isPending: false }),
+  useUpdateMcpClientId: () => ({ mutate: mocks.updateMcpClientId, isPending: false }),
 }));
 
 // Real usePermissions() pulls from useAuth(); short-circuit with the shape the
@@ -69,6 +70,10 @@ function mcpConnector(overrides: Partial<McpConnector>): McpConnector {
 }
 
 describe("NetSuiteConnectionsSection — MCP connector filtering", () => {
+  beforeEach(() => {
+    mocks.updateMcpClientId.mockClear();
+  });
+
   it("excludes a celigo_mcp connector from the MCP Tool Connections list and never selects it as active", async () => {
     mocks.connections.mockReturnValue([]);
     mocks.health.mockReturnValue(undefined);
@@ -119,5 +124,76 @@ describe("NetSuiteConnectionsSection — MCP connector filtering", () => {
     wrap(<NetSuiteConnectionsSection />);
 
     expect(screen.getByText("NetSuite MCP")).toBeInTheDocument();
+  });
+
+  it("still shows shopify_mcp and stripe_mcp rows with their Test/Reauthorize/Delete controls -- this is their only UI", async () => {
+    // MAJOR 1 fix history: the allowlist that previously fixed the celigo leak
+    // (provider === "netsuite_mcp") also hid shopify_mcp/stripe_mcp entirely.
+    // add-mcp-connector-dialog.tsx is never mounted and ConnectionStatusSection
+    // is read-only, so this section is the ONLY place either provider can be
+    // tested, reauthorized, or deleted -- losing this row is a real regression,
+    // not a cosmetic one.
+    mocks.connections.mockReturnValue([]);
+    mocks.health.mockReturnValue(undefined);
+    mocks.mcpConnectors.mockReturnValue([
+      mcpConnector({ id: "ns-1", provider: "netsuite_mcp", label: "NetSuite MCP" }),
+      mcpConnector({ id: "shopify-1", provider: "shopify_mcp", label: "Shopify MCP", auth_type: "api_key" }),
+      mcpConnector({ id: "stripe-1", provider: "stripe_mcp", label: "Stripe MCP", auth_type: "api_key" }),
+    ]);
+
+    const { NetSuiteConnectionsSection } = await import("../netsuite-connections-section");
+    wrap(<NetSuiteConnectionsSection />);
+
+    expect(screen.getByText("NetSuite MCP")).toBeInTheDocument();
+    expect(screen.getByText("Shopify MCP")).toBeInTheDocument();
+    expect(screen.getByText("Stripe MCP")).toBeInTheDocument();
+  });
+
+  it("never sends a NetSuite Client ID PATCH to a celigo_mcp row, even when Celigo is the newest connector", async () => {
+    // The real defect MAJOR 1 identifies: activeMcp feeds the "Client ID" PATCH.
+    // Proving the row is hidden (test above) is not enough on its own -- this
+    // proves the PATCH itself is scoped to netsuite_mcp regardless of what else
+    // is present or how mcpConns is filtered.
+    mocks.connections.mockReturnValue([]);
+    mocks.health.mockReturnValue(undefined);
+    mocks.mcpConnectors.mockReturnValue([
+      mcpConnector({
+        id: "celigo-1",
+        provider: "celigo_mcp",
+        label: "Celigo (agent access)",
+        auth_type: "bearer",
+        created_at: "2026-03-01T00:00:00Z",
+        metadata_json: { client_id: "celigo-should-not-receive-this" },
+      }),
+      mcpConnector({
+        id: "shopify-1",
+        provider: "shopify_mcp",
+        label: "Shopify MCP",
+        auth_type: "api_key",
+        created_at: "2026-02-01T00:00:00Z",
+        metadata_json: { client_id: "shopify-should-not-receive-this" },
+      }),
+      mcpConnector({
+        id: "ns-1",
+        provider: "netsuite_mcp",
+        label: "NetSuite MCP",
+        created_at: "2026-01-01T00:00:00Z",
+        metadata_json: { client_id: "ns-real-client-id" },
+      }),
+    ]);
+
+    const { NetSuiteConnectionsSection } = await import("../netsuite-connections-section");
+    wrap(<NetSuiteConnectionsSection />);
+
+    fireEvent.click(screen.getByRole("button", { name: /edit/i }));
+    const input = screen.getByDisplayValue("ns-real-client-id");
+    fireEvent.change(input, { target: { value: "new-ns-client-id" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(mocks.updateMcpClientId).toHaveBeenCalledTimes(1);
+    expect(mocks.updateMcpClientId.mock.calls[0][0]).toEqual({
+      id: "ns-1",
+      client_id: "new-ns-client-id",
+    });
   });
 });

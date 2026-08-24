@@ -384,20 +384,30 @@ export function NetSuiteConnectionsSection() {
   const oauthConns = (connections ?? []).filter(
     (c) => c.provider === "netsuite" && c.status !== "revoked",
   );
-  // Allowlist, not denylist: this section is NetSuite-only UI (Reauthorize
-  // fires an OAuth popup against a bearer connector, "Client ID" PATCHes
-  // credentials, Delete hard-revokes). A denylist ("not bigquery") already
-  // let a second non-NetSuite provider (celigo_mcp) through once -- for a
-  // tenant that connected Celigo after NetSuite, `.find(active) ?? [0]` then
-  // picked the Celigo row as `activeMcp`, so editing "Client ID" here wrote
-  // to Celigo's credentials while showing "MCP Client ID updated".
+  // Denylist, not allowlist: Test/Reauthorize/Delete for shopify_mcp and
+  // stripe_mcp live ONLY here -- there is no add-mcp-connector-dialog mount
+  // point and ConnectionStatusSection is read-only status with no controls.
+  // Excluded are bigquery and celigo_mcp, which each already have their own
+  // dedicated card elsewhere (the table selector; CeligoConnectorCard) -- an
+  // allowlist ("netsuite_mcp" only) previously over-corrected the activeMcp
+  // bug below by also hiding shopify_mcp/stripe_mcp's only UI. Don't repeat
+  // that: broaden display here, and narrow only what actually needs it.
   const mcpConns = (mcpConnectors ?? []).filter(
-    (c) => c.status !== "revoked" && c.provider === "netsuite_mcp",
+    (c) => c.status !== "revoked" && c.provider !== "bigquery" && c.provider !== "celigo_mcp",
   );
+  // NetSuite-specific actions (the "Client ID" PATCH below) must never target
+  // a non-NetSuite row just because it's present in the broader mcpConns list
+  // above -- narrow explicitly to netsuite_mcp here rather than assuming
+  // mcpConns is already NetSuite-only. The API orders by created_at DESC, so
+  // a tenant that connected e.g. Celigo or Shopify AFTER NetSuite would
+  // otherwise have `.find(active) ?? [0]` pick that row as `activeMcp`,
+  // silently PATCHing the wrong connector's credentials while showing
+  // "MCP Client ID updated".
+  const netsuiteMcpConns = mcpConns.filter((c) => c.provider === "netsuite_mcp");
 
   // Derive client IDs and restlet URL from first active connection metadata
   const activeOAuth = oauthConns.find((c) => c.status === "active") ?? oauthConns[0];
-  const activeMcp = mcpConns.find((c) => c.status === "active") ?? mcpConns[0];
+  const activeMcp = netsuiteMcpConns.find((c) => c.status === "active") ?? netsuiteMcpConns[0];
 
   // Get Client IDs and RESTlet URL from health data (decrypted on server)
   const oauthHealthItem = health?.connections.find((h) => h.id === activeOAuth?.id);
