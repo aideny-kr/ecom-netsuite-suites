@@ -16,7 +16,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db, set_tenant_context
-from app.core.dependencies import require_any_permission, require_permission
+from app.core.dependencies import require_any_permission, require_feature, require_permission
 from app.core.encryption import decrypt_credentials, encrypt_credentials, get_current_key_version
 from app.models.canonical import NetsuitePosting, Payout, PayoutLine
 from app.models.connection import Connection
@@ -630,6 +630,7 @@ async def _upsert_celigo_mcp_connector(
 @router.get("/celigo", response_model=CeligoStatusResponse)
 async def get_celigo_status(
     user: Annotated[User, Depends(require_permission("connections.view"))],
+    _flag: Annotated[User, Depends(require_feature("celigo"))],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Get Celigo connector status."""
@@ -653,6 +654,7 @@ async def get_celigo_status(
 async def test_celigo_connection(
     request: CeligoTestRequest,
     user: Annotated[User, Depends(require_permission("connections.manage"))],
+    _flag: Annotated[User, Depends(require_feature("celigo"))],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Validate a Celigo token without persisting it."""
@@ -670,6 +672,7 @@ async def test_celigo_connection(
 async def connect_celigo(
     request: CeligoConnectRequest,
     user: Annotated[User, Depends(require_permission("connections.manage"))],
+    _flag: Annotated[User, Depends(require_feature("celigo"))],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Create (or reactivate) a Celigo connection.
@@ -810,6 +813,7 @@ async def connect_celigo(
 @router.delete("/celigo", status_code=status.HTTP_204_NO_CONTENT)
 async def disconnect_celigo(
     user: Annotated[User, Depends(require_permission("connections.manage"))],
+    _flag: Annotated[User, Depends(require_feature("celigo"))],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Soft-delete the Celigo connection (matches connections.py's convention).

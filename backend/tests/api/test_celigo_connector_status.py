@@ -8,8 +8,76 @@ session fixture is plain ``db`` (see ``tests/conftest.py``).
 """
 
 import httpx
+import pytest
 
 from app.services.celigo.client import CeligoAuthError, CeligoError
+from tests.conftest import enable_feature_flag
+
+
+@pytest.fixture(autouse=True)
+async def _celigo_flag_enabled(db, admin_user):
+    """MAJOR 4 (T2 gate on PR #202): all four Celigo endpoints below are now
+    gated on the `celigo` feature flag (default OFF). Enable it here for
+    every test in this file so the rest of the suite continues to exercise
+    normal (flag-on) behavior; TestCeligoFeatureFlag below explicitly turns
+    it back off to prove the 403 path."""
+    user, _ = admin_user
+    await enable_feature_flag(db, user.tenant_id, "celigo")
+
+
+class TestCeligoFeatureFlag:
+    """The flag is the kill switch for the whole Celigo surface -- a
+    default-off flag that leaves the API live for every tenant is not one."""
+
+    async def test_status_403_when_flag_disabled(self, client, admin_user, db):
+        user, headers = admin_user
+        await enable_feature_flag(db, user.tenant_id, "celigo", enabled=False)
+
+        r = await client.get("/api/v1/connector-status/celigo", headers=headers)
+        assert r.status_code == 403
+
+    async def test_test_endpoint_403_when_flag_disabled(self, client, admin_user, db):
+        user, headers = admin_user
+        await enable_feature_flag(db, user.tenant_id, "celigo", enabled=False)
+
+        r = await client.post(
+            "/api/v1/connector-status/celigo/test",
+            headers=headers,
+            json={"token": "tok", "region": "us"},
+        )
+        assert r.status_code == 403
+
+    async def test_connect_403_when_flag_disabled(self, client, admin_user, db):
+        user, headers = admin_user
+        await enable_feature_flag(db, user.tenant_id, "celigo", enabled=False)
+
+        r = await client.post(
+            "/api/v1/connector-status/celigo/connect",
+            headers=headers,
+            json={"token": "tok", "region": "us", "label": "x"},
+        )
+        assert r.status_code == 403
+
+        from sqlalchemy import select
+
+        from app.models.connection import Connection
+
+        row = (
+            await db.execute(
+                select(Connection).where(
+                    Connection.tenant_id == user.tenant_id,
+                    Connection.provider == "celigo",
+                )
+            )
+        ).scalar_one_or_none()
+        assert row is None, "a disabled flag must never allow a connection row to be created"
+
+    async def test_disconnect_403_when_flag_disabled(self, client, admin_user, db):
+        user, headers = admin_user
+        await enable_feature_flag(db, user.tenant_id, "celigo", enabled=False)
+
+        r = await client.delete("/api/v1/connector-status/celigo", headers=headers)
+        assert r.status_code == 403
 
 
 class TestCeligoStatus:
