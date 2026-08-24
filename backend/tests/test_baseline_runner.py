@@ -24,6 +24,21 @@ from app.services.benchmarks.baseline_runner import (
 # ---------------------------------------------------------------------------
 
 
+def _ns_tool_defs():
+    """A realistic non-empty Oracle MCP tool list.
+
+    run_baseline now fails closed on an empty tool list, so tests that
+    exercise the loop must hand it real tool definitions.
+    """
+    return [
+        {
+            "name": "ext__abc__ns_runCustomSuiteQL",
+            "description": "Run a SuiteQL query",
+            "input_schema": {"type": "object", "properties": {}},
+        }
+    ]
+
+
 def _make_text_block(text: str):
     block = MagicMock()
     block.type = "text"
@@ -137,7 +152,7 @@ class TestRunBaselineHappyPath:
         with (
             patch(
                 "app.services.benchmarks.baseline_runner._build_baseline_tools",
-                new=AsyncMock(return_value=[]),
+                new=AsyncMock(return_value=_ns_tool_defs()),
             ),
             patch("app.services.benchmarks.baseline_runner._get_anthropic_client") as mock_get_client,
         ):
@@ -355,7 +370,7 @@ class TestRunBaselineApiError:
         with (
             patch(
                 "app.services.benchmarks.baseline_runner._build_baseline_tools",
-                new=AsyncMock(return_value=[]),
+                new=AsyncMock(return_value=_ns_tool_defs()),
             ),
             patch("app.services.benchmarks.baseline_runner._get_anthropic_client") as mock_get_client,
         ):
@@ -374,3 +389,95 @@ class TestRunBaselineApiError:
         assert "rate_limit_error" in result.error
         # No retries
         assert mock_create.await_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Tool discovery — the baseline is worthless without Oracle's MCP tools
+# ---------------------------------------------------------------------------
+
+
+def _fake_connector(provider: str, tool_names: list[str]):
+    """Minimal stand-in for an McpConnector row."""
+    conn = MagicMock()
+    conn.id = uuid.uuid5(uuid.NAMESPACE_DNS, provider)
+    conn.provider = provider
+    conn.discovered_tools = [
+        {"name": n, "description": f"{n} description", "input_schema": {"type": "object", "properties": {}}}
+        for n in tool_names
+    ]
+    return conn
+
+
+class TestBuildBaselineTools:
+    """`mcp_connectors.provider` for NetSuite MCP is `netsuite_mcp`, never `netsuite`.
+
+    A filter that misses it hands Claude ZERO tools, and Claude then
+    role-plays `<tool_call>` XML in plain text — the benchmark scores a
+    hallucination instead of the real Claude+MCP baseline.
+    """
+
+    @pytest.mark.asyncio
+    async def test_selects_netsuite_mcp_connector(self, fake_db, tenant_id):
+        from app.services.benchmarks.baseline_runner import _build_baseline_tools
+
+        connectors = [
+            _fake_connector("bigquery", ["bq_query"]),
+            _fake_connector("netsuite_mcp", ["ns_runCustomSuiteQL", "ns_getSuiteQLMetadata"]),
+            _fake_connector("google_sheets", ["sheets_append"]),
+        ]
+
+        with patch(
+            "app.services.mcp_connector_service.get_active_connectors_for_tenant",
+            new=AsyncMock(return_value=connectors),
+        ):
+            tools = await _build_baseline_tools(fake_db, tenant_id)
+
+        names = [t["name"] for t in tools]
+        assert len(tools) == 2, f"expected the 2 NetSuite MCP tools, got {names}"
+        assert all("ns_" in n for n in names), names
+        # Non-NetSuite providers stay out — the baseline is Claude + NetSuite MCP only.
+        assert not any("bq_query" in n or "sheets_append" in n for n in names), names
+
+    @pytest.mark.asyncio
+    async def test_no_netsuite_connector_yields_no_tools(self, fake_db, tenant_id):
+        from app.services.benchmarks.baseline_runner import _build_baseline_tools
+
+        with patch(
+            "app.services.mcp_connector_service.get_active_connectors_for_tenant",
+            new=AsyncMock(return_value=[_fake_connector("bigquery", ["bq_query"])]),
+        ):
+            tools = await _build_baseline_tools(fake_db, tenant_id)
+
+        assert tools == []
+
+
+class TestBaselineFailsClosedWithoutTools:
+    """No tools => no baseline. Fail loudly instead of scoring a hallucination."""
+
+    @pytest.mark.asyncio
+    async def test_empty_tool_list_is_a_hard_failure(self, fake_db, tenant_id):
+        mock_create = AsyncMock(return_value=_make_response([_make_text_block("I'll explore the tables.")]))
+
+        with (
+            patch(
+                "app.services.benchmarks.baseline_runner._build_baseline_tools",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch("app.services.benchmarks.baseline_runner._get_anthropic_client") as mock_get_client,
+        ):
+            mock_client = MagicMock()
+            mock_client.messages.create = mock_create
+            mock_get_client.return_value = mock_client
+
+            result = await run_baseline(
+                tenant_id=tenant_id,
+                question="How much did we sell today?",
+                db=fake_db,
+            )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "no_mcp_tools" in result.error
+        # The model must never be called without tools — that is what produced
+        # the fake `<tool_call>` transcripts.
+        assert mock_create.await_count == 0
