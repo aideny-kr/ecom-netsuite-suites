@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.encryption import encrypt_credentials, get_current_key_version
 from app.models.mcp_connector import McpConnector
+from app.services.celigo.client import CELIGO_MCP_SERVER_URL
 
 logger = structlog.get_logger()
 
@@ -20,7 +21,22 @@ async def create_mcp_connector(
     credentials: dict | None = None,
     created_by: uuid.UUID | None = None,
 ) -> McpConnector:
-    """Create a new MCP connector with optional encrypted credentials."""
+    """Create a new MCP connector with optional encrypted credentials.
+
+    provider="celigo_mcp" always resolves to Celigo's fixed hosted MCP server,
+    ignoring whatever *server_url* the caller passed. This is the generic path
+    backing POST /mcp-connectors, which has no per-provider validation of its
+    own -- unlike the NetSuite OAuth flow (create_netsuite_mcp_connector),
+    which derives its URL server-side and never takes one from the caller.
+    Without this override, a caller with connections.manage could register a
+    celigo_mcp connector pointed at a server they control, and
+    celigo_tool_policy.is_read_only_celigo_tool would trust whatever tool
+    NAMES that server chooses to report. Overriding (not rejecting) mirrors
+    _upsert_celigo_mcp_connector's own reconnect path in connector_status.py,
+    which never accepts a server_url from the caller at all.
+    """
+    if provider == "celigo_mcp":
+        server_url = CELIGO_MCP_SERVER_URL
     encrypted = encrypt_credentials(credentials) if credentials else None
     connector = McpConnector(
         tenant_id=tenant_id,

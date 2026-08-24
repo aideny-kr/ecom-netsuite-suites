@@ -21,6 +21,12 @@ CELIGO_BASE_URLS: dict[str, str] = {
     "eu": "https://api.eu.integrator.io",
 }
 
+# Celigo's hosted MCP server -- a fixed URL, not tenant-configurable (Plan A).
+# Lives here (not in connector_status.py, its original home) so
+# mcp_connector_service.create_mcp_connector can import it without a circular
+# import (connector_status.py already imports mcp_connector_service).
+CELIGO_MCP_SERVER_URL = "https://api.integrator.io/celigo-mcp"
+
 _TIMEOUT = httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=30.0)
 
 

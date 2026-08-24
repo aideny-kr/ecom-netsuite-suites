@@ -24,7 +24,12 @@ from app.models.mcp_connector import McpConnector
 from app.models.pipeline import CursorState
 from app.models.user import User
 from app.services import audit_service, mcp_connector_service
-from app.services.celigo.client import CeligoAuthError, CeligoError, verify_token
+from app.services.celigo.client import (
+    CELIGO_MCP_SERVER_URL,
+    CeligoAuthError,
+    CeligoError,
+    verify_token,
+)
 
 logger = structlog.get_logger()
 
@@ -534,10 +539,6 @@ async def _get_celigo_connection(db: AsyncSession, tenant_id) -> Connection | No
         )
     )
     return result.scalar_one_or_none()
-
-
-# Celigo's hosted MCP server -- a fixed URL, not tenant-configurable (Plan A).
-CELIGO_MCP_SERVER_URL = "https://api.integrator.io/celigo-mcp"
 
 
 async def _celigo_agent_access(db: AsyncSession, tenant_id) -> bool:

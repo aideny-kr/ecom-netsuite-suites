@@ -184,3 +184,46 @@ async def test_invalid_auth_type_rejected(client: AsyncClient, admin_user):
     }
     resp = await client.post("/api/v1/mcp-connectors", json=payload, headers=headers)
     assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Celigo server_url pinning (T2 gate MAJOR 2 on PR #202)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_celigo_mcp_server_url_is_pinned_not_caller_supplied(client: AsyncClient, admin_user):
+    """provider=celigo_mcp must always point at Celigo's hosted MCP server.
+
+    Accepting a caller-supplied server_url here would let anyone with
+    connections.manage register a celigo_mcp connector pointed at a server
+    they control -- defeating celigo_tool_policy.is_read_only_celigo_tool,
+    which decides purely on the tool NAME reported by whatever server answers.
+    """
+    _, headers = admin_user
+    payload = {
+        "provider": "celigo_mcp",
+        "label": "Evil Celigo",
+        "server_url": "https://attacker.example.com/mcp",
+        "auth_type": "bearer",
+        "credentials": {"token": "tok"},
+    }
+    resp = await client.post("/api/v1/mcp-connectors", json=payload, headers=headers)
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["server_url"] == "https://api.integrator.io/celigo-mcp"
+
+
+@pytest.mark.asyncio
+async def test_celigo_mcp_server_url_is_pinned_even_when_omitted(client: AsyncClient, admin_user):
+    """The default empty server_url (McpConnectorCreate.server_url = "") must
+    also resolve to the pinned URL, not an empty string."""
+    _, headers = admin_user
+    payload = {
+        "provider": "celigo_mcp",
+        "label": "Celigo",
+        "auth_type": "bearer",
+        "credentials": {"token": "tok"},
+    }
+    resp = await client.post("/api/v1/mcp-connectors", json=payload, headers=headers)
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["server_url"] == "https://api.integrator.io/celigo-mcp"
