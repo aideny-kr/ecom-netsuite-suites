@@ -158,6 +158,25 @@ class TestValidateMutationWiring:
             )
 
     @pytest.mark.asyncio
+    async def test_create_with_dual_key_payload_raises(self):
+        """T2 gate Finding B: validate_mutation routes through
+        normalize_for_validation -> normalize_write_payload, which now
+        raises PayloadParseError when more than one payload key coerces —
+        exactly the same fail-closed contract as an unparseable payload."""
+        with pytest.raises(PayloadParseError):
+            await validate_mutation(
+                tool_name=_ext("ns_createRecord"),
+                tool_input={"recordType": "customer", "data": {}, "body": {"companyname": "Acme"}},
+                mutation_type="create",
+                record_type="customer",
+                tenant_id=uuid.uuid4(),
+                actor_id=uuid.uuid4(),
+                correlation_id="c",
+                db=None,
+                session_id="s",
+            )
+
+    @pytest.mark.asyncio
     async def test_delete_mocked_invariant_violation_reaches_validation_result(self):
         """Proves the PLUMBING only: check_posting_invariants is mocked here
         to return a violation, and that value is carried through
@@ -451,3 +470,55 @@ class TestDeleteInvariantGapIsPinned:
 
         assert errors == []
         assert calls == [], "the period query must never even be attempted for a delete today (86bbk2580)"
+
+
+# ---------------------------------------------------------------------------
+# T2 gate Finding B, blast-radius site 2 — a hallucinated dual-key payload
+# hitting the mutation intercept for the FIRST time (agent's own proposal,
+# not yet a confirmation card) must be absorbed by the designed error path:
+# fed back to the model as a structured tool_result for the bounded
+# write-repair loop, never surfaced as a confirmation_required card the
+# human would have to judge. Drives the REAL run_streaming loop (same
+# harness as the delete tests above), not a unit test on normalize_write_payload
+# in isolation.
+# ---------------------------------------------------------------------------
+
+
+class TestMutationInterceptDualKeyPayloadFeedsRepairNotCard:
+    @pytest.mark.asyncio
+    async def test_dual_key_payload_feeds_repair_not_card(self):
+        metadata_spy = AsyncMock(return_value=None)
+        invariants_spy = AsyncMock(return_value=[])
+
+        agent, events = await _drive_delete_turn(
+            _ext("ns_createRecord"),
+            {"recordType": "customer", "data": {"companyname": "A"}, "body": {"companyname": "B"}},
+            metadata_spy,
+            invariants_spy,
+        )
+
+        # validate_mutation raises before ever reaching metadata/invariants —
+        # this must never be treated as "requirements unknown, ask NetSuite".
+        metadata_spy.assert_not_awaited()
+        invariants_spy.assert_not_awaited()
+
+        # Never a confirmation card — the human must not be shown an
+        # ambiguous payload the system itself cannot render faithfully.
+        confirmations = [p for t, p in events if t == "confirmation_required"]
+        assert confirmations == []
+
+        # A tool_end that reports failure, so the persisted trail and the
+        # streamed UI both see this as a failed tool call, not a silent
+        # no-op.
+        tool_ends = [p for t, p in events if t == "tool_end"]
+        assert tool_ends
+        assert tool_ends[-1]["success"] is False
+
+        # The model gets a structured error it can read and self-correct
+        # from within the same turn — never a raw exception, never silence.
+        responses_events = [p for t, p in events if t == "response"]
+        assert len(responses_events) == 1
+        tool_calls_log = responses_events[0].tool_calls_log
+        assert tool_calls_log
+        last_summary = tool_calls_log[-1]["result_summary"].lower()
+        assert "could not be read" in last_summary or "blocked" in last_summary

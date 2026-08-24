@@ -1679,6 +1679,63 @@ async def _ensure_session_messages_loaded(db: AsyncSession, session: ChatSession
         await db.refresh(session, attribute_names=["messages"])
 
 
+async def _cas_claim_write_confirmation(
+    db: AsyncSession,
+    confirm_msg: ChatMessage,
+    so: dict[str, Any],
+    new_status: str,
+) -> bool:
+    """Atomically claim a pending write-confirmation row: ``UPDATE ... WHERE
+    id = confirm_msg.id AND status = 'pending'``, setting ``status`` to
+    *new_status*.
+
+    Shared by BOTH the approve and reject branches of the write_confirm
+    short-circuit in ``run_chat_turn`` (T2 gate — the reject branch was
+    found to have no compare-and-swap while approve did; this is the SIXTH
+    instance on this branch of a race guard fixed at one site and not its
+    twin — see the module-level history around the write_confirm block).
+    Both branches read the SAME ``_so`` snapshot once at the top of the
+    block; that snapshot goes stale the instant either request commits a
+    transition, so neither branch may act on it directly — every write to
+    the row's status must go through this claim. DO NOT duplicate this CAS
+    inline at a new call site; call this instead.
+
+    Returns ``True`` iff THIS call won the claim (``rowcount == 1``) — on
+    success the UPDATE has already been committed, so the row is durably
+    *new_status* before this function returns; the caller may treat *so* as
+    the authoritative pre-claim state for whatever it does next (e.g.
+    approve still needs to execute the write and later persist a richer
+    final status; reject's *new_status* IS the final status, nothing further
+    to do). Returns ``False`` (without committing anything) when another
+    request already claimed or resolved the row first (``rowcount == 0``) —
+    the caller MUST refuse and MUST NOT touch ``confirm_msg.structured_output``
+    from its own now-stale *so*; the winner owns that transition.
+
+    Tenant context: ``SET LOCAL app.current_tenant_id`` is transaction-scoped
+    and this function's own commit clears it (bitten twice already in this
+    repo — see ``set_tenant_context``'s docstring). A caller that runs
+    further tenant-scoped DB statements AFTER a successful claim (approve's
+    ``execute_tool_call``, its audit log, its final message insert; reject's
+    own assistant-message insert) MUST re-establish it itself via
+    ``set_tenant_context(db, str(tenant_id))`` — this helper does not do
+    that, since not every caller has more tenant-scoped work left to do.
+    """
+    from sqlalchemy import update as _cas_update
+
+    cas_result = await db.execute(
+        _cas_update(ChatMessage)
+        .where(
+            ChatMessage.id == confirm_msg.id,
+            ChatMessage.structured_output["status"].astext == "pending",
+        )
+        .values(structured_output={**so, "status": new_status})
+    )
+    if cas_result.rowcount == 0:
+        return False
+    await db.commit()
+    return True
+
+
 async def run_chat_turn(
     db: AsyncSession,
     session: ChatSession,
@@ -1717,7 +1774,6 @@ async def run_chat_turn(
 
         if _wc_action in ("approve", "reject") and _wc_confirmation_id:
             from sqlalchemy import select as _wc_select
-            from sqlalchemy import update as _wc_update
             from sqlalchemy.orm.attributes import flag_modified as _wc_flag_modified
 
             from app.core.database import set_tenant_context
@@ -1864,6 +1920,17 @@ async def run_chat_turn(
                 # intercept already validated; re-checking the staleness
                 # window (a period closing between mint and approve) on
                 # EVERY approve is a named follow-up, not this fix.
+                # `_merged_normalized` is computed HERE, before the CAS, and
+                # reused verbatim at the persist site below (instead of a
+                # second `normalize_write_payload(tool_input)` call after
+                # execute_tool_call) — T2 gate finding B blast-radius
+                # hardening. `tool_input` is never reassigned between here
+                # and the persist site, so this makes a post-execution
+                # PayloadParseError impossible BY CONSTRUCTION rather than
+                # merely proven unreachable (merge_slot_values already
+                # enforces single-coerced-key on the pre-merge input, and
+                # its write-back only ever touches that one key).
+                _merged_normalized = None
                 if _merged_confirmation_token is not None:
                     try:
                         _merged_validation = await validate_mutation(
@@ -1877,6 +1944,7 @@ async def run_chat_turn(
                             db=db,
                             session_id=str(session.id),
                         )
+                        _merged_normalized = normalize_write_payload(tool_input)
                     except PayloadParseError as exc:
                         # Should not normally happen — merge_slot_values
                         # already proved tool_input re-parses via
@@ -1953,23 +2021,17 @@ async def run_chat_turn(
                 # the transition, then make the call on a connection
                 # returned to the pool — is the safe shape. Same
                 # compare-and-swap pattern as handle_plan_mode_choice's CAS
-                # in plan_mode/short_circuit.py.
-                _cas_result = await db.execute(
-                    _wc_update(ChatMessage)
-                    .where(
-                        ChatMessage.id == _confirm_msg.id,
-                        ChatMessage.structured_output["status"].astext == "pending",
-                    )
-                    .values(structured_output={**_so, "status": "executing"})
-                )
-                if _cas_result.rowcount == 0:
+                # in plan_mode/short_circuit.py. Shared with the reject
+                # branch below via `_cas_claim_write_confirmation` — see its
+                # docstring for why this is a helper, not an inline block.
+                _claimed = await _cas_claim_write_confirmation(db, _confirm_msg, _so, "executing")
+                if not _claimed:
                     yield {
                         "type": "error",
                         "error": "This confirmation is already being processed by another request.",
                     }
                     return
-                await db.commit()
-                # The commit above clears `SET LOCAL app.current_tenant_id`
+                # The claim above committed — clears `SET LOCAL app.current_tenant_id`
                 # (transaction-scoped — dies at the first COMMIT, see
                 # set_tenant_context's docstring; bitten twice already in
                 # this repo). Re-establish it before the next statement on
@@ -2039,8 +2101,10 @@ async def run_chat_turn(
                     # actually written. `tool_input` is guaranteed
                     # re-parseable here: merge_slot_values already proved
                     # it by constructing it FROM a normalize_write_payload
-                    # call on the pre-merge payload.
-                    _merged_normalized = normalize_write_payload(tool_input)
+                    # call on the pre-merge payload. `_merged_normalized`
+                    # was already computed pre-CAS (see the comment there) —
+                    # reused as-is rather than recomputed here, so this site
+                    # can never raise post-execution.
                     _updated_so["tool_input"] = tool_input
                     _updated_so["confirmation_token"] = _merged_confirmation_token
                     _updated_so["proposed_fields"] = _merged_normalized.fields
@@ -2085,8 +2149,33 @@ async def run_chat_turn(
                 return
 
             elif _wc_action == "reject":
-                _updated_so = dict(_so)
-                _updated_so["status"] = "rejected"
+                # T2 gate mirror finding — reject must only succeed from a
+                # still-pending row, exactly like approve above. Without
+                # this, a concurrent approve + reject (double-click, a
+                # retried request) let approve win the real race
+                # (execute_tool_call actually runs) while reject's
+                # unconditional overwrite — off the SAME stale `_so`
+                # snapshot both branches read at the top of this block —
+                # still flipped the row to 'rejected' and told the human
+                # "No changes were made", permanently misreporting whether
+                # the mutation happened. Shared helper with the approve CAS
+                # above — see `_cas_claim_write_confirmation`'s docstring.
+                _updated_so = {**_so, "status": "rejected"}
+                _claimed = await _cas_claim_write_confirmation(db, _confirm_msg, _so, "rejected")
+                if not _claimed:
+                    yield {
+                        "type": "error",
+                        "error": (
+                            "This confirmation is already being processed or was already resolved by another request."
+                        ),
+                    }
+                    return
+                # The claim above committed — clears `SET LOCAL
+                # app.current_tenant_id` (transaction-scoped, dies at
+                # COMMIT — same note as the approve CAS above). The
+                # assistant-message insert below is a tenant-scoped write,
+                # so re-establish it before that statement.
+                await set_tenant_context(db, str(tenant_id))
                 _confirm_msg.structured_output = _updated_so
                 _wc_flag_modified(_confirm_msg, "structured_output")
 

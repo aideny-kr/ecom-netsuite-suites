@@ -4,6 +4,12 @@ Every NetSuite write payload enters the system through exactly one function so
 a new MCP tool schema cannot silently produce an empty confirmation card. The
 Oracle NetSuite MCP sends ``data`` as a JSON *string*; older/other schemas send
 ``body`` as a dict. Both — and dict-valued ``data`` — normalize here.
+
+Two payload keys are never both trusted at once: if MORE THAN ONE of
+``_PAYLOAD_KEYS`` coerces to a dict, ``normalize_write_payload`` raises
+``PayloadParseError`` rather than picking one — see its docstring for why
+(T2 gate finding B / architect ruling). A single coerced key, even an empty
+dict, is never ambiguous and is always accepted.
 """
 
 from __future__ import annotations
@@ -13,7 +19,10 @@ from typing import Any
 
 from pydantic import BaseModel
 
-# Keys that hold the record payload, in precedence order.
+# Keys that hold the record payload. "Precedence order" here means
+# fall-through past a PRESENT-BUT-UNCOERCIBLE key only (e.g. `data: None`
+# falls through to `body`) — it is not a tie-breaker between two keys that
+# both coerce. Two coerced keys are refused; see the module docstring.
 _PAYLOAD_KEYS = ("data", "body")
 
 # Sublist keys that carry transaction lines. NetSuite uses several names
@@ -57,18 +66,55 @@ def _coerce(raw: Any) -> dict[str, Any] | None:
 
 
 def normalize_write_payload(tool_input: dict[str, Any]) -> NormalizedPayload:
-    """Return the canonical payload, or raise :class:`PayloadParseError`."""
-    record: dict[str, Any] | None = None
-    payload_key: str | None = None
+    """Return the canonical payload, or raise :class:`PayloadParseError`.
+
+    Architect ruling (T2 gate finding B): scan EVERY key in ``_PAYLOAD_KEYS``
+    (not just up to the first that coerces) and refuse — raise, never guess
+    — when more than one coerces to a dict. ``execute_tool_call`` sends
+    ``tool_input`` to the external MCP verbatim (no key filtering), and
+    which key the remote reads is unknowable from our side (the module
+    docstring above: Oracle's MCP reads ``data``, older/other schemas read
+    ``body``) — so no precedence rule, "prefer non-empty" included, can ever
+    make the confirmation card equal what executes when two keys coerce; it
+    only picks which half of the ambiguity the card shows. A dual-populated
+    input can only come from LLM hallucination (no producer in this repo
+    emits one — see the grep evidence in the T2 finding), and the system
+    already has the designed absorber for that: ``PayloadParseError`` here
+    is caught by the mutation intercept (``base_agent.py``) and fed back to
+    the model as a structured error for the bounded write-repair loop — the
+    human never sees the ambiguous card. This is a change from the old
+    break-on-first-match scan: a present-but-uncoercible sibling key
+    (``None``/``""``/non-dict-non-JSON-object) still falls through as
+    before — that is what "precedence order" legitimately means, pinned by
+    ``test_payload_key_resolves_to_the_key_that_actually_coerced`` — but a
+    SECOND key that also coerces (empty or not, equal or not) is now a
+    parse error rather than a silently-discarded sibling. No emptiness or
+    equality inspection anywhere: a sole coerced key stays valid even when
+    its value is ``{}`` (case 3 — see
+    ``test_sole_empty_dict_payload_still_normalizes_not_raises``).
+    """
+    coerced_keys: list[tuple[str, dict[str, Any]]] = []
     for key in _PAYLOAD_KEYS:
         if key in tool_input:
+            # Every present key is coerced now (not just up to the first
+            # match) — a malformed second key must fail closed too, rather
+            # than riding along unexamined because the first key already won.
             coerced = _coerce(tool_input[key])
             if coerced is not None:
-                record, payload_key = coerced, key
-                break
+                coerced_keys.append((key, coerced))
 
-    if record is None or payload_key is None:
+    if len(coerced_keys) > 1:
+        raise PayloadParseError(
+            "tool_input carries more than one record payload ("
+            + ", ".join(key for key, _ in coerced_keys)
+            + ") — the confirmation card can only render one, and which one "
+            "the downstream tool executes is ambiguous; supply the record "
+            "under exactly one of 'data' or 'body'"
+        )
+    if not coerced_keys:
         raise PayloadParseError("tool_input carried no 'data' or 'body' payload")
+
+    payload_key, record = coerced_keys[0]
 
     lines: list[dict[str, Any]] = []
     fields: dict[str, Any] = {}

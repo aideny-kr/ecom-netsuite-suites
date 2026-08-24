@@ -126,3 +126,84 @@ def test_line_list_with_one_non_dict_entry_among_dicts_raises():
                 },
             }
         )
+
+
+# ---------------------------------------------------------------------------
+# T2 gate Finding B — two coerced payload keys must raise, not silently pick
+# one (the reported bug: `{"data": {}, "body": {pop}}` picked "data" and
+# rendered an empty confirmation card while `tool_input` still carried the
+# populated `body`, which executes verbatim against the remote MCP). Ruling:
+# raise whenever MORE THAN ONE key coerces to a dict — no emptiness or
+# equality inspection anywhere. See the architect ruling this branch's T2
+# gate delivered (orchestrator.py write_confirm block, write_payload.py
+# module docstring).
+# ---------------------------------------------------------------------------
+
+
+def test_both_payload_keys_populated_raises():
+    with pytest.raises(PayloadParseError) as exc_info:
+        normalize_write_payload({"recordType": "customer", "data": {"memo": "A"}, "body": {"memo": "B"}})
+    assert "data" in str(exc_info.value)
+    assert "body" in str(exc_info.value)
+
+
+def test_empty_data_plus_populated_body_dict_raises():
+    """The reported bug, dict-empty variant — today picks 'data' with
+    fields={}, silently dropping the populated 'body' from the card while
+    tool_input (what actually executes) still carries it."""
+    with pytest.raises(PayloadParseError):
+        normalize_write_payload({"data": {}, "body": {"account": "123", "amount": 500}})
+
+
+def test_empty_data_plus_populated_body_string_raises():
+    """The reported bug, string-'{}' variant."""
+    with pytest.raises(PayloadParseError):
+        normalize_write_payload({"data": "{}", "body": {"account": "123", "amount": 500}})
+
+
+def test_both_keys_identical_still_raises():
+    """No equality carve-out: a dual-populated input is refused even when
+    both keys happen to hold the same value — determinism over cleverness;
+    no real producer emits this shape, and the write-repair loop absorbs it
+    either way."""
+    with pytest.raises(PayloadParseError):
+        normalize_write_payload({"data": {"memo": "A"}, "body": {"memo": "A"}})
+
+
+def test_both_keys_empty_dicts_raises():
+    with pytest.raises(PayloadParseError):
+        normalize_write_payload({"data": {}, "body": {}})
+
+
+def test_sole_empty_dict_payload_still_normalizes_not_raises():
+    """Case 3 guard — the row a naive 'skip empty keys, prefer non-empty'
+    fix would break. Exactly one key present and it coerces (to an empty
+    dict) — no ambiguity, so this must NOT raise. This is also the
+    regression the task explicitly calls out: a genuinely empty payload
+    must still yield an empty NormalizedPayload."""
+    result = normalize_write_payload({"data": {}})
+    assert result.fields == {}
+    assert result.lines == []
+    assert result.record == {}
+    assert result.payload_key == "data"
+
+
+@pytest.mark.parametrize("uncoercible_data", [None, "", "   ", 42, [1]])
+def test_present_but_uncoercible_data_still_falls_through_to_body(uncoercible_data):
+    """Present-but-uncoercible sibling keys keep falling through — this is
+    what `_PAYLOAD_KEYS` precedence legitimately means; only the SECOND
+    coerced key is new territory. Extends
+    test_payload_key_resolves_to_the_key_that_actually_coerced."""
+    result = normalize_write_payload({"data": uncoercible_data, "body": {"companyname": "x"}})
+    assert result.payload_key == "body"
+    assert result.record == {"companyname": "x"}
+
+
+def test_populated_data_with_malformed_body_string_now_raises():
+    """Intended behavior delta: under the old break-on-first-match scan,
+    'data' won and a malformed 'body' string was never even examined — it
+    would ride along unexamined all the way to tool_input, still sent to
+    NetSuite verbatim. The new scan coerces every present key, so a
+    malformed second key now fails closed instead."""
+    with pytest.raises(PayloadParseError):
+        normalize_write_payload({"data": {"memo": "A"}, "body": "{not json"})

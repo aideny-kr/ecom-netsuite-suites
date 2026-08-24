@@ -380,6 +380,84 @@ def test_merge_writes_back_to_the_key_normalize_actually_read():
 
 
 # ---------------------------------------------------------------------------
+# T2 gate Finding B, blast-radius site 4 — a STORED card whose tool_input
+# already carries two coerced payload keys (only reachable as a legacy card
+# minted before the fix, or a hand-crafted/tampered structured_output) must
+# fail closed at merge time, BEFORE execute_tool_call is anywhere near
+# reachable. Such a card was already ambiguous when it was minted — this is
+# the correct place to catch it, not the post-execution persist site.
+# ---------------------------------------------------------------------------
+
+
+def test_merge_slot_values_dual_key_stored_card_fails_closed():
+    tool_input = {"recordType": "customer", "data": {"companyname": "A"}, "body": {"companyname": "B"}}
+    pending = {
+        "type": "write_confirmation",
+        "mutation_type": "create",
+        "record_type": "customer",
+        "tool_name": TOOL,
+        "tool_input": tool_input,
+        "editable_slots": SLOTS,
+        "confirmation_token": generate_confirmation_token(SESSION, _build_payload_json(TOOL, tool_input, SLOTS)),
+        "status": "pending",
+    }
+    ok, _, merged, err = merge_slot_values(pending, {"subsidiary": "2"}, SESSION)
+    assert ok is False
+    assert "unparseable" in err.lower()
+    assert merged == {}
+
+
+# ---------------------------------------------------------------------------
+# T2 gate Finding B, blast-radius proof (property, promoted from the
+# investigation) — every reachable single-coerced-key PRE-merge shape
+# re-normalizes cleanly under the new dual-key-raises rule AFTER
+# merge_slot_values' write-back, with the SAME payload_key. This is what
+# proves orchestrator.py's post-execution persist-site
+# `normalize_write_payload(tool_input)` call can never newly raise: the
+# write-back only ever touches the ONE key that coerced pre-merge, so a
+# merged input can never grow a second coerced key.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "tool_input",
+    [
+        {"recordType": "customer", "data": '{"companyname": "x"}'},
+        {"recordType": "customer", "data": {"companyname": "x"}},
+        {"recordType": "customer", "body": {"companyname": "x"}},
+        {"recordType": "customer", "data": None, "body": {"companyname": "x"}},
+        {"recordType": "customer", "data": "", "body": {"companyname": "x"}},
+        {"recordType": "customer", "data": "   ", "body": {"companyname": "x"}},
+        {"recordType": "customer", "data": 42, "body": {"companyname": "x"}},
+        {"recordType": "customer", "data": [1], "body": {"companyname": "x"}},
+        {"recordType": "customer", "data": {}, "body": None},
+        {"recordType": "customer", "data": {"companyname": "x"}, "body": None},
+    ],
+)
+def test_merged_input_renormalizes_for_all_single_key_shapes(tool_input):
+    from app.services.chat.write_payload import normalize_write_payload
+
+    pre_merge_normalized = normalize_write_payload(tool_input)
+
+    pending = {
+        "type": "write_confirmation",
+        "mutation_type": "create",
+        "record_type": "customer",
+        "tool_name": TOOL,
+        "tool_input": tool_input,
+        "editable_slots": SLOTS,
+        "confirmation_token": generate_confirmation_token(SESSION, _build_payload_json(TOOL, tool_input, SLOTS)),
+        "status": "pending",
+    }
+    ok, _, merged, err = merge_slot_values(pending, {"subsidiary": "2"}, SESSION)
+    assert ok is True, err
+
+    post_merge_normalized = normalize_write_payload(merged)
+    assert post_merge_normalized.payload_key == pre_merge_normalized.payload_key
+    assert post_merge_normalized.fields.get("subsidiary") == "2"
+
+
+# ---------------------------------------------------------------------------
 # Review round 1, Important #5 — a non-dict `slot_values` must not crash
 # the SSE stream. `write_confirm` is a bare `dict | None` with no inner
 # schema, so `slot_values` can be any JSON value; a list or string passes

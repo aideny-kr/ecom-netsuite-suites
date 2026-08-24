@@ -1497,3 +1497,329 @@ class TestWriteConfirmAtomicClaim:
         error_events = [e for e in events if e.get("type") == "error"]
         assert error_events
         assert "already being processed" in error_events[0]["error"].lower()
+
+
+# ---------------------------------------------------------------------------
+# K) T2 gate Finding B, full approve-path integration — a stored card whose
+# tool_input already carries two coerced payload keys (a legacy card minted
+# before the write_payload.py fix, or a tampered structured_output) must be
+# refused BEFORE the atomic claim, never reaching execute_tool_call. The
+# real refusal fires inside merge_slot_values's own normalize_write_payload
+# call (write_confirmation_service.py) — proven unreachable past that point
+# for a genuinely MERGED payload (blast_radius analysis, T2 gate finding B).
+# This test drives the REAL run_chat_turn approve branch end to end, not
+# just the merge_slot_values unit function, so a wiring regression between
+# the two would be caught here.
+# ---------------------------------------------------------------------------
+
+
+class TestApprovePathRefusesDualKeyStoredPayload:
+    @pytest.mark.asyncio
+    async def test_dual_key_stored_payload_errors_before_cas_no_execute(self):
+        from sqlalchemy import Update
+
+        from app.services.chat.mutation_guard import generate_confirmation_token
+        from app.services.chat.orchestrator import run_chat_turn
+        from app.services.chat.write_confirmation_service import _build_payload_json
+
+        session_id = uuid.uuid4()
+        tool_name = _ext("ns_createRecord")
+        # A dual-coerced tool_input — only reachable today as a legacy/
+        # tampered stored card, since build_confirmation_payload itself
+        # would now refuse to mint one.
+        tool_input = {"recordType": "customer", "data": {"companyname": "A"}, "body": {"companyname": "B"}}
+        slots = [
+            {
+                "name": "subsidiary",
+                "label": "Primary Subsidiary",
+                "type": "select",
+                "allowed": [{"value": "1", "label": "Framework Inc"}],
+            }
+        ]
+        structured_output = {
+            "type": "write_confirmation",
+            "mutation_type": "create",
+            "record_type": "customer",
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+            "editable_slots": slots,
+            "proposed_fields": {"companyname": "A"},
+            "proposed_lines": [],
+            "confirmation_token": generate_confirmation_token(
+                str(session_id), _build_payload_json(tool_name, tool_input, slots)
+            ),
+            "status": "pending",
+        }
+        confirm_msg = ChatMessage(
+            tenant_id=_TENANT_ID,
+            session_id=session_id,
+            role="assistant",
+            content="",
+            structured_output=structured_output,
+            created_at=datetime.now(timezone.utc),
+        )
+        confirm_msg.id = uuid.uuid4()
+
+        cas_attempted = False
+
+        def _make_watching_db():
+            nonlocal cas_attempted
+
+            async def _execute(stmt, *args, **kwargs):
+                nonlocal cas_attempted
+                if isinstance(stmt, Update):
+                    cas_attempted = True
+                return _FakeScalarResult(confirm_msg)
+
+            db = MagicMock()
+            db.execute = _execute
+            db.commit = AsyncMock()
+            db.refresh = AsyncMock()
+            db.add = MagicMock()
+            return db
+
+        db = _make_watching_db()
+        session = _make_session(session_id=str(session_id))
+
+        mock_execute_tool_call = AsyncMock(return_value=json.dumps({"id": "999"}))
+
+        with patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call):
+            events = [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="approve",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={
+                        "action": "approve",
+                        "confirmation_id": str(confirm_msg.id),
+                        "slot_values": {"subsidiary": "1"},
+                    },
+                )
+            ]
+
+        mock_execute_tool_call.assert_not_awaited()
+        assert cas_attempted is False, "the atomic claim must never even run for an unparseable stored payload"
+        error_events = [e for e in events if e.get("type") == "error"]
+        assert error_events
+        assert "unparseable" in error_events[0]["error"].lower()
+        assert confirm_msg.structured_output["status"] == "pending"
+
+
+# ---------------------------------------------------------------------------
+# L) T2 gate Finding A (mirror) — the reject branch had no compare-and-swap,
+# while approve was hardened with one (section J above). Both branches read
+# the SAME stale `_so` snapshot once at the top of the write_confirm block;
+# reject then applied an UNCONDITIONAL overwrite off that snapshot. A
+# concurrent approve + reject (double-click, retried request): approve wins
+# the CAS, transitions to 'executing', and calls NetSuite — reject then
+# overwrites the row to 'rejected' from its stale snapshot and tells the
+# human "No changes were made", while the write actually executed. The card
+# permanently misreports whether the mutation happened.
+#
+# Fix: reject claims the row via the SAME atomic UPDATE ... WHERE
+# status='pending' shape approve uses, extracted into one shared helper
+# (`_cas_claim_write_confirmation`) both branches call — this repo's SIXTH
+# instance of a fix applied at one site and not its twin is why this is a
+# helper, not two hand-maintained copies of the same race guard.
+# ---------------------------------------------------------------------------
+
+
+class TestWriteConfirmRejectAtomicClaim:
+    @pytest.mark.asyncio
+    async def test_plain_reject_on_pending_card_still_works(self):
+        """Unraced reject: exactly the pre-fix behavior — status flips to
+        'rejected', a 'no changes were made' message is yielded."""
+        from app.services.chat.orchestrator import run_chat_turn
+
+        session_id = uuid.uuid4()
+        tool_name = _ext("ns_createRecord")
+        tool_input = {"recordType": "customer", "data": '{"companyname": "clean co"}'}
+        confirm_msg = _make_real_confirmation_msg(session_id, tool_name, tool_input)
+        db = _make_db(confirm_msg)
+        session = _make_session(session_id=str(session_id))
+
+        events = [
+            event
+            async for event in run_chat_turn(
+                db=db,
+                session=session,
+                user_message="reject",
+                user_id=_USER_ID,
+                tenant_id=_TENANT_ID,
+                write_confirm={"action": "reject", "confirmation_id": str(confirm_msg.id)},
+            )
+        ]
+
+        assert not [e for e in events if e.get("type") == "error"]
+        message_events = [e for e in events if e.get("type") == "message"]
+        assert message_events
+        assert "no changes were made" in message_events[-1]["message"]["content"].lower()
+        assert confirm_msg.structured_output["status"] == "rejected"
+
+    @pytest.mark.asyncio
+    async def test_reject_against_executing_row_is_refused_without_overwrite(self):
+        """A confirmation already claimed by an in-flight approve (status=
+        'executing') must be refused by the SAME pending-only gate that
+        already blocks 'approved'/'failed'/'rejected' — not silently
+        flipped to 'rejected'."""
+        from app.services.chat.orchestrator import run_chat_turn
+
+        session_id = uuid.uuid4()
+        tool_name = _ext("ns_createRecord")
+        tool_input = {"recordType": "customer", "data": '{"companyname": "test ai customer"}'}
+        confirm_msg = _make_real_confirmation_msg(session_id, tool_name, tool_input, status="executing")
+        db = _make_db(confirm_msg)
+        session = _make_session(session_id=str(session_id))
+
+        events = [
+            event
+            async for event in run_chat_turn(
+                db=db,
+                session=session,
+                user_message="reject",
+                user_id=_USER_ID,
+                tenant_id=_TENANT_ID,
+                write_confirm={"action": "reject", "confirmation_id": str(confirm_msg.id)},
+            )
+        ]
+
+        error_events = [e for e in events if e.get("type") == "error"]
+        assert error_events
+        assert "not in a pending state" in error_events[0]["error"].lower()
+        assert confirm_msg.structured_output["status"] == "executing"
+
+    @pytest.mark.asyncio
+    async def test_reject_claim_loses_yields_clear_error_without_overwriting(self):
+        """Unit-level mirror of the approve CAS-loses test: when reject's own
+        UPDATE ... WHERE status='pending' returns rowcount=0 (another
+        request already claimed/resolved the row between the top-of-block
+        read and here), it must refuse cleanly — never touch
+        confirm_msg.structured_output."""
+        from app.services.chat.orchestrator import run_chat_turn
+
+        session_id = uuid.uuid4()
+        tool_name = _ext("ns_createRecord")
+        tool_input = {"recordType": "customer", "data": '{"companyname": "clean co"}'}
+        confirm_msg = _make_real_confirmation_msg(session_id, tool_name, tool_input)
+        db = _make_db(confirm_msg, cas_rowcount=0)
+        session = _make_session(session_id=str(session_id))
+
+        events = [
+            event
+            async for event in run_chat_turn(
+                db=db,
+                session=session,
+                user_message="reject",
+                user_id=_USER_ID,
+                tenant_id=_TENANT_ID,
+                write_confirm={"action": "reject", "confirmation_id": str(confirm_msg.id)},
+            )
+        ]
+
+        error_events = [e for e in events if e.get("type") == "error"]
+        assert error_events
+        assert "already" in error_events[0]["error"].lower()
+        # Must NOT have been overwritten — the winner (whoever it was) owns
+        # the transition, not this request's stale snapshot.
+        assert confirm_msg.structured_output["status"] == "pending"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_approve_and_reject_approve_wins_reject_refused_without_overwrite(self):
+        """THE reported bug, reproduced with genuine interleaving.
+
+        Approve and reject race on the SAME confirmation — both read the
+        SAME stale pre-CAS `_so` snapshot (mirrors two live HTTP requests
+        both reading status='pending' before either commits). Approve's
+        synchronous CAS wins first (nothing suspends it before that point),
+        THEN it suspends inside execute_tool_call (standing in for the
+        multi-second NetSuite call), giving reject its turn. Pre-fix,
+        reject's unconditional overwrite would flip the row to 'rejected'
+        out from under the in-flight approve, and tell the human "No
+        changes were made" while the write had actually executed. Post-fix,
+        reject's own CAS attempt loses (the row is already 'executing') and
+        it refuses cleanly — the row ends up 'approved', never 'rejected'.
+
+        Same real-interleaving technique as
+        test_concurrent_approves_execute_tool_call_exactly_once above: the
+        genuine suspension lives inside execute_tool_call
+        (`await asyncio.sleep(0)`), not anywhere else in this fully-mocked
+        flow — without it, asyncio.gather on two mock-backed generators
+        never actually interleaves.
+        """
+        from sqlalchemy import Update
+
+        from app.services.chat.orchestrator import run_chat_turn
+
+        session_id = uuid.uuid4()
+        tool_name = _ext("ns_createRecord")
+        tool_input = {"recordType": "customer", "data": '{"companyname": "race co"}'}
+        confirm_msg = _make_real_confirmation_msg(session_id, tool_name, tool_input)
+        session = _make_session(session_id=str(session_id))
+
+        row_state = {"status": "pending"}
+
+        async def _execute(stmt, *args, **kwargs):
+            if isinstance(stmt, Update):
+                if row_state["status"] == "pending":
+                    row_state["status"] = "claimed"
+                    return MagicMock(rowcount=1)
+                return MagicMock(rowcount=0)
+            return _FakeScalarResult(confirm_msg)
+
+        def _make_racy_db():
+            db = MagicMock()
+            db.execute = _execute
+            db.commit = AsyncMock()
+            db.refresh = AsyncMock()
+            db.add = MagicMock()
+            return db
+
+        db_approve = _make_racy_db()
+        db_reject = _make_racy_db()
+
+        async def _racy_execute_tool_call(**kwargs):
+            await asyncio.sleep(0)  # the multi-second NetSuite call, standing in
+            return json.dumps({"id": "999", "success": True})
+
+        mock_execute_tool_call = AsyncMock(side_effect=_racy_execute_tool_call)
+        mock_log_event = AsyncMock(return_value=None)
+
+        async def _drain(db, action):
+            return [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message=action,
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={"action": action, "confirmation_id": str(confirm_msg.id)},
+                )
+            ]
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", mock_log_event),
+        ):
+            events_approve, events_reject = await asyncio.gather(
+                _drain(db_approve, "approve"), _drain(db_reject, "reject")
+            )
+
+        # The property that matters — not "an error was yielded somewhere".
+        mock_execute_tool_call.assert_awaited_once()
+
+        all_events = events_approve + events_reject
+        error_events = [e for e in all_events if e.get("type") == "error"]
+        message_events = [e for e in all_events if e.get("type") == "message"]
+        assert len(error_events) == 1, f"expected exactly one refusal, got {error_events}"
+        assert "already" in error_events[0]["error"].lower()
+        assert len(message_events) == 1, f"expected exactly one terminal message, got {message_events}"
+
+        # THE bug this pins: approve won the race — the row must NOT end up
+        # 'rejected', and the message shown must be the approve outcome,
+        # never "No changes were made" for a write that actually executed.
+        assert confirm_msg.structured_output["status"] == "approved"
+        assert "no changes were made" not in message_events[0]["message"]["content"].lower()
