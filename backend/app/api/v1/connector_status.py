@@ -583,9 +583,6 @@ async def _upsert_celigo_mcp_connector(
         existing.encryption_key_version = get_current_key_version()
         existing.auth_type = "bearer"
         existing.server_url = CELIGO_MCP_SERVER_URL
-        existing.status = "active"
-        existing.is_enabled = True
-        existing.error_reason = None
         connector = existing
     else:
         connector = await mcp_connector_service.create_mcp_connector(
@@ -610,13 +607,21 @@ async def _upsert_celigo_mcp_connector(
     # rather than "a row exists". A failure also resets discovered_tools --
     # a reconnect must not leave a PREVIOUS successful discovery's tool list
     # attached to a token that just failed to enumerate tools.
+    #
+    # `status` and `is_enabled` are decided HERE, together, as one outcome --
+    # never independently. Setting them in separate branches previously let a
+    # failed reconnect land on status="active" + is_enabled=False: an
+    # incoherent pair only masked (not fixed) by get_active_connectors_for_tenant
+    # also filtering on is_enabled.
     try:
         from app.services.mcp_client_service import discover_tools
 
         tools = await discover_tools(connector, db)
         connector.discovered_tools = tools
         connector.is_enabled = True
-    except Exception:
+        connector.status = "active"
+        connector.error_reason = None
+    except Exception as exc:
         logger.warning(
             "celigo_mcp_connector.tool_discovery_failed",
             tenant_id=str(tenant_id),
@@ -624,6 +629,8 @@ async def _upsert_celigo_mcp_connector(
         )
         connector.discovered_tools = None
         connector.is_enabled = False
+        connector.status = "error"
+        connector.error_reason = f"Tool discovery failed: {exc}"
 
     await db.flush()
     return connector
