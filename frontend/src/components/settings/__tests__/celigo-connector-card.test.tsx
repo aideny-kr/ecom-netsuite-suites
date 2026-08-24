@@ -133,4 +133,22 @@ describe("CeligoConnectorCard", () => {
     wrap(<Card />);
     expect(screen.getByText(/agent access.*not enabled/i)).toBeInTheDocument();
   });
+
+  it("only tells the operator to do something they can actually do from this state", async () => {
+    // MINOR (T2 gate on PR #202): the connected state renders no token input
+    // and no standalone "reconnect" action -- only Disconnect. The old copy
+    // ("reconnect with an agent token") described an action with no button
+    // anywhere on the connected card, a dead end. The copy must reference the
+    // Disconnect control that is actually present.
+    mocks.status.mockReturnValue({
+      connected: true,
+      account_name: "Framework",
+      region: "us",
+      agent_access: false,
+    });
+    const { default: Card } = await import("../celigo-connector-card");
+    wrap(<Card />);
+    expect(screen.getByText(/disconnect and reconnect/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /disconnect/i })).toBeInTheDocument();
+  });
 });

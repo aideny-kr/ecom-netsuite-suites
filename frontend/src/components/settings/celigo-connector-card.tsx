@@ -169,8 +169,8 @@ export default function CeligoConnectorCard() {
             ) : (
               <>
                 <XCircle className="h-3.5 w-3.5 text-muted-foreground" />
-                Agent access not enabled — reconnect with an agent token to let the assistant
-                read Celigo.
+                Agent access not enabled — disconnect and reconnect with an agent token to
+                let the assistant read Celigo.
               </>
             )}
           </div>
