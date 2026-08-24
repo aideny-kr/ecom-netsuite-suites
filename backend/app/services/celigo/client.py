@@ -84,17 +84,28 @@ async def verify_token(
 
     if response.status_code in (401, 403):
         raise CeligoAuthError(_auth_message(response))
-    if response.status_code >= 400:
+    # A genuine success is a 2xx status -- NOT merely "< 400". Without this,
+    # a 3xx (e.g. a proxy/redirect Celigo never documents) or a 204 falls
+    # through neither raise above and reaches the body-parsing code below,
+    # which then degrades a non-response into a "verified" empty identity.
+    if not (200 <= response.status_code < 300):
         raise CeligoError(f"Celigo returned {response.status_code}")
 
     try:
         body = response.json()
     except ValueError:
-        body = {}
+        raise CeligoError("Celigo returned an unparseable token-info response") from None
     if not isinstance(body, dict):
-        body = {}
+        raise CeligoError("Celigo returned an unparseable token-info response")
 
-    return {
-        "account_name": str(body.get("name") or ""),
-        "user_email": str(body.get("email") or ""),
-    }
+    account_name = str(body.get("name") or "")
+    user_email = str(body.get("email") or "")
+    # A 2xx with NEITHER field proves nothing about the token -- this used to
+    # silently degrade to {"account_name": "", "user_email": ""} and let the
+    # caller treat that as "verified". Not a CeligoAuthError: this isn't
+    # evidence the token was rejected, only that Celigo's response carried no
+    # identity to report.
+    if not account_name and not user_email:
+        raise CeligoError("Celigo returned no identity for this token")
+
+    return {"account_name": account_name, "user_email": user_email}

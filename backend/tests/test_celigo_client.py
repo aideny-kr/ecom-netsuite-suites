@@ -112,11 +112,74 @@ class TestSuccess:
         assert info == {"account_name": "Framework", "user_email": "ops@frame.work"}
 
     @pytest.mark.asyncio
-    async def test_missing_fields_degrade_gracefully(self):
+    async def test_one_identity_field_present_is_enough(self):
+        """At least ONE of name/email is required, not both."""
+
         def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, json={})
+            return httpx.Response(200, json={"name": "Framework"})
 
         async with _client(handler) as c:
             info = await verify_token("tok", client=c)
 
-        assert info == {"account_name": "", "user_email": ""}
+        assert info == {"account_name": "Framework", "user_email": ""}
+
+
+class TestNonGenuineSuccess:
+    """MINOR (T2 gate on PR #202): verify_token previously treated any status
+    < 400 as success -- including 3xx and 204 -- and a 200 with an empty or
+    unparseable body degraded to {"account_name": "", "user_email": ""}
+    rather than raising. That means a misconfigured/compromised Celigo
+    endpoint (or a proxy returning a redirect/204) could make an invalid or
+    meaningless token look "verified". A genuine success now requires a 2xx
+    status AND a parseable JSON object body carrying at least one identity
+    field; anything else raises CeligoError (never CeligoAuthError -- this is
+    not evidence the token itself is bad, just that Celigo's response
+    couldn't prove an identity)."""
+
+    @pytest.mark.asyncio
+    async def test_204_is_not_success(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(204)
+
+        async with _client(handler) as c:
+            with pytest.raises(CeligoError):
+                await verify_token("tok", client=c)
+
+    @pytest.mark.asyncio
+    async def test_3xx_is_not_success(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(302, headers={"Location": "https://example.com"})
+
+        async with _client(handler) as c:
+            with pytest.raises(CeligoError):
+                await verify_token("tok", client=c)
+
+    @pytest.mark.asyncio
+    async def test_200_with_non_json_body_is_not_success(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, text="<html>not json</html>")
+
+        async with _client(handler) as c:
+            with pytest.raises(CeligoError):
+                await verify_token("tok", client=c)
+
+    @pytest.mark.asyncio
+    async def test_200_with_a_json_list_body_is_not_success(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=["not", "a", "dict"])
+
+        async with _client(handler) as c:
+            with pytest.raises(CeligoError):
+                await verify_token("tok", client=c)
+
+    @pytest.mark.asyncio
+    async def test_200_with_completely_empty_identity_is_not_success(self):
+        """A 200 with neither name nor email carries no proof of anything --
+        this used to silently degrade to {"account_name": "", "user_email": ""}."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={})
+
+        async with _client(handler) as c:
+            with pytest.raises(CeligoError):
+                await verify_token("tok", client=c)
