@@ -145,7 +145,13 @@ async def _build_baseline_tools(
     from app.services.mcp_connector_service import get_active_connectors_for_tenant
 
     connectors = await get_active_connectors_for_tenant(db, tenant_id)
-    netsuite_connectors = [c for c in connectors if c.provider == "netsuite"]
+    # `mcp_connectors.provider` is `netsuite_mcp` (see schemas/mcp_connector.py,
+    # which only ACCEPTS netsuite_mcp/shopify_mcp/stripe_mcp/custom). An equality
+    # test against "netsuite" matched nothing, so the baseline ran with zero
+    # tools and Claude role-played `<tool_call>` XML in prose — the benchmark
+    # then scored a hallucination as "Claude + MCP". Prefix-match so any
+    # netsuite* provider naming is picked up.
+    netsuite_connectors = [c for c in connectors if str(c.provider or "").startswith("netsuite")]
     return build_external_tool_definitions(netsuite_connectors)
 
 
@@ -229,6 +235,15 @@ async def run_baseline(
         result.latency_ms = int((time.monotonic() - start) * 1000)
         return result
 
+    # Fail CLOSED. A toolless baseline is not "Claude + MCP" — Claude answers
+    # from prose, inventing `<tool_call>`/`<tool_response>` blocks, and the
+    # scorer happily grades that fiction. Better a loud harness error than a
+    # benchmark that reports a win over nothing.
+    if not tools:
+        result.error = f"no_mcp_tools: tenant {tenant_id} has no active NetSuite MCP connector with discovered tools"
+        result.latency_ms = int((time.monotonic() - start) * 1000)
+        return result
+
     try:
         client = _get_anthropic_client()
     except Exception as exc:  # pragma: no cover - defensive
@@ -261,8 +276,7 @@ async def run_baseline(
                 "system": system_prompt,
                 "messages": messages,
             }
-            if tools:
-                create_kwargs["tools"] = tools
+            create_kwargs["tools"] = tools
 
             response = await client.messages.create(**create_kwargs)
         except Exception as exc:
