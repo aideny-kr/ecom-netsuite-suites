@@ -536,6 +536,103 @@ class TestCeligoAgentAccess:
         r1 = await client.get("/api/v1/connector-status/celigo", headers=headers)
         assert r1.json()["agent_access"] is True
 
+    async def test_discovery_failure_leaves_agent_access_false_but_rest_connection_ok(
+        self, client, admin_user, db, monkeypatch
+    ):
+        """MAJOR 3 (T2 gate): agent_token is never itself verified -- only
+        discover_tools proves the token actually yields usable Celigo tools.
+        Before this fix, is_enabled/status were set to active unconditionally
+        and a discovery failure was swallowed, so `agent_access: true` could
+        mean "a row exists" rather than "the agent actually has tools"."""
+        user, headers = admin_user
+
+        async def _ok(token, region="us", **kw):
+            return {"account_name": "Framework", "user_email": "ops@frame.work"}
+
+        async def _discovery_fails(connector, db=None):
+            raise RuntimeError("celigo mcp server unreachable")
+
+        monkeypatch.setattr("app.api.v1.connector_status.verify_token", _ok, raising=False)
+        monkeypatch.setattr("app.services.mcp_client_service.discover_tools", _discovery_fails, raising=False)
+
+        r = await client.post(
+            "/api/v1/connector-status/celigo/connect",
+            headers=headers,
+            json={"token": "s3cret", "region": "us", "label": "Celigo", "agent_token": "agent-tok"},
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["connected"] is True, "REST connection must still succeed"
+        assert r.json()["agent_access"] is False, "discovery failure must not report agent access"
+
+        from sqlalchemy import select
+
+        from app.models.mcp_connector import McpConnector
+
+        row = (
+            await db.execute(
+                select(McpConnector).where(
+                    McpConnector.tenant_id == user.tenant_id,
+                    McpConnector.provider == "celigo_mcp",
+                )
+            )
+        ).scalar_one()
+        assert row.is_enabled is False, "a connector with zero verified tools must not be enabled"
+        assert not row.discovered_tools, "no tools were ever verified"
+
+        status_resp = await client.get("/api/v1/connector-status/celigo", headers=headers)
+        assert status_resp.json()["agent_access"] is False
+
+    async def test_reconnect_with_failing_discovery_clears_stale_tools(self, client, admin_user, db, monkeypatch):
+        """MINOR (T2 gate): a reconnect whose discovery fails must not leave a
+        PREVIOUS successful discovery's tool list attached to a token that
+        just failed to enumerate tools."""
+        user, headers = admin_user
+
+        async def _ok(token, region="us", **kw):
+            return {"account_name": "Framework", "user_email": "ops@frame.work"}
+
+        async def _discover_ok(connector, db=None):
+            return [{"name": "list_flows", "description": "List flows"}]
+
+        monkeypatch.setattr("app.api.v1.connector_status.verify_token", _ok, raising=False)
+        monkeypatch.setattr("app.services.mcp_client_service.discover_tools", _discover_ok, raising=False)
+
+        first = await client.post(
+            "/api/v1/connector-status/celigo/connect",
+            headers=headers,
+            json={"token": "s3cret", "region": "us", "label": "Celigo", "agent_token": "agent-tok"},
+        )
+        assert first.status_code == 201, first.text
+        assert first.json()["agent_access"] is True
+
+        async def _discover_fails(connector, db=None):
+            raise RuntimeError("celigo mcp server unreachable")
+
+        monkeypatch.setattr("app.services.mcp_client_service.discover_tools", _discover_fails, raising=False)
+
+        second = await client.post(
+            "/api/v1/connector-status/celigo/connect",
+            headers=headers,
+            json={"token": "s3cret2", "region": "us", "label": "Celigo", "agent_token": "agent-tok2"},
+        )
+        assert second.status_code == 201, second.text
+        assert second.json()["agent_access"] is False
+
+        from sqlalchemy import select
+
+        from app.models.mcp_connector import McpConnector
+
+        row = (
+            await db.execute(
+                select(McpConnector).where(
+                    McpConnector.tenant_id == user.tenant_id,
+                    McpConnector.provider == "celigo_mcp",
+                )
+            )
+        ).scalar_one()
+        assert not row.discovered_tools, "the earlier successful discovery's tools must be cleared"
+        assert row.is_enabled is False
+
 
 class TestCeligoMcpGuardIntegration:
     """End-to-end proof that Tasks 1-3's read-only guards protect the real

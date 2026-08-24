@@ -598,20 +598,30 @@ async def _upsert_celigo_mcp_connector(
         )
 
     # Best-effort tool discovery -- must not fail the connector row itself.
-    # The read-only guards (Tasks 1-3) apply on whatever discovered_tools ends
-    # up holding, so a failure here just means the agent picks up tools on the
-    # next test/reconnect rather than immediately.
+    # But "must not fail the row" is not the same as "must report success":
+    # agent_token is never verified on its own (unlike the REST token, which
+    # goes through verify_token before any write) -- discover_tools actually
+    # reaching the server and returning tools is the ONLY proof this token is
+    # good for anything. `is_enabled` is what `agent_access`
+    # (both the API field and _celigo_agent_access, via
+    # get_active_connectors_for_tenant) key off, so it must reflect that proof
+    # rather than "a row exists". A failure also resets discovered_tools --
+    # a reconnect must not leave a PREVIOUS successful discovery's tool list
+    # attached to a token that just failed to enumerate tools.
     try:
         from app.services.mcp_client_service import discover_tools
 
         tools = await discover_tools(connector, db)
         connector.discovered_tools = tools
+        connector.is_enabled = True
     except Exception:
         logger.warning(
             "celigo_mcp_connector.tool_discovery_failed",
             tenant_id=str(tenant_id),
             exc_info=True,
         )
+        connector.discovered_tools = None
+        connector.is_enabled = False
 
     await db.flush()
     return connector
