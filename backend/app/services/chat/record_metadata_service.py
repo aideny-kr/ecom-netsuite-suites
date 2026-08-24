@@ -21,6 +21,53 @@ logger = logging.getLogger(__name__)
 _TTL_SECONDS = 3600
 _cache: dict[tuple[str, str], tuple[float, "RecordMetadata"]] = {}
 
+# NetSuite has been observed to serialise the required-marker under several
+# names depending on endpoint/version (`ismandatory` on discovered account
+# metadata per prompt_template_service.py:87, `mandatory` in our own fixture
+# shape). The live `ns_getRecordTypeMetadata` shape has never been captured
+# (MCP token expired — see backend/tests/fixtures/netsuite_metadata/README.md),
+# so every plausible key is accepted rather than betting on one. Order is the
+# tie-break when a payload somehow carries more than one; first present wins.
+_REQUIRED_MARKER_KEYS: tuple[str, ...] = (
+    "mandatory",
+    "ismandatory",
+    "required",
+    "isrequired",
+    "isMandatory",
+    "isRequired",
+)
+
+_TRUTHY_STRINGS = {"t", "true", "yes", "1"}
+
+# Sentinel distinguishing "no recognised marker key present" from "marker key
+# present with a falsy value" — the two must not be treated the same, or a
+# field with e.g. {"mandatory": False} would fall through to a later key.
+_NO_MARKER = object()
+
+
+def _coerce_required_flag(value: Any) -> bool:
+    """Tolerantly coerce NetSuite's required-marker to a real bool.
+
+    NetSuite serialises booleans as real `True`/`False` OR as the strings
+    "T"/"F" (same convention `posting_invariants.py`'s closed-period check
+    handles). A bare `bool(...)` on a string is wrong — `bool("F")` is `True`
+    in Python — so this never falls back to it for a string value.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in _TRUTHY_STRINGS
+    return bool(value)
+
+
+def _required_marker_value(raw: dict[str, Any]) -> Any:
+    """Return the raw value under the first recognised marker key present in
+    *raw*, or `_NO_MARKER` if none of them appear at all."""
+    for key in _REQUIRED_MARKER_KEYS:
+        if key in raw:
+            return raw[key]
+    return _NO_MARKER
+
 
 class FieldSpec(BaseModel):
     name: str
@@ -50,11 +97,12 @@ def clear_metadata_cache() -> None:
 
 
 def _parse_field(raw: dict[str, Any]) -> FieldSpec:
+    marker = _required_marker_value(raw)
+    required = False if marker is _NO_MARKER else _coerce_required_flag(marker)
     return FieldSpec(
         name=raw.get("name", ""),
         label=raw.get("label") or raw.get("name", ""),
-        # NetSuite metadata uses "mandatory"; accept "required" defensively.
-        required=bool(raw.get("mandatory") or raw.get("required")),
+        required=required,
         type=raw.get("type", "text"),
         options=raw.get("options"),
     )
@@ -127,10 +175,29 @@ async def get_record_metadata(
                 line_fields.append(_parse_field(raw_field))
 
         fields: list[FieldSpec] = []
+        any_required_marker = False
         for raw_field in raw_fields:
             if not isinstance(raw_field, dict):
                 return None
+            if _required_marker_value(raw_field) is not _NO_MARKER:
+                any_required_marker = True
             fields.append(_parse_field(raw_field))
+
+        # A shape mismatch (none of the recognised marker keys present on any
+        # field) degrades silently into "nothing is required" — which reads
+        # exactly like a legitimately permissive record type. Make it LOUD
+        # rather than fatal: a genuinely permissive record type is possible,
+        # so this must not block the write, only flag the shape for a human.
+        if raw_fields and not any_required_marker:
+            first_field = raw_fields[0]
+            observed_keys = sorted(first_field.keys()) if isinstance(first_field, dict) else []
+            logger.warning(
+                "record_metadata: no recognised required-marker key (%s) found on any field "
+                "for record type %r; keys observed on first field: %s",
+                ", ".join(_REQUIRED_MARKER_KEYS),
+                record_type,
+                observed_keys,
+            )
 
         meta = RecordMetadata(record_type=record_type, fields=fields, line_fields=line_fields)
     except Exception:

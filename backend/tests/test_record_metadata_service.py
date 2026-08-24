@@ -1,4 +1,5 @@
 import json
+import logging
 
 import pytest
 
@@ -173,3 +174,138 @@ async def test_malformed_metadata_shape_returns_none_not_empty(monkeypatch, malf
         session_id="s",
     )
     assert meta is None
+
+
+# ── Boolean coercion of NetSuite's required-marker (mandatory/T/F) ──────────
+#
+# NetSuite has never been observed live (MCP token expired) — the parser must
+# be correct under every plausible shape rather than betting on one. See
+# backend/tests/fixtures/netsuite_metadata/README.md.
+
+_TRUTHY_SPELLINGS = [True, "T", "TRUE", "true", "YES", "1"]
+_FALSY_SPELLINGS = [False, None, "", "F", "FALSE", "no", "0"]
+
+
+@pytest.mark.parametrize("value", _TRUTHY_SPELLINGS)
+def test_truthy_required_marker_spellings(value):
+    field = svc._parse_field({"name": "subsidiary", "mandatory": value})
+    assert field.required is True
+
+
+@pytest.mark.parametrize("value", _FALSY_SPELLINGS)
+def test_falsy_required_marker_spellings(value):
+    field = svc._parse_field({"name": "subsidiary", "mandatory": value})
+    assert field.required is False
+
+
+def test_absent_required_marker_is_not_required():
+    """No marker key at all — not the same as a falsy value, but resolves the same way."""
+    field = svc._parse_field({"name": "subsidiary"})
+    assert field.required is False
+
+
+@pytest.mark.parametrize("key", ["mandatory", "ismandatory", "required", "isrequired"])
+def test_each_accepted_key_name_is_recognised(key):
+    assert svc._parse_field({"name": "subsidiary", key: "T"}).required is True
+    assert svc._parse_field({"name": "subsidiary", key: "F"}).required is False
+
+
+def test_f_string_is_not_python_truthy_bool():
+    """Regression guard: bool("F") is True in Python — must never be used bare."""
+    assert svc._parse_field({"name": "subsidiary", "mandatory": "F"}).required is False
+
+
+@pytest.mark.asyncio
+async def test_mixed_keys_resolve_independently_in_same_response(monkeypatch):
+    """{'mandatory': 'F'} and {'ismandatory': 'T'} in the same response must not
+    contaminate each other — each field's marker is read from its own dict."""
+
+    async def fake_exec(**kwargs):
+        return json.dumps(
+            {
+                "fields": [
+                    {"name": "companyname", "label": "Company Name", "mandatory": "F", "type": "text"},
+                    {"name": "subsidiary", "label": "Primary Subsidiary", "ismandatory": "T", "type": "select"},
+                ]
+            }
+        )
+
+    monkeypatch.setattr(svc, "execute_tool_call", fake_exec)
+    meta = await svc.get_record_metadata(
+        record_type="customer",
+        mutation_tool_name=EXT,
+        tenant_id=None,
+        actor_id=None,
+        correlation_id="c",
+        db=None,
+        session_id="s",
+    )
+    assert meta is not None
+    assert meta.required_field_names() == ["subsidiary"]
+
+
+@pytest.mark.asyncio
+async def test_unrecognised_shape_warns_loudly_but_still_returns_metadata(monkeypatch, caplog):
+    """No field in the response carries any recognised required-marker key.
+
+    Today this degrades silently into 'nothing is required', which reads
+    exactly like a legitimately permissive record type. It must instead be
+    LOUD (a warning naming the record type + observed keys) — but NOT fatal,
+    because a genuinely permissive record type is possible.
+    """
+
+    async def fake_exec(**kwargs):
+        return json.dumps({"fields": [{"name": "companyname", "label": "Company Name", "sometotallyunknownkey": True}]})
+
+    monkeypatch.setattr(svc, "execute_tool_call", fake_exec)
+    with caplog.at_level(logging.WARNING, logger="app.services.chat.record_metadata_service"):
+        meta = await svc.get_record_metadata(
+            record_type="customer",
+            mutation_tool_name=EXT,
+            tenant_id=None,
+            actor_id=None,
+            correlation_id="c",
+            db=None,
+            session_id="s",
+        )
+
+    # Loud, not fatal: metadata is still usable.
+    assert meta is not None
+    assert meta.fields[0].name == "companyname"
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "customer" in warnings[0].message
+    assert "sometotallyunknownkey" in warnings[0].message
+
+
+@pytest.mark.asyncio
+async def test_no_warning_when_at_least_one_field_carries_a_marker(monkeypatch, caplog):
+    """The loud-shape-mismatch warning must not fire just because SOME fields
+    lack a marker key — only when NONE of them carry one."""
+
+    async def fake_exec(**kwargs):
+        return json.dumps(
+            {
+                "fields": [
+                    {"name": "companyname", "label": "Company Name"},  # no marker key at all
+                    {"name": "subsidiary", "label": "Primary Subsidiary", "mandatory": True},
+                ]
+            }
+        )
+
+    monkeypatch.setattr(svc, "execute_tool_call", fake_exec)
+    with caplog.at_level(logging.WARNING, logger="app.services.chat.record_metadata_service"):
+        meta = await svc.get_record_metadata(
+            record_type="customer",
+            mutation_tool_name=EXT,
+            tenant_id=None,
+            actor_id=None,
+            correlation_id="c",
+            db=None,
+            session_id="s",
+        )
+
+    assert meta is not None
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings == []
