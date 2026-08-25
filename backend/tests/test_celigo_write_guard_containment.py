@@ -40,6 +40,7 @@ PRODUCTION_ALLOWLIST = {
 TEST_ALLOWLIST = {
     "tests/api/test_celigo_write_guard.py",
     "tests/services/test_mcp_connector_service_celigo.py",
+    "tests/services/test_celigo_dispatcher_feature_flag.py",  # seeds a celigo_mcp row to drive the dispatcher
     "tests/test_connections.py",  # seeds Celigo rows to test the generic-DELETE refusal
     "tests/test_celigo_write_guard_containment.py",  # names the token to check for it
 }

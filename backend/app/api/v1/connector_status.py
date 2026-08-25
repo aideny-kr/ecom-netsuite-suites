@@ -592,6 +592,53 @@ def _celigo_accounts_match(rest_identity: dict, agent_identity: dict) -> bool:
     return rest_name == agent_name
 
 
+async def _disable_celigo_agent_access(db: AsyncSession, tenant_id, actor_id, reason: str) -> bool:
+    """Revoke the agent's Celigo tools because the row can no longer be trusted.
+
+    The other trusted celigo_mcp writer besides ``_upsert_celigo_mcp_connector``
+    and ``disconnect_celigo``, so it holds the write window itself.
+
+    Deliberately does NOT touch the token or attempt to re-verify anything --
+    it is called precisely when there is no agent token to verify. It leaves the
+    row in the same coherent shape a failed reconnect produces
+    (``is_enabled=False`` + ``status='error'`` + a reason), and clears
+    ``discovered_tools`` for the reason the discovery path does: a tool list
+    enumerated against the OLD account must not stay attached to a connector the
+    operator is being asked to re-authorize.
+
+    Returns whether a row was actually disabled.
+    """
+    result = await db.execute(
+        select(McpConnector).where(
+            McpConnector.tenant_id == tenant_id,
+            McpConnector.provider == "celigo_mcp",
+            McpConnector.status != "revoked",
+        )
+    )
+    connector = result.scalar_one_or_none()
+    if connector is None:
+        return False
+
+    with celigo_writes_allowed(db):
+        connector.is_enabled = False
+        connector.status = "error"
+        connector.error_reason = reason
+        connector.discovered_tools = None
+
+        await audit_service.log_event(
+            db=db,
+            tenant_id=tenant_id,
+            category="mcp_connector",
+            action="mcp_connector.update",
+            actor_id=actor_id,
+            resource_type="mcp_connector",
+            resource_id=str(connector.id),
+            payload={"provider": "celigo_mcp", "reason": reason},
+        )
+        await db.commit()
+    return True
+
+
 async def _upsert_celigo_mcp_connector(
     db: AsyncSession,
     tenant_id,
@@ -856,6 +903,12 @@ async def connect_celigo(
     )
     existing = existing_result.scalar_one_or_none()
 
+    # Captured BEFORE metadata_json is overwritten below: the account this
+    # connection was last verified against. The `else` branch at the bottom
+    # compares it with `info` to decide whether this reconnect moved the REST
+    # side to a different Celigo account.
+    previous_identity = dict(existing.metadata_json or {}) if existing else {}
+
     # The trusted Celigo write window. It must span the db.commit() as well as
     # the attribute writes: the guard fires at the FLUSH, and for the `existing`
     # branch that flush is the audit log_event / commit below, not any statement
@@ -954,6 +1007,39 @@ async def connect_celigo(
                 error=str(exc),
             )
     else:
+        # No agent token to verify -- and omitting it is the documented way to
+        # leave agent access alone. That is only safe while the REST side stays
+        # on the same Celigo account. Rotating the REST token to a DIFFERENT
+        # account would otherwise leave the agent's connector live against the
+        # OLD one: the UI says account B, the agent keeps reading account A's
+        # flows, and agent_access reports True over the split.
+        #
+        # We cannot re-verify a token we were not given, so the only correct
+        # move is to disable the paired connector and tell the operator to
+        # re-supply an agent token. Reuses _celigo_accounts_match so "is this
+        # the same account?" has ONE answer in this module, including its
+        # deliberate fail-closed behaviour on a missing account_name: an
+        # identity we cannot prove unchanged is not an identity we can keep
+        # agent access on.
+        if not _celigo_accounts_match(previous_identity, info):
+            previous_name = previous_identity.get("account_name") or "unknown"
+            new_name = info.get("account_name") or "unknown"
+            disabled = await _disable_celigo_agent_access(
+                db,
+                user.tenant_id,
+                user.id,
+                reason=(
+                    "Agent access was disabled because this connection was reconnected to a "
+                    f"different Celigo account (was: {previous_name!r}, now: {new_name!r}). "
+                    "Reconnect with an agent token for the new account to restore it."
+                ),
+            )
+            if disabled:
+                # That path commits, which clears the transaction-scoped
+                # SET LOCAL app.current_tenant_id -- re-establish it before the
+                # agent-access read below.
+                await set_tenant_context(db, str(user.tenant_id))
+
         agent_access = await _celigo_agent_access(db, user.tenant_id)
 
     return CeligoStatusResponse(

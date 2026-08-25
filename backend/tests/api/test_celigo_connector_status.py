@@ -1359,3 +1359,183 @@ class TestGuardExceptionsAreNotSwallowed:
         assert r.status_code == 201, r.text
         assert r.json()["connected"] is True
         assert r.json()["agent_access"] is False
+
+
+class TestReconnectToADifferentAccount:
+    """MAJOR 4 (T2 gate round 4, PR #202): when ``agent_token`` is omitted,
+    ``connect_celigo`` only ASKED whether an enabled celigo_mcp row exists -- it
+    never re-checked that row against the freshly-verified REST identity.
+
+    So an admin rotating the REST token to a DIFFERENT Celigo account (and
+    omitting agent_token, which is the documented way to leave agent access
+    alone) moved the Connection to account B while the agent's connector kept a
+    live token verified against account A -- and the status endpoint reported
+    ``connected: true, agent_access: true`` over that split. The agent goes on
+    reading account A's flows under a UI that says B.
+
+    The fix must NOT try to re-verify a token it was not given: the only correct
+    move is to disable the paired connector with a reason and make the operator
+    re-supply an agent token.
+    """
+
+    @staticmethod
+    def _verify_by_token(monkeypatch, accounts: dict[str, str]):
+        async def _verify(token, region="us", **kw):
+            return {"account_name": accounts[token], "user_email": "ops@frame.work"}
+
+        monkeypatch.setattr("app.api.v1.connector_status.verify_token", _verify, raising=False)
+
+    @staticmethod
+    def _discovery_ok(monkeypatch):
+        async def _discover(connector, db=None):
+            return [{"name": "list_flows", "description": "List flows"}]
+
+        monkeypatch.setattr("app.services.mcp_client_service.discover_tools", _discover, raising=False)
+
+    async def _celigo_mcp_row(self, db, tenant_id):
+        from sqlalchemy import select
+
+        from app.models.mcp_connector import McpConnector
+
+        return (
+            await db.execute(
+                select(McpConnector).where(
+                    McpConnector.tenant_id == tenant_id,
+                    McpConnector.provider == "celigo_mcp",
+                )
+            )
+        ).scalar_one()
+
+    async def test_reconnect_to_a_different_account_disables_agent_access(self, client, admin_user, db, monkeypatch):
+        user, headers = admin_user
+        self._verify_by_token(monkeypatch, {"tok-a": "Account A", "agent-a": "Account A", "tok-b": "Account B"})
+        self._discovery_ok(monkeypatch)
+
+        first = await client.post(
+            "/api/v1/connector-status/celigo/connect",
+            headers=headers,
+            json={"token": "tok-a", "region": "us", "label": "Celigo", "agent_token": "agent-a"},
+        )
+        assert first.status_code == 201, first.text
+        assert first.json()["agent_access"] is True
+
+        # The REST token is rotated to a DIFFERENT Celigo account, agent_token omitted.
+        second = await client.post(
+            "/api/v1/connector-status/celigo/connect",
+            headers=headers,
+            json={"token": "tok-b", "region": "us", "label": "Celigo"},
+        )
+        assert second.status_code == 201, second.text
+        assert second.json()["account_name"] == "Account B"
+        assert second.json()["agent_access"] is False, (
+            "the agent's token was verified against Account A and was never re-verified against B"
+        )
+
+        row = await self._celigo_mcp_row(db, user.tenant_id)
+        assert row.is_enabled is False
+        assert row.status != "active"
+        assert row.error_reason, "the operator needs to be told why agent access went away"
+        assert "agent token" in row.error_reason.lower(), row.error_reason
+
+        status_resp = await client.get("/api/v1/connector-status/celigo", headers=headers)
+        assert status_resp.json()["agent_access"] is False
+
+    async def test_reconnect_to_the_same_account_preserves_agent_access(self, client, admin_user, db, monkeypatch):
+        """The control. Rotating the REST token WITHIN the same account is the
+        ordinary case and must leave the agent connector completely untouched."""
+        user, headers = admin_user
+        self._verify_by_token(monkeypatch, {"tok-a": "Account A", "agent-a": "Account A", "tok-a2": "Account A"})
+        self._discovery_ok(monkeypatch)
+
+        first = await client.post(
+            "/api/v1/connector-status/celigo/connect",
+            headers=headers,
+            json={"token": "tok-a", "region": "us", "label": "Celigo", "agent_token": "agent-a"},
+        )
+        assert first.status_code == 201, first.text
+        before = await self._celigo_mcp_row(db, user.tenant_id)
+        before_credentials = before.encrypted_credentials
+        before_tools = before.discovered_tools
+
+        second = await client.post(
+            "/api/v1/connector-status/celigo/connect",
+            headers=headers,
+            json={"token": "tok-a2", "region": "us", "label": "Celigo"},
+        )
+        assert second.status_code == 201, second.text
+        assert second.json()["agent_access"] is True
+
+        row = await self._celigo_mcp_row(db, user.tenant_id)
+        assert row.is_enabled is True
+        assert row.status == "active"
+        assert row.error_reason is None
+        assert row.encrypted_credentials == before_credentials, "the agent token must not be touched"
+        assert row.discovered_tools == before_tools
+
+    async def test_a_supplied_agent_token_is_still_verified_against_the_new_account(
+        self, client, admin_user, db, monkeypatch
+    ):
+        """When agent_token IS supplied the existing identity check owns the
+        decision -- this fix must not shadow it or double-disable."""
+        user, headers = admin_user
+        self._verify_by_token(
+            monkeypatch,
+            {"tok-a": "Account A", "tok-b": "Account B", "agent-a": "Account A", "agent-b": "Account B"},
+        )
+        self._discovery_ok(monkeypatch)
+
+        await client.post(
+            "/api/v1/connector-status/celigo/connect",
+            headers=headers,
+            json={"token": "tok-a", "region": "us", "label": "Celigo", "agent_token": "agent-a"},
+        )
+
+        moved = await client.post(
+            "/api/v1/connector-status/celigo/connect",
+            headers=headers,
+            json={"token": "tok-b", "region": "us", "label": "Celigo", "agent_token": "agent-b"},
+        )
+        assert moved.status_code == 201, moved.text
+        assert moved.json()["agent_access"] is True, "both halves moved to Account B together"
+
+        row = await self._celigo_mcp_row(db, user.tenant_id)
+        assert row.is_enabled is True
+        assert row.status == "active"
+
+    async def test_reconnect_without_any_agent_connector_is_a_no_op(self, client, admin_user, db, monkeypatch):
+        """A tenant that never granted agent access must not acquire a row, and
+        the account-change path must not blow up when there is nothing to
+        disable."""
+        user, headers = admin_user
+        self._verify_by_token(monkeypatch, {"tok-a": "Account A", "tok-b": "Account B"})
+
+        await client.post(
+            "/api/v1/connector-status/celigo/connect",
+            headers=headers,
+            json={"token": "tok-a", "region": "us", "label": "Celigo"},
+        )
+        second = await client.post(
+            "/api/v1/connector-status/celigo/connect",
+            headers=headers,
+            json={"token": "tok-b", "region": "us", "label": "Celigo"},
+        )
+        assert second.status_code == 201, second.text
+        assert second.json()["agent_access"] is False
+
+        from sqlalchemy import select
+
+        from app.models.mcp_connector import McpConnector
+
+        rows = (
+            (
+                await db.execute(
+                    select(McpConnector).where(
+                        McpConnector.tenant_id == user.tenant_id,
+                        McpConnector.provider == "celigo_mcp",
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert list(rows) == []
