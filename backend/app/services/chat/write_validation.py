@@ -26,7 +26,76 @@ from app.services.chat.required_field_registry import apply_curated_requirements
 from app.services.chat.write_payload import NormalizedPayload, normalize_write_payload
 from app.services.chat.write_validator import ValidationResult, validate_write
 
-__all__ = ["normalize_for_validation", "validate_mutation"]
+__all__ = ["normalize_for_validation", "resolve_curated_metadata", "validate_mutation"]
+
+
+async def _curated_metadata(
+    *,
+    payload: NormalizedPayload,
+    record_type: str,
+    tool_name: str,
+    tenant_id: Any,
+    actor_id: Any,
+    correlation_id: str,
+    db: Any,
+    session_id: str,
+):
+    """Fetch live metadata and overlay the curated registry. THE one way any
+    caller obtains metadata for a write.
+
+    Two callers need this and they must not diverge: `validate_mutation`
+    (which derives `missing_required` from it) and the `ask_user` slot
+    resolution in ``agents/base_agent.py`` (which checks a hinted field name
+    against it). A T2 gate round found them split — the ask_user path used raw
+    `get_record_metadata` while validation used the curated overlay — so a
+    field could be reported missing by one and "not a recognized field" by the
+    other, bouncing to the repair loop the exact question that was meant to
+    reach a human. The overlay is now unskippable by construction rather than
+    by both call sites remembering to apply it.
+    """
+    meta = await get_record_metadata(
+        record_type=record_type,
+        mutation_tool_name=tool_name,
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        correlation_id=correlation_id,
+        db=db,
+        session_id=session_id,
+    )
+    return apply_curated_requirements(meta, record_type=record_type, fields=payload.fields)
+
+
+async def resolve_curated_metadata(
+    *,
+    tool_name: str,
+    tool_input: dict[str, Any],
+    mutation_type: str,
+    record_type: str,
+    tenant_id: Any,
+    actor_id: Any,
+    correlation_id: str,
+    db: Any,
+    session_id: str,
+):
+    """Curated metadata for a write, addressed by its tool input.
+
+    Same result `validate_mutation` validates against, for callers that hold
+    the tool call rather than a parsed payload. The underlying fetch is served
+    from `get_record_metadata`'s 1h (connector_id, record_type) cache, so
+    calling this after `validate_mutation` in the same turn is a cache hit,
+    not a second MCP round trip.
+    """
+    payload = normalize_for_validation(mutation_type, tool_input)
+    return await _curated_metadata(
+        payload=payload,
+        record_type=record_type,
+        tool_name=tool_name,
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        correlation_id=correlation_id,
+        db=db,
+        session_id=session_id,
+    )
 
 
 def normalize_for_validation(mutation_type: str, tool_input: dict[str, Any]) -> NormalizedPayload:
@@ -96,26 +165,26 @@ async def validate_mutation(
     """
     payload = normalize_for_validation(mutation_type, tool_input)
 
-    meta = await get_record_metadata(
+    # The live NetSuite metadata shape carries field NAMES and nothing about
+    # requiredness (see required_field_registry's docstring for the three
+    # independent confirmations), so raw `requirements_known` is False and
+    # `validate_write` would return early with an empty `missing_required` —
+    # a card with nothing to ask for. The curated overlay happens here rather
+    # than inside `get_record_metadata` because this is the layer holding the
+    # payload the conditional rules read (`isperson` decides companyname vs
+    # lastname), and `get_record_metadata` caches, so a payload-dependent
+    # overlay applied there would leak one write's conditions into every
+    # later one.
+    meta = await _curated_metadata(
+        payload=payload,
         record_type=record_type,
-        mutation_tool_name=tool_name,
+        tool_name=tool_name,
         tenant_id=tenant_id,
         actor_id=actor_id,
         correlation_id=correlation_id,
         db=db,
         session_id=session_id,
     )
-    # The live NetSuite metadata shape carries field NAMES and nothing about
-    # requiredness (see required_field_registry's docstring for the three
-    # independent confirmations), so `meta.requirements_known` is False and
-    # `validate_write` would return early with an empty `missing_required` —
-    # a card with nothing to ask for. Overlaying the curated registry HERE,
-    # rather than inside `get_record_metadata`, is deliberate on two counts:
-    # this is the only place holding the payload the conditional rules read
-    # (`isperson` decides companyname vs lastname), and `get_record_metadata`
-    # caches its result, so a payload-dependent overlay applied there would
-    # leak one write's conditions into every later one.
-    meta = apply_curated_requirements(meta, record_type=record_type, fields=payload.fields)
     invariants = await check_posting_invariants(
         payload=payload,
         record_type=record_type,

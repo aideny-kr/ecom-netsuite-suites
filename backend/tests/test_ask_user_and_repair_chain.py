@@ -623,6 +623,30 @@ class TestDelegationVersusRepair:
         assert len(self._repair_bounced(events)) == 1
 
     @pytest.mark.asyncio
+    async def test_a_bounced_attempt_still_tells_the_model_why_its_hint_failed(self):
+        """T2 gate finding: the card path reports rejected hints, the bounce
+        path dropped them. A model bounced with no explanation repeats the same
+        bad field name and drains its repair budget on a mistake we already
+        diagnosed."""
+        agent = _make_agent()
+        create_name = _ext("ns_createRecord")
+        adapter = _make_adapter(
+            [
+                _metadata_step(_ext("ns_getRecordTypeMetadata")),
+                self._create_call(create_name, ask_user=["not_a_real_field"]),
+                _final_step(),
+            ]
+        )
+
+        with _patches():
+            events = await _run(agent, adapter)
+
+        responses = [p for t, p in events if t == "response"]
+        bounce_entry = responses[0].tool_calls_log[-1]
+        assert "unresolved_ask_user_fields" in bounce_entry["result_summary"]
+        assert "not_a_real_field" in bounce_entry["result_summary"]
+
+    @pytest.mark.asyncio
     async def test_incomplete_payload_with_zero_options_goes_to_the_model(self):
         """The hint named a registered field, but the server found nothing to
         offer. An empty dropdown is not an answerable question."""

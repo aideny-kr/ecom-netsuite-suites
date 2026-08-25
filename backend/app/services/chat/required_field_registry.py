@@ -44,6 +44,16 @@ Entries deliberately EXCLUDED, each for a reason worth keeping written down:
   JE balance already lives in ``posting_invariants.py`` and must not be
   re-implemented here.
 
+A curated rule only ever applies to a field the account's own metadata catalog
+actually exposes. That is the per-account gate: `subsidiary` appears on
+customer/vendor/journalEntry only when OneWorld is enabled, so on a
+single-entity account the field is simply absent and nothing is required —
+which is what the prompt text this registry replaced always said ("a OneWorld
+account requires a subsidiary; a single-entity one does not"). It also means a
+curated requirement can never name a field the raw catalog lacks, so any code
+resolving a field name against raw metadata cannot disagree with what the
+validator reports as missing.
+
 Adding a record type is one reviewed block below. Nothing at runtime — and no
 model — can add one.
 """
@@ -275,33 +285,65 @@ def apply_curated_requirements(
     if not rules:
         return metadata
 
-    applicable = {rule.name: rule for rule in rules if rule.applies_to(fields)}
-    if not applicable:
-        # A curated record type whose every rule is conditioned out is still a
-        # completed check — say so, rather than falling back to "unknown".
-        return metadata.model_copy(
-            update={"requirements_known": True, "requirements_source": REQUIREMENTS_SOURCE},
-            deep=True,
+    # An empty catalog told us nothing. Claiming "checked, and this account
+    # requires none of these" off zero fields would wave an empty payload
+    # through wearing a validated badge, so it stays UNKNOWN.
+    if not metadata.fields:
+        return metadata
+
+    exposed = {spec.name for spec in metadata.fields}
+
+    # PRESENCE IS THE ACCOUNT GATE — the fix for a T2 gate major.
+    # `subsidiary` exists on customer/vendor/journalEntry only when the
+    # account has OneWorld enabled; a single-entity account has no such field
+    # at all. Requiring it there would block every customer create behind a
+    # question the operator cannot answer, which is precisely the "a wrong
+    # entry is worse than a missing one" failure this registry is built to
+    # avoid. The account's own field catalog already answers it, so no extra
+    # round trip is needed — and this restores the per-account nuance the
+    # prompt text used to carry ("a OneWorld account requires a subsidiary; a
+    # single-entity one does not").
+    #
+    # It also removes a divergence by construction: because a curated
+    # requirement can now only ever name a field the raw catalog already
+    # contains, curated and raw metadata always agree on which field NAMES
+    # exist. Anything resolving a name against the raw catalog (the ask_user
+    # path in `agents/base_agent.py`) can no longer disagree with what
+    # `validate_write` reports as missing.
+    applicable = {rule.name: rule for rule in rules if rule.name in exposed and rule.applies_to(fields)}
+
+    skipped = [rule.name for rule in rules if rule.name not in exposed]
+    if skipped:
+        logger.info(
+            "required_field_registry: record_type=%s does not expose %s — not requiring them "
+            "(account feature set differs, e.g. no OneWorld)",
+            record_type,
+            sorted(skipped),
         )
 
     merged_fields: list[FieldSpec] = []
-    seen: set[str] = set()
     for spec in metadata.fields:
-        seen.add(spec.name)
         if spec.name in applicable:
             # Keep NetSuite's own label and type — that is what the operator
             # sees on the NetSuite form. Only requiredness comes from us.
-            merged_fields.append(spec.model_copy(update={"required": True}, deep=True))
+            # `model_copy` yields a NEW object, so the cached metadata's own
+            # FieldSpec is never touched.
+            update: dict[str, Any] = {"required": True}
+            if not spec.label or spec.label == spec.name:
+                # The catalog carried no human title for this field, so
+                # `_parse_properties_shape` fell back to the raw API name.
+                # A card asking an operator to fill in "subsidiary" is worse
+                # than one asking for "Primary Subsidiary"; the curated label
+                # is the better fallback.
+                update["label"] = applicable[spec.name].label
+            merged_fields.append(spec.model_copy(update=update))
         else:
-            merged_fields.append(spec.model_copy(deep=True))
-
-    for name, rule in applicable.items():
-        if name in seen:
-            continue
-        # The catalog omitted a field we know is required. Dropping it would
-        # turn a known requirement back into an unasked question, so
-        # synthesise a spec from the rule instead.
-        merged_fields.append(FieldSpec(name=name, label=rule.label, required=True))
+            # Untouched specs are passed through by reference rather than
+            # deep-copied: nothing here mutates a FieldSpec in place, and the
+            # ~170 field catalogs NetSuite returns make a full deep copy on
+            # every write a real cost for no safety gained. Cache safety comes
+            # from building a NEW list and never mutating a shared spec.
+            merged_fields.append(spec)
 
     logger.info(
         "required_field_registry: applied curated requirements record_type=%s required=%s",
@@ -315,5 +357,4 @@ def apply_curated_requirements(
             "requirements_known": True,
             "requirements_source": REQUIREMENTS_SOURCE,
         },
-        deep=True,
     )

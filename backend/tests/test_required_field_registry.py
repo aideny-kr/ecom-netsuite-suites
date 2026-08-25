@@ -164,8 +164,7 @@ def test_merge_marks_curated_fields_required_and_flips_requirements_known():
 
 def test_merge_preserves_live_label_and_type():
     """NetSuite's own label beats ours — it is what the operator sees on the
-    NetSuite form. The registry label is a fallback for a field the live
-    metadata omitted."""
+    NetSuite form."""
     meta = RecordMetadata(
         record_type="customer",
         fields=[FieldSpec(name="subsidiary", label="Subsidiary (Primary)", type="integer")],
@@ -177,16 +176,42 @@ def test_merge_preserves_live_label_and_type():
     assert spec.type == "integer"
 
 
-def test_merge_synthesises_a_spec_for_a_field_live_metadata_omitted():
-    """A curated requirement must not be silently dropped because the metadata
-    catalog did not list the field — that would turn a known requirement back
-    into an unasked question."""
+def test_a_field_the_account_does_not_expose_is_not_required():
+    """T2 gate finding (major): `subsidiary` exists on customer/vendor/journal
+    entry only when the account has OneWorld enabled. A single-entity account's
+    NetSuite has no such field at all, so requiring it there would block every
+    customer create with a question the operator cannot answer — the exact
+    "wrong entry is worse than a missing one" failure this registry is supposed
+    to avoid. Presence in the account's own field catalog IS the OneWorld
+    gate, and it needs no extra round trip: we already hold the catalog.
+    """
+    single_entity = RecordMetadata(
+        record_type="customer",
+        fields=[
+            FieldSpec(name="companyname", label="Company Name"),
+            FieldSpec(name="email", label="Email"),
+        ],
+        requirements_known=False,
+    )
+    merged = apply_curated_requirements(single_entity, record_type="customer", fields={})
+
+    assert merged.required_field_names() == ["companyname"]
+    assert merged.spec_for("subsidiary") is None
+    # Still a completed check — we consulted the catalog and it settled the
+    # question. Reporting "unknown" here would drop back to an unvalidated
+    # card for an account we CAN validate.
+    assert merged.requirements_known is True
+
+
+def test_an_empty_field_catalog_is_unknown_not_permissive():
+    """Zero fields means the catalog told us nothing, not that the record type
+    requires nothing. Treating it as "checked, nothing required" would let an
+    empty payload through claiming it had been validated."""
     meta = RecordMetadata(record_type="customer", fields=[], requirements_known=False)
     merged = apply_curated_requirements(meta, record_type="customer", fields={})
-    spec = merged.spec_for("subsidiary")
-    assert spec is not None
-    assert spec.required is True
-    assert spec.label == "Primary Subsidiary"
+    assert merged.requirements_known is False
+    assert merged.requirements_source is None
+    assert merged.required_field_names() == []
 
 
 def test_merge_does_not_mutate_the_cached_input():
@@ -296,7 +321,15 @@ def test_update_still_accepts_a_partial_payload():
     rename. validate_write already scopes the sweep to create/upsert — the
     registry must not change that."""
     meta = apply_curated_requirements(
-        RecordMetadata(record_type="customer", fields=[], requirements_known=False),
+        RecordMetadata(
+            record_type="customer",
+            fields=[
+                FieldSpec(name="subsidiary", label="Primary Subsidiary"),
+                FieldSpec(name="companyname", label="Company Name"),
+                FieldSpec(name="phone", label="Phone"),
+            ],
+            requirements_known=False,
+        ),
         record_type="customer",
         fields={"phone": "555-0100"},
     )
@@ -342,3 +375,17 @@ def test_a_required_field_present_but_blank_still_counts_as_missing(empty):
         mutation_type="create",
     )
     assert "subsidiary" in result.missing_required
+
+
+def test_curated_label_fills_in_when_the_catalog_had_no_title():
+    """`_parse_properties_shape` falls back to the raw API name when a field
+    carries no `title`. Asking an operator to fill in "subsidiary" is worse
+    than asking for "Primary Subsidiary", so the curated label wins there —
+    and only there."""
+    meta = RecordMetadata(
+        record_type="customer",
+        fields=[FieldSpec(name="subsidiary", label="subsidiary")],
+        requirements_known=False,
+    )
+    merged = apply_curated_requirements(meta, record_type="customer", fields={})
+    assert merged.spec_for("subsidiary").label == "Primary Subsidiary"

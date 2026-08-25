@@ -13,6 +13,7 @@ import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from app.services.chat.record_metadata_service import coerce_netsuite_bool
 from app.services.chat.tools import execute_tool_call
 from app.services.chat.write_payload import NormalizedPayload
 
@@ -153,8 +154,10 @@ async def _check_period_open(payload: NormalizedPayload, **kw: Any) -> list[str]
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            closed = str(row.get("closed", "")).strip().upper()
-            if closed in ("T", "TRUE", "YES"):
+            # Shared with record_metadata_service and required_field_registry:
+            # one definition of NetSuite's boolean serialisation, because this
+            # copy had ALREADY drifted from it (it did not accept "1").
+            if coerce_netsuite_bool(row.get("closed")):
                 name = row.get("periodname", tran_date)
                 return [f"Accounting period '{name}' is closed — posting is not permitted."]
     except Exception:

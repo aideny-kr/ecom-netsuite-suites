@@ -1494,21 +1494,25 @@ class BaseSpecialistAgent(abc.ABC):
                         # — see that module's docstring for the full boundary.
                         _ask_user_rejected: list[dict[str, str]] = []
                         if _ask_user_hint and validation is not None:
-                            from app.services.chat.record_metadata_service import (
-                                get_record_metadata as _get_metadata_for_ask_user,
-                            )
                             from app.services.chat.slot_option_sources import resolve_ask_user_slots
+                            from app.services.chat.write_validation import resolve_curated_metadata
 
-                            # A second get_record_metadata call, separate
-                            # from validate_mutation's internal one above —
-                            # that call's ValidationResult does not carry the
-                            # RecordMetadata object itself, and this call
-                            # hits the SAME (connector_id, record_type)-keyed
-                            # 1h cache, so in production it is a cache hit,
-                            # not a second live MCP round trip.
-                            _ask_user_metadata = await _get_metadata_for_ask_user(
+                            # MUST be the curated metadata, not raw
+                            # get_record_metadata — a T2 gate round found
+                            # these two paths split, so a field could be
+                            # reported `missing_required` by validation and
+                            # simultaneously rejected here as "not a
+                            # recognized field", bouncing to the repair loop
+                            # the exact question meant to reach a human.
+                            # Served from the same (connector_id,
+                            # record_type) 1h cache validate_mutation just
+                            # populated, so this is a cache hit, not a second
+                            # live MCP round trip.
+                            _ask_user_metadata = await resolve_curated_metadata(
+                                tool_name=block.name,
+                                tool_input=block.input,
+                                mutation_type=mutation_type,
                                 record_type=record_type,
-                                mutation_tool_name=block.name,
                                 tenant_id=self.tenant_id,
                                 actor_id=self.user_id,
                                 correlation_id=self.correlation_id,
@@ -1549,7 +1553,26 @@ class BaseSpecialistAgent(abc.ABC):
                                 # the turn" shape as the Plan Mode InterceptError
                                 # branch above — result_str is what recomposes
                                 # the model's next attempt, not an SSE event.
-                                result_str = json.dumps(validation.as_model_error())
+                                _model_error = validation.as_model_error()
+                                if _ask_user_rejected:
+                                    # The card path reports rejected hints to
+                                    # the model; this path must too. Without
+                                    # it a model whose hint named a bad field
+                                    # gets bounced with no clue WHY the
+                                    # delegation did not happen, so its next
+                                    # attempt repeats the same bad name and
+                                    # the repair budget drains on a mistake
+                                    # we already diagnosed.
+                                    # Front of the dict on purpose: the
+                                    # persisted `result_summary` is truncated,
+                                    # and a diagnostic that only exists past
+                                    # the cut is invisible to anyone reading
+                                    # the tool-call log afterwards.
+                                    _model_error = {
+                                        "unresolved_ask_user_fields": _ask_user_rejected,
+                                        **_model_error,
+                                    }
+                                result_str = json.dumps(_model_error)
                                 elapsed_ms = int((time.monotonic() - t0) * 1000)
                                 # success MUST be False here — a repair round that
                                 # logs as a success would make the whole loop
