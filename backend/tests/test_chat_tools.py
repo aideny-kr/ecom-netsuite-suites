@@ -368,6 +368,17 @@ class TestCeligoReadOnlyEnforcement:
         assert "read-only" in result["error"].lower()
         assert called["n"] == 0, "the write reached the Celigo MCP server"
 
+    def _stub_flag(self, monkeypatch, enabled: bool):
+        """The dispatcher also enforces the `celigo` kill switch (round-4 fix),
+        so a unit test about the READ-ONLY policy has to say which side of the
+        flag it is on. Stubbed rather than seeded: these tests run without a DB.
+        """
+
+        async def _flag(db, tenant_id, flag_key):
+            return enabled
+
+        monkeypatch.setattr("app.services.feature_flag_service.is_enabled", _flag, raising=False)
+
     @pytest.mark.asyncio
     async def test_layer2_dispatcher_allows_read(self, monkeypatch):
         import uuid as _uuid
@@ -384,6 +395,7 @@ class TestCeligoReadOnlyEnforcement:
 
         monkeypatch.setattr("app.services.mcp_connector_service.get_mcp_connector", _fake_get, raising=False)
         monkeypatch.setattr("app.services.mcp_client_service.call_external_mcp_tool", _fake_call, raising=False)
+        self._stub_flag(monkeypatch, True)
 
         result = await tools_mod._execute_external_tool(
             connector_id=connector.id,
@@ -394,3 +406,38 @@ class TestCeligoReadOnlyEnforcement:
         )
 
         assert result == {"items": []}
+
+    @pytest.mark.asyncio
+    async def test_layer2_dispatcher_denies_read_when_the_flag_is_off(self, monkeypatch):
+        """The kill switch is enforced at this layer too, for the same reason
+        the read-only policy is: the dispatcher has several callers and a
+        tool_use block can outlive the inventory it was built from."""
+        import uuid as _uuid
+
+        from app.services.chat import tools as tools_mod
+
+        connector = self._FakeConnector("celigo_mcp", [])
+
+        async def _fake_get(db, connector_id, tenant_id):
+            return connector
+
+        called = {"n": 0}
+
+        async def _fake_call(*args, **kwargs):
+            called["n"] += 1
+            return {"items": []}
+
+        monkeypatch.setattr("app.services.mcp_connector_service.get_mcp_connector", _fake_get, raising=False)
+        monkeypatch.setattr("app.services.mcp_client_service.call_external_mcp_tool", _fake_call, raising=False)
+        self._stub_flag(monkeypatch, False)
+
+        result = await tools_mod._execute_external_tool(
+            connector_id=connector.id,
+            raw_tool_name="list_flows",
+            tool_input={},
+            tenant_id=_uuid.uuid4(),
+            db=None,
+        )
+
+        assert "error" in result
+        assert called["n"] == 0, "the read reached the Celigo MCP server after the kill switch"
