@@ -7,8 +7,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.encryption import decrypt_credentials, encrypt_credentials, get_current_key_version
 from app.models.connection import Connection
+from app.services.celigo_write_guard import CeligoManagedElsewhereError
 
 logger = structlog.get_logger()
+
+__all__ = [
+    "CeligoManagedElsewhereError",
+    "create_connection",
+    "delete_connection",
+    "get_connection",
+    "list_connections",
+    "test_connection",
+]
 
 
 async def create_connection(
@@ -51,10 +61,13 @@ async def list_connections(db: AsyncSession, tenant_id: uuid.UUID) -> list[Conne
     return list(result.scalars().all())
 
 
-class CeligoManagedElsewhereError(Exception):
-    """Raised when a generic, provider-agnostic path tries to mutate a Celigo
-    Connection row that must go through its own dedicated, guarded flow.
-    """
+# CeligoManagedElsewhereError is imported at the top of this module and
+# re-exported here (see __all__ below) rather than defined. The class moved to
+# celigo_write_guard because the session-flush listener raises it too, and that
+# module cannot import this one -- it is imported BY app.models.connection,
+# which this module imports. Callers that already catch
+# connection_service.CeligoManagedElsewhereError keep working unchanged, and
+# now catch the guard's refusals as the same type.
 
 
 async def delete_connection(db: AsyncSession, connection_id: uuid.UUID, tenant_id: uuid.UUID) -> bool:
