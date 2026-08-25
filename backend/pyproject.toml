@@ -26,7 +26,19 @@ dependencies = [
     "httpx>=0.26.0",
     "python-multipart>=0.0.6",
     "mcp>=1.0.0,<2",  # 2.0.0 removed mcp.client.streamable_http.streamablehttp_client (CI break 2026-08-02)
-    "anthropic>=0.40.0",
+    # Ceiling is deliberate. anthropic 1.0.0 ships its own vendored httpx line
+    # (httpx2/httpcore2), so the `httpx.Timeout` our adapters construct
+    # (anthropic_adapter.py:98 and siblings) is a foreign object to it — it is
+    # passed straight through to `anyio.fail_after`, which does
+    # `current_time() + delay` and raises
+    #   TypeError: unsupported operand type(s) for +: 'float' and 'Timeout'
+    # on every outbound connection. Symptom is a total chat outage presenting
+    # as `anthropic.APIConnectionError: Connection error.` — observed on
+    # staging 2026-08-25 the first time an image was rebuilt after 1.0.0
+    # released. The floor alone let a MAJOR bump in on a routine rebuild.
+    # Lifting this ceiling means migrating the adapters off httpx.Timeout and
+    # re-verifying the whole 1.x surface — see ClickUp 86bbm719c.
+    "anthropic>=0.40.0,<1.0.0",
     "openai>=1.0.0",
     "google-genai>=1.0.0",
     "voyageai>=0.3.0",
