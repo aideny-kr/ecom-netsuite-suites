@@ -175,6 +175,14 @@ async def get_active_connectors_for_tenant(db: AsyncSession, tenant_id: uuid.UUI
     benchmark runners and ``_celigo_agent_access``, so gating here covers every
     one of them without a per-consumer check.
 
+    This is layer 1 of 2, and only layer 1. It gates the tool INVENTORY, which
+    is not the same as gating execution: a tool_use block emitted before the
+    flag was flipped off already carries a connector id, and any caller that
+    does not re-derive the inventory never passes through here at all. The
+    dispatcher (``chat/tools._execute_external_tool``) therefore re-checks the
+    flag, mirroring the read-only policy's own two layers -- see
+    ``.claude/rules/agent-graph.md`` #3. Both must move together.
+
     Deliberately the WRITE side's mirror image and not part of the write guard:
     this revokes an existing grant at read time, so a tenant whose flag is
     turned off loses agent access immediately, with no row mutation and nothing

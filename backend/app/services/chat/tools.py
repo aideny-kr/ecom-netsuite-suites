@@ -350,19 +350,44 @@ async def _execute_external_tool(
         # tool definitions alone leaves a hole any new caller can walk through
         # (.claude/rules/agent-graph.md #3). Refuse here regardless of how we got
         # called. Celigo's own delete_resource never blocks server-side.
-        if is_celigo_provider(connector.provider) and not is_read_only_celigo_tool(raw_tool_name):
-            logger.warning(
-                "celigo_write_blocked",
-                tool=raw_tool_name,
-                connector_id=str(connector_id),
-            )
-            return {
-                "error": (
-                    f"'{raw_tool_name}' is not available. This Celigo connection is "
-                    f"read-only — it can read flows, scripts, and errors, but cannot "
-                    f"create, change, run, or delete anything."
+        #
+        # Provider check FIRST so nothing below costs a non-Celigo tool call
+        # anything: this runs for every external tool call in every chat turn.
+        if is_celigo_provider(connector.provider):
+            if not is_read_only_celigo_tool(raw_tool_name):
+                logger.warning(
+                    "celigo_write_blocked",
+                    tool=raw_tool_name,
+                    connector_id=str(connector_id),
                 )
-            }
+                return {
+                    "error": (
+                        f"'{raw_tool_name}' is not available. This Celigo connection is "
+                        f"read-only — it can read flows, scripts, and errors, but cannot "
+                        f"create, change, run, or delete anything."
+                    )
+                }
+
+            # The `celigo` flag is the kill switch for the whole Celigo surface,
+            # and it needs both layers for the same reason the read-only policy
+            # does. get_active_connectors_for_tenant enforces it when the tool
+            # INVENTORY is built, but a tool_use block emitted before an operator
+            # flipped the flag off — or any caller that does not re-derive the
+            # inventory — arrives here holding a connector id and would otherwise
+            # read live Celigo data after the switch was thrown.
+            from app.services.feature_flag_service import is_enabled as _flag_is_enabled
+
+            if not await _flag_is_enabled(db, tenant_id, "celigo"):
+                logger.warning(
+                    "celigo_disabled_tool_blocked",
+                    tool=raw_tool_name,
+                    connector_id=str(connector_id),
+                )
+                return {
+                    "error": (
+                        f"'{raw_tool_name}' is not available. The Celigo integration is turned off for this workspace."
+                    )
+                }
 
         from app.services.mcp_client_service import call_external_mcp_tool
 
