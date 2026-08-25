@@ -1517,6 +1517,78 @@ class BaseSpecialistAgent(abc.ABC):
                         self._last_validation = validation
                         # ── End write validation + bounded repair ──
 
+                        # ── ask_user resolution (requirement C) — only for
+                        # the attempt that proceeds to a card; a bounced
+                        # attempt (investigation gate above, or the repair
+                        # branch just above) is discarded, so resolving its
+                        # hint here would be wasted MCP calls for a proposal
+                        # the model is about to replace. The model
+                        # contributes a NAME ONLY; every VALUE comes from a
+                        # server-executed fetch (slot_option_sources.py) —
+                        # see that module's docstring for the full boundary.
+                        _ask_user_rejected: list[dict[str, str]] = []
+                        if _ask_user_hint and validation is not None:
+                            from app.services.chat.record_metadata_service import (
+                                get_record_metadata as _get_metadata_for_ask_user,
+                            )
+                            from app.services.chat.slot_option_sources import resolve_ask_user_slots
+
+                            # A second get_record_metadata call, separate
+                            # from validate_mutation's internal one above —
+                            # that call's ValidationResult does not carry the
+                            # RecordMetadata object itself, and this call
+                            # hits the SAME (connector_id, record_type)-keyed
+                            # 1h cache, so in production it is a cache hit,
+                            # not a second live MCP round trip.
+                            _ask_user_metadata = await _get_metadata_for_ask_user(
+                                record_type=record_type,
+                                mutation_tool_name=block.name,
+                                tenant_id=self.tenant_id,
+                                actor_id=self.user_id,
+                                correlation_id=self.correlation_id,
+                                db=db,
+                                session_id=session_id or str(self.tenant_id),
+                            )
+                            _ask_user_slots, _ask_user_rejected = await resolve_ask_user_slots(
+                                _ask_user_hint,
+                                metadata=_ask_user_metadata,
+                                mutation_tool_name=block.name,
+                                tenant_id=self.tenant_id,
+                                actor_id=self.user_id,
+                                correlation_id=self.correlation_id,
+                                db=db,
+                                session_id=session_id or str(self.tenant_id),
+                                already_declared=[s.name for s in validation.editable_slots],
+                            )
+                            if _ask_user_slots:
+                                # ValidationResult isn't mutated via
+                                # assignment validation (no
+                                # validate_assignment) — appending here does
+                                # NOT need to satisfy the ok/lists invariant,
+                                # since editable_slots plays no part in it
+                                # (see ValidationResult._ok_must_agree_with_its_own_lists).
+                                validation.editable_slots = list(validation.editable_slots) + _ask_user_slots
+                        # ── End ask_user resolution ──
+
+                        # ── Repair-chain stamping + intent guard (D/E) —
+                        # server-stamped from orchestrator-held repair
+                        # context ONLY, never from block.input. A repair-turn
+                        # proposal whose (mutation_type, record_type) differs
+                        # from the root is NOT linked into the chain — it
+                        # becomes a plainly fresh proposal with a fresh
+                        # budget (the intent guard).
+                        _repair_context = getattr(self, "_write_repair_context", None)
+                        _card_repair_of: str | None = None
+                        _card_repair_attempt = 0
+                        if (
+                            _repair_context is not None
+                            and _repair_context.get("mutation_type") == mutation_type
+                            and _repair_context.get("record_type") == record_type
+                        ):
+                            _card_repair_of = _repair_context.get("root_id")
+                            _card_repair_attempt = _repair_context.get("attempt", 0)
+                        # ── End repair-chain stamping ──
+
                         # For updates/upserts: pre-fetch current record for
                         # before/after diff display (capped at 5s to avoid
                         # blocking the SSE stream on slow MCP calls)
@@ -1561,6 +1633,8 @@ class BaseSpecialistAgent(abc.ABC):
                             session_id=session_id if session_id else str(self.tenant_id),
                             current_record=current_record,
                             validation=getattr(self, "_last_validation", None),
+                            repair_of=_card_repair_of,
+                            repair_attempt=_card_repair_attempt,
                         )
 
                         payload_unparseable = False
@@ -1591,18 +1665,26 @@ class BaseSpecialistAgent(abc.ABC):
                                 )
                         else:
                             yield ("confirmation_required", payload.model_dump())
-                            result_str = json.dumps(
-                                {
-                                    "confirmation_required": True,
-                                    "mutation_type": mutation_type,
-                                    "record_type": record_type,
-                                    "message": (
-                                        f"This {mutation_type} operation on {record_type} requires human "
-                                        f"confirmation. The confirmation dialog has been shown to the user. "
-                                        f"Do NOT proceed until the user explicitly approves."
-                                    ),
-                                }
-                            )
+                            _confirmation_result: dict[str, Any] = {
+                                "confirmation_required": True,
+                                "mutation_type": mutation_type,
+                                "record_type": record_type,
+                                "message": (
+                                    f"This {mutation_type} operation on {record_type} requires human "
+                                    f"confirmation. The confirmation dialog has been shown to the user. "
+                                    f"Do NOT proceed until the user explicitly approves."
+                                ),
+                            }
+                            if _ask_user_rejected:
+                                # A hinted name that failed verification
+                                # produces NO slot — tell the model so here,
+                                # on the SAME result the card is announced
+                                # in, rather than silently dropping the
+                                # request. The write still proceeds to the
+                                # card either way (unresolved names are not a
+                                # validation failure).
+                                _confirmation_result["unresolved_ask_user_fields"] = _ask_user_rejected
+                            result_str = json.dumps(_confirmation_result)
 
                         elapsed_ms = int((time.monotonic() - t0) * 1000)
                         yield (
