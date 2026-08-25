@@ -1256,3 +1256,106 @@ class TestCeligoTenantContextAfterCommit:
         ctx_after_commit = events.index("ctx", first_commit)
         read_idx = events.index("agent_access_read")
         assert ctx_after_commit < read_idx, "tenant context must be re-set before the agent-access read"
+
+
+class TestGuardExceptionsAreNotSwallowed:
+    """MAJOR 2 (T2 gate round 4, PR #202): the celigo_mcp side of
+    ``connect_celigo`` is best-effort -- an agent-access failure must never fail
+    the REST connection. It was implemented as a bare ``except Exception``, which
+    also demoted the WRITE GUARD's own exceptions to a warning.
+
+    ``CeligoInvariantError`` is documented as "a programming error, not operator
+    error, so it is deliberately NOT mapped to a 4xx -- it should surface as a
+    500 and a stack trace". Swallowing it means the trusted write path can
+    produce an incoherent Celigo row, the guard can catch it, and the only
+    visible consequence is ``agent_access: false`` -- the exact silent failure
+    the guard was built to make impossible.
+
+    Two sites do this, and both are covered here: the agent-token block in
+    ``connect_celigo`` and the best-effort discovery block in
+    ``_upsert_celigo_mcp_connector_locked``.
+    """
+
+    @staticmethod
+    def _verify_ok(monkeypatch):
+        async def _ok(token, region="us", **kw):
+            return {"account_name": "Framework", "user_email": "ops@frame.work"}
+
+        monkeypatch.setattr("app.api.v1.connector_status.verify_token", _ok, raising=False)
+
+    async def test_invariant_violation_in_the_agent_block_propagates(self, client, admin_user, db, monkeypatch):
+        """Site 1 -- ``connect_celigo``'s ``except Exception``.
+
+        Drives a REAL invariant violation rather than mocking the exception: an
+        unpinned ``server_url`` is precisely what ``_enforce_invariants`` exists
+        to refuse, because ``celigo_tool_policy`` trusts the tool names whatever
+        server answers for that URL.
+        """
+        from app.services.celigo_write_guard import CeligoInvariantError
+
+        self._verify_ok(monkeypatch)
+        # Both modules bound the helper at import time, so both need patching.
+        monkeypatch.setattr(
+            "app.api.v1.connector_status.mcp_server_url",
+            lambda region: "https://attacker.example.com/celigo-mcp",
+        )
+        monkeypatch.setattr(
+            "app.services.mcp_connector_service.mcp_server_url",
+            lambda region: "https://attacker.example.com/celigo-mcp",
+        )
+
+        with pytest.raises(CeligoInvariantError):
+            await client.post(
+                "/api/v1/connector-status/celigo/connect",
+                headers=admin_user[1],
+                json={"token": "s3cret", "region": "us", "label": "Celigo", "agent_token": "agent-tok"},
+            )
+
+    async def test_invariant_violation_inside_discovery_propagates(self, client, admin_user, db, monkeypatch):
+        """Site 2 -- the best-effort ``except Exception`` around discover_tools.
+
+        A guard refusal raised while discovery is running was reported as
+        ``error_reason="Tool discovery failed: ..."``, which is not merely a
+        swallowed exception but an actively misleading diagnosis.
+        """
+        from app.services.celigo_write_guard import CeligoInvariantError
+
+        self._verify_ok(monkeypatch)
+
+        async def _discover_violates_the_invariant(connector, db=None):
+            connector.server_url = "https://attacker.example.com/celigo-mcp"
+            await db.flush()
+            return [{"name": "list_flows", "description": "List flows"}]
+
+        monkeypatch.setattr(
+            "app.services.mcp_client_service.discover_tools",
+            _discover_violates_the_invariant,
+            raising=False,
+        )
+
+        with pytest.raises(CeligoInvariantError):
+            await client.post(
+                "/api/v1/connector-status/celigo/connect",
+                headers=admin_user[1],
+                json={"token": "s3cret", "region": "us", "label": "Celigo", "agent_token": "agent-tok"},
+            )
+
+    async def test_a_genuine_agent_side_failure_still_degrades_gracefully(self, client, admin_user, db, monkeypatch):
+        """The control, and the guarantee this fix must not break: a real
+        transient agent-side failure (unreachable MCP host) still leaves the
+        REST connection connected with ``agent_access: false``."""
+        self._verify_ok(monkeypatch)
+
+        async def _discovery_fails(connector, db=None):
+            raise httpx.ConnectError("celigo mcp server unreachable")
+
+        monkeypatch.setattr("app.services.mcp_client_service.discover_tools", _discovery_fails, raising=False)
+
+        r = await client.post(
+            "/api/v1/connector-status/celigo/connect",
+            headers=admin_user[1],
+            json={"token": "s3cret", "region": "us", "label": "Celigo", "agent_token": "agent-tok"},
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["connected"] is True
+        assert r.json()["agent_access"] is False

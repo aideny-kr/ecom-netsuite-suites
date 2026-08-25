@@ -30,11 +30,25 @@ from app.services.celigo.client import (
     mcp_server_url,
     verify_token,
 )
-from app.services.celigo_write_guard import celigo_writes_allowed
+from app.services.celigo_write_guard import (
+    CeligoInvariantError,
+    CeligoManagedElsewhereError,
+    celigo_writes_allowed,
+)
 
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/connector-status", tags=["connector-status"])
+
+# The write guard's refusals are not best-effort failures and must never be
+# demoted to a warning by the two "this side is optional" blocks below.
+# ``CeligoInvariantError`` means the TRUSTED path itself produced an incoherent
+# Celigo row; ``CeligoManagedElsewhereError`` means a write escaped the allow
+# window that was supposed to cover it. Both are programming errors, so both
+# belong at a 500 with a stack trace (see celigo_write_guard's class docstrings)
+# rather than surfacing as a quiet ``agent_access: false`` -- which is precisely
+# the silent-incoherence outcome the guard exists to prevent.
+_GUARD_ERRORS = (CeligoInvariantError, CeligoManagedElsewhereError)
 
 
 # ---------------------------------------------------------------------------
@@ -728,6 +742,12 @@ async def _upsert_celigo_mcp_connector_locked(
         connector.is_enabled = True
         connector.status = "active"
         connector.error_reason = None
+    except _GUARD_ERRORS:
+        # "Best-effort" covers Celigo being unreachable, not the guard refusing
+        # this function's own writes. Recording that as
+        # error_reason="Tool discovery failed" would not merely swallow the
+        # exception, it would state a wrong diagnosis.
+        raise
     except Exception as exc:
         logger.warning(
             "celigo_mcp_connector.tool_discovery_failed",
@@ -922,6 +942,11 @@ async def connect_celigo(
                     )
                 await db.commit()
             agent_access = mcp_connector.is_enabled
+        except _GUARD_ERRORS:
+            # The REST connection is already committed above, so it still
+            # stands; what must NOT stand is a guard refusal reported as a
+            # routine agent-access failure.
+            raise
         except Exception as exc:
             logger.warning(
                 "celigo.agent_connector_create_failed",
