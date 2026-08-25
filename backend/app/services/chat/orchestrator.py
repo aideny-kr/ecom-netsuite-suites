@@ -1736,6 +1736,103 @@ async def _cas_claim_write_confirmation(
     return True
 
 
+async def _resolve_repair_chain_previous_fingerprint(
+    db: AsyncSession,
+    session_id: uuid.UUID,
+    root_id: str,
+    target_attempt: int,
+) -> str | None:
+    """Return the ``failure_fingerprint`` persisted on the chain entry (the
+    root card itself, or one of its repair cards) whose ``repair_attempt``
+    equals *target_attempt*, or ``None`` if no such row exists or it never
+    failed.
+
+    Reads the PERSISTED chain — rows that survive a process restart, a new
+    session, and ``/clear`` — never an in-memory object, per the bounding
+    ruling (agentic-repair design, ``bounding``). ``target_attempt < 0``
+    (the root's own first failure, attempt 0, has no predecessor to stall
+    against) returns ``None`` without issuing a query. Scoped to
+    *session_id* — a confirmation card is always session-scoped (the HMAC
+    token is bound to it), so the chain can never span sessions.
+    """
+    if target_attempt < 0:
+        return None
+
+    try:
+        root_uuid = uuid.UUID(root_id)
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+    from sqlalchemy import or_ as _rc_or
+    from sqlalchemy import select as _rc_select
+
+    result = await db.execute(
+        _rc_select(ChatMessage)
+        .where(
+            ChatMessage.session_id == session_id,
+            _rc_or(
+                ChatMessage.id == root_uuid,
+                ChatMessage.structured_output["repair_of"].astext == root_id,
+            ),
+            ChatMessage.structured_output["repair_attempt"].astext == str(target_attempt),
+        )
+        .limit(1)
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        return None
+    so = row.structured_output
+    if not isinstance(so, dict):
+        return None
+    return so.get("failure_fingerprint")
+
+
+def _build_write_repair_directive(
+    *,
+    mutation_type: str,
+    record_type: str,
+    attempted_payload: dict[str, Any],
+    error_details: list[str],
+    raw_error: str,
+) -> str:
+    """System-prompt directive injected on a repair re-entry (requirement
+    B). Scopes the agent to repairing the SAME write — guidance for
+    quality, not a control; the control is the card the human must still
+    approve. What the model receives is a mechanical JSON traversal of
+    NetSuite's own error (`error_details`) plus the exact payload that was
+    executed — never a title-matched guess at which field it means."""
+    details_block = "\n".join(f"- {d}" for d in error_details) if error_details else raw_error or "(no detail returned)"
+    return (
+        "<write_repair>\n"
+        f"Your previous {mutation_type} on {record_type} was approved by the user and "
+        "sent to NetSuite, but NetSuite REJECTED it. Investigate and repair the SAME "
+        "write — do not start a different write, and do not simply re-propose the "
+        "identical payload.\n\n"
+        f"What was sent:\n{json.dumps(attempted_payload, default=str)}\n\n"
+        f"What NetSuite said:\n{details_block}\n\n"
+        "Call ns_getRecordTypeMetadata for this record type and resolve any values you "
+        "need (ns_getSubsidiaries / SuiteQL) before re-proposing. If you cannot "
+        "determine a value a human must choose, use ask_user with the field NAME only "
+        "— do not guess a value.\n"
+        "</write_repair>"
+    )
+
+
+def _repair_exit_message(reason: str, last_detail: str) -> str:
+    """Human-facing message for a TERMINAL write-repair exit (stall/budget/
+    error) — names the reason and the last thing NetSuite said, per
+    requirement D. Never called on a "reenter" decision — that path stays
+    silent and lets the agent's own investigation narrate the turn."""
+    phrasing = {
+        "stall": "the revised proposal ran into the exact same problem NetSuite already rejected",
+        "budget": "the available repair attempts for this write have been used up",
+        "error": "NetSuite's response could not be understood well enough to safely retry",
+    }
+    explanation = phrasing.get(reason, "the write could not be completed")
+    detail = last_detail.strip() or "no further detail was returned"
+    return f"The write failed and could not be completed after retrying — {explanation}. NetSuite said: {detail}"
+
+
 async def run_chat_turn(
     db: AsyncSession,
     session: ChatSession,
@@ -1764,6 +1861,17 @@ async def run_chat_turn(
     # resumed turn raises. None on non-resume turns → the except block is a
     # no-op revert path (still re-raises so callers see the failure).
     _revert_message_id_on_failure: uuid.UUID | None = None
+
+    # Bounded write-repair loop (agentic-repair design requirement B) — set
+    # ONLY on a re-entry after NetSuite rejects an approved write and the
+    # persisted bound still has budget. Consumed at the UnifiedAgent
+    # construction site below (mirrors the Plan Mode directive pattern):
+    # non-None means "inject _write_repair_directive/_write_repair_context
+    # onto the agent". Must be initialized here, before the write_confirm
+    # branch point, per this file's own variable-init invariant
+    # (test_orchestrator_paths.py).
+    write_repair_context: dict[str, Any] | None = None
+    write_repair_directive: str = ""
 
     # ── Write confirmation short-circuit (HITL) — runs before any expensive
     # context assembly (history, RAG, entity resolution). The approve/reject
@@ -2103,6 +2211,9 @@ async def run_chat_turn(
                     _confirm_content = f"The {_mutation_type} operation has been executed."
 
                 _updated_so = dict(_so)
+                _repair_decision = None
+                _repair_root_id: str | None = None
+                _repair_current_attempt = 0
                 if _exec_succeeded:
                     _updated_so["status"] = "approved"
                 else:
@@ -2115,6 +2226,51 @@ async def run_chat_turn(
                     # sentence.
                     _updated_so["status"] = "failed"
                     _updated_so["error"] = _exec_error
+
+                    # ── Bounded write-repair loop (requirement B/D) —
+                    # decide whether this rejection may re-enter the agent
+                    # to compose a revised proposal, or must stop. See
+                    # write_repair_bound.py for the full decision table.
+                    # failure_fingerprint is ALWAYS persisted on a failure;
+                    # repair_exit_reason ONLY at a terminal exit (stall,
+                    # budget, or error) — its absence on a card that goes on
+                    # to re-enter is itself meaningful (this attempt hasn't
+                    # exited yet).
+                    from app.services.chat.write_repair_bound import (
+                        compute_failure_fingerprint,
+                        decide_repair_bound,
+                        extract_netsuite_error_details,
+                    )
+
+                    _repair_fingerprint, _ = compute_failure_fingerprint(_exec_result_str, _exec_error or "")
+                    _updated_so["failure_fingerprint"] = _repair_fingerprint
+
+                    _repair_root_id = _so.get("repair_of") or str(_confirm_msg.id)
+                    _repair_current_attempt = int(_so.get("repair_attempt") or 0)
+                    _repair_previous_fingerprint = await _resolve_repair_chain_previous_fingerprint(
+                        db, session.id, _repair_root_id, _repair_current_attempt - 1
+                    )
+                    _repair_decision = decide_repair_bound(
+                        current_attempt=_repair_current_attempt,
+                        current_fingerprint=_repair_fingerprint,
+                        previous_fingerprint=_repair_previous_fingerprint,
+                        max_attempts=2,
+                    )
+                    if _repair_decision.reason == "reenter":
+                        # Suppress the terminal "operation failed" narration
+                        # — double-narration risk: the human is about to
+                        # watch the agent investigate live via ordinary
+                        # tool_start/tool_end/message events, not read a
+                        # dead-end message immediately followed by more
+                        # activity.
+                        _confirm_content = None
+                    else:
+                        _updated_so["repair_exit_reason"] = _repair_decision.reason
+                        _repair_last_detail = "; ".join(extract_netsuite_error_details(_exec_result_str)) or (
+                            _exec_error or ""
+                        )
+                        _confirm_content = _repair_exit_message(_repair_decision.reason, _repair_last_detail)
+                    # ── End bounded write-repair loop ──
                 if _merged_confirmation_token is not None:
                     # A slot merge happened above — persist what was
                     # actually written and the token minted over it, so the
@@ -2149,31 +2305,84 @@ async def run_chat_turn(
                     resource_id=str(session.id),
                     payload={"tool_name": tool_name, "tool_input": tool_input, "result": _exec_result_str[:1000]},
                 )
+                if _repair_decision is not None and _repair_decision.reason != "reenter":
+                    # Terminal exit — a SEPARATE audit event naming WHY the
+                    # loop stopped, distinct from the generic ...failed log
+                    # above (which fires on every failure, reenter or not).
+                    await log_event(
+                        db=db,
+                        tenant_id=tenant_id,
+                        category="chat",
+                        action=f"record.{_mutation_type}.repair_exhausted",
+                        actor_id=user_id,
+                        resource_type="chat_session",
+                        resource_id=str(session.id),
+                        payload={
+                            "reason": _repair_decision.reason,
+                            "repair_attempt": _repair_current_attempt,
+                            "root_confirmation_id": _repair_root_id,
+                        },
+                    )
 
-                _assistant_msg = ChatMessage(
-                    tenant_id=tenant_id,
-                    session_id=session.id,
-                    role="assistant",
-                    content=_confirm_content,
-                    created_at=datetime.now(timezone.utc),
-                )
-                db.add(_assistant_msg)
+                if _confirm_content is not None:
+                    _assistant_msg = ChatMessage(
+                        tenant_id=tenant_id,
+                        session_id=session.id,
+                        role="assistant",
+                        content=_confirm_content,
+                        created_at=datetime.now(timezone.utc),
+                    )
+                    db.add(_assistant_msg)
+                    await db.commit()
+                    await db.refresh(_assistant_msg)
+
+                    yield {
+                        "type": "message",
+                        "message": {
+                            "id": str(_assistant_msg.id),
+                            "role": "assistant",
+                            "content": _confirm_content,
+                            "tool_calls": None,
+                            "citations": None,
+                            "created_at": _assistant_msg.created_at.isoformat(),
+                        },
+                    }
+                    print(f"[WRITE-CONFIRM] approved {_mutation_type} on {_so.get('record_type')}", flush=True)
+                    return
+
+                # ── Fall through into the agent (requirement B) ──
+                # _confirm_content is None ONLY on a "reenter" decision — a
+                # NetSuite rejection with repair budget remaining. No
+                # `return` below: the turn continues into the normal agent
+                # path further down this function, exactly like the Plan
+                # Mode resume precedent in this same function ("NOTE: do
+                # NOT return — fall through into the regular flow.").
                 await db.commit()
-                await db.refresh(_assistant_msg)
-
-                yield {
-                    "type": "message",
-                    "message": {
-                        "id": str(_assistant_msg.id),
-                        "role": "assistant",
-                        "content": _confirm_content,
-                        "tool_calls": None,
-                        "citations": None,
-                        "created_at": _assistant_msg.created_at.isoformat(),
-                    },
+                # The commit above (and the CAS commit earlier in this
+                # block) clears `SET LOCAL app.current_tenant_id`
+                # (transaction-scoped, dies at COMMIT — bitten twice already
+                # in this repo, see set_tenant_context's docstring). The
+                # rest of this turn does tenant-scoped reads/writes.
+                await set_tenant_context(db, str(tenant_id))
+                write_repair_context = {
+                    "root_id": _repair_root_id,
+                    "attempt": _repair_decision.next_attempt,
+                    "mutation_type": _mutation_type,
+                    "record_type": _record_type,
                 }
-                print(f"[WRITE-CONFIRM] approved {_mutation_type} on {_so.get('record_type')}", flush=True)
-                return
+                write_repair_directive = _build_write_repair_directive(
+                    mutation_type=_mutation_type,
+                    record_type=_record_type,
+                    attempted_payload=tool_input,
+                    error_details=extract_netsuite_error_details(_exec_result_str),
+                    raw_error=(_exec_error or "")[:2000],
+                )
+                print(
+                    f"[WRITE-CONFIRM] repair re-entry attempt={_repair_decision.next_attempt} "
+                    f"for {_mutation_type} on {_record_type}",
+                    flush=True,
+                )
+                # ── End fall-through — do NOT return ──
 
             elif _wc_action == "reject":
                 # T2 gate mirror finding — reject must only succeed from a
@@ -3213,6 +3422,17 @@ async def run_chat_turn(
                             unified_agent._plan_mode_augmentation = plan_mode_augmentation
                         if plan_mode_resume_directive:
                             unified_agent._plan_mode_resume_directive = plan_mode_resume_directive
+                        # Write-repair re-entry (requirement B) — set ONLY
+                        # when the write_confirm short-circuit above fell
+                        # through on a "reenter" decision. Same
+                        # attribute-injection seam as the Plan Mode
+                        # directives; _write_repair_context is separate from
+                        # the prompt text — base_agent.py's mutation
+                        # intercept reads it to stamp repair_of/repair_attempt
+                        # on the NEXT card and enforce the intent guard.
+                        if write_repair_context is not None:
+                            unified_agent._write_repair_directive = write_repair_directive
+                            unified_agent._write_repair_context = write_repair_context
 
                     # Classify follow-up intent (TRANSFORM vs NEW_DATA)
                     from app.services.chat.follow_up_classifier import FollowUpIntent, classify_follow_up

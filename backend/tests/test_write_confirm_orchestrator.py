@@ -68,7 +68,9 @@ def _ext(tool_name: str) -> str:
     return f"ext__{_HEX_32}__{tool_name}"
 
 
-def _make_real_confirmation_msg(session_id, tool_name, tool_input, status="pending"):
+def _make_real_confirmation_msg(
+    session_id, tool_name, tool_input, status="pending", *, repair_of=None, repair_attempt=0
+):
     """Like ``_make_confirmation_msg`` but a REAL ``ChatMessage`` instance.
 
     Tests that actually drive ``run_chat_turn``'s approve branch need this —
@@ -77,6 +79,12 @@ def _make_real_confirmation_msg(session_id, tool_name, tool_input, status="pendi
     only SQLAlchemy-instrumented instances have. ``MagicMock(spec=ChatMessage)``
     (what ``_make_confirmation_msg`` above returns) raises ``AttributeError``
     there — see the same note in ``test_write_slot_merge.py``.
+
+    ``repair_of``/``repair_attempt`` default to a FRESH root card (matching
+    every pre-existing caller's behavior unchanged) — pass ``repair_attempt``
+    at the write-repair ceiling for a test that needs a TERMINAL failure
+    (the write-repair bound now re-enters the agent on a fresh card's first
+    rejection when budget remains; see write_repair_bound.py).
     """
     from app.services.chat.write_confirmation_service import build_confirmation_payload
 
@@ -86,6 +94,8 @@ def _make_real_confirmation_msg(session_id, tool_name, tool_input, status="pendi
         tool_name=tool_name,
         tool_input=tool_input,
         session_id=str(session_id),
+        repair_of=repair_of,
+        repair_attempt=repair_attempt,
     )
     assert payload is not None
 
@@ -421,13 +431,21 @@ class TestWriteConfirmFailedFlow:
     @pytest.mark.asyncio
     async def test_failed_write_gets_terminal_status_and_error(self):
         """Regression for 86bbgnw9g: a failed write must never revert to
-        'pending' — it must become 'failed' and carry the NetSuite error."""
+        'pending' — it must become 'failed' and carry the NetSuite error.
+
+        repair_attempt=2 (write-repair ceiling) makes this a TERMINAL
+        failure (decide_repair_bound exits "budget") rather than a re-entry
+        into the agent — a fresh card's first rejection with budget
+        remaining now re-enters instead of returning, which is the NEW,
+        separately-tested behavior (see test_write_repair_reentry.py); this
+        test is about the invariant that a failure — reenter or terminal —
+        must still persist status='failed' + the NetSuite error."""
         from app.services.chat.orchestrator import run_chat_turn
 
         session_id = uuid.uuid4()
         tool_name = _ext("ns_createRecord")
         tool_input = {"recordType": "customer", "data": '{"companyname": "test ai customer"}'}
-        confirm_msg = _make_real_confirmation_msg(session_id, tool_name, tool_input)
+        confirm_msg = _make_real_confirmation_msg(session_id, tool_name, tool_input, repair_attempt=2)
         db = _make_db(confirm_msg)
         session = _make_session(session_id=str(session_id))
 
@@ -568,6 +586,13 @@ class TestWriteConfirmFailedFlow:
                 str(session_id), _build_payload_json(tool_name, tool_input, slots)
             ),
             "status": "pending",
+            # Budget-exhausted (write-repair ceiling) so this failure is
+            # TERMINAL rather than a re-entry into the agent — a fresh
+            # card's first rejection with budget remaining now re-enters
+            # instead of returning (see test_write_repair_reentry.py); this
+            # test is about the merge-then-persist block, unaffected by
+            # which exit the repair bound takes.
+            "repair_attempt": 2,
         }
         confirm_msg = ChatMessage(
             tenant_id=_TENANT_ID,
@@ -639,13 +664,17 @@ class TestWriteConfirmSuccessFalseWithoutErrorKey:
     async def test_success_false_no_error_key_is_reported_as_failed(self):
         """{"success": false} with no error key must set status 'failed',
         must NOT tell the human the write succeeded, and must carry an
-        error string the human can act on (not None / empty)."""
+        error string the human can act on (not None / empty).
+
+        repair_attempt=2 (write-repair ceiling) makes this a TERMINAL
+        failure rather than a re-entry into the agent — see the note on
+        test_failed_write_gets_terminal_status_and_error above."""
         from app.services.chat.orchestrator import run_chat_turn
 
         session_id = uuid.uuid4()
         tool_name = _ext("ns_createRecord")
         tool_input = {"recordType": "customer", "data": '{"companyname": "test ai customer"}'}
-        confirm_msg = _make_real_confirmation_msg(session_id, tool_name, tool_input)
+        confirm_msg = _make_real_confirmation_msg(session_id, tool_name, tool_input, repair_attempt=2)
         db = _make_db(confirm_msg)
         session = _make_session(session_id=str(session_id))
 
@@ -681,21 +710,28 @@ class TestWriteConfirmSuccessFalseWithoutErrorKey:
         assert "executed successfully" not in content
         assert "failed" in content
 
-        # The audit log must record the failure, not a false approval.
-        log_call = mock_log_event.await_args
-        assert log_call.kwargs["action"] == "record.create.failed"
+        # The audit log must record the failure, not a false approval. A
+        # terminal repair exit (this test forces repair_attempt=2, the
+        # budget ceiling) ALSO logs a SEPARATE record.create.repair_exhausted
+        # event after this one — check membership, not the last call.
+        actions = [c.kwargs["action"] for c in mock_log_event.await_args_list]
+        assert "record.create.failed" in actions
 
     @pytest.mark.asyncio
     async def test_success_false_with_error_key_still_failed(self):
         """Regression: success:false + a populated error key must still
         fail, with the error text preserved verbatim (the new success:false
-        check must not swallow or override an actual error message)."""
+        check must not swallow or override an actual error message).
+
+        repair_attempt=2 (write-repair ceiling) makes this a TERMINAL
+        failure rather than a re-entry into the agent — see the note on
+        test_failed_write_gets_terminal_status_and_error above."""
         from app.services.chat.orchestrator import run_chat_turn
 
         session_id = uuid.uuid4()
         tool_name = _ext("ns_createRecord")
         tool_input = {"recordType": "customer", "data": '{"companyname": "test ai customer"}'}
-        confirm_msg = _make_real_confirmation_msg(session_id, tool_name, tool_input)
+        confirm_msg = _make_real_confirmation_msg(session_id, tool_name, tool_input, repair_attempt=2)
         db = _make_db(confirm_msg)
         session = _make_session(session_id=str(session_id))
 
