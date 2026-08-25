@@ -165,6 +165,20 @@ async def get_active_connectors_for_tenant(db: AsyncSession, tenant_id: uuid.UUI
     Anthropic prompt-cache breakpoint stamped on the last tool definition and
     silently invalidate the cache. ``build_external_tool_definitions`` also
     sorts defensively at the Python layer; this is the SQL-side guarantee.
+
+    ``celigo_mcp`` rows additionally require the tenant's ``celigo`` feature
+    flag. The flag is the kill switch for the whole Celigo surface, and a kill
+    switch that leaves the chat agent holding live Celigo tools is not one --
+    the API endpoints were already gated (``require_feature("celigo")``) while
+    the agent's tool grant was not. All three tool-grant consumers (unified
+    agent, suiteql agent, chat tools) funnel through this function, plus the
+    benchmark runners and ``_celigo_agent_access``, so gating here covers every
+    one of them without a per-consumer check.
+
+    Deliberately the WRITE side's mirror image and not part of the write guard:
+    this revokes an existing grant at read time, so a tenant whose flag is
+    turned off loses agent access immediately, with no row mutation and nothing
+    to repair when the flag comes back on.
     """
     result = await db.execute(
         select(McpConnector)
@@ -175,7 +189,17 @@ async def get_active_connectors_for_tenant(db: AsyncSession, tenant_id: uuid.UUI
         )
         .order_by(McpConnector.id)
     )
-    return list(result.scalars().all())
+    connectors = list(result.scalars().all())
+
+    # The flag lookup is skipped entirely for the ~all of tenants that have no
+    # celigo_mcp row -- this is the hot path for every chat turn.
+    if any(c.provider == "celigo_mcp" for c in connectors):
+        from app.services.feature_flag_service import is_enabled as _flag_is_enabled
+
+        if not await _flag_is_enabled(db, tenant_id, "celigo"):
+            connectors = [c for c in connectors if c.provider != "celigo_mcp"]
+
+    return connectors
 
 
 async def test_mcp_connector(db: AsyncSession, connector_id: uuid.UUID, tenant_id: uuid.UUID) -> dict:
