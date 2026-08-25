@@ -114,6 +114,137 @@ class TestValidateWriteDeleteCharacterization:
 # ---------------------------------------------------------------------------
 
 
+class TestCuratedRequirementsWiring:
+    """The live `ns_getRecordTypeMetadata` shape yields field names only, so
+    `requirements_known` is False and the validator returns early with an
+    empty `missing_required`. `validate_mutation` is where the curated
+    registry gets overlaid — it is the only place holding BOTH the metadata
+    and the payload the conditional rules read.
+    """
+
+    @staticmethod
+    def _live_shape_metadata():
+        """What get_record_metadata really returns for `customer` today:
+        names and labels, requirements_known=False."""
+        from app.services.chat.record_metadata_service import FieldSpec, RecordMetadata
+
+        return RecordMetadata(
+            record_type="customer",
+            fields=[
+                FieldSpec(name="subsidiary", label="Primary Subsidiary"),
+                FieldSpec(name="companyname", label="Company Name"),
+                FieldSpec(name="email", label="Email"),
+            ],
+            requirements_known=False,
+        )
+
+    @pytest.mark.asyncio
+    async def test_customer_create_missing_subsidiary_is_caught(self):
+        with (
+            patch(
+                "app.services.chat.write_validation.get_record_metadata",
+                AsyncMock(return_value=self._live_shape_metadata()),
+            ),
+            patch("app.services.chat.write_validation.check_posting_invariants", AsyncMock(return_value=[])),
+        ):
+            result = await validate_mutation(
+                tool_name=_ext("ns_createRecord"),
+                tool_input={"recordType": "customer", "data": {"companyname": "Acme Corp"}},
+                mutation_type="create",
+                record_type="customer",
+                tenant_id=uuid.uuid4(),
+                actor_id=uuid.uuid4(),
+                correlation_id="c",
+                db=None,
+                session_id="s",
+            )
+
+        assert result.ok is False
+        assert result.unvalidated is False
+        assert result.missing_required == ["subsidiary"]
+        assert [s.name for s in result.editable_slots] == ["subsidiary"]
+
+    @pytest.mark.asyncio
+    async def test_complete_customer_create_passes(self):
+        with (
+            patch(
+                "app.services.chat.write_validation.get_record_metadata",
+                AsyncMock(return_value=self._live_shape_metadata()),
+            ),
+            patch("app.services.chat.write_validation.check_posting_invariants", AsyncMock(return_value=[])),
+        ):
+            result = await validate_mutation(
+                tool_name=_ext("ns_createRecord"),
+                tool_input={"recordType": "customer", "data": {"companyname": "Acme Corp", "subsidiary": "1"}},
+                mutation_type="create",
+                record_type="customer",
+                tenant_id=uuid.uuid4(),
+                actor_id=uuid.uuid4(),
+                correlation_id="c",
+                db=None,
+                session_id="s",
+            )
+
+        assert result.ok is True
+        assert result.unvalidated is False
+
+    @pytest.mark.asyncio
+    async def test_uncurated_record_type_stays_unvalidated(self):
+        """An uncurated type must keep saying "I did not check this" — the
+        card's honesty rule. Silently reporting it as validated would claim a
+        check that never ran, on a financial write path."""
+        from app.services.chat.record_metadata_service import FieldSpec, RecordMetadata
+
+        meta = RecordMetadata(
+            record_type="expenseReport",
+            fields=[FieldSpec(name="memo", label="Memo")],
+            requirements_known=False,
+        )
+        with (
+            patch("app.services.chat.write_validation.get_record_metadata", AsyncMock(return_value=meta)),
+            patch("app.services.chat.write_validation.check_posting_invariants", AsyncMock(return_value=[])),
+        ):
+            result = await validate_mutation(
+                tool_name=_ext("ns_createRecord"),
+                tool_input={"recordType": "expenseReport", "data": {"memo": "x"}},
+                mutation_type="create",
+                record_type="expenseReport",
+                tenant_id=uuid.uuid4(),
+                actor_id=uuid.uuid4(),
+                correlation_id="c",
+                db=None,
+                session_id="s",
+            )
+
+        assert result.unvalidated is True
+        assert result.missing_required == []
+
+    @pytest.mark.asyncio
+    async def test_metadata_outage_keeps_failing_open(self):
+        """A curated record type does NOT get validated off the registry alone
+        when the metadata fetch failed. The registry adds requirements to
+        metadata we have; it does not stand in for metadata we could not
+        read."""
+        with (
+            patch("app.services.chat.write_validation.get_record_metadata", AsyncMock(return_value=None)),
+            patch("app.services.chat.write_validation.check_posting_invariants", AsyncMock(return_value=[])),
+        ):
+            result = await validate_mutation(
+                tool_name=_ext("ns_createRecord"),
+                tool_input={"recordType": "customer", "data": {"companyname": "Acme Corp"}},
+                mutation_type="create",
+                record_type="customer",
+                tenant_id=uuid.uuid4(),
+                actor_id=uuid.uuid4(),
+                correlation_id="c",
+                db=None,
+                session_id="s",
+            )
+
+        assert result.unvalidated is True
+        assert result.ok is True
+
+
 class TestValidateMutationWiring:
     @pytest.mark.asyncio
     async def test_delete_flows_through_metadata_and_invariants(self):

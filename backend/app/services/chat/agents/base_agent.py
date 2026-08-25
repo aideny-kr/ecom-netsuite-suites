@@ -1396,7 +1396,11 @@ class BaseSpecialistAgent(abc.ABC):
                                         "instruction": (
                                             f"Call ns_getRecordTypeMetadata for '{record_type}' first, "
                                             "resolve any values you need (e.g. ns_getSubsidiaries, or a "
-                                            "SuiteQL lookup), then re-propose this write."
+                                            "SuiteQL lookup), then re-propose this write. If a value the "
+                                            "record needs has several valid options and the user's request "
+                                            "does not say which, do NOT pick one — add "
+                                            "'ask_user': ['<field name>'] to the write call so the user "
+                                            "is shown the real options."
                                         ),
                                     }
                                 )
@@ -1465,6 +1469,78 @@ class BaseSpecialistAgent(abc.ABC):
                             result_str = json.dumps({"error": f"Write payload could not be parsed: {exc}"})
                             validation = None
 
+                        # ── ask_user resolution (requirement C) — MUST run
+                        # BEFORE the repair decision below, not after it.
+                        # `ask_user` is the model stating it CANNOT determine
+                        # a value and needs a human to choose. Deciding to
+                        # repair first would send exactly that field back to
+                        # the model to resolve on its own — the one action it
+                        # has just told us cannot work — so the proposal would
+                        # bounce, re-propose, and burn its repair budget to a
+                        # stall while the human who could answer in one click
+                        # never sees a card. Resolving first lets
+                        # `with_delegated_slots` reclassify a resolved field
+                        # from "missing" to "asked", which is what keeps the
+                        # question in front of the person who can answer it.
+                        #
+                        # Cost: a hint on a proposal that ends up bounced
+                        # anyway spends its option fetch for nothing. That is
+                        # accepted — the fetch is one cached MCP call, and it
+                        # is the only way to know whether the hint actually
+                        # covers the gap before ruling on it.
+                        #
+                        # The model contributes a NAME ONLY; every VALUE comes
+                        # from a server-executed fetch (slot_option_sources.py)
+                        # — see that module's docstring for the full boundary.
+                        _ask_user_rejected: list[dict[str, str]] = []
+                        if _ask_user_hint and validation is not None:
+                            from app.services.chat.record_metadata_service import (
+                                get_record_metadata as _get_metadata_for_ask_user,
+                            )
+                            from app.services.chat.slot_option_sources import resolve_ask_user_slots
+
+                            # A second get_record_metadata call, separate
+                            # from validate_mutation's internal one above —
+                            # that call's ValidationResult does not carry the
+                            # RecordMetadata object itself, and this call
+                            # hits the SAME (connector_id, record_type)-keyed
+                            # 1h cache, so in production it is a cache hit,
+                            # not a second live MCP round trip.
+                            _ask_user_metadata = await _get_metadata_for_ask_user(
+                                record_type=record_type,
+                                mutation_tool_name=block.name,
+                                tenant_id=self.tenant_id,
+                                actor_id=self.user_id,
+                                correlation_id=self.correlation_id,
+                                db=db,
+                                session_id=session_id or str(self.tenant_id),
+                            )
+                            _ask_user_slots, _ask_user_rejected = await resolve_ask_user_slots(
+                                _ask_user_hint,
+                                metadata=_ask_user_metadata,
+                                mutation_tool_name=block.name,
+                                tenant_id=self.tenant_id,
+                                actor_id=self.user_id,
+                                correlation_id=self.correlation_id,
+                                db=db,
+                                session_id=session_id or str(self.tenant_id),
+                                # Only slots that ALREADY carry a real
+                                # allow-set count as declared. A slot
+                                # `validate_write` derived for a missing
+                                # required field has `allowed=None` (the live
+                                # metadata shape has no options), which is
+                                # unusable to a human — they would have to
+                                # type a NetSuite internal id from memory.
+                                # Treating those as declared would skip the
+                                # fetch that is the entire point of the hint;
+                                # `with_delegated_slots` replaces the bare
+                                # slot with the resolved one by name.
+                                already_declared=[s.name for s in validation.editable_slots if s.allowed],
+                            )
+                            if _ask_user_slots:
+                                validation = validation.with_delegated_slots(_ask_user_slots)
+                        # ── End ask_user resolution ──
+
                         if validation is not None:
                             if self._write_repair.should_repair(record_type, validation):
                                 # Hand the model a structured error INSTEAD of a
@@ -1516,59 +1592,6 @@ class BaseSpecialistAgent(abc.ABC):
                         # Consumed by Task 7 when the card learns about slots.
                         self._last_validation = validation
                         # ── End write validation + bounded repair ──
-
-                        # ── ask_user resolution (requirement C) — only for
-                        # the attempt that proceeds to a card; a bounced
-                        # attempt (investigation gate above, or the repair
-                        # branch just above) is discarded, so resolving its
-                        # hint here would be wasted MCP calls for a proposal
-                        # the model is about to replace. The model
-                        # contributes a NAME ONLY; every VALUE comes from a
-                        # server-executed fetch (slot_option_sources.py) —
-                        # see that module's docstring for the full boundary.
-                        _ask_user_rejected: list[dict[str, str]] = []
-                        if _ask_user_hint and validation is not None:
-                            from app.services.chat.record_metadata_service import (
-                                get_record_metadata as _get_metadata_for_ask_user,
-                            )
-                            from app.services.chat.slot_option_sources import resolve_ask_user_slots
-
-                            # A second get_record_metadata call, separate
-                            # from validate_mutation's internal one above —
-                            # that call's ValidationResult does not carry the
-                            # RecordMetadata object itself, and this call
-                            # hits the SAME (connector_id, record_type)-keyed
-                            # 1h cache, so in production it is a cache hit,
-                            # not a second live MCP round trip.
-                            _ask_user_metadata = await _get_metadata_for_ask_user(
-                                record_type=record_type,
-                                mutation_tool_name=block.name,
-                                tenant_id=self.tenant_id,
-                                actor_id=self.user_id,
-                                correlation_id=self.correlation_id,
-                                db=db,
-                                session_id=session_id or str(self.tenant_id),
-                            )
-                            _ask_user_slots, _ask_user_rejected = await resolve_ask_user_slots(
-                                _ask_user_hint,
-                                metadata=_ask_user_metadata,
-                                mutation_tool_name=block.name,
-                                tenant_id=self.tenant_id,
-                                actor_id=self.user_id,
-                                correlation_id=self.correlation_id,
-                                db=db,
-                                session_id=session_id or str(self.tenant_id),
-                                already_declared=[s.name for s in validation.editable_slots],
-                            )
-                            if _ask_user_slots:
-                                # ValidationResult isn't mutated via
-                                # assignment validation (no
-                                # validate_assignment) — appending here does
-                                # NOT need to satisfy the ok/lists invariant,
-                                # since editable_slots plays no part in it
-                                # (see ValidationResult._ok_must_agree_with_its_own_lists).
-                                validation.editable_slots = list(validation.editable_slots) + _ask_user_slots
-                        # ── End ask_user resolution ──
 
                         # ── Repair-chain stamping + intent guard (D/E) —
                         # server-stamped from orchestrator-held repair

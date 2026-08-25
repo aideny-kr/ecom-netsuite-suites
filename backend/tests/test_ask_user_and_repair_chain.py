@@ -251,7 +251,7 @@ class TestAskUserResolution:
                     name=create_name,
                     input={
                         "recordType": "customer",
-                        "body": {"companyname": "Acme"},
+                        "body": {"companyname": "Acme", "subsidiary": "1"},
                         "ask_user": ["not_a_real_field"],
                     },
                 )
@@ -291,7 +291,11 @@ class TestAskUserResolution:
                 ToolUseBlock(
                     id="t1",
                     name=create_name,
-                    input={"recordType": "customer", "body": {"companyname": "Acme"}, "ask_user": ["subsidiary"]},
+                    input={
+                        "recordType": "customer",
+                        "body": {"companyname": "Acme", "subsidiary": "1"},
+                        "ask_user": ["subsidiary"],
+                    },
                 )
             ],
             usage=TokenUsage(input_tokens=10, output_tokens=10),
@@ -320,7 +324,11 @@ class TestAskUserResolution:
                 ToolUseBlock(
                     id="t1",
                     name=create_name,
-                    input={"recordType": "customer", "body": {"companyname": "Acme"}, "ask_user": "subsidiary"},
+                    input={
+                        "recordType": "customer",
+                        "body": {"companyname": "Acme", "subsidiary": "1"},
+                        "ask_user": "subsidiary",
+                    },
                 )
             ],
             usage=TokenUsage(input_tokens=10, output_tokens=10),
@@ -353,7 +361,9 @@ class TestRepairChainStamping:
             text_blocks=[],
             tool_use_blocks=[
                 ToolUseBlock(
-                    id="t1", name=create_name, input={"recordType": "customer", "body": {"companyname": "Acme"}}
+                    id="t1",
+                    name=create_name,
+                    input={"recordType": "customer", "body": {"companyname": "Acme", "subsidiary": "1"}},
                 )
             ],
             usage=TokenUsage(input_tokens=10, output_tokens=10),
@@ -385,7 +395,9 @@ class TestRepairChainStamping:
             text_blocks=[],
             tool_use_blocks=[
                 ToolUseBlock(
-                    id="t1", name=create_name, input={"recordType": "customer", "body": {"companyname": "Acme"}}
+                    id="t1",
+                    name=create_name,
+                    input={"recordType": "customer", "body": {"companyname": "Acme", "subsidiary": "1"}},
                 )
             ],
             usage=TokenUsage(input_tokens=10, output_tokens=10),
@@ -420,7 +432,9 @@ class TestRepairChainStamping:
         create_call = LLMResponse(
             text_blocks=[],
             tool_use_blocks=[
-                ToolUseBlock(id="t1", name=create_name, input={"recordType": "invoice", "body": {"memo": "x"}})
+                ToolUseBlock(
+                    id="t1", name=create_name, input={"recordType": "invoice", "body": {"memo": "x", "entity": "1"}}
+                )
             ],
             usage=TokenUsage(input_tokens=10, output_tokens=10),
         )
@@ -451,7 +465,9 @@ class TestRepairChainStamping:
             text_blocks=[],
             tool_use_blocks=[
                 ToolUseBlock(
-                    id="t1", name=create_name, input={"recordType": "customer", "body": {"companyname": "Acme"}}
+                    id="t1",
+                    name=create_name,
+                    input={"recordType": "customer", "body": {"companyname": "Acme", "subsidiary": "1"}},
                 )
             ],
             usage=TokenUsage(input_tokens=10, output_tokens=10),
@@ -484,7 +500,7 @@ class TestRepairChainStamping:
                     name=create_name,
                     input={
                         "recordType": "customer",
-                        "body": {"companyname": "Acme"},
+                        "body": {"companyname": "Acme", "subsidiary": "1"},
                         "repair_of": "attacker-supplied-root-id",
                         "repair_attempt": 99,
                     },
@@ -500,3 +516,161 @@ class TestRepairChainStamping:
         confirmations = [p for t, p in events if t == "confirmation_required"]
         assert confirmations[0]["repair_of"] is None
         assert confirmations[0]["repair_attempt"] == 0
+
+
+# ---------------------------------------------------------------------------
+# ask_user vs. the repair loop — which of the two gets a missing required field
+# ---------------------------------------------------------------------------
+
+
+class TestDelegationVersusRepair:
+    """The registry made `customer` really validate, which put these two
+    mechanisms in direct contact for the first time.
+
+    A missing required field goes to exactly one of two places, and the
+    `ask_user` hint is the switch. Resolved hint -> the human, via a slot on
+    the card. No hint, or a hint the server could not resolve -> back to the
+    model, via the bounded repair loop. Getting this backwards is not cosmetic:
+    bouncing a field the model has already said it cannot determine burns the
+    repair budget to a stall, and carding a field with no slot produces a
+    proposal the approve path's slot-coverage gate refuses — a dead end for
+    the operator either way.
+
+    (The fixtures in the classes above carry complete payloads precisely so
+    that they test hint resolution and repair-chain stamping WITHOUT this
+    interaction as a hidden variable. It is tested here instead.)
+    """
+
+    @staticmethod
+    def _create_call(create_name, **extra):
+        from app.services.chat.llm_adapter import LLMResponse, TokenUsage, ToolUseBlock
+
+        return LLMResponse(
+            text_blocks=[],
+            tool_use_blocks=[
+                ToolUseBlock(
+                    id="t1",
+                    name=create_name,
+                    # subsidiary deliberately absent — the registry makes it
+                    # required, so this payload is genuinely incomplete.
+                    input={"recordType": "customer", "body": {"companyname": "Acme"}, **extra},
+                )
+            ],
+            usage=TokenUsage(input_tokens=10, output_tokens=10),
+        )
+
+    @staticmethod
+    def _repair_bounced(events):
+        return [p for t, p in events if t == "tool_end" and "Write repair requested" in (p.get("result_summary") or "")]
+
+    @pytest.mark.asyncio
+    async def test_incomplete_payload_with_no_hint_goes_to_the_model(self):
+        agent = _make_agent()
+        create_name = _ext("ns_createRecord")
+        adapter = _make_adapter(
+            [_metadata_step(_ext("ns_getRecordTypeMetadata")), self._create_call(create_name), _final_step()]
+        )
+
+        with _patches():
+            events = await _run(agent, adapter)
+
+        assert [p for t, p in events if t == "confirmation_required"] == []
+        assert len(self._repair_bounced(events)) == 1
+
+    @pytest.mark.asyncio
+    async def test_incomplete_payload_with_a_resolving_hint_goes_to_the_human(self):
+        agent = _make_agent()
+        create_name = _ext("ns_createRecord")
+        adapter = _make_adapter(
+            [
+                _metadata_step(_ext("ns_getRecordTypeMetadata")),
+                self._create_call(create_name, ask_user=["subsidiary"]),
+                _final_step(),
+            ]
+        )
+
+        with _patches():
+            events = await _run(agent, adapter)
+
+        confirmations = [p for t, p in events if t == "confirmation_required"]
+        assert len(confirmations) == 1
+        assert self._repair_bounced(events) == []
+        slots = confirmations[0]["editable_slots"]
+        assert [s["name"] for s in slots] == ["subsidiary"]
+        # The slot the human sees carries SERVER-fetched options — not the
+        # bare, optionless slot validate_write derives for a missing field.
+        assert slots[0]["allowed"] == [{"value": "1", "label": "Framework Inc"}]
+
+    @pytest.mark.asyncio
+    async def test_incomplete_payload_with_an_unknown_hint_goes_to_the_model(self):
+        """The model asked about a field that does not exist, so nothing was
+        delegated and the real gap remains. Carding it would hand the operator
+        a proposal they cannot approve."""
+        agent = _make_agent()
+        create_name = _ext("ns_createRecord")
+        adapter = _make_adapter(
+            [
+                _metadata_step(_ext("ns_getRecordTypeMetadata")),
+                self._create_call(create_name, ask_user=["not_a_real_field"]),
+                _final_step(),
+            ]
+        )
+
+        with _patches():
+            events = await _run(agent, adapter)
+
+        assert [p for t, p in events if t == "confirmation_required"] == []
+        assert len(self._repair_bounced(events)) == 1
+
+    @pytest.mark.asyncio
+    async def test_incomplete_payload_with_zero_options_goes_to_the_model(self):
+        """The hint named a registered field, but the server found nothing to
+        offer. An empty dropdown is not an answerable question."""
+        agent = _make_agent()
+        create_name = _ext("ns_createRecord")
+        adapter = _make_adapter(
+            [
+                _metadata_step(_ext("ns_getRecordTypeMetadata")),
+                self._create_call(create_name, ask_user=["subsidiary"]),
+                _final_step(),
+            ]
+        )
+
+        with _patches(subsidiaries_response=json.dumps({"subsidiaries": []})):
+            events = await _run(agent, adapter)
+
+        assert [p for t, p in events if t == "confirmation_required"] == []
+        assert len(self._repair_bounced(events)) == 1
+
+    @pytest.mark.asyncio
+    async def test_hint_for_a_field_already_supplied_still_offers_the_choice(self):
+        """A complete payload plus a hint is the model saying "I picked one,
+        but let them change it". That must reach the card as a real choice,
+        not be swallowed because nothing was technically missing."""
+        from app.services.chat.llm_adapter import LLMResponse, TokenUsage, ToolUseBlock
+
+        agent = _make_agent()
+        create_name = _ext("ns_createRecord")
+        call = LLMResponse(
+            text_blocks=[],
+            tool_use_blocks=[
+                ToolUseBlock(
+                    id="t1",
+                    name=create_name,
+                    input={
+                        "recordType": "customer",
+                        "body": {"companyname": "Acme", "subsidiary": "1"},
+                        "ask_user": ["subsidiary"],
+                    },
+                )
+            ],
+            usage=TokenUsage(input_tokens=10, output_tokens=10),
+        )
+        adapter = _make_adapter([_metadata_step(_ext("ns_getRecordTypeMetadata")), call, _final_step()])
+
+        with _patches():
+            events = await _run(agent, adapter)
+
+        confirmations = [p for t, p in events if t == "confirmation_required"]
+        assert len(confirmations) == 1
+        assert [s["name"] for s in confirmations[0]["editable_slots"]] == ["subsidiary"]

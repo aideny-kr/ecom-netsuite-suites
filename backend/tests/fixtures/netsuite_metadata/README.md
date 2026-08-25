@@ -36,7 +36,7 @@ a string, whether it's the same across record types) is currently guessed.**
    fields correctly (cross-check a few field names by hand against the NetSuite
    UI or documentation).
 4. If the real shape uses a key or boolean encoding NOT already handled by
-   `_REQUIRED_MARKER_KEYS` / `_coerce_required_flag` in
+   `_REQUIRED_MARKER_KEYS` / `coerce_netsuite_bool` in
    `record_metadata_service.py`, extend those — don't special-case the
    fixture.
 5. Once a real fixture is in place, the tolerant-multi-key guessing can be

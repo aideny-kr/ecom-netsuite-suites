@@ -45,13 +45,19 @@ _TRUTHY_STRINGS = {"t", "true", "yes", "1"}
 _NO_MARKER = object()
 
 
-def _coerce_required_flag(value: Any) -> bool:
-    """Tolerantly coerce NetSuite's required-marker to a real bool.
+def coerce_netsuite_bool(value: Any) -> bool:
+    """Tolerantly coerce a NetSuite-serialised boolean to a real bool.
 
     NetSuite serialises booleans as real `True`/`False` OR as the strings
     "T"/"F" (same convention `posting_invariants.py`'s closed-period check
     handles). A bare `bool(...)` on a string is wrong — `bool("F")` is `True`
     in Python — so this never falls back to it for a string value.
+
+    Public because the same convention governs PAYLOAD values, not just
+    metadata markers: `required_field_registry` reads `isperson` off a write
+    payload to decide whether a customer needs `companyname` or `lastname`,
+    and a second copy of this coercion is exactly the kind of twin that has
+    drifted here before.
     """
     if isinstance(value, bool):
         return value
@@ -91,6 +97,14 @@ class RecordMetadata(BaseModel):
     # construction of this model (tests + the legacy parse path before this
     # field existed) keeps validating exactly as before.
     requirements_known: bool = True
+    # WHERE the requirements came from, when they are known at all. `None`
+    # means they came from the response itself (the legacy shape's own
+    # required-marker keys) or are unknown. `"curated_registry"` means a
+    # human-reviewed entry in `required_field_registry` supplied them,
+    # because the live NetSuite shape structurally cannot. Recorded so a log
+    # or a future card caption can say which check actually ran rather than
+    # implying NetSuite asserted it.
+    requirements_source: str | None = None
 
     def required_field_names(self) -> list[str]:
         return [f.name for f in self.fields if f.required]
@@ -147,7 +161,7 @@ def _parse_properties_shape(data: dict[str, Any], record_type: str) -> "RecordMe
 
 def _parse_field(raw: dict[str, Any]) -> FieldSpec:
     marker = _required_marker_value(raw)
-    required = False if marker is _NO_MARKER else _coerce_required_flag(marker)
+    required = False if marker is _NO_MARKER else coerce_netsuite_bool(marker)
     return FieldSpec(
         name=raw.get("name", ""),
         label=raw.get("label") or raw.get("name", ""),

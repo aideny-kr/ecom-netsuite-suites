@@ -22,6 +22,7 @@ from typing import Any, Literal
 
 from app.services.chat.posting_invariants import check_posting_invariants
 from app.services.chat.record_metadata_service import get_record_metadata
+from app.services.chat.required_field_registry import apply_curated_requirements
 from app.services.chat.write_payload import NormalizedPayload, normalize_write_payload
 from app.services.chat.write_validator import ValidationResult, validate_write
 
@@ -104,6 +105,17 @@ async def validate_mutation(
         db=db,
         session_id=session_id,
     )
+    # The live NetSuite metadata shape carries field NAMES and nothing about
+    # requiredness (see required_field_registry's docstring for the three
+    # independent confirmations), so `meta.requirements_known` is False and
+    # `validate_write` would return early with an empty `missing_required` —
+    # a card with nothing to ask for. Overlaying the curated registry HERE,
+    # rather than inside `get_record_metadata`, is deliberate on two counts:
+    # this is the only place holding the payload the conditional rules read
+    # (`isperson` decides companyname vs lastname), and `get_record_metadata`
+    # caches its result, so a payload-dependent overlay applied there would
+    # leak one write's conditions into every later one.
+    meta = apply_curated_requirements(meta, record_type=record_type, fields=payload.fields)
     invariants = await check_posting_invariants(
         payload=payload,
         record_type=record_type,

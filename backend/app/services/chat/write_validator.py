@@ -51,6 +51,47 @@ class ValidationResult(BaseModel):
             )
         return self
 
+    def with_delegated_slots(self, slots: list[EditableSlot]) -> "ValidationResult":
+        """Return a copy in which every field covered by *slots* counts as
+        DELEGATED TO THE HUMAN rather than missing.
+
+        The distinction matters because `missing_required` has exactly one
+        consequence: it bounces the proposal back to the model to solve on its
+        own (`as_model_error`). When the model has explicitly said "a human
+        must choose this" via `ask_user` AND the server has resolved a real
+        allow-set for it, sending it back to the model is the one thing that
+        cannot help — the model already told us it cannot determine the value,
+        so it would propose, bounce, and stall against its own repair budget
+        while the human who could answer in one click never sees a card.
+
+        Only top-level required fields can be delegated. `missing_line_required`
+        (no line-slot mechanism exists in v1) and `invariant_errors` (a closed
+        period is not a question a dropdown can answer) are terminal and pass
+        through untouched — otherwise a stray hint could wave a write into a
+        closed period through to a human as if it were fine.
+
+        A slot naming a field that already has one REPLACES it: `validate_write`
+        declares a bare slot for every missing required field, and the resolved
+        one carries the server-fetched allow-set that bare slot lacks.
+        """
+        if not slots:
+            return self
+
+        delegated_names = {s.name for s in slots}
+        remaining = [n for n in self.missing_required if n not in delegated_names]
+
+        merged: list[EditableSlot] = [s for s in self.editable_slots if s.name not in delegated_names]
+        merged.extend(slots)
+
+        return ValidationResult(
+            ok=not (remaining or self.missing_line_required or self.invariant_errors),
+            unvalidated=self.unvalidated,
+            missing_required=remaining,
+            missing_line_required=list(self.missing_line_required),
+            invariant_errors=list(self.invariant_errors),
+            editable_slots=merged,
+        )
+
     def fingerprint(self) -> str:
         """Stable identity of *what is wrong*, for stall detection."""
         return "|".join(
@@ -70,8 +111,12 @@ class ValidationResult(BaseModel):
             "invariant_errors": self.invariant_errors,
             "instruction": (
                 "Do NOT retry with the same payload. Resolve these fields first "
-                "(use ns_getRecordTypeMetadata / ns_getSubsidiaries), then call "
-                "the write tool again with a complete payload."
+                "(ns_getRecordTypeMetadata for exact field names, ns_getSubsidiaries "
+                "or a SuiteQL lookup for values), then call the write tool again with "
+                "a complete payload. If one of these fields has several valid values "
+                "and the user's request does not say which, do NOT pick one yourself "
+                "— add 'ask_user': ['<field name>'] to the write call and the user "
+                "will be shown the real options to choose from."
             ),
         }
 

@@ -144,6 +144,41 @@ fresh branch off `main` and leave Track O behind pending its own decision.
 
 Written so the next session does not re-litigate these.
 
+- **2026-08-25 · Required NetSuite fields are CURATED IN CODE, over "discovered at runtime
+  from `ns_getRecordTypeMetadata`"** · because the runtime option does not exist. The plan
+  (`docs/superpowers/plans/2026-08-19-agentic-netsuite-write-loop.md:20`) forbade hardcoding
+  field names and required every requiredness fact to come from that tool. Three independent
+  checks killed it: the tool returns a JSON-Schema catalog whose per-field keys are only
+  `{description, format, nullable, properties, title, type, x-ns-custom-field}` — no
+  `required` array, and `nullable` is `false` on **zero of 177** customer fields;
+  `ns_getSuiteQLMetadata` returns the identical shape; and SuiteQL `CustomField.ismandatory`
+  covers **custom fields only**, never `subsidiary`/`companyname`/`entityid`. Consequence
+  while it stood: every card was `unvalidated: True` with `editable_slots: []`, so required
+  field validation was inert and the agent picked values like `subsidiary` by reasoning
+  alone. `backend/app/services/chat/required_field_registry.py` is the reversal.
+  **The risk runs BACKWARDS from the usual one** — a missing entry is cheap (NetSuite
+  rejects, the repair loop recovers), a WRONG entry blocks a write NetSuite would have
+  accepted and reads to an operator as the product being broken. So entries must clear two
+  bars (NetSuite really rejects without it AND it does not auto-derive), carry provenance,
+  and stay OUT when unproven. Deliberately excluded, each a live trap: `subsidiary` on any
+  transaction carrying an `entity` (it derives FROM the entity — required=false), `trandate`
+  anywhere (NetSuite defaults it), `location`/`department`/`class` (per-account config), and
+  all of `expenseReport` (never observed here). Only `customer.subsidiary` is
+  account-evidenced; everything else is domain knowledge, marked as such.
+- **2026-08-25 · A resolved `ask_user` slot DELEGATES a missing field to the human, over
+  letting the repair loop own every gap** · because once the registry made `customer`
+  actually validate, the two mechanisms met for the first time and the old ordering was
+  wrong: `ask_user` is the model stating it *cannot* determine a value, so bouncing that
+  exact field back to the model is the one action that cannot help — it re-proposes, burns
+  its repair budget to a `stall`, and the human who could answer in one click never sees a
+  card. Resolution therefore runs BEFORE the repair decision in `base_agent`, and
+  `ValidationResult.with_delegated_slots()` reclassifies a resolved field from "missing" to
+  "asked". Terminal things never delegate: `invariant_errors` (a closed period is not a
+  question a dropdown answers) and `missing_line_required` (no line-slot mechanism in v1).
+  An UNresolved hint — unknown field name, or zero options — still goes to the repair loop,
+  because a card with an unfillable required field is refused by the approve path's
+  slot-coverage gate and is a dead end for the operator.
+
 - **2026-08-06 · We had been SKIPPING RUNGS on the agentic-engineering ladder** · because
   the ladder (flat capture → code graph → domain graph → single-agent loop → verifier →
   small fan-out → gated team → worktrees) says each rung needs an entry trigger and a kill

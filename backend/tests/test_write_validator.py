@@ -286,3 +286,115 @@ def test_missing_line_required_fields_never_become_editable_slots():
     # The line-level miss is terminal (unfillable_line_fields on the card),
     # NOT a slot — only "subsidiary" (top-level) may ever appear here.
     assert [s.name for s in result.editable_slots] == ["subsidiary"]
+
+
+# ---------------------------------------------------------------------------
+# Delegating a missing field to the human instead of back to the model
+# ---------------------------------------------------------------------------
+
+
+def _missing_subsidiary_result():
+    meta = RecordMetadata(
+        record_type="customer",
+        fields=[
+            FieldSpec(name="subsidiary", label="Primary Subsidiary", required=True),
+            FieldSpec(name="companyname", label="Company Name", required=True),
+        ],
+    )
+    return validate_write(
+        payload=NormalizedPayload(fields={"companyname": "Acme"}, lines=[]),
+        metadata=meta,
+        record_type="customer",
+        mutation_type="create",
+    )
+
+
+def test_delegated_slot_clears_that_field_from_missing_required():
+    """When the model says "a human must choose this" and the server actually
+    resolved options for it, the field is no longer the model's problem to
+    solve — it is a question for the card. Leaving it in missing_required
+    would bounce the proposal back to the model forever."""
+    from app.services.chat.write_validator import EditableSlot
+
+    base = _missing_subsidiary_result()
+    assert base.ok is False and base.missing_required == ["subsidiary"]
+
+    delegated = base.with_delegated_slots(
+        [EditableSlot(name="subsidiary", label="Primary Subsidiary", allowed=[{"value": "1", "label": "Framework"}])]
+    )
+
+    assert delegated.ok is True
+    assert delegated.missing_required == []
+    assert [s.name for s in delegated.editable_slots] == ["subsidiary"]
+    assert delegated.editable_slots[0].allowed == [{"value": "1", "label": "Framework"}]
+
+
+def test_delegating_an_unrelated_field_leaves_the_real_gap_open():
+    """A slot for something else does not make the missing field any less
+    missing — otherwise a stray hint would wave an incomplete write through."""
+    from app.services.chat.write_validator import EditableSlot
+
+    delegated = _missing_subsidiary_result().with_delegated_slots(
+        [EditableSlot(name="department", label="Department", allowed=[{"value": "2", "label": "Ops"}])]
+    )
+    assert delegated.ok is False
+    assert delegated.missing_required == ["subsidiary"]
+
+
+def test_delegation_never_clears_invariant_errors():
+    """Invariant failures (closed period, unbalanced journal) are terminal —
+    no human slot can answer them, so they must survive delegation."""
+    from app.services.chat.write_validator import EditableSlot
+
+    meta = RecordMetadata(record_type="journalEntry", fields=[], requirements_known=True)
+    base = validate_write(
+        payload=NormalizedPayload(fields={}, lines=[]),
+        metadata=meta,
+        record_type="journalEntry",
+        mutation_type="create",
+        invariant_errors=["Accounting period 2026-01 is closed."],
+    )
+    delegated = base.with_delegated_slots([EditableSlot(name="subsidiary", label="Subsidiary")])
+    assert delegated.ok is False
+    assert delegated.invariant_errors == ["Accounting period 2026-01 is closed."]
+
+
+def test_delegation_never_clears_line_level_gaps():
+    """Line fields have no slot mechanism in v1 — a line gap stays terminal."""
+    from app.services.chat.write_validator import EditableSlot
+
+    meta = RecordMetadata(
+        record_type="journalEntry",
+        fields=[],
+        line_fields=[FieldSpec(name="account", label="Account", required=True)],
+    )
+    base = validate_write(
+        payload=NormalizedPayload(fields={}, lines=[{"debit": 5}]),
+        metadata=meta,
+        record_type="journalEntry",
+        mutation_type="create",
+    )
+    delegated = base.with_delegated_slots([EditableSlot(name="account", label="Account")])
+    assert delegated.ok is False
+    assert delegated.missing_line_required == ["line[0].account"]
+
+
+def test_delegation_with_no_slots_returns_an_equal_result():
+    base = _missing_subsidiary_result()
+    assert base.with_delegated_slots([]) == base
+
+
+def test_delegation_does_not_duplicate_an_already_declared_slot():
+    """validate_write already declares a slot for every missing required field.
+    A hint naming the same field must refine that slot (it carries real
+    options), not stack a second one with the same name onto the card."""
+    from app.services.chat.write_validator import EditableSlot
+
+    base = _missing_subsidiary_result()
+    assert [s.name for s in base.editable_slots] == ["subsidiary"]
+
+    delegated = base.with_delegated_slots(
+        [EditableSlot(name="subsidiary", label="Primary Subsidiary", allowed=[{"value": "1", "label": "Framework"}])]
+    )
+    assert [s.name for s in delegated.editable_slots] == ["subsidiary"]
+    assert delegated.editable_slots[0].allowed == [{"value": "1", "label": "Framework"}]
