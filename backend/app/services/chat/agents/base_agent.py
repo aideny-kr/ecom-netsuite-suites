@@ -126,6 +126,31 @@ def _validation_failure_detail(validation: ValidationResult) -> str:
     return "; ".join(b for b in bits if b) or "validation failed"
 
 
+def _metadata_fetched_this_turn(tool_calls_log: list[dict[str, Any]], record_type: str) -> bool:
+    """True if `tool_calls_log` already contains a prior `ns_getRecordTypeMetadata`
+    call for *record_type* earlier in this turn.
+
+    Backs the investigation gate (agentic-repair design requirement A): a
+    create/upsert proposal reaching the mutation intercept with no prior
+    same-turn metadata lookup for its own record type is bounced back to the
+    model rather than validated. Matches on `record_type` only — a metadata
+    call logged for a DIFFERENT record type does not satisfy this one's gate.
+    """
+    from app.services.chat.tools import parse_external_tool_name
+
+    for entry in tool_calls_log:
+        parsed = parse_external_tool_name(entry.get("tool", ""))
+        if not parsed:
+            continue
+        _, raw_name = parsed
+        if raw_name != "ns_getRecordTypeMetadata":
+            continue
+        params = entry.get("params") or {}
+        if params.get("recordType") == record_type:
+            return True
+    return False
+
+
 def _build_learned_rules_block(learned_rules: list) -> str:
     """Render the tenant <learned_rules> block, XML-escaping each rule so admin
     rule text containing markup can't break out of the block or inject prompt
@@ -1333,6 +1358,82 @@ class BaseSpecialistAgent(abc.ABC):
                     mutation_type = classify_mutation(block.name)
                     if mutation_type is not None:
                         record_type = block.input.get("recordType", "unknown")
+
+                        # ── ask_user hint pop (requirement C) — MUST happen
+                        # before anything else touches tool_input: this key
+                        # must never reach NetSuite, the signed HMAC
+                        # envelope, or execute_tool_call. The model may name
+                        # field NAMES ONLY it wants a human to choose; every
+                        # VALUE offered to the human comes from a
+                        # server-executed fetch (slot_option_sources.py),
+                        # resolved below once validation/the repair loop have
+                        # decided this attempt is the one shown as a card.
+                        _ask_user_hint = block.input.pop("ask_user", None)
+
+                        # ── Investigation gate (requirement A) — mechanism,
+                        # not prompt (the write profile's metadata-first
+                        # prose has been ignored live on this branch before).
+                        # Only create/upsert are gated: partial payloads are
+                        # legitimate on update, and metadata cannot yield
+                        # required fields anyway (see write_validator.py's
+                        # honesty rule), so no pre-flight check could ever
+                        # prove a create complete — the gate enforces
+                        # BEHAVIOR (look before composing), the human
+                        # enforces correctness. Bounded by construction: at
+                        # most ONE bounce per (turn, record_type), tracked in
+                        # a per-instance set — a stubborn model's SECOND
+                        # proposal always reaches validation/the card.
+                        if mutation_type in ("create", "upsert"):
+                            if not hasattr(self, "_investigation_gate_bounced"):
+                                self._investigation_gate_bounced: set[str] = set()
+                            if record_type not in self._investigation_gate_bounced and not _metadata_fetched_this_turn(
+                                tool_calls_log, record_type
+                            ):
+                                self._investigation_gate_bounced.add(record_type)
+                                result_str = json.dumps(
+                                    {
+                                        "unexamined_write": True,
+                                        "instruction": (
+                                            f"Call ns_getRecordTypeMetadata for '{record_type}' first, "
+                                            "resolve any values you need (e.g. ns_getSubsidiaries, or a "
+                                            "SuiteQL lookup), then re-propose this write."
+                                        ),
+                                    }
+                                )
+                                elapsed_ms = int((time.monotonic() - t0) * 1000)
+                                yield (
+                                    "tool_end",
+                                    {
+                                        "tool_name": block.name,
+                                        "step": step,
+                                        "duration_ms": elapsed_ms,
+                                        "success": False,
+                                        "result_summary": (
+                                            f"Investigation required — call ns_getRecordTypeMetadata for "
+                                            f"'{record_type}' before composing this {mutation_type}."
+                                        ),
+                                    },
+                                )
+                                tool_calls_log.append(
+                                    build_tool_call_log_entry(
+                                        step=step,
+                                        agent_name=self.agent_name,
+                                        tool_name=block.name,
+                                        params=block.input,
+                                        result_str=result_str,
+                                        duration_ms=elapsed_ms,
+                                    )
+                                )
+                                tool_results_content.append(
+                                    {
+                                        "type": "tool_result",
+                                        "tool_use_id": block.id,
+                                        "content": result_str,
+                                        "is_error": True,
+                                    }
+                                )
+                                continue
+                        # ── End investigation gate ──
 
                         # ── Write validation + bounded repair ──
                         if not hasattr(self, "_write_repair"):

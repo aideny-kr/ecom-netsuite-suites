@@ -185,7 +185,16 @@ async def test_repair_loop_feeds_error_back_without_crashing_the_stream():
 
     agent = _make_agent()
     tool_name = _ext("ns_createRecord")
+    metadata_tool_name = _ext("ns_getRecordTypeMetadata")
 
+    # The investigation gate (requirement A) bounces a create with no prior
+    # same-turn metadata call before it ever reaches validation — satisfy it
+    # first so this attempt exercises the REPAIR loop this test is about.
+    metadata_call_response = LLMResponse(
+        text_blocks=[],
+        tool_use_blocks=[ToolUseBlock(id="m1", name=metadata_tool_name, input={"recordType": "customer"})],
+        usage=TokenUsage(input_tokens=10, output_tokens=10),
+    )
     tool_call_response = LLMResponse(
         text_blocks=[],
         tool_use_blocks=[
@@ -204,7 +213,7 @@ async def test_repair_loop_feeds_error_back_without_crashing_the_stream():
         tool_use_blocks=[],
         usage=TokenUsage(input_tokens=10, output_tokens=10),
     )
-    responses = iter([tool_call_response, final_response])
+    responses = iter([metadata_call_response, tool_call_response, final_response])
 
     async def _fake_stream_message(**kwargs):
         yield "response", next(responses)
@@ -233,6 +242,11 @@ async def test_repair_loop_feeds_error_back_without_crashing_the_stream():
             "app.services.chat.agents.base_agent.extract_structured_confidence",
             new_callable=AsyncMock,
             return_value=MagicMock(score=4, source="mock"),
+        ),
+        patch(
+            "app.services.chat.tools.execute_tool_call",
+            new_callable=AsyncMock,
+            return_value="{}",
         ),
     ):
         events = []
@@ -285,6 +299,17 @@ async def test_persisted_log_flags_a_card_shown_after_repair_is_exhausted():
 
     agent = _make_agent()
     tool_name = _ext("ns_createRecord")
+    metadata_tool_name = _ext("ns_getRecordTypeMetadata")
+
+    # The investigation gate (requirement A) bounces a create with no prior
+    # same-turn metadata call before it ever reaches validation — satisfy it
+    # first so both attempts below exercise the REPAIR loop this test is
+    # about, not the investigation gate.
+    metadata_call_response = LLMResponse(
+        text_blocks=[],
+        tool_use_blocks=[ToolUseBlock(id="m1", name=metadata_tool_name, input={"recordType": "customer"})],
+        usage=TokenUsage(input_tokens=10, output_tokens=10),
+    )
 
     # Same missing field both times -> identical ValidationResult fingerprint,
     # so the SECOND should_repair() call exits "stall" instead of granting a
@@ -305,7 +330,7 @@ async def test_persisted_log_flags_a_card_shown_after_repair_is_exhausted():
         tool_use_blocks=[],
         usage=TokenUsage(input_tokens=10, output_tokens=10),
     )
-    responses = iter([tool_call_response_1, tool_call_response_2, final_response])
+    responses = iter([metadata_call_response, tool_call_response_1, tool_call_response_2, final_response])
 
     async def _fake_stream_message(**kwargs):
         yield "response", next(responses)
@@ -335,6 +360,11 @@ async def test_persisted_log_flags_a_card_shown_after_repair_is_exhausted():
             new_callable=AsyncMock,
             return_value=MagicMock(score=4, source="mock"),
         ),
+        patch(
+            "app.services.chat.tools.execute_tool_call",
+            new_callable=AsyncMock,
+            return_value="{}",
+        ),
     ):
         events = []
         async for event_type, payload in agent.run_streaming(
@@ -354,9 +384,11 @@ async def test_persisted_log_flags_a_card_shown_after_repair_is_exhausted():
     responses_events = [p for t, p in events if t == "response"]
     assert len(responses_events) == 1
     tool_calls_log = responses_events[0].tool_calls_log
-    assert len(tool_calls_log) == 2
+    # The metadata-satisfying call is entry 0; the repair-request and the
+    # eventual card are entries 1 and 2.
+    assert len(tool_calls_log) == 3
 
-    repair_entry, card_entry = tool_calls_log
+    _metadata_entry, repair_entry, card_entry = tool_calls_log
     # The first (repair-requested) entry is untouched by this change.
     assert "validation_failed_before_confirmation" not in repair_entry
     # The second entry is the card shown despite repair giving up — the

@@ -487,15 +487,66 @@ class TestDeleteInvariantGapIsPinned:
 class TestMutationInterceptDualKeyPayloadFeedsRepairNotCard:
     @pytest.mark.asyncio
     async def test_dual_key_payload_feeds_repair_not_card(self):
+        """Drives its own turn (rather than `_drive_delete_turn`, shared
+        with the delete tests above) because the investigation gate
+        (requirement A) now bounces a create with no prior same-turn
+        `ns_getRecordTypeMetadata` call before it ever reaches
+        `validate_mutation` — this test needs to satisfy that gate first so
+        it exercises the dual-key detection it is actually about."""
+        from app.services.chat.llm_adapter import LLMResponse, TokenUsage, ToolUseBlock
+
         metadata_spy = AsyncMock(return_value=None)
         invariants_spy = AsyncMock(return_value=[])
 
-        agent, events = await _drive_delete_turn(
-            _ext("ns_createRecord"),
-            {"recordType": "customer", "data": {"companyname": "A"}, "body": {"companyname": "B"}},
-            metadata_spy,
-            invariants_spy,
+        agent = _make_agent()
+        create_name = _ext("ns_createRecord")
+        metadata_tool_name = _ext("ns_getRecordTypeMetadata")
+        dual_key_input = {"recordType": "customer", "data": {"companyname": "A"}, "body": {"companyname": "B"}}
+
+        metadata_call_response = LLMResponse(
+            text_blocks=[],
+            tool_use_blocks=[ToolUseBlock(id="m1", name=metadata_tool_name, input={"recordType": "customer"})],
+            usage=TokenUsage(input_tokens=10, output_tokens=10),
         )
+        create_call_response = LLMResponse(
+            text_blocks=[],
+            tool_use_blocks=[ToolUseBlock(id="t1", name=create_name, input=dual_key_input)],
+            usage=TokenUsage(input_tokens=10, output_tokens=10),
+        )
+        final_response = LLMResponse(text_blocks=["done"], tool_use_blocks=[], usage=TokenUsage(10, 10))
+        responses = iter([metadata_call_response, create_call_response, final_response])
+
+        async def _fake_stream_message(**kwargs):
+            yield "response", next(responses)
+
+        mock_adapter = MagicMock()
+        mock_adapter.stream_message = _fake_stream_message
+        mock_adapter.build_assistant_message = MagicMock(return_value={"role": "assistant", "content": []})
+        mock_adapter.build_tool_result_message = MagicMock(
+            return_value={"role": "user", "content": [{"type": "tool_result"}]}
+        )
+
+        events = []
+        with (
+            patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
+            patch("app.services.chat.write_validation.get_record_metadata", metadata_spy),
+            patch("app.services.chat.write_validation.check_posting_invariants", invariants_spy),
+            patch("app.services.chat.agents.base_agent._maybe_store_query_pattern", new_callable=AsyncMock),
+            patch(
+                "app.services.chat.agents.base_agent.extract_structured_confidence",
+                new_callable=AsyncMock,
+                return_value=MagicMock(score=4, source="mock"),
+            ),
+            patch("app.services.chat.tools.execute_tool_call", new_callable=AsyncMock, return_value="{}"),
+        ):
+            async for event_type, payload in agent.run_streaming(
+                task="Create a new customer record.",
+                context={},
+                db=AsyncMock(),
+                adapter=mock_adapter,
+                model="test-model",
+            ):
+                events.append((event_type, payload))
 
         # validate_mutation raises before ever reaching metadata/invariants —
         # this must never be treated as "requirements unknown, ask NetSuite".
