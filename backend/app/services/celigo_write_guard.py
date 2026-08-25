@@ -63,6 +63,7 @@ from typing import Any, Iterator
 
 from sqlalchemy import event
 from sqlalchemy import inspect as sa_inspect
+from sqlalchemy import select as sa_select
 from sqlalchemy.orm import Session
 
 # ---------------------------------------------------------------------------
@@ -181,16 +182,86 @@ def _attr(obj: Any, name: str, default_if_unset: Any = None) -> Any:
     return getattr(obj, name, default_if_unset)
 
 
+def _provider_values(obj: Any) -> tuple[Any, ...]:
+    """Every ``provider`` value this flush puts *obj* through -- new AND prior.
+
+    Classifying on the CURRENT value alone is a hole, not a shortcut. An UPDATE
+    that rewrites ``provider`` has already applied the new value by the time
+    ``before_flush`` runs, so reading it makes a ``celigo`` -> ``netsuite``
+    rename look like an ordinary NetSuite write: the row is laundered out of the
+    guard in the same flush that mutates it. The inverse matters too -- a row
+    renamed INTO ``celigo``/``celigo_mcp`` is a Celigo row from that write
+    onward and must be guarded from it, not after it.
+
+    So both ends are returned and the caller guards on either matching.
+
+    ``AttributeState.history`` deliberately does NOT emit loader callables, so
+    it is free, and for a row whose ``provider`` is loaded (the overwhelming
+    case -- ``expire_on_commit=False`` on every session factory here) it is also
+    complete. Only when it comes back blank on both sides does this fall through
+    to ``_committed_provider_from_db``.
+    """
+    current = _attr(obj, "provider")
+    state = sa_inspect(obj)
+    if state.pending or state.transient:
+        # No prior database value exists; ``current`` is what will land.
+        return (current,)
+
+    history = state.attrs["provider"].history
+    previous = tuple(history.deleted) + tuple(history.unchanged)
+    if not previous:
+        stored = _committed_provider_from_db(state)
+        if stored is not _UNSET:
+            previous = (stored,)
+
+    return (current, *previous)
+
+
+def _committed_provider_from_db(state: Any) -> Any:
+    """The row's STORED ``provider``, for when attribute history cannot say.
+
+    Reached only when all three hold: the object is on a guarded table, its
+    ``provider`` was changed in this flush, and the pre-change value was never
+    loaded. ``expire()`` drops it, and SQLAlchemy then records ``NO_VALUE`` as
+    the pre-change value on the SET rather than fetching -- so the history has
+    an ``added`` and nothing else. ``load_history()`` cannot recover it either:
+    the NEW value is sitting in ``__dict__``, so the loader callable it would
+    fire is never reached.
+
+    Failing closed on that blank instead would refuse an ordinary
+    ``stripe`` -> ``shopify`` rename, and every non-Celigo write must keep
+    behaving exactly as it always has. So this asks the database, which is
+    exact. The cost is bounded to a case that requires an expired row AND a
+    provider rename AND a guarded table; ordinary flushes never reach it.
+
+    Safe inside ``before_flush``: ``Session._flushing`` is already True when the
+    event fires, so ``Session._autoflush`` is suppressed and this cannot
+    re-enter the flush; and the surrounding greenlet makes the I/O legal under
+    ``AsyncSession`` for the same reason ``_attr``'s ``getattr`` fallback is.
+    """
+    session = state.session
+    identity = state.identity
+    if session is None or identity is None:
+        return _UNSET
+
+    mapper = state.mapper
+    stmt = sa_select(mapper.columns["provider"]).where(
+        *[column == value for column, value in zip(mapper.primary_key, identity)]
+    )
+    return session.execute(stmt).scalar_one_or_none()
+
+
 def _guarded_table(obj: Any) -> str | None:
     """Return the guarded tablename *obj* belongs to, or None.
 
-    Cheapest possible reject: one class-attribute lookup and one dict lookup
-    for every object in every flush.
+    Cheapest possible reject FIRST: one class-attribute lookup and one dict
+    lookup rejects every non-guarded table, which is every object in almost
+    every flush in the application. Nothing below runs for those.
     """
     tablename = getattr(type(obj), "__tablename__", None)
     if tablename not in GUARDED_TABLES:
         return None
-    if _attr(obj, "provider") != GUARDED_TABLES[tablename]:
+    if GUARDED_TABLES[tablename] not in _provider_values(obj):
         return None
     return tablename
 

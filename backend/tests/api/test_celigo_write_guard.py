@@ -515,6 +515,113 @@ class TestFieldInvariantsInsideTheAllowedWindow:
         assert connector.status == "error"
 
 
+class TestProviderRenameCannotLaunderARow:
+    """Classifying a row by its CURRENT ``provider`` alone lets an UPDATE that
+    rewrites ``provider`` escape the guard in the same flush that mutates it:
+    the listener reads the already-applied new value, sees a non-Celigo
+    provider, and waves the write through. The inverse matters just as much --
+    a row renamed INTO ``celigo``/``celigo_mcp`` must be guarded from that write
+    onward, or the pair can be assembled through a generic path.
+
+    Both ends of the rename are therefore considered, and either one matching
+    guards the row.
+    """
+
+    async def test_renaming_a_celigo_connection_out_of_the_guard_is_refused(self, db, tenant_a):
+        connection = await seed_celigo_connection(db, tenant_a.id)
+        connection_id = connection.id
+
+        connection.provider = "netsuite"
+        with pytest.raises(CeligoManagedElsewhereError):
+            await db.flush()
+
+        await db.rollback()
+        row = (await db.execute(select(Connection).where(Connection.id == connection_id))).scalar_one()
+        assert row.provider == "celigo", "the rename must not have laundered the row out of the guard"
+
+    async def test_renaming_a_celigo_mcp_connector_out_of_the_guard_is_refused(self, db, tenant_a):
+        connector = await seed_celigo_mcp_connector(db, tenant_a.id)
+        connector_id = connector.id
+
+        connector.provider = "netsuite_mcp"
+        with pytest.raises(CeligoManagedElsewhereError):
+            await db.flush()
+
+        await db.rollback()
+        row = (await db.execute(select(McpConnector).where(McpConnector.id == connector_id))).scalar_one()
+        assert row.provider == "celigo_mcp"
+
+    async def test_renaming_an_expired_celigo_row_out_of_the_guard_is_refused(self, db, tenant_a):
+        """The prior value is not always sitting in ``__dict__``.
+
+        ``expire()`` drops it, and SQLAlchemy records ``NO_VALUE`` as the
+        pre-change value when the attribute is then SET without a fetch -- so
+        the cheap, non-loading history is blank on both sides and a guard that
+        trusted it would wave the write through.
+        """
+        connection = await seed_celigo_connection(db, tenant_a.id)
+        connection_id = connection.id
+        db.expire(connection)
+
+        connection.provider = "netsuite"
+        with pytest.raises(CeligoManagedElsewhereError):
+            await db.flush()
+
+        await db.rollback()
+        row = (await db.execute(select(Connection).where(Connection.id == connection_id))).scalar_one()
+        assert row.provider == "celigo"
+
+    async def test_renaming_a_plain_connection_into_celigo_is_refused(self, db, tenant_a):
+        connection = await seed_plain_connection(db, tenant_a.id, "netsuite")
+        connection_id = connection.id
+
+        connection.provider = "celigo"
+        with pytest.raises(CeligoManagedElsewhereError):
+            await db.flush()
+
+        await db.rollback()
+        row = (await db.execute(select(Connection).where(Connection.id == connection_id))).scalar_one()
+        assert row.provider == "netsuite"
+
+    @pytest.mark.parametrize("old,new", [("stripe", "shopify"), ("netsuite", "stripe")])
+    async def test_a_rename_between_two_non_guarded_providers_is_untouched(self, db, tenant_a, old, new):
+        """The control: neither end is a Celigo provider, so nothing fires."""
+        connection = await seed_plain_connection(db, tenant_a.id, old)
+
+        connection.provider = new
+        await db.flush()
+
+        assert connection.provider == new
+
+    async def test_renaming_an_expired_non_celigo_connection_is_untouched(self, db, tenant_a):
+        """The control for the DB fallback above: same unloaded-prior-value
+        shape, neither end Celigo. Failing CLOSED on the blank history would
+        refuse this, and every non-Celigo write must behave exactly as before --
+        so the fallback has to be exact, not conservative."""
+        connection = await seed_plain_connection(db, tenant_a.id, "stripe")
+        db.expire(connection)
+
+        connection.provider = "shopify"
+        await db.flush()
+
+        assert connection.provider == "shopify"
+
+    def test_the_fast_path_short_circuits_before_reading_any_attribute(self, monkeypatch, tenant_a):
+        """``_guarded_table`` runs for every object in every flush, so an
+        unrelated table must cost one class lookup and one dict lookup -- no
+        attribute read, no history, no lazy load."""
+        from app.models.job import Job
+        from app.services import celigo_write_guard
+
+        def _explode(*args, **kwargs):  # pragma: no cover - must never run
+            raise AssertionError("the fast path must reject before touching the instance")
+
+        monkeypatch.setattr(celigo_write_guard, "_attr", _explode)
+        monkeypatch.setattr(celigo_write_guard, "_provider_values", _explode)
+
+        assert celigo_write_guard._guarded_table(Job(tenant_id=tenant_a.id, job_type="tasks.noop")) is None
+
+
 class TestAllowTokenScoping:
     async def test_the_token_does_not_outlive_its_block(self, db, tenant_a):
         connection = await seed_celigo_connection(db, tenant_a.id)
