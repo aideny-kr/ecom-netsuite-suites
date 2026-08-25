@@ -213,6 +213,55 @@ def test_update_with_empty_required_field_still_skips_sweep_entirely():
     assert result.missing_required == []
 
 
+def test_requirements_known_false_skips_required_sweep_but_stays_unvalidated():
+    """The properties-only live shape gives us field NAMES, never requirements.
+    A naive fix that flips `unvalidated` to False the moment metadata exists
+    would claim a validation that was never performed — this must not happen."""
+    meta = RecordMetadata(
+        record_type="customer",
+        fields=[FieldSpec(name="subsidiary", label="Primary Subsidiary", required=False)],
+        requirements_known=False,
+    )
+    result = validate_write(
+        payload=NormalizedPayload(fields={"companyname": "x"}, lines=[]),
+        metadata=meta,
+        record_type="customer",
+        mutation_type="create",
+    )
+    assert result.unvalidated is True
+    assert result.missing_required == []
+    assert result.ok is True
+
+
+def test_requirements_known_false_with_invariant_errors_still_not_ok():
+    """Unknown requirements PLUS a known invariant violation: still unvalidated,
+    but not ok — mirrors test_no_metadata_with_invariant_errors_is_not_ok for
+    the requirements_known=False case."""
+    meta = RecordMetadata(record_type="customer", fields=[], requirements_known=False)
+    result = validate_write(
+        payload=NormalizedPayload(fields={}, lines=[]),
+        metadata=meta,
+        record_type="customer",
+        mutation_type="create",
+        invariant_errors=["debits must equal credits"],
+    )
+    assert result.unvalidated is True
+    assert result.ok is False
+
+
+def test_requirements_known_true_default_preserves_existing_validation():
+    """Regression guard: RecordMetadata constructed without requirements_known
+    (every other fixture in this file) must keep validating exactly as before."""
+    result = validate_write(
+        payload=NormalizedPayload(fields={"companyname": "test ai customer"}, lines=[]),
+        metadata=META,
+        record_type="customer",
+        mutation_type="create",
+    )
+    assert result.unvalidated is False
+    assert result.missing_required == ["subsidiary"]
+
+
 def test_missing_line_required_fields_never_become_editable_slots():
     """Finding B6: line-level required fields (debit/credit) must remain
     structurally unreachable via slot_values — editable_slots is built ONLY

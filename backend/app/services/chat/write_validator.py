@@ -113,6 +113,17 @@ def validate_write(
             invariant_errors=invariant_errors,
         )
 
+    # We learned field NAMES (the live properties shape), not requirements —
+    # missing_required must stay empty and unvalidated must stay True. A fix
+    # that flips unvalidated to False here would claim a validation that was
+    # never actually performed on a financial write path.
+    if not metadata.requirements_known:
+        return ValidationResult(
+            ok=not invariant_errors,
+            unvalidated=True,
+            invariant_errors=invariant_errors,
+        )
+
     missing: list[str] = []
     missing_lines: list[str] = []
 

@@ -279,6 +279,100 @@ async def test_unrecognised_shape_warns_loudly_but_still_returns_metadata(monkey
     assert "sometotallyunknownkey" in warnings[0].message
 
 
+# ── Live-shape properties parser (controller-verified 2026-08-25) ──────────
+#
+# Live `ns_getRecordTypeMetadata` returns {"success", "metadata": {"type",
+# "properties": {name: {title, type, ...}}}, "message"} — NOT the legacy
+# {"fields": [...]} shape every fixture above uses. There is no top-level
+# `required`/`mandatory` array and no field carries `nullable: false`, so this
+# shape can only ever yield field NAMES, never requirements.
+
+_LIVE_SHAPE = {
+    "success": True,
+    "metadata": {
+        "type": "object",
+        "properties": {
+            "companyname": {"title": "Company Name", "type": "string", "nullable": True},
+            "subsidiary": {"title": "Primary Subsidiary", "type": "integer", "nullable": True},
+        },
+        "$schema": "http://json-schema.org/draft-07/schema#",
+    },
+    "message": "ok",
+}
+
+
+@pytest.mark.asyncio
+async def test_live_properties_shape_parses_field_names_with_requirements_unknown(monkeypatch):
+    """Today's parser looks for d['fields'], gets None on this shape, and
+    returns None entirely — this is the controller-verified live-parity gap."""
+
+    async def fake_exec(**kwargs):
+        return json.dumps(_LIVE_SHAPE)
+
+    monkeypatch.setattr(svc, "execute_tool_call", fake_exec)
+    meta = await svc.get_record_metadata(
+        record_type="customer",
+        mutation_tool_name=EXT,
+        tenant_id=None,
+        actor_id=None,
+        correlation_id="c",
+        db=None,
+        session_id="s",
+    )
+    assert meta is not None
+    assert meta.requirements_known is False
+    assert sorted(f.name for f in meta.fields) == ["companyname", "subsidiary"]
+    assert meta.spec_for("subsidiary").label == "Primary Subsidiary"
+    # No requirements info exists in this shape — nothing may claim required.
+    assert meta.required_field_names() == []
+
+
+@pytest.mark.asyncio
+async def test_live_properties_shape_is_cached(monkeypatch):
+    calls = {"n": 0}
+
+    async def fake_exec(**kwargs):
+        calls["n"] += 1
+        return json.dumps(_LIVE_SHAPE)
+
+    monkeypatch.setattr(svc, "execute_tool_call", fake_exec)
+    kw = dict(
+        record_type="customer",
+        mutation_tool_name=EXT,
+        tenant_id=None,
+        actor_id=None,
+        correlation_id="c",
+        db=None,
+        session_id="s",
+    )
+    await svc.get_record_metadata(**kw)
+    await svc.get_record_metadata(**kw)
+    assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_legacy_fields_list_still_sets_requirements_known_true(monkeypatch):
+    """The legacy shape carries a real required-marker key — requirements_known
+    must stay True there, or the fix would silently degrade validation on the
+    shape that already works today."""
+
+    async def fake_exec(**kwargs):
+        return json.dumps(_META)
+
+    monkeypatch.setattr(svc, "execute_tool_call", fake_exec)
+    meta = await svc.get_record_metadata(
+        record_type="customer",
+        mutation_tool_name=EXT,
+        tenant_id=None,
+        actor_id=None,
+        correlation_id="c",
+        db=None,
+        session_id="s",
+    )
+    assert meta is not None
+    assert meta.requirements_known is True
+
+
 @pytest.mark.asyncio
 async def test_no_warning_when_at_least_one_field_carries_a_marker(monkeypatch, caplog):
     """The loud-shape-mismatch warning must not fire just because SOME fields

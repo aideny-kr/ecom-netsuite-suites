@@ -23,6 +23,20 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
+# Tools that legitimately exceed the default 15s ceiling. ns_getRecordTypeMetadata
+# was controller-verified live (2026-08-25) at 11-18s — under the old 15.0s
+# ceiling it failed roughly half the time, silently breaking both the
+# investigation gate (A) and the ask_user slot-name verification (C) that
+# depend on it succeeding. The 1h cache in record_metadata_service.py
+# amortizes the added latency to once per (connector, record_type)/hour.
+_EXTENDED_TIMEOUT_TOOLS = frozenset(
+    {"ns_runReport", "ns_runSavedSearch", "ns_runCustomSuiteQL", "ns_getRecordTypeMetadata"}
+)
+
+
+def _tool_timeout_seconds(tool_name: str) -> float:
+    return 60.0 if tool_name in _EXTENDED_TIMEOUT_TOOLS else 15.0
+
 
 async def _get_oauth2_token(connector: McpConnector, db: AsyncSession | None) -> str | None:
     """Get a valid OAuth2 access token, auto-refreshing if expired.
@@ -217,7 +231,7 @@ async def call_external_mcp_tool(
 
     # Reports and saved searches can take longer than simple queries
     # SuiteQL needs 60s too — systemnote and complex JOINs can exceed 15s
-    timeout = 60.0 if tool_name in ("ns_runReport", "ns_runSavedSearch", "ns_runCustomSuiteQL") else 15.0
+    timeout = _tool_timeout_seconds(tool_name)
     result = None
 
     try:

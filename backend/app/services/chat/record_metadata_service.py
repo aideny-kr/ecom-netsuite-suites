@@ -81,6 +81,16 @@ class RecordMetadata(BaseModel):
     record_type: str
     fields: list[FieldSpec] = []
     line_fields: list[FieldSpec] = []
+    # True only when a recognised required-marker key (see
+    # `_REQUIRED_MARKER_KEYS`) was actually observed on the legacy
+    # `{"fields": [...]}` shape. The live `ns_getRecordTypeMetadata` response
+    # (`{"metadata": {"properties": {...}}}`) carries field NAMES only — no
+    # `required`/`mandatory` array exists there and `nullable` is never
+    # `false` on any field (controller-verified 2026-08-25) — so that shape
+    # always sets this False. Defaults True so every pre-existing direct
+    # construction of this model (tests + the legacy parse path before this
+    # field existed) keeps validating exactly as before.
+    requirements_known: bool = True
 
     def required_field_names(self) -> list[str]:
         return [f.name for f in self.fields if f.required]
@@ -94,6 +104,45 @@ class RecordMetadata(BaseModel):
 
 def clear_metadata_cache() -> None:
     _cache.clear()
+
+
+def _parse_properties_shape(data: dict[str, Any], record_type: str) -> "RecordMetadata | None":
+    """Parse the live `ns_getRecordTypeMetadata` response shape:
+    ``{"success": true, "metadata": {"type": "object", "properties": {name:
+    {"title", "type", ...}}}, "message": ...}``.
+
+    Controller-verified 2026-08-25: no key across any field's schema carries
+    required/mandatory information, and `nullable` is never `false` — this
+    shape can only ever yield field NAMES, never requirements. Callers must
+    treat the result as ``requirements_known=False``.
+
+    Returns None if *data* doesn't match this shape at all (so the caller can
+    fall back to its existing "unknown shape" handling), or if it matches the
+    shape but a property entry is malformed (present-but-wrong-type is
+    "unknown", never "empty" — same rule the legacy-shape parser already
+    follows for its own malformed cases).
+    """
+    metadata_obj = data.get("metadata")
+    if not isinstance(metadata_obj, dict):
+        return None
+    properties = metadata_obj.get("properties")
+    if not isinstance(properties, dict):
+        return None
+
+    fields: list[FieldSpec] = []
+    for name, spec in properties.items():
+        if not isinstance(spec, dict):
+            return None
+        fields.append(
+            FieldSpec(
+                name=name,
+                label=spec.get("title") or name,
+                required=False,
+                type=spec.get("type", "text"),
+            )
+        )
+
+    return RecordMetadata(record_type=record_type, fields=fields, line_fields=[], requirements_known=False)
 
 
 def _parse_field(raw: dict[str, Any]) -> FieldSpec:
@@ -158,6 +207,13 @@ async def get_record_metadata(
         # `.get()` returns None for both, so the presence check is required to
         # tell them apart.
         if not isinstance(raw_fields, list):
+            # Not the legacy shape at all — try the live properties shape
+            # before giving up. A response matching neither still returns
+            # None (unknown, never "empty").
+            live_meta = _parse_properties_shape(data, record_type)
+            if live_meta is not None:
+                _cache[key] = (time.monotonic(), live_meta)
+                return live_meta
             return None
         if has_sublists_key and not isinstance(raw_sublists, list):
             return None
@@ -199,7 +255,12 @@ async def get_record_metadata(
                 observed_keys,
             )
 
-        meta = RecordMetadata(record_type=record_type, fields=fields, line_fields=line_fields)
+        meta = RecordMetadata(
+            record_type=record_type,
+            fields=fields,
+            line_fields=line_fields,
+            requirements_known=any_required_marker,
+        )
     except Exception:
         logger.warning("record_metadata: lookup failed for %s", record_type, exc_info=True)
         return None
