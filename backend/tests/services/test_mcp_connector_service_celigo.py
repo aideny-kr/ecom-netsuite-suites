@@ -9,14 +9,32 @@ caller-supplied server_url for celigo_mcp -- see docstring in
 mcp_connector_service.py) must survive; only the region derivation was wrong.
 """
 
+from app.services.celigo_write_guard import celigo_writes_allowed
 from app.services.mcp_connector_service import create_mcp_connector
+
+
+async def _create(db, **kwargs):
+    """Call create_mcp_connector holding the Celigo write window.
+
+    Creating a celigo_mcp row is a guarded write (app/services/celigo_write_guard.py):
+    in production the only caller is connector_status._upsert_celigo_mcp_connector,
+    which holds the window. These tests drive the same helper directly, so they
+    must hold it too -- which is why this file is on the containment check's
+    allowlist in tests/test_celigo_write_guard_containment.py.
+
+    The `custom`-provider test below deliberately does NOT go through here: an
+    unguarded provider must stay unguarded, and routing it through the window
+    would hide a regression in exactly that property.
+    """
+    with celigo_writes_allowed(db):
+        return await create_mcp_connector(db=db, **kwargs)
 
 
 class TestCeligoMcpServerUrlRegionPinning:
     async def test_us_region_pins_us_host(self, db, admin_user):
         user, _ = admin_user
-        connector = await create_mcp_connector(
-            db=db,
+        connector = await _create(
+            db,
             tenant_id=user.tenant_id,
             provider="celigo_mcp",
             label="Celigo (agent access)",
@@ -29,8 +47,8 @@ class TestCeligoMcpServerUrlRegionPinning:
 
     async def test_eu_region_pins_eu_host(self, db, admin_user):
         user, _ = admin_user
-        connector = await create_mcp_connector(
-            db=db,
+        connector = await _create(
+            db,
             tenant_id=user.tenant_id,
             provider="celigo_mcp",
             label="Celigo (agent access)",
@@ -43,8 +61,8 @@ class TestCeligoMcpServerUrlRegionPinning:
 
     async def test_unknown_region_falls_back_to_us_host(self, db, admin_user):
         user, _ = admin_user
-        connector = await create_mcp_connector(
-            db=db,
+        connector = await _create(
+            db,
             tenant_id=user.tenant_id,
             provider="celigo_mcp",
             label="Celigo (agent access)",
@@ -60,8 +78,8 @@ class TestCeligoMcpServerUrlRegionPinning:
         parameter must default sanely) resolves to the US host, exactly like
         celigo.client.base_url()'s own default."""
         user, _ = admin_user
-        connector = await create_mcp_connector(
-            db=db,
+        connector = await _create(
+            db,
             tenant_id=user.tenant_id,
             provider="celigo_mcp",
             label="Celigo (agent access)",
@@ -76,8 +94,8 @@ class TestCeligoMcpServerUrlRegionPinning:
         survive region-awareness: a caller cannot point a celigo_mcp connector
         at a server they control by passing server_url, regardless of region."""
         user, _ = admin_user
-        connector = await create_mcp_connector(
-            db=db,
+        connector = await _create(
+            db,
             tenant_id=user.tenant_id,
             provider="celigo_mcp",
             label="Celigo (agent access)",

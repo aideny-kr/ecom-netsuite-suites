@@ -10,6 +10,7 @@ from app.core.encryption import encrypt_credentials, get_current_key_version
 from app.models.connection import Connection
 from app.models.mcp_connector import McpConnector
 from app.services.celigo.client import CELIGO_MCP_SERVER_URL
+from app.services.celigo_write_guard import celigo_writes_allowed
 
 
 class TestConnectionCRUD:
@@ -117,6 +118,10 @@ class TestCeligoGenericDeleteGuard:
     """
 
     async def _seed_celigo_connection(self, db: AsyncSession, tenant_id, created_by) -> Connection:
+        # Seeding a Celigo row is itself a guarded write -- the session-flush
+        # guard (app/services/celigo_write_guard.py) refuses Celigo creates from
+        # anywhere but the dedicated connect flow, and a fixture is nowhere.
+        # Holding the window here is the guard working, not a workaround.
         connection = Connection(
             tenant_id=tenant_id,
             provider="celigo",
@@ -127,8 +132,9 @@ class TestCeligoGenericDeleteGuard:
             encryption_key_version=get_current_key_version(),
             created_by=created_by,
         )
-        db.add(connection)
-        await db.flush()
+        with celigo_writes_allowed(db):
+            db.add(connection)
+            await db.flush()
         return connection
 
     async def _seed_celigo_mcp_connector(self, db: AsyncSession, tenant_id, created_by) -> McpConnector:
@@ -145,8 +151,9 @@ class TestCeligoGenericDeleteGuard:
             discovered_tools=[{"name": "list_flows", "description": "List flows"}],
             created_by=created_by,
         )
-        db.add(connector)
-        await db.flush()
+        with celigo_writes_allowed(db):
+            db.add(connector)
+            await db.flush()
         return connector
 
     async def test_generic_delete_refuses_a_celigo_connection(self, client: AsyncClient, admin_user, db: AsyncSession):

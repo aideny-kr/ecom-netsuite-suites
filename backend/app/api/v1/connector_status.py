@@ -30,6 +30,7 @@ from app.services.celigo.client import (
     mcp_server_url,
     verify_token,
 )
+from app.services.celigo_write_guard import celigo_writes_allowed
 
 logger = structlog.get_logger()
 
@@ -585,6 +586,39 @@ async def _upsert_celigo_mcp_connector(
     rest_identity: dict,
     created_by,
 ) -> McpConnector:
+    """Trusted writer for the celigo_mcp row -- holds the write window.
+
+    Every celigo_mcp mutation in the application is supposed to happen here or
+    in ``disconnect_celigo``; the session-flush guard refuses it anywhere else.
+    This function flushes in three places (``create_mcp_connector``, the
+    identity-failure path, the discovery path), so the window wraps the whole
+    body rather than each write. It is re-entrant with ``connect_celigo``'s own
+    window, and holding it here too means a future second caller inherits the
+    permission instead of having to remember it.
+
+    Delegates to ``_upsert_celigo_mcp_connector_locked`` purely so opening the
+    window costs a wrapper rather than re-indenting the entire body -- there is
+    no behavioural difference.
+    """
+    with celigo_writes_allowed(db):
+        return await _upsert_celigo_mcp_connector_locked(
+            db=db,
+            tenant_id=tenant_id,
+            agent_token=agent_token,
+            region=region,
+            rest_identity=rest_identity,
+            created_by=created_by,
+        )
+
+
+async def _upsert_celigo_mcp_connector_locked(
+    db: AsyncSession,
+    tenant_id,
+    agent_token: str,
+    region: str,
+    rest_identity: dict,
+    created_by,
+) -> McpConnector:
     """Create (or reactivate) the celigo_mcp connector that gives the chat agent
     read-only Celigo tools -- Tasks 1-3's guards enforce the read-only boundary
     once this row exists.
@@ -802,39 +836,46 @@ async def connect_celigo(
     )
     existing = existing_result.scalar_one_or_none()
 
-    if existing:
-        existing.encrypted_credentials = encrypted
-        existing.status = "active"
-        existing.error_reason = None
-        existing.last_health_check_at = now
-        existing.label = request.label
-        existing.metadata_json = metadata
-        connection = existing
-    else:
-        connection = Connection(
-            tenant_id=user.tenant_id,
-            provider="celigo",
-            label=request.label,
-            status="active",
-            auth_type="api_key",
-            encrypted_credentials=encrypted,
-            created_by=user.id,
-            last_health_check_at=now,
-            metadata_json=metadata,
-        )
-        db.add(connection)
-        await db.flush()
+    # The trusted Celigo write window. It must span the db.commit() as well as
+    # the attribute writes: the guard fires at the FLUSH, and for the `existing`
+    # branch that flush is the audit log_event / commit below, not any statement
+    # in this block. Only THIS endpoint and disconnect_celigo verify the token
+    # and keep the REST row in step with its paired celigo_mcp connector, which
+    # is why every other path is refused.
+    with celigo_writes_allowed(db):
+        if existing:
+            existing.encrypted_credentials = encrypted
+            existing.status = "active"
+            existing.error_reason = None
+            existing.last_health_check_at = now
+            existing.label = request.label
+            existing.metadata_json = metadata
+            connection = existing
+        else:
+            connection = Connection(
+                tenant_id=user.tenant_id,
+                provider="celigo",
+                label=request.label,
+                status="active",
+                auth_type="api_key",
+                encrypted_credentials=encrypted,
+                created_by=user.id,
+                last_health_check_at=now,
+                metadata_json=metadata,
+            )
+            db.add(connection)
+            await db.flush()
 
-    await audit_service.log_event(
-        db=db,
-        tenant_id=user.tenant_id,
-        category="connection",
-        action="connection.create",
-        actor_id=user.id,
-        resource_type="connection",
-        resource_id=str(connection.id),
-    )
-    await db.commit()
+        await audit_service.log_event(
+            db=db,
+            tenant_id=user.tenant_id,
+            category="connection",
+            action="connection.create",
+            actor_id=user.id,
+            resource_type="connection",
+            resource_id=str(connection.id),
+        )
+        await db.commit()
     # SET LOCAL app.current_tenant_id is transaction-scoped and the commit above
     # just cleared it -- re-establish before ANY further DB work. That covers
     # db.refresh(connection) right below, the celigo_mcp upsert + audit log in
@@ -855,26 +896,31 @@ async def connect_celigo(
     agent_access = False
     if request.agent_token:
         try:
-            async with db.begin_nested():
-                mcp_connector = await _upsert_celigo_mcp_connector(
-                    db=db,
-                    tenant_id=user.tenant_id,
-                    agent_token=request.agent_token,
-                    region=request.region,
-                    rest_identity=info,
-                    created_by=user.id,
-                )
-                await audit_service.log_event(
-                    db=db,
-                    tenant_id=user.tenant_id,
-                    category="mcp_connector",
-                    action="mcp_connector.create",
-                    actor_id=user.id,
-                    resource_type="mcp_connector",
-                    resource_id=str(mcp_connector.id),
-                    payload={"provider": "celigo_mcp"},
-                )
-            await db.commit()
+            # Window spans the SAVEPOINT *and* the commit that follows it, for
+            # the same reason as above: the guard fires at the flush, and the
+            # commit is one. _upsert_celigo_mcp_connector opens its own window
+            # inside this one -- celigo_writes_allowed is re-entrant.
+            with celigo_writes_allowed(db):
+                async with db.begin_nested():
+                    mcp_connector = await _upsert_celigo_mcp_connector(
+                        db=db,
+                        tenant_id=user.tenant_id,
+                        agent_token=request.agent_token,
+                        region=request.region,
+                        rest_identity=info,
+                        created_by=user.id,
+                    )
+                    await audit_service.log_event(
+                        db=db,
+                        tenant_id=user.tenant_id,
+                        category="mcp_connector",
+                        action="mcp_connector.create",
+                        actor_id=user.id,
+                        resource_type="mcp_connector",
+                        resource_id=str(mcp_connector.id),
+                        payload={"provider": "celigo_mcp"},
+                    )
+                await db.commit()
             agent_access = mcp_connector.is_enabled
         except Exception as exc:
             logger.warning(
@@ -910,37 +956,42 @@ async def disconnect_celigo(
     if not connection:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No Celigo connection found")
 
-    connection.status = "revoked"
+    # The other trusted window. This endpoint is the ONLY one that revokes both
+    # halves of the pair together -- which is exactly why the guard refuses the
+    # generic DELETE /connections/{id} and DELETE /mcp-connectors/{id}, each of
+    # which would revoke one half and leave the other live.
+    with celigo_writes_allowed(db):
+        connection.status = "revoked"
 
-    await audit_service.log_event(
-        db=db,
-        tenant_id=user.tenant_id,
-        category="connection",
-        action="connection.delete",
-        actor_id=user.id,
-        resource_type="connection",
-        resource_id=str(connection.id),
-    )
-
-    mcp_result = await db.execute(
-        select(McpConnector).where(
-            McpConnector.tenant_id == user.tenant_id,
-            McpConnector.provider == "celigo_mcp",
-            McpConnector.status != "revoked",
-        )
-    )
-    mcp_connector = mcp_result.scalar_one_or_none()
-    if mcp_connector:
-        mcp_connector.status = "revoked"
-        mcp_connector.is_enabled = False
         await audit_service.log_event(
             db=db,
             tenant_id=user.tenant_id,
-            category="mcp_connector",
-            action="mcp_connector.delete",
+            category="connection",
+            action="connection.delete",
             actor_id=user.id,
-            resource_type="mcp_connector",
-            resource_id=str(mcp_connector.id),
+            resource_type="connection",
+            resource_id=str(connection.id),
         )
 
-    await db.commit()
+        mcp_result = await db.execute(
+            select(McpConnector).where(
+                McpConnector.tenant_id == user.tenant_id,
+                McpConnector.provider == "celigo_mcp",
+                McpConnector.status != "revoked",
+            )
+        )
+        mcp_connector = mcp_result.scalar_one_or_none()
+        if mcp_connector:
+            mcp_connector.status = "revoked"
+            mcp_connector.is_enabled = False
+            await audit_service.log_event(
+                db=db,
+                tenant_id=user.tenant_id,
+                category="mcp_connector",
+                action="mcp_connector.delete",
+                actor_id=user.id,
+                resource_type="mcp_connector",
+                resource_id=str(mcp_connector.id),
+            )
+
+        await db.commit()
