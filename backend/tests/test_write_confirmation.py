@@ -774,3 +774,101 @@ class TestUncoveredSlotNames:
         assert uncovered_slot_names([_SUBSIDIARY_SLOT], {"subsidiary": 0}) == []
         assert uncovered_slot_names([_SUBSIDIARY_SLOT], {"subsidiary": 0.0}) == []
         assert uncovered_slot_names([_SUBSIDIARY_SLOT], {"subsidiary": False}) == []
+
+
+# ---------------------------------------------------------------------------
+# repair_of / repair_attempt — chain metadata for the bounded write-repair
+# loop (requirement D). Display-only: NOT part of the signed HMAC envelope,
+# same reasoning as invariant_errors — see write_confirmation_service.py's
+# _build_payload_json docstring.
+# ---------------------------------------------------------------------------
+
+
+class TestRepairChainMetadata:
+    def test_defaults_are_none_and_zero(self):
+        payload = WriteConfirmationPayload(
+            mutation_type="create",
+            record_type="salesOrder",
+            proposed_fields={},
+            tool_name=_ext("ns_createRecord"),
+            tool_input={},
+            confirmation_token="abc",
+        )
+        assert payload.repair_of is None
+        assert payload.repair_attempt == 0
+
+    def test_build_confirmation_payload_stamps_repair_of_and_attempt_on_create(self):
+        payload = build_confirmation_payload(
+            mutation_type="create",
+            record_type="salesOrder",
+            tool_name=_ext("ns_createRecord"),
+            tool_input={"data": '{"entity": "123"}'},
+            session_id=_SESSION_ID,
+            repair_of="11111111-1111-1111-1111-111111111111",
+            repair_attempt=1,
+        )
+        assert payload is not None
+        assert payload.repair_of == "11111111-1111-1111-1111-111111111111"
+        assert payload.repair_attempt == 1
+
+    def test_build_confirmation_payload_stamps_repair_of_and_attempt_on_delete(self):
+        payload = build_confirmation_payload(
+            mutation_type="delete",
+            record_type="salesOrder",
+            tool_name=_ext("ns_deleteRecord"),
+            tool_input={"id": "42"},
+            session_id=_SESSION_ID,
+            repair_of="11111111-1111-1111-1111-111111111111",
+            repair_attempt=2,
+        )
+        assert payload is not None
+        assert payload.repair_of == "11111111-1111-1111-1111-111111111111"
+        assert payload.repair_attempt == 2
+
+    def test_defaults_when_not_a_repair(self):
+        payload = build_confirmation_payload(
+            mutation_type="create",
+            record_type="salesOrder",
+            tool_name=_ext("ns_createRecord"),
+            tool_input={"data": '{"entity": "123"}'},
+            session_id=_SESSION_ID,
+        )
+        assert payload is not None
+        assert payload.repair_of is None
+        assert payload.repair_attempt == 0
+
+    def test_repair_of_and_attempt_are_not_signed_into_the_token(self):
+        """Changing repair_of/repair_attempt after minting must NOT
+        invalidate the token — they are display-only chain metadata, not an
+        authorization surface (unlike editable_slots)."""
+        tool_name = _ext("ns_createRecord")
+        tool_input = {"data": '{"entity": "123"}'}
+
+        payload_a = build_confirmation_payload(
+            mutation_type="create",
+            record_type="salesOrder",
+            tool_name=tool_name,
+            tool_input=tool_input,
+            session_id=_SESSION_ID,
+            repair_of=None,
+            repair_attempt=0,
+        )
+        payload_b = build_confirmation_payload(
+            mutation_type="create",
+            record_type="salesOrder",
+            tool_name=tool_name,
+            tool_input=tool_input,
+            session_id=_SESSION_ID,
+            repair_of="some-root-id",
+            repair_attempt=2,
+        )
+        assert payload_a is not None
+        assert payload_b is not None
+        assert payload_a.confirmation_token == payload_b.confirmation_token
+
+        # A structured_output carrying the repair fields still validates —
+        # proves validate_and_extract_confirmation doesn't fold them into
+        # the signed payload either.
+        so = {**payload_b.model_dump(), "status": "pending"}
+        is_valid, _, _ = validate_and_extract_confirmation(so, _SESSION_ID)
+        assert is_valid is True

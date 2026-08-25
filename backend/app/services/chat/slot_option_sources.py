@@ -35,7 +35,9 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from app.services.chat.record_metadata_service import RecordMetadata
 from app.services.chat.tools import _make_ext_tool_name, execute_tool_call, parse_external_tool_name
+from app.services.chat.write_validator import EditableSlot
 
 logger = logging.getLogger(__name__)
 
@@ -140,3 +142,77 @@ async def fetch_options(
         db=db,
         session_id=session_id,
     )
+
+
+async def resolve_ask_user_slots(
+    hint: Any,
+    *,
+    metadata: RecordMetadata | None,
+    mutation_tool_name: str,
+    tenant_id: Any,
+    actor_id: Any,
+    correlation_id: str,
+    db: Any,
+    session_id: str,
+    already_declared: list[str] | None = None,
+) -> tuple[list[EditableSlot], list[dict[str, str]]]:
+    """Resolve a model-supplied ``ask_user`` hint into server-verified
+    editable slots.
+
+    This is the ENTIRE (C) server-authority boundary in one place: *hint* is
+    untrusted model output — a list of field NAMES the model claims it needs
+    a human to choose. A name only becomes an :class:`EditableSlot` if it
+    passes BOTH checks (exists in *metadata*'s real properties, AND is a key
+    in the option-source ``_REGISTRY``) and the registered fetch — executed
+    by the SERVER, never the model — returns at least one option. Every
+    other outcome (malformed hint shape, unknown field, unregistered field,
+    zero options, already covered by a server-derived slot) produces NO
+    slot; the second return value names why, so the caller can tell the
+    model rather than silently drop its request.
+
+    Never raises: a malformed *hint* (not a list, non-string entries) is
+    handled by rejecting the offending entries, not by raising into the
+    mutation intercept.
+    """
+    if not isinstance(hint, list):
+        return [], []
+
+    declared = set(already_declared or [])
+    seen: set[str] = set()
+    slots: list[EditableSlot] = []
+    rejected: list[dict[str, str]] = []
+
+    for name in hint:
+        if not isinstance(name, str) or not name:
+            rejected.append({"name": str(name), "reason": "ask_user entries must be non-empty field name strings."})
+            continue
+        if name in seen or name in declared:
+            continue
+        seen.add(name)
+
+        spec = metadata.spec_for(name) if metadata is not None else None
+        if spec is None:
+            rejected.append(
+                {"name": name, "reason": f"'{name}' is not a recognized field on this record type's metadata."}
+            )
+            continue
+        if not is_option_sourced(name):
+            rejected.append({"name": name, "reason": f"'{name}' has no server-side option source registered for it."})
+            continue
+
+        options = await fetch_options(
+            name,
+            mutation_tool_name=mutation_tool_name,
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            correlation_id=correlation_id,
+            db=db,
+            session_id=session_id,
+        )
+        if not options:
+            rejected.append({"name": name, "reason": f"no options are currently available for '{name}'."})
+            continue
+
+        slots.append(EditableSlot(name=name, label=spec.label, type=spec.type, allowed=options))
+
+    return slots, rejected

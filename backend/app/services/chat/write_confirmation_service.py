@@ -67,6 +67,18 @@ class WriteConfirmationPayload(BaseModel):
     # upsert) — a payload that fails an invariant check is exactly as
     # dangerous to approve blind on a delete as on a create.
     invariant_errors: list[str] = []
+    # Chain metadata for the bounded post-approval write-repair loop
+    # (requirement D). `repair_of` is the ROOT confirmation ChatMessage id
+    # this card revises (None when this card IS the root — a fresh
+    # proposal, not a repair); `repair_attempt` is its 1-indexed position in
+    # that chain (0 for the root). Both are server-stamped by the mutation
+    # intercept from orchestrator-held repair context — NEVER read from
+    # model/tool_input — and deliberately NOT part of the signed HMAC
+    # envelope (`_build_payload_json` below): they only add visibility for
+    # the human ("Revised proposal, attempt N"), never authorize anything,
+    # so a card must stay valid regardless of how its chain fields render.
+    repair_of: str | None = None
+    repair_attempt: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +153,8 @@ def build_confirmation_payload(
     session_id: str,
     current_record: dict[str, Any] | None = None,
     validation: "ValidationResult | None" = None,
+    repair_of: str | None = None,
+    repair_attempt: int = 0,
 ) -> WriteConfirmationPayload | None:
     """Build a ``WriteConfirmationPayload`` for a pending write operation.
 
@@ -184,6 +198,10 @@ def build_confirmation_payload(
         ``editable_slots``, ``unvalidated``, and ``missing_line_required``
         flow onto the card so the human sees exactly what the server will
         accept back, and Task 9 can render — or refuse to render — a form.
+    repair_of, repair_attempt:
+        Chain metadata for the bounded post-approval write-repair loop —
+        server-stamped by the caller from orchestrator-held repair context,
+        never read from *tool_input*. See ``WriteConfirmationPayload``.
     """
     if not is_record_type_allowed(record_type):
         return None
@@ -214,6 +232,8 @@ def build_confirmation_payload(
             unvalidated=bool(validation.unvalidated) if validation else False,
             unfillable_line_fields=list(validation.missing_line_required) if validation else [],
             invariant_errors=list(validation.invariant_errors) if validation else [],
+            repair_of=repair_of,
+            repair_attempt=repair_attempt,
         )
 
     # For create/update/upsert, require a parseable payload. Fail closed:
@@ -244,6 +264,8 @@ def build_confirmation_payload(
         unvalidated=bool(validation.unvalidated) if validation else False,
         unfillable_line_fields=list(validation.missing_line_required) if validation else [],
         invariant_errors=list(validation.invariant_errors) if validation else [],
+        repair_of=repair_of,
+        repair_attempt=repair_attempt,
     )
 
 
