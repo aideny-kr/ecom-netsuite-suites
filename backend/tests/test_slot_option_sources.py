@@ -335,11 +335,15 @@ class TestResolveAskUserSlots:
 
     @pytest.mark.asyncio
     async def test_duplicate_hinted_names_resolved_once(self, monkeypatch):
+        # Counts RESOLUTIONS, not raw tool calls: one resolution now costs one
+        # call when SuiteQL answers and two when it falls back to the report
+        # tool, so the SuiteQL shape is returned here to keep this test about
+        # deduplication rather than about the number of sources.
         calls = {"n": 0}
 
         async def fake_exec(**kwargs):
             calls["n"] += 1
-            return json.dumps({"subsidiaries": [{"id": "1", "name": "Framework Inc"}]})
+            return json.dumps({"data": [{"id": 1, "name": "Framework Inc", "iselimination": "F", "isinactive": "F"}]})
 
         monkeypatch.setattr(svc, "execute_tool_call", fake_exec)
         slots, rejected = await svc.resolve_ask_user_slots(
@@ -354,3 +358,158 @@ class TestResolveAskUserSlots:
         )
         assert len(slots) == 1
         assert calls["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Which subsidiaries a human may actually be offered
+# ---------------------------------------------------------------------------
+#
+# `ns_getSubsidiaries` is built for the REPORT tool, so it returns everything a
+# report can be filtered by — including constructs no record can be assigned
+# to. Verified live against account 6738075 on 2026-08-25: it returned SIX
+# entries while `SELECT ... FROM subsidiary` returned FIVE. The extra was
+# "Framework Computer, Inc. (Consolidated)" with id -1, a roll-up that exists
+# only for reporting; and among the five, "Elimination Subsidiary" carries
+# iselimination = "T".
+#
+# Offering either as a choice hands the operator a dropdown entry that fails on
+# approve. The exclusion rule mirrors required_field_registry's asymmetry, in
+# the same direction: wrongly EXCLUDING a valid subsidiary blocks a legitimate
+# write, while wrongly including one fails at NetSuite and recovers via the
+# repair loop. So a row is dropped only when we affirmatively know it is bad —
+# a null/absent flag keeps the subsidiary.
+
+
+def _suiteql(rows):
+    return json.dumps({"data": rows})
+
+
+def _tool(subs):
+    return json.dumps({"subsidiaries": subs})
+
+
+async def _fetch(monkeypatch, *, suiteql=None, tool=None, suiteql_raises=False):
+    async def fake_exec(**kwargs):
+        name = kwargs.get("tool_name", "")
+        if name.endswith("ns_runCustomSuiteQL"):
+            if suiteql_raises:
+                raise RuntimeError("SuiteQL unavailable for this role")
+            return suiteql
+        if name.endswith("ns_getSubsidiaries"):
+            return tool
+        return "{}"
+
+    monkeypatch.setattr(svc, "execute_tool_call", fake_exec)
+    return await svc.fetch_options(
+        "subsidiary",
+        mutation_tool_name=EXT,
+        tenant_id="t",
+        actor_id="a",
+        correlation_id="c",
+        db=None,
+        session_id="s",
+    )
+
+
+@pytest.mark.asyncio
+async def test_elimination_and_inactive_subsidiaries_are_not_offered(monkeypatch):
+    options = await _fetch(
+        monkeypatch,
+        suiteql=_suiteql(
+            [
+                {"id": 1, "name": "Framework Computer, Inc.", "iselimination": "F", "isinactive": "F"},
+                {"id": 3, "name": "Elimination Subsidiary", "iselimination": "T", "isinactive": "F"},
+                {"id": 9, "name": "Retired Entity", "iselimination": "F", "isinactive": "T"},
+            ]
+        ),
+    )
+    assert [o["label"] for o in options] == ["Framework Computer, Inc."]
+
+
+@pytest.mark.asyncio
+async def test_a_missing_flag_keeps_the_subsidiary(monkeypatch):
+    """Excluding on an absent flag would hide a valid subsidiary and block a
+    legitimate write — the expensive direction of this trade."""
+    options = await _fetch(
+        monkeypatch,
+        suiteql=_suiteql(
+            [
+                {"id": 1, "name": "No Flags At All"},
+                {"id": 2, "name": "Null Flags", "iselimination": None, "isinactive": None},
+            ]
+        ),
+    )
+    assert [o["label"] for o in options] == ["No Flags At All", "Null Flags"]
+
+
+@pytest.mark.asyncio
+async def test_consolidated_rollup_is_never_offered(monkeypatch):
+    """A negative id is NetSuite's marker for a consolidated roll-up (stated in
+    ns_getSubsidiaries' own tool description). No record can be assigned to
+    one, and it is absent from the subsidiary table entirely."""
+    options = await _fetch(
+        monkeypatch,
+        suiteql=_suiteql([]),
+        tool=_tool(
+            [
+                {"id": "1", "name": "Framework Computer, Inc."},
+                {"id": "-1", "name": "Framework Computer, Inc. (Consolidated)"},
+            ]
+        ),
+    )
+    assert [o["value"] for o in options] == ["1"]
+
+
+@pytest.mark.asyncio
+async def test_falls_back_to_the_report_tool_when_suiteql_fails(monkeypatch):
+    """SuiteQL needs search permissions the purpose-built tool does not. Losing
+    the dropdown entirely on a role that cannot run SuiteQL would be a worse
+    regression than offering a slightly coarser list."""
+    options = await _fetch(
+        monkeypatch,
+        suiteql_raises=True,
+        tool=_tool([{"id": "1", "name": "Framework Computer, Inc."}]),
+    )
+    assert options == [{"value": "1", "label": "Framework Computer, Inc."}]
+
+
+@pytest.mark.asyncio
+async def test_suiteql_error_payload_also_falls_back(monkeypatch):
+    options = await _fetch(
+        monkeypatch,
+        suiteql=json.dumps({"error": "Invalid search query"}),
+        tool=_tool([{"id": "2", "name": "Framework Computer B.V."}]),
+    )
+    assert options == [{"value": "2", "label": "Framework Computer B.V."}]
+
+
+@pytest.mark.asyncio
+async def test_both_sources_empty_yields_no_slot(monkeypatch):
+    """Callers must treat an empty result as "decline to declare a slot" — an
+    empty dropdown is a dead end at approve time."""
+    assert await _fetch(monkeypatch, suiteql=_suiteql([]), tool=_tool([])) == []
+
+
+@pytest.mark.asyncio
+async def test_suiteql_is_preferred_and_short_circuits_the_report_tool(monkeypatch):
+    called = []
+
+    async def fake_exec(**kwargs):
+        name = kwargs.get("tool_name", "")
+        called.append(name.split("__")[-1])
+        if name.endswith("ns_runCustomSuiteQL"):
+            return _suiteql([{"id": 1, "name": "Framework Computer, Inc.", "iselimination": "F", "isinactive": "F"}])
+        return _tool([{"id": "1", "name": "should not be reached"}])
+
+    monkeypatch.setattr(svc, "execute_tool_call", fake_exec)
+    options = await svc.fetch_options(
+        "subsidiary",
+        mutation_tool_name=EXT,
+        tenant_id="t",
+        actor_id="a",
+        correlation_id="c",
+        db=None,
+        session_id="s",
+    )
+    assert called == ["ns_runCustomSuiteQL"]
+    assert options == [{"value": "1", "label": "Framework Computer, Inc."}]
