@@ -1514,7 +1514,45 @@ class BaseSpecialistAgent(abc.ABC):
                         # from a server-executed fetch (slot_option_sources.py)
                         # — see that module's docstring for the full boundary.
                         _ask_user_rejected: list[dict[str, str]] = []
-                        if _ask_user_hint and validation is not None:
+
+                        # Which field names might become a slot on this card.
+                        #
+                        # Two sources, and the second is what makes the form
+                        # reachable at all. (1) names the MODEL asked about via
+                        # its ask_user hint. (2) names the SERVER already knows
+                        # are required, are missing from this payload, and have
+                        # a server-side option source — i.e. there is a real
+                        # list of valid values a human can just pick from.
+                        #
+                        # For (2) there is nothing left for the model to
+                        # discover: it can only guess, and guessing is exactly
+                        # what the confirmation card exists to prevent on a
+                        # financial write. Relying on the model to volunteer
+                        # ask_user did not work in practice either — live on
+                        # staging it narrated the options in prose, or called
+                        # ns_selector_app and announced a picker the UI cannot
+                        # render, so the form was effectively unreachable.
+                        #
+                        # The repair loop keeps every gap a human CANNOT pick
+                        # from a list (a company name, a line-level field):
+                        # those still bounce to the model, which is the only
+                        # party that can resolve them.
+                        _hint_names = (
+                            [n for n in _ask_user_hint if isinstance(n, str) and n]
+                            if isinstance(_ask_user_hint, list)
+                            else []
+                        )
+                        _slot_names = list(_hint_names)
+                        if validation is not None:
+                            from app.services.chat.slot_option_sources import (
+                                is_option_sourced as _is_option_sourced,
+                            )
+
+                            for _missing in validation.missing_required:
+                                if _missing not in _slot_names and _is_option_sourced(_missing):
+                                    _slot_names.append(_missing)
+
+                        if _slot_names and validation is not None:
                             from app.services.chat.slot_option_sources import resolve_ask_user_slots
                             from app.services.chat.write_validation import resolve_curated_metadata
 
@@ -1541,7 +1579,7 @@ class BaseSpecialistAgent(abc.ABC):
                                 session_id=session_id or str(self.tenant_id),
                             )
                             _ask_user_slots, _ask_user_rejected = await resolve_ask_user_slots(
-                                _ask_user_hint,
+                                _slot_names,
                                 metadata=_ask_user_metadata,
                                 mutation_tool_name=block.name,
                                 tenant_id=self.tenant_id,
@@ -1696,6 +1734,39 @@ class BaseSpecialistAgent(abc.ABC):
                                             record_id,
                                         )
 
+                        # Human labels for reference fields, so the card shows
+                        # "Framework Computer UK Ltd (ID 5)" rather than
+                        # {"id": "5"} on the one screen whose job is informed
+                        # consent. Display-only and server-sourced; see
+                        # reference_field_labels. NetSuite-only: the option
+                        # sources it reads are ns_* tools.
+                        _field_labels: dict[str, str] = {}
+                        if _is_netsuite_write:
+                            from app.services.chat.reference_field_labels import resolve_reference_labels
+                            from app.services.chat.write_payload import (
+                                PayloadParseError as _PPE,
+                            )
+                            from app.services.chat.write_validation import (
+                                normalize_for_validation as _normalize_for_labels,
+                            )
+
+                            try:
+                                _lbl_payload = _normalize_for_labels(mutation_type, block.input)
+                                _field_labels = await resolve_reference_labels(
+                                    _lbl_payload.fields,
+                                    mutation_tool_name=block.name,
+                                    tenant_id=self.tenant_id,
+                                    actor_id=self.user_id,
+                                    correlation_id=self.correlation_id,
+                                    db=db,
+                                    session_id=session_id or str(self.tenant_id),
+                                )
+                            except _PPE:
+                                # An unparseable payload is handled below by
+                                # build_confirmation_payload returning None;
+                                # labels are cosmetic, so say nothing here.
+                                _field_labels = {}
+
                         payload = build_confirmation_payload(
                             mutation_type=mutation_type,
                             record_type=record_type,
@@ -1706,6 +1777,7 @@ class BaseSpecialistAgent(abc.ABC):
                             validation=getattr(self, "_last_validation", None),
                             repair_of=_card_repair_of,
                             repair_attempt=_card_repair_attempt,
+                            field_labels=_field_labels,
                         )
 
                         payload_unparseable = False

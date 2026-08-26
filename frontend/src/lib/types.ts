@@ -858,6 +858,10 @@ export interface WriteConfirmationData {
   record_type: string;
   record_id: string | null;
   proposed_fields: Record<string, unknown>;
+  /** Display-only human labels for reference fields, e.g.
+   *  { subsidiary: "Framework Computer UK Ltd (ID 5)" }.
+   *  Server-resolved; never sent back and never written. */
+  field_labels?: Record<string, string>;
   // Transaction line items (sales orders, invoices, ...). Absent/empty for
   // header-only record types (e.g. customer).
   proposed_lines?: Record<string, unknown>[];

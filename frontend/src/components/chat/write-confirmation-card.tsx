@@ -193,9 +193,13 @@ export function WriteConfirmationCard({
 
       {/* Content */}
       {hasDiff ? (
-        <DiffTable proposedFields={visibleProposedFields} currentRecord={data.current_record!} />
+        <DiffTable
+          proposedFields={visibleProposedFields}
+          currentRecord={data.current_record!}
+          fieldLabels={data.field_labels}
+        />
       ) : (
-        <FieldsTable fields={visibleProposedFields} />
+        <FieldsTable fields={visibleProposedFields} fieldLabels={data.field_labels} />
       )}
 
       {proposedLines.length > 0 && <LinesTable lines={proposedLines} />}
@@ -387,7 +391,13 @@ function SlotField({
   );
 }
 
-function FieldsTable({ fields }: { fields: [string, unknown][] }) {
+function FieldsTable({
+  fields,
+  fieldLabels,
+}: {
+  fields: [string, unknown][];
+  fieldLabels?: Record<string, string>;
+}) {
   if (fields.length === 0) return null;
   return (
     <div className="overflow-hidden rounded-lg border border-border/50">
@@ -405,7 +415,11 @@ function FieldsTable({ fields }: { fields: [string, unknown][] }) {
                 {key}
               </td>
               <td className="px-3 py-2 text-[13px] text-foreground break-all">
-                {formatValue(value)}
+                {/* A NetSuite reference arrives as {"id":"5"}; the server
+                    resolves a human label for it where it can. Fall back to
+                    the raw value so an unresolved id is still shown rather
+                    than hidden. */}
+                {fieldLabels?.[key] ?? formatValue(value)}
               </td>
             </tr>
           ))}
@@ -418,9 +432,11 @@ function FieldsTable({ fields }: { fields: [string, unknown][] }) {
 function DiffTable({
   proposedFields,
   currentRecord,
+  fieldLabels,
 }: {
   proposedFields: [string, unknown][];
   currentRecord: Record<string, unknown>;
+  fieldLabels?: Record<string, string>;
 }) {
   if (proposedFields.length === 0) return null;
   return (
@@ -457,7 +473,7 @@ function DiffTable({
                   {formatValue(oldValue)}
                 </td>
                 <td className="px-3 py-2 text-[13px] text-emerald-700 dark:text-emerald-400 break-all align-top">
-                  {formatValue(newValue)}
+                  {fieldLabels?.[key] ?? formatValue(newValue)}
                 </td>
               </tr>
             );

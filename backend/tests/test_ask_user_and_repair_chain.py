@@ -564,12 +564,63 @@ class TestDelegationVersusRepair:
         return [p for t, p in events if t == "tool_end" and "Write repair requested" in (p.get("result_summary") or "")]
 
     @pytest.mark.asyncio
-    async def test_incomplete_payload_with_no_hint_goes_to_the_model(self):
+    async def test_missing_required_field_with_options_is_asked_not_bounced(self):
+        """BEHAVIOUR CHANGE, deliberate. This test previously asserted the
+        opposite: no hint meant the proposal bounced to the model's repair
+        budget.
+
+        Bouncing was wrong for THIS class of field. When the server already
+        knows the field is required AND already holds a server-fetched list of
+        valid values, there is nothing for the model to discover — it can only
+        guess, and a guess on a financial write is exactly what the card
+        exists to prevent. Worse, the model demonstrably does not ask: live on
+        staging it either narrated the options in prose or called
+        ns_selector_app, announcing a picker the UI cannot render. Waiting for
+        `ask_user` made the form unreachable in practice.
+
+        So the server declares the slot itself. The model keeps its repair
+        budget for gaps only IT can close (see the sibling test below)."""
         agent = _make_agent()
         create_name = _ext("ns_createRecord")
         adapter = _make_adapter(
             [_metadata_step(_ext("ns_getRecordTypeMetadata")), self._create_call(create_name), _final_step()]
         )
+
+        with _patches():
+            events = await _run(agent, adapter)
+
+        confirmations = [p for t, p in events if t == "confirmation_required"]
+        assert len(confirmations) == 1, "a pickable required field must reach the human, not the repair loop"
+        assert self._repair_bounced(events) == []
+        slots = confirmations[0]["editable_slots"]
+        assert [s["name"] for s in slots] == ["subsidiary"]
+        # The slot carries the SERVER-fetched allow-set, so the card renders a
+        # real dropdown rather than a bare text box asking for an internal id.
+        assert slots[0]["allowed"] == [{"value": "1", "label": "Framework Inc"}]
+
+    @pytest.mark.asyncio
+    async def test_missing_required_field_without_options_still_bounces(self):
+        """The repair loop is not obsolete — it still owns every gap the human
+        cannot simply pick from a list. `companyname` has no option source, so
+        there is no allow-set to offer and the model must resolve it."""
+        from app.services.chat.llm_adapter import LLMResponse, TokenUsage, ToolUseBlock
+
+        agent = _make_agent()
+        create_name = _ext("ns_createRecord")
+        call = LLMResponse(
+            text_blocks=[],
+            tool_use_blocks=[
+                ToolUseBlock(
+                    id="t1",
+                    name=create_name,
+                    # subsidiary supplied, company name absent: the missing
+                    # field is the one with no server-side option source.
+                    input={"recordType": "customer", "body": {"subsidiary": "1"}},
+                )
+            ],
+            usage=TokenUsage(input_tokens=10, output_tokens=10),
+        )
+        adapter = _make_adapter([_metadata_step(_ext("ns_getRecordTypeMetadata")), call, _final_step()])
 
         with _patches():
             events = await _run(agent, adapter)
@@ -602,10 +653,15 @@ class TestDelegationVersusRepair:
         assert slots[0]["allowed"] == [{"value": "1", "label": "Framework Inc"}]
 
     @pytest.mark.asyncio
-    async def test_incomplete_payload_with_an_unknown_hint_goes_to_the_model(self):
-        """The model asked about a field that does not exist, so nothing was
-        delegated and the real gap remains. Carding it would hand the operator
-        a proposal they cannot approve."""
+    async def test_unknown_hint_is_reported_but_does_not_suppress_a_real_slot(self):
+        """The model asked about a field that does not exist. That hint is
+        rejected and reported back — but it must not cost the human the slot
+        the SERVER independently knows is needed.
+
+        This previously bounced to the repair loop, because the model's hint
+        was the ONLY thing that could produce a slot. Now the server declares
+        `subsidiary` on its own, so a useless hint degrades to feedback rather
+        than to a dead end for the operator."""
         agent = _make_agent()
         create_name = _ext("ns_createRecord")
         adapter = _make_adapter(
@@ -619,8 +675,12 @@ class TestDelegationVersusRepair:
         with _patches():
             events = await _run(agent, adapter)
 
-        assert [p for t, p in events if t == "confirmation_required"] == []
-        assert len(self._repair_bounced(events)) == 1
+        confirmations = [p for t, p in events if t == "confirmation_required"]
+        assert len(confirmations) == 1
+        assert [s["name"] for s in confirmations[0]["editable_slots"]] == ["subsidiary"]
+        # The model still learns its hint was junk, so it does not repeat it.
+        responses = [p for t, p in events if t == "response"]
+        assert "not_a_real_field" in responses[0].tool_calls_log[-1]["result_summary"]
 
     @pytest.mark.asyncio
     async def test_a_bounced_attempt_still_tells_the_model_why_its_hint_failed(self):

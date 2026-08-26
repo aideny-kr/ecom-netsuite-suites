@@ -42,6 +42,12 @@ class WriteConfirmationPayload(BaseModel):
     record_type: str
     record_id: str | None = None
     proposed_fields: dict[str, Any]
+    # DISPLAY-ONLY human labels for reference fields, e.g.
+    # {"subsidiary": "Framework Computer UK Ltd (ID 5)"}. The card prefers
+    # these over the raw value; `proposed_fields` and `tool_input` are
+    # untouched, so a label can never become a written value. Resolved
+    # server-side (reference_field_labels), never model-supplied.
+    field_labels: dict[str, str] = {}
     proposed_lines: list[dict[str, Any]] = []
     current_record: dict[str, Any] | None = None
     tool_name: str
@@ -155,6 +161,7 @@ def build_confirmation_payload(
     validation: "ValidationResult | None" = None,
     repair_of: str | None = None,
     repair_attempt: int = 0,
+    field_labels: dict[str, str] | None = None,
 ) -> WriteConfirmationPayload | None:
     """Build a ``WriteConfirmationPayload`` for a pending write operation.
 
@@ -255,6 +262,7 @@ def build_confirmation_payload(
         record_type=record_type,
         record_id=normalized.record_id,
         proposed_fields=normalized.fields,
+        field_labels=dict(field_labels or {}),
         proposed_lines=normalized.lines,
         current_record=current_record,
         tool_name=tool_name,
