@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.services.chat.prompt_cache import split_system_prompt
-from app.services.chat.tool_categories import categorize
+from app.services.chat.tool_categories import categorize, is_celigo_tool
 from app.services.drive_rag.retriever import retrieve_drive_chunks
 from app.services.metrics.metric_compute import condense_metric_for_llm, is_suppressed_metric_payload
 
@@ -725,11 +725,22 @@ def _compute_source_pin_update(tool_calls_log: list[dict]) -> str | None:
             # expression or missing source_kind → source-agnostic; contribute nothing
             continue
 
+        # Celigo read tools are categorized "data_table" (their output is row
+        # data that must be intercepted rather than restated by the model), but
+        # Celigo is a THIRD source -- not NetSuite, and build_source_pin_hint has
+        # no name for it. Treating it as NetSuite pinned a Celigo-only turn to
+        # NetSuite and made a Celigo+BigQuery turn look like a source conflict.
+        # Source-agnostic, so it contributes nothing either way -- the same
+        # treatment metric_compute's `expression` backend gets above.
+        if is_celigo_tool(name):
+            continue
+
         if cat == "bigquery":
             used_bq = True
         elif cat in {"data_table", "financial"}:
             # data_table covers netsuite_suiteql + pivot; financial covers report.
-            # bigquery is its own category so we only land here for NetSuite.
+            # bigquery and Celigo are excluded above, so we only land here for
+            # NetSuite.
             used_ns = True
 
     if used_bq and used_ns:

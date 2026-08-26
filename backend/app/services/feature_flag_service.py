@@ -32,6 +32,9 @@ DEFAULT_FLAGS: dict[str, bool] = {
     # Phase 2 of the summary-first recon rework: background LLM agent that
     # investigates planner abstentions. LLM-cost surface — default OFF.
     "recon_resolution_agent": False,
+    # Celigo Plan A connect card (read-only integrator.io connector). Default
+    # OFF until the connect/test/disconnect + agent-access surface is rolled out.
+    "celigo": False,
 }
 
 # In-memory cache: (tenant_id, flag_key) → (enabled, timestamp)

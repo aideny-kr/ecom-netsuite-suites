@@ -6,12 +6,23 @@ Verifies:
    confirmation_required: true) for allowed record types
 3. Blocked record types produce an error JSON instead of a confirmation payload
 4. The getRecord pre-fetch tool name is built correctly from the update tool name
+5. The getRecord pre-fetch is SKIPPED for non-NetSuite connectors (e.g. Celigo) —
+   that sibling tool only exists on NetSuite, so calling it elsewhere would waste
+   up to 5s against a live MCP server before the bare except swallows the failure
 """
 
 from __future__ import annotations
 
 import json
+import uuid
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.services.chat.agents.base_agent import BaseSpecialistAgent
+from app.services.chat.agents.unified_agent import UnifiedAgent
+from app.services.chat.llm_adapter import LLMResponse, TokenUsage, ToolUseBlock
 from app.services.chat.mutation_guard import (
     get_mutation_type,
     is_mutation_tool,
@@ -277,3 +288,117 @@ class TestGetRecordPreFetchToolName:
         get_name = update_name.replace("ns_updateRecord", "ns_getRecord")
         assert get_name.startswith(f"ext__{_HEX_32}__")
         assert get_name.endswith("ns_getRecord")
+
+
+# ---------------------------------------------------------------------------
+# getRecord pre-fetch guard — skipped for non-NetSuite connectors
+#
+# Drives `BaseSpecialistAgent.run_streaming` directly — the exact method the
+# guard lives in — on a real `UnifiedAgent` instance, rather than replicating
+# the branch logic or driving the full orchestrator (which, with
+# MULTI_AGENT_ENABLED off, runs a legacy loop that doesn't even have this
+# intercept). This actually executes the fix, not just reads it.
+# ---------------------------------------------------------------------------
+
+
+def _llm_response(text: str | None = None, tool_blocks: list[ToolUseBlock] | None = None) -> LLMResponse:
+    return LLMResponse(
+        text_blocks=[text] if text else [],
+        tool_use_blocks=tool_blocks or [],
+        usage=TokenUsage(input_tokens=10, output_tokens=5),
+    )
+
+
+def _stream_replay(responses: list[LLMResponse]):
+    """Replay LLM responses in order as ("text", ...) / ("response", ...) events."""
+    call_count = 0
+
+    async def stream_fn(**kwargs):
+        nonlocal call_count
+        resp = responses[call_count] if call_count < len(responses) else responses[-1]
+        call_count += 1
+        for text in resp.text_blocks:
+            yield "text", text
+        yield "response", resp
+
+    return stream_fn
+
+
+def _celigo_upsert_block(block_id: str = "tu_1") -> ToolUseBlock:
+    """A Celigo `upsert_flow` write with a top-level `id` — exactly the shape
+    that triggers the update/upsert pre-fetch branch in base_agent.py."""
+    return ToolUseBlock(
+        id=block_id,
+        name=_ext("upsert_flow"),
+        input={"recordType": "flow", "id": "F-123", "body": {"name": "renamed"}},
+    )
+
+
+class TestMutationPrefetchGuardSkipsNonNetSuite:
+    """The update/upsert HITL pre-fetch reconstructs an `ns_getRecord` sibling
+    tool name to show a before/after diff. That tool only exists on NetSuite
+    connectors — on a Celigo connector it doesn't exist, so calling it wastes
+    up to 5s against the live MCP server before the bare `except Exception`
+    swallows the failure. The guard must skip the pre-fetch entirely for any
+    tool whose raw name doesn't start with `ns_`.
+    """
+
+    @pytest.mark.asyncio
+    async def test_celigo_upsert_with_top_level_id_never_calls_get_record(self):
+        tenant_id = uuid.uuid4()
+        user_id = uuid.uuid4()
+        agent = UnifiedAgent(tenant_id=tenant_id, user_id=user_id, correlation_id=str(uuid.uuid4()))
+
+        mock_adapter = MagicMock()
+        mock_adapter.stream_message = _stream_replay(
+            [
+                _llm_response(tool_blocks=[_celigo_upsert_block()]),
+                _llm_response(text="Done."),
+            ]
+        )
+        mock_adapter.build_assistant_message = MagicMock(return_value={"role": "assistant", "content": []})
+        mock_adapter.build_tool_result_message = MagicMock(return_value={"role": "user", "content": []})
+
+        db = AsyncMock(spec=AsyncSession)
+
+        tools_execute_mock = AsyncMock(return_value='{"ok": true}')
+
+        with (
+            patch(
+                "app.services.policy_service.get_active_policy",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            # The pre-fetch reconstructs an ext__<connector>__ns_getRecord tool
+            # name and calls the dispatcher via a FRESH
+            # `from app.services.chat.tools import execute_tool_call` inside
+            # run_streaming — so the dispatcher module attribute (not some
+            # already-bound caller-side name) is the one that must be patched
+            # to observe whether it was reached.
+            patch("app.services.chat.tools.execute_tool_call", tools_execute_mock),
+        ):
+            events = []
+            async for event in BaseSpecialistAgent.run_streaming(
+                agent,
+                task="rename the flow",
+                context={},
+                db=db,
+                adapter=mock_adapter,
+                model="claude-sonnet-4-20250514",
+            ):
+                events.append(event)
+
+        # The guard must skip the pre-fetch entirely for a non-NetSuite tool —
+        # the dispatcher must never be reached.
+        assert tools_execute_mock.await_count == 0, (
+            "the ns_getRecord pre-fetch reached the dispatcher for a non-NetSuite tool"
+        )
+
+        # Sanity: prove the mutation-intercept branch actually fired (for the
+        # right reason), so the assertion above isn't passing vacuously
+        # because the turn never reached the mutation branch at all.
+        confirmations = [payload for event_type, payload in events if event_type == "confirmation_required"]
+        assert len(confirmations) == 1, f"expected exactly one confirmation_required event, got {events}"
+        payload = confirmations[0]
+        assert payload["mutation_type"] == "upsert"
+        assert payload["tool_name"] == _ext("upsert_flow")

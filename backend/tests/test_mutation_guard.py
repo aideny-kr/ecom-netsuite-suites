@@ -189,3 +189,54 @@ class TestConfirmationTokens:
         t1 = generate_confirmation_token(self._SESSION_ID, '{"a": 1}')
         t2 = generate_confirmation_token(self._SESSION_ID, '{"a": 2}')
         assert t1 != t2
+
+
+# ---------------------------------------------------------------------------
+# Celigo write verbs
+# ---------------------------------------------------------------------------
+
+
+class TestCeligoMutationClassification:
+    """Celigo write tools must classify as mutations.
+
+    Regression guard: before this, classify_mutation() returned None for every
+    Celigo verb, so `delete_resource` would have auto-executed with no HITL —
+    violating CLAUDE.md mistake #2. Celigo's own delete_resource never blocks
+    server-side, so this cannot be left to the remote server.
+    """
+
+    CONNECTOR_HEX = "a" * 32
+
+    def _ext(self, raw: str) -> str:
+        return f"ext__{self.CONNECTOR_HEX}__{raw}"
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("upsert_flow", "upsert"),
+            ("upsert_script", "upsert"),
+            ("patch_flow", "update"),
+            ("delete_resource", "delete"),
+            ("delete_lookup_cache_data", "delete"),
+            ("run_flow", "update"),
+            ("triage_flow_errors", "update"),
+            ("manage_user", "update"),
+        ],
+    )
+    def test_celigo_writes_classify(self, raw, expected):
+        from app.services.chat.mutation_guard import classify_mutation
+
+        assert classify_mutation(self._ext(raw)) == expected
+
+    @pytest.mark.parametrize("raw", ["list_flows", "list_scripts", "get_schema", "search_knowledge_base"])
+    def test_celigo_reads_are_not_mutations(self, raw):
+        from app.services.chat.mutation_guard import classify_mutation
+
+        assert classify_mutation(self._ext(raw)) is None
+
+    def test_netsuite_verbs_still_classify(self):
+        """Adding Celigo verbs must not disturb the existing NetSuite mapping."""
+        from app.services.chat.mutation_guard import classify_mutation
+
+        assert classify_mutation(self._ext("ns_createRecord")) == "create"
+        assert classify_mutation(self._ext("ns_deleteRecord")) == "delete"

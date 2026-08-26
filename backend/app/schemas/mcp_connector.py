@@ -38,6 +38,13 @@ SharedDriveId = Annotated[str | None, AfterValidator(_coerce_drive_id)]
 
 
 class McpConnectorCreate(BaseModel):
+    # celigo_mcp is deliberately excluded: it is reachable only through
+    # connect_celigo's _upsert_celigo_mcp_connector (app/api/v1/connector_status.py),
+    # which calls mcp_connector_service.create_mcp_connector directly (bypassing
+    # this schema) and pins server_url/auth_type/credentials + the
+    # verified-before-enabled invariant itself. Widening this pattern to admit
+    # "celigo_mcp" would let POST /mcp-connectors register one that skips all of
+    # that -- see tests/schemas/test_celigo_provider_schemas.py.
     provider: str = Field(pattern=r"^(netsuite_mcp|shopify_mcp|stripe_mcp|custom)$")
     label: str = Field(min_length=1, max_length=255)
     server_url: str = Field(default="", max_length=1024)

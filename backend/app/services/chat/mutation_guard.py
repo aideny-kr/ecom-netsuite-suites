@@ -4,8 +4,9 @@ for human-in-the-loop write confirmation.
 External MCP tools follow the naming scheme:
     ext__<32 hex chars>__<tool_name>
 
-Mutation tools are those whose raw name (after stripping the ext__ prefix)
-is one of the four write verbs understood by the Oracle NetSuite MCP server.
+Mutation tools are those whose raw name (after stripping the ext__ prefix) is a
+known write verb — the four understood by the Oracle NetSuite MCP server, plus
+Celigo's write catalog (see celigo_tool_policy.CELIGO_WRITE_VERBS).
 """
 
 from __future__ import annotations
@@ -13,16 +14,29 @@ from __future__ import annotations
 import hashlib
 import hmac
 
+from app.services.chat.celigo_tool_policy import CELIGO_WRITE_VERBS
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 # Exact raw (unqualified) names that represent write operations.
-_MUTATION_TOOL_NAMES: dict[str, str] = {
+#
+# NetSuite verbs come from the Oracle NetSuite MCP server; Celigo verbs come from
+# celigo_tool_policy.CELIGO_WRITE_VERBS. The two name spaces do not collide
+# (`ns_*` vs bare verbs), so a single flat map keeps classify_mutation() a pure,
+# synchronous, DB-free lookup — it is called on the hot streaming path and must
+# not need to resolve which provider a connector belongs to.
+_NETSUITE_MUTATION_TOOL_NAMES: dict[str, str] = {
     "ns_createRecord": "create",
     "ns_updateRecord": "update",
     "ns_deleteRecord": "delete",
     "ns_upsertRecord": "upsert",
+}
+
+_MUTATION_TOOL_NAMES: dict[str, str] = {
+    **_NETSUITE_MUTATION_TOOL_NAMES,
+    **CELIGO_WRITE_VERBS,
 }
 
 # Record types that are safe to create/update/delete via AI-initiated flows.

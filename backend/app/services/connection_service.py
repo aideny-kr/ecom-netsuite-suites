@@ -7,8 +7,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.encryption import decrypt_credentials, encrypt_credentials, get_current_key_version
 from app.models.connection import Connection
+from app.services.celigo_write_guard import CeligoManagedElsewhereError
 
 logger = structlog.get_logger()
+
+__all__ = [
+    "CeligoManagedElsewhereError",
+    "create_connection",
+    "delete_connection",
+    "get_connection",
+    "list_connections",
+    "test_connection",
+]
 
 
 async def create_connection(
@@ -51,14 +61,37 @@ async def list_connections(db: AsyncSession, tenant_id: uuid.UUID) -> list[Conne
     return list(result.scalars().all())
 
 
+# CeligoManagedElsewhereError is imported at the top of this module and
+# re-exported here (see __all__ below) rather than defined. The class moved to
+# celigo_write_guard because the session-flush listener raises it too, and that
+# module cannot import this one -- it is imported BY app.models.connection,
+# which this module imports. Callers that already catch
+# connection_service.CeligoManagedElsewhereError keep working unchanged, and
+# now catch the guard's refusals as the same type.
+
+
 async def delete_connection(db: AsyncSession, connection_id: uuid.UUID, tenant_id: uuid.UUID) -> bool:
-    """Soft-delete a connection by setting status to revoked."""
+    """Soft-delete a connection by setting status to revoked.
+
+    Refuses celigo rows: this endpoint is provider-agnostic and has no idea a
+    Celigo connection has a paired celigo_mcp McpConnector (created by
+    connector_status._upsert_celigo_mcp_connector) giving the chat agent
+    Celigo tools. Revoking the Connection row here alone would leave that
+    connector live -- the user believes they disconnected, but the agent
+    keeps its Celigo tools. disconnect_celigo (DELETE /connector-status/celigo)
+    revokes both rows together; callers must go through it instead.
+    """
     result = await db.execute(
         select(Connection).where(Connection.id == connection_id, Connection.tenant_id == tenant_id)
     )
     connection = result.scalar_one_or_none()
     if not connection:
         return False
+    if connection.provider == "celigo":
+        raise CeligoManagedElsewhereError(
+            "Celigo connections must be disconnected via DELETE /connector-status/celigo, "
+            "which also revokes the paired celigo_mcp connector."
+        )
     connection.status = "revoked"
     await db.flush()
     return True

@@ -8,6 +8,14 @@ from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+# Installs the session-flush guard that refuses Celigo-row writes coming from
+# generic, provider-agnostic paths. Imported HERE, from the model itself, on
+# purpose: a model importing a service is backwards, but it is the only
+# placement under which a session for this model cannot be constructed without
+# the listener loaded. Registering from an app entrypoint instead would leave
+# workers, scripts, and the test harness silently unguarded the day someone
+# adds a fifth way to build a Session. See app/services/celigo_write_guard.py.
+import app.services.celigo_write_guard  # noqa: F401,E402  (import for side effect)
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 if TYPE_CHECKING:
