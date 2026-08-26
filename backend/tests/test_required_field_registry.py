@@ -389,3 +389,135 @@ def test_curated_label_fills_in_when_the_catalog_had_no_title():
     )
     merged = apply_curated_requirements(meta, record_type="customer", fields={})
     assert merged.spec_for("subsidiary").label == "Primary Subsidiary"
+
+
+# ---------------------------------------------------------------------------
+# Against the REAL catalog shape, not hand-written field names
+# ---------------------------------------------------------------------------
+#
+# Every test above this line invented its own field names, and invented them in
+# lowercase. That shared assumption is why none of them could catch the bug
+# this section exists for: NetSuite's REST metadata catalog spells entity
+# fields in camelCase (`companyName`, `lastName`, `isPerson`) while SuiteQL
+# spells them lowercase. With the registry keyed lowercase, the presence gate
+# silently skipped `companyname`/`lastname` on every real customer create —
+# failing in the SAFE direction (a skipped requirement, not a false block),
+# which is precisely why it looked fine on staging.
+#
+# Fixture is the verbatim live response for account 6738075, captured
+# 2026-08-25. It also pins the premise this whole registry rests on: nullable
+# is false on ZERO of the 177 fields.
+
+import json
+import pathlib
+
+from app.services.chat.record_metadata_service import _parse_properties_shape
+
+_FIXTURE = pathlib.Path(__file__).parent / "fixtures" / "netsuite_metadata" / "customer_properties_shape.json"
+
+
+def _live_customer_metadata():
+    return _parse_properties_shape(json.loads(_FIXTURE.read_text()), "customer")
+
+
+def test_fixture_really_is_the_camelcase_shape():
+    """Guards the premise of the tests below — if NetSuite ever switches to
+    lowercase, these tests must be re-derived, not quietly re-passed."""
+    meta = _live_customer_metadata()
+    names = {f.name for f in meta.fields}
+    assert {"companyName", "lastName", "isPerson", "subsidiary"} <= names
+    assert "companyname" not in names
+    assert meta.requirements_known is False
+
+
+def test_company_name_is_required_against_the_real_catalog():
+    meta = apply_curated_requirements(_live_customer_metadata(), record_type="customer", fields={})
+    required = set(meta.required_field_names())
+    assert "subsidiary" in required
+    assert "companyName" in required, "the curated companyname rule must match the catalog's companyName"
+
+
+def test_required_names_use_the_catalog_spelling_so_the_payload_lookup_matches():
+    """validate_write does payload.fields.get(name) with the name straight off
+    the FieldSpec. If the registry reported its own lowercase spelling, every
+    lookup would miss and a populated field would read as missing."""
+    meta = apply_curated_requirements(_live_customer_metadata(), record_type="customer", fields={})
+    result = validate_write(
+        payload=NormalizedPayload(
+            fields={"companyName": "Acme Test Corp", "subsidiary": {"id": "5"}},
+            lines=[],
+            record_id=None,
+            record={},
+            payload_key="data",
+        ),
+        metadata=meta,
+        record_type="customer",
+        mutation_type="create",
+    )
+    assert result.missing_required == []
+    assert result.ok is True
+
+
+def test_a_nameless_company_create_is_caught_against_the_real_catalog():
+    """The whole point: before the casing fix this passed validation, because
+    the companyname rule was skipped as 'not exposed by this account'."""
+    meta = apply_curated_requirements(_live_customer_metadata(), record_type="customer", fields={})
+    result = validate_write(
+        payload=NormalizedPayload(
+            fields={"subsidiary": {"id": "5"}}, lines=[], record_id=None, record={}, payload_key="data"
+        ),
+        metadata=meta,
+        record_type="customer",
+        mutation_type="create",
+    )
+    assert result.ok is False
+    assert "companyName" in result.missing_required
+
+
+def test_isperson_condition_reads_the_camelcase_payload_key():
+    """The payload carries isPerson; the rule predicate looked for isperson, so
+    every individual create was graded as a company."""
+    meta = apply_curated_requirements(_live_customer_metadata(), record_type="customer", fields={"isPerson": True})
+    required = set(meta.required_field_names())
+    assert "lastName" in required
+    assert "companyName" not in required
+
+
+def test_individual_create_with_only_a_last_name_validates():
+    meta = apply_curated_requirements(
+        _live_customer_metadata(),
+        record_type="customer",
+        fields={"isPerson": True, "lastName": "Tester", "subsidiary": {"id": "1"}},
+    )
+    result = validate_write(
+        payload=NormalizedPayload(
+            fields={"isPerson": True, "firstName": "Ada", "lastName": "Tester", "subsidiary": {"id": "1"}},
+            lines=[],
+            record_id=None,
+            record={},
+            payload_key="data",
+        ),
+        metadata=meta,
+        record_type="customer",
+        mutation_type="create",
+    )
+    assert result.ok is True, result.missing_required
+
+
+def test_a_subsidiary_reference_object_counts_as_present():
+    """NetSuite sends a reference field as {"id": "5"}, not a scalar. _is_empty
+    must not treat a dict as missing."""
+    meta = apply_curated_requirements(_live_customer_metadata(), record_type="customer", fields={})
+    result = validate_write(
+        payload=NormalizedPayload(
+            fields={"companyName": "Acme", "subsidiary": {"id": "5"}},
+            lines=[],
+            record_id=None,
+            record={},
+            payload_key="data",
+        ),
+        metadata=meta,
+        record_type="customer",
+        mutation_type="create",
+    )
+    assert "subsidiary" not in result.missing_required

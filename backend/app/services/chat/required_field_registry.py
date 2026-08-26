@@ -116,15 +116,35 @@ class RequiredFieldRule:
         return self.condition(fields)
 
 
+def field_value(fields: Mapping[str, Any], name: str) -> Any:
+    """Look a field up in a write payload, ignoring case.
+
+    NetSuite spells the same field two ways depending on the endpoint: the
+    REST metadata catalog and REST write payloads use camelCase
+    (``companyName``, ``isPerson``), while SuiteQL columns are lowercase
+    (``companyname``, ``isperson``). A registry keyed to either spelling alone
+    silently misses the other — which is exactly what happened: with lowercase
+    rule names, `companyname`/`lastname` were skipped on every real customer
+    create because the live catalog calls them `companyName`/`lastName`.
+    """
+    if name in fields:
+        return fields[name]
+    lowered = name.lower()
+    for key, value in fields.items():
+        if isinstance(key, str) and key.lower() == lowered:
+            return value
+    return None
+
+
 def _is_individual(fields: Mapping[str, Any]) -> bool:
     """True when the entity is a person rather than a company.
 
-    ``isperson`` arrives as a real bool or as NetSuite's ``"T"``/``"F"``
+    ``isPerson`` arrives as a real bool or as NetSuite's ``"T"``/``"F"``
     strings, so this must go through ``coerce_netsuite_bool`` — ``bool("F")``
     is ``True`` in Python and would invert the rule. Absent means company,
     matching NetSuite's own default.
     """
-    return coerce_netsuite_bool(fields.get("isperson"))
+    return coerce_netsuite_bool(field_value(fields, "isperson"))
 
 
 def _is_company(fields: Mapping[str, Any]) -> bool:
@@ -291,7 +311,13 @@ def apply_curated_requirements(
     if not metadata.fields:
         return metadata
 
-    exposed = {spec.name for spec in metadata.fields}
+    # lowercase name -> the catalog's OWN spelling. Matching is case-insensitive
+    # (NetSuite is camelCase over REST, lowercase over SuiteQL) but the catalog's
+    # spelling is what gets used from here on, because `validate_write` looks the
+    # field up with `payload.fields.get(name)` straight off the FieldSpec — report
+    # our spelling instead and every lookup misses, so a populated field would
+    # read as missing.
+    exposed = {spec.name.lower(): spec.name for spec in metadata.fields}
 
     # PRESENCE IS THE ACCOUNT GATE — the fix for a T2 gate major.
     # `subsidiary` exists on customer/vendor/journalEntry only when the
@@ -310,9 +336,14 @@ def apply_curated_requirements(
     # exist. Anything resolving a name against the raw catalog (the ask_user
     # path in `agents/base_agent.py`) can no longer disagree with what
     # `validate_write` reports as missing.
-    applicable = {rule.name: rule for rule in rules if rule.name in exposed and rule.applies_to(fields)}
+    applicable: dict[str, RequiredFieldRule] = {}
+    for rule in rules:
+        catalog_name = exposed.get(rule.name.lower())
+        if catalog_name is None or not rule.applies_to(fields):
+            continue
+        applicable[catalog_name] = rule
 
-    skipped = [rule.name for rule in rules if rule.name not in exposed]
+    skipped = [rule.name for rule in rules if rule.name.lower() not in exposed]
     if skipped:
         logger.info(
             "required_field_registry: record_type=%s does not expose %s — not requiring them "

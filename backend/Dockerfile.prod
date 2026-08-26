@@ -29,6 +29,34 @@ COPY backend/pyproject.toml .
 RUN pip install --no-cache-dir . && \
     apt-get purge -y --auto-remove gcc
 
+# Assert the resolved deps actually honour the ceilings pyproject declares.
+#
+# This is not belt-and-braces — it is the fix for an outage that already
+# happened twice. A pin in pyproject.toml only binds the layer that RESOLVES
+# it, and Docker will happily serve a cached `pip install` layer from before
+# the pin was added while the `COPY backend/ .` below brings fresh application
+# code. The image then looks correct by every check we had: the digest matches
+# what was pushed, the container is healthy, and the new code is demonstrably
+# running — against a dependency the pin was supposed to exclude. On
+# 2026-08-26 three consecutive digest-verified deploys shipped anthropic 1.0.0
+# that way, and every outbound LLM call died with
+#   TypeError: unsupported operand type(s) for +: 'float' and 'Timeout'
+# (1.x vendors its own httpcore2, so our httpx.Timeout is a foreign object to
+# anyio.fail_after) — surfacing to users as the chat's generic "I wasn't able
+# to find relevant information", which reads like a knowledge problem.
+#
+# A digest check cannot catch this by construction: it proves WHICH image runs,
+# never what pip resolved inside it. So the check belongs at build time, where
+# a violation fails the build instead of reaching staging.
+RUN python -c "\
+import sys, anthropic, httpx; \
+v = anthropic.__version__; \
+major = int(v.split('.')[0]); \
+sys.exit(0) if major == 0 else sys.exit( \
+    'FATAL: anthropic %s installed but pyproject pins <1.0.0. A stale cached '\
+    'pip layer is being reused — rebuild with --no-cache. See ClickUp 86bbm719c '\
+    'before lifting the ceiling.' % v)"
+
 # Install Node.js 20 + Java (JRE) + suitecloud CLI for workspace validate/deploy.
 # Pinned to major v3 of the CLI (plan's ^2 was unreachable — Oracle removed the
 # 2024.2.0 SDK JAR from their CDN, so npm postinstall fails on @^2). v3 ships
