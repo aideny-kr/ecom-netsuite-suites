@@ -1370,6 +1370,26 @@ class BaseSpecialistAgent(abc.ABC):
                         # decided this attempt is the one shown as a card.
                         _ask_user_hint = block.input.pop("ask_user", None)
 
+                        # Is this write headed for NetSuite at all? Everything
+                        # the agentic write loop adds below — the investigation
+                        # gate, validate_mutation, the ask_user slot fetch —
+                        # is built entirely out of NetSuite sibling tools
+                        # (ns_getRecordTypeMetadata, ns_getSubsidiaries). A
+                        # Celigo connector has none of them, so running any of
+                        # it there bounces the write with an instruction to
+                        # call a tool that does not exist in its toolset, and
+                        # the write can never proceed. Same `ns_` test the
+                        # ns_getRecord pre-fetch below already uses; a
+                        # non-NetSuite write keeps `validation = None` and
+                        # reaches the confirmation card exactly as it did
+                        # before this loop existed.
+                        from app.services.chat.tools import (
+                            parse_external_tool_name as _parse_write_tool_name,
+                        )
+
+                        _parsed_write = _parse_write_tool_name(block.name)
+                        _is_netsuite_write = bool(_parsed_write and _parsed_write[1].startswith("ns_"))
+
                         # ── Investigation gate (requirement A) — mechanism,
                         # not prompt (the write profile's metadata-first
                         # prose has been ignored live on this branch before).
@@ -1383,7 +1403,7 @@ class BaseSpecialistAgent(abc.ABC):
                         # most ONE bounce per (turn, record_type), tracked in
                         # a per-instance set — a stubborn model's SECOND
                         # proposal always reaches validation/the card.
-                        if mutation_type in ("create", "upsert"):
+                        if _is_netsuite_write and mutation_type in ("create", "upsert"):
                             if not hasattr(self, "_investigation_gate_bounced"):
                                 self._investigation_gate_bounced: set[str] = set()
                             if record_type not in self._investigation_gate_bounced and not _metadata_fetched_this_turn(
@@ -1453,21 +1473,22 @@ class BaseSpecialistAgent(abc.ABC):
                         # meet, which silently skipped this entire block for
                         # every delete. See write_validation.py.
                         validation = None
-                        try:
-                            validation = await validate_mutation(
-                                tool_name=block.name,
-                                tool_input=block.input,
-                                mutation_type=mutation_type,
-                                record_type=record_type,
-                                tenant_id=self.tenant_id,
-                                actor_id=self.user_id,
-                                correlation_id=self.correlation_id,
-                                db=db,
-                                session_id=session_id or str(self.tenant_id),
-                            )
-                        except PayloadParseError as exc:
-                            result_str = json.dumps({"error": f"Write payload could not be parsed: {exc}"})
-                            validation = None
+                        if _is_netsuite_write:
+                            try:
+                                validation = await validate_mutation(
+                                    tool_name=block.name,
+                                    tool_input=block.input,
+                                    mutation_type=mutation_type,
+                                    record_type=record_type,
+                                    tenant_id=self.tenant_id,
+                                    actor_id=self.user_id,
+                                    correlation_id=self.correlation_id,
+                                    db=db,
+                                    session_id=session_id or str(self.tenant_id),
+                                )
+                            except PayloadParseError as exc:
+                                result_str = json.dumps({"error": f"Write payload could not be parsed: {exc}"})
+                                validation = None
 
                         # ── ask_user resolution (requirement C) — MUST run
                         # BEFORE the repair decision below, not after it.

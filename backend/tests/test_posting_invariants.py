@@ -176,6 +176,12 @@ class _FakeConnector:
     auth_type: str = "none"
     encrypted_credentials: str | None = None
     is_enabled: bool = True
+    # `provider` is NOT optional on the real model (MCPConnector.provider is
+    # nullable=False) and `execute_tool_call` dispatches on it — Celigo
+    # connectors take a different path than NetSuite ones. Omitting it here
+    # made the stub diverge from the model it stands in for, so these tests
+    # died with AttributeError the moment the dispatcher started reading it.
+    provider: str = "netsuite_mcp"
 
 
 def _mock_mcp_wire(mock_session):
