@@ -73,6 +73,7 @@ function baseProposal(overrides: Partial<ReconResolutionProposal>): ReconResolut
     deposit_transaction_currency: null,
     deposit_foreign_amount: null,
     deposit_exchange_rate: null,
+    result_status: "pending",
     ...overrides,
   };
 }

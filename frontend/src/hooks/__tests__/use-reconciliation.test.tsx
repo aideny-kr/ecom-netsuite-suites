@@ -20,6 +20,7 @@ import {
   useClosePeriod,
   useCloseReadiness,
   useCreateReconRun,
+  useRejectResult,
 } from "@/hooks/use-reconciliation";
 
 function wrapper({ children }: { children: React.ReactNode }) {
@@ -198,5 +199,61 @@ describe("useCloseReadiness", () => {
     renderHook(() => useCloseReadiness(null), { wrapper });
     await new Promise((r) => setTimeout(r, 20));
     expect(get).not.toHaveBeenCalled();
+  });
+});
+
+describe("useRejectResult", () => {
+  it("PATCHes the reject endpoint with reason and note", async () => {
+    patch.mockResolvedValue({ id: "res1", status: "rejected" });
+    const { result } = renderHook(() => useRejectResult(), { wrapper });
+
+    result.current.mutate({
+      result_id: "res1",
+      reason: "wrong_match",
+      note: "payout belongs to the March batch",
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    // result_id is a PATH param, not a body field — the endpoint deliberately does
+    // not accept it in the body (unlike the older approve schema, which takes it and
+    // then ignores it). Sending it would be two sources for one identity.
+    expect(patch).toHaveBeenCalledWith(
+      "/api/v1/reconciliation/results/res1/reject",
+      { reason: "wrong_match", note: "payout belongs to the March batch" }
+    );
+  });
+
+  it("invalidates recon-results, bucket-summary AND close-readiness on success", async () => {
+    // Same regression as approve: a reject moves a row out of its bucket and changes
+    // the period readiness the CloseChecklist gates on. Missing the readiness key
+    // leaves the checklist green-stale until refocus.
+    patch.mockResolvedValue({ id: "res1", status: "rejected" });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
+
+    const { result } = renderHook(() => useRejectResult(), { wrapper: makeWrapper(qc) });
+    result.current.mutate({ result_id: "res1", reason: "duplicate" });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    const keys = invalidateSpy.mock.calls.map((c) => (c[0] as { queryKey: string[] }).queryKey[0]);
+    expect(keys).toContain("recon-results");
+    expect(keys).toContain("recon-bucket-summary");
+    expect(keys).toContain("recon-close-readiness");
+  });
+
+  it("omits note when not supplied rather than sending an empty string", async () => {
+    // The service treats reason 'other' + blank note as a 400. An empty string is a
+    // supplied-but-blank note, which is exactly the case it refuses; undefined is
+    // "not supplied". Keeping them distinct on the wire keeps the 400 meaningful.
+    patch.mockResolvedValue({ id: "res1", status: "rejected" });
+    const { result } = renderHook(() => useRejectResult(), { wrapper });
+
+    result.current.mutate({ result_id: "res1", reason: "not_actionable" });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(patch).toHaveBeenCalledWith(
+      "/api/v1/reconciliation/results/res1/reject",
+      { reason: "not_actionable" }
+    );
   });
 });

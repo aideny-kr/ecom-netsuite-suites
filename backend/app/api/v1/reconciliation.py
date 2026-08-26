@@ -40,6 +40,7 @@ from app.schemas.reconciliation import (
     ReconBucketSummary,
     ReconCloseReadiness,
     ReconResultApprove,
+    ReconResultReject,
     ReconResultResponse,
     ReconRunCreate,
     ReconRunResponse,
@@ -54,6 +55,7 @@ from app.schemas.reconciliation import (
     ResolutionSummaryResponse,
 )
 from app.services import audit_service
+from app.services.reconciliation import recon_reject
 from app.services.reconciliation.close_scope import (
     closeable_runs_conditions,
     left_for_review_conditions,
@@ -607,6 +609,75 @@ async def approve_result(
 
 
 # ---------------------------------------------------------------------------
+# Reject a single line — the NEGATIVE-label path
+# ---------------------------------------------------------------------------
+# Approve-only feedback teaches us nothing about what the matcher got wrong: a row
+# a human silently walks away from is indistinguishable from one never reviewed.
+# The autonomy ladder's next rung is gated on a measured false-positive rate, and
+# that rate has no numerator without this endpoint.
+#
+# The service (`recon_reject.reject_result`) owns the vocabulary, the freeze check
+# and the envelope snapshot; this handler owns only the HTTP concerns — tenant
+# scoping, loading the run, and translating a refusal into a 400. It does NOT
+# re-implement the guards: a second copy is how approve and reject drift apart,
+# and the reject path skipping a guard approve enforces would be a back door into
+# a closed period.
+@router.patch("/results/{result_id}/reject", response_model=ReconResultResponse)
+async def reject_result(
+    result_id: str,
+    request: ReconResultReject,
+    user: Annotated[User, Depends(require_permission("recon.run"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    recon_result = (
+        await db.execute(
+            select(ReconciliationResult).where(
+                ReconciliationResult.id == _parse_uuid(result_id),
+                ReconciliationResult.tenant_id == user.tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+
+    if not recon_result:
+        # 404 for another tenant's row too — a 403 would confirm the id exists.
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Result not found")
+
+    run = (
+        await db.execute(
+            select(ReconciliationRun).where(
+                ReconciliationRun.id == recon_result.run_id,
+                ReconciliationRun.tenant_id == user.tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+
+    # A result whose run is missing cannot have its period freeze checked, so it is
+    # not dispositionable — refuse rather than proceed with an unknown freeze state.
+    # `reject_result` requires `run` precisely so this cannot be waved through: the
+    # previous signature defaulted it to None and skipped the freeze silently.
+    if not run:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Result not found")
+
+    try:
+        await recon_reject.reject_result(
+            db,
+            result=recon_result,
+            user=user,
+            reason=request.reason,
+            note=request.note,
+            run=run,
+        )
+    except recon_reject.RejectNotAllowedError as exc:
+        # The service raises this for a closed run, a terminal row, an unknown
+        # reason, or 'other' with no note. Its messages are written to be shown.
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    await db.commit()
+    await db.refresh(recon_result)
+    return ReconResultResponse.model_validate(recon_result)
+
+
+# ---------------------------------------------------------------------------
 # Bulk-approve a whole bucket (set-based, per-line audit, no auto-post)
 # ---------------------------------------------------------------------------
 _SKIP_STATUSES = TERMINAL_RESULT_STATUSES
@@ -785,6 +856,19 @@ async def _fetch_group_summaries(
     aggregation, single source of truth (do not re-derive)."""
     P = ReconResolutionProposal
     live = (P.run_id == run_uuid, P.tenant_id == tenant_id, P.status.notin_(("superseded", "rejected")))
+    # "Still actionable" is a fact about the RESULT, not the proposal. reject_result
+    # mutates the result and never touches the proposal, so counting P.status alone
+    # left a rejected row inside proposed_count forever: the worksheet's
+    # oneClickCount = proposed_count - above_materiality_count + ticked kept offering
+    # "Approve N" for a row the API can only refuse, and the proposal stayed
+    # 'proposed' with no path out. Nothing corrupts — approve is refused server-side —
+    # but the number the whole surface is steered by drifts further wrong with every
+    # reject. NULL (no result row) counts as actionable so a proposal never silently
+    # disappears from its group.
+    _result_actionable = or_(
+        ReconciliationResult.status.is_(None),
+        ReconciliationResult.status.notin_(TERMINAL_RESULT_STATUSES),
+    )
 
     group_rows = (
         await db.execute(
@@ -794,13 +878,35 @@ async def _fetch_group_summaries(
                 P.booking_vehicle,
                 P.group_key,
                 P.currency,
+                # `count` and `total_amount` are deliberately NOT filtered by
+                # _result_actionable, unlike the two below. They describe the group as
+                # PLANNED — how many items the planner grouped and what they were
+                # worth — while proposed_count/above_materiality_count describe what is
+                # still actionable. A fully-rejected group therefore reads "212 items,
+                # $1,284.55, Approve 0", which is the honest summary of a group that
+                # existed and is now settled, not a contradiction.
+                #
+                # Filtering them was considered and rejected: both are columns of the
+                # `section=groups` export that accountants keep, so redefining them to
+                # mean "actionable only" would silently change the meaning of saved
+                # sheets — a bigger harm than the inconsistency it would remove, and
+                # not a call to make inside a PR about reject reachability.
                 func.count(P.id).label("count"),
-                func.count(P.id).filter(P.status == "proposed").label("proposed_count"),
+                func.count(P.id).filter(P.status == "proposed", _result_actionable).label("proposed_count"),
                 func.count(P.id).filter(P.status == "approved").label("approved_count"),
                 func.coalesce(func.sum(P.proposed_amount), 0).label("total_amount"),
                 func.count(P.id)
-                .filter(P.above_materiality.is_(True), P.status == "proposed")
+                .filter(P.above_materiality.is_(True), P.status == "proposed", _result_actionable)
                 .label("above_materiality_count"),
+            )
+            # LEFT JOIN so a proposal whose result is somehow absent still counts
+            # rather than silently vanishing from the group.
+            .outerjoin(
+                ReconciliationResult,
+                and_(
+                    ReconciliationResult.id == P.result_id,
+                    ReconciliationResult.tenant_id == tenant_id,
+                ),
             )
             .where(*live)
             .group_by(P.root_cause, P.action, P.booking_vehicle, P.group_key, P.currency)
@@ -932,9 +1038,14 @@ def _proposal_response_with_enrichment(
     deposit_transaction_currency: str | None = None,
     deposit_foreign_amount: Decimal | None = None,
     deposit_exchange_rate: Decimal | None = None,
+    # Appended last, and keyword-only in practice: every caller passes these
+    # positionally off a SELECT tuple, and reordering a SELECT without reordering the
+    # unpack has already silently swapped two plausible values in this codebase.
+    result_status: str | None = None,
 ) -> ResolutionProposalResponse:
     return ResolutionProposalResponse.model_validate(proposal).model_copy(
         update={
+            "result_status": result_status,
             "order_reference": order_reference,
             "stripe_charge_id": proposal.charge_source_id,
             "netsuite_internal_id": netsuite_internal_id,
@@ -969,6 +1080,7 @@ async def _enrich_proposal_response(
                 NetsuitePosting.transaction_currency,
                 NetsuitePosting.foreign_amount,
                 NetsuitePosting.exchange_rate,
+                ReconciliationResult.status,
             )
             .select_from(ReconciliationResult)
             .outerjoin(
@@ -994,7 +1106,8 @@ async def _enrich_proposal_response(
         transaction_currency,
         foreign_amount,
         exchange_rate,
-    ) = row or (None, None, None, None, None, None, None, None, None)
+        result_status,
+    ) = row or (None, None, None, None, None, None, None, None, None, None)
     return _proposal_response_with_enrichment(
         proposal,
         order_reference,
@@ -1006,6 +1119,7 @@ async def _enrich_proposal_response(
         transaction_currency,
         foreign_amount,
         exchange_rate,
+        result_status,
     )
 
 
@@ -1049,6 +1163,11 @@ def _build_proposal_query(
             NetsuitePosting.transaction_currency,
             NetsuitePosting.foreign_amount,
             NetsuitePosting.exchange_rate,
+            # LAST, because line ~1185 splats this row positionally onto
+            # _proposal_response_with_enrichment. Appending keeps every existing
+            # position stable; inserting in the middle would silently shift the
+            # amounts by one, and they are all plausible Decimals.
+            ReconciliationResult.status,
         )
         .join(
             ReconciliationResult,
@@ -1486,7 +1605,15 @@ def _proposals_export_row(
     transaction_currency: str | None,
     foreign_amount: Decimal | None,
     exchange_rate: Decimal | None,
+    # Accepted because this row is splatted from the same select as the API response,
+    # which now carries the result's status for the reject control. Deliberately NOT
+    # added to _PROPOSALS_HEADERS: the export's column set is a contract with the
+    # accountants who keep these sheets, and widening it is a separate decision from
+    # making reject reachable. Named rather than swallowed by *_ so the next person
+    # sees it is available.
+    result_status: str | None = None,
 ) -> list:
+    del result_status
     return [
         order_reference,
         p.charge_source_id,
@@ -1716,6 +1843,14 @@ async def get_close_readiness(
                 # Non-blocking (excluded from open_exceptions) and never
                 # locked by close_period's lock_predicate below.
                 func.count().filter(ReconciliationResult.status == "carried_forward").label("carried_forward"),
+                # Same shape as carried_forward, and for the same reason. A reject
+                # overwrites 'pending'/'auto_matched', so without its own counter a
+                # reviewer could zero this checklist by rejecting rows and the
+                # variance would leave the close report silently — measured at
+                # $1,150 across two rows in review. Rejected rows are decided, so
+                # they do not block; they must still be VISIBLE, because "we looked
+                # at it and it was wrong" is a reconciling item, not an absence.
+                func.count().filter(ReconciliationResult.status == "rejected").label("rejected"),
             )
             .select_from(ReconciliationResult)
             .where(
@@ -1737,6 +1872,7 @@ async def get_close_readiness(
         suggested=row.suggested,
         left_for_review=row.left_for_review,
         carried_forward=row.carried_forward,
+        rejected=row.rejected,
     )
 
 

@@ -1,26 +1,53 @@
+import asyncio
 import time
 import uuid
-from collections import defaultdict
 from typing import Any, Callable
 
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.rate_limit import check_mcp_tool_limit, reset_rate_limits
 from app.mcp.metrics import record_call, record_duration, record_rate_limit_rejection
 from app.services import audit_service
 
 logger = structlog.get_logger()
 
-# Rate limit tracking: {tenant_id: {tool_name: [timestamps]}}
-_rate_limits: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
+# Rate limit state lives in app.core.rate_limit (Redis sorted-set sliding window).
+# It used to be a module-level dict here, which made every configured per-tenant,
+# per-tool limit effectively N times higher across N workers/replicas -- the number
+# in TOOL_CONFIGS was not the number being enforced.
+#
+# RE-BASELINE, 2026-08-06, CORRECTED 2026-08-13: every rate_limit_per_minute below is
+# the pre-2026-08-06 per-process number multiplied by MCP_REBASELINE_FACTOR, so the
+# shared window enforces what N workers were collectively already allowing.
+#
+# The factor was originally 4, citing `--workers 4` in backend/Dockerfile. That is the
+# DEV image. Production is built from backend/Dockerfile.prod, which runs `--workers 2`
+# -- so a x4 re-baseline shipped ceilings roughly twice as loose as anything production
+# ever actually enforced, which is precisely the defect this change exists to end: the
+# number in TOOL_CONFIGS not being the number enforced. Corrected to 2, and pinned to
+# the image by tests/test_worker_concurrency_config.py so the comment cannot drift from
+# the Dockerfile again.
+#
+# So these numbers preserve production's BEHAVIOUR while fixing its CORRECTNESS. They
+# are not a considered policy -- the pre-2026-08-06 values never were either, since
+# nothing ever enforced them. Tuning them to real usage is a separate, deliberate
+# change: watch `mcp_rate_limit_rejections_total` (mcp/metrics.py) and set them from
+# data. Do not scale these again if the worker count changes; the window is shared
+# now, so the worker count no longer multiplies anything.
+MCP_REBASELINE_FACTOR = 2
+
+# Applied to any registered tool with no TOOL_CONFIGS entry. Same re-baseline: the
+# historical per-process default was 60.
+DEFAULT_TOOL_RATE_LIMIT = 60 * MCP_REBASELINE_FACTOR
 
 TOOL_CONFIGS = {
     "health": {
         "default_limit": None,
         "max_limit": None,
         "timeout_seconds": 5,
-        "rate_limit_per_minute": 60,
+        "rate_limit_per_minute": 120,
         "requires_entitlement": None,
         "allowlisted_params": [],
     },
@@ -32,7 +59,7 @@ TOOL_CONFIGS = {
         # implementation ever sees the real Settings cap.
         "max_limit": settings.NETSUITE_SUITEQL_MAX_ROWS,
         "timeout_seconds": 30,
-        "rate_limit_per_minute": 30,
+        "rate_limit_per_minute": 60,
         "requires_entitlement": "mcp_tools",
         "allowlisted_params": ["query", "limit"],
     },
@@ -41,7 +68,7 @@ TOOL_CONFIGS = {
         # Stub mirrors prod so tests/dev paths don't silently diverge.
         "max_limit": settings.NETSUITE_SUITEQL_MAX_ROWS,
         "timeout_seconds": 30,
-        "rate_limit_per_minute": 30,
+        "rate_limit_per_minute": 60,
         "requires_entitlement": "mcp_tools",
         "allowlisted_params": ["query", "limit"],
     },
@@ -49,7 +76,7 @@ TOOL_CONFIGS = {
         "default_limit": 100,
         "max_limit": 1000,
         "timeout_seconds": 10,
-        "rate_limit_per_minute": 30,
+        "rate_limit_per_minute": 60,
         "requires_entitlement": "mcp_tools",
         "allowlisted_params": ["table_name", "limit"],
     },
@@ -57,7 +84,7 @@ TOOL_CONFIGS = {
         "default_limit": None,
         "max_limit": None,
         "timeout_seconds": 120,
-        "rate_limit_per_minute": 10,
+        "rate_limit_per_minute": 20,
         "requires_entitlement": "mcp_tools",
         "allowlisted_params": ["date_from", "date_to", "payout_ids"],
     },
@@ -65,7 +92,7 @@ TOOL_CONFIGS = {
         "default_limit": None,
         "max_limit": None,
         "timeout_seconds": 30,
-        "rate_limit_per_minute": 10,
+        "rate_limit_per_minute": 20,
         "requires_entitlement": "mcp_tools",
         "allowlisted_params": [
             "run_id",
@@ -80,7 +107,7 @@ TOOL_CONFIGS = {
         "default_limit": None,
         "max_limit": None,
         "timeout_seconds": 10,
-        "rate_limit_per_minute": 10,
+        "rate_limit_per_minute": 20,
         "requires_entitlement": "mcp_tools",
         "allowlisted_params": ["name", "schedule_type", "cron", "params"],
     },
@@ -88,7 +115,7 @@ TOOL_CONFIGS = {
         "default_limit": None,
         "max_limit": None,
         "timeout_seconds": 10,
-        "rate_limit_per_minute": 30,
+        "rate_limit_per_minute": 60,
         "requires_entitlement": "mcp_tools",
         "allowlisted_params": [],
     },
@@ -96,7 +123,7 @@ TOOL_CONFIGS = {
         "default_limit": None,
         "max_limit": None,
         "timeout_seconds": 30,
-        "rate_limit_per_minute": 10,
+        "rate_limit_per_minute": 20,
         "requires_entitlement": "mcp_tools",
         "allowlisted_params": ["schedule_id"],
     },
@@ -104,7 +131,7 @@ TOOL_CONFIGS = {
         "default_limit": None,
         "max_limit": None,
         "timeout_seconds": 15,
-        "rate_limit_per_minute": 10,
+        "rate_limit_per_minute": 20,
         "requires_entitlement": "mcp_tools",
         "allowlisted_params": [],
     },
@@ -112,7 +139,7 @@ TOOL_CONFIGS = {
         "default_limit": None,
         "max_limit": None,
         "timeout_seconds": 60,
-        "rate_limit_per_minute": 10,
+        "rate_limit_per_minute": 20,
         "requires_entitlement": "mcp_tools",
         "allowlisted_params": [],
     },
@@ -120,7 +147,7 @@ TOOL_CONFIGS = {
         "default_limit": None,
         "max_limit": None,
         "timeout_seconds": 10,
-        "rate_limit_per_minute": 60,
+        "rate_limit_per_minute": 120,
         "requires_entitlement": "mcp_tools",
         "allowlisted_params": ["query", "top_k", "source_filter"],
     },
@@ -128,7 +155,7 @@ TOOL_CONFIGS = {
         "default_limit": None,
         "max_limit": None,
         "timeout_seconds": 15,
-        "rate_limit_per_minute": 10,
+        "rate_limit_per_minute": 20,
         "requires_entitlement": "mcp_tools",
         "allowlisted_params": ["query", "max_results"],
     },
@@ -136,7 +163,7 @@ TOOL_CONFIGS = {
         "default_limit": 200,
         "max_limit": 500,
         "timeout_seconds": 10,
-        "rate_limit_per_minute": 60,
+        "rate_limit_per_minute": 120,
         "requires_entitlement": "workspace",
         "allowlisted_params": ["workspace_id", "directory", "recursive", "limit"],
     },
@@ -144,7 +171,7 @@ TOOL_CONFIGS = {
         "default_limit": None,
         "max_limit": None,
         "timeout_seconds": 10,
-        "rate_limit_per_minute": 120,
+        "rate_limit_per_minute": 240,
         "requires_entitlement": "workspace",
         "allowlisted_params": ["workspace_id", "file_id", "line_start", "line_end"],
     },
@@ -152,7 +179,7 @@ TOOL_CONFIGS = {
         "default_limit": 20,
         "max_limit": 50,
         "timeout_seconds": 15,
-        "rate_limit_per_minute": 30,
+        "rate_limit_per_minute": 60,
         "requires_entitlement": "workspace",
         "allowlisted_params": ["workspace_id", "query", "search_type", "limit"],
     },
@@ -160,7 +187,7 @@ TOOL_CONFIGS = {
         "default_limit": None,
         "max_limit": None,
         "timeout_seconds": 10,
-        "rate_limit_per_minute": 10,
+        "rate_limit_per_minute": 20,
         "requires_entitlement": "workspace",
         "allowlisted_params": ["workspace_id", "file_path", "unified_diff", "title", "rationale"],
     },
@@ -168,7 +195,7 @@ TOOL_CONFIGS = {
         "default_limit": None,
         "max_limit": None,
         "timeout_seconds": 30,
-        "rate_limit_per_minute": 5,
+        "rate_limit_per_minute": 10,
         "requires_entitlement": "workspace",
         "allowlisted_params": ["changeset_id"],
     },
@@ -176,7 +203,7 @@ TOOL_CONFIGS = {
         "default_limit": None,
         "max_limit": None,
         "timeout_seconds": 60,
-        "rate_limit_per_minute": 5,
+        "rate_limit_per_minute": 10,
         "requires_entitlement": "workspace",
         "allowlisted_params": ["workspace_id", "changeset_id"],
     },
@@ -184,7 +211,7 @@ TOOL_CONFIGS = {
         "default_limit": None,
         "max_limit": None,
         "timeout_seconds": 120,
-        "rate_limit_per_minute": 5,
+        "rate_limit_per_minute": 10,
         "requires_entitlement": "workspace",
         "allowlisted_params": ["workspace_id", "changeset_id"],
     },
@@ -192,7 +219,7 @@ TOOL_CONFIGS = {
         "default_limit": None,
         "max_limit": None,
         "timeout_seconds": 300,
-        "rate_limit_per_minute": 5,
+        "rate_limit_per_minute": 10,
         "requires_entitlement": "workspace",
         "allowlisted_params": ["changeset_id", "assertions"],
     },
@@ -200,7 +227,7 @@ TOOL_CONFIGS = {
         "default_limit": None,
         "max_limit": None,
         "timeout_seconds": 600,
-        "rate_limit_per_minute": 2,
+        "rate_limit_per_minute": 4,
         "requires_entitlement": "workspace",
         "allowlisted_params": ["changeset_id", "sandbox_id", "require_assertions"],
     },
@@ -208,7 +235,7 @@ TOOL_CONFIGS = {
         "default_limit": None,
         "max_limit": None,
         "timeout_seconds": 60,
-        "rate_limit_per_minute": 2,
+        "rate_limit_per_minute": 4,
         "requires_entitlement": "workspace",
         "allowlisted_params": ["jti", "confirmation_token"],
     },
@@ -216,7 +243,7 @@ TOOL_CONFIGS = {
         "default_limit": 1000,
         "max_limit": 10000,
         "timeout_seconds": 30,
-        "rate_limit_per_minute": 30,
+        "rate_limit_per_minute": 60,
         "requires_entitlement": "mcp_tools",
         "allowlisted_params": ["query", "max_rows"],
     },
@@ -224,7 +251,7 @@ TOOL_CONFIGS = {
         "default_limit": None,
         "max_limit": None,
         "timeout_seconds": 15,
-        "rate_limit_per_minute": 30,
+        "rate_limit_per_minute": 60,
         "requires_entitlement": "mcp_tools",
         "allowlisted_params": ["dataset"],
     },
@@ -232,7 +259,7 @@ TOOL_CONFIGS = {
         "default_limit": None,
         "max_limit": None,
         "timeout_seconds": 15,
-        "rate_limit_per_minute": 30,
+        "rate_limit_per_minute": 60,
         "requires_entitlement": "mcp_tools",
         "allowlisted_params": ["query"],
     },
@@ -240,7 +267,7 @@ TOOL_CONFIGS = {
         "default_limit": None,
         "max_limit": None,
         "timeout_seconds": 15,
-        "rate_limit_per_minute": 20,
+        "rate_limit_per_minute": 40,
         "requires_entitlement": "mcp_tools",
         "allowlisted_params": ["title"],
     },
@@ -248,7 +275,7 @@ TOOL_CONFIGS = {
         "default_limit": None,
         "max_limit": None,
         "timeout_seconds": 30,
-        "rate_limit_per_minute": 20,
+        "rate_limit_per_minute": 40,
         "requires_entitlement": "mcp_tools",
         "allowlisted_params": ["spreadsheet_id", "data", "range"],
     },
@@ -256,7 +283,7 @@ TOOL_CONFIGS = {
         "default_limit": None,
         "max_limit": None,
         "timeout_seconds": 15,
-        "rate_limit_per_minute": 30,
+        "rate_limit_per_minute": 60,
         "requires_entitlement": "mcp_tools",
         "allowlisted_params": ["spreadsheet_id", "range"],
     },
@@ -268,7 +295,7 @@ TOOL_CONFIGS = {
         "default_limit": None,
         "max_limit": None,
         "timeout_seconds": 60,
-        "rate_limit_per_minute": 10,
+        "rate_limit_per_minute": 20,
         "requires_entitlement": "mcp_tools",
         # CRITICAL: report_export.execute consumes ONLY params["title"]/["sections"].
         # _filter_params strips anything else, so this list must be exactly these two —
@@ -281,19 +308,14 @@ TOOL_CONFIGS = {
 def check_rate_limit(tenant_id: str, tool_name: str) -> bool:
     """Check if the tenant is within rate limits for this tool."""
     config = TOOL_CONFIGS.get(tool_name, {})
-    limit = config.get("rate_limit_per_minute", 60)
+    limit = config.get("rate_limit_per_minute", DEFAULT_TOOL_RATE_LIMIT)
+    return check_mcp_tool_limit(tenant_id, tool_name, limit)
 
-    now = time.time()
-    window_start = now - 60
 
-    # Clean old entries
-    _rate_limits[tenant_id][tool_name] = [ts for ts in _rate_limits[tenant_id][tool_name] if ts > window_start]
-
-    if len(_rate_limits[tenant_id][tool_name]) >= limit:
-        return False
-
-    _rate_limits[tenant_id][tool_name].append(now)
-    return True
+def reset_rate_limit(tenant_id: str | None = None) -> None:
+    """Clear MCP tool rate-limit state, for one tenant or all of them. Tests only."""
+    prefix = f"ratelimit:mcp:{tenant_id}:" if tenant_id else "ratelimit:mcp:"
+    reset_rate_limits(prefix)
 
 
 def validate_params(tool_name: str, params: dict[str, Any], context_need: str | None = None) -> dict[str, Any]:
@@ -395,8 +417,11 @@ async def governed_execute(
     correlation_id = correlation_id or str(uuid.uuid4())
     start = time.monotonic()
 
-    # 1. Rate limit check
-    if not check_rate_limit(tenant_id, tool_name):
+    # 1. Rate limit check.
+    # Off the event loop: the limiter is the SYNC redis client against a remote
+    # Redis, and this runs on every tool call. Calling it inline stalled the whole
+    # worker's loop, not just this request (cf. api/v1/chat_runs.py, same idiom).
+    if not await asyncio.to_thread(check_rate_limit, tenant_id, tool_name):
         duration_ms = (time.monotonic() - start) * 1000
         logger.warning(
             "mcp.tool_call",

@@ -1,0 +1,325 @@
+"""Chat-turn burst limiting, and replica-safety of the shared sliding window.
+
+Two defects are pinned here:
+
+1. `send_message` had no rate limit at all. Platform-billed tenants spend OUR
+   Anthropic key, so a retry loop or scripted client ran unbounded until a human
+   noticed the bill. Operator decision 2026-08-06: per-minute burst only, no daily
+   quota -- bound runaway loops without telling a legitimate heavy recon/report user
+   "no more today".
+
+2. `governance._rate_limits` was a per-process dict, so the configured per-tenant,
+   per-tool MCP limits were effectively N-times higher with N workers/replicas. The
+   window now lives in Redis, which is what makes the configured number the real one.
+"""
+
+from __future__ import annotations
+
+import uuid
+
+import pytest
+
+from app.core import rate_limit as rl
+from app.mcp.governance import TOOL_CONFIGS, check_rate_limit, reset_rate_limit
+
+
+class FakeRedis:
+    """Minimal sorted-set double covering exactly the ops the limiter uses.
+
+    Stands in for a SHARED store: handing the same instance to two limiter states
+    is what "two replicas" means here.
+    """
+
+    def __init__(self) -> None:
+        self.zsets: dict[str, dict[str, float]] = {}
+
+    def ping(self) -> bool:
+        return True
+
+    def pipeline(self) -> FakePipeline:
+        return FakePipeline(self)
+
+    def scan(self, cursor, match="*", count=100):
+        prefix = match[:-1] if match.endswith("*") else match
+        return 0, [k for k in self.zsets if k.startswith(prefix)]
+
+    def delete(self, *keys):
+        for key in keys:
+            self.zsets.pop(key, None)
+        return len(keys)
+
+
+class FakePipeline:
+    def __init__(self, store: FakeRedis) -> None:
+        self._store = store
+        self._ops: list[tuple] = []
+
+    def zremrangebyscore(self, key, min_, max_):
+        self._ops.append(("zrem", key, max_))
+        return self
+
+    def zcard(self, key):
+        self._ops.append(("zcard", key))
+        return self
+
+    def zadd(self, key, mapping):
+        self._ops.append(("zadd", key, mapping))
+        return self
+
+    def expire(self, key, ttl):
+        self._ops.append(("expire", key, ttl))
+        return self
+
+    def execute(self):
+        results = []
+        for op in self._ops:
+            kind, key = op[0], op[1]
+            bucket = self._store.zsets.setdefault(key, {})
+            if kind == "zrem":
+                cutoff = op[2]
+                for member, score in list(bucket.items()):
+                    if score <= cutoff:
+                        del bucket[member]
+                results.append(None)
+            elif kind == "zcard":
+                results.append(len(bucket))
+            elif kind == "zadd":
+                bucket.update(op[2])
+                results.append(1)
+            else:
+                results.append(True)
+        self._ops = []
+        return results
+
+
+@pytest.fixture(autouse=True)
+def _clean_limiter_state():
+    rl.reset_rate_limits()
+    yield
+    rl.reset_rate_limits()
+
+
+@pytest.fixture
+def no_redis(monkeypatch):
+    """Force the in-memory fallback path, single-process.
+
+    WEB_CONCURRENCY=1 makes this process's share equal the fleet-wide limit, so
+    these tests read as "the cap is the cap". The multi-worker split has its own
+    test below.
+    """
+    monkeypatch.setattr(rl, "_get_redis", lambda: None)
+    monkeypatch.setattr(rl.settings, "WEB_CONCURRENCY", 1)
+
+
+@pytest.fixture
+def shared_redis(monkeypatch):
+    fake = FakeRedis()
+    monkeypatch.setattr(rl, "_get_redis", lambda: fake)
+    return fake
+
+
+# ---------------------------------------------------------------------------
+# Chat burst limit
+# ---------------------------------------------------------------------------
+
+
+def test_chat_burst_allows_up_to_the_limit(no_redis):
+    tenant, user = str(uuid.uuid4()), str(uuid.uuid4())
+    for _ in range(rl.CHAT_BURST_PER_MINUTE):
+        assert rl.check_chat_burst_limit(tenant, user) is True
+
+
+def test_chat_burst_denies_past_the_limit(no_redis):
+    tenant, user = str(uuid.uuid4()), str(uuid.uuid4())
+    for _ in range(rl.CHAT_BURST_PER_MINUTE):
+        rl.check_chat_burst_limit(tenant, user)
+    assert rl.check_chat_burst_limit(tenant, user) is False
+
+
+def test_chat_burst_is_per_user_not_per_tenant(no_redis):
+    tenant = str(uuid.uuid4())
+    noisy, quiet = str(uuid.uuid4()), str(uuid.uuid4())
+    for _ in range(rl.CHAT_BURST_PER_MINUTE):
+        rl.check_chat_burst_limit(tenant, noisy)
+    assert rl.check_chat_burst_limit(tenant, noisy) is False
+    assert rl.check_chat_burst_limit(tenant, quiet) is True, "one user must not starve their colleagues"
+
+
+def test_chat_burst_is_per_tenant(no_redis):
+    user = str(uuid.uuid4())
+    tenant_a, tenant_b = str(uuid.uuid4()), str(uuid.uuid4())
+    for _ in range(rl.CHAT_BURST_PER_MINUTE):
+        rl.check_chat_burst_limit(tenant_a, user)
+    assert rl.check_chat_burst_limit(tenant_b, user) is True
+
+
+def test_chat_burst_does_not_share_a_window_with_login(no_redis):
+    """Distinct key prefixes -- a chat flood must not lock the user out of logging in."""
+    tenant, user = str(uuid.uuid4()), str(uuid.uuid4())
+    for _ in range(rl.CHAT_BURST_PER_MINUTE):
+        rl.check_chat_burst_limit(tenant, user)
+    assert rl.check_chat_burst_limit(tenant, user) is False
+    assert rl.check_login_rate_limit(user) is True
+
+
+# ---------------------------------------------------------------------------
+# Replica safety -- the actual governance defect
+# ---------------------------------------------------------------------------
+
+
+def test_chat_burst_window_is_shared_across_replicas(shared_redis):
+    """Replica A exhausts the window; replica B must see it as exhausted.
+
+    Dropping the in-memory fallback between calls is what makes this a second
+    process rather than the same one.
+    """
+    tenant, user = str(uuid.uuid4()), str(uuid.uuid4())
+    for _ in range(rl.CHAT_BURST_PER_MINUTE):
+        assert rl.check_chat_burst_limit(tenant, user) is True
+
+    rl._fallback.clear()  # replica B: fresh process memory, same Redis
+
+    assert rl.check_chat_burst_limit(tenant, user) is False
+
+
+def test_mcp_tool_window_is_shared_across_replicas(shared_redis):
+    """The per-process dict meant N replicas granted N times the configured limit."""
+    tenant = str(uuid.uuid4())
+    tool = "netsuite.suiteql"
+    limit = TOOL_CONFIGS[tool]["rate_limit_per_minute"]
+
+    for _ in range(limit):
+        assert check_rate_limit(tenant, tool) is True
+
+    rl._fallback.clear()  # replica B
+
+    assert check_rate_limit(tenant, tool) is False
+
+
+def test_mcp_tool_limits_still_isolate_tenants(shared_redis):
+    tenant_a, tenant_b = str(uuid.uuid4()), str(uuid.uuid4())
+    tool = "recon.run"
+    limit = TOOL_CONFIGS[tool]["rate_limit_per_minute"]
+
+    for _ in range(limit):
+        check_rate_limit(tenant_a, tool)
+
+    assert check_rate_limit(tenant_a, tool) is False
+    assert check_rate_limit(tenant_b, tool) is True
+
+
+def test_reset_rate_limit_clears_a_single_tenant(shared_redis):
+    tenant = str(uuid.uuid4())
+    tool = "recon.run"
+    limit = TOOL_CONFIGS[tool]["rate_limit_per_minute"]
+    for _ in range(limit):
+        check_rate_limit(tenant, tool)
+    assert check_rate_limit(tenant, tool) is False
+
+    reset_rate_limit(tenant)
+
+    assert check_rate_limit(tenant, tool) is True
+
+
+# ---------------------------------------------------------------------------
+# Redis-down posture: fail CLOSED (keep enforcing), never fail open
+# ---------------------------------------------------------------------------
+
+
+def test_limits_still_enforced_when_redis_is_down(no_redis):
+    """Their limiter fails open. Ours must not -- Redis down is exactly when a
+    runaway loop is most likely to be the reason Redis is down."""
+    tenant = str(uuid.uuid4())
+    tool = "recon.run"
+    limit = TOOL_CONFIGS[tool]["rate_limit_per_minute"]
+    for _ in range(limit):
+        assert check_rate_limit(tenant, tool) is True
+    assert check_rate_limit(tenant, tool) is False
+
+
+def test_redis_raising_mid_call_denies_instead_of_granting_a_fresh_window(monkeypatch):
+    """A reachable-but-erroring Redis must DENY, not fall through to a zeroed counter.
+
+    The first version of this module caught the exception and called
+    `_check_fallback`, whose `_fallback[key]` starts empty and is completely
+    disjoint from the count Redis already holds. A client sitting at the cap got
+    handed a full fresh window on any transient error -- the cap lifted during
+    exactly the flakiness the module promises it will not lift for.
+    """
+    fake = FakeRedis()
+    monkeypatch.setattr(rl, "_get_redis", lambda: fake)
+
+    tenant, user = str(uuid.uuid4()), str(uuid.uuid4())
+    for _ in range(rl.CHAT_BURST_PER_MINUTE):
+        assert rl.check_chat_burst_limit(tenant, user) is True
+    assert rl.check_chat_burst_limit(tenant, user) is False
+
+    # Same client, now with Redis erroring mid-pipeline. The local counter is
+    # empty, so a fallback would say "allowed".
+    monkeypatch.setattr(rl, "_get_redis", lambda: _ErroringRedis())
+    assert rl.check_chat_burst_limit(tenant, user) is False, (
+        "a mid-call Redis error must deny, not grant a fresh in-memory window"
+    )
+    assert not _fallback_has(rl, tenant, user), "the denied call must not seed the fallback counter"
+
+
+class _ErroringRedis:
+    def ping(self):
+        return True
+
+    def pipeline(self):
+        raise ConnectionError("transient redis blip")
+
+
+def _fallback_has(module, tenant: str, user: str) -> bool:
+    return bool(module._fallback.get(f"ratelimit:chat:{tenant}:{user}"))
+
+
+def test_redis_unreachable_at_connect_still_degrades_to_the_local_window(no_redis):
+    """The other failure mode keeps working: absent Redis degrades, it does not deny.
+
+    Distinguishing the two matters -- denying forever on a genuinely absent Redis
+    would be an outage, and granting a fresh window on a blip would be the bug above.
+    """
+    tenant, user = str(uuid.uuid4()), str(uuid.uuid4())
+    assert rl.check_chat_burst_limit(tenant, user) is True
+
+
+# ---------------------------------------------------------------------------
+# Fleet-wide limits must not be multiplied by the worker count on the fallback
+# ---------------------------------------------------------------------------
+
+
+def test_fallback_enforces_this_process_share_not_the_whole_fleet_limit(monkeypatch):
+    """A Redis outage must not quietly hand every worker the full fleet ceiling.
+
+    Limits are fleet-wide by construction (TOOL_CONFIGS was multiplied by the
+    worker count on 2026-08-06 so the shared window enforces the real number).
+    Giving that same number to a per-process counter multiplies it straight back:
+    netsuite.suiteql would allow ~480/min across 4 workers during an outage,
+    against ~120/min before any of this work -- the outage would end up 4x looser
+    than the bug we set out to fix.
+    """
+    monkeypatch.setattr(rl, "_get_redis", lambda: None)
+    monkeypatch.setattr(rl.settings, "WEB_CONCURRENCY", 4)
+
+    tenant, user = str(uuid.uuid4()), str(uuid.uuid4())
+    share = rl.settings.CHAT_BURST_PER_MINUTE // 4
+
+    for _ in range(share):
+        assert rl.check_chat_burst_limit(tenant, user) is True
+    assert rl.check_chat_burst_limit(tenant, user) is False, (
+        "one worker must only get its share, so 4 workers total the fleet limit"
+    )
+
+
+def test_per_process_limit_never_rounds_down_to_zero(monkeypatch):
+    """A tool capped at 2/min with 4 workers must still allow 1, not deadlock at 0."""
+    monkeypatch.setattr(rl.settings, "WEB_CONCURRENCY", 4)
+    assert rl._per_process_limit(2) == 1
+    assert rl._per_process_limit(1) == 1
+
+
+def test_per_process_limit_is_identity_for_a_single_worker(monkeypatch):
+    monkeypatch.setattr(rl.settings, "WEB_CONCURRENCY", 1)
+    assert rl._per_process_limit(120) == 120

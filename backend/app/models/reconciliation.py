@@ -67,6 +67,41 @@ class ReconciliationResult(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     approved_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # Negative-label capture. `rejected` was a declared ResultStatus and already
+    # terminal, but nothing ever set it — so wrong matches left no trace and the
+    # autonomy envelope's false-positive rate was unmeasurable by construction.
+    # See services/reconciliation/recon_reject.py for why each column exists.
+    rejected_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reject_reason: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    reject_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Snapshotted at decision time, never recomputed: the envelope's admission
+    # rules will change, and replaying today's rules over yesterday's rows would
+    # silently re-baseline the metric every time they move.
+    envelope_eligible_at_decision: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Eligible AND rejected for a reason that means the matcher was wrong.
+    # `not_actionable` is excluded on purpose — the match was correct, and
+    # counting it would report operational friction as model error.
+    # Attribute renamed, DB column deliberately NOT. The old name asserts a
+    # false-POSITIVE rate — P(auto-post | actually wrong) — whose denominator covers
+    # rows the envelope never selected and which is therefore unidentifiable. What the
+    # autonomy decision needs is 1 - precision, the false DISCOVERY rate. Code should
+    # say the true thing, so the attribute is renamed.
+    #
+    # The COLUMN keeps its old name because renaming it breaks the deploy. Migrations
+    # run from the CI runner BEFORE any container is replaced (deploy.yml: `alembic
+    # upgrade head` then `docker compose up -d --no-deps`), and SQLAlchemy emits an
+    # explicit column list rather than SELECT *, so the still-running previous image
+    # would 500 on every recon read for the length of the restart — worse in
+    # production, where the worker is replaced only after the backend health check.
+    # Verified by compiling both models against a migrated scratch DB: the old
+    # mapping raises UndefinedColumnError.
+    #
+    # "Zero rows" does not help: this is code/schema skew, not a data migration. The
+    # rename is safe only as expand/contract (add, dual-write, backfill, drop a
+    # release later), which is not worth a release cycle for a cosmetic column name.
+    counts_as_envelope_error: Mapped[bool | None] = mapped_column("counts_as_false_positive", Boolean, nullable=True)
+
 
 # Proposal statuses that occupy the one-active-per-result slot (partial unique
 # index in migration 089). superseded/rejected rows are retained history.

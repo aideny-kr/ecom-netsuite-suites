@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_user, require_feature, require_permission
+from app.core.rate_limit import check_chat_burst_limit
 from app.models.chat import ChatMessage, ChatSession
 from app.models.task_file import TaskFile
 from app.models.user import User
@@ -279,6 +280,26 @@ async def send_message(
     wizard_step: str | None = None,
     x_timezone: str | None = Header(None),
 ):
+    # Bound runaway loops before touching the DB or the model. Platform-billed
+    # tenants spend the platform Anthropic key, so an unbounded retry loop or a
+    # scripted client costs real money until a human notices. Burst-only: a heavy
+    # recon/report session is legitimate and must not hit a daily ceiling.
+    # Off the loop -- sync redis client against a remote Redis (see governance.py).
+    if not await asyncio.to_thread(check_chat_burst_limit, str(user.tenant_id), str(user.id)):
+        # stdlib logger here, not structlog -- %s args, never kwargs.
+        logger.warning(
+            "chat.burst_limit_exceeded tenant_id=%s user_id=%s limit_per_minute=%s",
+            user.tenant_id,
+            user.id,
+            settings.CHAT_BURST_PER_MINUTE,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                f"Too many messages. Limit is {settings.CHAT_BURST_PER_MINUTE} per minute. Wait a moment and try again."
+            ),
+        )
+
     result = await db.execute(
         select(ChatSession).where(
             ChatSession.id == session_id,

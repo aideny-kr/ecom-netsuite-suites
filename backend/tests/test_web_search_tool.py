@@ -160,11 +160,11 @@ class TestWebSearchRegistration:
         assert "query" in tool["params_schema"]
 
     def test_governance_config_exists(self):
-        from app.mcp.governance import TOOL_CONFIGS
+        from app.mcp.governance import MCP_REBASELINE_FACTOR, TOOL_CONFIGS
 
         assert "web.search" in TOOL_CONFIGS
         config = TOOL_CONFIGS["web.search"]
-        assert config["rate_limit_per_minute"] == 10
+        assert config["rate_limit_per_minute"] == 10 * MCP_REBASELINE_FACTOR
         assert config["timeout_seconds"] == 15
         assert "query" in config["allowlisted_params"]
 

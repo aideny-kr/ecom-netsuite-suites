@@ -919,6 +919,13 @@ export interface ReconResult {
   approved_at: string | null;
   created_at: string;
   bucket?: string;
+  // Reject disposition (mirrors ReconResultResponse). counts_as_envelope_error is
+  // intentionally absent: it is the metric the corpus feeds, and a reviewer who can
+  // see which reasons score against the matcher can pick the number they want.
+  reject_reason?: string | null;
+  reject_note?: string | null;
+  rejected_by?: string | null;
+  rejected_at?: string | null;
 }
 
 export interface ReconBucketCount {
@@ -1069,6 +1076,10 @@ export interface ReconResolutionProposal {
   // currency-truth columns — Decimal-as-string like the amounts above, or
   // null when unmatched or the deposit predates the Phase-A backfill.
   // Required-nullable: the backend always sends these three keys.
+  // The matched ReconciliationResult's OWN disposition — distinct from `status`,
+  // which is the proposal's. "Reject match" mutates the result and never the
+  // proposal, so this is the only field on the row that can observe it.
+  result_status: string | null;
   deposit_transaction_currency: string | null;
   deposit_foreign_amount: string | null;
   deposit_exchange_rate: string | null;

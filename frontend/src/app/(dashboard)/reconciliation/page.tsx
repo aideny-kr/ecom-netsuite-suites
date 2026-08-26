@@ -307,6 +307,7 @@ export default function ReconciliationPage() {
         <ReconResultsTable
           results={results || []}
           onInvestigate={handleInvestigate}
+          disabled={!reconEnabled || isRunClosed}
         />
       </>
     );
@@ -420,6 +421,7 @@ export default function ReconciliationPage() {
             proposals={needsHumanProposals.data}
             isLoading={needsHumanProposals.isLoading}
             onInvestigate={handleInvestigateProposal}
+            disabled={!reconEnabled || isRunClosed}
           />
           <button
             type="button"

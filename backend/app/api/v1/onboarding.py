@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import uuid
 
@@ -7,9 +8,11 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.oauth_state import encode_state
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_user, require_entitlement, require_permission
+from app.core.rate_limit import check_chat_burst_limit
 from app.models.chat import ChatSession
 from app.models.tenant import TenantConfig
 from app.models.user import User
@@ -269,6 +272,17 @@ async def start_onboarding_chat(
             )
 
     # Create new onboarding session
+    # Third door to run_chat_turn (chat.py and chat_integration.py are the others).
+    # One greeting per signup, so the cap is never reached legitimately -- it is here
+    # so the guardrail covers every entry point rather than most of them.
+    # Checked BEFORE the session row is created, like the other two sites -- a
+    # rejected request must not leave an orphan ChatSession behind.
+    if not await asyncio.to_thread(check_chat_burst_limit, str(user.tenant_id), str(user.id)):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many requests. Please wait a moment and try again.",
+        )
+
     session = ChatSession(
         tenant_id=user.tenant_id,
         user_id=user.id,
@@ -559,7 +573,14 @@ async def onboarding_netsuite_mcp_authorize(
     await r.setex(
         f"netsuite_mcp_oauth:{state}",
         600,
-        f"{code_verifier}:{account_id}:{client_id}:{user.tenant_id}:{user.id}:{label}",
+        encode_state(
+            code_verifier=code_verifier,
+            account_id=account_id,
+            client_id=client_id,
+            tenant_id=str(user.tenant_id),
+            user_id=str(user.id),
+            label=label,
+        ),
     )
     await r.aclose()
 
@@ -598,7 +619,13 @@ async def onboarding_netsuite_oauth_authorize(
     await r.setex(
         f"netsuite_oauth:{state}",
         600,
-        f"{code_verifier}:{account_id}:{user.tenant_id}:{user.id}:{restlet_url}",
+        encode_state(
+            code_verifier=code_verifier,
+            account_id=account_id,
+            tenant_id=str(user.tenant_id),
+            user_id=str(user.id),
+            restlet_url=restlet_url,
+        ),
     )
     await r.aclose()
 

@@ -231,8 +231,11 @@ jobs:
       # Guards the T2 review gate's model-tiering (.claude/workflows/*.js): every fan-out
       # goes through tagent() (no un-tiered agent() burst) and the pasted TIER copies match
       # the canonical policy. Node builtins only — no install step. See tiering.test.mjs.
-      - name: Run workflow tiering guard tests
-        run: node --test .claude/workflows/tiering.test.mjs
+      # Glob, not a hand-listed file: gate-args.test.mjs was added in the same commit
+      # that fixed a gate which reviewed the WRONG DIFF and reported OK, and a guard
+      # that CI forgets to run is the same class of defect it exists to catch.
+      - name: Run workflow guard tests
+        run: node --test .claude/workflows/*.test.mjs
 
   required-checks:
     name: Required Checks

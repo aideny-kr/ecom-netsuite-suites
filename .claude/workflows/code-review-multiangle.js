@@ -43,21 +43,134 @@ REPO-SPECIFIC INVARIANTS — flag any place the diff could violate one:
 - SuiteQL dialect: local REST supports customrecord_*; external MCP only standard tables.
 - Recon HITL: approve writes one audit row per line, never auto-posts to NetSuite, and a closed/locked run rejects approve (hard freeze).`
 
-// ----- arg validation (fail-closed on hostile/huge input) ------------------
+// --- BEGIN arg-resolution (extracted verbatim by gate-args.test.mjs) -------
+// Kept as one pure function with no workflow globals so the test can eval it
+// standalone. Everything about WHICH DIFF GETS REVIEWED is decided here, which is
+// why it is the one part of this gate with its own test.
 function asArg(v, name, max) {
   if (v == null) return null
   if (typeof v !== 'string') throw new Error(`args.${name} must be a string`)
   if (v.length > max) throw new Error(`args.${name} too long (${v.length} > ${max})`)
   return v
 }
-let targetSpec, baseArg, providedDiff
-try {
-  targetSpec = asArg(args && args.target, 'target', 200)
-  baseArg = asArg(args && args.base, 'base', 200)
-  providedDiff = asArg(args && args.diff, 'diff', 2_000_000)
-  for (const [v, n] of [[targetSpec, 'target'], [baseArg, 'base']]) {
+function resolveArgs(args) {
+  // `args` arrives JSON-ENCODED AS A STRING, not as an object — and passing an object
+  // from the caller does not help, the harness stringifies in transit. Reading
+  // `.target` off a string yields undefined, targetSpec falls back to "the current
+  // branch HEAD", and the gate reviews whatever worktree the caller happened to be in
+  // while still returning status:OK. Twice on 2026-08-11 (wf_4e37835d, wf_4061fdb2),
+  // 9.7M tokens, with ZERO files of the actual PR examined.
+  let a = args
+  let parseFailed = false
+  if (typeof a === 'string') {
+    if (a.trim() === '') {
+      a = null // an empty string asks for nothing
+    } else {
+      try { a = JSON.parse(a) } catch { a = null; parseFailed = true }
+    }
+  }
+  // Array.isArray, because `typeof [] === 'object'`. Without it `args: '[]'` parsed
+  // cleanly, carried no keys for either check below to catch, and returned "no target"
+  // — the silent fall-back-to-the-current-checkout class, reached one more way.
+  let badShape = null
+  if (a !== null && a !== undefined && (typeof a !== 'object' || Array.isArray(a))) {
+    badShape = Array.isArray(a) ? 'array' : typeof a
+    a = null
+  }
+  a = a || {}
+
+  // FAIL CLOSED — but only when the caller actually asked for something. Reviewing
+  // the current checkout and reporting OK when a specific target was requested is the
+  // one outcome this gate must never produce.
+  //
+  // "Asked for something" is key-presence, not truthiness. An earlier version keyed
+  // off `args !== undefined && args !== null && args !== ''`, which made an
+  // empty-but-present object — `Workflow({name: 'code-review-multiangle', args: {}})`,
+  // a very plausible call — throw INVALID_ARGS, flatly contradicting this comment and
+  // breaking the documented "review the current branch" default. Caught by running
+  // this gate against its own PR (#198).
+  //
+  // Still refused, deliberately: a non-empty string that will not parse (the
+  // catastrophic case — a real target lost in transit), a non-object, and an object
+  // carrying keys none of which yield a usable target/base/diff (a typo'd key, or an
+  // empty target interpolated from an unset variable). Those all mean the caller
+  // wanted something specific that did not arrive.
+  // Say which of the two actually happened. `args: false` never reaches JSON.parse, so
+  // reporting "could not be parsed" sent a reader hunting for a JSON syntax error that
+  // does not exist.
+  if (parseFailed || badShape) {
+    throw new Error(
+      (parseFailed
+        ? 'args were supplied as a string that is not valid JSON'
+        : `args must be an object of target/base/diff, got ${badShape}`) +
+      '; refusing to fall back to the current checkout'
+    )
+  }
+
+  // UNRECOGNISED KEYS ARE CHECKED BEFORE per-field type validation. `{targt:'198',
+  // base:42}` used to report "args.base must be a string" and never mention the typo'd
+  // key that was the real problem — the wrong one of two simultaneously-true errors,
+  // on a function whose entire job is explaining why it refused.
+  const RECOGNISED_KEYS = new Set(['target', 'base', 'diff'])
+  const unknownKeys = Object.keys(a).filter((k) => !RECOGNISED_KEYS.has(k))
+  if (unknownKeys.length) {
+    throw new Error(
+      `unrecognised args: ${unknownKeys.join(', ')} — expected target/base/diff. ` +
+      'Refusing rather than reviewing the current checkout with the keys that did parse.'
+    )
+  }
+
+  const target = asArg(a.target, 'target', 200)
+  const base = asArg(a.base, 'base', 200)
+  const diff = asArg(a.diff, 'diff', 2_000_000)
+
+  // UNRECOGNISED KEYS ARE A HARD ERROR, checked BEFORE the all-blank test.
+  // The all-blank test alone is not enough: `{targt: '198', base: 'origin/main'}` — a
+  // single typo'd target alongside a perfectly good base — left `base` truthy, so
+  // `!target && !base && !diff` was false, nothing threw, and the gate reviewed the
+  // CURRENT CHECKOUT against origin/main while reporting OK. That is precisely the
+  // silent-wrong-review failure (wf_4e37835d / wf_4061fdb2) this whole function
+  // exists to prevent, surviving inside its own fix. Every invocation in this repo
+  // passes `base`, so one typo'd target was all it took.
+  // Found by running this gate against its own PR (#198).
+
+  // EVERY SUPPLIED KEY MUST CARRY A USABLE VALUE. One rule, replacing an all-blank
+  // check that three separate gate rounds picked holes in:
+  //
+  //   round 2: `{targt:'198', base:'origin/main'}` — truthy base kept `!target &&
+  //            !base && !diff` false, so nothing threw and the current checkout got
+  //            reviewed. Fixed by the unrecognised-key check above.
+  //   round 3: `{target:'', base:'origin/main'}` — same escape, but through a
+  //            CORRECTLY-named key holding an empty value (an unset variable
+  //            interpolated into the args), so the key check could not see it.
+  //   round 3: `{diff:''}` — I had carved this out believing it would reach the
+  //            EMPTY_DIFF status below. It does not: line ~149 is `if (!diff)`, and
+  //            '' is falsy, so an explicitly-empty diff fell into the git-resolution
+  //            branch and reviewed the current checkout. That carve-out is removed —
+  //            it was written on a misreading and made things worse.
+  //
+  // Every one of those was the same failure the file exists to prevent, reached by a
+  // different door. Requiring each supplied key to resolve closes the corridor rather
+  // than the doors: an argument that was worth passing is worth passing correctly.
+  for (const key of Object.keys(a)) {
+    const resolved = { target, base, diff }[key]
+    if (!resolved) {
+      throw new Error(
+        `args.${key} was supplied but is empty; refusing to fall back to the current ` +
+        'checkout. Omit the key entirely to review the current branch.'
+      )
+    }
+  }
+  for (const [v, n] of [[target, 'target'], [base, 'base']]) {
     if (v && /[\n\r]/.test(v)) throw new Error(`args.${n} must not contain newlines`)
   }
+  return { target, base, diff }
+}
+// --- END arg-resolution ----------------------------------------------------
+
+let targetSpec, baseArg, providedDiff
+try {
+  ({ target: targetSpec, base: baseArg, diff: providedDiff } = resolveArgs(args))
 } catch (e) {
   return { status: 'INVALID_ARGS', error: String(e.message || e), findings: [] }
 }

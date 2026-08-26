@@ -15,6 +15,15 @@ vi.mock("@/components/reconciliation/resolution-group-items", () => ({
   ),
 }));
 
+// NeedsHumanWorksheet rows now host a RejectMatchControl, which calls
+// useRejectResult() — a react-query mutation that throws without a
+// QueryClientProvider. Reject behaviour is covered in
+// reject-on-resolution-surface.test.tsx.
+vi.mock("@/hooks/use-reconciliation", () => ({
+  useApproveResult: () => ({ mutate: vi.fn(), isPending: false }),
+  useRejectResult: () => ({ mutate: vi.fn(), isPending: false, reset: vi.fn() }),
+}));
+
 const feeGroup: ReconResolutionGroup = {
   group_key: "fees:book_fee_line:deposit",
   root_cause: "fees",
@@ -168,14 +177,17 @@ describe("ResolutionGroupsTable", () => {
     expect((screen.getByPlaceholderText(/note/i) as HTMLInputElement).value).toBe("");
   });
 
-  it("rejects with the group + currency (reject lives in the expanded panel)", () => {
+  it("discards the plan for the group + currency (the control lives in the expanded panel)", () => {
+    // Renamed from "Reject": this discards the planner's proposed booking and leaves
+    // the underlying matches alone, which is the opposite of the per-item
+    // "Reject match" now rendered a few pixels below it.
     const onReject = vi.fn();
     render(
       <ResolutionGroupsTable
         {...baseProps({ onReject, expandedKey: "fees:book_fee_line:deposit:USD" })}
       />
     );
-    fireEvent.click(screen.getByRole("button", { name: /reject/i }));
+    fireEvent.click(screen.getByRole("button", { name: /discard plan/i }));
     expect(onReject).toHaveBeenCalledWith(feeGroup);
   });
 
@@ -185,14 +197,14 @@ describe("ResolutionGroupsTable", () => {
     expect(screen.getByRole("button", { name: /approve 0/i })).toBeDisabled();
   });
 
-  it("disables approve + reject when the disabled prop is set (e.g. closed run)", () => {
+  it("disables approve + discard plan when the disabled prop is set (e.g. closed run)", () => {
     render(
       <ResolutionGroupsTable
         {...baseProps({ disabled: true, expandedKey: "fees:book_fee_line:deposit:USD" })}
       />
     );
     expect(screen.getByRole("button", { name: /approve/i })).toBeDisabled();
-    expect(screen.getByRole("button", { name: /reject/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /discard plan/i })).toBeDisabled();
   });
 
   it("places the approve control in the row's last cell, never in the expanded detail panel", () => {
@@ -457,6 +469,7 @@ describe("NeedsHumanWorksheet", () => {
     id: "p1",
     run_id: "r1",
     result_id: "res1",
+    result_status: "pending",
     root_cause: "chargeback",
     action: "needs_human",
     booking_vehicle: "none",

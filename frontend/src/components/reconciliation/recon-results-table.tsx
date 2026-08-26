@@ -4,10 +4,19 @@ import { MessageSquare, Check } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ReconResult } from "@/lib/types";
 import { useApproveResult } from "@/hooks/use-reconciliation";
+import {
+  REASON_LABEL,
+  RejectMatchControl,
+  TERMINAL_STATUSES,
+} from "@/components/reconciliation/reject-match-control";
 
 interface ReconResultsTableProps {
   results: ReconResult[];
   onInvestigate?: (result: ReconResult) => void;
+  // Closed run / recon disabled. Without this the classic table was the ONE call
+  // site that never received the freeze the other two enforce — it kept offering
+  // reject on a closed run for any row not yet flipped to a terminal status.
+  disabled?: boolean;
 }
 
 const statusColors: Record<string, string> = {
@@ -16,9 +25,14 @@ const statusColors: Record<string, string> = {
   pending: "bg-red-100 text-red-800",
   approved: "bg-blue-100 text-blue-800",
   locked: "bg-gray-100 text-gray-800",
+  // Missing until 2026-08-06: 'rejected' fell through to the bare `bg-gray-100`
+  // fallback, which sets no text colour — the badge rendered as an unreadable
+  // white-on-white blob. Invisible to jsdom, obvious in a browser.
+  rejected: "bg-red-100 text-red-800",
+  carried_forward: "bg-amber-100 text-amber-800",
 };
 
-export function ReconResultsTable({ results, onInvestigate }: ReconResultsTableProps) {
+export function ReconResultsTable({ results, onInvestigate, disabled }: ReconResultsTableProps) {
   const approveResult = useApproveResult();
 
   if (results.length === 0) {
@@ -30,7 +44,12 @@ export function ReconResultsTable({ results, onInvestigate }: ReconResultsTableP
   }
 
   return (
-    <div className="rounded-xl border bg-card shadow-soft overflow-hidden">
+    // NOT overflow-hidden. The reject picker is absolutely positioned inside a cell,
+    // and clipping the card cut it off after two of five reasons — no note field, no
+    // buttons. A jsdom test cannot see this: it has no layout engine, so it happily
+    // "clicks" an element that a real browser never paints.
+    // overflow-x-auto keeps the wide table scrollable without clipping vertically.
+    <div className="rounded-xl border bg-card shadow-soft overflow-x-auto">
       <table className="w-full text-[13px]">
         <thead>
           <tr className="border-b bg-muted/50">
@@ -53,6 +72,13 @@ export function ReconResultsTable({ results, onInvestigate }: ReconResultsTableP
                 <span className={cn("rounded-full px-2 py-0.5 text-xs font-medium", statusColors[result.status] || "bg-gray-100")}>
                   {result.status}
                 </span>
+                {/* A terminal row with no visible reason sends the reviewer to the
+                    audit log to answer "why is this rejected?". Keep it on the row. */}
+                {result.status === "rejected" && result.reject_reason && (
+                  <div className="mt-0.5 text-[11px] text-muted-foreground">
+                    {REASON_LABEL[result.reject_reason] ?? result.reject_reason}
+                  </div>
+                )}
               </td>
               <td className="px-4 py-3">
                 {result.evidence?.order_reference ? (
@@ -85,9 +111,16 @@ export function ReconResultsTable({ results, onInvestigate }: ReconResultsTableP
                   {(Number(result.confidence) * 100).toFixed(0)}%
                 </span>
               </td>
-              <td className="px-4 py-3 text-center">
+              <td className="relative px-4 py-3 text-center">
                 <div className="flex items-center justify-center gap-1">
-                  {result.status === "suggested" && (
+                  {/* `disabled` guards Approve as well as Reject. Threading the freeze
+                      into only the reject control left this row showing a live Approve
+                      on a closed run while Reject correctly vanished — the same "UI
+                      lies to the operator" asymmetry the reject gating exists to avoid,
+                      just pointed the other way. The backend hard-freeze refuses it, so
+                      nothing could be corrupted; the operator was simply told they
+                      could act when they could not. */}
+                  {result.status === "suggested" && !disabled && (
                     <button
                       onClick={() => approveResult.mutate({ result_id: result.id })}
                       className="rounded p-1 text-green-600 hover:bg-green-50 transition-colors"
@@ -95,6 +128,9 @@ export function ReconResultsTable({ results, onInvestigate }: ReconResultsTableP
                     >
                       <Check className="h-4 w-4" />
                     </button>
+                  )}
+                  {!TERMINAL_STATUSES.has(result.status) && (
+                    <RejectMatchControl resultId={result.id} disabled={disabled} />
                   )}
                   {(result.status === "pending" || result.status === "suggested") && onInvestigate && (
                     <button
