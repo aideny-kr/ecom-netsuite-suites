@@ -2,8 +2,14 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY pyproject.toml .
-RUN pip install --no-cache-dir -e .
+COPY pyproject.toml scripts/assert_dependency_ceilings.py ./
+# Same ceiling assertion as Dockerfile.prod — see the long comment there for
+# why an independent check is needed rather than trusting the pin alone. This
+# image has the identical COPY-pyproject -> pip install -> COPY-code shape, and
+# it is what `docker compose up -d --build backend` builds, so without the
+# check a developer can reproduce the same silent chat outage locally and have
+# nothing tell them why.
+RUN pip install --no-cache-dir -e . && python assert_dependency_ceilings.py
 
 COPY . .
 
