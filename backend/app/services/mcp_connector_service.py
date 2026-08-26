@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.encryption import encrypt_credentials, get_current_key_version
 from app.models.mcp_connector import McpConnector
+from app.services.celigo.client import mcp_server_url
 
 logger = structlog.get_logger()
 
@@ -19,8 +20,27 @@ async def create_mcp_connector(
     auth_type: str = "none",
     credentials: dict | None = None,
     created_by: uuid.UUID | None = None,
+    region: str = "us",
 ) -> McpConnector:
-    """Create a new MCP connector with optional encrypted credentials."""
+    """Create a new MCP connector with optional encrypted credentials.
+
+    provider="celigo_mcp" always resolves to Celigo's fixed hosted MCP server
+    for *region* (defaulting to US on an unrecognized value, mirroring
+    celigo.client.base_url()'s own fallback), ignoring whatever *server_url*
+    the caller passed. McpConnectorCreate rejects provider="celigo_mcp" on the
+    generic POST /mcp-connectors path outright (app/schemas/mcp_connector.py),
+    so in practice the only caller is connector_status._upsert_celigo_mcp_connector,
+    which threads the connection's own region through here -- but the pin
+    itself must not depend on that: without it, a caller with
+    connections.manage could register a celigo_mcp connector pointed at a
+    server they control, and celigo_tool_policy.is_read_only_celigo_tool would
+    trust whatever tool NAMES that server chooses to report. Overriding (not
+    rejecting) mirrors _upsert_celigo_mcp_connector's own reconnect path in
+    connector_status.py, which never accepts a server_url from the caller at
+    all.
+    """
+    if provider == "celigo_mcp":
+        server_url = mcp_server_url(region)
     encrypted = encrypt_credentials(credentials) if credentials else None
     connector = McpConnector(
         tenant_id=tenant_id,
@@ -145,6 +165,28 @@ async def get_active_connectors_for_tenant(db: AsyncSession, tenant_id: uuid.UUI
     Anthropic prompt-cache breakpoint stamped on the last tool definition and
     silently invalidate the cache. ``build_external_tool_definitions`` also
     sorts defensively at the Python layer; this is the SQL-side guarantee.
+
+    ``celigo_mcp`` rows additionally require the tenant's ``celigo`` feature
+    flag. The flag is the kill switch for the whole Celigo surface, and a kill
+    switch that leaves the chat agent holding live Celigo tools is not one --
+    the API endpoints were already gated (``require_feature("celigo")``) while
+    the agent's tool grant was not. All three tool-grant consumers (unified
+    agent, suiteql agent, chat tools) funnel through this function, plus the
+    benchmark runners and ``_celigo_agent_access``, so gating here covers every
+    one of them without a per-consumer check.
+
+    This is layer 1 of 2, and only layer 1. It gates the tool INVENTORY, which
+    is not the same as gating execution: a tool_use block emitted before the
+    flag was flipped off already carries a connector id, and any caller that
+    does not re-derive the inventory never passes through here at all. The
+    dispatcher (``chat/tools._execute_external_tool``) therefore re-checks the
+    flag, mirroring the read-only policy's own two layers -- see
+    ``.claude/rules/agent-graph.md`` #3. Both must move together.
+
+    Deliberately the WRITE side's mirror image and not part of the write guard:
+    this revokes an existing grant at read time, so a tenant whose flag is
+    turned off loses agent access immediately, with no row mutation and nothing
+    to repair when the flag comes back on.
     """
     result = await db.execute(
         select(McpConnector)
@@ -155,7 +197,17 @@ async def get_active_connectors_for_tenant(db: AsyncSession, tenant_id: uuid.UUI
         )
         .order_by(McpConnector.id)
     )
-    return list(result.scalars().all())
+    connectors = list(result.scalars().all())
+
+    # The flag lookup is skipped entirely for the ~all of tenants that have no
+    # celigo_mcp row -- this is the hot path for every chat turn.
+    if any(c.provider == "celigo_mcp" for c in connectors):
+        from app.services.feature_flag_service import is_enabled as _flag_is_enabled
+
+        if not await _flag_is_enabled(db, tenant_id, "celigo"):
+            connectors = [c for c in connectors if c.provider != "celigo_mcp"]
+
+    return connectors
 
 
 async def test_mcp_connector(db: AsyncSession, connector_id: uuid.UUID, tenant_id: uuid.UUID) -> dict:

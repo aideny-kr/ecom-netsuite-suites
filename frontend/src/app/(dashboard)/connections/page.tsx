@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useConnections, useDeleteConnection } from "@/hooks/use-connections";
 import { AddConnectionDialog } from "@/components/add-connection-dialog";
 import { Badge } from "@/components/ui/badge";
@@ -118,15 +119,24 @@ export default function ConnectionsPage() {
                       ? `Last sync: ${new Date(conn.last_sync_at).toLocaleString()}`
                       : "Never synced"}
                   </p>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-8 w-8 opacity-0 transition-opacity group-hover:opacity-100"
-                    onClick={() => handleDelete(conn.id)}
-                    disabled={deleteConnection.isPending}
-                  >
-                    <Trash2 className="h-4 w-4 text-muted-foreground hover:text-destructive" />
-                  </Button>
+                  {conn.provider === "celigo" ? (
+                    <Link
+                      href="/settings"
+                      className="text-[12px] font-medium text-muted-foreground opacity-0 transition-opacity hover:text-foreground hover:underline group-hover:opacity-100"
+                    >
+                      Manage in Settings
+                    </Link>
+                  ) : (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 opacity-0 transition-opacity group-hover:opacity-100"
+                      onClick={() => handleDelete(conn.id)}
+                      disabled={deleteConnection.isPending}
+                    >
+                      <Trash2 className="h-4 w-4 text-muted-foreground hover:text-destructive" />
+                    </Button>
+                  )}
                 </div>
               </div>
             );

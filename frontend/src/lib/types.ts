@@ -58,7 +58,7 @@ export const ROLE_DESCRIPTIONS: Record<RoleName, string> = {
 export interface Connection {
   id: string;
   tenant_id: string;
-  provider: "shopify" | "stripe" | "netsuite";
+  provider: "shopify" | "stripe" | "netsuite" | "celigo";
   label: string;
   status: "active" | "inactive" | "error" | "revoked";
   auth_type: string | null;
@@ -240,7 +240,14 @@ export interface PlanInfo {
 export interface McpConnector {
   id: string;
   tenant_id: string;
-  provider: "netsuite_mcp" | "shopify_mcp" | "stripe_mcp" | "bigquery" | "google_sheets" | "custom";
+  provider:
+    | "netsuite_mcp"
+    | "shopify_mcp"
+    | "stripe_mcp"
+    | "bigquery"
+    | "google_sheets"
+    | "celigo_mcp"
+    | "custom";
   label: string;
   server_url: string;
   auth_type: "bearer" | "api_key" | "none" | "oauth2" | "service_account";

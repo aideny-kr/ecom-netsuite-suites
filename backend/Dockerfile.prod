@@ -25,37 +25,55 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
-COPY backend/pyproject.toml .
+COPY backend/pyproject.toml backend/scripts/assert_dependency_ceilings.py ./
 RUN pip install --no-cache-dir . && \
     apt-get purge -y --auto-remove gcc
 
-# Assert the resolved deps actually honour the ceilings pyproject declares.
+# Assert the INSTALLED anthropic honours the ceiling pyproject declares.
 #
-# This is not belt-and-braces — it is the fix for an outage that already
-# happened twice. A pin in pyproject.toml only binds the layer that RESOLVES
-# it, and Docker will happily serve a cached `pip install` layer from before
-# the pin was added while the `COPY backend/ .` below brings fresh application
-# code. The image then looks correct by every check we had: the digest matches
-# what was pushed, the container is healthy, and the new code is demonstrably
-# running — against a dependency the pin was supposed to exclude. On
-# 2026-08-26 three consecutive digest-verified deploys shipped anthropic 1.0.0
-# that way, and every outbound LLM call died with
+# What is verified, and what is not — read this before trusting either as the
+# cause of a future recurrence:
+#
+#   VERIFIED. `main` carried an unbounded `anthropic>=0.40.0` (the ceiling
+#   lived only on a feature branch), so any build from main resolved 1.0.0 on
+#   an ordinary `pip install`. That alone is sufficient to reproduce the
+#   outage and is the primary reason this file exists.
+#
+#   VERIFIED, MECHANISM UNEXPLAINED. On 2026-08-26 three digest-verified
+#   deploys built from a tree that DID contain the ceiling nonetheless shipped
+#   anthropic 1.0.0, and `/app/pyproject.toml` inside those images was the
+#   102-line pre-ceiling file while the application code was current. A
+#   rebuild with --no-cache produced the 114-line file and anthropic 0.125.0.
+#   Content-addressed caching should have invalidated that layer when
+#   pyproject.toml changed, so the exact mechanism is NOT established. Do not
+#   assume "stale layer" and stop there — check first whether the ceiling is
+#   actually present on the branch being built.
+#
+# Either way the failure is the same: 1.x vendors its own httpcore2, so the
+# httpx.Timeout our adapters construct is foreign to it and reaches
+# anyio.fail_after, which does `current_time() + delay`:
 #   TypeError: unsupported operand type(s) for +: 'float' and 'Timeout'
-# (1.x vendors its own httpcore2, so our httpx.Timeout is a foreign object to
-# anyio.fail_after) — surfacing to users as the chat's generic "I wasn't able
-# to find relevant information", which reads like a knowledge problem.
+# Every outbound LLM call dies, surfacing to users as the chat's generic
+# "I wasn't able to find relevant information" — so the outage is silent at
+# exactly the layer someone would investigate first.
 #
-# A digest check cannot catch this by construction: it proves WHICH image runs,
-# never what pip resolved inside it. So the check belongs at build time, where
-# a violation fails the build instead of reaching staging.
-RUN python -c "\
-import sys, anthropic, httpx; \
-v = anthropic.__version__; \
-major = int(v.split('.')[0]); \
-sys.exit(0) if major == 0 else sys.exit( \
-    'FATAL: anthropic %s installed but pyproject pins <1.0.0. A stale cached '\
-    'pip layer is being reused — rebuild with --no-cache. See ClickUp 86bbm719c '\
-    'before lifting the ceiling.' % v)"
+# Why this duplicates the pyproject pin ON PURPOSE: a guard derived from the
+# pin cannot catch the case where the pin failed to apply. The whole point is
+# to be an INDEPENDENT observation of what actually got installed. A digest
+# check cannot substitute — it proves which image runs, never what pip
+# resolved inside it.
+#
+# The check lives in a FILE, not inline here, so this image and the dev
+# `backend/Dockerfile` cannot drift: the first draft pasted the same assertion
+# into both, and a review round pointed out the next edit would land in one and
+# miss the other. Extending its table beyond anthropic is ClickUp 86bbmwwmt.
+# NB: the COPY above lists two sources, so both land FLAT in /app — the
+# script is at /app/assert_dependency_ceilings.py, NOT /app/scripts/. A
+# `scripts/`-prefixed path here fails the build with ENOENT (caught by
+# actually building the image; the script's own unit-level proof could not
+# see it). `COPY backend/ .` later puts a second copy under /app/scripts/,
+# which is why the runtime layout looks different from this one.
+RUN python assert_dependency_ceilings.py
 
 # Install Node.js 20 + Java (JRE) + suitecloud CLI for workspace validate/deploy.
 # Pinned to major v3 of the CLI (plan's ^2 was unreachable — Oracle removed the

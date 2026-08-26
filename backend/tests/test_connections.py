@@ -6,7 +6,11 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.encryption import encrypt_credentials, get_current_key_version
 from app.models.connection import Connection
+from app.models.mcp_connector import McpConnector
+from app.services.celigo.client import CELIGO_MCP_SERVER_URL
+from app.services.celigo_write_guard import celigo_writes_allowed
 
 
 class TestConnectionCRUD:
@@ -100,6 +104,102 @@ class TestConnectionCRUD:
         resp_test = await client.post(f"/api/v1/connections/{conn_id}/test", headers=headers)
         assert resp_test.status_code == 200
         assert resp_test.json()["status"] == "ok"
+
+
+class TestCeligoGenericDeleteGuard:
+    """T2 gate round 2, FIX 2: DELETE /connections/{id} is provider-agnostic --
+    it revokes a Connection row by id with no idea that a Celigo row has a
+    paired celigo_mcp McpConnector giving the chat agent Celigo tools. Deleting
+    a Celigo connection through this generic path must not orphan that paired
+    connector: the user believes they disconnected, but the agent keeps its
+    Celigo tools. Celigo already has its own guarded delete
+    (DELETE /connector-status/celigo, see disconnect_celigo) that revokes both
+    rows together -- this generic path must refuse instead of half-doing the job.
+    """
+
+    async def _seed_celigo_connection(self, db: AsyncSession, tenant_id, created_by) -> Connection:
+        # Seeding a Celigo row is itself a guarded write -- the session-flush
+        # guard (app/services/celigo_write_guard.py) refuses Celigo creates from
+        # anywhere but the dedicated connect flow, and a fixture is nowhere.
+        # Holding the window here is the guard working, not a workaround.
+        connection = Connection(
+            tenant_id=tenant_id,
+            provider="celigo",
+            label="Celigo Production",
+            status="active",
+            auth_type="api_key",
+            encrypted_credentials=encrypt_credentials({"token": "s3cret"}),
+            encryption_key_version=get_current_key_version(),
+            created_by=created_by,
+        )
+        with celigo_writes_allowed(db):
+            db.add(connection)
+            await db.flush()
+        return connection
+
+    async def _seed_celigo_mcp_connector(self, db: AsyncSession, tenant_id, created_by) -> McpConnector:
+        connector = McpConnector(
+            tenant_id=tenant_id,
+            provider="celigo_mcp",
+            label="Celigo (agent access)",
+            server_url=CELIGO_MCP_SERVER_URL,
+            auth_type="bearer",
+            encrypted_credentials=encrypt_credentials({"token": "agent-tok"}),
+            encryption_key_version=get_current_key_version(),
+            status="active",
+            is_enabled=True,
+            discovered_tools=[{"name": "list_flows", "description": "List flows"}],
+            created_by=created_by,
+        )
+        with celigo_writes_allowed(db):
+            db.add(connector)
+            await db.flush()
+        return connector
+
+    async def test_generic_delete_refuses_a_celigo_connection(self, client: AsyncClient, admin_user, db: AsyncSession):
+        user, headers = admin_user
+        connection = await self._seed_celigo_connection(db, user.tenant_id, user.id)
+        await db.commit()
+
+        resp = await client.delete(f"/api/v1/connections/{connection.id}", headers=headers)
+        assert resp.status_code == 400, resp.text
+        assert "connector-status/celigo" in resp.json()["detail"]
+
+        result = await db.execute(select(Connection).where(Connection.id == connection.id))
+        row = result.scalar_one()
+        assert row.status == "active", "a refused delete must not revoke the connection either"
+
+    async def test_generic_delete_does_not_orphan_the_mcp_connector(
+        self, client: AsyncClient, admin_user, db: AsyncSession
+    ):
+        user, headers = admin_user
+        connection = await self._seed_celigo_connection(db, user.tenant_id, user.id)
+        mcp_connector = await self._seed_celigo_mcp_connector(db, user.tenant_id, user.id)
+        await db.commit()
+
+        resp = await client.delete(f"/api/v1/connections/{connection.id}", headers=headers)
+        assert resp.status_code == 400, resp.text
+
+        result = await db.execute(select(McpConnector).where(McpConnector.id == mcp_connector.id))
+        row = result.scalar_one()
+        assert row.status == "active", "the paired celigo_mcp connector must not be left orphaned or touched"
+        assert row.is_enabled is True
+
+    async def test_generic_delete_still_works_for_non_celigo_providers(
+        self, client: AsyncClient, admin_user, db: AsyncSession
+    ):
+        """The guard must be Celigo-specific, not a blanket regression on
+        every other provider's generic delete."""
+        user, headers = admin_user
+        resp = await client.post(
+            "/api/v1/connections",
+            json={"provider": "shopify", "label": "Shop", "credentials": {"key": "val"}},
+            headers=headers,
+        )
+        conn_id = resp.json()["id"]
+
+        resp_del = await client.delete(f"/api/v1/connections/{conn_id}", headers=headers)
+        assert resp_del.status_code == 204
 
 
 class TestCredentialEncryption:
