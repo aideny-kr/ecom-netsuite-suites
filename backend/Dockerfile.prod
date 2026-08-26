@@ -25,7 +25,7 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
-COPY backend/pyproject.toml .
+COPY backend/pyproject.toml backend/scripts/assert_dependency_ceilings.py ./
 RUN pip install --no-cache-dir . && \
     apt-get purge -y --auto-remove gcc
 
@@ -63,16 +63,17 @@ RUN pip install --no-cache-dir . && \
 # check cannot substitute — it proves which image runs, never what pip
 # resolved inside it.
 #
-# Scoped to anthropic deliberately: it is the one dependency whose major bump
-# is known to break us. Generalising this to every ceiling in pyproject.toml
-# is tracked, not forgotten — ClickUp 86bbmwwmt.
-RUN python -c "\
-import sys, anthropic; \
-v = anthropic.__version__; \
-sys.exit(0 if int(v.split('.')[0]) == 0 else \
-    'FATAL: anthropic %s installed but pyproject pins <1.0.0. Check the branch '\
-    'being built actually carries the ceiling; if it does, rebuild with '\
-    '--no-cache. See ClickUp 86bbm719c before lifting the ceiling.' % v)"
+# The check lives in a FILE, not inline here, so this image and the dev
+# `backend/Dockerfile` cannot drift: the first draft pasted the same assertion
+# into both, and a review round pointed out the next edit would land in one and
+# miss the other. Extending its table beyond anthropic is ClickUp 86bbmwwmt.
+# NB: the COPY above lists two sources, so both land FLAT in /app — the
+# script is at /app/assert_dependency_ceilings.py, NOT /app/scripts/. A
+# `scripts/`-prefixed path here fails the build with ENOENT (caught by
+# actually building the image; the script's own unit-level proof could not
+# see it). `COPY backend/ .` later puts a second copy under /app/scripts/,
+# which is why the runtime layout looks different from this one.
+RUN python assert_dependency_ceilings.py
 
 # Install Node.js 20 + Java (JRE) + suitecloud CLI for workspace validate/deploy.
 # Pinned to major v3 of the CLI (plan's ^2 was unreachable — Oracle removed the

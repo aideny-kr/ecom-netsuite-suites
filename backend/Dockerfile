@@ -2,20 +2,14 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY pyproject.toml .
+COPY pyproject.toml scripts/assert_dependency_ceilings.py ./
 # Same ceiling assertion as Dockerfile.prod — see the long comment there for
 # why an independent check is needed rather than trusting the pin alone. This
 # image has the identical COPY-pyproject -> pip install -> COPY-code shape, and
 # it is what `docker compose up -d --build backend` builds, so without the
 # check a developer can reproduce the same silent chat outage locally and have
 # nothing tell them why.
-RUN pip install --no-cache-dir -e . && python -c "\
-import sys, anthropic; \
-v = anthropic.__version__; \
-sys.exit(0 if int(v.split('.')[0]) == 0 else \
-    'FATAL: anthropic %s installed but pyproject pins <1.0.0. Check the branch '\
-    'being built actually carries the ceiling; if it does, rebuild with '\
-    '--no-cache. See ClickUp 86bbm719c before lifting the ceiling.' % v)"
+RUN pip install --no-cache-dir -e . && python assert_dependency_ceilings.py
 
 COPY . .
 
