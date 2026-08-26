@@ -21,6 +21,7 @@ from xml.sax.saxutils import escape as _xml_escape
 from app.services.chat import thinking
 from app.services.chat.llm_adapter import BaseLLMAdapter, LLMResponse, TokenUsage
 from app.services.chat.prompt_cache import split_system_prompt
+from app.services.chat.selector_app_redirect import build_selector_redirect, is_selector_app_call
 from app.services.chat.tool_call_results import (
     build_tool_call_log_entry,
     tool_call_had_error,
@@ -124,6 +125,27 @@ def _validation_failure_detail(validation: ValidationResult) -> str:
         f"invariant violations: {'; '.join(validation.invariant_errors)}" if validation.invariant_errors else None,
     ]
     return "; ".join(b for b in bits if b) or "validation failed"
+
+
+def _last_metadata_record_type(tool_calls_log: list[dict[str, Any]]) -> str | None:
+    """The record type this turn last fetched metadata for, or None.
+
+    Used to make the ns_selector_app redirect concrete ("call ns_createRecord
+    for customer") rather than generic. Read from the turn's own tool log
+    because `record_type` is bound only inside the mutation branch — naming it
+    at the dispatch site raises UnboundLocalError, which is precisely what a
+    live-path test caught here.
+    """
+    for entry in reversed(tool_calls_log or []):
+        tool = str(entry.get("tool") or "")
+        if tool.rsplit("__", 1)[-1] != "ns_getRecordTypeMetadata":
+            continue
+        params = entry.get("params")
+        if isinstance(params, dict):
+            rt = params.get("recordType") or params.get("record_type")
+            if rt:
+                return str(rt)
+    return None
 
 
 def _metadata_fetched_this_turn(tool_calls_log: list[dict[str, Any]], record_type: str) -> bool:
@@ -1928,6 +1950,58 @@ class BaseSpecialistAgent(abc.ABC):
                         )
                         continue
                     # ── End recon group-approve intercept ──
+
+                    # ── ns_selector_app redirect ──
+                    # The model reaches for NetSuite's record picker when it
+                    # wants a human to choose a value. That picker is a
+                    # NetSuite-hosted UI with no surface in this client, so the
+                    # call is ANSWERED — never dispatched — with the name of
+                    # the mechanism that does work here: an ask_user slot on
+                    # the confirmation card. Measured on staging: 3 of 5
+                    # "create a customer" attempts ended here, two of them
+                    # under prompts explicitly telling the model to use
+                    # ask_user. Prompt wording has now been ignored three
+                    # times, so this is the choke point instead. Full evidence
+                    # in selector_app_redirect.
+                    if is_selector_app_call(block.name):
+                        result_str = build_selector_redirect(
+                            block.input,
+                            mutation_record_type=_last_metadata_record_type(tool_calls_log),
+                        )
+                        elapsed_ms = int((time.monotonic() - t0) * 1000)
+                        yield (
+                            "tool_end",
+                            {
+                                "tool_name": block.name,
+                                "step": step,
+                                "duration_ms": elapsed_ms,
+                                "success": False,
+                                "result_summary": (
+                                    "Selector app is not available in this client — "
+                                    "asking for the choice on the confirmation card instead."
+                                ),
+                            },
+                        )
+                        tool_calls_log.append(
+                            build_tool_call_log_entry(
+                                step=step,
+                                agent_name=self.agent_name,
+                                tool_name=block.name,
+                                params=block.input,
+                                result_str=result_str,
+                                duration_ms=elapsed_ms,
+                            )
+                        )
+                        tool_results_content.append(
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": block.id,
+                                "content": result_str,
+                                "is_error": True,
+                            }
+                        )
+                        continue
+                    # ── End ns_selector_app redirect ──
 
                     policy_result = policy_evaluate(active_policy, block.name, block.input)
                     if not policy_result["allowed"]:

@@ -758,3 +758,84 @@ class TestDelegationVersusRepair:
         confirmations = [p for t, p in events if t == "confirmation_required"]
         assert len(confirmations) == 1
         assert [s["name"] for s in confirmations[0]["editable_slots"]] == ["subsidiary"]
+
+
+class TestSelectorAppRedirectReachesTheForm:
+    """The redirect is only worth anything if it ends at the slot form.
+
+    Measured on staging: 3 of 5 "create a customer" attempts called
+    ns_selector_app and told the operator a picker had opened, when nothing
+    had. This proves the whole chain — selector call intercepted, model told
+    which call to make instead, next proposal carrying ask_user, card rendered
+    with a server-fetched dropdown.
+    """
+
+    @pytest.mark.asyncio
+    async def test_selector_call_is_redirected_and_then_reaches_the_card(self):
+        from app.services.chat.llm_adapter import LLMResponse, TokenUsage, ToolUseBlock
+
+        agent = _make_agent()
+        create_name = _ext("ns_createRecord")
+        selector_call = LLMResponse(
+            text_blocks=[],
+            tool_use_blocks=[ToolUseBlock(id="s1", name=_ext("ns_selector_app"), input={"recordType": "subsidiary"})],
+            usage=TokenUsage(input_tokens=10, output_tokens=10),
+        )
+        # What the model does after being told the selector is unavailable.
+        retry = LLMResponse(
+            text_blocks=[],
+            tool_use_blocks=[
+                ToolUseBlock(
+                    id="t1",
+                    name=create_name,
+                    input={
+                        "recordType": "customer",
+                        "body": {"companyname": "Acme"},
+                        "ask_user": ["subsidiary"],
+                    },
+                )
+            ],
+            usage=TokenUsage(input_tokens=10, output_tokens=10),
+        )
+        adapter = _make_adapter([_metadata_step(_ext("ns_getRecordTypeMetadata")), selector_call, retry, _final_step()])
+
+        with _patches():
+            events = await _run(agent, adapter)
+
+        # The selector was answered, never dispatched to NetSuite.
+        selector_ends = [
+            p
+            for t, p in events
+            if t == "tool_end" and "Selector app is not available" in (p.get("result_summary") or "")
+        ]
+        assert len(selector_ends) == 1
+
+        # And the turn ends where it should: a card with a real dropdown.
+        confirmations = [p for t, p in events if t == "confirmation_required"]
+        assert len(confirmations) == 1
+        slots = confirmations[0]["editable_slots"]
+        assert [s["name"] for s in slots] == ["subsidiary"]
+        assert slots[0]["allowed"] == [{"value": "1", "label": "Framework Inc"}]
+
+    @pytest.mark.asyncio
+    async def test_the_redirect_tells_the_model_no_picker_was_shown(self):
+        """The specific falsehood being corrected. Without this the model
+        narrates "I've opened the selector" regardless, because that is what
+        it believed it was doing."""
+        from app.services.chat.llm_adapter import LLMResponse, TokenUsage, ToolUseBlock
+
+        agent = _make_agent()
+        selector_call = LLMResponse(
+            text_blocks=[],
+            tool_use_blocks=[ToolUseBlock(id="s1", name=_ext("ns_selector_app"), input={"recordType": "subsidiary"})],
+            usage=TokenUsage(input_tokens=10, output_tokens=10),
+        )
+        adapter = _make_adapter([_metadata_step(_ext("ns_getRecordTypeMetadata")), selector_call, _final_step()])
+
+        with _patches():
+            events = await _run(agent, adapter)
+
+        log = [p for t, p in events if t == "response"][0].tool_calls_log
+        entry = next(e for e in log if "selector_app" in e["tool"])
+        assert "selector_unavailable" in entry["result_summary"]
+        assert "ask_user" in entry["result_summary"]
