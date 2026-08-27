@@ -47,8 +47,20 @@ note() { NOTES+=("$1");  printf '  NOTE  %s\n' "$1"; }   # true, but not caused 
 
 TMP="${TMPDIR:-/tmp}/verify.$$"; mkdir -p "$TMP"
 BASEWT=""
+ABORTED=0
 cleanup() { [[ -n "$BASEWT" ]] && git worktree remove --force "$BASEWT" >/dev/null 2>&1; rm -rf "$TMP"; }
-trap cleanup EXIT INT TERM
+# INT/TERM get their OWN handler. Sharing one trap with EXIT meant a signal tore
+# down $TMP and then let the script carry on to the verdict — which is how a
+# killed run recorded PASS on 2026-08-27. An interrupted run knows nothing, so
+# it must say nothing: no verdict, and a non-zero exit.
+on_signal() {
+  ABORTED=1
+  echo "verify.sh: interrupted — NO verdict recorded (this run proves nothing)" >&2
+  cleanup
+  exit 130
+}
+trap cleanup EXIT
+trap on_signal INT TERM
 
 # Capture WHAT IS BEING VERIFIED once, at the start, and use it for both the banner
 # and the evidence record. Re-querying HEAD when the run finishes attributes the
@@ -179,6 +191,19 @@ else
           fail "${_herr} tests ERRORed — they did not run, so this is not evidence" \
                "same count on $BASE, so not introduced here — but fix the environment (is Postgres up?) before claiming done"
         fi
+        # comm on a MISSING file writes to stderr and prints NOTHING — and an
+        # empty `new` is the success condition three lines down. So a vanished
+        # temp file (an interrupted run, a cleanup that fired early, a full
+        # disk) reads as "no new failing tests" and this script reports PASS
+        # having compared nothing. Observed 2026-08-27: a killed run logged
+        # `comm: .../head.ids: No such file` immediately followed by
+        # `PASS  no NEW failing tests`, and recorded PASS for that sha — the
+        # exact lie the evidence log exists to prevent, written BY the thing
+        # that prevents it. Check the inputs before trusting their comparison.
+        if [[ ! -r "$TMP/head.ids" || ! -r "$TMP/base.ids" ]]; then
+          fail "comparison inputs are missing — nothing was compared" \
+               "head.ids readable=$([[ -r "$TMP/head.ids" ]] && echo yes || echo NO), base.ids readable=$([[ -r "$TMP/base.ids" ]] && echo yes || echo NO)"
+        else
         new="$(comm -23 "$TMP/head.ids" "$TMP/base.ids")"
         fixedids="$(comm -13 "$TMP/head.ids" "$TMP/base.ids")"
         fixed="$(printf '%s' "$fixedids" | grep -c . || true)"
@@ -197,6 +222,7 @@ else
           fi
         else
           fail "NEW failing tests vs $BASE — these are yours" "$(echo "$new" | head -8)"
+        fi
         fi
       fi
     else fail "could not create baseline worktree for $BASE"; fi
@@ -220,6 +246,14 @@ fi
 # and stop_guard.py reads it — one producer, one consumer, no inference.
 record() {  # $1 = verdict
   local dir tree
+  # Belt to on_signal's braces: if anything set ABORTED, this run compared
+  # nothing and must leave no evidence behind. Silence is the correct output
+  # for a run that was cut short — the Stop hook then correctly reports "no
+  # PASS recorded", which is true.
+  if [[ "${ABORTED:-0}" -eq 1 ]]; then
+    echo "verify.sh: aborted run — leaving no evidence line" >&2
+    return 0
+  fi
   dir="$(git rev-parse --git-common-dir 2>/dev/null)/verify-runs"
   # Whether the working tree was clean. A PASS earned at a sha does NOT cover
   # uncommitted edits sitting on top of it, and a fresh branch starts at its base
