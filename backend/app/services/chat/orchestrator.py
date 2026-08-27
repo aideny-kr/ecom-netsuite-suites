@@ -2236,6 +2236,8 @@ async def run_chat_turn(
 
                             from app.models.tenant import Tenant as _Tenant
                             from app.services.chat.netsuite_record_url import build_record_url
+                            from app.services.chat.tools import parse_external_tool_name as _parse_ext
+                            from app.services.mcp_connector_service import get_mcp_connector as _get_conn
 
                             _new_id = (
                                 _exec_result.get("recordId") or _exec_result.get("id") or _exec_result.get("internalId")
@@ -2243,9 +2245,31 @@ async def run_chat_turn(
                                 else None
                             )
                             if _new_id:
-                                _acct = await db.scalar(
-                                    _sel(_Tenant.netsuite_account_id).where(_Tenant.id == tenant_id)
-                                )
+                                # Resolve the account from the CONNECTOR that
+                                # executed this write, not from the tenant's
+                                # single netsuite_account_id. The moment a
+                                # tenant has both a sandbox and a production
+                                # connector, a tenant-wide value sends a
+                                # sandbox write's link into PRODUCTION — worse
+                                # than no link, because it invites someone to
+                                # conclude the write failed, or to go hunting
+                                # in production for a record deliberately kept
+                                # out of it. The connector id is recoverable
+                                # from the signed tool_name.
+                                _acct = None
+                                _parsed_conn = _parse_ext(tool_name)
+                                if _parsed_conn:
+                                    _conn_row = await _get_conn(db, _parsed_conn[0], tenant_id)
+                                    _acct = (
+                                        ((_conn_row.metadata_json or {}) or {}).get("account_id") if _conn_row else None
+                                    )
+                                if not _acct:
+                                    # Single-connector tenants have no
+                                    # ambiguity; fall back rather than drop the
+                                    # link entirely.
+                                    _acct = await db.scalar(
+                                        _sel(_Tenant.netsuite_account_id).where(_Tenant.id == tenant_id)
+                                    )
                                 _record_url = build_record_url(_acct, _record_type, _new_id)
                                 if _record_url:
                                     _updated_so_record_url = _record_url

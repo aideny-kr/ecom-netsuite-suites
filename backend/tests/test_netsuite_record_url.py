@@ -80,3 +80,31 @@ def test_record_id_is_url_safe():
     function must not be the weak point if that ever changes."""
     url = build_record_url("6738075", "customer", "5 795008")
     assert url is not None and " " not in url
+
+
+# ---------------------------------------------------------------------------
+# The link must name the account that actually executed the write
+# ---------------------------------------------------------------------------
+#
+# Found by the adversarial pass of the sandbox research. The orchestrator built
+# the link from Tenant.netsuite_account_id — a single tenant-wide value. The
+# moment a tenant has BOTH a sandbox and a production connector (the whole
+# point of the sandbox work), a sandbox write would hand the operator a link
+# pointing into PRODUCTION.
+#
+# That is worse than no link: it sends someone to confirm a record that does
+# not exist there, and invites them to conclude the write failed — or, worse,
+# to go looking in production for something they deliberately kept out of it.
+#
+# The account must come from the connector that executed the write, which is
+# recoverable from the signed tool_name.
+
+
+def test_the_link_uses_the_executing_account_not_the_tenant_default():
+    """Same record id, two environments, two different hosts."""
+    prod = build_record_url("6738075", "customer", "5795008")
+    sandbox = build_record_url("6738075_SB1", "customer", "5795008")
+    assert prod is not None and sandbox is not None
+    assert prod != sandbox
+    assert "6738075.app.netsuite.com" in prod
+    assert "6738075-sb1.app.netsuite.com" in sandbox
