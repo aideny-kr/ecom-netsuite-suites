@@ -497,3 +497,185 @@ class TestScriptReferencesSurviveSanitization:
         out = sanitize("import", raw)
         assert out["hooks"]["preSavePage"] == {"_scriptId": "scr6", "function": "beforeSave"}
         assert "set-cookie" not in _dumped(out)
+
+
+class TestFlowTopologySurvivesSanitization:
+    """FIX ROUND 3: dropping a flow's `pageGenerators`/`pageProcessors`/
+    `routers` is the SAME silent-failure class as round 2's `_scriptId` gap,
+    with a wider blast radius -- these ARE the flow map. Task 5 builds
+    `celigo_flow_steps` from exactly these ids; a flow sanitizing down to
+    `{_id, name}` means every stored flow has zero steps, and the map comes
+    back empty with nothing erroring. Step/branch ids and routing config are
+    ids and config, not captured payload data -- there is no case where
+    dropping them is correct.
+
+    Real shapes (observed-shapes.md "routers" section, probed live
+    2026-08-27, across 60 real flows): every multi-subsidiary sales-order
+    flow -- the ones the recon chain depends on -- puts its steps inside
+    `routers[].branches[].pageProcessors`, NOT the top-level arrays. A Task 5
+    read of only `pageGenerators`/`pageProcessors` silently misses most steps
+    in exactly the flows that matter most.
+    """
+
+    def test_top_level_page_generators_and_processors_survive(self):
+        raw = {
+            "_id": "f1",
+            "name": "Backfill - RA Original Order Shipped Date",
+            "pageGenerators": [{"_exportId": "exp1", "skipRetries": True}],
+            "pageProcessors": [
+                {
+                    "type": "import",
+                    "_importId": "imp1",
+                    "responseMapping": {"fields": [{"extract": "id", "generate": "internalid"}], "lists": []},
+                }
+            ],
+        }
+        out = sanitize("flow", raw)
+        assert out["pageGenerators"] == [{"_exportId": "exp1", "skipRetries": True}]
+        assert out["pageProcessors"][0]["type"] == "import"
+        assert out["pageProcessors"][0]["_importId"] == "imp1"
+        assert out["pageProcessors"][0]["responseMapping"] == {"fields": [{"extract": "id", "generate": "internalid"}]}
+
+    def test_routers_branches_page_processors_survive(self):
+        """The Task 5 defect this round exists to prevent: every
+        multi-subsidiary sales-order flow puts its steps inside
+        routers[].branches[].pageProcessors, not the top-level arrays --
+        the import id inside a branch must survive."""
+        raw = {
+            "_id": "f2",
+            "name": "NS - Create Sales Order (multi-sub)",
+            "routers": [
+                {
+                    "id": "rtr-A",
+                    "name": "",
+                    "routeRecordsTo": "first_matching_branch",
+                    "routeRecordsUsing": "input_filters",
+                    "branches": [
+                        {
+                            "name": "Framework Intl",
+                            "branchId": "brn-A1",
+                            "inputFilter": {"rules": [{"field": "subsidiary", "value": "intl"}]},
+                            "pageProcessors": [
+                                {
+                                    "type": "import",
+                                    "_importId": "imp-intl",
+                                    "responseMapping": {"fields": [{"extract": "internalid", "generate": "id"}]},
+                                }
+                            ],
+                        }
+                    ],
+                    "script": {"function": "branching"},
+                }
+            ],
+        }
+        out = sanitize("flow", raw)
+        router = out["routers"][0]
+        assert router["routeRecordsTo"] == "first_matching_branch"
+        assert router["routeRecordsUsing"] == "input_filters"
+        branch = router["branches"][0]
+        assert branch["inputFilter"] == {"rules": [{"field": "subsidiary", "value": "intl"}]}
+        assert branch["pageProcessors"] == [
+            {
+                "type": "import",
+                "_importId": "imp-intl",
+                "responseMapping": {"fields": [{"extract": "internalid", "generate": "id"}]},
+            }
+        ]
+
+    def test_next_router_id_and_branch_id_survive(self):
+        """`nextRouterId` chains routers into a graph -- Task 5 needs the
+        chain, not a flat list, so both ids must survive."""
+        raw = {
+            "_id": "f3",
+            "name": "Pass-through router flow",
+            "routers": [
+                {
+                    "id": "rtr-A",
+                    "name": "",
+                    "branches": [
+                        {
+                            "name": "",
+                            "pageProcessors": [],
+                            "nextRouterId": "rtr-B",
+                            "branchId": "brn-A1",
+                        }
+                    ],
+                }
+            ],
+        }
+        out = sanitize("flow", raw)
+        branch = out["routers"][0]["branches"][0]
+        assert branch["nextRouterId"] == "rtr-B"
+        assert branch["branchId"] == "brn-A1"
+
+    def test_router_script_function_survives(self):
+        """The REAL shape: every router observed live carries
+        `script: {function: "branching"}` with NO `_scriptId`
+        (observed-shapes.md)."""
+        raw = {
+            "_id": "f4",
+            "name": "Branching router flow",
+            "routers": [{"id": "rtr-A", "name": "", "branches": [], "script": {"function": "branching"}}],
+        }
+        out = sanitize("flow", raw)
+        assert out["routers"][0]["script"] == {"function": "branching"}
+
+    def test_router_script_id_survives_if_ever_present(self):
+        """HYPOTHETICAL, NOT OBSERVED LIVE (per observed-shapes.md: "DO NOT
+        write a test asserting routers[].script._scriptId exists -- it does
+        not in any probed router"). Every router probed used
+        `routeRecordsUsing: "input_filters"`, never `"script"`. This fixture
+        only proves the schema doesn't special-case function-only routers --
+        IF a `_scriptId` ever does appear here, it must survive too, same as
+        every other script attachment site."""
+        raw = {
+            "_id": "f5",
+            "name": "Hypothetical script-routed flow -- shape invented, not observed",
+            "routers": [
+                {"id": "rtr-A", "name": "", "branches": [], "script": {"_scriptId": "scr9", "function": "custom"}}
+            ],
+        }
+        out = sanitize("flow", raw)
+        assert out["routers"][0]["script"] == {"_scriptId": "scr9", "function": "custom"}
+
+    def test_captured_payload_nested_inside_router_topology_is_still_stripped(self):
+        """Preserving topology must not reopen the payload hole fixed in
+        rounds 1-2. Plants a captured-payload-shaped value at three nesting
+        levels at once: the router itself, a branch, and a pageProcessor's
+        responseMapping."""
+        raw = {
+            "_id": "f6",
+            "name": "Flow with a captured payload smuggled into topology",
+            "routers": [
+                {
+                    "id": "rtr-A",
+                    "name": "",
+                    "mockResponse": {"_headers": {"set-cookie": ["router-leak"]}},
+                    "branches": [
+                        {
+                            "name": "",
+                            "mockOutput": {"result": "branch-leak"},
+                            "pageProcessors": [
+                                {
+                                    "type": "import",
+                                    "_importId": "imp1",
+                                    "sampleData": {"customer": {"email": "leak@example-shop.test"}},
+                                    "responseMapping": {
+                                        "fields": [{"extract": "id", "generate": "internalid"}],
+                                        "rawData": "leak",
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+        out = sanitize("flow", raw)
+        assert "set-cookie" not in _dumped(out)
+        assert "branch-leak" not in _dumped(out)
+        assert "example-shop.test" not in _dumped(out)
+        pp = out["routers"][0]["branches"][0]["pageProcessors"][0]
+        assert "rawData" not in pp["responseMapping"]
+        assert pp["_importId"] == "imp1"
+        assert pp["responseMapping"] == {"fields": [{"extract": "id", "generate": "internalid"}]}

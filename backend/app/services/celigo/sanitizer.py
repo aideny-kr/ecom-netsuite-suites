@@ -32,6 +32,18 @@ the flow map is concerned. `filter.script`/`transform.script` and `hooks.*`
 (an open-ended, never-enumerated key set) are allowlisted for exactly this
 reason -- see `_SCRIPT_REF` below.
 
+FIX ROUND 3 (2026-08-27): the same silent-failure class as round 2, wider
+blast radius -- `_FLOW` had no schema for `pageGenerators`/`pageProcessors`/
+`routers` at all, so a real flow sanitized down to `{_id, name}`. That IS the
+flow map: Task 5 builds `celigo_flow_steps` from exactly these ids. Worse,
+per a live probe across 60 real flows (observed-shapes.md "routers"
+section), every multi-subsidiary sales-order flow -- the ones the recon
+chain depends on -- puts its steps inside `routers[].branches[].
+pageProcessors`, not the top-level arrays, so the gap hit hardest exactly
+where it mattered most. Step/branch ids and routing config are ids and
+config, not captured payload data; there is no case where dropping them is
+correct. See `_PAGE_GENERATOR`/`_PAGE_PROCESSOR`/`_ROUTER` below.
+
 Allowlist, never denylist: a denylist of "known dangerous" field names only
 stops fields someone already thought to list. An allowlist stops everything
 by default and requires each field to be named IN before it survives, so an
@@ -157,6 +169,74 @@ _INTEGRATION: Schema = {
     "lastModified": None,
 }
 
+# `responseMapping` shape CONFIRMED live, embedded inline inside pageProcessors
+# (observed-shapes.md, fix round 3): {fields: [{extract, generate}], lists: []}.
+# Config (field-name mapping), not captured data -- Task 5 needs it to build
+# celigo_flow_steps, safe to store. `lists` is left out for the same reason
+# `netsuite_da.mapping.lists` was in round 1: observed empty, element shape
+# genuinely unverified -- dropped rather than guessed at.
+_RESPONSE_MAPPING_FIELD: Schema = {
+    "extract": None,
+    "generate": None,
+}
+_RESPONSE_MAPPING: Schema = {
+    "fields": _RESPONSE_MAPPING_FIELD,
+}
+
+# A flow step reference. CONFIRMED live at the flow's top level
+# (pageGenerators/pageProcessors) AND, per observed-shapes.md, in the
+# IDENTICAL shape inside every router branch ("pageProcessors: [ ...same
+# shape as above... ]") -- reused as one schema for both. This IS the flow
+# map's topology (fix round 3): Task 5 builds celigo_flow_steps from exactly
+# these ids, so dropping them silently empties the map.
+_PAGE_GENERATOR: Schema = {
+    "_exportId": None,
+    "skipRetries": None,
+}
+_PAGE_PROCESSOR: Schema = {
+    "type": None,
+    "_exportId": None,
+    "_importId": None,
+    "proceedOnFailure": None,
+    "responseMapping": _RESPONSE_MAPPING,
+}
+
+# `routers[].branches[].inputFilter` -- config (comparison rules), not a
+# script. Structurally simpler than filter/transform's expression form: no
+# `type`/`script`, and no script ref has ever been observed here.
+_INPUT_FILTER: Schema = {
+    "rules": None,
+}
+
+# `routers[].branches[]` -- CONFIRMED live, both forms (observed-shapes.md:
+# pass-through and branching routers). `nextRouterId` chains routers into a
+# graph -- Task 5 needs the chain, not a flat list, so it MUST survive
+# alongside `branchId`.
+_ROUTER_BRANCH: Schema = {
+    "name": None,
+    "branchId": None,
+    "nextRouterId": None,
+    "inputFilter": _INPUT_FILTER,
+    "pageProcessors": _PAGE_PROCESSOR,
+}
+
+# `routers[]` -- CONFIRMED live. `script` is a real attachment site (plan's
+# Verified Facts explicitly list "router branches"), but every router
+# observed live carries `script: {function: "branching"}` with NO
+# `_scriptId` -- every one of those routers used
+# `routeRecordsUsing: "input_filters"`, never `"script"`. Reuses
+# `_SCRIPT_REF` anyway so a `_scriptId` survives if a future router ever
+# does carry one (same reasoning as filter/transform: preserve the ref,
+# never guess whether one exists in a fixture).
+_ROUTER: Schema = {
+    "id": None,
+    "name": None,
+    "routeRecordsTo": None,
+    "routeRecordsUsing": None,
+    "branches": _ROUTER_BRANCH,
+    "script": _SCRIPT_REF,
+}
+
 _FLOW: Schema = {
     "_id": None,
     "name": None,
@@ -168,6 +248,9 @@ _FLOW: Schema = {
     "_sourceId": None,
     "numOpenError": None,
     "lastErrorAt": None,
+    "pageGenerators": _PAGE_GENERATOR,
+    "pageProcessors": _PAGE_PROCESSOR,
+    "routers": _ROUTER,
     "aiDescription": _AI_DESCRIPTION,
 }
 
