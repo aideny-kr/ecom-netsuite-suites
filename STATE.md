@@ -36,7 +36,7 @@ Updated at the end of every task, not "later".
 |---|---|---|---|
 | `feat/dev-loop-and-harness` | T2 | 21 commits, process only — gated ×3, blockers fixed, **frozen** | nothing |
 | `feat/agent-graph-operating-model` | T2 | Track O (22 majors) + reject action, **ungated** | needs Track O decision |
-| `feat/rolling-period` | T2 | Stage 1 **built + eyeball-approved**, ungated. Last full verify RED on 2 auth tests (see OPEN) | **093 collides with recon-reject** · needs 1 clean verify before gating |
+| `feat/rolling-period` | T2 | Stage 1 built + eyeball-approved. verify PASS @ `bbb28f8f`. Gate ×2 run (both valid, pinned, codex). Round-2 fixes **UNCOMMITTED, mid-flight** | finish round-2 fixes → verify → gate round 3 |
 
 **SHIPPED 2026-08-17 — `fix/ns-account-switch-and-chat-burst` → PR #194, squashed to
 `54729804`, deployed and live-verified on staging.** Ticket 86bba299w closed. It had
@@ -269,6 +269,35 @@ Written so the next session does not re-litigate these.
 - **Don't add a rule to CLAUDE.md when a docstring next to the code would carry it.**
 
 ## OPEN — needs a human, blocking something
+
+- **`feat/rolling-period` — resume here.** Worktree
+  `.claude/worktrees/feat-rolling-period`, HEAD `bbb28f8f` (verify PASS at that sha).
+  **There is UNCOMMITTED work in the tree** from a round-2 gate-fix agent that was still
+  running when the session ended — do NOT `git checkout --` it:
+  - DONE in tree: MAJOR A (`dashboard-tracking-empty-state.tsx` + `page.tsx` +
+    `dashboard-switcher.tsx`) — selecting a tracking series with no report yet used to
+    dump the user on the generic "nothing published" panel *with the switcher gone*, so
+    there was no way back. Also the resolver GUC-between-queries minor.
+  - IN PROGRESS: **MAJOR B** — `playbooks.py` creates the `ReportSeries` row BEFORE
+    `_execute_sources`, and a tool call in there can COMMIT mid-flight (OAuth token
+    refresh), so a later compose failure leaves a phantom series: zero reports, no audit,
+    still listed in `published_series`. Its two RED tests are already written
+    (`test_compose_playbook_tracking_failed_compose_leaves_no_orphaned_series`,
+    `..._series_conflicting_row_reuses_existing_not_500`) and currently FAIL — that is the
+    TDD red phase, not a regression. **Intended fix:** keep a read-only SELECT pre-check
+    before the compose (so a repeat compose still short-circuits cheaply) and move the
+    get-or-create upsert to AFTER the compose succeeds, immediately before the Report
+    insert — so the row that could be orphaned is never created.
+  - Then: `./scripts/verify.sh` (full — `--quick` is not evidence), then gate round 3
+    **pinned**: `Workflow({name:"code-review-multiangle", args:{target:"feat/rolling-period", base:"origin/main"}})`.
+  - **Do NOT merge** — deployment agents were active as of 2026-08-27, and merging
+    auto-deploys staging. The 093 collision is already resolved (main's
+    `093_recon_reject_labels` landed first; this branch re-parented onto it and merged main in).
+  - Gate history on this branch: round 1 → 2 majors (RLS GUC cleared by an in-request
+    OAuth commit; dashboard GET doing 2 live SuiteQL calls per page load) — both fixed in
+    `bbb28f8f`. Round 2 → 2 majors (the two above). Both rounds valid: target pinned,
+    `codex_used: true`, 0 UNVERIFIED. Expect a round 3 to find more; that has been the
+    pattern all the way through.
 
 - **`feat/rolling-period`'s last full `verify.sh` is RED — on two auth tests this branch
   does not touch.** `test_auth_security.py::TestLoginRateLimit::test_rate_limit_blocks_after_10`
