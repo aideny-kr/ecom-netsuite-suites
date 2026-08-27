@@ -44,6 +44,23 @@ where it mattered most. Step/branch ids and routing config are ids and
 config, not captured payload data; there is no case where dropping them is
 correct. See `_PAGE_GENERATOR`/`_PAGE_PROCESSOR`/`_ROUTER` below.
 
+FIX ROUND 4 (2026-08-27): a seam between this module and Task 2's
+`walk_script_refs` (app.services.celigo.graph) -- neither task's own tests
+could catch it alone, only composing the two: `walk_script_refs(sanitize(x))`
+found FEWER refs than `walk_script_refs(x)` for imports and for flows with an
+inlined step script. `_IMPORT` had `filter`/`hooks` but never gained
+`transform` when round 2 added it to `_EXPORT` -- an artifact of what got
+probed, not a real API distinction, and it dropped "the regression case...
+the most-used script in the live account" (plan's Verified Facts) on every
+import. `_PAGE_PROCESSOR` (round 3) also had no `hooks`/`transform`/`filter`
+of its own, so a script ref inlined inside a flow-embedded pageProcessor
+would be lost too (not observed live, added anyway -- see `_PAGE_PROCESSOR`).
+`TestSanitizerAndWalkerCompose` in the test file asserts the composition
+property directly (`walk_script_refs(sanitize(kind, obj)) ==
+walk_script_refs(obj)` as sets) for every kind that can carry scripts, so a
+future 7th kind or attachment site that forgets the allowlist fails THAT
+test instead of the flow map silently losing scripts again.
+
 Allowlist, never denylist: a denylist of "known dangerous" field names only
 stops fields someone already thought to list. An allowlist stops everything
 by default and requires each field to be named IN before it survives, so an
@@ -193,12 +210,22 @@ _PAGE_GENERATOR: Schema = {
     "_exportId": None,
     "skipRetries": None,
 }
+# FIX ROUND 4: hooks/transform/filter added alongside responseMapping. NOT
+# observed live -- every pageProcessor probed references its export/import
+# BY ID, never inlines a script container -- added anyway as cheap
+# insurance: the composition property this round exists to guarantee
+# (walk_script_refs(sanitize(x)) == walk_script_refs(x)) must hold even if
+# Celigo ever does inline one here, and an allowlist gap should never be the
+# reason a real script ref silently disappears.
 _PAGE_PROCESSOR: Schema = {
     "type": None,
     "_exportId": None,
     "_importId": None,
     "proceedOnFailure": None,
     "responseMapping": _RESPONSE_MAPPING,
+    "hooks": _HOOKS,
+    "transform": _TRANSFORM,
+    "filter": _FILTER,
 }
 
 # `routers[].branches[].inputFilter` -- config (comparison rules), not a
@@ -281,6 +308,14 @@ _EXPORT: Schema = {
 # guess, and observed-shapes.md proves it wrong. The real mapping config
 # lives at `netsuite_da.mapping` (now schema'd above). `filter` IS confirmed
 # on import objects and was previously missing here entirely.
+#
+# NOTE (fix round 4): `transform` was added to `_EXPORT` in round 2 but never
+# here -- an import/export asymmetry that was an artifact of what got probed
+# (the one live import captured happened to carry `filter`, not `transform`),
+# NOT a real API distinction. Celigo imports can carry `transform` too, and
+# it's "the regression case... the most-used script in the live account"
+# per the plan's Verified Facts -- dropping it on imports silently missed
+# the single most common script attachment site for exactly this kind.
 _IMPORT: Schema = {
     "_id": None,
     "name": None,
@@ -289,6 +324,7 @@ _IMPORT: Schema = {
     "_sourceId": None,
     "sandbox": None,
     "filter": _FILTER,
+    "transform": _TRANSFORM,
     "hooks": _HOOKS,
     "netsuite_da": _NETSUITE_DA,
     "aiDescription": _AI_DESCRIPTION,

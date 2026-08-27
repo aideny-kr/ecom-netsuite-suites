@@ -24,6 +24,7 @@ from __future__ import annotations
 import copy
 import json
 
+from app.services.celigo.graph import walk_script_refs
 from app.services.celigo.sanitizer import sanitize
 
 # Celigo's "test import"/"preview mapping" feature stores its last captured
@@ -679,3 +680,140 @@ class TestFlowTopologySurvivesSanitization:
         assert "rawData" not in pp["responseMapping"]
         assert pp["_importId"] == "imp1"
         assert pp["responseMapping"] == {"fields": [{"extract": "id", "generate": "internalid"}]}
+
+
+class TestSanitizerAndWalkerCompose:
+    """FIX ROUND 4: sanitize() (this module) and walk_script_refs() (Task 2,
+    app.services.celigo.graph, landed at bdab2b59) don't compose safely on
+    their own -- a script ref surviving in the RAW object can still be lost
+    after sanitize() if the allowlist doesn't cover every container the
+    walker searches. Rounds 2-3 covered filter/transform/hooks on export and
+    routers/pageProcessors on flow, but missed two seams that only appear
+    when the two are COMPOSED:
+
+    1. `transform` was added to `_EXPORT` in round 2 but never to `_IMPORT`
+       -- so `transform.script`, "the regression case... the most-used
+       script in the live account" per the plan's Verified Facts, silently
+       disappeared on imports while surviving on exports.
+    2. `_PAGE_PROCESSOR` (round 3) has no `hooks`/`transform`/`filter` of its
+       own, so a script ref inlined inside a flow-embedded pageProcessor --
+       top-level or inside a router branch -- would also be lost. Not
+       observed live (pageProcessors reference exports/imports by id in
+       every flow probed), added anyway as cheap insurance: the allowlist
+       should never be the reason a ref disappears if Celigo ever does
+       inline one.
+
+    The property under test, for every kind that can carry scripts (export,
+    import, flow): sanitizing must not change WHICH script refs
+    walk_script_refs finds, even though it must still strip everything else
+    -- a captured-payload-shaped value sits next to every script ref below
+    to prove this can't be satisfied by weakening the sanitizer. Compared as
+    SETS, not lists: `_apply_schema` builds its output in SCHEMA key order,
+    not the raw object's own key order, so the two traversals can legitimately
+    visit sibling containers in a different sequence -- that's an
+    implementation detail of dict ordering, not a change in which refs exist.
+    """
+
+    def test_export_script_refs_survive_composition(self):
+        raw = {
+            "_id": "e1",
+            "name": "export-with-scripts",
+            "filter": {
+                "type": "script",
+                "script": {"_scriptId": "FILT", "function": "onFilter"},
+                "mockResponse": {"_headers": {"set-cookie": ["filter-leak"]}},
+            },
+            "transform": {
+                "type": "script",
+                "script": {"_scriptId": "XFORM", "function": "onTransform"},
+                "mockOutput": {"result": "transform-leak"},
+            },
+            "hooks": {
+                "someFutureHook": {"_scriptId": "HOOKS", "function": "onHook"},
+            },
+        }
+        before = walk_script_refs(raw)
+        sanitized = sanitize("export", raw)
+        after = walk_script_refs(sanitized)
+        assert set(before) == set(after)
+        assert {r.script_id for r in after} == {"FILT", "XFORM", "HOOKS"}
+        assert "set-cookie" not in _dumped(sanitized)
+        assert "transform-leak" not in _dumped(sanitized)
+
+    def test_import_script_refs_survive_composition(self):
+        """THE round-4 defect, reproduced directly: before this fix,
+        `_IMPORT` had `filter`/`hooks` but no `transform`, so XFORM was lost
+        while FILT and HOOKS survived."""
+        raw = {
+            "_id": "i1",
+            "name": "import-with-scripts",
+            "adaptorType": "NetSuiteDistributedImport",
+            "filter": {
+                "type": "script",
+                "script": {"_scriptId": "FILT", "function": "onFilter"},
+                "sampleData": {"customer": {"email": "filter-leak@example-shop.test"}},
+            },
+            "transform": {
+                "type": "script",
+                "script": {"_scriptId": "XFORM", "function": "onTransform"},
+                "rawData": "transform-leak",
+            },
+            "hooks": {
+                "preSavePage": {"_scriptId": "HOOKS", "function": "onHook"},
+            },
+        }
+        before = walk_script_refs(raw)
+        sanitized = sanitize("import", raw)
+        after = walk_script_refs(sanitized)
+        assert set(before) == set(after)
+        assert {r.script_id for r in after} == {"FILT", "XFORM", "HOOKS"}
+        assert "example-shop.test" not in _dumped(sanitized)
+        assert "transform-leak" not in _dumped(sanitized)
+
+    def test_flow_script_refs_survive_composition_including_nested_page_processors(self):
+        """A script ref inlined inside a TOP-LEVEL pageProcessor's `hooks`,
+        AND inside a router branch's pageProcessor's `transform`, must both
+        survive -- not observed live, but the allowlist should not be the
+        reason a ref disappears if Celigo ever does inline one there."""
+        raw = {
+            "_id": "f1",
+            "name": "flow-with-scripts",
+            "pageProcessors": [
+                {
+                    "type": "import",
+                    "_importId": "imp-top",
+                    "hooks": {"preSavePage": {"_scriptId": "TOP", "function": "onTop"}},
+                    "mockOutput": {"leak": "top-level-leak"},
+                }
+            ],
+            "routers": [
+                {
+                    "id": "rtr-A",
+                    "name": "",
+                    "branches": [
+                        {
+                            "name": "",
+                            "pageProcessors": [
+                                {
+                                    "type": "import",
+                                    "_importId": "imp-branch",
+                                    "transform": {
+                                        "type": "script",
+                                        "script": {"_scriptId": "BRANCH", "function": "onBranch"},
+                                    },
+                                    "sampleData": {"customer": {"email": "branch-leak@example-shop.test"}},
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+        before = walk_script_refs(raw)
+        sanitized = sanitize("flow", raw)
+        after = walk_script_refs(sanitized)
+        assert set(before) == set(after)
+        assert {r.script_id for r in after} == {"TOP", "BRANCH"}
+        dumped = _dumped(sanitized)
+        assert "top-level-leak" not in dumped
+        assert "branch-leak" not in dumped
