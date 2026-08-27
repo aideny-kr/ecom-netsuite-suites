@@ -592,65 +592,42 @@ class TestFlowErrorsForStep:
 
 
 class TestErrorSummaryForIntegration:
-    """Use `_integrationId` for the summary mode -- never `_id` alone (see
-    TestFlowErrorsForStep). Built on confirmed primitives only: `GET
-    /v1/flows?_integrationId=` is a documented, real query filter. See
-    task-3-report.md for the documented limitation this implies."""
+    """FIX ROUND 1 (team lead, live-verified 2026-08-27): two live calls
+    against the same three real flows, same order --
+    `list_flows(limit=3, includeErrorCounts=true)` put `"numOpenError": 0` on
+    every item; `list_flows(limit=3)` (plain) had NO `numOpenError` key at
+    all, on any item. So a plain `GET /v1/flows?_integrationId=` -- the only
+    primitive this function had confirmed evidence for -- can NEVER carry a
+    real error count; summing an always-absent field always produces 0,
+    indistinguishable from "no errors" for an account that currently has
+    103+ open errors across 13+ flows. A monitoring feature that silently
+    reports zero problems is worse than one that reports nothing.
+
+    THE FIX: this function now refuses to guess. It raises `CeligoError`
+    unconditionally, before making any request, rather than compute and
+    return a number that looks like a real count but isn't. There is no
+    verified REST primitive today that can honestly answer "how many open
+    errors does this integration have" -- the only known populating path,
+    `POST /v1/flows/runs/stats`, is undocumented and was never confirmed.
+    Callers need either that endpoint (once verified) or a per-flow,
+    per-step fan-out through `list_flow_errors_for_step`.
+    """
 
     @pytest.mark.asyncio
-    async def test_integrationid_reaches_the_query_string(self):
-        seen = {}
+    async def test_raises_even_given_a_client_that_would_otherwise_answer_and_makes_no_request(self):
+        """The strong form: even wired to a client that would return a
+        plausible-looking (but numOpenError-absent, per the live-verified
+        finding) flow listing, this must still raise -- proving the refusal
+        is unconditional -- and it must not spend a network call finding
+        that out."""
+        calls = []
 
         def handler(request: httpx.Request) -> httpx.Response:
-            seen["params"] = dict(request.url.params)
-            return httpx.Response(200, json=[])
-
-        async with _json_client(handler) as c:
-            await list_error_summary_for_integration("integ1", token="tok", client=c)
-
-        assert seen["params"]["_integrationId"] == "integ1"
-
-    @pytest.mark.asyncio
-    async def test_aggregates_open_error_counts_across_flows(self):
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(
-                200,
-                json=[
-                    {"_id": "f1", "name": "Flow One", "numOpenError": 3},
-                    {"_id": "f2", "name": "Flow Two", "numOpenError": 0},
-                ],
-            )
-
-        async with _json_client(handler) as c:
-            summary = await list_error_summary_for_integration("integ1", token="tok", client=c)
-
-        assert summary["integration_id"] == "integ1"
-        assert summary["total_errors"] == 3
-        assert summary["affected_flows"] == 1
-        assert len(summary["flows"]) == 2
-
-    @pytest.mark.asyncio
-    async def test_missing_error_counts_degrade_to_zero_not_a_crash(self):
-        """If Celigo doesn't populate numOpenError on a plain listing call
-        (unverified either way -- see task-3-report.md), this must not
-        raise; it must report zero rather than fabricate a count."""
-
-        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(1)
             return httpx.Response(200, json=[{"_id": "f1", "name": "Flow One"}])
 
         async with _json_client(handler) as c:
-            summary = await list_error_summary_for_integration("integ1", token="tok", client=c)
+            with pytest.raises(CeligoError):
+                await list_error_summary_for_integration("integ1", token="tok", client=c)
 
-        assert summary["total_errors"] == 0
-        assert summary["affected_flows"] == 0
-        assert len(summary["flows"]) == 1
-
-    @pytest.mark.asyncio
-    async def test_returns_a_dict_not_a_generator(self):
-        def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, json=[])
-
-        async with _json_client(handler) as c:
-            summary = await list_error_summary_for_integration("integ1", token="tok", client=c)
-
-        assert isinstance(summary, dict)
+        assert calls == []

@@ -1,8 +1,10 @@
 """Celigo integrator.io REST client.
 
 Plan A scope: token verification. Plan B (Task 3) adds paginated, projected
-resource fetchers: `list_resource`, `get_resource`, `list_flow_errors_for_step`,
-`list_error_summary_for_integration`.
+resource fetchers: `list_resource`, `get_resource`, `list_flow_errors_for_step`.
+`list_error_summary_for_integration` also exists for signature compatibility
+but DELIBERATELY ALWAYS RAISES -- see its own docstring (FIX ROUND 1) for why
+there is no verified primitive to build it on yet.
 
 Two facts drive Plan A's shape:
   * EU accounts are fully isolated at api.eu.integrator.io. A US-region call
@@ -439,47 +441,46 @@ async def list_error_summary_for_integration(
     region: str = "us",
     client: httpx.AsyncClient | None = None,
 ) -> dict:
-    """Best-effort open-error summary for every flow in *integration_id*,
-    built ONLY from confirmed primitives: `GET /v1/flows?_integrationId=` is
-    a documented, real query filter (developer.celigo.com), and each
-    returned flow is sanitized through the existing `flow` allowlist, which
-    already carries `numOpenError`/`lastErrorAt` (sanitizer.py FIX ROUND 3).
+    """DELIBERATELY ALWAYS RAISES. Do not attempt to "fix" this by wiring it
+    back up to `GET /v1/flows?_integrationId=` -- that was tried and it was
+    wrong, not merely incomplete.
 
-    Uses `_integrationId`, never a bare flow id -- mirrors
-    `list_flow_errors_for_step`'s "never `_id` alone" rule for the same
-    underlying reason: an unscoped per-flow query is the mode observed to
-    come back empty.
+    FIX ROUND 1 (team lead, live-verified 2026-08-27): two live calls
+    against the same three real flows, same order --
+    `list_flows(limit=3, includeErrorCounts=true)` put `"numOpenError": 0` on
+    every item; `list_flows(limit=3)` (plain, no `includeErrorCounts`) had NO
+    `numOpenError` key at all, on ANY item. A plain `GET
+    /v1/flows?_integrationId=` -- the only primitive this function originally
+    had confirmed evidence for -- can therefore never carry a real error
+    count. The first version of this function summed that always-absent
+    field and returned `{"total_errors": 0, ...}` unconditionally -- a
+    silent false negative for an account that has 103+ open errors across
+    13+ flows right now. A monitoring feature that quietly reports zero
+    problems is worse than one that reports nothing: Task 6/7 would build a
+    "no errors to snapshot" path on it and nobody would ever see it fail.
 
-    KNOWN LIMITATION (see task-3-report.md): this does NOT independently
-    call the per-flow errors endpoint, and it is UNVERIFIED whether Celigo
-    populates `numOpenError` on a plain flow listing at all (it was not
-    observed on the one live flow probed in observed-shapes.md; it may only
-    appear via an unverified separate call). If it is absent on every flow,
-    `total_errors`/`affected_flows` both come back 0 -- a false negative,
-    not a crash. Do not treat a 0 here as proof an integration has no open
-    errors without independently confirming this assumption.
+    There is no verified REST primitive today that can honestly answer "how
+    many open errors does this integration have". The only known populating
+    path, `POST /v1/flows/runs/stats` (named only inside another MCP tool's
+    own description of its internals), is undocumented on
+    developer.celigo.com and was never confirmed against a real request or
+    response. Building on it blind would repeat exactly the mistake this fix
+    corrects, just moved one layer down.
+
+    Kept as a signature-compatible stub (same params, same declared
+    `-> dict`) rather than deleted, so a future task that DOES verify a real
+    summary primitive can fill this in without changing every call site --
+    but it fails loudly and immediately, before any request is made, until
+    that happens. Callers today have two honest options: verify
+    `POST /v1/flows/runs/stats` live first, or fan out per (flow_id,
+    step_id) through `list_flow_errors_for_step` once step ids are known
+    (e.g. from Task 5's flow-step extraction).
     """
-    owns_client = client is None
-    http = client or httpx.AsyncClient(timeout=_TIMEOUT)
-    flows: list[dict] = []
-    try:
-        async for flow in list_resource(
-            "flow",
-            token=token,
-            region=region,
-            params={"_integrationId": integration_id},
-            client=http,
-        ):
-            flows.append(flow)
-    finally:
-        if owns_client:
-            await http.aclose()
-
-    total_errors = sum((flow.get("numOpenError") or 0) for flow in flows)
-    affected_flows = sum(1 for flow in flows if (flow.get("numOpenError") or 0) > 0)
-    return {
-        "integration_id": integration_id,
-        "total_errors": total_errors,
-        "affected_flows": affected_flows,
-        "flows": flows,
-    }
+    raise CeligoError(
+        "list_error_summary_for_integration has no verified Celigo REST primitive to "
+        "answer from: numOpenError is ABSENT from a plain GET /v1/flows?_integrationId= "
+        "listing (live-verified 2026-08-27), and the only known populating path, "
+        "POST /v1/flows/runs/stats, is undocumented and unverified. Use "
+        "list_flow_errors_for_step(flow_id, step_id, ...) per step instead, or verify "
+        "the stats endpoint live before relying on this function."
+    )
