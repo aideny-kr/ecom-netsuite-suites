@@ -1221,6 +1221,14 @@ async def test_get_series_selection_resolver_failure_degrades_not_500(client, db
     ).status_code == 200
 
     _patch_resolver(monkeypatch, _UNREACHABLE)
+    # T2-gate MAJOR 2: the PUT above cached the successful JUN_CLOSED resolution for
+    # this tenant. Without clearing it, the GET below would legitimately reuse that
+    # cached answer instead of calling the resolver again -- which is the whole point
+    # of the cache, but it would mask what THIS test exists to exercise (a resolver
+    # failure degrading gracefully). Clearing simulates the TTL having elapsed.
+    from app.services.report.period_resolver import clear_period_cache
+
+    clear_period_cache()
     resp = await client.get("/api/v1/dashboard", headers=headers)
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -1522,3 +1530,93 @@ async def test_put_active_series_resolver_runs_before_commit_sees_tenant_context
     resp = await client.put("/api/v1/dashboard/active", headers=headers, json={"series_id": str(series.id)})
     assert resp.status_code == 200, resp.text
     assert seen["tenant_ctx"] == str(ta.id)
+
+
+# --- T2-gate fixes: tenant-context restore (defense in depth) + period-close cache --
+
+
+async def test_put_active_series_reestablishes_context_before_upsert_defense_in_depth(client, db, monkeypatch):
+    """MAJOR 1 defense-in-depth (T2 gate): set_active_dashboard's series branch must
+    re-set the tenant context itself immediately before its own RLS-protected write,
+    not rely solely on resolve_last_closed_period's own restore (period_resolver.py's
+    `finally` — see test_report_period_resolver.py's unit-level coverage of that) —
+    mirrors playbooks.py's own "tool calls may commit" re-set before its Report
+    insert. Asserted via CALL ORDERING (spy), the same idiom test_report_refresh.py
+    uses for the identical GUC-survives-commit constraint: the `db` test fixture wraps
+    everything in an outer transaction/savepoint, so a service-level db.commit() here
+    is RELEASE SAVEPOINT, not a real COMMIT, and (per conftest.py's own documented
+    caveat) does NOT clear SET LOCAL the way production does — asserting actual GUC
+    state across a commit in this fixture would pass identically whether or not the
+    guard exists at all."""
+    ta = await create_test_tenant(db, name="DefenseInDepthOrdering")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    series = await _seed_series(db, ta, ua)
+    await _seed_tracking_report(db, ta, ua, series, "Jun 2026")
+    headers = make_auth_headers(ua)
+
+    events: list[str] = []
+
+    async def spy_resolve(db_arg, tenant_id):
+        events.append("resolve")
+        return _JUN_CLOSED
+
+    real_commit = db.commit
+
+    async def spy_commit():
+        events.append("commit")
+        await real_commit()
+
+    async def spy_ctx(session, tenant_id):
+        events.append("ctx")
+        validated = str(uuid.UUID(str(tenant_id)))
+        await session.execute(text(f"SET LOCAL app.current_tenant_id = '{validated}'"))
+
+    monkeypatch.setattr("app.services.report.period_resolver.resolve_last_closed_period", spy_resolve)
+    monkeypatch.setattr("app.api.v1.dashboard.set_tenant_context", spy_ctx)
+    monkeypatch.setattr(db, "commit", spy_commit)
+
+    resp = await client.put("/api/v1/dashboard/active", headers=headers, json={"series_id": str(series.id)})
+    assert resp.status_code == 200, resp.text
+
+    assert "resolve" in events and "ctx" in events and "commit" in events
+    resolve_idx = events.index("resolve")
+    ctx_idx = events.index("ctx")
+    commit_idx = events.index("commit")
+    assert resolve_idx < ctx_idx < commit_idx, f"expected resolve -> ctx -> commit ordering, got {events}"
+
+
+async def test_get_dashboard_reuses_cached_period_resolution_within_ttl(client, db, monkeypatch):
+    """MAJOR 2 (T2 gate): GET /dashboard (and PUT/dismiss) must not re-query NetSuite
+    on every load for the same tracking selection — resolve_last_closed_period is
+    called at most once across N requests within the cache TTL. If _build_tracking_info
+    called the raw (uncached) resolver, this would be N calls, not 1."""
+    from app.services.report.period_resolver import clear_period_cache
+
+    clear_period_cache()
+    ta = await create_test_tenant(db, name="DashboardCacheReuse")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    series = await _seed_series(db, ta, ua)
+    await _seed_tracking_report(db, ta, ua, series, "Jun 2026")
+    headers = make_auth_headers(ua)
+
+    call_count = {"n": 0}
+
+    async def counting_resolve(db_arg, tenant_id):
+        call_count["n"] += 1
+        return _JUN_CLOSED
+
+    monkeypatch.setattr("app.services.report.period_resolver.resolve_last_closed_period", counting_resolve)
+
+    assert (
+        await client.put("/api/v1/dashboard/active", headers=headers, json={"series_id": str(series.id)})
+    ).status_code == 200
+    assert call_count["n"] == 1
+
+    for _ in range(3):
+        resp = await client.get("/api/v1/dashboard", headers=headers)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["active_tracking"]["period_check_ok"] is True
+
+    assert call_count["n"] == 1  # every subsequent GET served the cached resolution

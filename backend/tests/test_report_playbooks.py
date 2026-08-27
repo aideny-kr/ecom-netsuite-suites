@@ -838,6 +838,37 @@ async def test_compose_playbook_tracking_resolves_period_and_creates_series(db, 
     assert series.created_by == user.id
 
 
+async def test_compose_playbook_tracking_series_conflicting_row_reuses_existing_not_500(db, monkeypatch):
+    """MINOR (T2 gate): compose_playbook_report's ReportSeries get-or-create must
+    resolve via a real Postgres upsert (ON CONFLICT), not a bare SELECT-then-INSERT —
+    two concurrent tracking composes for the same (tenant, playbook_key) both racing
+    the old SELECT would both see 'no row', both INSERT, and the loser would violate
+    uq_report_series_tenant_playbook as an unhandled IntegrityError -> 500 (the
+    endpoint only catches ValueError/RefreshError; verified this raises on
+    unmodified code via a SELECT-interception race simulation during development).
+    Same seed-the-conflicting-row-directly idiom as
+    test_put_active_conflicting_row_upserts_instead_of_500 in test_dashboard_api.py
+    for the analogous dashboard.py race: assert the code resolves gracefully via the
+    existing row rather than attempting a raw duplicate insert."""
+    tenant = await create_test_tenant(db, name="SeriesConflictCorp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_resolver(monkeypatch, _JUN_CLOSED)
+    _patch_executor(monkeypatch, by_params=_income_statement_by_params())
+
+    # Simulate the racing writer landing first.
+    winner = ReportSeries(tenant_id=tenant.id, playbook_key="income_statement", created_by=user.id)
+    db.add(winner)
+    await db.flush()
+
+    report = await compose_playbook_report(
+        db, playbook_key="income_statement", params={}, tenant_id=tenant.id, actor_id=user.id, mode="tracking"
+    )
+
+    assert report.series_id == winner.id
+    series_rows = (await db.execute(select(ReportSeries).where(ReportSeries.tenant_id == tenant.id))).scalars().all()
+    assert len(series_rows) == 1  # get-or-create resolved to the existing row, not a duplicate
+
+
 async def test_compose_playbook_tracking_second_compose_same_period_is_idempotent(db, monkeypatch):
     tenant = await create_test_tenant(db, name="TrackingIdempotentCorp")
     user, _ = await create_test_user(db, tenant)

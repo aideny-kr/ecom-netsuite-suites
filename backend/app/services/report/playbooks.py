@@ -252,6 +252,7 @@ async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_
     inferred from catching the partial unique index's IntegrityError (that index is a
     backstop invariant, not the control-flow mechanism)."""
     from sqlalchemy import select
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
 
     from app.core.database import set_tenant_context
     from app.models.report import Report
@@ -271,7 +272,7 @@ async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_
     if mode not in ("period", "tracking"):
         raise ValueError(f"mode must be 'period' or 'tracking' (got {mode!r})")
 
-    series: ReportSeries | None = None
+    series_id: uuid.UUID | None = None
     if mode == "tracking":
         closed = await resolve_last_closed_period(db, tenant_id)
         if not closed.resolved:
@@ -286,21 +287,39 @@ async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_
         # regardless right before the Report insert — see the "tool calls may commit"
         # comment below).
         await set_tenant_context(db, str(tenant_id))
-        series = (
-            await db.execute(
-                select(ReportSeries).where(
-                    ReportSeries.tenant_id == tenant_id,
-                    ReportSeries.playbook_key == playbook_key,
+
+        # Real Postgres upsert (ON CONFLICT DO NOTHING + re-select on conflict), not a
+        # bare SELECT-then-INSERT: two concurrent tracking composes for the same
+        # (tenant, playbook_key) both racing the old SELECT would both see "no row",
+        # both INSERT, and the loser would violate uq_report_series_tenant_playbook as
+        # an unhandled IntegrityError -> 500 (compose_playbook_endpoint only catches
+        # ValueError/RefreshError). DO NOTHING makes OUR insert a no-op instead of a
+        # race when a concurrent writer already landed one — and get-or-create only
+        # ever needs the row's id downstream, never a full ORM object, so RETURNING
+        # just that column is enough (matches the pattern in dashboard.py's
+        # set_active_dashboard, whose upsert is the sibling fix for the same bug class).
+        insert_stmt = (
+            pg_insert(ReportSeries)
+            .values(tenant_id=tenant_id, playbook_key=playbook_key, created_by=actor_id)
+            .on_conflict_do_nothing(constraint="uq_report_series_tenant_playbook")
+            .returning(ReportSeries.id)
+        )
+        series_id = (await db.execute(insert_stmt)).scalar_one_or_none()
+        if series_id is None:
+            # DO NOTHING means our insert didn't happen — a concurrent compose won the
+            # race. Re-select the winner's row: this is the ordinary get-or-create
+            # outcome of losing a benign race, not an error.
+            series_id = (
+                await db.execute(
+                    select(ReportSeries.id).where(
+                        ReportSeries.tenant_id == tenant_id,
+                        ReportSeries.playbook_key == playbook_key,
+                    )
                 )
-            )
-        ).scalar_one_or_none()
-        if series is None:
-            series = ReportSeries(tenant_id=tenant_id, playbook_key=playbook_key, created_by=actor_id)
-            db.add(series)
-            await db.flush()  # need series.id before the idempotency check / Report insert below
+            ).scalar_one()
 
         existing = (
-            await db.execute(select(Report).where(Report.series_id == series.id, Report.period == closed.name))
+            await db.execute(select(Report).where(Report.series_id == series_id, Report.period == closed.name))
         ).scalar_one_or_none()
         if existing is not None:
             return existing
@@ -359,13 +378,13 @@ async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_
         # "Mon YYYY" this report covers); series_id only for a tracking compose — a
         # mode="period" report stays a one-off snapshot, not linked into any lineage.
         period=period,
-        series_id=series.id if series is not None else None,
+        series_id=series_id,
     )
     db.add(report)
     await db.flush()
     audit_payload = {"playbook": playbook_key, "source_count": len(recipe["sources"])}
-    if series is not None:
-        audit_payload["series_id"] = str(series.id)
+    if series_id is not None:
+        audit_payload["series_id"] = str(series_id)
     await audit_service.log_event(
         db=db,
         tenant_id=tenant_id,

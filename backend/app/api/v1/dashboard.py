@@ -8,7 +8,7 @@ from sqlalchemy import delete, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import get_db
+from app.core.database import get_db, set_tenant_context
 from app.core.dependencies import get_current_user
 from app.models.report import Report
 from app.models.report_series import ReportSeries
@@ -155,14 +155,23 @@ async def _build_tracking_info(
     "couldn't determine" (it returns an unresolved ClosedPeriod instead), but this
     still wraps the call: it does live I/O, and the Task 4 brief is explicit that a
     failure here must degrade the ribbon to "can't tell", never fail the whole GET/PUT.
+
+    T2-gate MAJOR 2: calls the TTL-memoized `resolve_last_closed_period_cached`, not
+    the raw resolver directly — this function is reached from THREE separate
+    endpoints (GET /dashboard, PUT /active, the dismiss endpoint) and period close
+    state changes at most once a month, so a live SuiteQL round trip on every one of
+    those calls was pure waste. See period_resolver.py's own docstring for the
+    cache's TTL/never-cache-a-failure contract.
     """
     if active_report is None:
         return DashboardTrackingInfo(series_id=str(series.id), playbook_key=series.playbook_key)
 
-    from app.services.report.period_resolver import resolve_last_closed_period  # lazy: monkeypatch boundary
+    from app.services.report.period_resolver import (  # lazy: monkeypatch boundary
+        resolve_last_closed_period_cached,
+    )
 
     try:
-        closed = await resolve_last_closed_period(db, tenant_id)
+        closed = await resolve_last_closed_period_cached(db, tenant_id)
     except Exception:
         logger.warning("dashboard tracking: period_resolver call failed, degrading", exc_info=True)
         closed = None
@@ -598,6 +607,15 @@ async def set_active_dashboard(
     # see zero rows / report unreachable if it ran after the GUC-clearing commit
     # (constraint 3).
     active_tracking = await _build_tracking_info(db, user.tenant_id, series, newest)
+
+    # Defense in depth (T2-gate MAJOR 1): _build_tracking_info's resolver call already
+    # restores tenant context itself before returning (period_resolver.py's own
+    # `finally`), but this re-set right before OUR OWN RLS-protected write is a second,
+    # independent guard against the same bug class — this codebase has been bitten by
+    # a mid-request commit silently clearing the tenant GUC three times now. Mirrors
+    # playbooks.py's "tool calls may commit" re-set immediately before its Report
+    # insert.
+    await set_tenant_context(db, str(user.tenant_id))
 
     upsert_stmt = pg_insert(UserDashboardPreference).values(
         tenant_id=user.tenant_id,
