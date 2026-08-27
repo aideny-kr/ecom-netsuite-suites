@@ -356,3 +356,144 @@ class TestFilterAndMappingAreNotBlobCopied:
         assert mapping["fields"] == [{"extract": "email", "generate": "custbody_email", "internalId": "123"}]
         assert "mockOutput" not in mapping
         assert "set-cookie" not in _dumped(out)
+
+
+class TestScriptReferencesSurviveSanitization:
+    """FIX ROUND 2: a `_scriptId` is an object id, not captured payload data --
+    there is no reason to drop one. Follow it through the pipeline: Task 2's
+    script-graph walker finds every `_scriptId`; if it ever runs on SANITIZED
+    (stored) data rather than the raw response, every attachment site this
+    sanitizer drops becomes a script that does not exist as far as our flow
+    map is concerned -- the map comes back empty with nothing erroring. So
+    sanitizing must never destroy a script reference.
+
+    Real shapes (observed-shapes.md, probed live 2026-08-27): `filter` on
+    import and `transform` on export are structurally parallel, each with two
+    forms -- `type: "expression"` (config only, no script, CONFIRMED live on
+    both) or `type: "script"` (a nested `script: {_scriptId, function}`
+    carries the attachment). `hooks.*` is a THIRD site with an open-ended,
+    never-enumerated key name (plan's Verified Facts: "recursive walk, not an
+    enumerated hook list").
+    """
+
+    def test_script_type_filter_keeps_script_id_on_import(self):
+        raw = {
+            "_id": "i1",
+            "filter": {
+                "type": "script",
+                "script": {"_scriptId": "scr1", "function": "matchOrder"},
+            },
+        }
+        out = sanitize("import", raw)
+        assert out["filter"]["type"] == "script"
+        assert out["filter"]["script"] == {"_scriptId": "scr1", "function": "matchOrder"}
+
+    def test_script_type_transform_keeps_script_id_and_function_on_export(self):
+        """THE most-used script attachment site in the live account, per the
+        plan's Verified Facts."""
+        raw = {
+            "_id": "e1",
+            "transform": {
+                "type": "script",
+                "script": {"_scriptId": "scr2", "function": "mapFields"},
+            },
+        }
+        out = sanitize("export", raw)
+        assert out["transform"]["type"] == "script"
+        assert out["transform"]["script"] == {"_scriptId": "scr2", "function": "mapFields"}
+
+    def test_arbitrary_never_enumerated_hook_name_keeps_script_id(self):
+        """Proves the sanitizer does NOT hardcode a hook taxonomy -- a hook
+        name invented for this test alone, never seen live and never listed
+        anywhere in this file, still survives with its script reference."""
+        raw = {
+            "_id": "i1",
+            "hooks": {
+                "someFutureHookNobodyHasEnumerated": {"_scriptId": "scr3", "function": "onEvent"},
+            },
+        }
+        out = sanitize("import", raw)
+        assert out["hooks"] == {
+            "someFutureHookNobodyHasEnumerated": {"_scriptId": "scr3", "function": "onEvent"},
+        }
+
+    def test_expression_form_filter_survives_with_no_script_ref(self):
+        """Real negative case (observed-shapes.md import section): `type ==
+        'expression'` carries no script and must yield none -- the walker
+        (a later task) must not treat every `filter` as a script site, and
+        this sanitizer must not manufacture one either."""
+        raw = {
+            "_id": "i1",
+            "filter": {
+                "type": "expression",
+                "expression": {"rules": [{"field": "status"}], "version": "1"},
+                "rules": [{"field": "status"}],
+                "version": "1",
+            },
+        }
+        out = sanitize("import", raw)
+        assert out["filter"]["type"] == "expression"
+        assert "script" not in out["filter"]
+
+    def test_expression_form_transform_survives_with_no_script_ref(self):
+        """Real negative case (observed-shapes.md export section) -- keying on
+        the presence of `transform` alone would wrongly manufacture a script
+        ref here."""
+        raw = {
+            "_id": "e1",
+            "transform": {
+                "type": "expression",
+                "expression": {"rules": [[{"key": "a", "extract": "b", "generate": "c"}]], "version": "1"},
+                "rules": [[{"key": "a", "extract": "b", "generate": "c"}]],
+                "version": "1",
+            },
+        }
+        out = sanitize("export", raw)
+        assert out["transform"]["type"] == "expression"
+        assert "script" not in out["transform"]
+
+    def test_captured_payload_nested_inside_script_form_filter_is_still_stripped(self):
+        """Preserving the script ref must not reopen the payload hole fixed in
+        round 1."""
+        raw = {
+            "_id": "i1",
+            "filter": {
+                "type": "script",
+                "script": {"_scriptId": "scr4", "function": "onFilter"},
+                "mockResponse": {"_headers": {"set-cookie": ["filter-script-leak"]}},
+            },
+        }
+        out = sanitize("import", raw)
+        assert out["filter"]["script"] == {"_scriptId": "scr4", "function": "onFilter"}
+        assert "mockResponse" not in out["filter"]
+        assert "set-cookie" not in _dumped(out)
+
+    def test_captured_payload_nested_inside_script_form_transform_is_still_stripped(self):
+        raw = {
+            "_id": "e1",
+            "transform": {
+                "type": "script",
+                "script": {"_scriptId": "scr5", "function": "onTransform"},
+                "mockOutput": {"result": "leaked"},
+            },
+        }
+        out = sanitize("export", raw)
+        assert out["transform"]["script"] == {"_scriptId": "scr5", "function": "onTransform"}
+        assert "mockOutput" not in out["transform"]
+
+    def test_captured_payload_nested_inside_hook_entry_is_still_stripped(self):
+        """The wildcard hooks.* mechanism must not become an accidental
+        pass-through for whatever else a hook entry happens to carry."""
+        raw = {
+            "_id": "i1",
+            "hooks": {
+                "preSavePage": {
+                    "_scriptId": "scr6",
+                    "function": "beforeSave",
+                    "mockResponse": {"_headers": {"set-cookie": ["hook-leak"]}},
+                }
+            },
+        }
+        out = sanitize("import", raw)
+        assert out["hooks"]["preSavePage"] == {"_scriptId": "scr6", "function": "beforeSave"}
+        assert "set-cookie" not in _dumped(out)
