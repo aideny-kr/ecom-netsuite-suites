@@ -263,6 +263,16 @@ async def resolve_last_closed_period_cached(db, tenant_id) -> ClosedPeriod:
     if cached is not None:
         result, cached_at = cached
         if time.time() - cached_at < _CACHE_TTL:
+            # MAJOR 2 (T2 gate, round 3): resolve_last_closed_period's own docstring
+            # promises the caller's tenant GUC is restored on EVERY exit path (its own
+            # `finally`) -- but that `finally` is only reached on a cache MISS below.
+            # A cache HIT is exactly as much an exit path as a MISS, so this wrapper
+            # must honour the same contract unconditionally, regardless of whether the
+            # one caller today happens to re-set context itself right after (see
+            # dashboard.py's "defense in depth" comment -- that re-set is the SECOND
+            # guard, not the first; guardrails are code at the choke point, never
+            # reliant on one caller).
+            await set_tenant_context(db, str(tenant_id))
             return result
 
     result = await resolve_last_closed_period(db, tenant_id)

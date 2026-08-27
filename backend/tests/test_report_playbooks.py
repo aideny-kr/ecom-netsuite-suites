@@ -887,6 +887,75 @@ async def test_compose_playbook_tracking_series_conflicting_row_reuses_existing_
     assert len(series_rows) == 1  # get-or-create resolved to the existing row, not a duplicate
 
 
+async def test_compose_playbook_tracking_report_conflicting_row_reuses_existing_not_500(db, monkeypatch):
+    """MAJOR 1 (T2 gate, round 3): moving the Report creation to after
+    _execute_sources (to stop orphaned series -- see the orphan-series test below)
+    widened the window between the pre-flight "does a report already exist for this
+    (series_id, period)?" SELECT above and the actual Report insert further down --
+    _execute_sources is a full round of live NetSuite calls in between. Two
+    concurrent mode="tracking" composes for the same tenant/playbook/period
+    (double-click, retry-on-timeout, two tabs) both pass the pre-flight check, both
+    insert, and the second violates the partial unique index
+    uq_reports_series_id_period as an unhandled IntegrityError --
+    compose_playbook_endpoint only catches ValueError/RefreshError, so it would
+    surface as a 500.
+
+    The asymmetry was the tell: the ReportSeries insert lower down got ON CONFLICT DO
+    NOTHING + re-select with a documented rationale; the Report insert was a bare
+    db.add(report). Mirrors
+    test_compose_playbook_tracking_series_conflicting_row_reuses_existing_not_500, but
+    seeds a FULL competing compose (its own series AND its own Report row) during
+    _execute_sources -- the series get-or-create is already race-safe (see that test);
+    this one is about the very next insert."""
+    tenant = await create_test_tenant(db, name="ReportConflictCorp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_resolver(monkeypatch, _JUN_CLOSED)
+
+    winner: dict[str, object] = {}
+
+    async def fake_execute(tool_name, tool_input, tenant_id, actor_id, correlation_id, db, **kw):
+        if "report_id" not in winner:
+            # Simulate a concurrent tracking compose finishing ENTIRELY (its own
+            # series get-or-create AND its own Report insert) while this one is
+            # still executing sources -- exactly the widened window MAJOR 1 exists to
+            # guard.
+            series = ReportSeries(tenant_id=tenant.id, playbook_key="income_statement", created_by=user.id)
+            db.add(series)
+            await db.flush()
+            other_report = Report(
+                tenant_id=tenant.id,
+                title="Income Statement",
+                spec_json={},
+                rendered_html="<html></html>",
+                created_by=user.id,
+                recipe_json={},
+                period="Jun 2026",
+                series_id=series.id,
+            )
+            db.add(other_report)
+            await db.flush()
+            winner["series_id"] = series.id
+            winner["report_id"] = other_report.id
+        by_params = _income_statement_by_params()
+        key = (tool_input.get("report_type"), tool_input.get("period"))
+        return by_params.get(key, _RESULT)
+
+    monkeypatch.setattr("app.services.chat.tools.execute_tool_call", fake_execute)
+
+    report = await compose_playbook_report(
+        db, playbook_key="income_statement", params={}, tenant_id=tenant.id, actor_id=user.id, mode="tracking"
+    )
+
+    assert report.id == winner["report_id"]
+    assert report.series_id == winner["series_id"]
+    report_rows = (
+        (await db.execute(select(Report).where(Report.series_id == winner["series_id"], Report.period == "Jun 2026")))
+        .scalars()
+        .all()
+    )
+    assert len(report_rows) == 1  # get-or-create resolved to the existing row, not a duplicate/IntegrityError
+
+
 async def test_compose_playbook_tracking_failed_compose_leaves_no_orphaned_series(db, monkeypatch):
     """MAJOR B (T2 gate, round 2): a failed tracking compose must never leave a
     ReportSeries row behind with zero linked reports. The series get-or-create used to

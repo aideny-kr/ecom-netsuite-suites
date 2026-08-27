@@ -95,6 +95,25 @@ describe("PlaybookLauncher compose chooser", () => {
     expect(screen.queryByPlaceholderText("Jun 2026")).not.toBeInTheDocument();
   });
 
+  it("describes tracking mode truthfully -- this branch is Stage 1, there is no scheduler", () => {
+    // MAJOR 3 (T2 gate, round 3): the shipped copy said "A new report is composed
+    // automatically when the next period closes" -- that's Stage 2 (a scheduled
+    // compose), which this branch does not build. Stage 1 only makes the dashboard
+    // wall FOLLOW the newest report in the series; nothing creates next period's
+    // report on its own -- someone must compose it. Shipping the Stage-2 copy as-is
+    // means the product lies to the user on first contact.
+    render(<PlaybookLauncher />);
+    fireEvent.click(screen.getByText("Income Statement"));
+
+    expect(screen.queryByText(/composed automatically/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/next period closes/i)).not.toBeInTheDocument();
+    // Absence alone would also pass against a DELETED description, so pin what the
+    // copy must actually say: the dashboard follows automatically, you compose.
+    expect(
+      screen.getByText(/moves forward on its own each time you compose a newer one/i),
+    ).toBeInTheDocument();
+  });
+
   it("selecting 'One specific period' reveals the period input", () => {
     render(<PlaybookLauncher />);
     fireEvent.click(screen.getByText("Income Statement"));

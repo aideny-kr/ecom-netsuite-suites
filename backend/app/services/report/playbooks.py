@@ -251,7 +251,7 @@ async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_
     report: a series+period pair is looked up deliberately BEFORE doing any work, never
     inferred from catching the partial unique index's IntegrityError (that index is a
     backstop invariant, not the control-flow mechanism)."""
-    from sqlalchemy import select
+    from sqlalchemy import select, text
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
     from app.core.database import set_tenant_context
@@ -397,24 +397,65 @@ async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_
                 )
             ).scalar_one()
 
-    report = Report(
-        tenant_id=tenant_id,
-        title=title,
-        # Risk 3: a financial_statement model carries raw Decimal (spark/trend) fields —
-        # sanitize BEFORE persisting (spec_json_safe), never before rendering (html
-        # above was already built from the live Decimal-bearing spec).
-        spec_json=spec_json_safe(spec),
-        rendered_html=html,
-        created_by=actor_id,
-        recipe_json=recipe,
-        # Rolling-period Stage 1 (Task 3): period is set in BOTH modes (the canonical
-        # "Mon YYYY" this report covers); series_id only for a tracking compose — a
-        # mode="period" report stays a one-off snapshot, not linked into any lineage.
-        period=period,
-        series_id=series_id,
+    # MAJOR 1 (T2 gate, round 3): moving this Report creation to after
+    # _execute_sources (to stop orphaned series — see the ReportSeries get-or-create
+    # comment above) widened the window between the pre-flight "does a report already
+    # exist for this (series_id, period)?" SELECT further up and this insert —
+    # _execute_sources is a full round of live NetSuite calls in between. Two
+    # concurrent mode="tracking" composes for the same tenant/playbook/period
+    # (double-click, retry-on-timeout, two tabs) both pass the pre-flight check, both
+    # reach here, and the second would violate the partial unique index
+    # uq_reports_series_id_period as an unhandled IntegrityError -> 500
+    # (compose_playbook_endpoint only catches ValueError/RefreshError). Same fix as
+    # the ReportSeries insert right above: a real Postgres upsert (ON CONFLICT DO
+    # NOTHING + re-select), not a bare INSERT — the loser resolves to the winner's row,
+    # which is the correct semantic (a concurrent compose already produced this
+    # period's report), rather than an unhandled error.
+    #
+    # The index is a partial one (WHERE series_id IS NOT NULL AND period IS NOT NULL —
+    # see migration 093_report_series.py), so it never applies to a mode="period"
+    # report (series_id is always None there): index_where must match that predicate
+    # text verbatim for Postgres to use it as the ON CONFLICT arbiter, and a period-
+    # mode row simply never satisfies it, so this insert always proceeds normally for
+    # that mode — no special-casing needed.
+    insert_stmt = (
+        pg_insert(Report)
+        .values(
+            tenant_id=tenant_id,
+            title=title,
+            # Risk 3: a financial_statement model carries raw Decimal (spark/trend)
+            # fields — sanitize BEFORE persisting (spec_json_safe), never before
+            # rendering (html above was already built from the live Decimal-bearing
+            # spec).
+            spec_json=spec_json_safe(spec),
+            rendered_html=html,
+            created_by=actor_id,
+            recipe_json=recipe,
+            # Rolling-period Stage 1 (Task 3): period is set in BOTH modes (the
+            # canonical "Mon YYYY" this report covers); series_id only for a tracking
+            # compose — a mode="period" report stays a one-off snapshot, not linked
+            # into any lineage.
+            period=period,
+            series_id=series_id,
+        )
+        .on_conflict_do_nothing(
+            index_elements=[Report.series_id, Report.period],
+            index_where=text("series_id IS NOT NULL AND period IS NOT NULL"),
+        )
+        .returning(Report.id)
     )
-    db.add(report)
-    await db.flush()
+    report_id = (await db.execute(insert_stmt)).scalar_one_or_none()
+    if report_id is None:
+        # DO NOTHING means our insert didn't happen — a concurrent tracking compose
+        # already produced this exact (series, period) report. Resolve to its row and
+        # return early: there is nothing of ours to audit-log or commit, exactly like
+        # the pre-flight "already covered" early return further up.
+        report = (
+            await db.execute(select(Report).where(Report.series_id == series_id, Report.period == period))
+        ).scalar_one()
+        return report
+
+    report = (await db.execute(select(Report).where(Report.id == report_id))).scalar_one()
     audit_payload = {"playbook": playbook_key, "source_count": len(recipe["sources"])}
     if series_id is not None:
         audit_payload["series_id"] = str(series_id)

@@ -147,8 +147,8 @@ export function PlaybookLauncher() {
                 Track the last closed period
               </span>
               <span className="text-[12px] text-muted-foreground">
-                Always shows the newest month NetSuite has closed. A new report is
-                composed automatically when the next period closes.
+                Your dashboard always shows the newest period in this series, and
+                moves forward on its own each time you compose a newer one.
               </span>
             </label>
             <label

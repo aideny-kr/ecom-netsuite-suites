@@ -663,6 +663,39 @@ async def test_cached_resolver_never_caches_a_failure(monkeypatch):
     assert second.resolved is True
 
 
+async def test_cached_resolver_restores_tenant_context_on_cache_hit(monkeypatch):
+    """MAJOR 2 (T2 gate, round 3): resolve_last_closed_period's own docstring promises
+    the caller's tenant GUC is restored on EVERY exit path (its `finally`) --
+    resolve_last_closed_period_cached only reaches that `finally` on a cache MISS
+    (it delegates to the raw resolver); a cache HIT returns `result` directly,
+    restoring nothing. Not a live bug today -- dashboard.py's one caller re-sets
+    context itself right before its own RLS-protected write -- but that caller's own
+    comment names its re-set "defense in depth", i.e. the SECOND guard, not the
+    first. This repo's doctrine (agent-graph.md) is that guardrails are code at the
+    choke point, never reliant on one caller -- the cached wrapper must honour the
+    same contract the raw function's docstring promises, regardless of caller.
+
+    Proven with the same spy idiom test_context_restore_uses_the_real_set_tenant_context_helper
+    uses -- a call count on the cache-HIT call, not just the MISS call."""
+    from app.services.report import period_resolver
+
+    period_resolver.clear_period_cache()
+    fake, _calls = _fake_period_table(_BASE_ROWS)
+    monkeypatch.setattr("app.mcp.tools.netsuite_suiteql.execute", fake)
+    ctx_calls = _spy_set_tenant_context(monkeypatch)
+    db = _FakeSession()
+
+    first = await period_resolver.resolve_last_closed_period_cached(db, _TENANT_ID)
+    assert first.name == "Jun 2026"
+    calls_after_miss = len(ctx_calls)
+    assert calls_after_miss > 0  # the MISS path already restores, via the raw resolver
+
+    second = await period_resolver.resolve_last_closed_period_cached(db, _TENANT_ID)
+
+    assert second.name == "Jun 2026"
+    assert len(ctx_calls) > calls_after_miss  # the cache HIT must restore too, not skip it
+
+
 async def test_cached_resolver_is_keyed_per_tenant(monkeypatch):
     """A cached answer for one tenant must never leak to another."""
     from app.services.report import period_resolver
