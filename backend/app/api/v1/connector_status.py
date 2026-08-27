@@ -96,10 +96,28 @@ class DepositSyncStatusResponse(BaseModel):
 
 class CeligoStatusResponse(BaseModel):
     connected: bool
+    # Celigo's /v1/tokenInfo returns no account name, so this is None for every
+    # real token -- None rather than "" deliberately, so the card's
+    # `account_name ?? "—"` fallback fires instead of rendering a blank field.
     account_name: str | None = None
+    # The only identifier Celigo exposes (`_userId`). Without it the connected
+    # card could not say WHICH account it was connected to, unlike the NetSuite
+    # section beside it which shows a real account id.
+    account_id: str | None = None
     region: str | None = None
     status: str | None = None
     agent_access: bool = False
+
+
+def _blank_to_none(value: object) -> str | None:
+    """Normalise "" to None so optional display fields stay genuinely optional.
+
+    An empty string is truthy-ish enough to defeat a `?? default` fallback in
+    the frontend while carrying no information, which renders as a blank field
+    that looks like a bug rather than an absent value.
+    """
+    text = str(value or "").strip()
+    return text or None
 
 
 class CeligoTestRequest(BaseModel):
@@ -834,7 +852,8 @@ async def get_celigo_status(
     metadata = connection.metadata_json or {}
     return CeligoStatusResponse(
         connected=True,
-        account_name=metadata.get("account_name"),
+        account_name=_blank_to_none(metadata.get("account_name")),
+        account_id=_blank_to_none(metadata.get("user_id")),
         region=metadata.get("region"),
         status=connection.status,
         agent_access=agent_access,
@@ -1058,7 +1077,8 @@ async def connect_celigo(
 
     return CeligoStatusResponse(
         connected=True,
-        account_name=metadata["account_name"],
+        account_name=_blank_to_none(metadata["account_name"]),
+        account_id=_blank_to_none(metadata["user_id"]),
         region=metadata["region"],
         status=connection.status,
         agent_access=agent_access,

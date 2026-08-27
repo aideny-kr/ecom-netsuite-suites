@@ -152,3 +152,39 @@ describe("CeligoConnectorCard", () => {
     expect(screen.getByRole("button", { name: /disconnect/i })).toBeInTheDocument();
   });
 });
+
+describe("CeligoConnectorCard account identity", () => {
+  // Found by looking at the rendered card: ACCOUNT was blank. Celigo's
+  // /v1/tokenInfo returns no account name, so account_name is null for every
+  // real token, and the card showed nothing identifying WHICH account was
+  // connected -- unlike the NetSuite section beside it, which shows an
+  // account id. Falling back to account_id (Celigo's _userId) fixes that.
+  it("falls back to the account id when Celigo reports no account name", async () => {
+    mocks.status.mockReturnValue({
+      connected: true,
+      account_name: null,
+      account_id: "5fe26cb4b32d987eb607618e",
+      region: "us",
+      status: "active",
+      agent_access: true,
+    });
+    const { default: Card } = await import("../celigo-connector-card");
+    wrap(<Card />);
+    expect(screen.getByText("5fe26cb4b32d987eb607618e")).toBeInTheDocument();
+  });
+
+  it("prefers a real account name over the id when Celigo provides one", async () => {
+    mocks.status.mockReturnValue({
+      connected: true,
+      account_name: "Framework",
+      account_id: "5fe26cb4b32d987eb607618e",
+      region: "us",
+      status: "active",
+      agent_access: true,
+    });
+    const { default: Card } = await import("../celigo-connector-card");
+    wrap(<Card />);
+    expect(screen.getByText("Framework")).toBeInTheDocument();
+    expect(screen.queryByText("5fe26cb4b32d987eb607618e")).not.toBeInTheDocument();
+  });
+});

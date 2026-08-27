@@ -92,6 +92,77 @@ class TestCeligoStatus:
         assert r.status_code in (401, 403)
 
 
+class TestCeligoStatusIdentity:
+    """The connected card must say WHICH Celigo account it is connected to.
+
+    Found by looking at the rendered card: the ACCOUNT field was blank. Celigo's
+    /v1/tokenInfo returns no account name, so `account_name` is "" for every
+    real token -- and the card's `status?.account_name ?? "—"` fallback only
+    fires on null/undefined, so an empty string rendered as nothing at all.
+
+    The NetSuite section beside it shows a real identifier ("NetSuite 9758575 -
+    sb1"). Celigo exposes exactly one identifier, `_userId`, so surface that as
+    `account_id` and return `account_name` as null (not "") so the existing
+    frontend fallback works instead of silently rendering blank.
+    """
+
+    @staticmethod
+    def _stub_verify(monkeypatch, user_id="u-framework", account_name=""):
+        async def _verify(token, region="us", **kw):
+            return {
+                "user_id": user_id,
+                "scope": "",
+                "account_name": account_name,
+                "user_email": "",
+            }
+
+        monkeypatch.setattr("app.api.v1.connector_status.verify_token", _verify, raising=False)
+
+    async def _connect(self, client, headers):
+        return await client.post(
+            "/api/v1/connector-status/celigo/connect",
+            headers=headers,
+            json={"token": "tok", "region": "us", "label": "Celigo"},
+        )
+
+    async def test_status_exposes_account_id(self, client, admin_user, monkeypatch):
+        _, headers = admin_user
+        self._stub_verify(monkeypatch)
+
+        assert (await self._connect(client, headers)).status_code == 201
+
+        r = await client.get("/api/v1/connector-status/celigo", headers=headers)
+        assert r.status_code == 200, r.text
+        assert r.json()["account_id"] == "u-framework"
+
+    async def test_connect_response_exposes_account_id(self, client, admin_user, monkeypatch):
+        _, headers = admin_user
+        self._stub_verify(monkeypatch)
+
+        r = await self._connect(client, headers)
+        assert r.status_code == 201, r.text
+        assert r.json()["account_id"] == "u-framework"
+
+    async def test_absent_account_name_is_null_not_empty_string(self, client, admin_user, monkeypatch):
+        """Empty string defeats the card's `?? "—"` fallback and renders blank."""
+        _, headers = admin_user
+        self._stub_verify(monkeypatch, account_name="")
+
+        assert (await self._connect(client, headers)).status_code == 201
+
+        r = await client.get("/api/v1/connector-status/celigo", headers=headers)
+        assert r.json()["account_name"] is None
+
+    async def test_real_account_name_still_passes_through(self, client, admin_user, monkeypatch):
+        _, headers = admin_user
+        self._stub_verify(monkeypatch, account_name="Framework")
+
+        assert (await self._connect(client, headers)).status_code == 201
+
+        r = await client.get("/api/v1/connector-status/celigo", headers=headers)
+        assert r.json()["account_name"] == "Framework"
+
+
 class TestCeligoRegionValidation:
     """CeligoTestRequest/CeligoConnectRequest.region were bare `str`, and
     client.base_url() silently falls back to US on any unknown value. So
