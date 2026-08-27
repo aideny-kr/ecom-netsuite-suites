@@ -839,3 +839,90 @@ class TestSelectorAppRedirectReachesTheForm:
         entry = next(e for e in log if "selector_app" in e["tool"])
         assert "selector_unavailable" in entry["result_summary"]
         assert "ask_user" in entry["result_summary"]
+
+
+class TestProseInsteadOfProposing:
+    """The failure every other mechanism on this branch cannot reach.
+
+    Observed live three times: the model calls ns_getRecordTypeMetadata —
+    declaring, in its own tool call, that it intends to write — and then
+    answers in prose instead of proposing anything. The server-declared slot
+    needs a proposal to attach to; the ns_selector_app redirect needs a
+    selector call to intercept. Neither exists on this path, so the operator
+    is asked a question in chat and the confirmation card never appears.
+
+    The signal is the model's OWN behaviour, not a guess at intent: it looked
+    up how to write a record type and then did not write one. Bounded to one
+    re-entry per turn, exactly like the investigation gate and the existing
+    step-0 query guard this mirrors.
+    """
+
+    @pytest.mark.asyncio
+    async def test_metadata_then_prose_is_bounced_once(self):
+        from app.services.chat.llm_adapter import LLMResponse, TokenUsage, ToolUseBlock
+
+        agent = _make_agent()
+        prose = LLMResponse(
+            text_blocks=["Which subsidiary should this customer be created under?"],
+            tool_use_blocks=[],
+            usage=TokenUsage(input_tokens=10, output_tokens=10),
+        )
+        proposal = LLMResponse(
+            text_blocks=[],
+            tool_use_blocks=[
+                ToolUseBlock(
+                    id="t1",
+                    name=_ext("ns_createRecord"),
+                    input={"recordType": "customer", "body": {"companyname": "Acme"}},
+                )
+            ],
+            usage=TokenUsage(input_tokens=10, output_tokens=10),
+        )
+        adapter = _make_adapter([_metadata_step(_ext("ns_getRecordTypeMetadata")), prose, proposal, _final_step()])
+
+        with _patches():
+            events = await _run(agent, adapter)
+
+        # The prose turn did not end the conversation; the model was sent back
+        # and its next proposal reached the card with a real dropdown.
+        confirmations = [p for t, p in events if t == "confirmation_required"]
+        assert len(confirmations) == 1
+        assert [s["name"] for s in confirmations[0]["editable_slots"]] == ["subsidiary"]
+
+    @pytest.mark.asyncio
+    async def test_prose_with_no_metadata_lookup_is_left_alone(self):
+        """Not every text answer is a dodged write. A plain question, with no
+        metadata lookup behind it, must answer normally — bouncing those would
+        make ordinary conversation impossible."""
+        from app.services.chat.llm_adapter import LLMResponse, TokenUsage
+
+        agent = _make_agent()
+        prose = LLMResponse(
+            text_blocks=["NetSuite subsidiaries represent legal entities."],
+            tool_use_blocks=[],
+            usage=TokenUsage(input_tokens=10, output_tokens=10),
+        )
+        adapter = _make_adapter([prose])
+
+        with _patches():
+            events = await _run(agent, adapter)
+
+        responses = [p for t, p in events if t == "response"]
+        assert "subsidiaries represent legal entities" in (responses[0].data or "")
+
+    @pytest.mark.asyncio
+    async def test_the_bounce_happens_at_most_once_per_turn(self):
+        """A model that answers in prose twice must be allowed to finish, not
+        loop. The bound is what makes this safe to put in the loop at all."""
+        from app.services.chat.llm_adapter import LLMResponse, TokenUsage
+
+        agent = _make_agent()
+        prose1 = LLMResponse(text_blocks=["Which subsidiary?"], tool_use_blocks=[], usage=TokenUsage(10, 10))
+        prose2 = LLMResponse(text_blocks=["I still need the subsidiary."], tool_use_blocks=[], usage=TokenUsage(10, 10))
+        adapter = _make_adapter([_metadata_step(_ext("ns_getRecordTypeMetadata")), prose1, prose2])
+
+        with _patches():
+            events = await _run(agent, adapter)
+
+        responses = [p for t, p in events if t == "response"]
+        assert "still need the subsidiary" in (responses[0].data or "")

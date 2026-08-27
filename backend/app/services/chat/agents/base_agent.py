@@ -127,6 +127,17 @@ def _validation_failure_detail(validation: ValidationResult) -> str:
     return "; ".join(b for b in bits if b) or "validation failed"
 
 
+_WRITE_TOOL_SUFFIXES = ("ns_createRecord", "ns_updateRecord", "ns_upsertRecord", "ns_deleteRecord")
+
+
+def _write_proposed_this_turn(tool_calls_log: list[dict[str, Any]]) -> bool:
+    """True if the model has already proposed a NetSuite write this turn."""
+    for entry in tool_calls_log or []:
+        if str(entry.get("tool") or "").rsplit("__", 1)[-1] in _WRITE_TOOL_SUFFIXES:
+            return True
+    return False
+
+
 def _last_metadata_record_type(tool_calls_log: list[dict[str, Any]]) -> str | None:
     """The record type this turn last fetched metadata for, or None.
 
@@ -1163,6 +1174,47 @@ class BaseSpecialistAgent(abc.ABC):
                         )
                         continue
 
+                    # ── Prose-instead-of-proposing guard ──
+                    # The model called ns_getRecordTypeMetadata — declaring in
+                    # its own tool call that it means to write — and then
+                    # answered in chat without proposing anything. Observed
+                    # live three times: the operator is asked a question in
+                    # prose, the confirmation card never appears, and the slot
+                    # form stays unreachable. Neither the server-declared slot
+                    # (needs a proposal to attach to) nor the ns_selector_app
+                    # redirect (needs a selector call) can reach this path —
+                    # both hang off a tool call that never happens.
+                    #
+                    # The trigger is the model's OWN behaviour, not a guess at
+                    # user intent: it looked up how to write a record type and
+                    # then wrote nothing. Same shape as the step-0 query guard
+                    # directly above, and bounded the same way — ONE re-entry
+                    # per turn, so a model that answers in prose twice still
+                    # finishes instead of looping.
+                    _pending_write_type = _last_metadata_record_type(tool_calls_log)
+                    if (
+                        _pending_write_type
+                        and not _write_proposed_this_turn(tool_calls_log)
+                        and not getattr(self, "_prose_instead_of_write_bounced", False)
+                    ):
+                        self._prose_instead_of_write_bounced = True
+                        messages.append(adapter.build_assistant_message(response))
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"Do not ask about the {_pending_write_type} write in chat — the user cannot "
+                                    "act on a question here. Call the write tool NOW with every field you already "
+                                    "know, and for each required value you cannot determine add "
+                                    '"ask_user": ["<field name>"] to that same tool call. The server fetches the '
+                                    "real options and renders them as a dropdown on the confirmation card the user "
+                                    "must approve anyway. Send field NAMES only — never values, never your own "
+                                    "list of options."
+                                ),
+                            }
+                        )
+                        continue
+                    # ── End prose-instead-of-proposing guard ──
                     final_text = "\n".join(response.text_blocks) if response.text_blocks else ""
 
                     # Extract confidence BEFORE stripping tag so agent self-score is used
