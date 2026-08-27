@@ -1203,13 +1203,15 @@ class BaseSpecialistAgent(abc.ABC):
                             {
                                 "role": "user",
                                 "content": (
-                                    f"Do not ask about the {_pending_write_type} write in chat — the user cannot "
-                                    "act on a question here. Call the write tool NOW with every field you already "
-                                    "know, and for each required value you cannot determine add "
-                                    '"ask_user": ["<field name>"] to that same tool call. The server fetches the '
-                                    "real options and renders them as a dropdown on the confirmation card the user "
-                                    "must approve anyway. Send field NAMES only — never values, never your own "
-                                    "list of options."
+                                    f"IF the user asked you to create or change a {_pending_write_type}: do NOT "
+                                    "ask them about it in chat — they cannot act on a question here. Call the "
+                                    "write tool now with every field you already know, and for each required "
+                                    'value you cannot determine add "ask_user": ["<field name>"] to that same '
+                                    "tool call. The server fetches the real options itself and renders them as a "
+                                    "dropdown on the confirmation card they must approve anyway. Send field "
+                                    "NAMES only — never values, never your own list of options.\n\n"
+                                    "IF the user only asked a question and did not request a write, ignore all "
+                                    "of the above and simply answer them."
                                 ),
                             }
                         )

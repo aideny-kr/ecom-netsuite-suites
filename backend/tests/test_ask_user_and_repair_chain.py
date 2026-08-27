@@ -926,3 +926,66 @@ class TestProseInsteadOfProposing:
 
         responses = [p for t, p in events if t == "response"]
         assert "still need the subsidiary" in (responses[0].data or "")
+
+
+class TestProseGuardDoesNotHijackQuestions:
+    """T2 gate (branch round 1, major): the prose-instead-of-proposing guard
+    fires on ANY turn that fetched record metadata and then answered in prose —
+    including a turn where the user only ASKED something.
+
+    "What fields does a NetSuite customer record require?" is answered by
+    calling ns_getRecordTypeMetadata and replying in prose. That is the correct
+    behaviour, and the guard as first written injected "Call the write tool
+    NOW", coercing an unwanted write-confirmation card in reply to a question.
+
+    There is no non-fuzzy signal for user intent available at that point — the
+    guard deliberately triggers on the model's own tool calls, not on a guess
+    about the user. So the fix is not a better trigger, it is a directive the
+    model can correctly decline: it names both branches, and a wrongly-fired
+    bounce costs one extra turn instead of producing a false write proposal.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_directive_lets_the_model_decline(self):
+        """The bounce must not be a command to write. It must be a reminder of
+        the mechanism, conditional on the user having actually asked for one."""
+        from app.services.chat.llm_adapter import LLMResponse, TokenUsage
+
+        agent = _make_agent()
+        prose = LLMResponse(
+            text_blocks=["A customer needs companyName and subsidiary."],
+            tool_use_blocks=[],
+            usage=TokenUsage(input_tokens=10, output_tokens=10),
+        )
+        answer = LLMResponse(
+            text_blocks=["A customer requires companyName and subsidiary."],
+            tool_use_blocks=[],
+            usage=TokenUsage(input_tokens=10, output_tokens=10),
+        )
+        adapter = _make_adapter([_metadata_step(_ext("ns_getRecordTypeMetadata")), prose, answer])
+
+        with _patches():
+            events = await _run(agent, adapter, task="What fields does a customer record require?")
+
+        # No write was proposed, and the user still got their answer.
+        assert [p for t, p in events if t == "confirmation_required"] == []
+        responses = [p for t, p in events if t == "response"]
+        assert "companyName" in (responses[0].data or "")
+
+    @pytest.mark.asyncio
+    async def test_the_directive_names_both_branches(self):
+        """Read the injected text directly — this is the whole mitigation."""
+        import inspect
+
+        from app.services.chat.agents import base_agent as ba
+
+        src = inspect.getsource(ba.BaseSpecialistAgent.run_streaming)
+        start = src.index("_prose_instead_of_write_bounced = True")
+        directive = src[start : start + 1400]
+        assert "ask_user" in directive
+        # Both branches must be named. An unconditional "call the write tool
+        # NOW" is what hijacked informational questions; asserting merely that
+        # the word "question" appears passes on the BROKEN wording too, so
+        # require the explicit decline branch.
+        assert "IF the user only asked a question" in directive
+        assert "ignore all" in directive

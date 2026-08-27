@@ -704,3 +704,64 @@ class TestMutationInterceptDualKeyPayloadFeedsRepairNotCard:
         assert tool_calls_log
         last_summary = tool_calls_log[-1]["result_summary"].lower()
         assert "could not be read" in last_summary or "blocked" in last_summary
+
+
+class TestValidationNeverRanIsNotValidationPassed:
+    """A card must never claim a check it did not perform.
+
+    T2 gate (branch round 1, major). `build_confirmation_payload` collapsed
+    "validation returned nothing to complain about" and "validation never ran"
+    into the same `unvalidated=False` — the flag that renders as a clean,
+    checked card.
+
+    Reachable today, not hypothetically: `classify_mutation` merges
+    CELIGO_WRITE_VERBS, so a Celigo write (e.g. `upsert_flow`) enters the write
+    intercept and gets a confirmation card, but `_is_netsuite_write` is False
+    so `validate_mutation` never runs — the whole write loop is built out of
+    ns_* sibling tools that Celigo does not have. The human then approves a
+    card that looks validated and never was.
+
+    `unvalidated` means "we could not check this". `validation is None` is
+    exactly that state, so it must map to True.
+    """
+
+    def test_no_validation_means_unvalidated_true(self):
+        from app.services.chat.write_confirmation_service import build_confirmation_payload
+
+        payload = build_confirmation_payload(
+            mutation_type="upsert",
+            record_type="flow",
+            tool_name=_ext("upsert_flow"),
+            tool_input={"recordType": "flow", "body": {"name": "x"}},
+            session_id="s",
+            validation=None,
+        )
+        assert payload is not None
+        assert payload.unvalidated is True, "a card that was never validated must say so"
+
+    def test_a_real_clean_validation_still_reads_as_validated(self):
+        """The other half — this must not make every card look unchecked."""
+        from app.services.chat.record_metadata_service import FieldSpec, RecordMetadata
+        from app.services.chat.write_confirmation_service import build_confirmation_payload
+        from app.services.chat.write_validator import validate_write
+
+        meta = RecordMetadata(
+            record_type="customer",
+            fields=[FieldSpec(name="companyName", label="Company Name", required=True)],
+        )
+        result = validate_write(
+            payload=NormalizedPayload(fields={"companyName": "Acme"}, lines=[]),
+            metadata=meta,
+            record_type="customer",
+            mutation_type="create",
+        )
+        payload = build_confirmation_payload(
+            mutation_type="create",
+            record_type="customer",
+            tool_name=_ext("ns_createRecord"),
+            tool_input={"recordType": "customer", "data": '{"companyName": "Acme"}'},
+            session_id="s",
+            validation=result,
+        )
+        assert payload is not None
+        assert payload.unvalidated is False

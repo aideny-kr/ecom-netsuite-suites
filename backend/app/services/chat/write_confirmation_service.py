@@ -236,7 +236,13 @@ def build_confirmation_payload(
             tool_input=tool_input,
             confirmation_token=confirmation_token,
             editable_slots=editable_slots,
-            unvalidated=bool(validation.unvalidated) if validation else False,
+            # `validation is None` means validation NEVER RAN — not that it ran
+            # and found nothing. Collapsing the two into False renders a
+            # card that claims a check it did not perform, on the one screen
+            # whose entire job is informed consent. Reachable today via any
+            # mutation-classified non-ns_ tool (Celigo write verbs are in
+            # classify_mutation), where the ns_*-based write loop cannot run.
+            unvalidated=bool(validation.unvalidated) if validation else True,
             unfillable_line_fields=list(validation.missing_line_required) if validation else [],
             invariant_errors=list(validation.invariant_errors) if validation else [],
             repair_of=repair_of,
@@ -269,7 +275,13 @@ def build_confirmation_payload(
         tool_input=tool_input,
         confirmation_token=confirmation_token,
         editable_slots=editable_slots,
-        unvalidated=bool(validation.unvalidated) if validation else False,
+        # `validation is None` means validation NEVER RAN — not that it ran
+        # and found nothing. Collapsing the two into False renders a
+        # card that claims a check it did not perform, on the one screen
+        # whose entire job is informed consent. Reachable today via any
+        # mutation-classified non-ns_ tool (Celigo write verbs are in
+        # classify_mutation), where the ns_*-based write loop cannot run.
+        unvalidated=bool(validation.unvalidated) if validation else True,
         unfillable_line_fields=list(validation.missing_line_required) if validation else [],
         invariant_errors=list(validation.invariant_errors) if validation else [],
         repair_of=repair_of,
