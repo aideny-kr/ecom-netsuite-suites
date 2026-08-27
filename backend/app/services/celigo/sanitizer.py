@@ -10,11 +10,14 @@ Celigo's "test connection"/"preview mapping" feature stores that capture on
 the resource's own config, and it can recur at any nesting level -- not only
 the top level.
 
-`exclude` projection on the wire (the client's job, Task 3) is the first line
-of defence: never ask Celigo for `mockResponse`/`mockOutput`/`sampleData`/
-`rawData`/`_headers` in the first place. This module is the second line, for
-when projection is bypassed, incomplete, or a future Celigo field turns out
-to carry the same kind of capture under a name nobody has seen yet.
+FIX ROUND 1 (2026-08-27): re-probed live, `exclude` projection on the wire
+does NOT reliably strip payload fields -- `GET /v1/imports/{id}` with
+`exclude=...,mockResponse,...` still returned `mockResponse`. THIS SANITIZER
+IS THE ONLY EFFECTIVE DEFENCE, not a backstop behind projection. That raises
+the bar on every allowlisted field: any field whose value CAN be a nested
+object or a list of them (`filter`, `netsuite_da.mapping`) must be
+recursively filtered by its own schema, never blob-copied as a leaf -- a
+leaf copy is exactly the shape of hole a captured payload slips through.
 
 Allowlist, never denylist: a denylist of "known dangerous" field names only
 stops fields someone already thought to list. An allowlist stops everything
@@ -26,12 +29,13 @@ from __future__ import annotations
 
 # A schema maps a Celigo field name to either:
 #   None  -- a leaf: the raw value is copied verbatim, whatever its type.
-#   dict  -- a nested schema: the raw value is expected to be a dict, and
-#            THAT dict is filtered by this nested schema (recursively, via
-#            _apply_schema), never passed through whole. A raw value that
-#            isn't a dict where a nested schema is expected can't be safely
-#            filtered, so it's dropped -- the same fail-closed posture as an
-#            unrecognized resource_kind or an unlisted key.
+#   dict  -- a nested schema: the raw value is expected to be a dict (filtered
+#            recursively by this nested schema) OR a list of dicts (each item
+#            filtered the same way, non-dict items dropped) -- never passed
+#            through whole either way. A raw value that is neither a dict nor
+#            a list of dicts where a nested schema is expected can't be
+#            safely filtered, so it's dropped -- the same fail-closed posture
+#            as an unrecognized resource_kind or an unlisted key.
 Schema = dict[str, "Schema | None"]
 
 # `aiDescription` appears on flows, exports, and imports alike (spec §3:
@@ -42,13 +46,48 @@ _AI_DESCRIPTION: Schema = {
     "generatedOn": None,
 }
 
+# `filter` shape CONFIRMED live on both export and import objects
+# (observed-shapes.md, fix round 1): {type, expression: {rules, version},
+# rules, version}. `type` can be "expression" (this shape) or "script" (not
+# yet observed live -- a script-type filter's own `script: {_scriptId, ...}`
+# field is NOT in this schema and will be dropped until that shape is
+# verified; flagged in the fix report rather than guessed at here).
+_FILTER_EXPRESSION: Schema = {
+    "rules": None,
+    "version": None,
+}
+_FILTER: Schema = {
+    "type": None,
+    "expression": _FILTER_EXPRESSION,
+    "rules": None,
+    "version": None,
+}
+
+# `netsuite_da.mapping` shape CONFIRMED live (observed-shapes.md, fix round
+# 1): {fields: [{extract, generate, internalId}], lists: []}. `fields` is a
+# LIST of dicts -- each one filtered by its own schema below, not
+# blob-copied. `lists`'s element shape was observed empty and is genuinely
+# unverified, so it is deliberately left OUT of this schema (dropped) rather
+# than guessed at -- the same fail-closed posture as everything else here.
+_MAPPING_FIELD: Schema = {
+    "extract": None,
+    "generate": None,
+    "internalId": None,
+}
+_MAPPING: Schema = {
+    "fields": _MAPPING_FIELD,
+}
+
 # NetSuite Distributed Adaptor config on import/export steps -- named
 # explicitly in spec §4.6 as Plan C's provenance input (`netsuite_da.recordType`
-# + `operation`). Kept narrow on purpose: only the two fields Plan C is known
-# to consume, not the adaptor's full (unverified) shape.
+# + `operation`). Kept narrow on purpose: only the fields Plan C is known to
+# consume or that are verified above, not the adaptor's full shape --
+# `restletVersion`/`internalIdLookup`/`lookups` were observed live too but are
+# out of scope for this fix (see fix report).
 _NETSUITE_DA: Schema = {
     "recordType": None,
     "operation": None,
+    "mapping": _MAPPING,
 }
 
 _INTEGRATION: Schema = {
@@ -81,10 +120,15 @@ _EXPORT: Schema = {
     "_connectionId": None,
     "_sourceId": None,
     "sandbox": None,
-    "filter": None,
+    "filter": _FILTER,
     "aiDescription": _AI_DESCRIPTION,
 }
 
+# NOTE (fix round 1): the real `GET /v1/imports/{id}` response has no
+# top-level `mapping` key -- that was this module's own inferred-not-verified
+# guess, and observed-shapes.md proves it wrong. The real mapping config
+# lives at `netsuite_da.mapping` (now schema'd above). `filter` IS confirmed
+# on import objects and was previously missing here entirely.
 _IMPORT: Schema = {
     "_id": None,
     "name": None,
@@ -92,7 +136,7 @@ _IMPORT: Schema = {
     "_connectionId": None,
     "_sourceId": None,
     "sandbox": None,
-    "mapping": None,
+    "filter": _FILTER,
     "netsuite_da": _NETSUITE_DA,
     "aiDescription": _AI_DESCRIPTION,
 }
@@ -153,16 +197,28 @@ def sanitize(resource_kind: str, raw: dict) -> dict:
 
 def _apply_schema(raw: dict, schema: Schema) -> dict:
     """Copy only the keys present in *schema*, recursing into nested dicts
-    with THEIR OWN sub-schema rather than passing them through whole."""
+    (or lists of them) with THEIR OWN sub-schema rather than passing them
+    through whole."""
     out: dict = {}
     for key, sub_schema in schema.items():
         if key not in raw:
             continue
         value = raw[key]
         if sub_schema is None:
-            out[key] = value
+            # A leaf field. Dict/list values are still copied ONE level
+            # shallow rather than aliased, so a caller mutating the returned
+            # structure can't reach back into *raw* through it -- purity
+            # holds for the caller's copy too, not just for sanitize()'s own
+            # read of *raw*.
+            out[key] = dict(value) if isinstance(value, dict) else (list(value) if isinstance(value, list) else value)
         elif isinstance(value, dict):
             out[key] = _apply_schema(value, sub_schema)
-        # else: a nested schema was expected but the value isn't a dict --
-        # drop it rather than guess.
+        elif isinstance(value, list):
+            # e.g. netsuite_da.mapping.fields: a list of dicts, each filtered
+            # by the SAME nested schema -- a leaf copy here would blob-copy
+            # every item whole, the same hole a captured payload slips
+            # through if nested inside one of them.
+            out[key] = [_apply_schema(item, sub_schema) for item in value if isinstance(item, dict)]
+        # else: a nested schema was expected but the value is neither a dict
+        # nor a list of dicts -- drop it rather than guess.
     return out

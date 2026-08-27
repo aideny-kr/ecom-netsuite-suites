@@ -4,9 +4,14 @@ See docs/superpowers/specs/2026-08-25-celigo-flow-map-design.md §4.3/§6: probe
 live on 2026-08-25 against the real Solidus + NetSuite integration, Celigo
 objects were found to embed captured production payloads -- a `mockResponse`
 contained a live `set-cookie` session header for `.frame.work`, a customer
-record, and product data. `exclude` projection on the wire (Task 3) is the
-first line of defence; this sanitizer is the second, so a new Celigo field
-that slips past projection still can't reach the database.
+record, and product data.
+
+FIX ROUND 1 (2026-08-27): re-probed live, `exclude` projection on the wire
+does NOT reliably strip payload fields -- `GET /v1/imports/{id}` with
+`exclude=...,mockResponse,...` still returned `mockResponse`. This sanitizer
+is therefore the ONLY effective defence, not a backstop behind projection, so
+every allowlisted field that can itself be a nested object (`filter`,
+`netsuite_da.mapping`) must be recursively filtered rather than blob-copied.
 
 The fixture below mirrors that REAL shape structurally -- an import object
 whose payload-bearing fields carry a cookie header and a customer/product
@@ -208,6 +213,8 @@ class TestOtherResourceKinds:
         assert out["_integrationId"] == "int1"
 
     def test_export(self):
+        # `filter` shape confirmed live (observed-shapes.md, fix round 1):
+        # {type, expression: {rules, version}, rules, version}.
         raw = {
             "_id": "e1",
             "name": "Solidus Orders Export",
@@ -215,7 +222,12 @@ class TestOtherResourceKinds:
             "_connectionId": "conn1",
             "_sourceId": "src2",
             "sandbox": False,
-            "filter": {"type": "expression", "expression": "status == 'complete'"},
+            "filter": {
+                "type": "expression",
+                "expression": {"rules": [{"field": "status", "op": "eq"}], "version": "1"},
+                "rules": [{"field": "status", "op": "eq"}],
+                "version": "1",
+            },
             "sampleData": {"customer": {"email": "leaked@example-shop.test"}},
         }
         out = sanitize("export", raw)
@@ -247,15 +259,15 @@ class TestOtherResourceKinds:
         fields, not scrubbing PII out of allowlisted ones (that is the
         signature fingerprint's job, a later task)."""
         raw = {
-            "traceKey": "R694979090",
+            "traceKey": "R000000001",
             "errorId": "err1",
             "retryDataKey": "rdk1",
             "source": "pre_save_page_hook",
             "code": "MISSING_SHIP_ADDRESS",
             "message": (
-                "MISSING_SHIP_ADDRESS: order R694979090 has no ship_address "
+                "MISSING_SHIP_ADDRESS: order R000000001 has no ship_address "
                 "in the Solidus payload. Usually a GDPR-scrubbed customer "
-                "(email deleted_user_242530@user.deleted) -- check the order."
+                "(email deleted_user_000000@user.deleted) -- check the order."
             ),
             "occurredAt": "2026-08-10T00:00:00.000Z",
             "purgeAt": "2026-09-09T00:00:00.000Z",
@@ -267,3 +279,80 @@ class TestOtherResourceKinds:
         assert out["message"] == raw["message"]
         assert "someInternalCeligoField" not in out
         assert out["retriable"] is True
+
+
+class TestFilterAndMappingAreNotBlobCopied:
+    """FIX ROUND 1, finding 1: `filter` (export/import) and `netsuite_da.mapping`
+    (import) were declared as schema LEAVES, so a captured-payload-shaped value
+    nested inside either would pass straight through unfiltered -- the exact
+    hole `exclude` projection was wrongly assumed to close (see module
+    docstring). Real shapes from observed-shapes.md (probed live 2026-08-27):
+
+        filter: {type, expression: {rules, version}, rules, version}
+        netsuite_da.mapping: {fields: [{extract, generate, internalId}], lists}
+    """
+
+    def test_captured_payload_nested_inside_export_filter_is_stripped(self):
+        raw = {
+            "_id": "e1",
+            "filter": {
+                "type": "expression",
+                "expression": {"rules": [{"field": "status", "op": "eq"}], "version": "1"},
+                "rules": [{"field": "status", "op": "eq"}],
+                "version": "1",
+                "mockResponse": {"_headers": {"set-cookie": ["export-filter-leak"]}},
+            },
+        }
+        out = sanitize("export", raw)
+        assert out["filter"]["type"] == "expression"
+        assert out["filter"]["expression"] == {"rules": [{"field": "status", "op": "eq"}], "version": "1"}
+        assert out["filter"]["rules"] == [{"field": "status", "op": "eq"}]
+        assert out["filter"]["version"] == "1"
+        assert "mockResponse" not in out["filter"]
+        assert "set-cookie" not in _dumped(out)
+
+    def test_captured_payload_nested_inside_import_filter_is_stripped(self):
+        """`filter` is confirmed live on import objects too, not just export --
+        it was previously missing from `_IMPORT`'s allowlist entirely."""
+        raw = {
+            "_id": "i1",
+            "filter": {
+                "type": "expression",
+                "expression": {"rules": [], "version": "1"},
+                "rules": [],
+                "version": "1",
+                "mockResponse": {"_headers": {"set-cookie": ["import-filter-leak"]}},
+            },
+        }
+        out = sanitize("import", raw)
+        assert out["filter"]["type"] == "expression"
+        assert "mockResponse" not in out["filter"]
+        assert "set-cookie" not in _dumped(out)
+
+    def test_captured_payload_nested_inside_netsuite_da_mapping_is_stripped(self):
+        raw = {
+            "_id": "i1",
+            "netsuite_da": {
+                "recordType": "returnauthorization",
+                "operation": "update",
+                "mapping": {
+                    "fields": [
+                        {
+                            "extract": "email",
+                            "generate": "custbody_email",
+                            "internalId": "123",
+                            # A captured-payload-shaped value on a single field
+                            # entry -- must be stripped without dropping the
+                            # field's own legitimate keys.
+                            "mockResponse": {"_headers": {"set-cookie": ["field-leak"]}},
+                        }
+                    ],
+                    "mockOutput": {"result": "leaked"},
+                },
+            },
+        }
+        out = sanitize("import", raw)
+        mapping = out["netsuite_da"]["mapping"]
+        assert mapping["fields"] == [{"extract": "email", "generate": "custbody_email", "internalId": "123"}]
+        assert "mockOutput" not in mapping
+        assert "set-cookie" not in _dumped(out)
