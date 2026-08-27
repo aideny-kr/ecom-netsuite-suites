@@ -1,4 +1,7 @@
-"""Celigo REST client — token verification only (Plan A scope)."""
+"""Celigo REST client — token verification (Plan A) plus paginated, projected
+resource fetchers (Plan B, Task 3)."""
+
+import inspect
 
 import httpx
 import pytest
@@ -7,6 +10,10 @@ from app.services.celigo.client import (
     CELIGO_BASE_URLS,
     CeligoAuthError,
     CeligoError,
+    get_resource,
+    list_error_summary_for_integration,
+    list_flow_errors_for_step,
+    list_resource,
     mcp_server_url,
     verify_token,
 )
@@ -286,3 +293,364 @@ class TestNonGenuineSuccess:
         async with _client(handler) as c:
             with pytest.raises(CeligoError):
                 await verify_token("tok", client=c)
+
+
+# ============================================================================
+# Task 3: paginated, projected resource fetchers.
+#
+# SECURITY MODEL CORRECTION (see app/services/celigo/sanitizer.py module
+# docstring, FIX ROUNDS 1-2): a live probe found Celigo ignores BOTH
+# `include` and `exclude` for payload-bearing fields -- `exclude=mockResponse`
+# on GET /v1/imports/{id} still returned mockResponse; a positive `include=`
+# allowlist on GET /v1/exports/{id} still returned mockOutput/rawData
+# unrequested. Projection is NOT a privacy control in either direction.
+# sanitize() is the ONLY effective control. Consequently:
+#   * Tests below assert `include`/`exclude` reach the query string (cheap,
+#     real, costs nothing) -- NEVER that they remove a payload field.
+#   * Tests below assert sanitize() strips leaked fields regardless of what
+#     projection was requested -- this is the actual guarantee callers get.
+# ============================================================================
+
+
+def _json_client(handler) -> httpx.AsyncClient:
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+class TestListResourceUnknownKind:
+    @pytest.mark.asyncio
+    async def test_rejects_a_kind_with_no_known_endpoint(self):
+        with pytest.raises(ValueError):
+            async for _ in list_resource("bogus", token="tok"):
+                pass
+
+
+class TestGetResourceUnknownKind:
+    @pytest.mark.asyncio
+    async def test_rejects_a_kind_with_no_known_endpoint(self):
+        with pytest.raises(ValueError):
+            await get_resource("bogus", "id1", token="tok")
+
+
+class TestListResourcePagination:
+    """Celigo's documented pagination (developer.celigo.com/api/using-the-api/
+    pagination.md) is Link-header based: follow `rel="next"` until it's
+    absent; a 204 with no body means there is nothing to list. The client
+    must not hand-craft `after`/`limit` -- it must follow the exact URL the
+    server hands back."""
+
+    @pytest.mark.asyncio
+    async def test_follows_link_header_across_pages_then_stops(self):
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(str(request.url))
+            if len(calls) == 1:
+                return httpx.Response(
+                    200,
+                    json=[{"_id": "f1", "name": "Flow One"}],
+                    headers={"Link": '<https://api.integrator.io/v1/flows?after=page2>; rel="next"'},
+                )
+            return httpx.Response(200, json=[{"_id": "f2", "name": "Flow Two"}])
+
+        async with _json_client(handler) as c:
+            results = [item async for item in list_resource("flow", token="tok", client=c)]
+
+        assert [r["_id"] for r in results] == ["f1", "f2"]
+        assert len(calls) == 2
+        assert "after=page2" in calls[1]
+
+    @pytest.mark.asyncio
+    async def test_no_link_header_means_exactly_one_page(self):
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(1)
+            return httpx.Response(200, json=[{"_id": "f1", "name": "Flow One"}])
+
+        async with _json_client(handler) as c:
+            results = [item async for item in list_resource("flow", token="tok", client=c)]
+
+        assert len(results) == 1
+        assert len(calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_204_yields_nothing(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(204)
+
+        async with _json_client(handler) as c:
+            results = [item async for item in list_resource("flow", token="tok", client=c)]
+
+        assert results == []
+
+
+class TestProjectionParamsReachTheWire:
+    """Assert ONLY that `include`/`exclude` reach the query string -- never
+    that they remove anything. See module-level note above."""
+
+    @pytest.mark.asyncio
+    async def test_include_reaches_query_string_on_list(self):
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["params"] = dict(request.url.params)
+            return httpx.Response(200, json=[])
+
+        async with _json_client(handler) as c:
+            async for _ in list_resource("flow", token="tok", include=["name", "disabled"], client=c):
+                pass
+
+        assert seen["params"]["include"] == "name,disabled"
+
+    @pytest.mark.asyncio
+    async def test_exclude_reaches_query_string_on_get(self):
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["params"] = dict(request.url.params)
+            return httpx.Response(200, json={"_id": "i1", "name": "Import One"})
+
+        async with _json_client(handler) as c:
+            await get_resource("import", "i1", token="tok", exclude="mockResponse,rawData", client=c)
+
+        assert seen["params"]["exclude"] == "mockResponse,rawData"
+
+
+class TestSanitizationIsTheOnlyControl:
+    """The load-bearing regression test: simulate exactly the falsified
+    scenario (exclude requested, Celigo ignores it for a payload field
+    anyway) and prove the fetcher's OUTPUT is still clean -- because
+    sanitize() ran, not because exclude worked."""
+
+    @pytest.mark.asyncio
+    async def test_get_resource_strips_a_leaked_payload_field_despite_exclude(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            # Celigo returns mockResponse anyway, exactly as observed live,
+            # even though exclude=mockResponse was requested.
+            return httpx.Response(
+                200,
+                json={"_id": "i1", "name": "Import One", "mockResponse": {"_headers": {"set-cookie": "leak"}}},
+            )
+
+        async with _json_client(handler) as c:
+            result = await get_resource("import", "i1", token="tok", exclude="mockResponse", client=c)
+
+        assert "mockResponse" not in result
+        assert result == {"_id": "i1", "name": "Import One"}
+
+    @pytest.mark.asyncio
+    async def test_list_resource_sanitizes_every_item(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=[{"_id": "e1", "name": "Export One", "rawData": {"leak": True}}])
+
+        async with _json_client(handler) as c:
+            results = [item async for item in list_resource("export", token="tok", client=c)]
+
+        assert "rawData" not in results[0]
+
+    @pytest.mark.asyncio
+    async def test_list_flow_errors_for_step_sanitizes_each_error(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={"errors": [{"errorId": "e1", "message": "boom", "unallowlistedField": "leak"}]},
+            )
+
+        async with _json_client(handler) as c:
+            errors = await list_flow_errors_for_step("flow1", "step1", token="tok", client=c)
+
+        assert "unallowlistedField" not in errors[0]
+        assert errors[0]["errorId"] == "e1"
+
+
+class TestRetryAfterIsHonoured:
+    @pytest.mark.asyncio
+    async def test_429_with_retry_after_is_retried_and_then_succeeds(self):
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(1)
+            if len(calls) == 1:
+                return httpx.Response(429, headers={"Retry-After": "0"})
+            return httpx.Response(200, json={"_id": "f1", "name": "Flow One"})
+
+        async with _json_client(handler) as c:
+            result = await get_resource("flow", "f1", token="tok", client=c)
+
+        assert len(calls) == 2
+        assert result["_id"] == "f1"
+
+    @pytest.mark.asyncio
+    async def test_429_exhausting_retries_raises_celigo_error(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(429, headers={"Retry-After": "0"})
+
+        async with _json_client(handler) as c:
+            with pytest.raises(CeligoError):
+                await get_resource("flow", "f1", token="tok", client=c)
+
+    @pytest.mark.asyncio
+    async def test_429_is_honoured_during_pagination_too(self):
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(1)
+            if len(calls) == 1:
+                return httpx.Response(429, headers={"Retry-After": "0"})
+            return httpx.Response(200, json=[{"_id": "f1", "name": "Flow One"}])
+
+        async with _json_client(handler) as c:
+            results = [item async for item in list_resource("flow", token="tok", client=c)]
+
+        assert len(results) == 1
+        assert len(calls) == 2
+
+
+class TestNewFetchersAuthErrors:
+    @pytest.mark.asyncio
+    async def test_get_resource_401_raises_auth_error(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(401, json={"message": "Invalid token"})
+
+        async with _json_client(handler) as c:
+            with pytest.raises(CeligoAuthError):
+                await get_resource("flow", "f1", token="bad", client=c)
+
+    @pytest.mark.asyncio
+    async def test_list_resource_401_raises_auth_error(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(401, json={"message": "Invalid token"})
+
+        async with _json_client(handler) as c:
+            with pytest.raises(CeligoAuthError):
+                async for _ in list_resource("flow", token="bad", client=c):
+                    pass
+
+
+class TestFlowErrorsForStep:
+    """Live-probed finding (observed-shapes.md, 2026-08-27): errors are
+    listed PER STEP. `_id` (flow) alone returns `steps: []` even when errors
+    exist -- the useless mode. `list_flow_errors_for_step` makes that mode
+    structurally unreachable by requiring both `flow_id` and `step_id` as
+    required positional parameters, not optional ones."""
+
+    def test_flow_id_and_step_id_are_required_not_optional(self):
+        sig = inspect.signature(list_flow_errors_for_step)
+        names = list(sig.parameters)
+        assert names[0] == "flow_id"
+        assert names[1] == "step_id"
+        assert sig.parameters["flow_id"].default is inspect.Parameter.empty
+        assert sig.parameters["step_id"].default is inspect.Parameter.empty
+
+    @pytest.mark.asyncio
+    async def test_stepid_reaches_the_query_string_and_never_id_alone(self):
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["path"] = request.url.path
+            seen["params"] = dict(request.url.params)
+            return httpx.Response(200, json={"errors": []})
+
+        async with _json_client(handler) as c:
+            await list_flow_errors_for_step("flow1", "step1", token="tok", client=c)
+
+        assert seen["path"] == "/v1/flows/flow1/errors"
+        assert seen["params"]["_stepId"] == "step1"
+
+    @pytest.mark.asyncio
+    async def test_paginates_via_next_page_url_until_absent(self):
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(str(request.url))
+            if len(calls) == 1:
+                return httpx.Response(
+                    200,
+                    json={
+                        "errors": [{"errorId": "e1", "message": "first"}],
+                        "nextPageURL": "/v1/flows/flow1/errors?after=abc123",
+                    },
+                )
+            return httpx.Response(200, json={"errors": [{"errorId": "e2", "message": "second"}]})
+
+        async with _json_client(handler) as c:
+            errors = await list_flow_errors_for_step("flow1", "step1", token="tok", client=c)
+
+        assert [e["errorId"] for e in errors] == ["e1", "e2"]
+        assert len(calls) == 2
+        assert "after=abc123" in calls[1]
+
+    @pytest.mark.asyncio
+    async def test_returns_a_materialized_list_not_a_generator(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"errors": []})
+
+        async with _json_client(handler) as c:
+            errors = await list_flow_errors_for_step("flow1", "step1", token="tok", client=c)
+
+        assert isinstance(errors, list)
+
+
+class TestErrorSummaryForIntegration:
+    """Use `_integrationId` for the summary mode -- never `_id` alone (see
+    TestFlowErrorsForStep). Built on confirmed primitives only: `GET
+    /v1/flows?_integrationId=` is a documented, real query filter. See
+    task-3-report.md for the documented limitation this implies."""
+
+    @pytest.mark.asyncio
+    async def test_integrationid_reaches_the_query_string(self):
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["params"] = dict(request.url.params)
+            return httpx.Response(200, json=[])
+
+        async with _json_client(handler) as c:
+            await list_error_summary_for_integration("integ1", token="tok", client=c)
+
+        assert seen["params"]["_integrationId"] == "integ1"
+
+    @pytest.mark.asyncio
+    async def test_aggregates_open_error_counts_across_flows(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json=[
+                    {"_id": "f1", "name": "Flow One", "numOpenError": 3},
+                    {"_id": "f2", "name": "Flow Two", "numOpenError": 0},
+                ],
+            )
+
+        async with _json_client(handler) as c:
+            summary = await list_error_summary_for_integration("integ1", token="tok", client=c)
+
+        assert summary["integration_id"] == "integ1"
+        assert summary["total_errors"] == 3
+        assert summary["affected_flows"] == 1
+        assert len(summary["flows"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_missing_error_counts_degrade_to_zero_not_a_crash(self):
+        """If Celigo doesn't populate numOpenError on a plain listing call
+        (unverified either way -- see task-3-report.md), this must not
+        raise; it must report zero rather than fabricate a count."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=[{"_id": "f1", "name": "Flow One"}])
+
+        async with _json_client(handler) as c:
+            summary = await list_error_summary_for_integration("integ1", token="tok", client=c)
+
+        assert summary["total_errors"] == 0
+        assert summary["affected_flows"] == 0
+        assert len(summary["flows"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_returns_a_dict_not_a_generator(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=[])
+
+        async with _json_client(handler) as c:
+            summary = await list_error_summary_for_integration("integ1", token="tok", client=c)
+
+        assert isinstance(summary, dict)

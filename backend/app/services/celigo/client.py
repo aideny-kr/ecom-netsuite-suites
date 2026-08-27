@@ -1,25 +1,79 @@
 """Celigo integrator.io REST client.
 
-Plan A scope: token verification only. Pagination, field projection, and the
-resource fetchers land in Plan B.
+Plan A scope: token verification. Plan B (Task 3) adds paginated, projected
+resource fetchers: `list_resource`, `get_resource`, `list_flow_errors_for_step`,
+`list_error_summary_for_integration`.
 
-Two facts drive this module's shape:
+Two facts drive Plan A's shape:
   * EU accounts are fully isolated at api.eu.integrator.io. A US-region call
     against an EU account fails auth, so region is stored per connection and
     routed here.
   * Celigo returns {"message": ...} on 401/403, NOT the {"errors": [...]}
     envelope it uses elsewhere. Parsing the wrong shape turns a clean auth
     failure into a 500.
+
+TASK 3 SECURITY MODEL (see sanitizer.py's module docstring for the full
+story): a live probe found Celigo ignores BOTH `include` and `exclude` for
+payload-bearing fields -- `exclude=mockResponse` on a real import still
+returned it; a positive `include=` allowlist on a real export still returned
+`mockOutput`/`rawData` unrequested. Projection is NOT a privacy control in
+either direction; it is passed through anyway (it shrinks most responses and
+costs nothing) but relied on for NOTHING. Every fetcher in this module runs
+its response through `sanitize()` before returning -- unconditionally, on
+every branch, including partial/error-adjacent ones -- so a raw Celigo object
+can never leave this module. No fetcher here logs a response body; the only
+things logged (via exception messages) are status codes and resource
+identifiers, never payload content.
+
+TASK 3 PAGINATION: Celigo's documented pagination
+(developer.celigo.com/api/using-the-api/pagination.md, fetched 2026-08-27 --
+NOT independently verified live, see task-3-report.md) is Link-header based
+for collection endpoints (`Link: <url>; rel="next"`, follow verbatim, never
+hand-craft `after`/`limit`; a 204 with no body means nothing to list) and
+body-based (`{"errors": [...], "nextPageURL": "..."}`) for the per-step flow
+error endpoint specifically -- the docs' own worked example for body-based
+pagination IS that errors endpoint. `list_resource`/`get_resource` use the
+former; `list_flow_errors_for_step` uses the latter.
+
+TASK 3 ERRORS ARE PER-STEP, NOT PER-FLOW (observed-shapes.md, live-probed
+2026-08-27): passing a flow id alone (no step id) returns `steps: []` even
+when errors exist -- the useless mode. `list_flow_errors_for_step` makes that
+mode structurally unreachable: `flow_id` and `step_id` are both required
+positional parameters, never optional.
 """
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator, Iterable
+
 import httpx
+
+from app.services.celigo.sanitizer import sanitize
 
 CELIGO_BASE_URLS: dict[str, str] = {
     "us": "https://api.integrator.io",
     "eu": "https://api.eu.integrator.io",
 }
+
+# Resource kinds `list_resource`/`get_resource` know how to fetch, mapped to
+# their `/v1/<endpoint>` collection name. Deliberately excludes "error":
+# errors are not a standalone listable/gettable resource in Celigo's API --
+# they only exist scoped to a flow + step, which is why they get their own
+# dedicated functions below rather than going through this generic path.
+_KIND_ENDPOINTS: dict[str, str] = {
+    "integration": "integrations",
+    "flow": "flows",
+    "export": "exports",
+    "import": "imports",
+    "script": "scripts",
+}
+
+# Bound on 429 retries and on error-page-following. Both are read-only GET
+# loops driven by server-supplied cursors, but neither should be allowed to
+# spin forever against a misbehaving or malicious response.
+_MAX_RETRIES = 3
+_MAX_ERROR_PAGES = 200
 
 # Celigo's hosted MCP server -- a fixed URL per region, not tenant-configurable
 # (Plan A). Derived from CELIGO_BASE_URLS (never a second hardcoded map) so
@@ -141,4 +195,291 @@ async def verify_token(
         "scope": scope,
         "account_name": account_name,
         "user_email": user_email,
+    }
+
+
+def _raise_for_status(response: httpx.Response, *, context: str) -> None:
+    """Shared status check for the Task 3 fetchers. Mirrors verify_token's
+    401/403-vs-other split: an auth failure is caller error (bad/expired
+    token), everything else is treated as an upstream problem. Never
+    includes the response body in the raised message -- only the status
+    code and a caller-supplied, payload-free description of what was being
+    fetched -- so a raw Celigo object can never end up in a traceback."""
+    if response.status_code in (401, 403):
+        raise CeligoAuthError(_auth_message(response))
+    if not (200 <= response.status_code < 300):
+        raise CeligoError(f"Celigo returned {response.status_code} while {context}")
+
+
+def _retry_after_seconds(response: httpx.Response, *, default: float = 1.0) -> float:
+    """Best-effort parse of a 429's Retry-After header. RFC 7231 allows
+    either delta-seconds (what Celigo sends in every case observed) or an
+    HTTP-date; a non-numeric value falls back to *default* rather than
+    raising -- a malformed backoff hint must never crash the retry loop."""
+    value = response.headers.get("retry-after")
+    if value is None:
+        return default
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        return default
+
+
+async def _get_with_retry(
+    http: httpx.AsyncClient,
+    url: str,
+    *,
+    headers: dict,
+    params: dict | None = None,
+) -> httpx.Response:
+    """GET *url*, honouring a 429's Retry-After by sleeping and retrying up
+    to `_MAX_RETRIES` times. The final response (whatever its status) is
+    returned to the caller, which decides success/failure via
+    `_raise_for_status` -- this function's only job is the retry loop."""
+    attempt = 0
+    while True:
+        response = await http.get(url, headers=headers, params=params)
+        if response.status_code == 429 and attempt < _MAX_RETRIES:
+            await asyncio.sleep(_retry_after_seconds(response))
+            attempt += 1
+            continue
+        return response
+
+
+def _join_projection(value: str | Iterable[str]) -> str:
+    """`include`/`exclude` accept either a pre-joined comma string or an
+    iterable of field names, for caller convenience."""
+    return value if isinstance(value, str) else ",".join(value)
+
+
+def _resolve_next_page_url(next_page_url: str, region: str) -> str:
+    """`nextPageURL` (the error endpoint's body-pagination field) may be
+    absolute or relative per the documented example
+    (`/v1/flows/.../errors?after=...`) -- resolve a relative one against
+    this region's host rather than assuming a shape."""
+    if next_page_url.startswith("http://") or next_page_url.startswith("https://"):
+        return next_page_url
+    path = next_page_url if next_page_url.startswith("/") else f"/{next_page_url}"
+    return f"{base_url(region)}{path}"
+
+
+async def list_resource(
+    kind: str,
+    *,
+    token: str,
+    region: str = "us",
+    include: str | Iterable[str] | None = None,
+    exclude: str | Iterable[str] | None = None,
+    params: dict | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> AsyncIterator[dict]:
+    """List every resource of *kind*, transparently following Celigo's
+    Link-header pagination (`rel="next"`) until it's absent, and sanitizing
+    each item before it's yielded.
+
+    *include*/*exclude* are passed through to the wire as-is when given --
+    they shrink most responses and cost nothing -- but callers must NOT rely
+    on them to keep payload-bearing fields off the wire; see the module
+    docstring. *params* carries any other caller-supplied filter (e.g.
+    ``{"_integrationId": ...}``).
+
+    Raises :class:`ValueError` for an unrecognized *kind* -- a resource type
+    this module has no allowlist for is not something we can safely fetch
+    and sanitize, so this fails before making any request rather than after.
+
+    Caller-owned resource note: when *client* is omitted, this generator
+    creates and owns an `httpx.AsyncClient` for its lifetime and closes it
+    once the generator is exhausted (or explicitly aclosed). A caller that
+    only partially iterates and never closes the generator should pass its
+    own *client* instead, the same convention `verify_token` already uses.
+    """
+    endpoint = _KIND_ENDPOINTS.get(kind)
+    if endpoint is None:
+        raise ValueError(f"unknown Celigo resource kind: {kind!r}")
+
+    query: dict = dict(params or {})
+    if include:
+        query["include"] = _join_projection(include)
+    if exclude:
+        query["exclude"] = _join_projection(exclude)
+
+    owns_client = client is None
+    http = client or httpx.AsyncClient(timeout=_TIMEOUT)
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    url: str | None = f"{base_url(region)}/v1/{endpoint}"
+    # Only the FIRST request carries our query params -- the Link header's
+    # `rel="next"` URL is a complete, self-sufficient URL (it already embeds
+    # whatever filters were on the original query, plus the server's own
+    # `after`/`limit`), so subsequent requests use it verbatim.
+    next_params: dict | None = query
+    try:
+        while url:
+            response = await _get_with_retry(http, url, headers=headers, params=next_params)
+            next_params = None
+            _raise_for_status(response, context=f"listing {kind}")
+            if response.status_code == 204:
+                return
+            try:
+                body = response.json()
+            except ValueError:
+                raise CeligoError(f"Celigo returned an unparseable {kind} listing") from None
+            if not isinstance(body, list):
+                raise CeligoError(f"Celigo returned a non-list body listing {kind}")
+            for raw in body:
+                if isinstance(raw, dict):
+                    yield sanitize(kind, raw)
+            url = response.links.get("next", {}).get("url")
+    finally:
+        if owns_client:
+            await http.aclose()
+
+
+async def get_resource(
+    kind: str,
+    celigo_id: str,
+    *,
+    token: str,
+    region: str = "us",
+    include: str | Iterable[str] | None = None,
+    exclude: str | Iterable[str] | None = None,
+    client: httpx.AsyncClient | None = None,
+) -> dict:
+    """Fetch a single resource of *kind* by id and sanitize it before
+    returning. See `list_resource` for the *include*/*exclude* caveat and
+    the *kind* validation behavior -- both apply identically here."""
+    endpoint = _KIND_ENDPOINTS.get(kind)
+    if endpoint is None:
+        raise ValueError(f"unknown Celigo resource kind: {kind!r}")
+
+    query: dict = {}
+    if include:
+        query["include"] = _join_projection(include)
+    if exclude:
+        query["exclude"] = _join_projection(exclude)
+
+    owns_client = client is None
+    http = client or httpx.AsyncClient(timeout=_TIMEOUT)
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    url = f"{base_url(region)}/v1/{endpoint}/{celigo_id}"
+    try:
+        response = await _get_with_retry(http, url, headers=headers, params=query)
+    finally:
+        if owns_client:
+            await http.aclose()
+
+    _raise_for_status(response, context=f"fetching {kind} {celigo_id}")
+    try:
+        body = response.json()
+    except ValueError:
+        raise CeligoError(f"Celigo returned an unparseable {kind} response") from None
+    if not isinstance(body, dict):
+        raise CeligoError(f"Celigo returned an unparseable {kind} response")
+    return sanitize(kind, body)
+
+
+async def list_flow_errors_for_step(
+    flow_id: str,
+    step_id: str,
+    *,
+    token: str,
+    region: str = "us",
+    client: httpx.AsyncClient | None = None,
+) -> list[dict]:
+    """List every open error for one step of one flow, following the error
+    endpoint's body-based pagination (`nextPageURL`) until it's absent, and
+    sanitizing each error before it's returned.
+
+    `flow_id` and `step_id` are BOTH required, non-optional parameters --
+    deliberately, not incidentally. A live probe (observed-shapes.md,
+    2026-08-27) found that querying by flow id alone returns `steps: []`
+    even when errors exist for that flow; this signature makes that useless
+    call structurally impossible to make through this function rather than
+    merely discouraging it in a docstring.
+
+    Returns a materialized `list`, not an async generator -- callers of this
+    function need the full error set for one step (e.g. to fingerprint or
+    dedupe), not a lazy stream.
+    """
+    owns_client = client is None
+    http = client or httpx.AsyncClient(timeout=_TIMEOUT)
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    url: str | None = f"{base_url(region)}/v1/flows/{flow_id}/errors"
+    next_params: dict | None = {"_stepId": step_id}
+    errors: list[dict] = []
+    try:
+        pages = 0
+        while url and pages < _MAX_ERROR_PAGES:
+            response = await _get_with_retry(http, url, headers=headers, params=next_params)
+            next_params = None
+            _raise_for_status(response, context=f"listing errors for flow {flow_id} step {step_id}")
+            if response.status_code == 204:
+                break
+            try:
+                body = response.json()
+            except ValueError:
+                raise CeligoError("Celigo returned an unparseable flow-errors response") from None
+            if not isinstance(body, dict):
+                raise CeligoError("Celigo returned an unparseable flow-errors response")
+            for raw in body.get("errors") or []:
+                if isinstance(raw, dict):
+                    errors.append(sanitize("error", raw))
+            next_page_url = body.get("nextPageURL")
+            url = _resolve_next_page_url(next_page_url, region) if next_page_url else None
+            pages += 1
+    finally:
+        if owns_client:
+            await http.aclose()
+    return errors
+
+
+async def list_error_summary_for_integration(
+    integration_id: str,
+    *,
+    token: str,
+    region: str = "us",
+    client: httpx.AsyncClient | None = None,
+) -> dict:
+    """Best-effort open-error summary for every flow in *integration_id*,
+    built ONLY from confirmed primitives: `GET /v1/flows?_integrationId=` is
+    a documented, real query filter (developer.celigo.com), and each
+    returned flow is sanitized through the existing `flow` allowlist, which
+    already carries `numOpenError`/`lastErrorAt` (sanitizer.py FIX ROUND 3).
+
+    Uses `_integrationId`, never a bare flow id -- mirrors
+    `list_flow_errors_for_step`'s "never `_id` alone" rule for the same
+    underlying reason: an unscoped per-flow query is the mode observed to
+    come back empty.
+
+    KNOWN LIMITATION (see task-3-report.md): this does NOT independently
+    call the per-flow errors endpoint, and it is UNVERIFIED whether Celigo
+    populates `numOpenError` on a plain flow listing at all (it was not
+    observed on the one live flow probed in observed-shapes.md; it may only
+    appear via an unverified separate call). If it is absent on every flow,
+    `total_errors`/`affected_flows` both come back 0 -- a false negative,
+    not a crash. Do not treat a 0 here as proof an integration has no open
+    errors without independently confirming this assumption.
+    """
+    owns_client = client is None
+    http = client or httpx.AsyncClient(timeout=_TIMEOUT)
+    flows: list[dict] = []
+    try:
+        async for flow in list_resource(
+            "flow",
+            token=token,
+            region=region,
+            params={"_integrationId": integration_id},
+            client=http,
+        ):
+            flows.append(flow)
+    finally:
+        if owns_client:
+            await http.aclose()
+
+    total_errors = sum((flow.get("numOpenError") or 0) for flow in flows)
+    affected_flows = sum(1 for flow in flows if (flow.get("numOpenError") or 0) > 0)
+    return {
+        "integration_id": integration_id,
+        "total_errors": total_errors,
+        "affected_flows": affected_flows,
+        "flows": flows,
     }
