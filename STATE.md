@@ -144,6 +144,40 @@ fresh branch off `main` and leave Track O behind pending its own decision.
 
 Written so the next session does not re-litigate these.
 
+- **2026-08-27 · The HITL guard lives at the DISPATCHER, default-denied, over "each caller checks"**
+  · because a caller that forgets is a hole, and one already existed. Verified reachable: a chat
+  session with `workspace_id` set skips the guarded unified-agent block
+  (`orchestrator.py:2933`, which ends in `return` at 4009) and falls through to the single-agent
+  loop at 4016, whose toolset includes `ns_createRecord`/`ns_updateRecord`/`ns_deleteRecord` and
+  whose only gate is `policy_evaluate` — SQL params and row limits, never mutations.
+  `classify_mutation` appears **zero** times in orchestrator.py. So a workspace-attached session
+  could write to PRODUCTION NetSuite with no card, no HMAC, no approval — contradicting CLAUDE.md's
+  own stated invariant. Pre-existing; `agent-graph.md` #3 had named the shape without anyone
+  establishing reachability. Measured urgency before fixing: 11 workspace-attached sessions exist,
+  **zero active in 60 days**. Fix: `execute_tool_call(..., human_approved=False)` refusing at the
+  choke point; exactly ONE caller passes True (the approve branch, whose payload is HMAC-verified
+  against what a human accepted). **The default is the mechanism** — a caller added tomorrow that
+  has never heard of HITL is refused rather than trusted.
+- **2026-08-27 · NetSuite tools are ALLOW-listed, over the four-name deny-list** · because the
+  NetSuite tool surface is *discovered at runtime* from Oracle's MCP server
+  (`session.list_tools()`, `mcp_client_service.py:164`), so any write tool Oracle exposes that
+  `classify_mutation` has not heard of would pass the HITL guard and mutate production unapproved.
+  `agent-graph.md` states the rule ("allow-list derived from a registry, never a deny-list"). The
+  trade is asymmetric on purpose: a new READ tool being refused is visible, logged with the remedy,
+  and recoverable; a new WRITE tool being allowed is an irreversible ERP mutation nobody sees until
+  after. `human_approved` still passes, so it is fail-closed, not fail-permanently.
+  **`_BLOCKED_RECORD_TYPES` stays a deny-list** — agent-graph.md #1 says so, and record types are a
+  different axis from tool names.
+- **2026-08-27 · Sandbox environment binding must be ENFORCED, not hinted** ·
+  `docs/superpowers/specs/2026-08-27-sandbox-environment-binding-design.md`. `source_pin` is
+  deliberately advisory and is the wrong model: on an irreversible ERP write, a hint followed 95% of
+  the time is a 5% chance of hitting production when the user said sandbox. It is also unusable
+  mechanically — its column was dropped in migration 067. Environment is derived server-side from
+  the account id (never operator-asserted — `metadata_json['account_id']` is unvalidated free text,
+  so a row labelled "sandbox" can point at production), stored NOT NULL with an explicit
+  `production` backfill, re-derived at dispatch, and signed into the confirmation envelope. Three of
+  the nine threat-model holes were bugs in the CURRENT system and are already fixed.
+
 - **2026-08-25 · Required NetSuite fields are CURATED IN CODE, over "discovered at runtime
   from `ns_getRecordTypeMetadata`"** · because the runtime option does not exist. The plan
   (`docs/superpowers/plans/2026-08-19-agentic-netsuite-write-loop.md:20`) forbade hardcoding
