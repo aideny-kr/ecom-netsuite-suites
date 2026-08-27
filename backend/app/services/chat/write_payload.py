@@ -65,6 +65,9 @@ def _coerce(raw: Any) -> dict[str, Any] | None:
     return None
 
 
+_ASK_USER_KEY = "ask_user"
+
+
 def normalize_write_payload(tool_input: dict[str, Any]) -> NormalizedPayload:
     """Return the canonical payload, or raise :class:`PayloadParseError`.
 
@@ -119,6 +122,16 @@ def normalize_write_payload(tool_input: dict[str, Any]) -> NormalizedPayload:
     lines: list[dict[str, Any]] = []
     fields: dict[str, Any] = {}
     for line_key, value in record.items():
+        if line_key == _ASK_USER_KEY:
+            # Out-of-band hint, never a record field. `base_agent` pops it
+            # from the TOP level of tool_input, but the model has been
+            # observed nesting it inside the data payload instead (staging,
+            # 2026-08-27) — where the top-level pop cannot see it. Left in, it
+            # renders as a bogus field row on the confirmation card AND gets
+            # posted to NetSuite as a record field on approve, which NetSuite
+            # rejects. Dropped at the one place every payload is parsed, so no
+            # nesting level survives.
+            continue
         if line_key in _LINE_KEYS and isinstance(value, list):
             # A non-dict entry must fail closed, not be silently dropped.
             # Dropping it would desync the confirmation card (built from

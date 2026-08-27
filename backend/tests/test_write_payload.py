@@ -207,3 +207,53 @@ def test_populated_data_with_malformed_body_string_now_raises():
     malformed second key now fails closed instead."""
     with pytest.raises(PayloadParseError):
         normalize_write_payload({"data": {"memo": "A"}, "body": "{not json"})
+
+
+# ---------------------------------------------------------------------------
+# ask_user must never survive into the payload, at ANY nesting level
+# ---------------------------------------------------------------------------
+#
+# `ask_user` is an out-of-band hint: the model names a field it wants a human
+# to choose, the server resolves the options, and the key is popped before
+# anything else touches the tool input. That pop handles the TOP level of
+# tool_input — but observed live on staging 2026-08-27 the model nested it
+# INSIDE the data payload instead:
+#
+#   {"recordType": "customer",
+#    "data": "{\"companyName\": \"Acme\", \"ask_user\": [\"subsidiary\"]}"}
+#
+# Two real consequences. It rendered as a bogus field row on the confirmation
+# card — the operator saw a field named `ask_user` and reasonably rejected the
+# write. And on approve it would have been posted to NetSuite as a record
+# field, which NetSuite rejects, turning an approved write into a 400.
+
+
+def test_ask_user_nested_in_data_is_stripped_from_fields():
+    payload = normalize_write_payload(
+        {"recordType": "customer", "data": '{"companyName": "Acme", "ask_user": ["subsidiary"]}'}
+    )
+    assert payload.fields == {"companyName": "Acme"}
+
+
+def test_ask_user_nested_in_body_is_stripped_too():
+    payload = normalize_write_payload(
+        {"recordType": "customer", "body": {"companyName": "Acme", "ask_user": ["subsidiary"]}}
+    )
+    assert payload.fields == {"companyName": "Acme"}
+
+
+def test_stripping_ask_user_does_not_break_an_otherwise_empty_payload():
+    """A payload whose only key was the hint still parses. It is genuinely
+    empty of real fields, and the validator's missing-required check is what
+    should speak to that — not a parse error."""
+    payload = normalize_write_payload({"recordType": "customer", "data": '{"ask_user": ["subsidiary"]}'})
+    assert payload.fields == {}
+
+
+def test_a_field_merely_named_like_the_hint_is_untouched():
+    """Only the exact key is removed. NetSuite has no `ask_user` field, but a
+    custom field could be named something adjacent — do not over-match."""
+    payload = normalize_write_payload(
+        {"recordType": "customer", "data": '{"custentity_ask_user_note": "x", "companyName": "Acme"}'}
+    )
+    assert payload.fields == {"custentity_ask_user_note": "x", "companyName": "Acme"}

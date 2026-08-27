@@ -2181,6 +2181,12 @@ async def run_chat_turn(
                 _record_type = _so.get("record_type", "record")
 
                 _exec_succeeded = False
+                # Initialised BEFORE the try/except branches below —
+                # this file's own rule (chat-orchestration.md #19,
+                # pinned by test_orchestrator_paths.py): a variable
+                # read after an if/elif chain must be bound on every
+                # path, or the exception route raises UnboundLocalError.
+                _updated_so_record_url: str | None = None
                 _exec_error: str | None = None
                 try:
                     _exec_result = json.loads(_exec_result_str)
@@ -2209,6 +2215,38 @@ async def run_chat_turn(
                     else:
                         _exec_succeeded = True
                         _confirm_content = f"Done — the {_record_type} {_mutation_type} has been executed successfully."
+                        # Hand back a link to what was just written. Without
+                        # it the operator is told "Done" and left to find the
+                        # record by searching NetSuite for a name, or by
+                        # knowing the URL shape for an internal id. The id is
+                        # already in the response; only the link was missing.
+                        # Best-effort by construction: an unknown record type
+                        # or a tenant with no NetSuite account id yields no
+                        # link rather than a guessed one, and nothing here may
+                        # turn a SUCCESSFUL write into an error.
+                        try:
+                            from sqlalchemy import select as _sel
+
+                            from app.models.tenant import Tenant as _Tenant
+                            from app.services.chat.netsuite_record_url import build_record_url
+
+                            _new_id = (
+                                _exec_result.get("recordId") or _exec_result.get("id") or _exec_result.get("internalId")
+                                if isinstance(_exec_result, dict)
+                                else None
+                            )
+                            if _new_id:
+                                _acct = await db.scalar(
+                                    _sel(_Tenant.netsuite_account_id).where(_Tenant.id == tenant_id)
+                                )
+                                _record_url = build_record_url(_acct, _record_type, _new_id)
+                                if _record_url:
+                                    _updated_so_record_url = _record_url
+                                    _confirm_content += (
+                                        f"\n\n[View {_record_type} {_new_id} in NetSuite]({_record_url})"
+                                    )
+                        except Exception:
+                            logger.warning("record link could not be built", exc_info=True)
                 except (json.JSONDecodeError, TypeError):
                     # UNPARSEABLE result reported as success — deliberately
                     # deferred, out of scope here. This is genuinely a
@@ -2222,6 +2260,10 @@ async def run_chat_turn(
                     _confirm_content = f"The {_mutation_type} operation has been executed."
 
                 _updated_so = dict(_so)
+                if _exec_succeeded and _updated_so_record_url:
+                    # Display-only, like field_labels: never part of the
+                    # signed tool_input, never written to NetSuite.
+                    _updated_so["record_url"] = _updated_so_record_url
                 _repair_decision = None
                 _repair_root_id: str | None = None
                 _repair_current_attempt = 0
