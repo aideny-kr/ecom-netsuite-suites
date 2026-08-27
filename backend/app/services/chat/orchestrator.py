@@ -2168,6 +2168,13 @@ async def run_chat_turn(
                 # write NetSuite already accepted. A human must check the
                 # NetSuite record and resolve it manually.
                 _exec_result_str = await execute_tool_call(
+                    # The ONE place this may be True. `tool_name`/`tool_input`
+                    # here came from validate_and_extract_confirmation, which
+                    # HMAC-verified the exact payload a human accepted — so
+                    # this is the approval, not a claim of one. Every other
+                    # caller of execute_tool_call leaves it default-False and
+                    # is refused at the dispatcher.
+                    human_approved=True,
                     tool_name=tool_name,
                     tool_input=tool_input,
                     tenant_id=tenant_id,

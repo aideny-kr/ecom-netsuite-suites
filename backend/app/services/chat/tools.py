@@ -262,12 +262,67 @@ async def execute_tool_call(
     context_need: str | None = None,
     session_id: str | None = None,
     actor_type: str = "user",
+    human_approved: bool = False,
 ) -> str:
     """Execute a tool call and return the result as a JSON string.
 
     Routes to local MCP server or external MCP client based on tool name prefix.
+
+    ``human_approved`` MUST stay default-False. It is the sole permission to
+    execute a NetSuite mutation, and only the orchestrator's approve branch —
+    which has already HMAC-verified the exact payload a human accepted — may
+    pass True. Defaulting to False is the entire point: a caller added later
+    that knows nothing about HITL is refused rather than trusted.
     """
     start = time.monotonic()
+
+    # ── HITL guard at the choke point ──
+    # This used to live in ONE caller (base_agent.run_streaming, which yields a
+    # confirmation card instead of executing), leaving every other caller able
+    # to reach the ERP unguarded. That was reachable: a chat session with a
+    # workspace_id skips the guarded unified-agent block (orchestrator.py:2933,
+    # which ends in `return` at 4009) and falls through to the single-agent
+    # loop at 4016, whose toolset includes ns_createRecord/ns_updateRecord/
+    # ns_deleteRecord and whose only gate is policy_evaluate — which inspects
+    # SQL params and row limits, never mutations. `classify_mutation` appears
+    # zero times in orchestrator.py.
+    #
+    # So the guard moves here, where `.claude/rules/agent-graph.md` #3 says it
+    # belongs ("the dispatcher is the choke point... Adding a caller must not
+    # be able to add a hole"). Refusing by DEFAULT is what makes that true: the
+    # protection no longer depends on each caller remembering it exists.
+    #
+    # Narrow on purpose — NetSuite mutation verbs only. The write loop is built
+    # out of ns_getRecordTypeMetadata / ns_getSubsidiaries / ns_runCustomSuiteQL,
+    # and blocking those would break validation, the slot form and the posting
+    # invariants.
+    if not human_approved:
+        from app.services.chat.mutation_guard import classify_mutation as _classify_at_chokepoint
+
+        _verb = _classify_at_chokepoint(tool_name)
+        if _verb:
+            logger.warning(
+                "HITL guard refused an unapproved %s via %s (tenant=%s session=%s)",
+                _verb,
+                tool_name,
+                tenant_id,
+                session_id,
+            )
+            return json.dumps(
+                {
+                    "error": (
+                        f"This {_verb} was NOT executed: a NetSuite write requires explicit human "
+                        "approval, and this call carried none."
+                    ),
+                    "hitl_required": True,
+                    "instruction": (
+                        "Do not retry this call. Propose the write so the user is shown a "
+                        "confirmation card, and let them approve it — the approved payload is "
+                        "what executes."
+                    ),
+                }
+            )
+    # ── End HITL guard ──
 
     if tool_name == "escalate_reasoning":
         # Control signal handled by the agent loop (it bumps thinking depth).
