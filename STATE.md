@@ -36,7 +36,7 @@ Updated at the end of every task, not "later".
 |---|---|---|---|
 | `feat/dev-loop-and-harness` | T2 | 21 commits, process only — gated ×3, blockers fixed, **frozen** | nothing |
 | `feat/agent-graph-operating-model` | T2 | Track O (22 majors) + reject action, **ungated** | needs Track O decision |
-| `feat/rolling-period` | T2 | Stage 1 built + eyeball-approved. verify PASS @ `bbb28f8f`. Gate ×2 run (both valid, pinned, codex). Round-2 fixes **UNCOMMITTED, mid-flight** | finish round-2 fixes → verify → gate round 3 |
+| `feat/rolling-period` | T2 | Stage 1 built + eyeball-approved. verify **PASS @ `a656ebd9`** (5789 pass, no new failures vs main). Gate ×3 run (all valid, pinned, codex). Round-3 majors fixed + committed; **gate round 4 in flight** | round 4 verdict → open PR (do NOT merge, deploy agents active) |
 
 **SHIPPED 2026-08-17 — `fix/ns-account-switch-and-chat-burst` → PR #194, squashed to
 `54729804`, deployed and live-verified on staging.** Ticket 86bba299w closed. It had
@@ -144,6 +144,21 @@ fresh branch off `main` and leave Track O behind pending its own decision.
 ## DECIDED — date · chose X over Y · because
 
 Written so the next session does not re-litigate these.
+
+- **2026-08-27 · On `feat/rolling-period` we answered a repeating gate shape with a SIBLING
+  AUDIT, not a 4th patch** · because two of round 3's three majors were regressions from
+  round 2's *own* fixes, and both shared one shape: *a guard applied to one path but not to
+  its sibling* (ReportSeries insert got ON CONFLICT, the Report insert next to it did not;
+  the resolver's GUC-restore `finally` covered the cache MISS but not the HIT). CLAUDE.md's
+  PR #194 lesson is that when consecutive rounds' findings share a shape you stop looping
+  and make the shape unrepresentable. So instead of only fixing the two instances, we
+  enumerated every sibling of both classes on the branch: **all 3 insert sites** (
+  `UserDashboardPreference` upsert, `ReportSeries`, `Report`) now carry conflict handling,
+  and **all 6 `db.commit()` sites** in `dashboard.py` are followed only by in-memory
+  response building. The one asymmetry left — the `report_id` branch of
+  `set_active_dashboard` lacking the series branch's defense-in-depth `set_tenant_context`
+  — is deliberate: it does no live I/O between its read and its write, so nothing can clear
+  the GUC there. Recorded because a future reader will otherwise "fix" that asymmetry.
 
 - **2026-08-06 · We had been SKIPPING RUNGS on the agentic-engineering ladder** · because
   the ladder (flat capture → code graph → domain graph → single-agent loop → verifier →
