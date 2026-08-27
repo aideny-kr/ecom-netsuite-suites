@@ -28,7 +28,7 @@ class TestRegionRouting:
 
         def handler(request: httpx.Request) -> httpx.Response:
             seen["url"] = str(request.url)
-            return httpx.Response(200, json={"name": "Acme", "email": "a@b.co"})
+            return httpx.Response(200, json={"_userId": "5fe26cb4b32d987eb607618e"})
 
         async with _client(handler) as c:
             await verify_token("tok", region="eu", client=c)
@@ -41,7 +41,7 @@ class TestRegionRouting:
 
         def handler(request: httpx.Request) -> httpx.Response:
             seen["url"] = str(request.url)
-            return httpx.Response(200, json={"name": "Acme", "email": "a@b.co"})
+            return httpx.Response(200, json={"_userId": "5fe26cb4b32d987eb607618e"})
 
         async with _client(handler) as c:
             await verify_token("tok", client=c)
@@ -77,7 +77,7 @@ class TestAuth:
 
         def handler(request: httpx.Request) -> httpx.Response:
             seen["auth"] = request.headers.get("authorization")
-            return httpx.Response(200, json={"name": "Acme", "email": "a@b.co"})
+            return httpx.Response(200, json={"_userId": "5fe26cb4b32d987eb607618e"})
 
         async with _client(handler) as c:
             await verify_token("s3cret", client=c)
@@ -130,25 +130,101 @@ class TestExceptionHierarchy:
 class TestSuccess:
     @pytest.mark.asyncio
     async def test_returns_account_identity(self):
+        """Display fields are passed through WHEN present -- but they are not
+        what proves identity, and the live endpoint omits them entirely (see
+        TestDocumentedTokenInfoShape)."""
+
         def handler(request: httpx.Request) -> httpx.Response:
-            return httpx.Response(200, json={"name": "Framework", "email": "ops@frame.work"})
+            return httpx.Response(
+                200,
+                json={"_userId": "u-framework", "name": "Framework", "email": "ops@frame.work"},
+            )
 
         async with _client(handler) as c:
             info = await verify_token("tok", client=c)
 
-        assert info == {"account_name": "Framework", "user_email": "ops@frame.work"}
+        assert info == {
+            "user_id": "u-framework",
+            "scope": "",
+            "account_name": "Framework",
+            "user_email": "ops@frame.work",
+        }
 
     @pytest.mark.asyncio
-    async def test_one_identity_field_present_is_enough(self):
-        """At least ONE of name/email is required, not both."""
+    async def test_absent_display_fields_are_empty_not_an_error(self):
+        """The real-world case: ``_userId`` alone is a complete, verified
+        identity. Display fields default to empty rather than failing."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"_userId": "u-framework"})
+
+        async with _client(handler) as c:
+            info = await verify_token("tok", client=c)
+
+        assert info == {
+            "user_id": "u-framework",
+            "scope": "",
+            "account_name": "",
+            "user_email": "",
+        }
+
+
+class TestDocumentedTokenInfoShape:
+    """REGRESSION (found live 2026-08-27, against the real Framework account).
+
+    Celigo's ``GET /v1/tokenInfo`` returns ``{"_userId": ...}`` and optionally
+    ``"scope"``. It does NOT return ``name`` or ``email`` -- see
+    https://github.com/celigo/integrator-api-docs. Every fixture in this file
+    invented those two fields, and a comment in
+    ``tests/api/test_celigo_connector_status.py`` codified the invention as a
+    guarantee ("tokenInfo guarantees at least one of name/email"). So 5936
+    tests passed against a response shape Celigo never sends, while
+    ``connect_celigo`` raised ``CeligoError`` for every real token and the
+    feature could not be connected at all.
+
+    ``_userId`` is also a STRICTLY better identity key than ``account_name``:
+    it is a stable id rather than a display string Celigo never promised to be
+    unique, which is what let the old ``_celigo_accounts_match`` docstring
+    concede it was "NOT a cryptographic proof of account identity".
+    """
+
+    @pytest.mark.asyncio
+    async def test_documented_response_is_a_verified_identity(self):
+        """The exact body the live endpoint returned for a real service token."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"_userId": "5fe26cb4b32d987eb607618e"})
+
+        async with _client(handler) as c:
+            info = await verify_token("tok", client=c)
+
+        assert info["user_id"] == "5fe26cb4b32d987eb607618e"
+
+    @pytest.mark.asyncio
+    async def test_scope_is_surfaced_when_celigo_reports_it(self):
+        """``scope`` is Celigo stating the token's permissions itself -- a
+        stronger read-only signal than trusting tool names reported by a
+        remote MCP server."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"_userId": "u1", "scope": "*"})
+
+        async with _client(handler) as c:
+            info = await verify_token("tok", client=c)
+
+        assert info["scope"] == "*"
+
+    @pytest.mark.asyncio
+    async def test_missing_user_id_is_not_a_verified_identity(self):
+        """Fail closed: no ``_userId`` means the documented identity field is
+        absent, so nothing was proven -- even if display fields are present."""
 
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json={"name": "Framework"})
 
         async with _client(handler) as c:
-            info = await verify_token("tok", client=c)
-
-        assert info == {"account_name": "Framework", "user_email": ""}
+            with pytest.raises(CeligoError):
+                await verify_token("tok", client=c)
 
 
 class TestNonGenuineSuccess:

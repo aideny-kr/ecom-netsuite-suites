@@ -116,14 +116,29 @@ async def verify_token(
     if not isinstance(body, dict):
         raise CeligoError("Celigo returned an unparseable token-info response")
 
+    user_id = str(body.get("_userId") or "")
+    scope = str(body.get("scope") or "")
+    # ``name``/``email`` are NOT returned by this endpoint. They are read
+    # opportunistically for display only, and are empty for every real token.
     account_name = str(body.get("name") or "")
     user_email = str(body.get("email") or "")
-    # A 2xx with NEITHER field proves nothing about the token -- this used to
-    # silently degrade to {"account_name": "", "user_email": ""} and let the
-    # caller treat that as "verified". Not a CeligoAuthError: this isn't
-    # evidence the token was rejected, only that Celigo's response carried no
-    # identity to report.
-    if not account_name and not user_email:
+
+    # ``_userId`` is the only identity field Celigo documents for /v1/tokenInfo
+    # (https://github.com/celigo/integrator-api-docs) -- a real service token
+    # returns exactly {"_userId": "..."}, optionally with "scope".
+    #
+    # This guard used to key on name/email, which the endpoint never sends, so
+    # it raised for EVERY valid token and the connector could not be connected
+    # at all. The whole suite stayed green because every fixture invented those
+    # two fields. Keying on ``_userId`` both fixes that and gives callers a
+    # stable id to compare rather than a display string Celigo never promised
+    # to be unique -- see ``_celigo_accounts_match``.
+    if not user_id:
         raise CeligoError("Celigo returned no identity for this token")
 
-    return {"account_name": account_name, "user_email": user_email}
+    return {
+        "user_id": user_id,
+        "scope": scope,
+        "account_name": account_name,
+        "user_email": user_email,
+    }
