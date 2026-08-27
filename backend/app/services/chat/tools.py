@@ -341,7 +341,9 @@ async def execute_tool_call(
     ext_parsed = parse_external_tool_name(tool_name)
     if ext_parsed is not None:
         connector_id, raw_tool_name = ext_parsed
-        result = await _execute_external_tool(connector_id, raw_tool_name, tool_input, tenant_id, db)
+        result = await _execute_external_tool(
+            connector_id, raw_tool_name, tool_input, tenant_id, db, human_approved=human_approved
+        )
         duration_ms = int((time.monotonic() - start) * 1000)
         logger.info(
             "tool_executed",
@@ -384,12 +386,55 @@ async def execute_tool_call(
         return json.dumps({"error": f"Tool '{mcp_name}' execution failed: {exc}"})
 
 
+# NetSuite tools that only READ. Anything not here is treated as a write.
+#
+# `classify_mutation` recognises four write verbs by name, which is a DENY-list
+# — and the NetSuite tool surface is DISCOVERED AT RUNTIME from Oracle's MCP
+# server (`session.list_tools()`, mcp_client_service.py:164). Oracle can expose
+# a write tool tomorrow that the deny-list has never heard of; it would pass the
+# HITL guard, reach the ERP, and mutate a production record with no
+# confirmation card. `.claude/rules/agent-graph.md` names the rule:
+# "allow-list derived from a registry, never a deny-list".
+#
+# The trade is deliberate and asymmetric. A NEW READ tool being refused is
+# visible, recoverable, and logged loudly below — someone adds a line here. A
+# NEW WRITE tool being allowed is an unapproved irreversible ERP mutation that
+# nobody learns about until afterwards.
+_NETSUITE_READ_ONLY_TOOLS: frozenset[str] = frozenset(
+    {
+        "ns_getRecord",
+        "ns_getRecordTypeMetadata",
+        "ns_getSuiteQLMetadata",
+        "ns_getSubsidiaries",
+        "ns_getAccountingBooks",
+        "ns_getAccountingContexts",
+        "ns_getNexusIds",
+        "ns_runCustomSuiteQL",
+        "ns_runReport",
+        "ns_runSavedSearch",
+        "ns_listAllReports",
+        "ns_listSavedSearches",
+        # *_app tools open NetSuite-hosted UI panels; they mutate nothing here.
+        # ns_selector_app is additionally intercepted upstream (see
+        # selector_app_redirect) because this client cannot render it.
+        "ns_selector_app",
+        "ns_report_filters_app",
+        "ns_prompt_library_app",
+    }
+)
+
+
+def is_netsuite_provider(provider: str | None) -> bool:
+    return bool(provider) and str(provider).startswith("netsuite")
+
+
 async def _execute_external_tool(
     connector_id: uuid.UUID,
     raw_tool_name: str,
     tool_input: dict,
     tenant_id: uuid.UUID,
     db: "AsyncSession",
+    human_approved: bool = False,
 ) -> dict:
     """Execute a tool on an external MCP connector."""
     print(f"[EXT_MCP] Calling {raw_tool_name} with params: {tool_input}", flush=True)
@@ -408,6 +453,31 @@ async def _execute_external_tool(
         #
         # Provider check FIRST so nothing below costs a non-Celigo tool call
         # anything: this runs for every external tool call in every chat turn.
+        # NetSuite: allow-list inversion. See _NETSUITE_READ_ONLY_TOOLS.
+        # `human_approved` is threaded from execute_tool_call so an operator can
+        # still approve an unrecognised tool — fail-closed, not fail-permanently.
+        if is_netsuite_provider(connector.provider) and not human_approved:
+            if raw_tool_name not in _NETSUITE_READ_ONLY_TOOLS:
+                logger.warning(
+                    "netsuite_unrecognised_tool_refused tool=%s connector=%s — not on the "
+                    "read-only allow-list. If this is a legitimate READ tool, add it to "
+                    "_NETSUITE_READ_ONLY_TOOLS; if it writes, it correctly requires approval.",
+                    raw_tool_name,
+                    connector_id,
+                )
+                return {
+                    "error": (
+                        f"'{raw_tool_name}' was NOT executed: it is not a recognised read-only "
+                        "NetSuite tool, so it is treated as a write and requires explicit human "
+                        "approval."
+                    ),
+                    "hitl_required": True,
+                    "instruction": (
+                        "Do not retry this call. If a record must change, propose the write so "
+                        "the user is shown a confirmation card and can approve it."
+                    ),
+                }
+
         if is_celigo_provider(connector.provider):
             if not is_read_only_celigo_tool(raw_tool_name):
                 logger.warning(
