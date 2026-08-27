@@ -432,8 +432,14 @@ async def test_context_restored_after_successful_resolve(monkeypatch):
     result = await resolve_last_closed_period(db, _TENANT_ID)
 
     assert result.resolved is True
-    assert len(db.executed) == 1, "context must be restored exactly once, not per sub-query"
-    assert f"'{_TENANT_ID}'" in db.executed[0]
+    # T2-gate MINOR fix: context is restored TWICE on the two-query happy path now --
+    # once between the closed-period query and the next-open-period query (see the
+    # dedicated ordering test below for why), and once more in the trailing `finally`.
+    # The old "exactly once" assumption this test used to pin was itself the bug: it
+    # meant the second query could run without tenant context if the first query's own
+    # SuiteQL call had committed mid-flight.
+    assert len(db.executed) == 2
+    assert all(f"'{_TENANT_ID}'" in stmt for stmt in db.executed)
 
 
 async def test_context_restored_on_unreachable_path(monkeypatch):
@@ -453,7 +459,9 @@ async def test_context_restored_on_unreachable_path(monkeypatch):
 
 async def test_context_restored_when_next_open_lookup_fails_but_closed_period_resolved(monkeypatch):
     """The degraded "closed period found, next-open lookup failed" branch is its own
-    early return — must restore context too, not only the two branches above."""
+    early return — must restore context too, not only the two branches above. T2-gate
+    MINOR fix: the between-queries restore already fired before the second (failing)
+    query ran, so this path restores twice (between + finally), not once."""
     call_count = {"n": 0}
 
     async def flaky_execute(params, context=None, **kwargs):
@@ -468,14 +476,16 @@ async def test_context_restored_when_next_open_lookup_fails_but_closed_period_re
     result = await resolve_last_closed_period(db, _TENANT_ID)
 
     assert result.resolved is True
-    assert len(db.executed) == 1
-    assert f"'{_TENANT_ID}'" in db.executed[0]
+    assert len(db.executed) == 2
+    assert all(f"'{_TENANT_ID}'" in stmt for stmt in db.executed)
 
 
 async def test_context_restored_even_when_suiteql_call_commits_mid_resolve(monkeypatch):
     """The actual T2-gate scenario: get_valid_token commits partway through the
     SuiteQL round trip (an OAuth token refresh). The restore must fire regardless of
-    what happened inside the SuiteQL call, not only on a path that never committed."""
+    what happened inside the SuiteQL call, not only on a path that never committed. Both
+    queries hit this same fake here, so the T2-gate MINOR fix's between-queries restore
+    plus the trailing `finally` add up to two restores, not one."""
     db = _FakeSession()
 
     async def fake_execute(params, context=None, **kwargs):
@@ -487,8 +497,50 @@ async def test_context_restored_even_when_suiteql_call_commits_mid_resolve(monke
     result = await resolve_last_closed_period(db, _TENANT_ID)
 
     assert result.resolved is True
-    assert len(db.executed) == 1
-    assert f"'{_TENANT_ID}'" in db.executed[0]
+    assert len(db.executed) == 2
+    assert all(f"'{_TENANT_ID}'" in stmt for stmt in db.executed)
+
+
+async def test_context_restored_between_the_two_queries_not_only_at_the_end(monkeypatch):
+    """T2-gate MINOR: a mid-request commit inside the FIRST SuiteQL call (get_valid_token's
+    OAuth token refresh) can clear the tenant GUC before the SECOND ("next open period")
+    query ever runs. Restoring only in the trailing `finally` is too late for that second
+    call -- on a real Postgres connection it would silently see no rows (RLS blocks
+    everything) and get misread as "no later open period" even though nothing is actually
+    wrong with Jul 2026, and that wrong answer then gets cached for 5 minutes by
+    resolve_last_closed_period_cached. Pins the ORDERING (a restore lands between the two
+    SuiteQL calls, not only after both) via a shared events log both a set_tenant_context
+    spy and the fake SuiteQL execute append to -- the interleaving is what's under test,
+    not just a total count (see test_context_restored_after_successful_resolve above for
+    the count-only assertion)."""
+    events: list[str] = []
+
+    async def spy(session, tenant_id):
+        events.append(f"restore:{tenant_id}")
+
+    monkeypatch.setattr("app.services.report.period_resolver.set_tenant_context", spy)
+
+    async def fake_execute(params, context=None, **kwargs):
+        query = params["query"]
+        if "closed = 'T'" in query:
+            events.append("query:closed")
+            return {"columns": ["periodname", "enddate"], "rows": [["Jun 2026", "2026-06-30"]], "row_count": 1}
+        events.append("query:next_open")
+        return {"columns": ["periodname", "enddate"], "rows": [["Jul 2026", "2026-07-31"]], "row_count": 1}
+
+    monkeypatch.setattr("app.mcp.tools.netsuite_suiteql.execute", fake_execute)
+    db = _FakeSession()
+
+    result = await resolve_last_closed_period(db, _TENANT_ID)
+
+    assert result.resolved is True
+    assert result.next_open_name == "Jul 2026"  # proves the second query actually ran and succeeded
+    assert events == [
+        "query:closed",
+        f"restore:{_TENANT_ID}",
+        "query:next_open",
+        f"restore:{_TENANT_ID}",
+    ]
 
 
 async def test_context_restored_even_when_an_unexpected_exception_propagates(monkeypatch):
@@ -516,7 +568,8 @@ async def test_context_restore_uses_the_real_set_tenant_context_helper(monkeypat
     `app.core.database.set_tenant_context` specifically (never a hand-rolled `SET
     LOCAL` f-string — that helper exists precisely because SET LOCAL takes no bind
     params, see rules/sqlalchemy-fastapi.md #5), by intercepting the call itself
-    rather than inspecting the SQL text it produces."""
+    rather than inspecting the SQL text it produces. T2-gate MINOR fix: two calls on
+    the two-query happy path (between + finally), not one."""
     fake, _calls = _fake_period_table(_BASE_ROWS)
     monkeypatch.setattr("app.mcp.tools.netsuite_suiteql.execute", fake)
     ctx_calls = _spy_set_tenant_context(monkeypatch)
@@ -524,7 +577,7 @@ async def test_context_restore_uses_the_real_set_tenant_context_helper(monkeypat
     result = await resolve_last_closed_period(db=_FakeSession(), tenant_id=_TENANT_ID)
 
     assert result.resolved is True
-    assert ctx_calls == [_TENANT_ID]
+    assert ctx_calls == [_TENANT_ID, _TENANT_ID]
 
 
 # ---------------------------------------------------------------------------

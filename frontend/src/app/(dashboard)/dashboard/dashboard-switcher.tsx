@@ -45,7 +45,7 @@ export interface DashboardSwitcherProps {
  * `name` exactly (`income_statement` -> "Income Statement", etc.) — if a future
  * playbook's display name ever diverges from its title-cased key, this humanizer (not
  * the backend contract) is what needs revisiting. */
-function humanizePlaybookKey(key: string): string {
+export function humanizePlaybookKey(key: string): string {
   return key
     .split("_")
     .filter(Boolean)

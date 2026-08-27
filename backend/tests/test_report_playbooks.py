@@ -846,27 +846,86 @@ async def test_compose_playbook_tracking_series_conflicting_row_reuses_existing_
     uq_report_series_tenant_playbook as an unhandled IntegrityError -> 500 (the
     endpoint only catches ValueError/RefreshError; verified this raises on
     unmodified code via a SELECT-interception race simulation during development).
-    Same seed-the-conflicting-row-directly idiom as
-    test_put_active_conflicting_row_upserts_instead_of_500 in test_dashboard_api.py
-    for the analogous dashboard.py race: assert the code resolves gracefully via the
-    existing row rather than attempting a raw duplicate insert."""
+
+    MAJOR B (T2 gate, round 2) moved the get-or-create's actual INSERT to AFTER
+    _execute_sources succeeds (see the orphan-series tests below) — a pre-flight
+    read-only SELECT now runs first and would simply find a row seeded BEFORE this
+    call, never reaching the INSERT/ON CONFLICT branch at all. So the racing writer
+    must land its row DURING _execute_sources (from the fake tool executor) — after
+    the pre-flight SELECT has already returned 'no row' but before the real INSERT —
+    to still exercise the ON CONFLICT path this test is actually about. Same
+    seed-the-conflicting-row idiom as test_put_active_conflicting_row_upserts_instead_of_500
+    in test_dashboard_api.py for the analogous dashboard.py race, just relocated to
+    where a genuine race would actually land now."""
     tenant = await create_test_tenant(db, name="SeriesConflictCorp")
     user, _ = await create_test_user(db, tenant)
     _patch_resolver(monkeypatch, _JUN_CLOSED)
-    _patch_executor(monkeypatch, by_params=_income_statement_by_params())
 
-    # Simulate the racing writer landing first.
-    winner = ReportSeries(tenant_id=tenant.id, playbook_key="income_statement", created_by=user.id)
-    db.add(winner)
-    await db.flush()
+    winner_id: dict[str, object] = {}
+
+    async def fake_execute(tool_name, tool_input, tenant_id, actor_id, correlation_id, db, **kw):
+        if "id" not in winner_id:
+            # Simulate a concurrent tracking compose landing its series row WHILE this
+            # one is still executing sources — exactly the window the real ON CONFLICT
+            # upsert (in compose_playbook_report) exists to resolve gracefully.
+            winner = ReportSeries(tenant_id=tenant.id, playbook_key="income_statement", created_by=user.id)
+            db.add(winner)
+            await db.flush()
+            winner_id["id"] = winner.id
+        by_params = _income_statement_by_params()
+        key = (tool_input.get("report_type"), tool_input.get("period"))
+        return by_params.get(key, _RESULT)
+
+    monkeypatch.setattr("app.services.chat.tools.execute_tool_call", fake_execute)
 
     report = await compose_playbook_report(
         db, playbook_key="income_statement", params={}, tenant_id=tenant.id, actor_id=user.id, mode="tracking"
     )
 
-    assert report.series_id == winner.id
+    assert report.series_id == winner_id["id"]
     series_rows = (await db.execute(select(ReportSeries).where(ReportSeries.tenant_id == tenant.id))).scalars().all()
     assert len(series_rows) == 1  # get-or-create resolved to the existing row, not a duplicate
+
+
+async def test_compose_playbook_tracking_failed_compose_leaves_no_orphaned_series(db, monkeypatch):
+    """MAJOR B (T2 gate, round 2): a failed tracking compose must never leave a
+    ReportSeries row behind with zero linked reports. The series get-or-create used to
+    run BEFORE _execute_sources — if a tool call inside _execute_sources commits the
+    session mid-flight (a real production risk: OAuth token refresh, see
+    netsuite_oauth_service.py, reached via get_valid_token) and compose then fails (a
+    required rid's own RefreshError, or the financial_statement_resolution_error 502
+    path), that mid-flight commit durably persisted the series INSERT even though the
+    exception propagated before any Report row or report.compose audit event ever
+    existed — a phantom series with zero reports, surfaced by GET /dashboard's
+    published_series as trackable, that the user never successfully created.
+
+    Reproduces the mid-flight commit with a fake tool executor that commits the
+    session (RELEASE SAVEPOINT under this fixture's create_savepoint mode — folds
+    prior writes into the outer scope, immune to a LATER rollback, exactly like a real
+    Postgres COMMIT durably persisting work mid-request — see conftest.py's db fixture
+    docstring) before failing r1 (the hard-dependency source), then rolls back — as the
+    endpoint's own except ValueError/RefreshError path leaves the session — and asserts
+    no series row survived that sequence."""
+    tenant = await create_test_tenant(db, name="OrphanSeriesCorp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_resolver(monkeypatch, _JUN_CLOSED)
+
+    async def fake_execute(tool_name, tool_input, tenant_id, actor_id, correlation_id, db, **kw):
+        await db.commit()  # simulates get_valid_token's token-refresh commit, mid-flight
+        return json.dumps({"success": False, "error": "No active NetSuite connection found"})
+
+    monkeypatch.setattr("app.services.chat.tools.execute_tool_call", fake_execute)
+
+    with pytest.raises(RefreshError):
+        await compose_playbook_report(
+            db, playbook_key="income_statement", params={}, tenant_id=tenant.id, actor_id=user.id, mode="tracking"
+        )
+    await db.rollback()
+
+    series_rows = (await db.execute(select(ReportSeries).where(ReportSeries.tenant_id == tenant.id))).scalars().all()
+    assert series_rows == []  # no orphan: the series is never durably created before a report exists
+    report_rows = (await db.execute(select(Report).where(Report.tenant_id == tenant.id))).scalars().all()
+    assert report_rows == []
 
 
 async def test_compose_playbook_tracking_second_compose_same_period_is_idempotent(db, monkeypatch):

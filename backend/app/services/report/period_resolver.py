@@ -190,6 +190,19 @@ async def resolve_last_closed_period(db, tenant_id) -> ClosedPeriod:
 
         enddate = _parse_period_date(closed_row["enddate"])
 
+        # T2-gate MINOR: the FIRST query above can itself commit mid-request (the same
+        # OAuth token-refresh commit the docstring above describes), clearing the tenant
+        # GUC before the SECOND query below ever runs. Restoring only in the trailing
+        # `finally` is too late for that second call — on a real Postgres connection it
+        # would silently see no rows (RLS blocks everything with no GUC set) and get
+        # misread as "no later open period" even though nothing is wrong with that
+        # period; that wrong answer then gets cached for 5 minutes by
+        # resolve_last_closed_period_cached. Restore here too, not just on exit —
+        # unconditionally, since there's no cheap way to know from here whether the
+        # first call actually committed, and re-setting an already-correct GUC is
+        # harmless.
+        await set_tenant_context(db, str(tenant_id))
+
         # Second lookup: the next period after the one we just resolved, restricted
         # to closed='F' (it's known to be open by construction — nothing later than
         # the row above passed the closed='T' filter — but stating it explicitly

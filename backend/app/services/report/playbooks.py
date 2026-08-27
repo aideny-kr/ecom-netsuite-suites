@@ -282,47 +282,48 @@ async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_
         params = {"period": closed.name}
 
         # report_series / reports are FORCE-RLS'd — establish tenant context before
-        # touching either. Nothing between here and _execute_sources below commits, so
-        # this one SET LOCAL also covers that call (which re-establishes it again
-        # regardless right before the Report insert — see the "tool calls may commit"
-        # comment below).
+        # touching either.
         await set_tenant_context(db, str(tenant_id))
 
-        # Real Postgres upsert (ON CONFLICT DO NOTHING + re-select on conflict), not a
-        # bare SELECT-then-INSERT: two concurrent tracking composes for the same
-        # (tenant, playbook_key) both racing the old SELECT would both see "no row",
-        # both INSERT, and the loser would violate uq_report_series_tenant_playbook as
-        # an unhandled IntegrityError -> 500 (compose_playbook_endpoint only catches
-        # ValueError/RefreshError). DO NOTHING makes OUR insert a no-op instead of a
-        # race when a concurrent writer already landed one — and get-or-create only
-        # ever needs the row's id downstream, never a full ORM object, so RETURNING
-        # just that column is enough (matches the pattern in dashboard.py's
-        # set_active_dashboard, whose upsert is the sibling fix for the same bug class).
-        insert_stmt = (
-            pg_insert(ReportSeries)
-            .values(tenant_id=tenant_id, playbook_key=playbook_key, created_by=actor_id)
-            .on_conflict_do_nothing(constraint="uq_report_series_tenant_playbook")
-            .returning(ReportSeries.id)
-        )
-        series_id = (await db.execute(insert_stmt)).scalar_one_or_none()
-        if series_id is None:
-            # DO NOTHING means our insert didn't happen — a concurrent compose won the
-            # race. Re-select the winner's row: this is the ordinary get-or-create
-            # outcome of losing a benign race, not an error.
-            series_id = (
-                await db.execute(
-                    select(ReportSeries.id).where(
-                        ReportSeries.tenant_id == tenant_id,
-                        ReportSeries.playbook_key == playbook_key,
-                    )
+        # T2-gate MAJOR B (round 2): the series row used to be get-or-created HERE,
+        # before _execute_sources ran below. A tool call inside _execute_sources can
+        # commit the session mid-flight (an OAuth token refresh — see the "tool calls
+        # may commit" comment further down); if compose then failed (a required rid's
+        # RefreshError, or the financial_statement_resolution_error 502 path), that
+        # mid-flight commit durably persisted the series INSERT even though the
+        # exception propagated before any Report row or report.compose audit event
+        # ever existed — a phantom series with zero reports, surfaced by GET
+        # /dashboard's published_series as trackable, that the user never successfully
+        # created.
+        #
+        # Fix: only ever LOOK UP (never create) the series here — a read-only SELECT
+        # can't orphan anything. The real get-or-create INSERT moves to right before
+        # the Report row, once _execute_sources has actually succeeded (see below).
+        # This lookup still buys the idempotency short-circuit (composing tracking
+        # twice for an already-covered period skips re-dispatching every source) for
+        # every case except "no series exists yet at all" — which by definition has no
+        # existing report to be idempotent about.
+        existing_series_id = (
+            await db.execute(
+                select(ReportSeries.id).where(
+                    ReportSeries.tenant_id == tenant_id,
+                    ReportSeries.playbook_key == playbook_key,
                 )
-            ).scalar_one()
-
-        existing = (
-            await db.execute(select(Report).where(Report.series_id == series_id, Report.period == closed.name))
+            )
         ).scalar_one_or_none()
-        if existing is not None:
-            return existing
+
+        if existing_series_id is not None:
+            existing = (
+                await db.execute(
+                    select(Report).where(Report.series_id == existing_series_id, Report.period == closed.name)
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                return existing
+            # A series already exists (an earlier period's compose created it) but not
+            # for THIS period yet — carry its id forward so the post-execute block
+            # below never needs to touch report_series again.
+            series_id = existing_series_id
 
     title, recipe = build_playbook_recipe(playbook_key, params)
     period = recipe["sections"][0]["period"]
@@ -364,6 +365,38 @@ async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_
 
     # tool calls may commit (e.g. token refresh) — re-establish before RLS writes
     await set_tenant_context(db, str(tenant_id))
+
+    if mode == "tracking" and series_id is None:
+        # Only reached the FIRST time this (tenant, playbook_key) is ever tracked — the
+        # lookup above found no existing row. Durably create it now, for the first
+        # time, only after compose has actually succeeded (see the MAJOR B comment
+        # above for why this moved from before _execute_sources to here). Still a real
+        # Postgres upsert (ON CONFLICT DO NOTHING + re-select), not a bare INSERT: two
+        # concurrent FIRST-ever tracking composes for the same (tenant, playbook_key)
+        # can both reach this point with series_id=None, and the loser must resolve to
+        # the winner's row rather than violate uq_report_series_tenant_playbook as an
+        # unhandled IntegrityError -> 500 (compose_playbook_endpoint only catches
+        # ValueError/RefreshError).
+        insert_stmt = (
+            pg_insert(ReportSeries)
+            .values(tenant_id=tenant_id, playbook_key=playbook_key, created_by=actor_id)
+            .on_conflict_do_nothing(constraint="uq_report_series_tenant_playbook")
+            .returning(ReportSeries.id)
+        )
+        series_id = (await db.execute(insert_stmt)).scalar_one_or_none()
+        if series_id is None:
+            # DO NOTHING means our insert didn't happen — a concurrent compose won the
+            # race. Re-select the winner's row: this is the ordinary get-or-create
+            # outcome of losing a benign race, not an error.
+            series_id = (
+                await db.execute(
+                    select(ReportSeries.id).where(
+                        ReportSeries.tenant_id == tenant_id,
+                        ReportSeries.playbook_key == playbook_key,
+                    )
+                )
+            ).scalar_one()
+
     report = Report(
         tenant_id=tenant_id,
         title=title,
