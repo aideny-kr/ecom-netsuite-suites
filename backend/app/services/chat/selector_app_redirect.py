@@ -45,7 +45,13 @@ def is_selector_app_call(tool_name: str) -> bool:
     """
     if not tool_name or not isinstance(tool_name, str):
         return False
-    return tool_name.rsplit("__", 1)[-1] == SELECTOR_TOOL
+    # Canonical parser rather than a private rsplit — it owns the
+    # `ext__<connector>__<tool>` format. Imported here, not at module scope,
+    # because `tools` imports this module's siblings.
+    from app.services.chat.tools import parse_external_tool_name
+
+    parsed = parse_external_tool_name(tool_name)
+    return (parsed[1] if parsed else tool_name) == SELECTOR_TOOL
 
 
 def build_selector_redirect(tool_input: Any, *, mutation_record_type: str | None) -> str:

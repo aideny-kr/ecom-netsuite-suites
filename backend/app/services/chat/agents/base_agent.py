@@ -130,12 +130,31 @@ def _validation_failure_detail(validation: ValidationResult) -> str:
 _WRITE_TOOL_SUFFIXES = ("ns_createRecord", "ns_updateRecord", "ns_upsertRecord", "ns_deleteRecord")
 
 
+def _bare_tool_name(logged_tool: Any) -> str:
+    """Strip the `ext__<connector>__` prefix off a logged tool name.
+
+    Delegates to `parse_external_tool_name`, the canonical parser that owns the
+    `ext__<connector>__<tool>` format (`mutation_guard._raw_tool_name` already
+    routes through it too). Three call sites here had grown their own
+    `.rsplit("__", 1)[-1]` (T2 gate, minor) — the format is one fact about
+    `_make_ext_tool_name`, and every private copy is a place to miss when it
+    changes.
+
+    Unlike the canonical parser this falls back to the name AS GIVEN rather
+    than None, because a tool_calls_log entry may be a LOCAL tool with no
+    `ext__` prefix at all — for those the bare name is already correct, and
+    returning None would silently drop them from every scan below.
+    """
+    from app.services.chat.tools import parse_external_tool_name
+
+    name = str(logged_tool or "")
+    parsed = parse_external_tool_name(name)
+    return parsed[1] if parsed else name
+
+
 def _write_proposed_this_turn(tool_calls_log: list[dict[str, Any]]) -> bool:
     """True if the model has already proposed a NetSuite write this turn."""
-    for entry in tool_calls_log or []:
-        if str(entry.get("tool") or "").rsplit("__", 1)[-1] in _WRITE_TOOL_SUFFIXES:
-            return True
-    return False
+    return any(_bare_tool_name(e.get("tool")) in _WRITE_TOOL_SUFFIXES for e in tool_calls_log or [])
 
 
 def _last_metadata_record_type(tool_calls_log: list[dict[str, Any]]) -> str | None:
@@ -148,8 +167,7 @@ def _last_metadata_record_type(tool_calls_log: list[dict[str, Any]]) -> str | No
     live-path test caught here.
     """
     for entry in reversed(tool_calls_log or []):
-        tool = str(entry.get("tool") or "")
-        if tool.rsplit("__", 1)[-1] != "ns_getRecordTypeMetadata":
+        if _bare_tool_name(entry.get("tool")) != "ns_getRecordTypeMetadata":
             continue
         params = entry.get("params")
         if isinstance(params, dict):
