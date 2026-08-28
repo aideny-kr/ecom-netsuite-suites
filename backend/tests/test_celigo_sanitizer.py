@@ -147,6 +147,52 @@ class TestPurity:
         assert _CAPTURED_IMPORT_PAYLOAD == before
 
 
+class TestLeafValuesAreFullyDeepCopied:
+    """WHOLE-BRANCH REVIEW FINDING 9 (2026-08-27): `_apply_schema`'s leaf
+    branch (`sub_schema is None`) used to claim a caller mutating the
+    returned structure "can't reach back into raw through it -- purity holds
+    for the caller's copy too". False as written: `dict(value)`/`list(value)`
+    copy only ONE level shallow, so a nested dict/list two or more levels
+    deep inside a leaf field's value was still the SAME object as *raw*'s.
+
+    Finding 3's fix (`rules` -> `_RULE_TREE`, recursively rebuilt) closed the
+    specific example the review gave (`out["filter"]["rules"][0]["nested"] =
+    X`) -- `filter` is a nested schema now, not a leaf, and everything under
+    it (including `rules`) is rebuilt at every depth. RE-VERIFIED before this
+    fix: the hole is still open through a DIFFERENT leaf field -- `schedule`
+    on `_FLOW` is `None` (an undifferentiated leaf) and is `dict | None` at
+    the model/API layer, so a nested dict inside it is exactly this shape.
+    """
+
+    def test_mutating_a_nested_dict_inside_a_leaf_field_does_not_reach_raw(self):
+        raw = {
+            "_id": "flow_1",
+            "name": "Test Flow",
+            # A nested dict INSIDE a leaf field's value -- `schedule` itself
+            # is copied (`dict(value)`), but a shallow copy leaves this
+            # `cron` sub-dict aliased to raw's own object unless the copy
+            # goes all the way down.
+            "schedule": {"type": "custom", "cron": {"hour": 9, "minute": 0}},
+        }
+        out = sanitize("flow", raw)
+
+        out["schedule"]["cron"]["hour"] = 99
+
+        assert raw["schedule"]["cron"]["hour"] == 9, "mutating the sanitized copy must never reach raw"
+
+    def test_mutating_a_list_nested_inside_a_leaf_field_does_not_reach_raw(self):
+        raw = {
+            "_id": "flow_1",
+            "name": "Test Flow",
+            "schedule": {"type": "custom", "excludeDates": [{"date": "2026-12-25"}]},
+        }
+        out = sanitize("flow", raw)
+
+        out["schedule"]["excludeDates"][0]["date"] = "TAMPERED"
+
+        assert raw["schedule"]["excludeDates"][0]["date"] == "2026-12-25"
+
+
 class TestUnknownResourceKindFailsClosed:
     """RESOLVED AMBIGUITY: an unrecognized resource_kind has no allowlist, so
     nothing about it is provably safe -- return an empty dict rather than

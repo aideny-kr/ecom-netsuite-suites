@@ -597,12 +597,21 @@ def _apply_schema(raw: dict, schema: Schema) -> dict:
             # than by a key schema -- see `_filter_rule_tree` and fix round 6.
             out[key] = _filter_rule_tree(value)
         elif sub_schema is None:
-            # A leaf field. Dict/list values are still copied ONE level
-            # shallow rather than aliased, so a caller mutating the returned
-            # structure can't reach back into *raw* through it -- purity
-            # holds for the caller's copy too, not just for sanitize()'s own
-            # read of *raw*.
-            out[key] = dict(value) if isinstance(value, dict) else (list(value) if isinstance(value, list) else value)
+            # A leaf field: the raw value (whatever its shape) is preserved,
+            # but DEEP-copied -- at every depth, not just one level -- so a
+            # caller mutating the returned structure can never reach back
+            # into *raw* through it. FIX ROUND 8 (whole-branch review finding
+            # 9): this used to be a ONE-level-shallow copy
+            # (`dict(value)`/`list(value)`), which left any dict/list nested
+            # TWO OR MORE levels inside a leaf value (e.g. `schedule`'s own
+            # nested `cron` config) aliased to *raw*'s own object --
+            # `out["schedule"]["cron"]["x"] = y` still mutated `raw`, which
+            # is exactly the shallow-leaf hole finding 3 closed for `rules`
+            # (now `_RULE_TREE`, recursively rebuilt) but this general leaf
+            # branch still had. `_deep_copy_leaf` gives every leaf field the
+            # same full-depth-copy guarantee `_filter_rule_tree` already gives
+            # `rules`.
+            out[key] = _deep_copy_leaf(value)
         elif isinstance(value, dict):
             out[key] = _apply_schema(value, sub_schema)
         elif isinstance(value, list):
@@ -614,6 +623,23 @@ def _apply_schema(raw: dict, schema: Schema) -> dict:
         # else: a nested schema was expected but the value is neither a dict
         # nor a list of dicts -- drop it rather than guess.
     return out
+
+
+def _deep_copy_leaf(value: object) -> object:
+    """Deep-copy *value* for a schema LEAF (`sub_schema is None`), at every
+    depth, not just the top one -- FIX ROUND 8 (whole-branch review finding
+    9). A dict/list value is rebuilt recursively so nothing inside it, at any
+    depth, is the same object as *raw*'s; anything else (str/int/float/bool/
+    None) is immutable already and returned as-is. Same posture as
+    `_filter_rule_tree` for `rules`, generalised to every OTHER leaf field --
+    a leaf has no schema to recurse BY, so this recurses by shape alone
+    (dict -> dict, list -> list, everything else verbatim), never dropping a
+    key the way a real schema-driven filter would."""
+    if isinstance(value, dict):
+        return {key: _deep_copy_leaf(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_deep_copy_leaf(item) for item in value]
+    return value
 
 
 def _filter_rule_tree(value: object) -> object:
