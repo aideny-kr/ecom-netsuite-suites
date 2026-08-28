@@ -79,6 +79,20 @@ matching assertion added to that test, still lands permanently NULL -- see
 that test's own docstring for what a structural fix (an AST scan or a
 repository-side assertion) would take, deliberately not implemented here.
 
+FIX ROUND 6 (2026-08-27, whole-branch review finding 3): round 1 wrote the
+rule and then left one field breaking it. `rules` stayed a schema LEAF, and
+`_apply_schema`'s leaf branch copies exactly one level deep -- so a
+`mockResponse` carrying a session cookie, a customer email and an order ref,
+nested under `filter.expression.rules`, came through `sanitize("import", ...)`
+VERBATIM. Same via `transform.expression.rules` and
+`routers[].branches[].inputFilter.rules`. Not a hypothetical: rounds 1 and 2
+proved neither projection direction keeps captures off the wire, so this is
+the only thing standing between a live payload and our DB. `rules` cannot
+take a key schema (its real values are arbitrarily-nested EXPRESSION TREES,
+not fixed-key objects), so it gets a third schema kind -- `_RULE_TREE`,
+filtered by value shape -- see `_RULE_DICT_KEYS` and `_filter_rule_tree`
+below. With that, no allowlisted field is a blob-copied leaf any more.
+
 Allowlist, never denylist: a denylist of "known dangerous" field names only
 stops fields someone already thought to list. An allowlist stops everything
 by default and requires each field to be named IN before it survives, so an
@@ -87,24 +101,78 @@ unfamiliar field -- captured payload or not -- is dropped the same way.
 
 from __future__ import annotations
 
-# A schema maps a Celigo field name to either:
-#   None  -- a leaf: the raw value is copied verbatim, whatever its type.
-#   dict  -- a nested schema: the raw value is expected to be a dict (filtered
-#            recursively by this nested schema) OR a list of dicts (each item
-#            filtered the same way, non-dict items dropped) -- never passed
-#            through whole either way. A raw value that is neither a dict nor
-#            a list of dicts where a nested schema is expected can't be
-#            safely filtered, so it's dropped -- the same fail-closed posture
-#            as an unrecognized resource_kind or an unlisted key.
+# A schema maps a Celigo field name to one of:
+#   None        -- a leaf: the raw value is copied verbatim, whatever its type.
+#   dict        -- a nested schema: the raw value is expected to be a dict
+#                  (filtered recursively by this nested schema) OR a list of
+#                  dicts (each item filtered the same way, non-dict items
+#                  dropped) -- never passed through whole either way. A raw
+#                  value that is neither a dict nor a list of dicts where a
+#                  nested schema is expected can't be safely filtered, so it's
+#                  dropped -- the same fail-closed posture as an unrecognized
+#                  resource_kind or an unlisted key.
+#   _RULE_TREE  -- an EXPRESSION TREE: arbitrarily nested lists/scalars with
+#                  small config dicts at the leaves, filtered by VALUE SHAPE
+#                  rather than by a key schema (see `_filter_rule_tree`).
 #
 # ONE exception: a schema containing the literal key `_WILDCARD` applies its
 # sub-schema to EVERY key present in the raw dict, by position rather than by
 # name (see `_apply_schema`). This is how `hooks.*` allowlists an
 # open-ended, never-enumerated set of hook names without hardcoding a
 # taxonomy -- the allowlisting still happens, just one level down.
-Schema = dict[str, "Schema | None"]
+Schema = dict[str, "Schema | None | _RuleTreeMarker"]
 
 _WILDCARD = "*"  # not a real Celigo field name; sentinel for `hooks.*`
+
+
+class _RuleTreeMarker:
+    """Sentinel schema value for `rules` -- see `_filter_rule_tree`. A
+    distinct type rather than another magic string so it can never collide
+    with a real Celigo field name and so `is` identity, not equality,
+    decides which branch of `_apply_schema` runs."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover -- debugging aid only
+        return "_RULE_TREE"
+
+
+_RULE_TREE = _RuleTreeMarker()
+
+# FIX ROUND 6 (2026-08-27, final-review finding 3): `rules` was the LAST
+# field still declared a schema LEAF, and a leaf copy is one level shallow --
+# so a `mockResponse` carrying a session cookie, a customer email and an
+# order ref, nested anywhere under `filter.expression.rules`, passed
+# `sanitize("import", ...)` VERBATIM. That is this module's own round-1
+# invariant broken word for word ("never blob-copied as a leaf -- a leaf copy
+# is exactly the shape of hole a captured payload slips through"), in the one
+# place where it is the only control there is (both projection directions
+# were proven useless live -- see rounds 1 and 2 above).
+#
+# `rules` could not simply get a key schema the way `filter` and
+# `netsuite_da.mapping` did in round 1, because real `rules` values are
+# EXPRESSION TREES, not fixed-key objects. Both of these are real shapes from
+# observed-shapes.md's live probes:
+#
+#     ["notempty", ["string", ["extract", "..."]]]   -- nested lists of strings
+#     [[{key, extract, generate}]]                    -- list of list of dicts
+#
+# There is no top-level key set to enumerate. So `rules` is filtered by VALUE
+# SHAPE instead: lists recurse, scalars pass through, and DICTS keep only the
+# keys named below. A captured payload is always a dict under some key
+# (`mockResponse`, `mockOutput`, `rawData`, `_headers`, `sampleData`), so
+# dropping unlisted dict keys at EVERY depth closes the hole while leaving
+# every legitimate expression tree byte-identical.
+#
+# The key list is OBSERVATION-DERIVED, not guessed: `key`/`extract`/`generate`
+# are the only keys seen inside a real `rules` tree. Stated plainly, since
+# this cuts both ways: a legitimate rule key nobody has observed yet IS
+# dropped, which loses filter/mapping detail from the flow map until someone
+# probes it and adds it here. That direction is recoverable; the other one
+# (widening on a guess and blob-copying a capture into the DB forever) is
+# not, and this module's fail-closed posture -- `netsuite_da.mapping.lists`
+# dropped in round 1 for exactly this reason -- decides it the same way.
+_RULE_DICT_KEYS = frozenset({"key", "extract", "generate"})
 
 # `aiDescription` appears on flows, exports, and imports alike (spec §3:
 # "aiDescription{summary,detailed} exists on flows and imports/exports").
@@ -132,13 +200,13 @@ _SCRIPT_REF: Schema = {
 # `type` or on the presence of the `filter` key itself, both forms are
 # allowlisted here.
 _FILTER_EXPRESSION: Schema = {
-    "rules": None,
+    "rules": _RULE_TREE,
     "version": None,
 }
 _FILTER: Schema = {
     "type": None,
     "expression": _FILTER_EXPRESSION,
-    "rules": None,
+    "rules": _RULE_TREE,
     "version": None,
     "script": _SCRIPT_REF,
 }
@@ -149,13 +217,13 @@ _FILTER: Schema = {
 # with a nested `script: {_scriptId, function}` -- "THE most-used [script]
 # site in the live account" per the plan's Verified Facts.
 _TRANSFORM_EXPRESSION: Schema = {
-    "rules": None,
+    "rules": _RULE_TREE,
     "version": None,
 }
 _TRANSFORM: Schema = {
     "type": None,
     "expression": _TRANSFORM_EXPRESSION,
-    "rules": None,
+    "rules": _RULE_TREE,
     "version": None,
     "script": _SCRIPT_REF,
 }
@@ -272,7 +340,7 @@ _PAGE_PROCESSOR: Schema = {
 # script. Structurally simpler than filter/transform's expression form: no
 # `type`/`script`, and no script ref has ever been observed here.
 _INPUT_FILTER: Schema = {
-    "rules": None,
+    "rules": _RULE_TREE,
 }
 
 # `routers[].branches[]` -- CONFIRMED live, both forms (observed-shapes.md:
@@ -456,7 +524,11 @@ def _apply_schema(raw: dict, schema: Schema) -> dict:
         if key not in raw:
             continue
         value = raw[key]
-        if sub_schema is None:
+        if sub_schema is _RULE_TREE:
+            # `rules`: an expression tree, filtered by value shape rather
+            # than by a key schema -- see `_filter_rule_tree` and fix round 6.
+            out[key] = _filter_rule_tree(value)
+        elif sub_schema is None:
             # A leaf field. Dict/list values are still copied ONE level
             # shallow rather than aliased, so a caller mutating the returned
             # structure can't reach back into *raw* through it -- purity
@@ -474,3 +546,37 @@ def _apply_schema(raw: dict, schema: Schema) -> dict:
         # else: a nested schema was expected but the value is neither a dict
         # nor a list of dicts -- drop it rather than guess.
     return out
+
+
+def _filter_rule_tree(value: object) -> object:
+    """Recursively filter one Celigo EXPRESSION TREE (`rules`) by value shape.
+
+    Fix round 6 -- see `_RULE_DICT_KEYS` above for why `rules` gets this
+    instead of a key schema, and for the two real tree shapes it must leave
+    byte-identical.
+
+    * list  -- rebuilt element by element, every element filtered. Nothing is
+      dropped for being the "wrong" type: `["notempty", ["string", [...]]]`
+      is a real, legitimate tree of bare strings, and a filter that only
+      understood dicts would gut it.
+    * dict  -- keys not in `_RULE_DICT_KEYS` are DROPPED, and the values of
+      the ones that survive are filtered again. This is the whole privacy
+      control: a captured payload is always a dict under some key, at some
+      depth, so an allowlist applied at EVERY depth is what closes the hole
+      a one-level-shallow leaf copy left open.
+    * str/int/float/bool/None -- returned as-is. These are operators and
+      operands; none can hide a nested capture.
+    * anything else -- dropped (returned as None). Unreachable from parsed
+      JSON, kept fail-closed anyway, same posture as `_apply_schema`'s final
+      `else`.
+
+    Builds new containers throughout, never edits *value* -- `sanitize()`'s
+    purity contract holds through this path too.
+    """
+    if isinstance(value, dict):
+        return {key: _filter_rule_tree(item) for key, item in value.items() if key in _RULE_DICT_KEYS}
+    if isinstance(value, list):
+        return [_filter_rule_tree(item) for item in value]
+    if value is None or isinstance(value, (str, int, float)):  # bool is an int subclass
+        return value
+    return None

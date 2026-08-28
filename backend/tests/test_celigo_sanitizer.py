@@ -17,6 +17,19 @@ The fixture below mirrors that REAL shape structurally -- an import object
 whose payload-bearing fields carry a cookie header and a customer/product
 body -- but every value is INVENTED. No real cookie, email, or order
 reference belongs in this repo.
+
+FIX ROUND 6 (2026-08-27, final-review finding 3): `rules` is no longer a
+schema leaf -- it is filtered as an expression tree, and dicts inside it keep
+only observed config keys (`sanitizer._RULE_DICT_KEYS`). Several fixtures
+here previously spelled a rule as `{"field": ..., "op": ...}` /
+`{"field": ..., "value": ...}`, key names NOBODY EVER OBSERVED -- invented
+when `rules` was blob-copied and its contents therefore never mattered. They
+now read `{key, extract, generate}`, the shape observed-shapes.md actually
+recorded live. Changing them was not a matter of making a new assertion pass:
+an invented shape in a fixture is the failure mode this whole session has
+been about, and a privacy allowlist widened to accommodate one would have
+been strictly worse. See `TestRulesAreFilteredAsExpressionTrees` at the end
+of this file.
 """
 
 from __future__ import annotations
@@ -226,8 +239,11 @@ class TestOtherResourceKinds:
             "sandbox": False,
             "filter": {
                 "type": "expression",
-                "expression": {"rules": [{"field": "status", "op": "eq"}], "version": "1"},
-                "rules": [{"field": "status", "op": "eq"}],
+                "expression": {
+                    "rules": [{"key": "r1", "extract": "status", "generate": "orderStatus"}],
+                    "version": "1",
+                },
+                "rules": [{"key": "r1", "extract": "status", "generate": "orderStatus"}],
                 "version": "1",
             },
             "sampleData": {"customer": {"email": "leaked@example-shop.test"}},
@@ -299,16 +315,22 @@ class TestFilterAndMappingAreNotBlobCopied:
             "_id": "e1",
             "filter": {
                 "type": "expression",
-                "expression": {"rules": [{"field": "status", "op": "eq"}], "version": "1"},
-                "rules": [{"field": "status", "op": "eq"}],
+                "expression": {
+                    "rules": [{"key": "r1", "extract": "status", "generate": "orderStatus"}],
+                    "version": "1",
+                },
+                "rules": [{"key": "r1", "extract": "status", "generate": "orderStatus"}],
                 "version": "1",
                 "mockResponse": {"_headers": {"set-cookie": ["export-filter-leak"]}},
             },
         }
         out = sanitize("export", raw)
         assert out["filter"]["type"] == "expression"
-        assert out["filter"]["expression"] == {"rules": [{"field": "status", "op": "eq"}], "version": "1"}
-        assert out["filter"]["rules"] == [{"field": "status", "op": "eq"}]
+        assert out["filter"]["expression"] == {
+            "rules": [{"key": "r1", "extract": "status", "generate": "orderStatus"}],
+            "version": "1",
+        }
+        assert out["filter"]["rules"] == [{"key": "r1", "extract": "status", "generate": "orderStatus"}]
         assert out["filter"]["version"] == "1"
         assert "mockResponse" not in out["filter"]
         assert "set-cookie" not in _dumped(out)
@@ -428,8 +450,8 @@ class TestScriptReferencesSurviveSanitization:
             "_id": "i1",
             "filter": {
                 "type": "expression",
-                "expression": {"rules": [{"field": "status"}], "version": "1"},
-                "rules": [{"field": "status"}],
+                "expression": {"rules": [{"key": "r1", "extract": "status"}], "version": "1"},
+                "rules": [{"key": "r1", "extract": "status"}],
                 "version": "1",
             },
         }
@@ -556,7 +578,7 @@ class TestFlowTopologySurvivesSanitization:
                         {
                             "name": "Framework Intl",
                             "branchId": "brn-A1",
-                            "inputFilter": {"rules": [{"field": "subsidiary", "value": "intl"}]},
+                            "inputFilter": {"rules": [{"key": "b1", "extract": "subsidiary", "generate": "intl"}]},
                             "pageProcessors": [
                                 {
                                     "type": "import",
@@ -575,7 +597,7 @@ class TestFlowTopologySurvivesSanitization:
         assert router["routeRecordsTo"] == "first_matching_branch"
         assert router["routeRecordsUsing"] == "input_filters"
         branch = router["branches"][0]
-        assert branch["inputFilter"] == {"rules": [{"field": "subsidiary", "value": "intl"}]}
+        assert branch["inputFilter"] == {"rules": [{"key": "b1", "extract": "subsidiary", "generate": "intl"}]}
         assert branch["pageProcessors"] == [
             {
                 "type": "import",
@@ -1107,3 +1129,162 @@ class TestExportNetsuiteRestletProvenanceSurvives:
         raw = {"_id": "e1", "name": "Non-NetSuite export"}
         out = sanitize("export", raw)
         assert "netsuite" not in out
+
+
+class TestRulesAreFilteredAsExpressionTrees:
+    """FINAL REVIEW finding 3: `rules` was the LAST field still declared a
+    schema leaf, and `_apply_schema`'s leaf branch copies one level shallow --
+    so anything at any depth below `rules` survived VERBATIM. A `mockResponse`
+    carrying a session cookie, a customer email and an order ref, nested under
+    `filter.expression.rules`, passed `sanitize("import", ...)` completely
+    untouched.
+
+    That is the module's OWN stated invariant (module docstring, fix round 1)
+    violated word for word: "any field whose value CAN be a nested object or
+    a list of them ... must be recursively filtered by its own schema, never
+    blob-copied as a leaf -- a leaf copy is exactly the shape of hole a
+    captured payload slips through." Both projection directions were proven
+    useless live (observed-shapes.md), so this sanitizer is the only control
+    there is.
+
+    WHY `rules` COULDN'T JUST GET A KEY SCHEMA like `filter` or
+    `netsuite_da.mapping` did: real `rules` values are EXPRESSION TREES, not
+    fixed-key objects. Both shapes below are real, from observed-shapes.md's
+    live probes:
+
+        ["notempty", ["string", ["extract", "..."]]]   # nested lists of strings
+        [[{key, extract, generate}]]                    # list of list of dicts
+
+    Arbitrary nesting of lists, strings and small dicts -- there is no fixed
+    key set to enumerate at the top. So `rules` is filtered by VALUE SHAPE
+    (`sanitizer._filter_rule_tree`): lists and scalars recurse/pass through
+    unchanged, and DICTS keep only allowlisted keys. A captured payload is
+    always a dict under some key, so dropping unlisted dict keys at every
+    depth closes the hole while leaving every legitimate expression tree
+    byte-identical.
+    """
+
+    # Both taken structurally from observed-shapes.md's live probes; the
+    # string values are invented (never a real order ref or field path).
+    _REAL_NOTEMPTY_TREE = ["notempty", ["string", ["extract", "custbody_order_ref"]]]
+    _REAL_MAPPING_TREE = [[{"key": "aBc123", "extract": "orderNumber", "generate": "custbody_order_ref"}]]
+
+    # A captured payload nested inside an otherwise-legitimate expression
+    # tree -- the exact shape observed-shapes.md warns rides along on every
+    # import/export response regardless of projection.
+    _PAYLOAD_BEARING_TREE = [
+        "and",
+        [
+            "notempty",
+            {
+                "key": "legit",
+                "mockResponse": {
+                    "_headers": {"set-cookie": ["connect.sid=s%3AinventedRulesLeak; HttpOnly"]},
+                    "body": {"customer": {"email": "rules.leak@example-shop.test"}, "orderId": "R999999"},
+                },
+            },
+        ],
+    ]
+
+    def _assert_leak_stripped(self, out: dict) -> None:
+        dumped = _dumped(out)
+        assert "set-cookie" not in dumped
+        assert "example-shop.test" not in dumped
+        assert "R999999" not in dumped
+        assert "mockResponse" not in dumped
+
+    def test_import_filter_expression_rules_strip_a_captured_payload(self):
+        """THE reproduction from the review, verbatim: a payload nested under
+        `filter.expression.rules` on an import."""
+        raw = {
+            "_id": "i1",
+            "filter": {
+                "type": "expression",
+                "expression": {"rules": self._PAYLOAD_BEARING_TREE, "version": "1"},
+                "version": "1",
+            },
+        }
+        out = sanitize("import", raw)
+        self._assert_leak_stripped(out)
+        # The legitimate structure around the leak survives -- this is a
+        # filter, not a drop.
+        assert out["filter"]["expression"]["rules"] == ["and", ["notempty", {"key": "legit"}]]
+
+    def test_import_filter_top_level_rules_strip_a_captured_payload(self):
+        raw = {
+            "_id": "i1",
+            "filter": {"type": "expression", "rules": self._PAYLOAD_BEARING_TREE, "version": "1"},
+        }
+        out = sanitize("import", raw)
+        self._assert_leak_stripped(out)
+
+    def test_export_transform_expression_rules_strip_a_captured_payload(self):
+        raw = {
+            "_id": "e1",
+            "transform": {
+                "type": "expression",
+                "expression": {"rules": self._PAYLOAD_BEARING_TREE, "version": "1"},
+                "rules": self._PAYLOAD_BEARING_TREE,
+                "version": "1",
+            },
+        }
+        out = sanitize("export", raw)
+        self._assert_leak_stripped(out)
+
+    def test_router_branch_input_filter_rules_strip_a_captured_payload(self):
+        """`routers[].branches[].inputFilter.rules` -- the third site the
+        review reproduced, reached only through the flow schema."""
+        raw = {
+            "_id": "f1",
+            "name": "flow-with-branch-filter",
+            "routers": [
+                {
+                    "id": "rtr-A",
+                    "branches": [
+                        {"name": "Branch", "branchId": "b1", "inputFilter": {"rules": self._PAYLOAD_BEARING_TREE}}
+                    ],
+                }
+            ],
+        }
+        out = sanitize("flow", raw)
+        self._assert_leak_stripped(out)
+
+    def test_real_notempty_expression_tree_survives_byte_identical(self):
+        """The `["notempty", ["string", ["extract", ...]]]` shape from
+        observed-shapes.md: nested lists of bare strings, no dicts at all.
+        A filter that only understood dicts would flatten or drop this."""
+        raw = {"_id": "i1", "filter": {"type": "expression", "rules": self._REAL_NOTEMPTY_TREE, "version": "1"}}
+        out = sanitize("import", raw)
+        assert out["filter"]["rules"] == self._REAL_NOTEMPTY_TREE
+
+    def test_real_mapping_expression_tree_survives_byte_identical(self):
+        """The `[[{key, extract, generate}]]` shape from observed-shapes.md:
+        a list of lists of small config dicts. Every one of those three keys
+        must survive -- they are field mappings, the config this whole flow
+        map exists to record."""
+        raw = {
+            "_id": "e1",
+            "transform": {
+                "type": "expression",
+                "expression": {"rules": self._REAL_MAPPING_TREE, "version": "1"},
+                "version": "1",
+            },
+        }
+        out = sanitize("export", raw)
+        assert out["transform"]["expression"]["rules"] == self._REAL_MAPPING_TREE
+
+    def test_rules_filtering_does_not_mutate_the_raw_object(self):
+        """Same purity contract as `sanitize()` itself -- the recursive rule
+        filter must build new containers, never edit the caller's."""
+        raw = {"_id": "i1", "filter": {"type": "expression", "rules": copy.deepcopy(self._PAYLOAD_BEARING_TREE)}}
+        before = copy.deepcopy(raw)
+        sanitize("import", raw)
+        assert raw == before
+
+    def test_scalars_and_nulls_inside_rules_survive(self):
+        """Expression trees carry numbers, booleans and nulls as operands.
+        None of those can hide a captured payload, and dropping them would
+        silently corrupt a filter's meaning."""
+        raw = {"_id": "i1", "filter": {"type": "expression", "rules": ["equals", 42, True, None, 1.5, "x"]}}
+        out = sanitize("import", raw)
+        assert out["filter"]["rules"] == ["equals", 42, True, None, 1.5, "x"]
