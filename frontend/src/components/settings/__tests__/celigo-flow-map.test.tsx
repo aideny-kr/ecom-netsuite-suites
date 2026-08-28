@@ -376,6 +376,38 @@ describe("CeligoFlowMap — error states are distinct from empty states (fix rou
     await waitFor(() => expect(screen.getByText(/couldn.?t load.*steps/i)).toBeInTheDocument());
   });
 
+  it("a failed per-integration flows query marks the stats strip, never a falsely-confident 0", () => {
+    // WHOLE-BRANCH REVIEW FINDING 12 (2026-08-27): `flowQueries[index]?.data
+    // ?? []` made a failed per-integration query contribute ZERO to both
+    // "Flows" and "Open errors", with no marker distinguishing that from a
+    // genuinely healthy zero -- unlike "Last synced" five lines below it in
+    // the source, which already applies the "—" + unmarked-tone pattern for
+    // exactly this reason. Two integrations: one healthy with real flows,
+    // one whose flows query failed -- the strip must not silently drop the
+    // failed one's contribution and present the healthy-only total as
+    // complete.
+    mocks.integrations.mockReturnValue({
+      data: [integration, { ...integration, id: "int-2", celigo_id: "c-int-2", name: "Other ERP" }],
+      isLoading: false,
+    });
+    mocks.allFlows.mockReturnValue([
+      { data: [healthyFlow, failingFlow], isLoading: false, isSuccess: true },
+      { data: undefined, isLoading: false, isError: true, refetch: vi.fn() },
+    ]);
+    mocks.syncStatus.mockReturnValue({ data: { last_synced_at: null }, isLoading: false });
+    wrap(<CeligoFlowMap />);
+
+    const stripe = within(screen.getByTestId("celigo-stats-strip"));
+    const stats = stripe.getAllByTestId("celigo-stat-value").map((el) => el.textContent);
+    // Integrations count (a real, always-known list) is untouched; Flows
+    // and Open errors must show the same "unresolved" marker "Last synced"
+    // uses, NOT "2" flows / "12" open errors, which would silently omit
+    // whatever the failed integration's real flows/errors are.
+    expect(stats[0]).toBe("2"); // Integrations
+    expect(stats[1]).toBe("—"); // Flows -- NOT "2"
+    expect(stats[2]).toBe("—"); // Open errors -- NOT "12"
+  });
+
   it("the flow detail dialog shows an error instead of spinning forever when its query fails", async () => {
     mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
     setLists([[healthyFlow]]);

@@ -692,6 +692,15 @@ export function CeligoFlowMap() {
   );
   const allFlows = Array.from(flowsByIntegration.values()).flat();
   const totalOpenErrors = allFlows.reduce((sum, f) => sum + f.error_count, 0);
+  // WHOLE-BRANCH REVIEW FINDING 12: `flowQueries[index]?.data ?? []` above
+  // makes a failed (or still-loading) per-integration query contribute ZERO
+  // to `allFlows`/`totalOpenErrors`, with nothing distinguishing that from a
+  // genuinely healthy zero -- the same "don't let an unresolved query's
+  // silence read as a confident answer" defect the "Last synced" stat right
+  // below already guards against. Applying the identical pattern here: any
+  // unresolved per-integration flows query marks BOTH stats "—" rather than
+  // silently presenting a partial total as complete.
+  const anyFlowsQueryUnresolved = flowQueries.some((q) => q.isLoading || q.isError);
 
   // Loading/error render a neutral placeholder rather than a fabricated
   // "Never synced" -- that string is a real, meaningful claim (fix round
@@ -712,8 +721,8 @@ export function CeligoFlowMap() {
 
       <div data-testid="celigo-stats-strip" className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <StatCard label="Integrations" value={integrations.length} />
-        <StatCard label="Flows" value={allFlows.length} />
-        <StatCard label="Open errors" value={totalOpenErrors} tone="err" />
+        <StatCard label="Flows" value={anyFlowsQueryUnresolved ? "—" : allFlows.length} />
+        <StatCard label="Open errors" value={anyFlowsQueryUnresolved ? "—" : totalOpenErrors} tone="err" />
         <StatCard label="Last synced" value={syncedValue} tone={syncedOk ? "ok" : undefined} />
       </div>
 
