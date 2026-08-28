@@ -239,6 +239,39 @@ class TestExportStepIsRead:
         assert writes == []
 
 
+class TestOperationWithoutRecordTypeYieldsNothing:
+    """Fix round 1: `_extract_provenance` (sync_service.py) does NOT
+    guarantee `record_type` and `operation` are always set together --
+    `netsuite_da.get(...)` returns `None` for whichever key that object's
+    own payload simply omits. Verified live:
+    `_extract_provenance({"netsuite_da": {"operation": "update"}})` returns
+    `(None, "update", None)`. A step backfilled from exactly that shape
+    (operation set, record_type NULL) must yield zero writes -- it has a
+    write signal with nothing to attach it to, and this module never
+    fabricates a record type. This pins `record_type.isnot(None)`
+    (provenance.py) as independently load-bearing, not a defensive no-op
+    riding on `operation.isnot(None)`."""
+
+    async def test_operation_set_record_type_null_yields_no_write(self, db: AsyncSession):
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+        _, flow_id = await _seed_integration_and_flow(db, tenant.id, conn_id, flow_suffix="op-only")
+
+        await _add_step_with_provenance(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            flow_id=flow_id,
+            celigo_id="imp_op_only_1",
+            record_type=None,
+            operation="update",
+        )
+
+        writes = await derive_flow_record_writes(db, tenant_id=tenant.id, connection_id=conn_id)
+
+        assert writes == []
+
+
 class TestFlowWithSeveralImportStepsYieldsSeveralRecordTypes:
     async def test_multiple_import_steps_yield_multiple_writes(self, db: AsyncSession):
         tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")

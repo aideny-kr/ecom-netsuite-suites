@@ -81,11 +81,20 @@ async def derive_flow_record_writes(
         module docstring) and the export/read case (`record_type`/
         `search_id` set, `operation` NULL), because `operation` is only
         ever populated from the import side.
-      * `record_type IS NULL` is excluded too, defensively, even though
-        `_extract_provenance` (sync_service.py) always sets `record_type`
-        and `operation` together from the same `netsuite_da` object -- this
-        function never fabricates a record type for a row it can't fully
-        account for.
+      * `record_type IS NULL` is a REAL, independently load-bearing filter,
+        not a defensive no-op alongside `operation IS NOT NULL`. Verified by
+        execution: `_extract_provenance({"netsuite_da": {"operation":
+        "update"}})` returns `(None, "update", None)`, and
+        `_extract_provenance({"netsuite_da": {"recordType": "salesorder"}})`
+        returns `("salesorder", None, None)` -- `netsuite_da.get(...)`
+        returns `None` for whichever key is simply absent from that
+        object's own payload, and nothing in `_extract_provenance` requires
+        both keys to be present together. A `netsuite_da` block carrying
+        `operation` alone (no `recordType`) is exactly the row this
+        predicate exists to drop: it has a write signal but no record type
+        to attach it to, and this function never fabricates one. See
+        `TestOperationWithoutRecordTypeYieldsNothing` in the test module,
+        proven RED-then-GREEN against this exact predicate.
 
     No result for a flow means one of two things this function cannot tell
     apart on its own: the flow's steps genuinely carry no NetSuite write
