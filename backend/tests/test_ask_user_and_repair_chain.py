@@ -1165,3 +1165,109 @@ class TestForcedWriteProposal:
 
         responses = [p for t, p in events if t == "response"]
         assert "Still need the subsidiary" in (responses[0].data or "")
+
+
+class TestBouncedProposalStillCountsAsUnproposed:
+    """The live root cause, caught by instrumentation on staging 2026-08-28.
+
+    The probe printed this at the moment the turn ended in prose:
+
+        [FORCE_WRITE] prose branch step=2
+          tools_so_far=['..._ns_createRecord', '..._ns_getRecordTypeMetadata']
+          pending_write_type='customer' already_bounced=False
+
+    The model called ns_createRecord FIRST, before any metadata lookup. The
+    investigation gate bounced it (metadata is required before a write is
+    validated), the model complied by fetching metadata — and then answered in
+    prose instead of re-proposing.
+
+    Both guard stages were gated behind `not _write_proposed_this_turn(...)`,
+    which asks "was a write tool ever called this turn". It was — the bounced
+    one. So the guard concluded a proposal had already been made and stood
+    down, while the operator got a question and no card. `already_bounced=False`
+    proves stage 1 never fired either; stage 2 inherited the same broken
+    precondition and could never have run no matter how well it worked.
+
+    The predicate has to test what the guard actually cares about: did a
+    confirmation card reach the human. A proposal the gate rejected did not.
+    """
+
+    @staticmethod
+    def _prose(text):
+        from app.services.chat.llm_adapter import LLMResponse, TokenUsage
+
+        return LLMResponse(text_blocks=[text], tool_use_blocks=[], usage=TokenUsage(10, 10))
+
+    @staticmethod
+    def _create_call(block_id="c1"):
+        from app.services.chat.llm_adapter import LLMResponse, TokenUsage, ToolUseBlock
+
+        return LLMResponse(
+            text_blocks=[],
+            tool_use_blocks=[
+                ToolUseBlock(
+                    id=block_id,
+                    name=_ext("ns_createRecord"),
+                    # No subsidiary, and — critically — no metadata fetched yet,
+                    # so the investigation gate bounces this instead of building
+                    # a card.
+                    input={"recordType": "customer", "body": {"companyname": "Acme"}},
+                )
+            ],
+            usage=TokenUsage(10, 10),
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_gate_bounced_write_does_not_disarm_the_guard(self):
+        """Replays the live sequence exactly: create (bounced) → metadata →
+        prose. Against the shipped predicate this produced no card at all."""
+        from app.services.chat.llm_adapter import LLMResponse, TokenUsage, ToolUseBlock
+
+        agent = _make_agent()
+        forced = LLMResponse(
+            text_blocks=[],
+            tool_use_blocks=[
+                ToolUseBlock(
+                    id="forced-1",
+                    name=_ext("ns_createRecord"),
+                    input={"recordType": "customer", "body": {"companyname": "Acme"}},
+                )
+            ],
+            usage=TokenUsage(10, 10),
+        )
+        adapter = _make_adapter(
+            [
+                self._create_call(),
+                _metadata_step(_ext("ns_getRecordTypeMetadata")),
+                self._prose("Which subsidiary should Acme be created under?"),
+                self._prose("I still need a subsidiary before I can continue."),
+                _final_step(),
+            ],
+            forced=forced,
+        )
+
+        with _patches():
+            events = await _run(agent, adapter)
+
+        confirmations = [p for t, p in events if t == "confirmation_required"]
+        assert confirmations, "a write the gate bounced is not a write the operator ever saw"
+
+    @pytest.mark.asyncio
+    async def test_a_card_that_did_reach_the_human_still_disarms_the_guard(self):
+        """The other half of the predicate. Once a card exists there is nothing
+        to rescue, and forcing a second proposal would be a duplicate write
+        offer — so a successful proposal must still stand the guard down."""
+        agent = _make_agent()
+        adapter = _make_adapter(
+            [
+                _metadata_step(_ext("ns_getRecordTypeMetadata")),
+                self._create_call("c2"),
+                self._prose("I have shown you the confirmation card above."),
+            ]
+        )
+
+        with _patches():
+            events = await _run(agent, adapter)
+
+        assert len([p for t, p in events if t == "confirmation_required"]) == 1
+        assert adapter.forced_calls == [], "a card already reached the human — nothing to force"

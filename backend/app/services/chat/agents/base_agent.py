@@ -207,6 +207,30 @@ def _last_metadata_record_type(tool_calls_log: list[dict[str, Any]]) -> str | No
     return None
 
 
+def _write_reached_the_human(agent: Any) -> bool:
+    """True only once a confirmation card has actually been shown this turn.
+
+    This replaced `_write_proposed_this_turn` as the prose guard's stand-down
+    condition, and the difference is the whole bug. That helper asks "was a
+    write tool called this turn", which is True for a proposal the
+    investigation gate REJECTED — a write nobody ever saw.
+
+    Caught live on staging 2026-08-28 only after instrumenting the branch:
+
+        [FORCE_WRITE] prose branch step=2
+          tools_so_far=['..._ns_createRecord', '..._ns_getRecordTypeMetadata']
+          pending_write_type='customer' already_bounced=False
+
+    The model called ns_createRecord before fetching metadata, the gate
+    bounced it, the model fetched metadata and then answered in prose. Both
+    guard stages stood down because a write "had been proposed", so the
+    operator got a question and no card — and `already_bounced=False` shows
+    stage 1 never ran either. The guard exists precisely for turns where
+    nothing reached the human, so that is what it must test.
+    """
+    return bool(getattr(agent, "_write_confirmation_emitted", False))
+
+
 def _forced_write_tool_subset(
     tool_calls_log: list[dict[str, Any]],
     tool_definitions: list[dict[str, Any]] | None,
@@ -1170,8 +1194,19 @@ class BaseSpecialistAgent(abc.ABC):
         a turn breaks: the worst case it is allowed to produce is the
         behaviour we already have.
         """
+        # print(flush=True), not logger.info: structlog does not surface stdlib
+        # logger calls in container logs (.claude/rules/sqlalchemy-fastapi.md
+        # #8). A guard whose firing cannot be observed in production is how
+        # this path's first live diagnosis went wrong — absence of a marker
+        # was read as absence of the call, when the marker could never appear.
         forced_tools = _forced_write_tool_subset(tool_calls_log, self.tool_definitions)
+        print(
+            f"[FORCE_WRITE] hop entered: menu={len(forced_tools)} "
+            f"record_type={_last_metadata_record_type(tool_calls_log)!r}",
+            flush=True,
+        )
         if not forced_tools:
+            print("[FORCE_WRITE] no forceable write tool for that connector — leaving prose alone", flush=True)
             return None
 
         record_type = _last_metadata_record_type(tool_calls_log) or "record"
@@ -1198,6 +1233,9 @@ class BaseSpecialistAgent(abc.ABC):
             )
         except Exception:
             logger.warning("forced write-proposal composition failed", exc_info=True)
+            import traceback
+
+            print(f"[FORCE_WRITE] hop FAILED: {traceback.format_exc()[-400:]}", flush=True)
             return None
 
         blocks = getattr(forced, "tool_use_blocks", None) or []
@@ -1208,7 +1246,7 @@ class BaseSpecialistAgent(abc.ABC):
         # actually leaves the prose alone. `_DECLINE_WRITE_TOOL` must never
         # reach the dispatcher: it is a local signal, not a real tool.
         if all(getattr(b, "name", "") == _DECLINE_WRITE_TOOL for b in blocks):
-            logger.info("agent.write_proposal_forcing_declined agent=%s", self.agent_name)
+            print("[FORCE_WRITE] model DECLINED — no write was requested", flush=True)
             return None
         # A mixed response would otherwise dispatch the synthetic name and
         # fail the whole turn on an unknown tool.
@@ -1348,9 +1386,10 @@ class BaseSpecialistAgent(abc.ABC):
                     not response.tool_use_blocks
                     and getattr(self, "_prose_instead_of_write_bounced", False)
                     and not getattr(self, "_write_proposal_forced", False)
-                    and not _write_proposed_this_turn(tool_calls_log)
+                    and not _write_reached_the_human(self)
                 ):
                     self._write_proposal_forced = True
+                    print("[FORCE_WRITE] stage2 triggered", flush=True)
                     _forced = await self._compose_forced_write_proposal(
                         adapter=adapter,
                         model=model,
@@ -1367,16 +1406,27 @@ class BaseSpecialistAgent(abc.ABC):
                         # about the write is decided here.
                         total_input_tokens += _forced.usage.input_tokens
                         total_output_tokens += _forced.usage.output_tokens
-                        logger.info(
-                            "agent.write_proposal_forced agent=%s tools=%d",
-                            self.agent_name,
-                            len(_forced.tool_use_blocks),
+                        print(
+                            f"[FORCE_WRITE] PROPOSAL COMPOSED: {[b.name for b in _forced.tool_use_blocks]}",
+                            flush=True,
                         )
                         response = _forced
                 # ── End forced write-proposal composition ──
 
                 # Pure text response — done
                 if not response.tool_use_blocks:
+                    # Only on turns that declared write intent — an ordinary
+                    # answered question must not log. Kept in production
+                    # deliberately: this guard's first live diagnosis was wrong
+                    # for two deploys because every branch of it was silent.
+                    if _last_metadata_record_type(tool_calls_log):
+                        print(
+                            f"[FORCE_WRITE] prose on a write turn step={step} "
+                            f"record_type={_last_metadata_record_type(tool_calls_log)!r} "
+                            f"card_reached_human={_write_reached_the_human(self)} "
+                            f"already_bounced={getattr(self, '_prose_instead_of_write_bounced', False)}",
+                            flush=True,
+                        )
                     # Guard: if step 0 and task contains a SELECT query, the model
                     # is hallucinating from conversation history instead of executing.
                     # Force it to actually call the tool.
@@ -1415,10 +1465,14 @@ class BaseSpecialistAgent(abc.ABC):
                     _pending_write_type = _last_metadata_record_type(tool_calls_log)
                     if (
                         _pending_write_type
-                        and not _write_proposed_this_turn(tool_calls_log)
+                        and not _write_reached_the_human(self)
                         and not getattr(self, "_prose_instead_of_write_bounced", False)
                     ):
                         self._prose_instead_of_write_bounced = True
+                        print(
+                            f"[FORCE_WRITE] stage1 bounce fired for {_pending_write_type!r}",
+                            flush=True,
+                        )
                         messages.append(adapter.build_assistant_message(response))
                         messages.append(
                             {
@@ -2135,6 +2189,10 @@ class BaseSpecialistAgent(abc.ABC):
                                     }
                                 )
                         else:
+                            # A card has now genuinely reached the human. This
+                            # — not "a write tool was called" — is what stands
+                            # the prose guard down; see _write_reached_the_human.
+                            self._write_confirmation_emitted = True
                             yield ("confirmation_required", payload.model_dump())
                             _confirmation_result: dict[str, Any] = {
                                 "confirmation_required": True,
