@@ -37,6 +37,7 @@ from __future__ import annotations
 import copy
 import json
 
+from app.services.celigo import sanitizer
 from app.services.celigo.graph import walk_script_refs
 from app.services.celigo.repository import FlowStepInput, extract_flow_steps
 from app.services.celigo.sanitizer import sanitize
@@ -726,9 +727,23 @@ class TestSanitizerAndWalkerCompose:
        should never be the reason a ref disappears if Celigo ever does
        inline one.
 
-    The property under test, for every kind that can carry scripts (export,
-    import, flow): sanitizing must not change WHICH script refs
-    walk_script_refs finds, even though it must still strip everything else
+    SCOPE CORRECTION (round 7): this class is THREE HAND-WRITTEN FIXTURES for
+    export, import and flow -- nothing more. Its original docstring, and
+    `ae9919fa`'s commit message, claimed it made "this whole class of defect
+    unrepresentable rather than fixing two instances of it", covering "every
+    kind that can carry scripts". That was false when written: round 4 fixed
+    two of five attachment sites, and the three siblings it never considered
+    (`_PAGE_GENERATOR`, `_ROUTER_BRANCH`, `inputFilter`) went on dropping real
+    refs until the whole-branch review executed them. A fixture list covers
+    the containers whoever wrote it thought of; that is the opposite of
+    unrepresentable. `TestScriptSiteCoverageIsDerivedFromTheSchema` at the end
+    of this file is the structural version. These three stay because a
+    concrete, readable reproduction of a defect that actually shipped is worth
+    keeping next to the general rule.
+
+    The property under test, for the three kinds below: sanitizing must not
+    change WHICH script refs walk_script_refs finds, even though it must
+    still strip everything else
     -- a captured-payload-shaped value sits next to every script ref below
     to prove this can't be satisfied by weakening the sanitizer. Compared as
     SETS, not lists: `_apply_schema` builds its output in SCHEMA key order,
@@ -1288,3 +1303,323 @@ class TestRulesAreFilteredAsExpressionTrees:
         raw = {"_id": "i1", "filter": {"type": "expression", "rules": ["equals", 42, True, None, 1.5, "x"]}}
         out = sanitize("import", raw)
         assert out["filter"]["rules"] == ["equals", 42, True, None, 1.5, "x"]
+
+
+class TestEverySchemaNodeThatModelsTopologyKeepsScriptRefs:
+    """FINAL REVIEW finding 2: round 4 claimed to make a whole class of defect
+    "unrepresentable rather than fixing two instances of it", covering "every
+    kind that can carry scripts". It fixed two of five sites and pinned only
+    those two -- the claim was in the docstring and in the commit message, and
+    it was false when written.
+
+    The three sites it missed, each a SIBLING of one it fixed:
+      * `_PAGE_GENERATOR` never gained `hooks`/`transform`/`filter` when
+        `_PAGE_PROCESSOR` did.
+      * `_ROUTER_BRANCH` never gained `script`, though `_ROUTER` carries it
+        and the plan's Verified Facts name "router branches" as an
+        attachment site EXPLICITLY.
+      * `routers[].branches[].inputFilter` was schema'd as a bare
+        `{rules}` with no `script`, unlike its `filter`/`transform` cousins.
+
+    The tests directly below reproduce those three losses. The structural
+    tests in `TestScriptSiteCoverageIsDerivedFromTheSchema` are the actual
+    fix for the pattern: the site list and the containers that carry it are
+    both derived from the schema table, so the next sibling cannot be
+    half-done.
+    """
+
+    _LEAK = {"_headers": {"set-cookie": ["connect.sid=s%3AinventedSiteLeak; HttpOnly"]}}
+
+    def test_page_generator_hooks_and_transform_script_refs_survive(self):
+        """`pageGenerators` is the sibling of `pageProcessors`, which round 4
+        covered. Both are lists of step references on the same flow object;
+        there is no reason one keeps script refs and the other drops them."""
+        raw = {
+            "_id": "f1",
+            "name": "flow-with-generator-scripts",
+            "pageGenerators": [
+                {
+                    "_exportId": "exp-gen",
+                    "hooks": {"preSavePage": {"_scriptId": "GEN_HOOK", "function": "onHook"}},
+                    "transform": {
+                        "type": "script",
+                        "script": {"_scriptId": "GEN_XFORM", "function": "onTransform"},
+                    },
+                    "mockOutput": self._LEAK,
+                }
+            ],
+        }
+        before = walk_script_refs(raw)
+        sanitized = sanitize("flow", raw)
+        after = walk_script_refs(sanitized)
+        assert set(before) == set(after)
+        assert {r.script_id for r in after} == {"GEN_HOOK", "GEN_XFORM"}
+        assert "set-cookie" not in _dumped(sanitized)
+
+    def test_router_branch_script_ref_survives(self):
+        """`routers[].branches[].script` -- `_ROUTER` carries `script`, its
+        own branches did not."""
+        raw = {
+            "_id": "f1",
+            "name": "flow-with-branch-script",
+            "routers": [
+                {
+                    "id": "rtr-A",
+                    "branches": [
+                        {
+                            "name": "Branch",
+                            "branchId": "b1",
+                            "script": {"_scriptId": "BRANCH_SCRIPT", "function": "branching"},
+                            "mockResponse": self._LEAK,
+                        }
+                    ],
+                }
+            ],
+        }
+        before = walk_script_refs(raw)
+        sanitized = sanitize("flow", raw)
+        after = walk_script_refs(sanitized)
+        assert set(before) == set(after)
+        assert {r.script_id for r in after} == {"BRANCH_SCRIPT"}
+        assert "set-cookie" not in _dumped(sanitized)
+
+    def test_router_branch_input_filter_script_ref_survives(self):
+        """`inputFilter` is filter-shaped; a `type: "script"` form carries an
+        attachment exactly the way `filter` does, and was schema'd as a bare
+        `{rules}`."""
+        raw = {
+            "_id": "f1",
+            "name": "flow-with-branch-input-filter-script",
+            "routers": [
+                {
+                    "id": "rtr-A",
+                    "branches": [
+                        {
+                            "name": "Branch",
+                            "branchId": "b1",
+                            "inputFilter": {
+                                "type": "script",
+                                "script": {"_scriptId": "INPUT_FILTER", "function": "onFilter"},
+                                "mockResponse": self._LEAK,
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+        before = walk_script_refs(raw)
+        sanitized = sanitize("flow", raw)
+        after = walk_script_refs(sanitized)
+        assert set(before) == set(after)
+        assert {r.script_id for r in after} == {"INPUT_FILTER"}
+        assert "set-cookie" not in _dumped(sanitized)
+
+
+# --------------------------------------------------------------------------
+# Schema-derived probes for `TestScriptSiteCoverageIsDerivedFromTheSchema`.
+# These read `sanitizer`'s own schema table deliberately -- that is the whole
+# point: nothing below hardcodes a list of kinds, containers or sites, so a
+# container or a site added to the module tomorrow is covered here without
+# anyone remembering to edit this file.
+# --------------------------------------------------------------------------
+
+
+def _iter_schema_nodes(schema: dict, seen: set[int] | None = None):
+    """Every schema dict reachable from *schema*, itself included. `None`
+    leaves and the `_RULE_TREE` marker are not dicts and are skipped."""
+    seen = set() if seen is None else seen
+    if id(schema) in seen:
+        return
+    seen.add(id(schema))
+    yield schema
+    for sub in schema.values():
+        if isinstance(sub, dict):
+            yield from _iter_schema_nodes(sub, seen)
+
+
+def _all_schema_nodes() -> list[dict]:
+    nodes: list[dict] = []
+    seen: set[int] = set()
+    for schema in sanitizer._ALLOWLISTS.values():
+        nodes.extend(_iter_schema_nodes(schema, seen))
+    return nodes
+
+
+def _site_internal_node_ids() -> set[int]:
+    """Every node INSIDE a script site's own sub-schema (`_FILTER` itself,
+    its nested `script`, `_HOOKS`' wildcard target, ...). These describe the
+    internals of ONE site and are not containers, so the "declares one site
+    => declares all five" rule must not apply to them -- `_FILTER` carrying
+    only `script` is correct, not a half-splice. Derived, not listed: a new
+    site sub-schema is exempted automatically."""
+    ids: set[int] = set()
+    seen: set[int] = set()
+    for site_schema in sanitizer._SCRIPT_SITES.values():
+        ids.update(id(node) for node in _iter_schema_nodes(site_schema, seen))
+    return ids
+
+
+def _plant_script_ref(site_schema: dict, script_id: str):
+    """The smallest raw value for *site_schema* that carries a `_scriptId`,
+    DERIVED from the schema rather than hand-written per site: descend until
+    a `_SCRIPT_REF`-shaped node is found (through the `hooks` wildcard, or
+    through `filter`/`transform`'s own `script` key). Returns None if the
+    schema cannot hold a ref at all."""
+    if sanitizer._WILDCARD in site_schema:
+        return {"probeHook": _plant_script_ref(site_schema[sanitizer._WILDCARD], script_id)}
+    if "_scriptId" in site_schema:
+        return {"_scriptId": script_id, "function": "onProbe"}
+    for key, sub in site_schema.items():
+        if isinstance(sub, dict):
+            nested = _plant_script_ref(sub, script_id)
+            if nested is not None:
+                return {key: nested}
+    return None
+
+
+def _build_probe_object(schema: dict, path: str, planted: list[str], seen: frozenset[int] = frozenset()):
+    """A raw object shaped by *schema*, with a captured-payload marker at
+    EVERY node and a unique `_scriptId` at every script site that node
+    declares. Nested schemas are emitted as one-element lists (both list and
+    dict forms go down the same `_apply_schema` path; the list form also
+    exercises the index suffix in `walk_script_refs`' json_path)."""
+    if id(schema) in seen:  # the real graph is a DAG; guard anyway
+        return {}
+    node_seen = seen | {id(schema)}
+    out: dict = {"mockResponse": {"_headers": {"set-cookie": [f"probe-leak-{path or 'root'}"]}}}
+    for key, sub in schema.items():
+        if key == sanitizer._WILDCARD or key in sanitizer._SCRIPT_SITES:
+            continue  # script sites are planted below, not generated here
+        child = f"{path}.{key}" if path else key
+        if sub is sanitizer._RULE_TREE:
+            out[key] = ["notempty", [{"key": "k", "extract": "e", "generate": "g"}]]
+        elif sub is None:
+            out[key] = f"cfg-{child}"
+        elif isinstance(sub, dict):
+            out[key] = [_build_probe_object(sub, f"{child}[0]", planted, node_seen)]
+    for site, site_schema in sanitizer._SCRIPT_SITES.items():
+        if site not in schema:
+            continue
+        script_id = f"PROBE_{len(planted)}"
+        value = _plant_script_ref(site_schema, script_id)
+        assert value is not None, f"{site} cannot hold a script ref"
+        out[site] = value
+        planted.append(script_id)
+    return out
+
+
+class TestScriptSiteCoverageIsDerivedFromTheSchema:
+    """FIX ROUND 7 -- the actual fix for finding 2, as opposed to the three
+    reproductions above.
+
+    Round 4's docstring claimed its composition test made "this whole class
+    of defect unrepresentable rather than fixing two instances of it". It did
+    not: it hand-wrote three fixtures, so it covered exactly the three
+    containers whoever wrote it happened to think of, and the two siblings
+    they did not think of (`_PAGE_GENERATOR`, `_ROUTER_BRANCH`) went on
+    losing refs. A hand-written fixture list can only ever pin today's known
+    sites -- the same gap `TestSanitizerPreservesEveryRepositoryReadField`
+    names in its own docstring.
+
+    Everything below is derived from `sanitizer`'s schema table instead:
+
+    1. `test_script_sites_are_spliced_never_hand_copied` -- any node
+       declaring ANY script-site key declares ALL of them, with the identical
+       sub-schema object. Half-updating a container is unrepresentable.
+    2. `test_every_topology_node_carries_every_script_site` -- any node
+       declaring a TOPOLOGY key (a step reference, a branch, or a container
+       of them) must carry every script site. This is the rule that would
+       have caught `_PAGE_GENERATOR` and `_ROUTER_BRANCH` before they shipped,
+       and it catches their next sibling automatically: a node cannot model
+       flow topology without naming one of those keys.
+    3. `test_generated_probe_preserves_every_script_ref_for_every_kind` --
+       rules 1 and 2 only READ the table; this one PROVES the table produces
+       the behaviour, by execution, on an object generated from the schema
+       graph itself: a `_scriptId` planted at every site of every reachable
+       container, with a captured payload beside it. Adding a sixth site key
+       to `_SCRIPT_SITES`, or a new container, extends it with no edit here.
+
+    WHICH RULE CATCHES WHAT -- stated because getting this wrong is the very
+    mistake being fixed, and all three claims below are MUTATION-PROVEN, not
+    reasoned:
+
+      * Unsplicing `_PAGE_GENERATOR` (reproducing round 4's exact omission)
+        fails rules 2 and the reach test. It does NOT fail rule 3: the probe
+        builder derives what to plant from the same table, so a site the
+        schema does not declare is a site the probe never plants, and the
+        composition holds vacuously. Rule 3 proves that what IS declared
+        survives; rule 2 is the one that catches a site MISSING.
+      * Hand-copying a SUBSET of the sites into `_ROUTER_BRANCH` fails rules
+        1 and 2.
+      * Hand-copying the FULL set, but as fresh dict objects rather than the
+        shared ones, fails rule 1's identity assertion -- which is the point
+        of asserting `is` and not `==`: equal-today copies are what drift
+        apart tomorrow.
+
+    WHAT THIS STILL DOES NOT COVER: a script ATTACHMENT SITE Celigo invents
+    that is not in `_SCRIPT_SITES` is invisible to all three -- no test can
+    know a key nobody has seen. What changed is the cost of learning about
+    one: adding it to `_SCRIPT_SITES` now covers every container at once,
+    instead of five separate edits of which two got forgotten. Likewise, a
+    script-carrying container that names none of `_TOPOLOGY_KEYS` and is not
+    spliced would pass rule 2 -- rule 1 still forces it to be all-or-nothing,
+    and rule 3 still proves whatever it does declare actually works.
+    """
+
+    def test_script_sites_are_spliced_never_hand_copied(self):
+        internal = _site_internal_node_ids()
+        for node in _all_schema_nodes():
+            if id(node) in internal:
+                continue  # a site's own internals, not a container -- see helper
+            declared = {key for key in sanitizer._SCRIPT_SITES if key in node}
+            if not declared:
+                continue
+            assert declared == set(sanitizer._SCRIPT_SITES), (
+                f"node declares {sorted(declared)} but not {sorted(set(sanitizer._SCRIPT_SITES) - declared)} -- "
+                "splice **_SCRIPT_SITES instead of copying keys"
+            )
+            for key, sub_schema in sanitizer._SCRIPT_SITES.items():
+                assert node[key] is sub_schema, f"{key} is a hand-written copy, not the shared _SCRIPT_SITES entry"
+
+    def test_every_topology_node_carries_every_script_site(self):
+        checked = 0
+        for node in _all_schema_nodes():
+            if not (set(node) & sanitizer._TOPOLOGY_KEYS):
+                continue
+            checked += 1
+            missing = {key for key in sanitizer._SCRIPT_SITES if key not in node}
+            assert not missing, f"topology node is missing script sites {sorted(missing)}"
+        # _FLOW, _PAGE_GENERATOR, _PAGE_PROCESSOR, _ROUTER, _ROUTER_BRANCH.
+        # Asserted so a refactor that stops REACHING the topology nodes can't
+        # turn this test into a vacuous pass over an empty loop.
+        assert checked == 5
+
+    def test_generated_probe_preserves_every_script_ref_for_every_kind(self):
+        for kind, schema in sanitizer._ALLOWLISTS.items():
+            planted: list[str] = []
+            raw = _build_probe_object(schema, "", planted)
+            before = walk_script_refs(raw)
+            sanitized = sanitize(kind, raw)
+            after = walk_script_refs(sanitized)
+
+            assert {r.script_id for r in before} == set(planted), f"{kind}: probe builder disagrees with itself"
+            assert set(before) == set(after), f"{kind}: sanitize() lost script refs"
+            assert "probe-leak" not in _dumped(sanitized), f"{kind}: captured payload survived"
+            assert "set-cookie" not in _dumped(sanitized), f"{kind}: captured payload survived"
+
+    def test_generated_flow_probe_actually_reaches_every_topology_container(self):
+        """The generated probe is only worth anything if it gets INTO the
+        containers that lost refs. Pins the reach explicitly rather than
+        trusting the generator."""
+        planted: list[str] = []
+        raw = _build_probe_object(sanitizer._ALLOWLISTS["flow"], "", planted)
+        paths = {ref.json_path for ref in walk_script_refs(raw)}
+
+        for prefix in (
+            "pageGenerators[0].",
+            "pageProcessors[0].",
+            "routers[0].",
+            "routers[0].branches[0].",
+            "routers[0].branches[0].pageProcessors[0].",
+        ):
+            assert any(p.startswith(prefix) for p in paths), f"probe never reached {prefix}"

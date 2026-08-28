@@ -57,9 +57,19 @@ of its own, so a script ref inlined inside a flow-embedded pageProcessor
 would be lost too (not observed live, added anyway -- see `_PAGE_PROCESSOR`).
 `TestSanitizerAndWalkerCompose` in the test file asserts the composition
 property directly (`walk_script_refs(sanitize(kind, obj)) ==
-walk_script_refs(obj)` as sets) for every kind that can carry scripts, so a
-future 7th kind or attachment site that forgets the allowlist fails THAT
-test instead of the flow map silently losing scripts again.
+walk_script_refs(obj)` as sets) for the three kinds it hand-writes fixtures
+for.
+
+CORRECTED BY ROUND 7 -- READ THIS BEFORE TRUSTING THE PARAGRAPH ABOVE: that
+test's own docstring, and this one, originally claimed round 4 had made "this
+whole class of defect unrepresentable rather than fixing two instances of
+it", covering "every kind that can carry scripts". BOTH CLAIMS WERE FALSE
+WHEN WRITTEN. Round 4 fixed two of five attachment sites and pinned only
+those two; three siblings (`_PAGE_GENERATOR`, `_ROUTER_BRANCH`, and the
+branch's `inputFilter`) went on silently dropping real refs, proven by
+execution in the whole-branch review. Three hand-written fixtures can only
+cover the containers whoever wrote them thought of, which is not a
+structural property at all. See fix round 7 below for what replaced it.
 
 FIX ROUND 5 (2026-08-27, FINAL ROUND): the third instance of the same
 pattern -- round 2 dropped script refs, round 3 dropped flow topology, this
@@ -92,6 +102,27 @@ take a key schema (its real values are arbitrarily-nested EXPRESSION TREES,
 not fixed-key objects), so it gets a third schema kind -- `_RULE_TREE`,
 filtered by value shape -- see `_RULE_DICT_KEYS` and `_filter_rule_tree`
 below. With that, no allowlisted field is a blob-copied leaf any more.
+
+FIX ROUND 7 (2026-08-27, whole-branch review finding 2): the sibling half of
+round 4, plus the correction to what round 4 claimed about itself (see
+above). `_PAGE_GENERATOR` never got the `hooks`/`transform`/`filter` that
+`_PAGE_PROCESSOR` did; `_ROUTER_BRANCH` never got the `script` that `_ROUTER`
+has, though the plan's Verified Facts name router branches as an attachment
+site explicitly; and the branch's `inputFilter` was schema'd as a bare
+`{rules}` unlike its `filter`/`transform` cousins. All three lost real refs.
+
+Fixing three more instances would have been the fourth round of the same
+move. Instead the site list became ONE definition, `_SCRIPT_SITES`, spliced
+into every container -- so "some sites but not all" is no longer expressible
+-- and the tests derive both the site list and the containers from this
+table (`TestScriptSiteCoverageIsDerivedFromTheSchema`): any node declaring
+one site must declare all five, and any node declaring a TOPOLOGY key
+(`_TOPOLOGY_KEYS`: a step reference, a branch, or a container of them) must
+carry every site. A future sibling of `_PAGE_GENERATOR` cannot model
+topology without naming one of those keys, so it is covered without anyone
+remembering to update a test. What that still cannot cover -- a site key
+Celigo invents that nobody has seen -- is stated in that test's docstring
+rather than papered over.
 
 Allowlist, never denylist: a denylist of "known dangerous" field names only
 stops fields someone already thought to list. An allowlist stops everything
@@ -236,6 +267,51 @@ _HOOKS: Schema = {
     _WILDCARD: _SCRIPT_REF,
 }
 
+# FIX ROUND 7 (2026-08-27, whole-branch review finding 2): EVERY key a script
+# can hang off, defined ONCE, spliced into every container that models flow
+# topology -- never hand-copied into one and forgotten in its sibling.
+#
+# That forgetting is the entire defect this replaces. Round 4 added
+# `hooks`/`transform`/`filter` to `_PAGE_PROCESSOR` but not to
+# `_PAGE_GENERATOR`; `_ROUTER` got `script` but `_ROUTER_BRANCH` did not,
+# though the plan's Verified Facts name router branches as an attachment site
+# explicitly; and `inputFilter` was schema'd as a bare `{rules}` unlike its
+# `filter`/`transform` cousins. Three sites lost refs live -- and round 4's
+# own docstring claimed it had made "this whole class of defect
+# unrepresentable rather than fixing two instances of it". It had fixed two
+# of five.
+#
+# With one definition spliced in, "half the sites" is no longer expressible:
+# a container either splices this dict and gets all of them, or it doesn't
+# and `TestScriptSiteCoverageIsDerivedFromTheSchema` fails. Adding a SIXTH
+# site key here covers every container at once; adding a new container that
+# models topology is caught by that test's topology-key rule.
+#
+# `inputFilter` reuses `_FILTER`: Celigo's naming is inconsistent (a branch's
+# is `inputFilter`, an export's is `filter`) but the shapes are the same
+# family, and every one observed live -- `{rules: [...]}` -- is a subset of
+# `_FILTER`. Treating them alike costs nothing (both are recursively
+# filtered, neither can pass a payload) and removes a distinction that only
+# ever produced a gap.
+_SCRIPT_SITES: Schema = {
+    "script": _SCRIPT_REF,
+    "hooks": _HOOKS,
+    "transform": _TRANSFORM,
+    "filter": _FILTER,
+    "inputFilter": _FILTER,
+}
+
+# Keys that mean "this schema node models part of a flow's topology" -- a
+# step reference, a branch, or a container of them. Derived from the schema
+# table by `TestScriptSiteCoverageIsDerivedFromTheSchema`, which requires
+# every node declaring one of these to splice `_SCRIPT_SITES` in full. This
+# is what makes a FUTURE sibling of `_PAGE_GENERATOR`/`_ROUTER_BRANCH`
+# covered without anyone remembering to update a test: it cannot model
+# topology without naming one of these keys.
+_TOPOLOGY_KEYS = frozenset(
+    {"_exportId", "_importId", "branchId", "pageGenerators", "pageProcessors", "routers", "branches"}
+)
+
 # `netsuite_da.mapping` shape CONFIRMED live (observed-shapes.md, fix round
 # 1): {fields: [{extract, generate, internalId}], lists: []}. `fields` is a
 # LIST of dicts -- each one filtered by its own schema below, not
@@ -314,44 +390,39 @@ _RESPONSE_MAPPING: Schema = {
 # shape as above... ]") -- reused as one schema for both. This IS the flow
 # map's topology (fix round 3): Task 5 builds celigo_flow_steps from exactly
 # these ids, so dropping them silently empties the map.
+#
+# FIX ROUND 7: `**_SCRIPT_SITES` here and on every topology node below. It
+# was ROUND 4 that added hooks/transform/filter to `_PAGE_PROCESSOR` and
+# skipped this, its own sibling -- see `_SCRIPT_SITES`. None of these sites
+# is observed live on a page generator (every one probed references its
+# export BY ID and inlines nothing), and that is exactly the argument for
+# splicing rather than deciding per node: "not observed here" is what
+# produced a gap that lost two real refs on the sibling shape.
 _PAGE_GENERATOR: Schema = {
+    **_SCRIPT_SITES,
     "_exportId": None,
     "skipRetries": None,
 }
-# FIX ROUND 4: hooks/transform/filter added alongside responseMapping. NOT
-# observed live -- every pageProcessor probed references its export/import
-# BY ID, never inlines a script container -- added anyway as cheap
-# insurance: the composition property this round exists to guarantee
-# (walk_script_refs(sanitize(x)) == walk_script_refs(x)) must hold even if
-# Celigo ever does inline one here, and an allowlist gap should never be the
-# reason a real script ref silently disappears.
 _PAGE_PROCESSOR: Schema = {
+    **_SCRIPT_SITES,
     "type": None,
     "_exportId": None,
     "_importId": None,
     "proceedOnFailure": None,
     "responseMapping": _RESPONSE_MAPPING,
-    "hooks": _HOOKS,
-    "transform": _TRANSFORM,
-    "filter": _FILTER,
-}
-
-# `routers[].branches[].inputFilter` -- config (comparison rules), not a
-# script. Structurally simpler than filter/transform's expression form: no
-# `type`/`script`, and no script ref has ever been observed here.
-_INPUT_FILTER: Schema = {
-    "rules": _RULE_TREE,
 }
 
 # `routers[].branches[]` -- CONFIRMED live, both forms (observed-shapes.md:
 # pass-through and branching routers). `nextRouterId` chains routers into a
 # graph -- Task 5 needs the chain, not a flat list, so it MUST survive
-# alongside `branchId`.
+# alongside `branchId`. `inputFilter` arrives via `_SCRIPT_SITES` (mapped to
+# `_FILTER`); it used to be a bare `{rules}` of its own, which dropped a
+# `type: "script"` form's attachment.
 _ROUTER_BRANCH: Schema = {
+    **_SCRIPT_SITES,
     "name": None,
     "branchId": None,
     "nextRouterId": None,
-    "inputFilter": _INPUT_FILTER,
     "pageProcessors": _PAGE_PROCESSOR,
 }
 
@@ -359,17 +430,17 @@ _ROUTER_BRANCH: Schema = {
 # Verified Facts explicitly list "router branches"), but every router
 # observed live carries `script: {function: "branching"}` with NO
 # `_scriptId` -- every one of those routers used
-# `routeRecordsUsing: "input_filters"`, never `"script"`. Reuses
-# `_SCRIPT_REF` anyway so a `_scriptId` survives if a future router ever
-# does carry one (same reasoning as filter/transform: preserve the ref,
-# never guess whether one exists in a fixture).
+# `routeRecordsUsing: "input_filters"`, never `"script"`. `script` now
+# arrives via `_SCRIPT_SITES` along with its four siblings, for the same
+# reason it was kept here on its own before: preserve the ref, never guess
+# whether one exists in a fixture.
 _ROUTER: Schema = {
+    **_SCRIPT_SITES,
     "id": None,
     "name": None,
     "routeRecordsTo": None,
     "routeRecordsUsing": None,
     "branches": _ROUTER_BRANCH,
-    "script": _SCRIPT_REF,
 }
 
 # FIX ROUND 5: `lastModified` was never allowlisted here, so
@@ -378,6 +449,7 @@ _ROUTER: Schema = {
 # the schema has the column, `upsert_flow` reads it, and only this allowlist
 # was dropping it. Also needed for Task 7's drift detection.
 _FLOW: Schema = {
+    **_SCRIPT_SITES,
     "_id": None,
     "name": None,
     "_integrationId": None,
@@ -405,15 +477,13 @@ _FLOW: Schema = {
 # confirmed, more heavily used field. Flagged for whoever probes export data
 # next to confirm/prune.
 _EXPORT: Schema = {
+    **_SCRIPT_SITES,
     "_id": None,
     "name": None,
     "adaptorType": None,
     "_connectionId": None,
     "_sourceId": None,
     "sandbox": None,
-    "filter": _FILTER,
-    "transform": _TRANSFORM,
-    "hooks": _HOOKS,
     "netsuite": _NETSUITE_EXPORT,
     "aiDescription": _AI_DESCRIPTION,
 }
@@ -432,15 +502,13 @@ _EXPORT: Schema = {
 # per the plan's Verified Facts -- dropping it on imports silently missed
 # the single most common script attachment site for exactly this kind.
 _IMPORT: Schema = {
+    **_SCRIPT_SITES,
     "_id": None,
     "name": None,
     "adaptorType": None,
     "_connectionId": None,
     "_sourceId": None,
     "sandbox": None,
-    "filter": _FILTER,
-    "transform": _TRANSFORM,
-    "hooks": _HOOKS,
     "netsuite_da": _NETSUITE_DA,
     "aiDescription": _AI_DESCRIPTION,
 }
