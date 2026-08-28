@@ -83,13 +83,24 @@ SELF_DOCUMENTING = {
 # NARROW shape; only text matching it is stripped out of these two files
 # before the scan runs, so anything else DML in them -- an UPDATE, a bare
 # DELETE, a DELETE on mcp_connectors -- still trips the guard exactly like it
-# would anywhere else.
+# would anywhere else. FIX ROUND 9 (re-review R6): the shape must also END
+# there -- a statement that merely STARTS with it and then widens
+# (`... WHERE id = :id OR tenant_id = :t`) is caught, not exempted.
 DML_TEST_ALLOWLIST = {
     "tests/test_celigo_flow_map_rls.py",
     "tests/test_celigo_repository.py",
 }
 
-_ALLOWED_DELETE_BY_ID = re.compile(r"(?is)\bdelete\s+from\s+connections\s+where\s+id\s*=\s*:\w+\b")
+# FIX ROUND 9 (scoped re-review R6, 2026-08-27): this used to end at `\b`
+# after the bind parameter, so it matched a PREFIX -- `DELETE FROM connections
+# WHERE id = :id OR tenant_id = :t` had its authorised head stripped and its
+# widening tail left behind as text the DML pattern below no longer
+# recognises, which is the whole-file exemption's hole reintroduced one
+# statement at a time. The trailing lookahead requires the match to run to the
+# END of the SQL string literal, so the exemption covers the entire statement
+# or none of it. (Lookahead, not a consumed character, so the quote stays in
+# the text and cannot silently join two adjacent literals together.)
+_ALLOWED_DELETE_BY_ID = re.compile(r"""(?is)\bdelete\s+from\s+connections\s+where\s+id\s*=\s*:\w+\s*(?=["'])""")
 
 
 def _python_files(root: pathlib.Path = BACKEND):
@@ -184,6 +195,32 @@ class TestDmlAllowlistIsStatementScopedNotFileScoped:
         assert not any("DELETE FROM connections" in o for o in offenders), (
             "the one deliberately-authorised delete-by-id statement must still be exempt"
         )
+
+    def test_a_delete_that_only_starts_with_the_allowed_shape_is_still_caught(self, tmp_path):
+        """SCOPED RE-REVIEW R6 (2026-08-27, PROVEN against a synthetic tree):
+        the narrowed pattern matched a PREFIX, so a WIDENED delete that merely
+        begins with the authorised shape -- `... WHERE id = :id OR tenant_id
+        = :t` -- had its authorised head stripped and its dangerous tail left
+        behind as text the DML pattern no longer recognises. The allowlist
+        must exempt the whole statement or nothing: the match now has to run
+        to the end of the SQL string literal."""
+        allowlisted_rel = next(iter(DML_TEST_ALLOWLIST))
+        target = tmp_path / allowlisted_rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            'await db.execute(text("DELETE FROM connections WHERE id = :id").bindparams(id=conn_id))\n'
+            "# the same shape, widened -- no longer a single-row delete by primary key:\n"
+            'await db.execute(text("DELETE FROM connections WHERE id = :id OR tenant_id = :t"))\n'
+        )
+
+        offenders = _find_dml_offenders(tmp_path)
+
+        assert any("DELETE FROM connections" in o for o in offenders), (
+            "a delete that widens past the authorised single-row shape must not inherit its exemption"
+        )
+        # ...and the authorised statement in the same file is still exempt, so
+        # the fix is a tightening, not a blanket revocation.
+        assert len(offenders) == 1
 
 
 class TestOperatorScriptRefusal:
