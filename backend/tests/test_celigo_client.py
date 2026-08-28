@@ -667,8 +667,7 @@ class TestFlowErrorsPageCap:
             # instead of spinning or hanging the suite on a timeout.
             if len(calls) > 2 * _MAX_ERROR_PAGES:
                 raise AssertionError(
-                    f"list_flow_errors_for_step made over {2 * _MAX_ERROR_PAGES} requests -- "
-                    "its page cap did not fire"
+                    f"list_flow_errors_for_step made over {2 * _MAX_ERROR_PAGES} requests -- its page cap did not fire"
                 )
             return httpx.Response(
                 200,
