@@ -155,6 +155,35 @@ Schema = dict[str, "Schema | None | _RuleTreeMarker"]
 
 _WILDCARD = "*"  # not a real Celigo field name; sentinel for `hooks.*`
 
+# Depth ceiling for the two SHAPE-driven recursions below (`_deep_copy_leaf`
+# and `_filter_rule_tree`) -- FIX ROUND 9, scoped re-review R4. Schema-driven
+# recursion (`_apply_schema`) is bounded by the schemas themselves, which are
+# finite and shallow; those two are not bounded by anything but Python's call
+# stack. Measured on this branch before the bound existed: `json.loads`
+# accepts 9997 levels of nesting (that is what `response.json()` runs), while
+# sanitize() blew the stack at 996 -- a ~9000-level window where a Celigo
+# response parses on the wire and then raises `RecursionError` inside this
+# module. It failed closed and fast, but `RecursionError` is an accident of
+# the interpreter, not a decision this module made.
+#
+# 100 is chosen against measured evidence, not taste: the deepest structure
+# anywhere in this repo's Celigo corpus (every fixture plus the schemas
+# themselves) is 10 levels, so this is 10x the deepest thing ever observed,
+# and still an order of magnitude under the recursion limit -- the bound
+# fires as a deliberate refusal, never as a stack overflow.
+_MAX_SANITIZE_DEPTH = 100
+
+
+class CeligoSanitizeDepthError(Exception):
+    """A Celigo payload nested deeper than `_MAX_SANITIZE_DEPTH` inside a
+    schema leaf or a `rules` expression tree.
+
+    Fails CLOSED, exactly like every other refusal in this module: nothing is
+    returned, so nothing partially-filtered can be stored. Raised instead of
+    letting `RecursionError` escape so the failure names its own cause and its
+    own limit rather than surfacing as an interpreter-level stack overflow
+    from somewhere inside a comprehension."""
+
 
 class _RuleTreeMarker:
     """Sentinel schema value for `rules` -- see `_filter_rule_tree`. A
@@ -625,7 +654,19 @@ def _apply_schema(raw: dict, schema: Schema) -> dict:
     return out
 
 
-def _deep_copy_leaf(value: object) -> object:
+def _check_depth(depth: int, what: str) -> None:
+    """Refuse a structure nested past `_MAX_SANITIZE_DEPTH` -- see that
+    constant for the measurement this bound is set against."""
+    if depth > _MAX_SANITIZE_DEPTH:
+        raise CeligoSanitizeDepthError(
+            f"Celigo payload nests more than {_MAX_SANITIZE_DEPTH} levels deep inside {what}; refusing to "
+            "walk it further. Either this object is malformed or self-referential, or a real Celigo shape "
+            f"has outgrown the limit -- raise {_MAX_SANITIZE_DEPTH} deliberately, with an observed shape to "
+            "justify it, rather than removing the bound."
+        )
+
+
+def _deep_copy_leaf(value: object, depth: int = 1) -> object:
     """Deep-copy *value* for a schema LEAF (`sub_schema is None`), at every
     depth, not just the top one -- FIX ROUND 8 (whole-branch review finding
     9). A dict/list value is rebuilt recursively so nothing inside it, at any
@@ -634,15 +675,21 @@ def _deep_copy_leaf(value: object) -> object:
     `_filter_rule_tree` for `rules`, generalised to every OTHER leaf field --
     a leaf has no schema to recurse BY, so this recurses by shape alone
     (dict -> dict, list -> list, everything else verbatim), never dropping a
-    key the way a real schema-driven filter would."""
+    key the way a real schema-driven filter would.
+
+    Bounded by `_MAX_SANITIZE_DEPTH` (FIX ROUND 9): recursing by shape means
+    the input decides the depth, so the input must not be able to decide it
+    without limit."""
     if isinstance(value, dict):
-        return {key: _deep_copy_leaf(item) for key, item in value.items()}
+        _check_depth(depth, "an allowlisted leaf field")
+        return {key: _deep_copy_leaf(item, depth + 1) for key, item in value.items()}
     if isinstance(value, list):
-        return [_deep_copy_leaf(item) for item in value]
+        _check_depth(depth, "an allowlisted leaf field")
+        return [_deep_copy_leaf(item, depth + 1) for item in value]
     return value
 
 
-def _filter_rule_tree(value: object) -> object:
+def _filter_rule_tree(value: object, depth: int = 1) -> object:
     """Recursively filter one Celigo EXPRESSION TREE (`rules`) by value shape.
 
     Fix round 6 -- see `_RULE_DICT_KEYS` above for why `rules` gets this
@@ -666,11 +713,16 @@ def _filter_rule_tree(value: object) -> object:
 
     Builds new containers throughout, never edits *value* -- `sanitize()`'s
     purity contract holds through this path too.
+
+    Bounded by `_MAX_SANITIZE_DEPTH` (FIX ROUND 9), for the same reason as
+    `_deep_copy_leaf`: the tree's shape comes entirely from the input.
     """
     if isinstance(value, dict):
-        return {key: _filter_rule_tree(item) for key, item in value.items() if key in _RULE_DICT_KEYS}
+        _check_depth(depth, "a `rules` expression tree")
+        return {key: _filter_rule_tree(item, depth + 1) for key, item in value.items() if key in _RULE_DICT_KEYS}
     if isinstance(value, list):
-        return [_filter_rule_tree(item) for item in value]
+        _check_depth(depth, "a `rules` expression tree")
+        return [_filter_rule_tree(item, depth + 1) for item in value]
     if value is None or isinstance(value, (str, int, float)):  # bool is an int subclass
         return value
     return None

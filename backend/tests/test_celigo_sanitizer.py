@@ -36,6 +36,9 @@ from __future__ import annotations
 
 import copy
 import json
+import sys
+
+import pytest
 
 from app.services.celigo import sanitizer
 from app.services.celigo.graph import walk_script_refs
@@ -1669,3 +1672,75 @@ class TestScriptSiteCoverageIsDerivedFromTheSchema:
             "routers[0].branches[0].pageProcessors[0].",
         ):
             assert any(p.startswith(prefix) for p in paths), f"probe never reached {prefix}"
+
+
+class TestSanitizeDepthIsBounded:
+    """SCOPED RE-REVIEW R4 (2026-08-27). Fix round 8's two recursive filters --
+    `_deep_copy_leaf` (finding 9) and `_filter_rule_tree` (finding 3) -- recurse
+    by SHAPE, so their depth is bounded by nothing but Python's own call stack.
+    Measured independently on this branch before the fix:
+
+        sys.getrecursionlimit()                = 1000
+        max depth json.loads accepts           = 9997   <- what response.json() uses
+        max leaf depth sanitize() accepts      = 996
+
+    That is a ~9000-level window where a Celigo response PARSES on the wire and
+    then blows the stack inside the sanitizer. It failed closed (RecursionError
+    in 0.0004s, nothing committed), which is why this is low severity -- but
+    the surface is new to fix round 8, and `RecursionError` is an
+    implementation accident, not a decision. The bound is now explicit and the
+    failure is a typed, self-explaining one.
+    """
+
+    @staticmethod
+    def _nest(levels: int, leaf: object = "x") -> object:
+        value: object = leaf
+        for _ in range(levels):
+            value = {"n": value}
+        return value
+
+    def test_the_deepest_shape_this_repo_has_ever_seen_is_far_inside_the_bound(self):
+        """The bound has to be generous enough that no real payload trips it.
+        The deepest literal structure in this repo's whole Celigo corpus
+        (fixtures + schemas) is 10 levels."""
+        assert sanitizer._MAX_SANITIZE_DEPTH >= 100
+        assert sanitizer._MAX_SANITIZE_DEPTH < sys.getrecursionlimit() // 2
+
+    def test_a_leaf_value_nested_past_the_bound_raises_a_typed_error(self):
+        too_deep = self._nest(sanitizer._MAX_SANITIZE_DEPTH + 5)
+
+        with pytest.raises(sanitizer.CeligoSanitizeDepthError) as excinfo:
+            sanitize("flow", {"_id": "f_deep", "schedule": too_deep})
+
+        assert str(sanitizer._MAX_SANITIZE_DEPTH) in str(excinfo.value)
+
+    def test_a_rules_tree_nested_past_the_bound_raises_a_typed_error(self):
+        """`rules` is the other shape-driven recursion (fix round 3's
+        `_filter_rule_tree`), and it nests through LISTS as well as dicts."""
+        too_deep: object = "notempty"
+        for _ in range(sanitizer._MAX_SANITIZE_DEPTH + 5):
+            too_deep = [too_deep]
+
+        with pytest.raises(sanitizer.CeligoSanitizeDepthError):
+            sanitize("import", {"_id": "i_deep", "filter": {"type": "expression", "rules": too_deep}})
+
+    def test_a_leaf_and_a_rules_tree_just_inside_the_bound_still_sanitize(self):
+        """The bound must not be off by one against legitimate input: a
+        structure exactly at the limit is accepted, and its content survives."""
+        deep_leaf = self._nest(sanitizer._MAX_SANITIZE_DEPTH - 1, leaf="kept")
+
+        out = sanitize("flow", {"_id": "f_edge", "schedule": deep_leaf})
+
+        probe = out["schedule"]
+        for _ in range(sanitizer._MAX_SANITIZE_DEPTH - 1):
+            probe = probe["n"]
+        assert probe == "kept"
+
+    def test_a_self_referential_structure_raises_the_typed_error_not_a_recursionerror(self):
+        """The pathological case the depth bound also has to cover: a structure
+        Python itself will happily build but never finish walking."""
+        looping: dict = {}
+        looping["self"] = looping
+
+        with pytest.raises(sanitizer.CeligoSanitizeDepthError):
+            sanitize("flow", {"_id": "f_loop", "schedule": looping})
