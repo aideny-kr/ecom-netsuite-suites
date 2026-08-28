@@ -71,28 +71,42 @@ error-normalizer" (this module) as the owner of `occurrence_count`/
 `first_seen`/`last_seen` aggregation semantics. A naive `+= len(raw_errors)`
 on every call would double-count every already-synced error on every
 re-sync -- the same open `celigo_id` is fetched from Celigo repeatedly
-until it resolves, sometimes over many days. Instead, after upserting this
-call's `celigo_flow_errors` rows, `occurrence_count` is recomputed as
-`COUNT(*) FILTER (WHERE resolved_at IS NULL)` and `first_seen`/`last_seen`
-as `MIN`/`MAX(occurred_at)`, all scoped to `signature_id` (not to this
-call's step or even this call's flow) -- idempotent by construction
-(re-upserting the same `celigo_id` updates one row, never adds one), and
-it correctly reflects contributions from every OTHER step that happens to
-share the same fingerprint, not just the step this call is processing.
-`first_seen`/`last_seen` intentionally span resolved AND open rows (the
-full historical range); `occurrence_count` intentionally counts only
-currently-open rows (a resolved failure isn't still "occurring").
+until it resolves, sometimes over many days. Instead, `occurrence_count` is
+recomputed as `COUNT(*) FILTER (WHERE resolved_at IS NULL)` and
+`first_seen`/`last_seen` as `MIN`/`MAX(occurred_at)`, scoped to
+`signature_id` (not to this call's step or even this call's flow), applied
+via a plain `UPDATE` targeting that id -- never an upsert, because the
+signature row is guaranteed to already exist (a `celigo_flow_errors` row
+can only reference one through a real FK). This is idempotent by
+construction and correctly reflects contributions from every OTHER step
+that happens to share the same fingerprint, not just the step this call is
+processing. `first_seen`/`last_seen` intentionally span resolved AND open
+rows (the full historical range); `occurrence_count` intentionally counts
+only currently-open rows (a resolved failure isn't still "occurring").
+
+WHICH SIGNATURES GET RECOMPUTED -- MUST INCLUDE ORPHANS (FIX ROUND 2, team
+lead, 2026-08-27 -- proven with a probe against shipped code, not a
+reading): recomputing only the signatures that appear in THIS call's
+`raw_errors` grouping is not enough. Take one signature with exactly one
+open error, and a resync where that error is simply absent -- no sibling
+under the same signature anywhere in the call, not on this step, not on
+any other step this call happens to touch. Recomputing only from
+`raw_errors` grouping never touches that signature at all, in EITHER
+ordering, because it has zero representation to group by. `occurrence_
+count` would freeze at its old value forever -- precisely the "genuinely
+fixed, never seen again" case this module exists to get right. The fix:
+before resolving, the pre-call snapshot query also captures each
+about-to-be-resolved row's `signature_id` (not just its `celigo_id`), and
+those ids are UNIONed into phase 3's recompute set alongside whatever came
+from `raw_errors` grouping. A signature is recomputed because one of its
+rows changed state THIS call -- a new/updated error OR a resolution --
+never only because a sibling happened to appear in the same batch.
 
 ORDERING WITHIN ONE CALL (FIX ROUND 1, team lead, 2026-08-27 -- caught by an
-executed repro, not a reading): this call's own `mark_flow_errors_resolved`
-MUST run BEFORE the phase-3 recompute above, never after. The recompute
-filters `WHERE resolved_at IS NULL`; if resolution ran second, the count
-would be stale by exactly the set this call just resolved. That staleness
-is not self-healing -- if the underlying root cause is genuinely fixed and
-never appears in any future `raw_errors` batch, nothing ever touches that
-`signature_id` again, so a wrong-ordered call would leave `occurrence_count`
-frozen at its last-open value forever, permanently overstating an
-already-resolved root cause on any dashboard reading that column.
+executed repro, not a reading): resolving must still happen BEFORE phase 3
+recomputes, for the same reason as before -- the recompute filters `WHERE
+resolved_at IS NULL`, so this call's own resolutions must already be
+visible in the database when that filter runs, not applied afterward.
 """
 
 from __future__ import annotations
@@ -104,10 +118,10 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Iterable
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.celigo import CeligoFlowError, CeligoFlowStep
+from app.models.celigo import CeligoErrorSignature, CeligoFlowError, CeligoFlowStep
 from app.services.celigo.repository import (
     mark_flow_errors_resolved,
     upsert_error_signature,
@@ -212,21 +226,25 @@ async def upsert_errors(
 
     # Snapshot of what THIS STEP believed was open before this call writes
     # anything -- read first, so it isn't contaminated by this call's own
-    # upserts.
-    previously_open_ids = set(
-        (
-            await db.execute(
-                select(CeligoFlowError.celigo_id).where(
-                    CeligoFlowError.tenant_id == tenant_id,
-                    CeligoFlowError.celigo_connection_id == connection_id,
-                    CeligoFlowError.flow_step_id == step.id,
-                    CeligoFlowError.resolved_at.is_(None),
-                )
+    # upserts. Captures each row's `signature_id` too, not just its
+    # `celigo_id` -- FIX ROUND 2: a resolved row's signature must be
+    # recomputed even when it has ZERO representation anywhere in
+    # *raw_errors* (no sibling on this step or any other step in this
+    # call). See module docstring's "WHICH SIGNATURES GET RECOMPUTED".
+    previously_open_rows = (
+        await db.execute(
+            select(CeligoFlowError.celigo_id, CeligoFlowError.signature_id).where(
+                CeligoFlowError.tenant_id == tenant_id,
+                CeligoFlowError.celigo_connection_id == connection_id,
+                CeligoFlowError.flow_step_id == step.id,
+                CeligoFlowError.resolved_at.is_(None),
             )
         )
-        .scalars()
-        .all()
-    )
+    ).all()
+    previously_open_signature_by_id: dict[str, uuid.UUID | None] = {
+        row.celigo_id: row.signature_id for row in previously_open_rows
+    }
+    previously_open_ids = set(previously_open_signature_by_id)
 
     # Group this call's errors by fingerprint. Errors with no `errorId` are
     # malformed -- skipped, never given a fabricated id (same posture as
@@ -251,6 +269,11 @@ async def upsert_errors(
     # own resolutions are already reflected when that filter runs, instead
     # of leaving the count stale by exactly the set just resolved here.
     resolved_ids = previously_open_ids - now_open_ids
+    resolved_signature_ids = {
+        previously_open_signature_by_id[celigo_id]
+        for celigo_id in resolved_ids
+        if previously_open_signature_by_id[celigo_id] is not None
+    }
     if resolved_ids:
         await mark_flow_errors_resolved(db, tenant_id=tenant_id, connection_id=connection_id, celigo_ids=resolved_ids)
 
@@ -259,10 +282,8 @@ async def upsert_errors(
     # phase 2 -- `celigo_flow_errors.signature_id` is a real (non-deferred)
     # FK, so the referenced row has to exist first.
     signature_ids: dict[str, uuid.UUID] = {}
-    representatives: dict[str, dict] = {}
     for fp, group in groups.items():
         representative = group[0]
-        representatives[fp] = representative
         signature_ids[fp] = await upsert_error_signature(
             db,
             tenant_id=tenant_id,
@@ -297,15 +318,23 @@ async def upsert_errors(
                 retriable=error.get("retriable"),
             )
 
-    # Phase 3: recompute each touched signature's aggregate stats from the
+    # Phase 3: recompute every TOUCHED signature's aggregate stats from the
     # actual stored rows (see module docstring -- never incremented in
-    # place). Re-passes source/code/sample_message from phase 1 so this
-    # second upsert doesn't clobber them back to NULL: `upsert_error_
-    # signature` writes every field it's given unconditionally except
-    # occurrence_count/first_seen/last_seen (which are conditional on not
-    # being None), so this call must repeat the phase-1 identity fields to
-    # be a safe idempotent re-assertion rather than a silent wipe.
-    for fp, signature_id in signature_ids.items():
+    # place). "Touched" is the union of two sets, not just the first one --
+    # FIX ROUND 2: a resolved row's signature must be recomputed even with
+    # zero representation in *raw_errors* (see module docstring's "WHICH
+    # SIGNATURES GET RECOMPUTED"):
+    #   * signature_ids.values() -- signatures with a live error in THIS
+    #     call's raw_errors grouping (phases 1-2 above).
+    #   * resolved_signature_ids -- signatures of rows resolved above,
+    #     whether or not they have any sibling in this call.
+    # A plain UPDATE by id, not an upsert: the row is guaranteed to already
+    # exist (celigo_flow_errors.signature_id is a real FK into it), so
+    # there's no insert case to handle and no need to re-supply
+    # source/code/sample_message -- those identity fields are set once, by
+    # phase 1, and never touched here.
+    touched_signature_ids = set(signature_ids.values()) | resolved_signature_ids
+    for signature_id in touched_signature_ids:
         count, first_seen, last_seen = (
             await db.execute(
                 select(
@@ -319,16 +348,12 @@ async def upsert_errors(
                 )
             )
         ).one()
-        representative = representatives[fp]
-        await upsert_error_signature(
-            db,
-            tenant_id=tenant_id,
-            connection_id=connection_id,
-            fingerprint=fp,
-            source=representative.get("source"),
-            code=representative.get("code"),
-            sample_message=representative.get("message"),
-            occurrence_count=count,
-            first_seen=first_seen,
-            last_seen=last_seen,
+        await db.execute(
+            update(CeligoErrorSignature)
+            .where(
+                CeligoErrorSignature.tenant_id == tenant_id,
+                CeligoErrorSignature.celigo_connection_id == connection_id,
+                CeligoErrorSignature.id == signature_id,
+            )
+            .values(occurrence_count=count, first_seen=first_seen, last_seen=last_seen, updated_at=func.now())
         )

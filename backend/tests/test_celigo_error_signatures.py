@@ -393,6 +393,65 @@ class TestOccurrenceCountReflectsResolutionWithinSameCall:
         assert vanished.resolved_at is not None  # row survives, resolved -- never deleted
 
 
+class TestOccurrenceCountRecomputesOrphanedSignatures:
+    """FIX ROUND 2 (team lead, 2026-08-27, proven with a probe against
+    shipped code, not a reading): round 1's ordering fix only covers the
+    TRANSIENT case, where a resolving error's signature has a surviving
+    sibling somewhere in the same call -- that sibling is what makes
+    `signature_ids` (built exclusively from *raw_errors*) include the
+    signature at all. This is the PERMANENT case round 1 could not catch:
+    one signature, one error, and a resync with a COMPLETELY EMPTY
+    *raw_errors* for that step -- no sibling anywhere, on this step or any
+    other step touched in the call. Before this fix, nothing in phase 3
+    would ever recompute that signature again; `occurrence_count` would
+    freeze at 1 forever even though the underlying error is resolved."""
+
+    async def test_occurrence_count_drops_to_zero_with_no_sibling_anywhere_in_the_call(self, db: AsyncSession):
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+        step = await _seed_step(db, tenant.id, conn_id, suffix="orphan")
+
+        first_sync = [
+            _raw_error(celigo_id="err_orphan_only", message=_ship_address_message(*_SHIP_ADDRESS_VARIANTS[0])),
+        ]
+        await upsert_errors(db, tenant_id=tenant.id, connection_id=conn_id, step=step, raw_errors=first_sync)
+        await db.flush()
+
+        occurrence_count_before = (
+            await db.execute(
+                text("SELECT occurrence_count FROM celigo_error_signatures WHERE tenant_id = :t").bindparams(
+                    t=tenant.id
+                )
+            )
+        ).scalar_one()
+        assert occurrence_count_before == 1
+
+        # Resync with an EMPTY raw_errors list -- the error is simply gone,
+        # with NO sibling anywhere in this call to keep its signature
+        # "represented". This is the whole point of the test: it must not
+        # accidentally recreate the transient (sibling-present) case.
+        await upsert_errors(db, tenant_id=tenant.id, connection_id=conn_id, step=step, raw_errors=[])
+        await db.flush()
+
+        occurrence_count_after = (
+            await db.execute(
+                text("SELECT occurrence_count FROM celigo_error_signatures WHERE tenant_id = :t").bindparams(
+                    t=tenant.id
+                )
+            )
+        ).scalar_one()
+        assert occurrence_count_after == 0
+
+        orphaned = (
+            await db.execute(
+                select(CeligoFlowError).where(
+                    CeligoFlowError.tenant_id == tenant.id, CeligoFlowError.celigo_id == "err_orphan_only"
+                )
+            )
+        ).scalar_one()
+        assert orphaned.resolved_at is not None  # never deleted -- row survives, marked resolved
+
+
 class TestUpsertErrorsIsIdempotent:
     async def test_same_batch_synced_twice_does_not_double_the_count(self, db: AsyncSession):
         tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
