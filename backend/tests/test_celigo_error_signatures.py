@@ -858,6 +858,114 @@ class TestOccurrenceCountExcludesPurgedRows:
         assert occurrence_count_after == 0, "a purged row must not count as open, even with resolved_at still NULL"
 
 
+class TestAPurgedRowIsNotPreviouslyOpen:
+    """SCOPED RE-REVIEW R3 (2026-08-27, PROVEN by execution). The recompute in
+    phase 3 asks `celigo_error_is_open()` -- the canonical predicate -- but the
+    pre-call snapshot 100 lines above it asked `resolved_at IS NULL` alone, a
+    THIRD definition of "open" living in the very module that imports the
+    canonical one. A row Celigo had already purged therefore counted as
+    "previously open", and its absence from the next listing stamped it with a
+    `resolved_at` this app never observed. Both columns are API-exposed
+    (`celigo_flows.py`), so the error panel could show a purged error as
+    "resolved at" a moment nothing happened."""
+
+    async def _seed_one_purged_error(self, db: AsyncSession, tenant_id, conn_id, step) -> None:
+        raw_errors = [_raw_error(celigo_id="err_purged_vanished", message=_TYPE_ERROR_MESSAGE)]
+        await upsert_errors(
+            db,
+            tenant_id=tenant_id,
+            connection_id=conn_id,
+            step=step,
+            raw_errors=raw_errors,
+            raw_errors_is_complete=True,
+        )
+        await db.flush()
+
+        # Celigo's own ~30-day window destroys the underlying record;
+        # `resolved_at` stays NULL because this app never saw it resolve.
+        purged = await mark_flow_errors_purged(
+            db, tenant_id=tenant_id, connection_id=conn_id, celigo_ids=["err_purged_vanished"]
+        )
+        assert purged == 1
+        await db.flush()
+
+    async def test_a_purged_row_absent_from_the_next_listing_is_never_stamped_resolved(self, db: AsyncSession):
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+        step = await _seed_step(db, tenant.id, conn_id, suffix="purgedgone")
+        await self._seed_one_purged_error(db, tenant.id, conn_id, step)
+
+        # The natural next sync: Celigo purged it, so it is simply gone from
+        # the listing.
+        await upsert_errors(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            step=step,
+            raw_errors=[],
+            raw_errors_is_complete=True,
+        )
+        await db.flush()
+
+        row = (
+            await db.execute(
+                select(CeligoFlowError).where(
+                    CeligoFlowError.tenant_id == tenant.id,
+                    CeligoFlowError.celigo_id == "err_purged_vanished",
+                )
+            )
+        ).scalar_one()
+        assert row.purged_at is not None
+        assert row.resolved_at is None, (
+            "a row Celigo already destroyed was never observed to resolve -- inventing a resolved_at for it "
+            "is a fact this app does not have"
+        )
+
+    async def test_the_purged_rows_signature_stats_are_still_recomputed(self, db: AsyncSession):
+        """No-regression guard on the fix above. Marking a row purged does not
+        itself recompute its signature (`repository.mark_flow_errors_purged`
+        touches one column), so before this fix the stale `occurrence_count`
+        was repaired only as a SIDE EFFECT of the wrong resolution -- the row
+        got resolved, which put its signature in the recompute set. Removing
+        the wrong resolution must not take the repair with it: a signature
+        whose only change this call is one of its rows disappearing after a
+        purge still gets recomputed."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+        step = await _seed_step(db, tenant.id, conn_id, suffix="purgedstats")
+        await self._seed_one_purged_error(db, tenant.id, conn_id, step)
+
+        # Stale by construction: purging changed what "open" means for this
+        # signature without recomputing it.
+        stale = (
+            await db.execute(
+                text("SELECT occurrence_count FROM celigo_error_signatures WHERE tenant_id = :t").bindparams(
+                    t=tenant.id
+                )
+            )
+        ).scalar_one()
+        assert stale == 1
+
+        await upsert_errors(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            step=step,
+            raw_errors=[],
+            raw_errors_is_complete=True,
+        )
+        await db.flush()
+
+        recomputed = (
+            await db.execute(
+                text("SELECT occurrence_count FROM celigo_error_signatures WHERE tenant_id = :t").bindparams(
+                    t=tenant.id
+                )
+            )
+        ).scalar_one()
+        assert recomputed == 0, "the signature of a purged, now-absent row must still be recomputed"
+
+
 class TestIncompleteRawErrorsNeverResolvesAnything:
     """WHOLE-BRANCH REVIEW FINDING 4 (2026-08-27) -- defense-in-depth, second
     layer: `client.list_flow_errors_for_step` now raises rather than truncate

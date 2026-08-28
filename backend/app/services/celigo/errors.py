@@ -53,7 +53,10 @@ error paths"). This module is the last stop before an error reaches the
 database; it does not trust that some upstream caller remembered.
 
 RESOLUTION SCOPE, DELIBERATELY NARROW: `upsert_errors` resolves an error
-that disappeared from *this step's* current listing. It does NOT mark
+that disappeared from *this step's* current listing AND was OPEN by
+`models.celigo.celigo_error_is_open` -- an already-purged row is not
+resolvable, because Celigo destroying a record is not this app observing it
+resolve (FIX ROUND 9, re-review R3). It does NOT mark
 anything `purged` -- that requires comparing each error's own `purge_at`
 against wall-clock `now()` independently of any single step's sync
 (`repository.mark_flow_errors_purged`'s own docstring: "the caller decides
@@ -247,16 +250,29 @@ async def upsert_errors(
     raw_errors = list(raw_errors)
     sanitized_errors = [sanitize("error", raw) for raw in raw_errors]
 
-    # Snapshot of what THIS STEP believed was open before this call writes
-    # anything -- read first, so it isn't contaminated by this call's own
-    # upserts. Captures each row's `signature_id` too, not just its
-    # `celigo_id` -- FIX ROUND 2: a resolved row's signature must be
-    # recomputed even when it has ZERO representation anywhere in
-    # *raw_errors* (no sibling on this step or any other step in this
-    # call). See module docstring's "WHICH SIGNATURES GET RECOMPUTED".
-    previously_open_rows = (
+    # Snapshot of every row THIS STEP could still transition this call --
+    # read first, so it isn't contaminated by this call's own upserts.
+    # Captures each row's `signature_id` too, not just its `celigo_id` --
+    # FIX ROUND 2: a resolved row's signature must be recomputed even when it
+    # has ZERO representation anywhere in *raw_errors* (no sibling on this
+    # step or any other step in this call). See module docstring's "WHICH
+    # SIGNATURES GET RECOMPUTED".
+    #
+    # `resolved_at IS NULL` here is the precondition for a row being IN PLAY
+    # (already-resolved rows are done), NOT a definition of "open" -- FIX
+    # ROUND 9, re-review R3. It used to be both, which made it a third,
+    # divergent open-predicate inside the module that imports the canonical
+    # one: a row Celigo had already PURGED counted as previously open, so its
+    # absence from the next listing stamped it with a `resolved_at` this app
+    # never observed. Openness is decided below by `celigo_error_is_open()`
+    # and nothing else.
+    previously_unresolved_rows = (
         await db.execute(
-            select(CeligoFlowError.celigo_id, CeligoFlowError.signature_id).where(
+            select(
+                CeligoFlowError.celigo_id,
+                CeligoFlowError.signature_id,
+                celigo_error_is_open().label("is_open"),
+            ).where(
                 CeligoFlowError.tenant_id == tenant_id,
                 CeligoFlowError.celigo_connection_id == connection_id,
                 CeligoFlowError.flow_step_id == step.id,
@@ -265,7 +281,7 @@ async def upsert_errors(
         )
     ).all()
     previously_open_signature_by_id: dict[str, uuid.UUID | None] = {
-        row.celigo_id: row.signature_id for row in previously_open_rows
+        row.celigo_id: row.signature_id for row in previously_unresolved_rows if row.is_open
     }
     previously_open_ids = set(previously_open_signature_by_id)
 
@@ -303,6 +319,22 @@ async def upsert_errors(
         previously_open_signature_by_id[celigo_id]
         for celigo_id in resolved_ids
         if previously_open_signature_by_id[celigo_id] is not None
+    }
+
+    # A row that is unresolved but already PURGED gets no `resolved_at` (see
+    # the snapshot query's comment) -- but its signature's stored
+    # `occurrence_count` may still be stale, because
+    # `repository.mark_flow_errors_purged` sets one column and recomputes
+    # nothing. Before FIX ROUND 9 that staleness happened to be repaired as a
+    # SIDE EFFECT of the wrong resolution putting the signature in the
+    # recompute set; removing the wrong resolution must not take the repair
+    # with it. Its signature is recomputed on the same trigger as any other:
+    # one of its rows changed state (Celigo destroyed it) and it is no longer
+    # listed.
+    purged_and_absent_signature_ids = {
+        row.signature_id
+        for row in previously_unresolved_rows
+        if not row.is_open and row.signature_id is not None and row.celigo_id not in now_open_ids
     }
     if resolved_ids:
         await mark_flow_errors_resolved(db, tenant_id=tenant_id, connection_id=connection_id, celigo_ids=resolved_ids)
@@ -363,7 +395,7 @@ async def upsert_errors(
     # there's no insert case to handle and no need to re-supply
     # source/code/sample_message -- those identity fields are set once, by
     # phase 1, and never touched here.
-    touched_signature_ids = set(signature_ids.values()) | resolved_signature_ids
+    touched_signature_ids = set(signature_ids.values()) | resolved_signature_ids | purged_and_absent_signature_ids
     for signature_id in touched_signature_ids:
         count, first_seen, last_seen = (
             await db.execute(

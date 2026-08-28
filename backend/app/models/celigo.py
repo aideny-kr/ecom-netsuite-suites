@@ -409,9 +409,24 @@ def celigo_error_is_open() -> ColumnElement[bool]:
     has already destroyed the underlying record (`repository.
     mark_flow_errors_purged`'s own docstring) -- there is nothing left to
     action, the same as a resolved error, even though this app never saw it
-    resolve. Single-sourced HERE (not in either caller) so a third caller
-    added later has no way to invent a third definition -- it has to import
-    this one."""
+    resolve.
+
+    WHAT SINGLE-SOURCING HERE DOES AND DOES NOT BUY (corrected, re-review R3,
+    2026-08-27 -- the previous wording claimed "a third caller added later has
+    no way to invent a third definition -- it has to import this one", and the
+    counter-example was already in one of the two importing modules).
+    Nothing forces the import. Any query can write `resolved_at IS NULL` again,
+    and `errors.upsert_errors` DID: its pre-call snapshot used that alone, so a
+    purged row counted as previously open and got stamped with a `resolved_at`
+    this app never observed. What this function buys is that the definition
+    exists in one place and a diverging query is VISIBLE as a hand-rolled
+    predicate next to an available import -- not that divergence is
+    impossible. Today's known callers, all executed: `celigo_flows.py`'s
+    open-count query, `errors.py`'s `occurrence_count` aggregate, and
+    `errors.py`'s pre-call snapshot. `resolved_at IS NULL` on its own is a
+    legitimate predicate for "this row is not already finished with" (as that
+    snapshot's WHERE clause now uses it); it is only wrong when it is used to
+    mean OPEN."""
     return and_(CeligoFlowError.resolved_at.is_(None), CeligoFlowError.purged_at.is_(None))
 
 
