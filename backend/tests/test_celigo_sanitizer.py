@@ -837,9 +837,21 @@ class TestSanitizerPreservesEveryRepositoryReadField:
     `sanitized` dict), this asserts every field the repository's own code
     reads off that dict survives sanitize() -- with a captured-payload value
     planted alongside every read site, so the property can't be satisfied by
-    weakening the sanitizer. If a future column gets a repository read but
-    the allowlist is never updated, THIS test fails instead of the column
-    staying permanently NULL.
+    weakening the sanitizer.
+
+    WHAT THIS DOES AND DOES NOT GUARANTEE, stated rather than implied: this
+    PINS the read-set as traced BY HAND today (verified against every
+    `.get(...)`/`[...]` call in `upsert_integration`/`upsert_flow`/
+    `extract_flow_steps`/`upsert_script`, function by function) -- a
+    regression that drops one of THOSE fields fails here. It does NOT derive
+    the read-set from repository.py itself. A field repository.py starts
+    reading TOMORROW, with no matching assertion added HERE, passes this
+    test silently and can still land permanently NULL -- the same failure
+    mode this test exists to catch, just one release later. Closing that gap
+    for real needs something structural (an AST scan of repository.py's own
+    key accesses, or a repository-side assertion that every key it touches
+    was allowlisted) -- deliberately NOT implemented here; that is real
+    engineering, deferred to the whole-branch review to triage.
 
     The flow case goes one step further and calls `extract_flow_steps` --
     the REAL, pure consumer function, not a hand-typed key list -- directly

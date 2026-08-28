@@ -65,15 +65,19 @@ FIX ROUND 5 (2026-08-27, FINAL ROUND): the third instance of the same
 pattern -- round 2 dropped script refs, round 3 dropped flow topology, this
 one silently dropped `lastModified` for `_FLOW`/`_SCRIPT` (their
 `celigo_last_modified` columns, migration 094, stayed permanently NULL --
-`_INTEGRATION` already had it correctly). Rather than fix a fourth instance
-later, `TestSanitizerPreservesEveryRepositoryReadField` in the test file
-asserts, for every kind `app.services.celigo.repository`'s `upsert_*`
-functions actually consume a sanitized dict for, that every field those
-functions read survives sanitize() -- calling `extract_flow_steps` (the real
-pure consumer) directly for the flow case, the same "compose with the real
-downstream" pattern round 4 used for `walk_script_refs`. A future column
-with a repository read but no allowlist entry fails THAT test instead of
-landing permanently NULL.
+`_INTEGRATION` already had it correctly). `TestSanitizerPreservesEveryRepositoryReadField`
+in the test file asserts, for every kind `app.services.celigo.repository`'s
+`upsert_*` functions actually consume a sanitized dict for, that every field
+those functions read TODAY survives sanitize() -- calling `extract_flow_steps`
+(the real pure consumer) directly for the flow case, the same "compose with
+the real downstream" pattern round 4 used for `walk_script_refs`.
+
+STATED PLAINLY SO THIS DOCSTRING DOESN'T MAKE THE SAME MISTAKE ITSELF: that
+test PINS today's known read-set by hand; it does NOT derive it from
+repository.py. A field repository.py starts reading tomorrow, with no
+matching assertion added to that test, still lands permanently NULL -- see
+that test's own docstring for what a structural fix (an AST scan or a
+repository-side assertion) would take, deliberately not implemented here.
 
 Allowlist, never denylist: a denylist of "known dangerous" field names only
 stops fields someone already thought to list. An allowlist stops everything
