@@ -445,30 +445,50 @@ async def backfill_flow_step_reference_info(
     celigo_id: str,
     adaptor_type: str | None,
     connection_celigo_id: str | None,
+    record_type: str | None = None,
+    operation: str | None = None,
+    search_id: str | None = None,
 ) -> int:
     """Task 7's export/import fetch phase: bulk-backfill `adaptor_type`/
-    `connection_celigo_id` onto EVERY `celigo_flow_steps` row that references
-    `celigo_id` (the export/import object's own `_id`) -- filling in the two
-    columns `upsert_flow_step`'s own docstring flags as "live on the
-    REFERENCED export/import object... nullable here, filled in by whichever
-    sync step fetches that object". The SAME export/import id can be
-    referenced by more than one flow, or more than one branch within one
-    flow (module docstring point 1) -- a plain `db.get()`-and-update would
-    only touch the first row found; this statement updates ALL of them.
+    `connection_celigo_id`/`record_type`/`operation`/`search_id` onto EVERY
+    `celigo_flow_steps` row that references `celigo_id` (the export/import
+    object's own `_id`) -- filling in columns `upsert_flow_step`'s own
+    docstring flags as "live on the REFERENCED export/import object...
+    nullable here, filled in by whichever sync step fetches that object".
+    The SAME export/import id can be referenced by more than one flow, or
+    more than one branch within one flow (module docstring point 1) -- a
+    plain `db.get()`-and-update would only touch the first row found; this
+    statement updates ALL of them.
+
+    `record_type`/`operation`/`search_id` are Task 11's provenance input
+    (fix round 2, migration 096) -- `record_type` is shared across import
+    and export callers (same semantic field, different parent key on the
+    wire: `netsuite_da.recordType` vs `netsuite.restlet.recordType`);
+    `operation` is import-only and `search_id` is export-only, so a caller
+    backfilling from the "wrong" kind simply never passes the other one,
+    same as `adaptor_type`/`connection_celigo_id` already worked.
 
     Only fields that are non-`None` are included in the `SET` clause: an
     export/import fetch that happens to omit one of these on a resync (a
-    projection quirk, not a real config change) must never blank out a
-    previously-known value -- an unconditional `UPDATE ... SET x = NULL`
-    would silently regress a prior successful backfill. Returns the number
-    of rows updated (`0` is a legitimate result: no currently-synced step
-    references this `celigo_id` yet, or neither field had a real value to
-    write)."""
+    projection quirk, or genuinely the wrong kind for that field) must never
+    blank out a previously-known value -- an unconditional `UPDATE ... SET
+    x = NULL` would silently regress a prior successful backfill (confirmed
+    by execution once already, for `adaptor_type`/`connection_celigo_id` --
+    see `upsert_flow_step`'s own FIX ROUND 1 docstring for the sibling bug
+    this same discipline prevents). Returns the number of rows updated (`0`
+    is a legitimate result: no currently-synced step references this
+    `celigo_id` yet, or none of the fields had a real value to write)."""
     values: dict = {}
     if adaptor_type is not None:
         values["adaptor_type"] = adaptor_type
     if connection_celigo_id is not None:
         values["connection_celigo_id"] = connection_celigo_id
+    if record_type is not None:
+        values["record_type"] = record_type
+    if operation is not None:
+        values["operation"] = operation
+    if search_id is not None:
+        values["search_id"] = search_id
     if not values:
         return 0
     values["updated_at"] = func.now()

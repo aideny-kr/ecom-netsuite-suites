@@ -1025,3 +1025,85 @@ class TestSanitizerPreservesEveryRepositoryReadField:
         assert out["sandbox"] is False
         assert out["lastModified"] == "2026-03-13T00:44:05.606Z"
         assert "script-leak" not in _dumped(out)
+
+
+class TestExportNetsuiteRestletProvenanceSurvives:
+    """FIX ROUND 2 (Task 7): `_EXPORT` had no allowlist entry for `netsuite`
+    at all, so `netsuite.restlet.recordType`/`searchId` -- Task 11's
+    export-side provenance input, the export-side counterpart to
+    `netsuite_da.recordType`/`operation` on imports -- was dropped before it
+    could ever reach `sync_service.py`'s Phase D. Same shape of gap as the
+    fourth and fifth prior rounds: data existed upstream (Celigo returns it;
+    Phase D fetches the export object) and nothing carried it through this
+    one allowlist.
+    """
+
+    def test_netsuite_restlet_record_type_and_search_id_survive(self):
+        raw = {
+            "_id": "e1",
+            "name": "Solidus Orders Export",
+            "adaptorType": "NetSuiteExport",
+            "_connectionId": "conn1",
+            "netsuite": {
+                "type": "restlet",
+                "skipGrouping": False,
+                "statsOnly": False,
+                "restlet": {
+                    "recordType": "salesorder",
+                    "searchId": "customsearch_so_export",
+                    "restletVersion": "suiteapp2.0",
+                    "markExportedBatchSize": 100,
+                },
+                "distributed": {},
+            },
+        }
+        out = sanitize("export", raw)
+        assert out["netsuite"] == {"restlet": {"recordType": "salesorder", "searchId": "customsearch_so_export"}}
+
+    def test_narrow_allowlist_drops_unlisted_netsuite_fields(self):
+        """Kept narrow on purpose, same discipline as `_NETSUITE_DA`: only
+        `restlet.recordType`/`searchId` are known-consumed. `type`/
+        `skipGrouping`/`statsOnly`/`restlet.restletVersion`/
+        `restlet.markExportedBatchSize`/`distributed` are dropped, not
+        guessed at."""
+        raw = {
+            "_id": "e1",
+            "netsuite": {
+                "type": "restlet",
+                "skipGrouping": True,
+                "statsOnly": True,
+                "restlet": {
+                    "recordType": "customer",
+                    "searchId": "s1",
+                    "restletVersion": "v2",
+                    "markExportedBatchSize": 50,
+                },
+                "distributed": {"foo": "bar"},
+            },
+        }
+        out = sanitize("export", raw)
+        assert out["netsuite"] == {"restlet": {"recordType": "customer", "searchId": "s1"}}
+
+    def test_captured_payload_planted_alongside_netsuite_is_still_stripped(self):
+        """The whole point of this allowlist addition: proving it doesn't
+        reopen the payload-leak hole every prior round closed."""
+        raw = {
+            "_id": "e1",
+            "name": "Export with a leak",
+            "netsuite": {"restlet": {"recordType": "salesorder", "searchId": "s1"}},
+            "mockOutput": {"orderId": "R999999", "customer": {"email": "leaked@example-shop.test"}},
+            "rawData": "<raw wire bytes, never persisted>",
+        }
+        out = sanitize("export", raw)
+        assert out["netsuite"] == {"restlet": {"recordType": "salesorder", "searchId": "s1"}}
+        assert "mockOutput" not in out
+        assert "rawData" not in out
+        assert "leaked@example-shop.test" not in _dumped(out)
+
+    def test_missing_netsuite_key_produces_no_key_not_an_error(self):
+        """Coverage of `netsuite` is uneven (only NetSuite-backed exports
+        carry it, same posture as `aiDescription`) -- absence must degrade
+        cleanly, never raise."""
+        raw = {"_id": "e1", "name": "Non-NetSuite export"}
+        out = sanitize("export", raw)
+        assert "netsuite" not in out

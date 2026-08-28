@@ -106,13 +106,19 @@ def _raw_export(
     adaptor_type: str | None = "NetSuiteExport",
     connection_celigo_id: str | None = "conn_ns_synth",
     transform: dict | None = None,
+    record_type: str | None = None,
+    search_id: str | None = None,
 ) -> dict:
     """Shaped like sanitizer.py's `_EXPORT` allowlist (observed-shapes.md:
     `transform` carries either `type: "expression"` -- no script -- or
-    `type: "script"` with a nested `script: {_scriptId, function}`)."""
+    `type: "script"` with a nested `script: {_scriptId, function}`).
+    `record_type`/`search_id` populate `netsuite.restlet.{recordType,
+    searchId}` -- Task 11's export-side provenance input (fix round 2)."""
     obj: dict = {"_id": celigo_id, "name": name, "adaptorType": adaptor_type, "_connectionId": connection_celigo_id}
     if transform is not None:
         obj["transform"] = transform
+    if record_type is not None or search_id is not None:
+        obj["netsuite"] = {"restlet": {"recordType": record_type, "searchId": search_id}}
     return obj
 
 
@@ -123,11 +129,17 @@ def _raw_import(
     adaptor_type: str | None = "NetSuiteDistributedImport",
     connection_celigo_id: str | None = "conn_ns_synth",
     filter_json: dict | None = None,
+    record_type: str | None = None,
+    operation: str | None = None,
 ) -> dict:
-    """Shaped like sanitizer.py's `_IMPORT` allowlist."""
+    """Shaped like sanitizer.py's `_IMPORT` allowlist. `record_type`/
+    `operation` populate `netsuite_da.{recordType, operation}` -- Task 11's
+    import-side provenance input."""
     obj: dict = {"_id": celigo_id, "name": name, "adaptorType": adaptor_type, "_connectionId": connection_celigo_id}
     if filter_json is not None:
         obj["filter"] = filter_json
+    if record_type is not None or operation is not None:
+        obj["netsuite_da"] = {"recordType": record_type, "operation": operation}
     return obj
 
 
@@ -806,6 +818,87 @@ class TestExportImportAttachmentsAndStepBackfill:
         assert attachment.script_celigo_id == "script_router_1"
         assert attachment.flow_step_id is None  # a flow-level ref, not scoped to one step
         assert attachment.site_type == "router"
+
+
+# ---------------------------------------------------------------------------
+# Fix round 2: NetSuite provenance (Task 11's data dependency). Phase D
+# already fetches the export/import object -- these fields were fetched and
+# thrown away because nothing persisted them. `netsuite_da.{recordType,
+# operation}` (imports) / `netsuite.restlet.{recordType, searchId}`
+# (exports) land on dedicated `celigo_flow_steps` columns (design call: see
+# task-7-report.md for the raw_json-vs-dedicated-columns reasoning).
+# ---------------------------------------------------------------------------
+
+
+class TestNetSuiteProvenanceBackfill:
+    async def test_import_backed_step_carries_record_type_and_operation(self, db: AsyncSession, monkeypatch):
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        # `export_id` in `_raw_flow` just names "the referenced id" on the
+        # pageProcessor -- `extract_flow_steps` keys a step's `celigo_id` on
+        # whichever of `_exportId`/`_importId` is present, and Phase D's
+        # export_import_flow_steps map is keyed on that celigo_id alone, not
+        # on which key it came from -- so reusing it to point at an id the
+        # IMPORT loop will fetch is correct, not a fixture shortcut.
+        await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_1")],
+            flows=[_raw_flow("flow_1", integration_id="int_1", export_id="imp_1")],
+            imports=[_raw_import("imp_1", record_type="customer", operation="add")],
+        )
+
+        step = (await db.execute(select(CeligoFlowStep).where(CeligoFlowStep.tenant_id == tenant.id))).scalar_one()
+        assert step.record_type == "customer"
+        assert step.operation == "add"
+        assert step.search_id is None  # import-side never populates the export-only field
+
+    async def test_export_backed_step_carries_record_type_and_search_id(self, db: AsyncSession, monkeypatch):
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_1")],
+            flows=[_raw_flow("flow_1", integration_id="int_1", export_id="exp_1")],
+            exports=[_raw_export("exp_1", record_type="salesorder", search_id="customsearch_so_export")],
+        )
+
+        step = (await db.execute(select(CeligoFlowStep).where(CeligoFlowStep.tenant_id == tenant.id))).scalar_one()
+        assert step.record_type == "salesorder"
+        assert step.search_id == "customsearch_so_export"
+        assert step.operation is None  # export-side never populates the import-only field
+
+    async def test_provenance_backfill_is_idempotent_and_never_blanked(self, db: AsyncSession, monkeypatch):
+        """Same NULL-wipe class the adaptor_type/connection_celigo_id fix
+        already closed once -- proving the new fields inherit that guard
+        rather than reopening the bug for themselves."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        for _ in range(2):
+            await _run_sync(
+                monkeypatch,
+                db,
+                tenant_id=tenant.id,
+                connection_id=conn_id,
+                integrations=[_raw_integration("int_1")],
+                flows=[_raw_flow("flow_1", integration_id="int_1", export_id="exp_1")],
+                exports=[_raw_export("exp_1", record_type="salesorder", search_id="cs1")],
+            )
+
+        step_count = (await db.execute(text("SELECT COUNT(*) FROM celigo_flow_steps"))).scalar_one()
+        assert step_count == 1  # not duplicated
+
+        step = (await db.execute(select(CeligoFlowStep).where(CeligoFlowStep.tenant_id == tenant.id))).scalar_one()
+        assert step.record_type == "salesorder"  # not blanked
+        assert step.search_id == "cs1"
 
 
 # ---------------------------------------------------------------------------

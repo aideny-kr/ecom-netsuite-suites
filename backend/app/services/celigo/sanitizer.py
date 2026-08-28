@@ -195,6 +195,28 @@ _NETSUITE_DA: Schema = {
     "mapping": _MAPPING,
 }
 
+# FIX ROUND 2 (Task 7): NetSuite Restlet Adaptor config on EXPORT steps --
+# the export-side counterpart to `_NETSUITE_DA` above, under a DIFFERENT
+# top-level key (observed-shapes.md: "imports carry netsuite_da; exports
+# carry netsuite -- DIFFERENT KEY FROM IMPORTS"). Task 11's provenance
+# ("which flows write which NetSuite record types") needs
+# `netsuite.restlet.recordType`/`searchId` for exports the same way it needs
+# `netsuite_da.recordType`/`operation` for imports -- Phase D
+# (`sync_service.py`) fetches every export already, but without this
+# allowlist entry the field never survives sanitize() to reach it. Kept
+# narrow on purpose, same discipline as `_NETSUITE_DA`: only the two fields
+# Task 11 is known to consume, not the full observed shape --
+# `type`/`skipGrouping`/`statsOnly`/`restlet.restletVersion`/
+# `restlet.markExportedBatchSize`/`distributed` were observed live too but
+# are out of scope for this fix.
+_NETSUITE_RESTLET: Schema = {
+    "recordType": None,
+    "searchId": None,
+}
+_NETSUITE_EXPORT: Schema = {
+    "restlet": _NETSUITE_RESTLET,
+}
+
 _INTEGRATION: Schema = {
     "_id": None,
     "name": None,
@@ -324,6 +346,7 @@ _EXPORT: Schema = {
     "filter": _FILTER,
     "transform": _TRANSFORM,
     "hooks": _HOOKS,
+    "netsuite": _NETSUITE_EXPORT,
     "aiDescription": _AI_DESCRIPTION,
 }
 

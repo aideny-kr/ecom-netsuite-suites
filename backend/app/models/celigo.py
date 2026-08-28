@@ -169,10 +169,22 @@ class CeligoFlowStep(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # -- the unique-key columns above don't preserve original step order.
     sequence: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     # Live on the REFERENCED export/import object, not the pageProcessor
-    # entry itself -- null unless a follow-up fetch (no such fetcher exists
-    # yet) populates them. Never invented.
+    # entry itself -- null until `sync_service.py`'s Phase D (Task 7 fix
+    # round 1) backfills them from that object's own fetch. Never invented.
     adaptor_type: Mapped[str | None] = mapped_column(Text, nullable=True)
     connection_celigo_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Task 11's provenance input (Task 7 fix round 2, migration 096) -- also
+    # live on the referenced export/import object, backfilled by the same
+    # Phase D pass. `record_type` is shared: `netsuite_da.recordType`
+    # (imports) and `netsuite.restlet.recordType` (exports) are the same
+    # semantic field under different parent keys. `operation` is import-only
+    # (`netsuite_da.operation`); `search_id` is export-only (`netsuite.
+    # restlet.searchId`) -- each stays NULL for the kind that doesn't carry
+    # it. See migration 096's own docstring for the raw_json-vs-dedicated-
+    # columns design call.
+    record_type: Mapped[str | None] = mapped_column(Text, nullable=True)
+    operation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    search_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     # filter/responseMapping ARE present directly on the pageProcessor entry
     # (sanitizer.py's _PAGE_PROCESSOR) -- no extra fetch needed for these two.
     filter_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

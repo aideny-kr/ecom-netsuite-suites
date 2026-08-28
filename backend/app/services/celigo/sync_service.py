@@ -48,6 +48,12 @@ step", extended by fix round 1 -- see below):
     docstring for exactly how the one-export-many-flows case is modelled).
     Uses `list_resource`'s collection-listing pattern (pagination + sanitize
     for free), NOT per-id fetches -- same reasoning as Phase C's scripts.
+    FIX ROUND 2: the SAME backfill call also carries Task 11's provenance --
+    `record_type`/`operation`/`search_id` (`_extract_provenance`, migration
+    096) -- for the identical reason: Task 11 derives "which flows write
+    which NetSuite record types" from `netsuite_da.recordType`/`operation`
+    (imports) and `netsuite.restlet.recordType`/`searchId` (exports), fields
+    this phase already fetches but, before this round, threw away.
   Phase E: for every step collected during Phase B, in that same order, its
     open errors (`client.list_flow_errors_for_step`) are fetched and
     snapshotted (`errors.upsert_errors`). This is deliberately its OWN pass,
@@ -337,6 +343,26 @@ async def _record_attachments(
     return len(refs)
 
 
+def _extract_provenance(obj: dict) -> tuple[str | None, str | None, str | None]:
+    """`(record_type, operation, search_id)` from whichever of `netsuite_da`
+    (imports) or `netsuite` (exports) *obj* carries -- Task 11's provenance
+    input (fix round 2). observed-shapes.md: "imports carry netsuite_da;
+    exports carry netsuite -- DIFFERENT KEY FROM IMPORTS", so this reads
+    BOTH and keys on which one is actually PRESENT (never on which fetch
+    loop the caller happened to be in -- same "presence decides, not the
+    container name" discipline already used by `graph.walk_script_refs` and
+    the sanitizer's `filter`/`transform` handling). An object with neither
+    key (a non-NetSuite export/import) returns all three as `None` -- no
+    guessing."""
+    netsuite_da = obj.get("netsuite_da") or {}
+    if netsuite_da:
+        return netsuite_da.get("recordType"), netsuite_da.get("operation"), None
+    restlet = (obj.get("netsuite") or {}).get("restlet") or {}
+    if restlet:
+        return restlet.get("recordType"), None, restlet.get("searchId")
+    return None, None, None
+
+
 async def _process_reference_object(
     db: AsyncSession,
     *,
@@ -382,6 +408,7 @@ async def _process_reference_object(
     if not celigo_id or not referencing_flow_steps:
         return 0, 0
 
+    record_type, operation, search_id = _extract_provenance(obj)
     rows_backfilled = await backfill_flow_step_reference_info(
         db,
         tenant_id=tenant_id,
@@ -389,6 +416,9 @@ async def _process_reference_object(
         celigo_id=celigo_id,
         adaptor_type=obj.get("adaptorType"),
         connection_celigo_id=obj.get("_connectionId"),
+        record_type=record_type,
+        operation=operation,
+        search_id=search_id,
     )
 
     refs = walk_script_refs(obj)
