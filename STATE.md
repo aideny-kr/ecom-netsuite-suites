@@ -36,7 +36,7 @@ Updated at the end of every task, not "later".
 |---|---|---|---|
 | `feat/dev-loop-and-harness` | T2 | 21 commits, process only — gated ×3, blockers fixed, **frozen** | nothing |
 | `feat/agent-graph-operating-model` | T2 | Track O (22 majors) + reject action, **ungated** | needs Track O decision |
-| `feat/rolling-period` | T2 | Stage 1 built + eyeball-approved. verify **PASS @ `a656ebd9`** (5789 pass, no new failures vs main). Gate ×3 run (all valid, pinned, codex). Round-3 majors fixed + committed; **gate round 4 in flight** | round 4 verdict → open PR (do NOT merge, deploy agents active) |
+| `feat/rolling-period` | T2 | Stage 1 done. **PR #209 open, NOT merged.** verify **PASS @ `7f494264`**. Gate ×4 (budget spent; all pinned+codex): majors 2→3→0. Round-4 fixes landed | human merge call — deploy agents active. Then **Stage 2: scheduled compose** |
 
 **SHIPPED 2026-08-17 — `fix/ns-account-switch-and-chat-burst` → PR #194, squashed to
 `54729804`, deployed and live-verified on staging.** Ticket 86bba299w closed. It had
