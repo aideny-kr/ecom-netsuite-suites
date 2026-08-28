@@ -438,8 +438,10 @@ async def get_flow_detail(
 ):
     """One flow's steps (ordered, generators then top-level processors then
     router-branch processors -- `router_id`/`branch_id` break ties BETWEEN
-    branches, `sequence` within each -- see the query below's own comment;
-    whole-branch review finding 7) plus every script attachment, nested onto
+    branches, `sequence` within each, and `celigo_id` last so the order is
+    TOTAL even when Celigo omits a router id or a branch id -- see the query
+    below's own comment; whole-branch review finding 7, re-review R2) plus
+    every script attachment, nested onto
     the step it belongs to. Attachments with no owning
     step (a `routers[].script` ref -- belongs to the router, not a step) come
     back in `unassigned_attachments` instead of being dropped."""
@@ -466,6 +468,16 @@ async def get_flow_detail(
     # deterministically (two different branches both starting at sequence 0
     # would otherwise still tie), and `sequence` breaks ties within each
     # group/branch, as promised.
+    #
+    # SCOPED RE-REVIEW R2 (2026-08-27): those four keys are still not TOTAL,
+    # proven on two tie shapes -- one router whose branches carry no
+    # `branchId` (router_id equal, branch_id NULL on both), and two routers
+    # carrying no `id` under one `branchId` (router_id NULL on both). Each
+    # pair persists legitimately (`celigo_id` differs, so `branch_key`'s
+    # unique constraint does not collapse them) and then ties on all four
+    # keys, leaving render order arbitrary. `celigo_id` is appended as the
+    # final key: NOT NULL, and unique within a flow's step set, so no two
+    # rows can tie on the whole ordering any more.
     _step_order_priority = case(
         (CeligoFlowStep.role == "generator", 0),
         (and_(CeligoFlowStep.role == "processor", CeligoFlowStep.router_id.is_(None)), 1),
@@ -484,6 +496,7 @@ async def get_flow_detail(
                     CeligoFlowStep.router_id,
                     CeligoFlowStep.branch_id,
                     CeligoFlowStep.sequence,
+                    CeligoFlowStep.celigo_id,
                 )
             )
         )

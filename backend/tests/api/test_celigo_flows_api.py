@@ -447,6 +447,70 @@ class TestGetFlowDetail:
             "imp_branch_z",
         ]
 
+    async def test_step_order_is_total_even_when_the_router_or_branch_id_is_absent(self, client, admin_user, db):
+        """SCOPED RE-REVIEW R2 (2026-08-27, PROVEN on the scratch DB): the
+        finding-7 fix ordered by `(role_priority, router_id, branch_id,
+        sequence)`, which is a large improvement but still not TOTAL. Two tie
+        shapes survive it, both seeded below:
+
+          * one router, two branches that carry NO `branchId`
+            -> ('processor', 'router_tie', NULL, 0) twice;
+          * two routers that carry NO `id`, under the same `branchId`
+            -> ('processor', NULL, 'branch_shared', 0) twice.
+
+        Both rows persist legitimately in each case -- `celigo_id` differs, so
+        the `branch_key` unique constraint does not collapse them -- and the
+        `ORDER BY` had no further key, leaving render order arbitrary.
+        `celigo_id` is appended as a final tiebreaker: it is NOT NULL and
+        unique within a flow's step set, so the order is now total.
+
+        Seeded in reverse of the expected output on purpose -- with no real
+        final tiebreaker this returns insertion order and fails."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        flow_id = world["flow"].id
+        conn_id = world["connection_id"]
+
+        def _step(celigo_id: str, *, router_id: str | None, branch_id: str | None) -> CeligoFlowStep:
+            return CeligoFlowStep(
+                tenant_id=user.tenant_id,
+                celigo_connection_id=conn_id,
+                flow_id=flow_id,
+                celigo_id=celigo_id,
+                role="processor",
+                router_id=router_id,
+                branch_id=branch_id,
+                sequence=0,
+                raw_json={},
+            )
+
+        db.add_all(
+            [
+                # Tie shape 1 -- a router whose branches carry no branchId.
+                _step("imp_tie_1b", router_id="router_tie", branch_id=None),
+                # Tie shape 2 -- routers with no id, sharing one branchId.
+                _step("imp_tie_2b", router_id=None, branch_id="branch_shared"),
+                _step("imp_tie_1a", router_id="router_tie", branch_id=None),
+                _step("imp_tie_2a", router_id=None, branch_id="branch_shared"),
+            ]
+        )
+        await db.flush()
+
+        r = await client.get(f"/api/v1/celigo/flows/{flow_id}", headers=headers)
+        assert r.status_code == 200, r.text
+        celigo_ids = [s["celigo_id"] for s in r.json()["steps"]]
+        assert celigo_ids == [
+            world["step"].celigo_id,  # generator -- always first
+            # router_id IS NULL -> the "top-level processor" priority group,
+            # then celigo_id breaks the otherwise-total tie inside it.
+            "imp_tie_2a",
+            "imp_tie_2b",
+            # router-branch group; branch_id NULL on both, so celigo_id is
+            # the only thing left to order by.
+            "imp_tie_1a",
+            "imp_tie_1b",
+        ]
+
     async def test_router_level_attachment_has_no_step_appears_unassigned(self, client, admin_user, db):
         user, headers = admin_user
         world = await _seed_world(db, user.tenant_id)
