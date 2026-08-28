@@ -12,6 +12,15 @@ from app.models.canonical import (
     PayoutLine,
     Refund,
 )
+from app.models.celigo import (  # noqa: F401
+    CeligoErrorSignature,
+    CeligoFlow,
+    CeligoFlowError,
+    CeligoFlowStep,
+    CeligoIntegration,
+    CeligoScript,
+    CeligoScriptAttachment,
+)
 from app.models.chat import ChatMessage, ChatSession, DocChunk
 from app.models.chat_api_key import ChatApiKey
 from app.models.chat_disclosure_event import ChatDisclosureEvent  # noqa: F401
@@ -106,4 +115,11 @@ __all__ = [
     "ExperimentLog",
     "Report",
     "UserDashboardPreference",
+    "CeligoIntegration",
+    "CeligoFlow",
+    "CeligoFlowStep",
+    "CeligoScript",
+    "CeligoScriptAttachment",
+    "CeligoErrorSignature",
+    "CeligoFlowError",
 ]
