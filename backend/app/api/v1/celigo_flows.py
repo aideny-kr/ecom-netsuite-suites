@@ -44,7 +44,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import distinct, func, select
+from sqlalchemy import and_, distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.connector_status import _get_celigo_connection
@@ -59,6 +59,7 @@ from app.models.celigo import (
     CeligoScript,
     CeligoScriptAttachment,
 )
+from app.models.pipeline import CursorState
 from app.models.user import User
 from app.services.celigo.repository import list_logical_scripts
 
@@ -150,10 +151,15 @@ class CeligoScriptAttachmentSiteOut(BaseModel):
     """One row of the script viewer's "Attached to / Where / Function" table
     (mockup spec, Screen 04). `script_celigo_id` names WHICH clone in the
     logical group was actually attached at this site -- clones can diverge, so
-    this is not always the id the caller looked up."""
+    this is not always the id the caller looked up. `integration_id` comes
+    free off the same join that already gets `flow_name` (`CeligoFlow.
+    integration_id` is a plain column, no extra query) -- it's what lets
+    `CeligoScriptOut.integration_count` below answer the mockup's headline
+    pill ("14 integrations") without a second round trip."""
 
     flow_id: str
     flow_name: str
+    integration_id: str
     flow_step_id: str | None
     flow_step_role: str | None
     flow_step_adaptor_type: str | None
@@ -172,7 +178,15 @@ class CeligoScriptOut(BaseModel):
     view shows exactly the row the caller navigated to). `dedup_key`/
     `copies_count`/`attachment_count`/`content_diverged` describe the whole
     clone family this script belongs to (`app.services.celigo.repository.
-    list_logical_scripts` -- reused verbatim, not reimplemented here)."""
+    list_logical_scripts` -- reused verbatim, not reimplemented here).
+
+    `integration_count` is the count of DISTINCT integrations across
+    `used_by` -- computed in Python from the same rows `used_by` is already
+    built from, not a second query. Deliberately NOT `integration_name` per
+    site: the mockup's pill needs a count, not names, and `used_by` already
+    carries `flow_name` for per-row context -- adding a name here would be an
+    unused field, which is exactly what this file's explicit-response-model
+    discipline exists to avoid."""
 
     id: str
     dedup_key: str
@@ -181,6 +195,7 @@ class CeligoScriptOut(BaseModel):
     content_hash: str | None
     copies_count: int
     attachment_count: int
+    integration_count: int
     content_diverged: bool
     used_by: list[CeligoScriptAttachmentSiteOut]
 
@@ -217,6 +232,24 @@ class CeligoErrorSignatureOut(BaseModel):
 class CeligoErrorsResponse(BaseModel):
     signature: CeligoErrorSignatureOut
     errors: list[CeligoErrorOut]
+
+
+class CeligoSyncStatusOut(BaseModel):
+    """`last_synced_at` is the freshness cursor Task 7's nightly sync worker
+    writes to `cursor_states` (`object_type="celigo_flow_map"`) ONLY after a
+    full sync completes without raising -- never a partial/failed run (see
+    `app/workers/tasks/celigo_flow_map_sync.py`'s own docstring). Null covers
+    BOTH "no active Celigo connection" and "connected, but no sync has ever
+    completed" identically -- the stats strip has the same one thing to say
+    either way: there is no successful sync to report a time for. A dedicated
+    endpoint rather than a field folded onto `/integrations`: that endpoint
+    returns a bare list (an existing frontend contract this fix must not
+    break), and a bare JSON array has nowhere to carry a sibling field when
+    the list itself is legitimately empty -- which "zero integrations synced
+    yet" always is on a fresh connection, exactly when this timestamp matters
+    most."""
+
+    last_synced_at: datetime | None
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +296,42 @@ async def list_integrations(
         )
         for i in integrations
     ]
+
+
+# ---------------------------------------------------------------------------
+# GET /celigo/sync-status
+# ---------------------------------------------------------------------------
+
+
+@router.get("/sync-status", response_model=CeligoSyncStatusOut)
+async def get_sync_status(
+    user: Annotated[User, Depends(require_permission("connections.view"))],
+    _flag: Annotated[User, Depends(require_feature("celigo"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """The "Last synced" stats-strip value (mockup Screen 02) -- Task 9 had to
+    drop it because nothing exposed it. Reads `cursor_states` for the
+    tenant's active Celigo connection; see `CeligoSyncStatusOut`'s docstring
+    for the null semantics and why this is a separate endpoint rather than a
+    field on `/integrations`.
+
+    `cursor_states` has no `tenant_id` column of its own -- safe here only
+    because `connection` is already tenant-verified by `_get_celigo_
+    connection` before it's used to scope the cursor lookup."""
+    connection = await _get_celigo_connection(db, user.tenant_id)
+    if connection is None:
+        return CeligoSyncStatusOut(last_synced_at=None)
+
+    last_synced_at = (
+        await db.execute(
+            select(CursorState.last_synced_at).where(
+                CursorState.connection_id == connection.id,
+                CursorState.object_type == "celigo_flow_map",
+            )
+        )
+    ).scalar_one_or_none()
+
+    return CeligoSyncStatusOut(last_synced_at=last_synced_at)
 
 
 # ---------------------------------------------------------------------------
@@ -496,15 +565,37 @@ async def get_script_detail(
     attachment_count = group.attachment_count if group is not None else 0
     content_diverged = group.content_diverged if group is not None else False
 
+    # Tenant predicates on BOTH joined tables, not only on `CeligoScriptAttachment`
+    # -- and on the JOIN's ON clause, not a trailing WHERE, which matters for
+    # `CeligoFlowStep` specifically: it's an OUTER join (a router-level ref has
+    # no owning step), so a WHERE-clause predicate would silently drop every
+    # legitimate NULL-step row along with any cross-tenant one. RLS (FORCE) is
+    # the backstop here, not the plan -- see module docstring -- and this
+    # codebase's own test harness connects as a superuser, which bypasses RLS
+    # unconditionally, so this explicit scoping is the only thing standing in
+    # that context, not defence-in-depth.
     sites_result = await db.execute(
         select(
             CeligoScriptAttachment,
             CeligoFlow.name.label("flow_name"),
+            CeligoFlow.integration_id.label("integration_id"),
             CeligoFlowStep.role.label("step_role"),
             CeligoFlowStep.adaptor_type.label("step_adaptor_type"),
         )
-        .join(CeligoFlow, CeligoFlow.id == CeligoScriptAttachment.flow_id)
-        .outerjoin(CeligoFlowStep, CeligoFlowStep.id == CeligoScriptAttachment.flow_step_id)
+        .join(
+            CeligoFlow,
+            and_(
+                CeligoFlow.id == CeligoScriptAttachment.flow_id,
+                CeligoFlow.tenant_id == user.tenant_id,
+            ),
+        )
+        .outerjoin(
+            CeligoFlowStep,
+            and_(
+                CeligoFlowStep.id == CeligoScriptAttachment.flow_step_id,
+                CeligoFlowStep.tenant_id == user.tenant_id,
+            ),
+        )
         .where(
             CeligoScriptAttachment.tenant_id == user.tenant_id,
             CeligoScriptAttachment.celigo_connection_id == script.celigo_connection_id,
@@ -513,20 +604,24 @@ async def get_script_detail(
         .order_by(CeligoFlow.name, CeligoScriptAttachment.json_path)
     )
 
-    used_by = [
-        CeligoScriptAttachmentSiteOut(
-            flow_id=str(attachment.flow_id),
-            flow_name=flow_name,
-            flow_step_id=str(attachment.flow_step_id) if attachment.flow_step_id else None,
-            flow_step_role=step_role,
-            flow_step_adaptor_type=step_adaptor_type,
-            script_celigo_id=attachment.script_celigo_id,
-            json_path=attachment.json_path,
-            function_name=attachment.function_name,
-            site_type=attachment.site_type,
+    used_by: list[CeligoScriptAttachmentSiteOut] = []
+    integration_ids: set[uuid.UUID] = set()
+    for attachment, flow_name, integration_id, step_role, step_adaptor_type in sites_result.all():
+        integration_ids.add(integration_id)
+        used_by.append(
+            CeligoScriptAttachmentSiteOut(
+                flow_id=str(attachment.flow_id),
+                flow_name=flow_name,
+                integration_id=str(integration_id),
+                flow_step_id=str(attachment.flow_step_id) if attachment.flow_step_id else None,
+                flow_step_role=step_role,
+                flow_step_adaptor_type=step_adaptor_type,
+                script_celigo_id=attachment.script_celigo_id,
+                json_path=attachment.json_path,
+                function_name=attachment.function_name,
+                site_type=attachment.site_type,
+            )
         )
-        for attachment, flow_name, step_role, step_adaptor_type in sites_result.all()
-    ]
 
     return CeligoScriptOut(
         id=str(script.id),
@@ -536,6 +631,7 @@ async def get_script_detail(
         content_hash=script.content_hash,
         copies_count=len(celigo_ids),
         attachment_count=attachment_count,
+        integration_count=len(integration_ids),
         content_diverged=content_diverged,
         used_by=used_by,
     )

@@ -38,6 +38,7 @@ from app.models.celigo import (
     CeligoScript,
     CeligoScriptAttachment,
 )
+from app.models.pipeline import CursorState
 from tests.conftest import enable_feature_flag
 
 PII_MESSAGE = "Customer email jane.doe@example.com not found in NetSuite"
@@ -413,11 +414,13 @@ class TestGetScriptDetail:
         assert body["dedup_key"] == world["script"].celigo_id, "original script's dedup_key is its own celigo_id"
         assert body["copies_count"] == 1
         assert body["content_diverged"] is False
+        assert body["integration_count"] == 1
 
         assert len(body["used_by"]) == 1
         site = body["used_by"][0]
         assert site["flow_id"] == str(world["flow"].id)
         assert site["flow_name"] == "Sales Order Sync"
+        assert site["integration_id"] == str(world["integration"].id)
         assert site["json_path"] == "pageGenerators[0].transform.script"
         assert site["function_name"] == "transform"
 
@@ -467,6 +470,85 @@ class TestGetScriptDetail:
         assert r2.status_code == 200, r2.text
         assert r2.json()["copies_count"] == 2
         assert r2.json()["dedup_key"] == world["script"].celigo_id
+
+    async def test_integration_count_reflects_distinct_integrations(self, client, admin_user, db):
+        """The mockup's headline pill is "20 copies · 14 integrations" -- a
+        second integration/flow in the SAME connection that also attaches the
+        SAME script must push `integration_count` to 2, computed from the
+        already-fetched `used_by` rows (no second query)."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+
+        integration2 = CeligoIntegration(
+            tenant_id=user.tenant_id,
+            celigo_connection_id=world["connection_id"],
+            celigo_id=f"int2_{world['suffix']}",
+            name="Second ERP",
+            raw_json={},
+        )
+        db.add(integration2)
+        await db.flush()
+
+        flow2 = CeligoFlow(
+            tenant_id=user.tenant_id,
+            celigo_connection_id=world["connection_id"],
+            integration_id=integration2.id,
+            celigo_id=f"flow2_{world['suffix']}",
+            name="Second Flow",
+            raw_json={},
+        )
+        db.add(flow2)
+        await db.flush()
+
+        db.add(
+            CeligoScriptAttachment(
+                tenant_id=user.tenant_id,
+                celigo_connection_id=world["connection_id"],
+                flow_id=flow2.id,
+                flow_step_id=None,
+                script_id=world["script"].id,
+                script_celigo_id=world["script"].celigo_id,
+                function_name="transform",
+                json_path="pageProcessors[0].transform.script",
+                site_type="transform",
+            )
+        )
+        await db.flush()
+
+        r = await client.get(f"/api/v1/celigo/scripts/{world['script'].id}", headers=headers)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["integration_count"] == 2
+        integration_ids_seen = {site["integration_id"] for site in body["used_by"]}
+        assert integration_ids_seen == {str(world["integration"].id), str(integration2.id)}
+
+    async def test_used_by_never_includes_another_tenants_flow_or_step_context(
+        self, client, admin_user, admin_user_b, db
+    ):
+        """Strong form: with a SECOND tenant's full world coexisting in the
+        DB, `used_by`'s joined flow/step/integration context must never
+        surface tenant B's rows. Not exploitable today (an attachment's own
+        `flow_id` always points at a same-tenant flow by construction -- see
+        `celigo_flows.py`'s comment on this join), but the join predicates
+        must hold on their own merit, not merely inherit safety from the
+        attachment-level filter -- this is what actually proves that."""
+        user_a, headers_a = admin_user
+        user_b, headers_b = admin_user_b
+        await enable_feature_flag(db, user_b.tenant_id, "celigo")
+
+        world_a = await _seed_world(db, user_a.tenant_id)
+        world_b = await _seed_world(db, user_b.tenant_id)
+
+        r = await client.get(f"/api/v1/celigo/scripts/{world_a['script'].id}", headers=headers_a)
+        assert r.status_code == 200, r.text
+        body = r.json()
+
+        flow_ids_seen = {site["flow_id"] for site in body["used_by"]}
+        integration_ids_seen = {site["integration_id"] for site in body["used_by"]}
+        assert flow_ids_seen == {str(world_a["flow"].id)}, "tenant B's flow must never appear"
+        assert integration_ids_seen == {str(world_a["integration"].id)}, "tenant B's integration must never appear"
+        assert str(world_b["flow"].id) not in flow_ids_seen
+        assert str(world_b["integration"].id) not in integration_ids_seen
 
     async def test_404_for_unknown_script(self, client, admin_user):
         _, headers = admin_user
@@ -545,3 +627,96 @@ class TestGetErrorsForSignature:
             "/api/v1/celigo/errors", params={"signature": str(world_a["signature"].id)}, headers=headers_b
         )
         assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# GET /celigo/sync-status
+# ---------------------------------------------------------------------------
+
+
+class TestSyncStatus:
+    async def test_null_when_never_synced(self, client, admin_user, db):
+        """A connection exists but Task 7's worker has never completed a run
+        for it -- no `cursor_states` row at all."""
+        user, headers = admin_user
+        await _seed_world(db, user.tenant_id)
+
+        r = await client.get("/api/v1/celigo/sync-status", headers=headers)
+        assert r.status_code == 200, r.text
+        assert r.json()["last_synced_at"] is None
+
+    async def test_null_when_no_connection_at_all(self, client, admin_user):
+        _, headers = admin_user
+        r = await client.get("/api/v1/celigo/sync-status", headers=headers)
+        assert r.status_code == 200
+        assert r.json()["last_synced_at"] is None
+
+    async def test_returns_last_synced_at_after_a_sync(self, client, admin_user, db):
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        synced_at = datetime.now(timezone.utc)
+        db.add(
+            CursorState(
+                connection_id=world["connection_id"],
+                object_type="celigo_flow_map",
+                cursor_value=synced_at.isoformat(),
+                last_synced_at=synced_at,
+            )
+        )
+        await db.flush()
+
+        r = await client.get("/api/v1/celigo/sync-status", headers=headers)
+        assert r.status_code == 200, r.text
+        returned = r.json()["last_synced_at"]
+        assert returned is not None
+        assert abs((datetime.fromisoformat(returned) - synced_at).total_seconds()) < 1
+
+    async def test_a_different_cursor_object_type_is_ignored(self, client, admin_user, db):
+        """`cursor_states` is a shared table across every ingestion feature --
+        a row for a DIFFERENT `object_type` on the SAME connection must never
+        be mistaken for a flow-map sync."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        db.add(
+            CursorState(
+                connection_id=world["connection_id"],
+                object_type="celigo_something_else",
+                last_synced_at=datetime.now(timezone.utc),
+            )
+        )
+        await db.flush()
+
+        r = await client.get("/api/v1/celigo/sync-status", headers=headers)
+        assert r.status_code == 200, r.text
+        assert r.json()["last_synced_at"] is None
+
+    async def test_requires_permission(self, client):
+        r = await client.get("/api/v1/celigo/sync-status")
+        assert r.status_code in (401, 403)
+
+    async def test_403_when_flag_disabled(self, client, admin_user, db):
+        user, headers = admin_user
+        await enable_feature_flag(db, user.tenant_id, "celigo", enabled=False)
+        r = await client.get("/api/v1/celigo/sync-status", headers=headers)
+        assert r.status_code == 403
+
+    async def test_tenant_isolation(self, client, admin_user, admin_user_b, db):
+        user_a, headers_a = admin_user
+        user_b, headers_b = admin_user_b
+        await enable_feature_flag(db, user_b.tenant_id, "celigo")
+
+        world_a = await _seed_world(db, user_a.tenant_id)
+        synced_at = datetime.now(timezone.utc)
+        db.add(
+            CursorState(
+                connection_id=world_a["connection_id"],
+                object_type="celigo_flow_map",
+                cursor_value=synced_at.isoformat(),
+                last_synced_at=synced_at,
+            )
+        )
+        await db.flush()
+
+        r = await client.get("/api/v1/celigo/sync-status", headers=headers_b)
+        assert r.status_code == 200, r.text
+        assert r.json()["last_synced_at"] is None, "tenant B must not see tenant A's sync cursor"
