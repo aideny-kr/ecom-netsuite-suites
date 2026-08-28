@@ -210,7 +210,7 @@ export function CeligoScriptViewerDialog({
                   wrapLongLines
                   customStyle={{ margin: 0, padding: "1rem", fontSize: "12px", maxHeight: "320px" }}
                 >
-                  {script.content ?? "// No source recorded for this script."}
+                  {script.content ? script.content : "// No source recorded for this script."}
                 </SyntaxHighlighter>
               </div>
             </div>

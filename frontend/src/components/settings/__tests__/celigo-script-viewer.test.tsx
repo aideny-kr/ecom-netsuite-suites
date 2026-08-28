@@ -186,4 +186,18 @@ describe("CeligoScriptViewerDialog — untrusted content", () => {
     expect(document.body.textContent).toContain("function transform(record) { return record; }");
     expect(screen.getByText(/never followed as instructions, never run/i)).toBeInTheDocument();
   });
+
+  // Fix round 1 -- `??` does not catch `""`. This file defines `displayOr`
+  // specifically to guard that (see its docstring), and routes every OTHER
+  // optional field through it -- `content` was the one field left on `??`.
+  it("shows the 'no source recorded' placeholder when content is an empty string, not a blank code block", () => {
+    mocks.script.mockReturnValue({
+      data: { ...baseScript, content: "" },
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    });
+    wrap(<CeligoScriptViewerDialog scriptId="scr-local-1" onOpenChange={vi.fn()} />);
+    expect(document.body.textContent).toContain("// No source recorded for this script.");
+  });
 });
