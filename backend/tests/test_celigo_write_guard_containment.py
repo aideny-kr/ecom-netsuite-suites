@@ -72,18 +72,32 @@ SELF_DOCUMENTING = {
 # ON DELETE SET NULL behaviour on celigo_flow_errors/celigo_error_signatures.
 # Kept as its own set (not folded into SELF_DOCUMENTING) so that set's own
 # name stays honest -- everything in it truly is prose, nothing here is.
+#
+# FIX ROUND 6 (whole-branch review finding 13, 2026-08-27): this USED TO
+# exempt these two files ENTIRELY from the scan below, so a future raw
+# `UPDATE connections SET ...` anywhere in either file would have been
+# invisible to the guard -- not just the one delete-by-id statement they
+# actually need. Every DML match in both files today (confirmed by grep) is
+# exactly `DELETE FROM connections WHERE id = :<param>` -- a single-row
+# delete by primary key, nothing wider. `_ALLOWED_DELETE_BY_ID` below is that
+# NARROW shape; only text matching it is stripped out of these two files
+# before the scan runs, so anything else DML in them -- an UPDATE, a bare
+# DELETE, a DELETE on mcp_connectors -- still trips the guard exactly like it
+# would anywhere else.
 DML_TEST_ALLOWLIST = {
     "tests/test_celigo_flow_map_rls.py",
     "tests/test_celigo_repository.py",
 }
 
+_ALLOWED_DELETE_BY_ID = re.compile(r"(?is)\bdelete\s+from\s+connections\s+where\s+id\s*=\s*:\w+\b")
 
-def _python_files():
-    for root in ("app", "tests", "scripts"):
-        for path in (BACKEND / root).rglob("*.py"):
+
+def _python_files(root: pathlib.Path = BACKEND):
+    for subdir in ("app", "tests", "scripts"):
+        for path in (root / subdir).rglob("*.py"):
             if "__pycache__" in path.parts:
                 continue
-            yield path, path.relative_to(BACKEND).as_posix()
+            yield path, path.relative_to(root).as_posix()
 
 
 def test_allow_token_appears_only_in_allowlisted_modules():
@@ -111,22 +125,65 @@ def test_no_production_module_outside_the_celigo_flow_holds_the_window():
     assert not offenders, f"production modules holding the Celigo write window: {offenders}"
 
 
-def test_no_textual_sql_dml_targets_the_guarded_tables():
-    """``do_orm_execute`` catches ORM constructs, not textual DML -- this is the
-    documented hole in the guard's coverage, and it is empty today."""
+def _find_dml_offenders(root: pathlib.Path = BACKEND) -> list[str]:
+    """Scan every ``.py`` file under *root* for textual SQL DML against
+    ``GUARDED_TABLES``. ``SELF_DOCUMENTING`` files are skipped entirely
+    (prose, not code). ``DML_TEST_ALLOWLIST`` files are NOT skipped -- only
+    the specific, deliberately-authorised ``_ALLOWED_DELETE_BY_ID`` shape is
+    stripped out of them before the pattern runs, so anything else DML in
+    those two files is still caught (FIX ROUND 6, finding 13). Factored out
+    of the test below so a synthetic tree can exercise the statement-level
+    scoping without seeding a real forbidden statement into a real
+    allowlisted file, which would itself be the bug this guards against."""
     pattern = re.compile(
         r"(?is)\b(update|delete\s+from)\s+(" + "|".join(GUARDED_TABLES) + r")\b",
     )
     offenders = []
-    for path, rel in _python_files():
-        if rel in SELF_DOCUMENTING or rel in DML_TEST_ALLOWLIST:
+    for path, rel in _python_files(root):
+        if rel in SELF_DOCUMENTING:
             continue
-        for match in pattern.finditer(path.read_text()):
+        content = path.read_text()
+        if rel in DML_TEST_ALLOWLIST:
+            content = _ALLOWED_DELETE_BY_ID.sub("", content)
+        for match in pattern.finditer(content):
             offenders.append(f"{rel}: {match.group(0)!r}")
+    return offenders
+
+
+def test_no_textual_sql_dml_targets_the_guarded_tables():
+    """``do_orm_execute`` catches ORM constructs, not textual DML -- this is the
+    documented hole in the guard's coverage, and it is empty today."""
+    offenders = _find_dml_offenders()
     assert not offenders, (
         "textual SQL DML against a guarded table bypasses the session-flush guard entirely "
         f"(do_orm_execute only sees ORM constructs). Found: {offenders}"
     )
+
+
+class TestDmlAllowlistIsStatementScopedNotFileScoped:
+    """FIX ROUND 6 (whole-branch review finding 13, 2026-08-27): proves the
+    narrowing above against a SYNTHETIC tree, not the real allowlisted
+    files -- seeding a genuine `UPDATE connections ...` into either real file
+    to prove the guard catches it would itself be the exact bug under test."""
+
+    def test_an_update_alongside_the_allowed_delete_is_still_caught(self, tmp_path):
+        allowlisted_rel = next(iter(DML_TEST_ALLOWLIST))
+        target = tmp_path / allowlisted_rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            'await db.execute(text("DELETE FROM connections WHERE id = :id").bindparams(id=conn_id))\n'
+            "# a hypothetical FUTURE statement this file has no business adding:\n"
+            "await db.execute(text(\"UPDATE connections SET status = 'error'\"))\n"
+        )
+
+        offenders = _find_dml_offenders(tmp_path)
+
+        assert any("UPDATE connections" in o for o in offenders), (
+            "a whole-file exemption would hide this -- the allowlist must be statement-scoped"
+        )
+        assert not any("DELETE FROM connections" in o for o in offenders), (
+            "the one deliberately-authorised delete-by-id statement must still be exempt"
+        )
 
 
 class TestOperatorScriptRefusal:
