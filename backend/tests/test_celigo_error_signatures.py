@@ -21,9 +21,11 @@ error does not, and no PII survives into the fingerprint.
 
 from __future__ import annotations
 
+import inspect
 import re
 import uuid
 
+import pytest
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -225,7 +227,14 @@ class TestUpsertErrorsGroupsBySignature:
             for i, (ref, email) in enumerate(_SHIP_ADDRESS_VARIANTS)
         ]
 
-        await upsert_errors(db, tenant_id=tenant.id, connection_id=conn_id, step=step, raw_errors=raw_errors)
+        await upsert_errors(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            step=step,
+            raw_errors=raw_errors,
+            raw_errors_is_complete=True,
+        )
         await db.flush()
 
         sig_count = (
@@ -273,7 +282,14 @@ class TestUpsertErrorsGroupsBySignature:
             ),
         ]
 
-        await upsert_errors(db, tenant_id=tenant.id, connection_id=conn_id, step=step, raw_errors=raw_errors)
+        await upsert_errors(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            step=step,
+            raw_errors=raw_errors,
+            raw_errors_is_complete=True,
+        )
         await db.flush()
 
         sig_count = (
@@ -293,7 +309,14 @@ class TestUpsertErrorsGroupsBySignature:
             _raw_error(celigo_id="err_b", source=None, code=None, message=_TYPE_ERROR_MESSAGE),
         ]
 
-        await upsert_errors(db, tenant_id=tenant.id, connection_id=conn_id, step=step, raw_errors=raw_errors)
+        await upsert_errors(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            step=step,
+            raw_errors=raw_errors,
+            raw_errors_is_complete=True,
+        )
         await db.flush()
 
         sig_count = (
@@ -318,7 +341,14 @@ class TestUpsertErrorsGroupsBySignature:
             _raw_error(celigo_id=f"err_pii_{i}", message=_ship_address_message(ref, email))
             for i, (ref, email) in enumerate(_SHIP_ADDRESS_VARIANTS)
         ]
-        await upsert_errors(db, tenant_id=tenant.id, connection_id=conn_id, step=step, raw_errors=raw_errors)
+        await upsert_errors(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            step=step,
+            raw_errors=raw_errors,
+            raw_errors_is_complete=True,
+        )
         await db.flush()
 
         fingerprints = (
@@ -353,7 +383,14 @@ class TestOccurrenceCountReflectsResolutionWithinSameCall:
             _raw_error(celigo_id="err_occ_stays", message=_ship_address_message(*_SHIP_ADDRESS_VARIANTS[0])),
             _raw_error(celigo_id="err_occ_vanishes", message=_ship_address_message(*_SHIP_ADDRESS_VARIANTS[1])),
         ]
-        await upsert_errors(db, tenant_id=tenant.id, connection_id=conn_id, step=step, raw_errors=first_sync)
+        await upsert_errors(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            step=step,
+            raw_errors=first_sync,
+            raw_errors_is_complete=True,
+        )
         await db.flush()
 
         occurrence_count_before = (
@@ -372,7 +409,14 @@ class TestOccurrenceCountReflectsResolutionWithinSameCall:
         second_sync = [
             _raw_error(celigo_id="err_occ_stays", message=_ship_address_message(*_SHIP_ADDRESS_VARIANTS[0])),
         ]
-        await upsert_errors(db, tenant_id=tenant.id, connection_id=conn_id, step=step, raw_errors=second_sync)
+        await upsert_errors(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            step=step,
+            raw_errors=second_sync,
+            raw_errors_is_complete=True,
+        )
         await db.flush()
 
         occurrence_count_after = (
@@ -415,7 +459,14 @@ class TestOccurrenceCountRecomputesOrphanedSignatures:
         first_sync = [
             _raw_error(celigo_id="err_orphan_only", message=_ship_address_message(*_SHIP_ADDRESS_VARIANTS[0])),
         ]
-        await upsert_errors(db, tenant_id=tenant.id, connection_id=conn_id, step=step, raw_errors=first_sync)
+        await upsert_errors(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            step=step,
+            raw_errors=first_sync,
+            raw_errors_is_complete=True,
+        )
         await db.flush()
 
         occurrence_count_before = (
@@ -431,7 +482,9 @@ class TestOccurrenceCountRecomputesOrphanedSignatures:
         # with NO sibling anywhere in this call to keep its signature
         # "represented". This is the whole point of the test: it must not
         # accidentally recreate the transient (sibling-present) case.
-        await upsert_errors(db, tenant_id=tenant.id, connection_id=conn_id, step=step, raw_errors=[])
+        await upsert_errors(
+            db, tenant_id=tenant.id, connection_id=conn_id, step=step, raw_errors=[], raw_errors_is_complete=True
+        )
         await db.flush()
 
         occurrence_count_after = (
@@ -464,9 +517,23 @@ class TestUpsertErrorsIsIdempotent:
             for i, (ref, email) in enumerate(_SHIP_ADDRESS_VARIANTS)
         ]
 
-        await upsert_errors(db, tenant_id=tenant.id, connection_id=conn_id, step=step, raw_errors=raw_errors)
+        await upsert_errors(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            step=step,
+            raw_errors=raw_errors,
+            raw_errors_is_complete=True,
+        )
         await db.flush()
-        await upsert_errors(db, tenant_id=tenant.id, connection_id=conn_id, step=step, raw_errors=raw_errors)
+        await upsert_errors(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            step=step,
+            raw_errors=raw_errors,
+            raw_errors_is_complete=True,
+        )
         await db.flush()
 
         error_count = (
@@ -558,13 +625,23 @@ class TestStep5RealisticLongTailedCorpus:
         # Flow 1 -- the "32-error" flow: mostly one root cause.
         step_1 = await _seed_step(db, tenant.id, conn_id, suffix="big1")
         await upsert_errors(
-            db, tenant_id=tenant.id, connection_id=conn_id, step=step_1, raw_errors=ship_address_errors(20, "big1")
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            step=step_1,
+            raw_errors=ship_address_errors(20, "big1"),
+            raw_errors_is_complete=True,
         )
 
         # Flow 2 -- the "24-error" flow: a different root cause entirely.
         step_2 = await _seed_step(db, tenant.id, conn_id, suffix="big2")
         await upsert_errors(
-            db, tenant_id=tenant.id, connection_id=conn_id, step=step_2, raw_errors=timeout_errors(12, "big2")
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            step=step_2,
+            raw_errors=timeout_errors(12, "big2"),
+            raw_errors_is_complete=True,
         )
 
         # Three small flows -- the long tail. One of them (step_5) ALSO
@@ -572,11 +649,21 @@ class TestStep5RealisticLongTailedCorpus:
         # signature collapses correctly ACROSS flows, not just within one.
         step_3 = await _seed_step(db, tenant.id, conn_id, suffix="small3")
         await upsert_errors(
-            db, tenant_id=tenant.id, connection_id=conn_id, step=step_3, raw_errors=lookup_errors(3, "small3")
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            step=step_3,
+            raw_errors=lookup_errors(3, "small3"),
+            raw_errors_is_complete=True,
         )
         step_4 = await _seed_step(db, tenant.id, conn_id, suffix="small4")
         await upsert_errors(
-            db, tenant_id=tenant.id, connection_id=conn_id, step=step_4, raw_errors=type_errors(1, "small4")
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            step=step_4,
+            raw_errors=type_errors(1, "small4"),
+            raw_errors_is_complete=True,
         )
         step_5 = await _seed_step(db, tenant.id, conn_id, suffix="small5")
         cross_flow_ship_address = [
@@ -594,6 +681,7 @@ class TestStep5RealisticLongTailedCorpus:
             connection_id=conn_id,
             step=step_5,
             raw_errors=duplicate_errors(4, "small5") + cross_flow_ship_address,
+            raw_errors_is_complete=True,
         )
         await db.flush()
 
@@ -638,14 +726,28 @@ class TestErrorsAreNeverDeletedOnlyResolved:
             _raw_error(celigo_id="err_stays", message=_ship_address_message(*_SHIP_ADDRESS_VARIANTS[0])),
             _raw_error(celigo_id="err_vanishes", message=_ship_address_message(*_SHIP_ADDRESS_VARIANTS[1])),
         ]
-        await upsert_errors(db, tenant_id=tenant.id, connection_id=conn_id, step=step, raw_errors=first_sync)
+        await upsert_errors(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            step=step,
+            raw_errors=first_sync,
+            raw_errors_is_complete=True,
+        )
         await db.flush()
 
         # Second sync: err_vanishes is gone (Celigo no longer reports it).
         second_sync = [
             _raw_error(celigo_id="err_stays", message=_ship_address_message(*_SHIP_ADDRESS_VARIANTS[0])),
         ]
-        await upsert_errors(db, tenant_id=tenant.id, connection_id=conn_id, step=step, raw_errors=second_sync)
+        await upsert_errors(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            step=step,
+            raw_errors=second_sync,
+            raw_errors_is_complete=True,
+        )
         await db.flush()
 
         # Row count unchanged -- NEVER deleted.
@@ -704,7 +806,14 @@ class TestOccurrenceCountExcludesPurgedRows:
         raw_errors = [
             _raw_error(celigo_id="err_purge_target", message=_ship_address_message(*_SHIP_ADDRESS_VARIANTS[0])),
         ]
-        await upsert_errors(db, tenant_id=tenant.id, connection_id=conn_id, step=step, raw_errors=raw_errors)
+        await upsert_errors(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            step=step,
+            raw_errors=raw_errors,
+            raw_errors_is_complete=True,
+        )
         await db.flush()
 
         occurrence_count_before = (
@@ -729,7 +838,14 @@ class TestOccurrenceCountExcludesPurgedRows:
         # -- this is what makes phase 3 recompute this row's signature again,
         # so the recompute's OWN definition of "open" is what's under test,
         # not just whether resolution ran.
-        await upsert_errors(db, tenant_id=tenant.id, connection_id=conn_id, step=step, raw_errors=raw_errors)
+        await upsert_errors(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            step=step,
+            raw_errors=raw_errors,
+            raw_errors_is_complete=True,
+        )
         await db.flush()
 
         occurrence_count_after = (
@@ -763,7 +879,14 @@ class TestIncompleteRawErrorsNeverResolvesAnything:
             _raw_error(celigo_id="err_partial_stays", message=_ship_address_message(*_SHIP_ADDRESS_VARIANTS[0])),
             _raw_error(celigo_id="err_partial_missing", message=_ship_address_message(*_SHIP_ADDRESS_VARIANTS[1])),
         ]
-        await upsert_errors(db, tenant_id=tenant.id, connection_id=conn_id, step=step, raw_errors=first_sync)
+        await upsert_errors(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            step=step,
+            raw_errors=first_sync,
+            raw_errors_is_complete=True,
+        )
         await db.flush()
 
         # A hypothetical truncated re-fetch: only ONE of the two previously-
@@ -806,13 +929,27 @@ class TestIncompleteRawErrorsNeverResolvesAnything:
             _raw_error(celigo_id="err_complete_stays", message=_ship_address_message(*_SHIP_ADDRESS_VARIANTS[0])),
             _raw_error(celigo_id="err_complete_vanishes", message=_ship_address_message(*_SHIP_ADDRESS_VARIANTS[1])),
         ]
-        await upsert_errors(db, tenant_id=tenant.id, connection_id=conn_id, step=step, raw_errors=first_sync)
+        await upsert_errors(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            step=step,
+            raw_errors=first_sync,
+            raw_errors_is_complete=True,
+        )
         await db.flush()
 
         second_sync = [
             _raw_error(celigo_id="err_complete_stays", message=_ship_address_message(*_SHIP_ADDRESS_VARIANTS[0])),
         ]
-        await upsert_errors(db, tenant_id=tenant.id, connection_id=conn_id, step=step, raw_errors=second_sync)
+        await upsert_errors(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            step=step,
+            raw_errors=second_sync,
+            raw_errors_is_complete=True,
+        )
         await db.flush()
 
         vanished = (
@@ -823,3 +960,74 @@ class TestIncompleteRawErrorsNeverResolvesAnything:
             )
         ).scalar_one()
         assert vanished.resolved_at is not None
+
+
+class TestCompletenessCannotBeForgotten:
+    """FIX ROUND 9 (scoped re-review finding R1, 2026-08-27 -- the re-reviewer
+    REPRODUCED finding 4's original bug straight through the guard added to
+    prevent it). `raw_errors_is_complete` shipped with a permissive default,
+    so a caller that simply OMITTED it got the old behaviour back: a partial
+    listing silently resolving errors that were merely absent from it. A
+    protection you have to remember is not a mechanism.
+
+    The fix is the shape this branch already proved one file over --
+    `repository.upsert_script_attachment`'s `reference_object_celigo_id` is
+    keyword-only with no default, so forgetting it is a `TypeError`, not a
+    wrong answer. Same here: every caller must ANSWER whether its listing is
+    complete. "Forgot the guard" is no longer expressible."""
+
+    async def test_omitting_the_completeness_answer_raises_instead_of_resolving(self, db: AsyncSession):
+        """The re-reviewer's exact repro: two open errors, then a partial
+        re-listing with the kwarg omitted. That used to resolve the absent
+        one; now the call cannot be made at all."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+        step = await _seed_step(db, tenant.id, conn_id, suffix="forgot")
+
+        first_sync = [
+            _raw_error(celigo_id="err_forgot_stays", message=_ship_address_message(*_SHIP_ADDRESS_VARIANTS[0])),
+            _raw_error(celigo_id="err_forgot_missing", message=_ship_address_message(*_SHIP_ADDRESS_VARIANTS[1])),
+        ]
+        await upsert_errors(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            step=step,
+            raw_errors=first_sync,
+            raw_errors_is_complete=True,
+        )
+        await db.flush()
+
+        partial_resync = [
+            _raw_error(celigo_id="err_forgot_stays", message=_ship_address_message(*_SHIP_ADDRESS_VARIANTS[0])),
+        ]
+        with pytest.raises(TypeError, match="raw_errors_is_complete"):
+            await upsert_errors(
+                db,
+                tenant_id=tenant.id,
+                connection_id=conn_id,
+                step=step,
+                raw_errors=partial_resync,
+            )
+
+        missing = (
+            await db.execute(
+                select(CeligoFlowError).where(
+                    CeligoFlowError.tenant_id == tenant.id, CeligoFlowError.celigo_id == "err_forgot_missing"
+                )
+            )
+        ).scalar_one()
+        assert missing.resolved_at is None, (
+            "a caller that never answered the completeness question must not have resolved anything"
+        )
+
+    def test_the_parameter_is_keyword_only_with_no_default(self):
+        """Pinned structurally as well as behaviourally: a later refactor that
+        reintroduces a default would leave the test above asserting a
+        `TypeError` that never fires, so the signature itself is asserted."""
+        parameter = inspect.signature(upsert_errors).parameters["raw_errors_is_complete"]
+
+        assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+        assert parameter.default is inspect.Parameter.empty, (
+            "a default makes the guard opt-in -- omitting it must be a TypeError, not a silent assumption"
+        )

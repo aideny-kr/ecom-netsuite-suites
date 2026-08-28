@@ -712,7 +712,16 @@ async def sync_flow_map_for_connection(
             summary.steps_with_errors_checked += 1
             summary.errors_snapshotted += len(raw_errors)
             await upsert_errors(
-                db, tenant_id=tenant_id, connection_id=connection_id, step=step_ref, raw_errors=raw_errors
+                db,
+                tenant_id=tenant_id,
+                connection_id=connection_id,
+                step=step_ref,
+                raw_errors=raw_errors,
+                # `list_flow_errors_for_step` raises rather than truncate, so
+                # a list that came back at all is the step's WHOLE current
+                # listing. Stated explicitly because `upsert_errors` has no
+                # default for this (FIX ROUND 9) -- see its docstring.
+                raw_errors_is_complete=True,
             )
 
         # Purge marking -- last, once per connection, independent of any

@@ -15,7 +15,8 @@ Two public functions:
     disposable copy of the message before hashing -- never by mutating or
     logging the stored `message`/`sample_message` columns themselves, which
     stay verbatim and PII-bearing on purpose.
-  * `upsert_errors(db, *, tenant_id, connection_id, step, raw_errors)` --
+  * `upsert_errors(db, *, tenant_id, connection_id, step, raw_errors,
+    raw_errors_is_complete)` --
     given one flow step's CURRENT list of open errors from Celigo (the
     shape `client.list_flow_errors_for_step` returns), upserts one
     `celigo_error_signatures` row per distinct fingerprint and one
@@ -207,7 +208,7 @@ async def upsert_errors(
     connection_id: uuid.UUID,
     step: CeligoFlowStep,
     raw_errors: Iterable[dict],
-    raw_errors_is_complete: bool = True,
+    raw_errors_is_complete: bool,
 ) -> None:
     """Snapshot *raw_errors* (one flow step's CURRENT open-error listing)
     into `celigo_error_signatures`/`celigo_flow_errors`.
@@ -222,23 +223,26 @@ async def upsert_errors(
     from *raw_errors* that was previously open for this step is marked
     resolved, not removed.
 
-    *raw_errors_is_complete* (FIX ROUND 8, whole-branch review finding 4)
-    defaults to `True`: resolving an error absent from *raw_errors* is only
-    correct if *raw_errors* is the step's WHOLE current open-error listing,
-    never a partial page of it. `client.list_flow_errors_for_step` now
-    raises rather than truncate (see its own docstring), so today's only
-    caller can never hand this function an incomplete list -- but that
-    invariant lived entirely in the fetcher, one layer away from the
-    resolution logic that depends on it. This parameter is the same
-    invariant enforced a second time, here, so a FUTURE fetcher that
-    reintroduces silent truncation (deliberately or by a refactor that drops
-    the raise) cannot silently re-open the exact bug this round fixed --
-    it would have to also affirmatively claim completeness to do so. Pass
-    `False` for a known-partial listing: no previously-open error is
-    resolved this call (new/updated errors from *raw_errors* are still
-    recorded and their signatures' stats still recomputed normally), which
-    is the strictly safer default absent proof the snapshot is whole --
-    "remove the possibility, don't just patch this instance."
+    *raw_errors_is_complete* is REQUIRED -- keyword-only, no default (FIX
+    ROUND 9, scoped re-review finding R1). Resolving an error absent from
+    *raw_errors* is only correct if *raw_errors* is the step's WHOLE current
+    open-error listing, never a partial page of it:
+
+      * `True` -- *raw_errors* is the complete current listing. Anything this
+        step had open that is absent from it is resolved.
+      * `False` -- *raw_errors* is known-partial. NO previously-open error is
+        resolved this call; new/updated errors in *raw_errors* are still
+        recorded and their signatures' stats still recomputed normally.
+
+    FIX ROUND 8 (whole-branch review finding 4) added this parameter with a
+    `True` default, and the re-review then reproduced finding 4's original
+    bug straight THROUGH it: a caller that merely omitted the argument got
+    the old silent-resolution behaviour back. A guard a caller has to
+    remember is not a guard. With no default, omitting it is a `TypeError`
+    at the call site -- the same shape `repository.upsert_script_attachment`
+    already uses for `reference_object_celigo_id`, and the reason "forgot to
+    say whether the list was whole" is no longer expressible rather than
+    merely discouraged.
     """
     raw_errors = list(raw_errors)
     sanitized_errors = [sanitize("error", raw) for raw in raw_errors]
@@ -282,10 +286,12 @@ async def upsert_errors(
     # *raw_errors* now, is resolved -- NEVER deleted. See module docstring
     # for why this stops at resolved_at and never touches purged_at.
     #
-    # GATED ON raw_errors_is_complete (FIX ROUND 8, finding 4): resolving an
-    # absence is only correct if *raw_errors* is provably the WHOLE current
-    # listing -- a caller that admits it handed over a partial one must never
-    # have that partiality read back as "these errors are gone now".
+    # GATED ON raw_errors_is_complete (FIX ROUND 8, finding 4; made
+    # unforgettable in FIX ROUND 9, re-review R1): resolving an absence is
+    # only correct if *raw_errors* is provably the WHOLE current listing --
+    # a caller that admits it handed over a partial one must never have that
+    # partiality read back as "these errors are gone now". The parameter has
+    # no default, so "admits" is the only option: every caller states it.
     #
     # MUST run BEFORE phase 3's aggregate recompute below, not after -- see
     # module docstring's "ORDERING WITHIN ONE CALL" (FIX ROUND 1). Phase 3
