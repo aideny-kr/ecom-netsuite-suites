@@ -63,6 +63,7 @@ import { NetSuiteConnectionsSection } from "@/components/settings/netsuite-conne
 import { BigQueryConnectionSection } from "@/components/settings/bigquery-connection-section";
 import { DataSourceConnectorsSection } from "@/components/settings/data-source-connectors-section";
 import CeligoConnectorCard from "@/components/settings/celigo-connector-card";
+import { CeligoFlowMap } from "@/components/settings/celigo-flow-map";
 
 import { usePermissions } from "@/hooks/use-permissions";
 import { useAuth } from "@/providers/auth-provider";
@@ -2906,6 +2907,11 @@ export default function SettingsPage() {
           {showCeligo && (
             <SectionErrorBoundary name="Celigo">
               <CeligoConnectorCard />
+            </SectionErrorBoundary>
+          )}
+          {showCeligo && (
+            <SectionErrorBoundary name="Celigo Flow Map">
+              <CeligoFlowMap />
             </SectionErrorBoundary>
           )}
         </>
