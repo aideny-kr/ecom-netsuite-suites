@@ -11,6 +11,10 @@ const mocks = vi.hoisted(() => ({
   allFlows: vi.fn(),
   flowDetail: vi.fn(),
   syncStatus: vi.fn(),
+  // Task 10 -- CeligoFlowMap now always mounts CeligoScriptViewerDialog, so
+  // its hook is called on every render regardless of whether a script is
+  // open (`enabled: false` while `scriptId` is null/undefined).
+  script: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-celigo-flows", () => ({
@@ -18,6 +22,7 @@ vi.mock("@/hooks/use-celigo-flows", () => ({
   useCeligoAllFlows: () => mocks.allFlows(),
   useCeligoFlowDetail: (flowId: string | undefined) => mocks.flowDetail(flowId),
   useCeligoSyncStatus: () => mocks.syncStatus(),
+  useCeligoScript: (scriptId: string | undefined) => mocks.script(scriptId),
 }));
 
 import { CeligoFlowMap } from "../celigo-flow-map";
@@ -129,6 +134,8 @@ beforeEach(() => {
   mocks.flowDetail.mockReturnValue({ data: undefined, isLoading: false });
   mocks.syncStatus.mockReset();
   mocks.syncStatus.mockReturnValue({ data: undefined, isLoading: true });
+  mocks.script.mockReset();
+  mocks.script.mockReturnValue({ data: undefined, isLoading: false, isError: false, refetch: vi.fn() });
 });
 
 describe("CeligoFlowMap — empty and loading states", () => {
@@ -460,5 +467,29 @@ describe("CeligoFlowMap — empty-string adaptor_type treated as missing (fix ro
 
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText(/unknown adaptor/i)).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 10 -- a step's script chip opens the script viewer for that
+// attachment's script_id.
+// ---------------------------------------------------------------------------
+
+describe("CeligoFlowMap — script viewer wiring (Task 10)", () => {
+  it("clicking a step's script chip opens the script viewer for that attachment's script", async () => {
+    mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
+    setLists([[healthyFlow]]);
+    mocks.flowDetail.mockReturnValue({
+      data: { id: "flow-healthy", steps: [generatorStep, processorStep], unassigned_attachments: [] },
+      isLoading: false,
+    });
+    wrap(<CeligoFlowMap />);
+
+    fireEvent.click(screen.getByRole("button", { name: /expand.*inventory sync|inventory sync.*expand/i }));
+    await waitFor(() => expect(screen.getByText(/1 script/i)).toBeInTheDocument());
+
+    fireEvent.click(screen.getByRole("button", { name: /open attached script/i }));
+
+    expect(mocks.script).toHaveBeenCalledWith("scr-1");
   });
 });

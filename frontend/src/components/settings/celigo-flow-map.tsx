@@ -38,10 +38,12 @@ import {
   useCeligoFlowDetail,
   useCeligoIntegrations,
   useCeligoSyncStatus,
+  type CeligoAttachment,
   type CeligoFlowStep,
   type CeligoFlowSummary,
   type CeligoIntegration,
 } from "@/hooks/use-celigo-flows";
+import { CeligoScriptViewerDialog } from "@/components/settings/celigo-script-viewer";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -54,6 +56,17 @@ import {
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
 import { AlertTriangle, ChevronDown, ChevronRight, Loader2 } from "lucide-react";
+
+/** Task 10 wiring: a step/node's script badge opens the script viewer for
+ * the FIRST attachment that resolved to a local script row -- `script_id`
+ * is nullable (an attachment can reference a `script_celigo_id` that never
+ * synced as its own `CeligoScript` row). A step with multiple distinct
+ * scripts attached opens only the first; the viewer's own attachment table
+ * still shows every site for that script's clone family, but not sibling
+ * scripts on the same step -- a known scope limit, not an oversight. */
+function firstOpenableScriptId(attachments: CeligoAttachment[]): string | null {
+  return attachments.find((a) => a.script_id)?.script_id ?? null;
+}
 
 // ---------------------------------------------------------------------------
 // Formatters -- each grounded in a confirmed real shape, not the mockup.
@@ -213,21 +226,32 @@ function FlowStatusPill({ flow }: { flow: CeligoFlowSummary }) {
   );
 }
 
-function StepRow({ step }: { step: CeligoFlowStep }) {
+function StepRow({ step, onOpenScript }: { step: CeligoFlowStep; onOpenScript: (scriptId: string) => void }) {
+  const openableId = firstOpenableScriptId(step.attachments);
   return (
     <div className="flex items-center gap-2 py-1 text-[12px] text-muted-foreground">
       <span>
         {stepKindLabel(step.role)} ·{" "}
         <span className="font-mono">{step.adaptor_type || "Unknown adaptor"}</span>
       </span>
-      {step.attachments.length > 0 && (
-        <Badge
-          variant="outline"
-          className="text-[10px] border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-400"
-        >
-          {step.attachments.length} script{step.attachments.length === 1 ? "" : "s"}
-        </Badge>
-      )}
+      {step.attachments.length > 0 &&
+        (openableId ? (
+          <button type="button" onClick={() => onOpenScript(openableId)} aria-label="Open attached script">
+            <Badge
+              variant="outline"
+              className="text-[10px] border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-400 hover:bg-amber-500/20 cursor-pointer"
+            >
+              {step.attachments.length} script{step.attachments.length === 1 ? "" : "s"}
+            </Badge>
+          </button>
+        ) : (
+          <Badge
+            variant="outline"
+            className="text-[10px] border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-400"
+          >
+            {step.attachments.length} script{step.attachments.length === 1 ? "" : "s"}
+          </Badge>
+        ))}
     </div>
   );
 }
@@ -242,11 +266,13 @@ function FlowRow({
   expanded,
   onToggle,
   onOpenDetail,
+  onOpenScript,
 }: {
   flow: CeligoFlowSummary;
   expanded: boolean;
   onToggle: () => void;
   onOpenDetail: () => void;
+  onOpenScript: (scriptId: string) => void;
 }) {
   const {
     data: detail,
@@ -290,7 +316,9 @@ function FlowRow({
           {isError && (
             <ErrorNotice message="Couldn't load steps." onRetry={() => refetch()} compact />
           )}
-          {!isLoading && !isError && detail?.steps.map((step) => <StepRow key={step.id} step={step} />)}
+          {!isLoading &&
+            !isError &&
+            detail?.steps.map((step) => <StepRow key={step.id} step={step} onOpenScript={onOpenScript} />)}
         </div>
       )}
     </div>
@@ -307,12 +335,14 @@ function IntegrationTree({
   flowsError,
   onRetryFlows,
   onSelectFlow,
+  onOpenScript,
 }: {
   integration: CeligoIntegration;
   flows: CeligoFlowSummary[];
   flowsError: boolean;
   onRetryFlows: () => void;
   onSelectFlow: (flowId: string) => void;
+  onOpenScript: (scriptId: string) => void;
 }) {
   const [treeExpanded, setTreeExpanded] = useState(true);
   const [expandedFlowId, setExpandedFlowId] = useState<string | null>(null);
@@ -370,6 +400,7 @@ function IntegrationTree({
                 expanded={expandedFlowId === flow.id}
                 onToggle={() => setExpandedFlowId((id) => (id === flow.id ? null : flow.id))}
                 onOpenDetail={() => onSelectFlow(flow.id)}
+                onOpenScript={onOpenScript}
               />
             ))}
         </>
@@ -386,23 +417,41 @@ function GraphNode({
   step,
   kind,
   highlight,
+  onOpenScript,
 }: {
   step: CeligoFlowStep;
   kind: "SOURCE" | "DESTINATION";
   highlight?: boolean;
+  onOpenScript: (scriptId: string) => void;
 }) {
+  const openableId = firstOpenableScriptId(step.attachments);
   return (
     <div className={cn("min-w-[180px] rounded-lg border px-3 py-2", highlight && "border-green-500/50 bg-green-500/5")}>
       <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{kind}</p>
       <p className="mt-0.5 font-mono text-[12px]">{step.adaptor_type || "Unknown adaptor"}</p>
-      {step.attachments.length > 0 && (
-        <Badge
-          variant="outline"
-          className="mt-1 text-[10px] font-mono border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-400"
-        >
-          {step.attachments.length} script{step.attachments.length === 1 ? "" : "s"}
-        </Badge>
-      )}
+      {step.attachments.length > 0 &&
+        (openableId ? (
+          <button
+            type="button"
+            className="mt-1"
+            onClick={() => onOpenScript(openableId)}
+            aria-label="Open attached script"
+          >
+            <Badge
+              variant="outline"
+              className="text-[10px] font-mono border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-400 hover:bg-amber-500/20 cursor-pointer"
+            >
+              {step.attachments.length} script{step.attachments.length === 1 ? "" : "s"}
+            </Badge>
+          </button>
+        ) : (
+          <Badge
+            variant="outline"
+            className="mt-1 text-[10px] font-mono border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-400"
+          >
+            {step.attachments.length} script{step.attachments.length === 1 ? "" : "s"}
+          </Badge>
+        ))}
     </div>
   );
 }
@@ -459,7 +508,15 @@ function FieldMappingPanel({ step }: { step: CeligoFlowStep }) {
   );
 }
 
-function FlowDetailDialog({ flowId, onOpenChange }: { flowId: string | null; onOpenChange: (open: boolean) => void }) {
+function FlowDetailDialog({
+  flowId,
+  onOpenChange,
+  onOpenScript,
+}: {
+  flowId: string | null;
+  onOpenChange: (open: boolean) => void;
+  onOpenScript: (scriptId: string) => void;
+}) {
   const {
     data: flow,
     isLoading,
@@ -501,7 +558,7 @@ function FlowDetailDialog({ flowId, onOpenChange }: { flowId: string | null; onO
             ) : (
               <div className="flex items-start gap-3 overflow-x-auto py-2">
                 {sources.map((s) => (
-                  <GraphNode key={s.id} step={s} kind="SOURCE" highlight />
+                  <GraphNode key={s.id} step={s} kind="SOURCE" highlight onOpenScript={onOpenScript} />
                 ))}
                 {sources.length > 0 && destinations.length > 0 && (
                   <span className="mt-4 text-muted-foreground" aria-hidden>
@@ -510,7 +567,7 @@ function FlowDetailDialog({ flowId, onOpenChange }: { flowId: string | null; onO
                 )}
                 <div className="flex flex-col gap-2">
                   {destinations.map((s) => (
-                    <GraphNode key={s.id} step={s} kind="DESTINATION" />
+                    <GraphNode key={s.id} step={s} kind="DESTINATION" onOpenScript={onOpenScript} />
                   ))}
                 </div>
               </div>
@@ -592,6 +649,7 @@ export function CeligoFlowMap() {
   const flowQueries = useCeligoAllFlows(integrationIds);
   const syncStatus = useCeligoSyncStatus();
   const [selectedFlowId, setSelectedFlowId] = useState<string | null>(null);
+  const [scriptViewerId, setScriptViewerId] = useState<string | null>(null);
 
   if (isLoading) {
     return (
@@ -670,6 +728,7 @@ export function CeligoFlowMap() {
               flowsError={!!flowsQuery?.isError}
               onRetryFlows={() => flowsQuery?.refetch()}
               onSelectFlow={setSelectedFlowId}
+              onOpenScript={setScriptViewerId}
             />
           );
         })}
@@ -690,7 +749,15 @@ export function CeligoFlowMap() {
         </span>
       </p>
 
-      <FlowDetailDialog flowId={selectedFlowId} onOpenChange={(open) => !open && setSelectedFlowId(null)} />
+      <FlowDetailDialog
+        flowId={selectedFlowId}
+        onOpenChange={(open) => !open && setSelectedFlowId(null)}
+        onOpenScript={setScriptViewerId}
+      />
+      <CeligoScriptViewerDialog
+        scriptId={scriptViewerId}
+        onOpenChange={(open) => !open && setScriptViewerId(null)}
+      />
     </div>
   );
 }

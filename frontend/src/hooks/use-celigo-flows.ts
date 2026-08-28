@@ -135,3 +135,55 @@ export function useCeligoFlowDetail(flowId: string | undefined) {
     enabled: !!flowId,
   });
 }
+
+// ---------------------------------------------------------------------------
+// Task 10 — script viewer (mockup screen 04), mirroring
+// `CeligoScriptAttachmentSiteOut` / `CeligoScriptOut` field-for-field
+// (backend/app/api/v1/celigo_flows.py). See that module's docstrings for why
+// `content`/`content_hash`/`name` are THIS row's own values while
+// `copies_count`/`attachment_count`/`integration_count`/`content_diverged`
+// describe the whole clone family -- `content_diverged` in particular is why
+// the script viewer must not assume every clone shares identical source.
+// ---------------------------------------------------------------------------
+
+export interface CeligoScriptAttachmentSite {
+  flow_id: string;
+  flow_name: string;
+  integration_id: string;
+  flow_step_id: string | null;
+  /** 'generator' | 'processor' | null (a router-level script ref has no
+   * owning step -- see `CeligoFlowDetailOut.unassigned_attachments`). */
+  flow_step_role: string | null;
+  flow_step_adaptor_type: string | null;
+  /** WHICH clone in the logical group was actually attached at this site --
+   * not necessarily the id the caller looked up (clones can diverge). */
+  script_celigo_id: string;
+  /** Opaque locator string, part of a DB unique key -- render verbatim,
+   * never parse, never feed to a JSONPath library. */
+  json_path: string;
+  function_name: string | null;
+  /** Best-effort (fragile path-segment matching) -- not authoritative;
+   * prefer `json_path` when showing where a script attaches. */
+  site_type: string | null;
+}
+
+export interface CeligoScript {
+  id: string;
+  dedup_key: string;
+  name: string;
+  content: string | null;
+  content_hash: string | null;
+  copies_count: number;
+  attachment_count: number;
+  integration_count: number;
+  content_diverged: boolean;
+  used_by: CeligoScriptAttachmentSite[];
+}
+
+export function useCeligoScript(scriptId: string | undefined) {
+  return useQuery<CeligoScript>({
+    queryKey: ["celigo", "script", scriptId],
+    queryFn: () => apiClient.get<CeligoScript>(`/api/v1/celigo/scripts/${scriptId}`),
+    enabled: !!scriptId,
+  });
+}
