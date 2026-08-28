@@ -378,6 +378,75 @@ class TestGetFlowDetail:
 
         assert body["unassigned_attachments"] == []
 
+    async def test_step_order_is_deterministic_across_a_three_way_sequence_tie(self, client, admin_user, db):
+        """WHOLE-BRANCH REVIEW FINDING 7 (2026-08-27, PROVEN by execution):
+        the docstring above `get_flow_detail` promises "generators then
+        processors then router-branch processors, sequence within each", but
+        the query was `ORDER BY sequence` alone, and `extract_flow_steps`
+        restarts `sequence` at 0 per branch -- so a generator and two
+        branch-processors in DIFFERENT branches all land at `sequence=0`, a
+        three-way tie with no tiebreaker, making render order arbitrary and
+        unstable across queries. Four steps, ALL at sequence=0, seeded in an
+        order that does NOT match the expected output -- if the query has no
+        real tiebreaker, this fails (or passes by accident, differently
+        across re-runs); with one, it is exact and repeatable."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        flow_id = world["flow"].id
+        conn_id = world["connection_id"]
+
+        # Seeded out of expected-output order on purpose.
+        db.add_all(
+            [
+                CeligoFlowStep(
+                    tenant_id=user.tenant_id,
+                    celigo_connection_id=conn_id,
+                    flow_id=flow_id,
+                    celigo_id="imp_branch_z",
+                    role="processor",
+                    router_id="router_1",
+                    branch_id="branch_z",
+                    sequence=0,
+                    raw_json={},
+                ),
+                CeligoFlowStep(
+                    tenant_id=user.tenant_id,
+                    celigo_connection_id=conn_id,
+                    flow_id=flow_id,
+                    celigo_id="imp_top",
+                    role="processor",
+                    router_id=None,
+                    branch_id=None,
+                    sequence=0,
+                    raw_json={},
+                ),
+                CeligoFlowStep(
+                    tenant_id=user.tenant_id,
+                    celigo_connection_id=conn_id,
+                    flow_id=flow_id,
+                    celigo_id="imp_branch_a",
+                    role="processor",
+                    router_id="router_1",
+                    branch_id="branch_a",
+                    sequence=0,
+                    raw_json={},
+                ),
+            ]
+        )
+        await db.flush()
+        # world["step"] is a pre-seeded generator (role=generator, sequence=0)
+        # -- the fourth arm of the tie.
+
+        r = await client.get(f"/api/v1/celigo/flows/{flow_id}", headers=headers)
+        assert r.status_code == 200, r.text
+        celigo_ids = [s["celigo_id"] for s in r.json()["steps"]]
+        assert celigo_ids == [
+            world["step"].celigo_id,  # generator -- always first
+            "imp_top",  # top-level processor -- before any router branch
+            "imp_branch_a",  # router-branch processor, branch "branch_a" before "branch_z"
+            "imp_branch_z",
+        ]
+
     async def test_router_level_attachment_has_no_step_appears_unassigned(self, client, admin_user, db):
         user, headers = admin_user
         world = await _seed_world(db, user.tenant_id)

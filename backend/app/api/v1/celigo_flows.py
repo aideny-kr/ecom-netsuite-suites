@@ -44,7 +44,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import and_, distinct, func, select
+from sqlalchemy import and_, case, distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.connector_status import _get_celigo_connection
@@ -429,9 +429,11 @@ async def get_flow_detail(
     _flag: Annotated[User, Depends(require_feature("celigo"))],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """One flow's steps (ordered, generators then processors then
-    router-branch processors -- `sequence` within each) plus every script
-    attachment, nested onto the step it belongs to. Attachments with no owning
+    """One flow's steps (ordered, generators then top-level processors then
+    router-branch processors -- `router_id`/`branch_id` break ties BETWEEN
+    branches, `sequence` within each -- see the query below's own comment;
+    whole-branch review finding 7) plus every script attachment, nested onto
+    the step it belongs to. Attachments with no owning
     step (a `routers[].script` ref -- belongs to the router, not a step) come
     back in `unassigned_attachments` instead of being dropped."""
     flow = (
@@ -445,6 +447,23 @@ async def get_flow_detail(
     if flow is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Flow not found")
 
+    # WHOLE-BRANCH REVIEW FINDING 7: `ORDER BY sequence` alone does not
+    # deliver the order this endpoint's own docstring promises --
+    # `extract_flow_steps` restarts `sequence` at 0 for EVERY branch (and for
+    # the top-level arrays), so a generator and every router-branch processor
+    # can share `sequence=0` with no tiebreaker, making render order
+    # arbitrary and unstable across queries. `_step_order_priority` puts
+    # generators first, top-level processors second, router-branch
+    # processors last -- exactly the three groups the docstring names --
+    # then `router_id`/`branch_id` break ties WITHIN the router-branch group
+    # deterministically (two different branches both starting at sequence 0
+    # would otherwise still tie), and `sequence` breaks ties within each
+    # group/branch, as promised.
+    _step_order_priority = case(
+        (CeligoFlowStep.role == "generator", 0),
+        (and_(CeligoFlowStep.role == "processor", CeligoFlowStep.router_id.is_(None)), 1),
+        else_=2,  # router-branch processor
+    )
     steps = (
         (
             await db.execute(
@@ -453,7 +472,12 @@ async def get_flow_detail(
                     CeligoFlowStep.tenant_id == user.tenant_id,
                     CeligoFlowStep.flow_id == flow_id,
                 )
-                .order_by(CeligoFlowStep.sequence)
+                .order_by(
+                    _step_order_priority,
+                    CeligoFlowStep.router_id,
+                    CeligoFlowStep.branch_id,
+                    CeligoFlowStep.sequence,
+                )
             )
         )
         .scalars()
