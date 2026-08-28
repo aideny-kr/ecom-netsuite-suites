@@ -68,6 +68,78 @@ def _coerce(raw: Any) -> dict[str, Any] | None:
 _ASK_USER_KEY = "ask_user"
 
 
+def _strip_ask_user(value: Any) -> Any:
+    """Recursively drop every ``ask_user`` key. Returns a NEW structure."""
+    if isinstance(value, dict):
+        return {k: _strip_ask_user(v) for k, v in value.items() if k != _ASK_USER_KEY}
+    if isinstance(value, list):
+        return [_strip_ask_user(v) for v in value]
+    return value
+
+
+def sanitize_tool_input(tool_input: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of *tool_input* with every ``ask_user`` key removed.
+
+    THIS is what must be signed and executed — not merely what the card
+    displays. Stripping inside ``normalize_write_payload`` cleaned only the
+    display struct: ``build_confirmation_payload`` signs and stores the RAW
+    ``tool_input``, and a plain approve (no slot edited) hands that verbatim to
+    ``execute_tool_call``. So the hint still reached NetSuite, which rejects an
+    unknown field — the 400 an operator actually hit on 2026-08-27, reported as
+    fixed when only the display had been.
+
+    Recursive, because the first attempt also missed a level: a key nested
+    inside a LINE ITEM survived, since lines are extended wholesale with no
+    per-item filtering.
+
+    Two properties the callers depend on:
+
+    * The input is NEVER mutated. The caller still holds the original, and
+      rewriting it underneath them is how a signed envelope and its payload
+      drift apart.
+    * Encoding is preserved. ``data`` arriving as a JSON string leaves as a
+      JSON string; the external MCP is shape-sensitive. A payload with nothing
+      to strip round-trips byte-identical, so tokens minted over it stay
+      stable.
+
+    Never raises: an unparseable payload is returned untouched and handled
+    downstream by ``PayloadParseError``, which owns that case.
+    """
+    if not isinstance(tool_input, dict):
+        return tool_input
+
+    out: dict[str, Any] = {}
+    changed = False
+    for key, value in tool_input.items():
+        if key == _ASK_USER_KEY:
+            # base_agent pops this from the top level first, but a second
+            # entry point must not depend on that having happened.
+            changed = True
+            continue
+        if key in _PAYLOAD_KEYS:
+            if isinstance(value, str):
+                try:
+                    parsed = json.loads(value)
+                except (ValueError, TypeError):
+                    out[key] = value
+                    continue
+                cleaned = _strip_ask_user(parsed)
+                if cleaned != parsed:
+                    out[key] = json.dumps(cleaned)
+                    changed = True
+                else:
+                    out[key] = value
+                continue
+            if isinstance(value, (dict, list)):
+                cleaned = _strip_ask_user(value)
+                if cleaned != value:
+                    changed = True
+                out[key] = cleaned
+                continue
+        out[key] = value
+    return out if changed else tool_input
+
+
 def normalize_write_payload(tool_input: dict[str, Any]) -> NormalizedPayload:
     """Return the canonical payload, or raise :class:`PayloadParseError`.
 

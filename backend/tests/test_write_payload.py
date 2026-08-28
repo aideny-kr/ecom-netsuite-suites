@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from app.services.chat.write_payload import (
@@ -257,3 +259,94 @@ def test_a_field_merely_named_like_the_hint_is_untouched():
         {"recordType": "customer", "data": '{"custentity_ask_user_note": "x", "companyName": "Acme"}'}
     )
     assert payload.fields == {"custentity_ask_user_note": "x", "companyName": "Acme"}
+
+
+# ---------------------------------------------------------------------------
+# The EXECUTED payload, not just the displayed one
+# ---------------------------------------------------------------------------
+#
+# T2 gate round 2, three majors on one defect. Stripping `ask_user` inside
+# normalize_write_payload cleaned only the DISPLAY struct: build_confirmation
+# _payload signs and stores the RAW tool_input, and a plain approve (no slot
+# edited) returns that verbatim to execute_tool_call. Proven by execution:
+#
+#   CARD shows      {"companyName": "Acme"}            <- clean
+#   CARD tool_input {"data": "{... \"ask_user\": ...}"} <- dirty
+#   approve ->      the dirty one is what runs
+#
+# So the NetSuite 400 the operator actually hit was never fixed. And the strip
+# missed a second level: a key nested inside a LINE ITEM survives, because
+# lines are `lines.extend(value)`d wholesale with no per-item filtering.
+
+
+def test_sanitize_removes_ask_user_from_the_executed_payload():
+    from app.services.chat.write_payload import sanitize_tool_input
+
+    out = sanitize_tool_input(
+        {"recordType": "customer", "data": '{"companyName": "Acme", "ask_user": ["subsidiary"]}'}
+    )
+    assert "ask_user" not in json.dumps(out)
+    # The payload key keeps its original ENCODING — data was a JSON string and
+    # must stay one, or the external MCP receives a shape it does not expect.
+    assert isinstance(out["data"], str)
+    assert json.loads(out["data"]) == {"companyName": "Acme"}
+
+
+def test_sanitize_handles_a_dict_payload_key():
+    from app.services.chat.write_payload import sanitize_tool_input
+
+    out = sanitize_tool_input({"recordType": "customer", "body": {"companyName": "Acme", "ask_user": ["x"]}})
+    assert out["body"] == {"companyName": "Acme"}
+    assert isinstance(out["body"], dict)
+
+
+def test_sanitize_reaches_inside_line_items():
+    """The level the first fix missed entirely."""
+    from app.services.chat.write_payload import sanitize_tool_input
+
+    out = sanitize_tool_input(
+        {
+            "recordType": "invoice",
+            "data": '{"entity": "5", "item": [{"amount": 100, "ask_user": ["account"]}]}',
+        }
+    )
+    assert "ask_user" not in json.dumps(out)
+    assert json.loads(out["data"])["item"] == [{"amount": 100}]
+
+
+def test_sanitize_also_strips_a_top_level_hint():
+    """base_agent pops it there first, but a second entry point must not
+    depend on that pop having happened."""
+    from app.services.chat.write_payload import sanitize_tool_input
+
+    out = sanitize_tool_input({"recordType": "customer", "ask_user": ["subsidiary"], "data": "{}"})
+    assert "ask_user" not in out
+
+
+def test_sanitize_does_not_mutate_its_input():
+    """The caller still holds the original; silently rewriting it under them
+    is how a signed envelope and its payload drift apart."""
+    from app.services.chat.write_payload import sanitize_tool_input
+
+    original = {"recordType": "customer", "data": '{"companyName": "Acme", "ask_user": ["s"]}'}
+    before = json.dumps(original, sort_keys=True)
+    sanitize_tool_input(original)
+    assert json.dumps(original, sort_keys=True) == before
+
+
+def test_sanitize_leaves_a_clean_payload_byte_identical():
+    """No gratuitous re-encoding: an untouched payload must round-trip
+    unchanged, so tokens minted over it stay stable."""
+    from app.services.chat.write_payload import sanitize_tool_input
+
+    clean = {"recordType": "customer", "data": '{"companyName": "Acme"}'}
+    assert sanitize_tool_input(clean) == clean
+
+
+def test_sanitize_survives_an_unparseable_payload():
+    """Never raise from a sanitiser — an unparseable payload is already
+    handled downstream by PayloadParseError."""
+    from app.services.chat.write_payload import sanitize_tool_input
+
+    bad = {"recordType": "customer", "data": "not json {{{"}
+    assert sanitize_tool_input(bad) == bad

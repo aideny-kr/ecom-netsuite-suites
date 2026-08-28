@@ -22,7 +22,7 @@ from app.services.chat.mutation_guard import (
     is_record_type_allowed,
     verify_confirmation_token,
 )
-from app.services.chat.write_payload import PayloadParseError, normalize_write_payload
+from app.services.chat.write_payload import PayloadParseError, normalize_write_payload, sanitize_tool_input
 from app.services.chat.write_validator import EditableSlot, ValidationResult
 
 # ---------------------------------------------------------------------------
@@ -254,6 +254,16 @@ def build_confirmation_payload(
     # approvable card, so an unparseable payload returns None here — same
     # as a blocked record type — rather than raising into the caller's
     # streaming loop. See the docstring for how callers distinguish the two.
+    # Sanitise BEFORE anything is signed or stored. `ask_user` is an
+    # out-of-band hint, and until now it was stripped only from the parsed
+    # DISPLAY struct — while the raw tool_input was what got HMAC-signed,
+    # persisted, and handed to execute_tool_call on a plain approve. So the
+    # card looked clean and NetSuite still received the hint as a record field
+    # and rejected the write (observed live 2026-08-27; T2 gate round 2 found
+    # the display-only fix). Everything below now derives from the sanitised
+    # payload, so the thing displayed and the thing executed are the same.
+    tool_input = sanitize_tool_input(tool_input)
+
     try:
         normalized = normalize_write_payload(tool_input)
     except PayloadParseError:
