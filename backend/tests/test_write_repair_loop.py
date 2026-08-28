@@ -213,13 +213,37 @@ async def test_repair_loop_feeds_error_back_without_crashing_the_stream():
         tool_use_blocks=[],
         usage=TokenUsage(input_tokens=10, output_tokens=10),
     )
-    responses = iter([metadata_call_response, tool_call_response, final_response])
+    # The prose-instead-of-proposing guard now fires on this turn, and that is
+    # correct: a write was attempted, validation rejected it, no card ever
+    # reached the human, and the model then answered in chat. That is the exact
+    # live failure the guard exists for (staging 2026-08-28) — the operator is
+    # told "I need the subsidiary" with nothing to act on.
+    #
+    # Before `_write_reached_the_human`, the guard stood down here because a
+    # write tool HAD been called, so this test only needed three responses. It
+    # now costs one bounce, hence the fourth. The turn still ends on the same
+    # sentence, which is what this test is actually about.
+    responses = iter([metadata_call_response, tool_call_response, final_response, final_response])
 
     async def _fake_stream_message(**kwargs):
         yield "response", next(responses)
 
+    async def _fake_create_message(**kwargs):
+        """Stage 2's forced hop. Returns the model DECLINING, so this test
+        keeps exercising the repair loop rather than the forcing path — and
+        so it fails loudly if the hop is ever reached with no stub, instead of
+        silently swallowing a TypeError off a MagicMock."""
+        from app.services.chat.agents.base_agent import _DECLINE_WRITE_TOOL
+
+        return LLMResponse(
+            text_blocks=[],
+            tool_use_blocks=[ToolUseBlock(id="decline", name=_DECLINE_WRITE_TOOL, input={})],
+            usage=TokenUsage(input_tokens=1, output_tokens=1),
+        )
+
     mock_adapter = MagicMock()
     mock_adapter.stream_message = _fake_stream_message
+    mock_adapter.create_message = _fake_create_message
     mock_adapter.build_assistant_message = MagicMock(return_value={"role": "assistant", "content": []})
     mock_adapter.build_tool_result_message = MagicMock(
         return_value={"role": "user", "content": [{"type": "tool_result"}]}
