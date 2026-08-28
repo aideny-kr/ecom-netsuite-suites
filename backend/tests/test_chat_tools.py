@@ -116,7 +116,15 @@ class TestBuildExternalToolDefinitions:
         assert build_external_tool_definitions([connector]) == []
 
     def test_description_includes_provider(self):
-        """Description should include the provider name."""
+        """Description should include the provider name.
+
+        The tag gained environment + account for NetSuite connectors (a tenant
+        can hold both a sandbox and a production one, and identical
+        descriptions left the model choosing between them blind). The provider
+        must still appear, which is what this test was always about — asserting
+        the exact old string would have pinned the format rather than the
+        intent.
+        """
         connector = MagicMock()
         connector.id = uuid.uuid4()
         connector.provider = "netsuite_mcp"
@@ -125,7 +133,7 @@ class TestBuildExternalToolDefinitions:
         ]
 
         defs = build_external_tool_definitions([connector])
-        assert "[netsuite_mcp]" in defs[0]["description"]
+        assert "netsuite_mcp" in defs[0]["description"]
 
 
 # ---------------------------------------------------------------------------

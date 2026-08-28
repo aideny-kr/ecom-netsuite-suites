@@ -106,11 +106,32 @@ function makeMdComponents(isTerminal: boolean): Components {
         </div>
       );
     },
+    a({ href, children, ...props }) {
+      // Chat links open in a NEW tab. The record link after a NetSuite write
+      // is the motivating case: following it in place would navigate the user
+      // out of the conversation they are mid-way through, losing the card and
+      // the thread. rel="noopener noreferrer" matches the convention already
+      // used by citation-renderer, docs-link-card and sheets-link-card — and
+      // noopener matters here because these point at an external ERP.
+      return (
+        <a
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-primary underline hover:no-underline"
+          {...props}
+        >
+          {children}
+        </a>
+      );
+    },
   };
 }
 
-/** Static default markdown components (no terminal styling) */
-const mdComponents: Components = makeMdComponents(false);
+/** Static default markdown components (no terminal styling).
+ *  Exported so tests assert against the SAME map production renders with — a
+ *  test that rebuilds its own component config proves nothing about the app. */
+export const mdComponents: Components = makeMdComponents(false);
 const mdComponentsTerminal: Components = makeMdComponents(true);
 
 /**
@@ -648,7 +669,10 @@ interface MessageListProps {
   onRemoveTemplate?: () => void;
   templateFile?: { id: string; filename: string } | null;
   onImportanceOverride?: (messageId: string, newTier: number) => void;
-  onWriteConfirm?: (messageId: string, action: "approve" | "reject") => void;
+  // slotValues carries any human-filled editable_slots (Task 9) — only ever
+  // populated on an "approve" action; the orchestrator reads it as
+  // write_confirm.slot_values.
+  onWriteConfirm?: (messageId: string, action: "approve" | "reject", slotValues?: Record<string, string>) => void;
   onClarificationChoose?: (messageId: string, optionId: "A" | "B" | "C") => void;
   // Manual clarification typed inside the card (dogfood follow-up 2026-04-30).
   // Returns a Promise so the card can await it and clear/preserve text.
@@ -1165,7 +1189,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   onChangesetAction?: () => void;
   isStreamingPreview?: boolean;
   onImportanceOverride?: (messageId: string, newTier: number) => void;
-  onWriteConfirm?: (messageId: string, action: "approve" | "reject") => void;
+  onWriteConfirm?: (messageId: string, action: "approve" | "reject", slotValues?: Record<string, string>) => void;
   onClarificationChoose?: (messageId: string, optionId: "A" | "B" | "C") => void;
   onClarificationManual?: (messageId: string, manualText: string) => Promise<void>;
   financialReportData?: FinancialReportData | null;
@@ -1212,7 +1236,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
           )}
           <WriteConfirmationCard
             data={structuredOutput as unknown as WriteConfirmationData}
-            onConfirm={() => onWriteConfirm?.(message.id, "approve")}
+            onConfirm={(slotValues) => onWriteConfirm?.(message.id, "approve", slotValues)}
             onReject={() => onWriteConfirm?.(message.id, "reject")}
           />
         </div>

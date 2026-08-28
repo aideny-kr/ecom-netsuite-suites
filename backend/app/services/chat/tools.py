@@ -140,6 +140,55 @@ def parse_external_tool_name(name: str) -> tuple[uuid.UUID, str] | None:
     return connector_id, raw_name
 
 
+# NetSuite account-id suffixes that mean "not the production books".
+# `_SB<n>` is a sandbox, `_RP` a release preview. Mirrors the pattern
+# `schemas/workspace.py` already validates sandbox deploy targets against.
+_NON_PRODUCTION_ACCOUNT_MARKERS = ("_SB", "_RP", "-SB", "-RP", "_TSTDRV", "TSTDRV")
+
+
+def netsuite_environment_of(account_id: str | None) -> str:
+    """ "SANDBOX" or "PRODUCTION" for a NetSuite account id.
+
+    Derived, never operator-asserted — `metadata_json['account_id']` is set
+    from the OAuth setup flow and is the closest thing to ground truth we hold.
+
+    Fails toward caution: an unrecognised id is called PRODUCTION. Mislabelling
+    production as sandbox invites a careless write; the reverse only invites
+    care.
+
+    NOTE the scope. This is DISPLAY: it lets the model and a human reading
+    tool_calls_log tell two connectors apart. It is not the enforcement in
+    docs/superpowers/specs/2026-08-27-sandbox-environment-binding-design.md,
+    which must refuse a write to the environment the session did not choose,
+    at the dispatcher. Seeing the difference is not the same as being unable
+    to get it wrong.
+    """
+    if not account_id:
+        return "PRODUCTION"
+    upper = str(account_id).upper()
+    return "SANDBOX" if any(m in upper for m in _NON_PRODUCTION_ACCOUNT_MARKERS) else "PRODUCTION"
+
+
+def _connector_tag(connector) -> str:
+    """The bracketed prefix on every external tool description.
+
+    NetSuite connectors additionally carry environment and account, because a
+    tenant can hold more than one and the difference is production money.
+    """
+    provider = getattr(connector, "provider", "") or "external"
+    if not str(provider).startswith("netsuite"):
+        return str(provider)
+    meta = getattr(connector, "metadata_json", None)
+    account = meta.get("account_id") if isinstance(meta, dict) else None
+    # Must be a real string. A test double or a malformed row can yield a
+    # truthy non-string here, and stringifying it would stamp a mock's repr
+    # into every tool description the model reads.
+    if not isinstance(account, str) or not account.strip():
+        return str(provider)
+    account = account.strip()
+    return f"{provider} · {netsuite_environment_of(account)} {account}"
+
+
 def build_external_tool_definitions(connectors: list) -> list[dict]:
     """Convert discovered MCP connector tools to Anthropic tool format.
 
@@ -185,7 +234,13 @@ def build_external_tool_definitions(connectors: list) -> list[dict]:
             tools.append(
                 {
                     "name": anthropic_name,
-                    "description": f"[{connector.provider}] {desc}",
+                    # Name the ENVIRONMENT and ACCOUNT, not just the provider.
+                    # Two NetSuite connectors previously produced byte-identical
+                    # descriptions, leaving an opaque connector UUID as the only
+                    # difference — so a model asked to "test in sandbox" chose
+                    # between them arbitrarily, and nobody could tell from the
+                    # log which one ran.
+                    "description": f"[{_connector_tag(connector)}] {desc}",
                     "input_schema": input_schema,
                 }
             )
@@ -262,12 +317,67 @@ async def execute_tool_call(
     context_need: str | None = None,
     session_id: str | None = None,
     actor_type: str = "user",
+    human_approved: bool = False,
 ) -> str:
     """Execute a tool call and return the result as a JSON string.
 
     Routes to local MCP server or external MCP client based on tool name prefix.
+
+    ``human_approved`` MUST stay default-False. It is the sole permission to
+    execute a NetSuite mutation, and only the orchestrator's approve branch —
+    which has already HMAC-verified the exact payload a human accepted — may
+    pass True. Defaulting to False is the entire point: a caller added later
+    that knows nothing about HITL is refused rather than trusted.
     """
     start = time.monotonic()
+
+    # ── HITL guard at the choke point ──
+    # This used to live in ONE caller (base_agent.run_streaming, which yields a
+    # confirmation card instead of executing), leaving every other caller able
+    # to reach the ERP unguarded. That was reachable: a chat session with a
+    # workspace_id skips the guarded unified-agent block (orchestrator.py:2933,
+    # which ends in `return` at 4009) and falls through to the single-agent
+    # loop at 4016, whose toolset includes ns_createRecord/ns_updateRecord/
+    # ns_deleteRecord and whose only gate is policy_evaluate — which inspects
+    # SQL params and row limits, never mutations. `classify_mutation` appears
+    # zero times in orchestrator.py.
+    #
+    # So the guard moves here, where `.claude/rules/agent-graph.md` #3 says it
+    # belongs ("the dispatcher is the choke point... Adding a caller must not
+    # be able to add a hole"). Refusing by DEFAULT is what makes that true: the
+    # protection no longer depends on each caller remembering it exists.
+    #
+    # Narrow on purpose — NetSuite mutation verbs only. The write loop is built
+    # out of ns_getRecordTypeMetadata / ns_getSubsidiaries / ns_runCustomSuiteQL,
+    # and blocking those would break validation, the slot form and the posting
+    # invariants.
+    if not human_approved:
+        from app.services.chat.mutation_guard import classify_mutation as _classify_at_chokepoint
+
+        _verb = _classify_at_chokepoint(tool_name)
+        if _verb:
+            logger.warning(
+                "HITL guard refused an unapproved %s via %s (tenant=%s session=%s)",
+                _verb,
+                tool_name,
+                tenant_id,
+                session_id,
+            )
+            return json.dumps(
+                {
+                    "error": (
+                        f"This {_verb} was NOT executed: a NetSuite write requires explicit human "
+                        "approval, and this call carried none."
+                    ),
+                    "hitl_required": True,
+                    "instruction": (
+                        "Do not retry this call. Propose the write so the user is shown a "
+                        "confirmation card, and let them approve it — the approved payload is "
+                        "what executes."
+                    ),
+                }
+            )
+    # ── End HITL guard ──
 
     if tool_name == "escalate_reasoning":
         # Control signal handled by the agent loop (it bumps thinking depth).
@@ -286,7 +396,9 @@ async def execute_tool_call(
     ext_parsed = parse_external_tool_name(tool_name)
     if ext_parsed is not None:
         connector_id, raw_tool_name = ext_parsed
-        result = await _execute_external_tool(connector_id, raw_tool_name, tool_input, tenant_id, db)
+        result = await _execute_external_tool(
+            connector_id, raw_tool_name, tool_input, tenant_id, db, human_approved=human_approved
+        )
         duration_ms = int((time.monotonic() - start) * 1000)
         logger.info(
             "tool_executed",
@@ -329,12 +441,55 @@ async def execute_tool_call(
         return json.dumps({"error": f"Tool '{mcp_name}' execution failed: {exc}"})
 
 
+# NetSuite tools that only READ. Anything not here is treated as a write.
+#
+# `classify_mutation` recognises four write verbs by name, which is a DENY-list
+# — and the NetSuite tool surface is DISCOVERED AT RUNTIME from Oracle's MCP
+# server (`session.list_tools()`, mcp_client_service.py:164). Oracle can expose
+# a write tool tomorrow that the deny-list has never heard of; it would pass the
+# HITL guard, reach the ERP, and mutate a production record with no
+# confirmation card. `.claude/rules/agent-graph.md` names the rule:
+# "allow-list derived from a registry, never a deny-list".
+#
+# The trade is deliberate and asymmetric. A NEW READ tool being refused is
+# visible, recoverable, and logged loudly below — someone adds a line here. A
+# NEW WRITE tool being allowed is an unapproved irreversible ERP mutation that
+# nobody learns about until afterwards.
+_NETSUITE_READ_ONLY_TOOLS: frozenset[str] = frozenset(
+    {
+        "ns_getRecord",
+        "ns_getRecordTypeMetadata",
+        "ns_getSuiteQLMetadata",
+        "ns_getSubsidiaries",
+        "ns_getAccountingBooks",
+        "ns_getAccountingContexts",
+        "ns_getNexusIds",
+        "ns_runCustomSuiteQL",
+        "ns_runReport",
+        "ns_runSavedSearch",
+        "ns_listAllReports",
+        "ns_listSavedSearches",
+        # *_app tools open NetSuite-hosted UI panels; they mutate nothing here.
+        # ns_selector_app is additionally intercepted upstream (see
+        # selector_app_redirect) because this client cannot render it.
+        "ns_selector_app",
+        "ns_report_filters_app",
+        "ns_prompt_library_app",
+    }
+)
+
+
+def is_netsuite_provider(provider: str | None) -> bool:
+    return bool(provider) and str(provider).startswith("netsuite")
+
+
 async def _execute_external_tool(
     connector_id: uuid.UUID,
     raw_tool_name: str,
     tool_input: dict,
     tenant_id: uuid.UUID,
     db: "AsyncSession",
+    human_approved: bool = False,
 ) -> dict:
     """Execute a tool on an external MCP connector."""
     print(f"[EXT_MCP] Calling {raw_tool_name} with params: {tool_input}", flush=True)
@@ -353,6 +508,31 @@ async def _execute_external_tool(
         #
         # Provider check FIRST so nothing below costs a non-Celigo tool call
         # anything: this runs for every external tool call in every chat turn.
+        # NetSuite: allow-list inversion. See _NETSUITE_READ_ONLY_TOOLS.
+        # `human_approved` is threaded from execute_tool_call so an operator can
+        # still approve an unrecognised tool — fail-closed, not fail-permanently.
+        if is_netsuite_provider(connector.provider) and not human_approved:
+            if raw_tool_name not in _NETSUITE_READ_ONLY_TOOLS:
+                logger.warning(
+                    "netsuite_unrecognised_tool_refused tool=%s connector=%s — not on the "
+                    "read-only allow-list. If this is a legitimate READ tool, add it to "
+                    "_NETSUITE_READ_ONLY_TOOLS; if it writes, it correctly requires approval.",
+                    raw_tool_name,
+                    connector_id,
+                )
+                return {
+                    "error": (
+                        f"'{raw_tool_name}' was NOT executed: it is not a recognised read-only "
+                        "NetSuite tool, so it is treated as a write and requires explicit human "
+                        "approval."
+                    ),
+                    "hitl_required": True,
+                    "instruction": (
+                        "Do not retry this call. If a record must change, propose the write so "
+                        "the user is shown a confirmation card and can approve it."
+                    ),
+                }
+
         if is_celigo_provider(connector.provider):
             if not is_read_only_celigo_tool(raw_tool_name):
                 logger.warning(

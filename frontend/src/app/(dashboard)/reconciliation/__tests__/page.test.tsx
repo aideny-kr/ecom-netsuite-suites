@@ -45,7 +45,7 @@ vi.mock("@/hooks/use-reconciliation", () => ({
   useCloseReadiness: () => ({ data: undefined, isLoading: true }),
   useApproveBucket: () => ({ mutate, isPending: false, data: mockApproveData }),
   useApproveResult: () => ({ mutate: vi.fn() }),
-  useRejectResult: () => ({ mutate: vi.fn(), reset: vi.fn() }),
+  useRejectResult: () => ({ mutate: vi.fn() }),
   useClosePeriod: () => ({ mutate: vi.fn(), isPending: false }),
 }));
 vi.mock("@/hooks/use-recon-pipeline", () => ({
@@ -276,6 +276,7 @@ describe("ReconciliationPage investigate-proposal prefill", () => {
     currency: "USD",
     above_materiality: false,
     status: "proposed",
+    result_status: null,
     failure_reason: null,
     correlation_id: null,
     created_at: "2026-07-06T00:00:00Z",
@@ -289,7 +290,6 @@ describe("ReconciliationPage investigate-proposal prefill", () => {
     deposit_transaction_currency: null,
     deposit_foreign_amount: null,
     deposit_exchange_rate: null,
-    result_status: "pending",
   };
 
   const mockGroup: ReconResolutionGroup = {

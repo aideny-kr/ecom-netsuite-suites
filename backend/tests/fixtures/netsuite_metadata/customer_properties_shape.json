@@ -1,0 +1,51 @@
+{
+  "message": "ok",
+  "metadata": {
+    "properties": {
+      "comments": {
+        "nullable": true,
+        "title": "Comments",
+        "type": "string"
+      },
+      "companyName": {
+        "nullable": true,
+        "title": "Company Name",
+        "type": "string"
+      },
+      "email": {
+        "nullable": true,
+        "title": " Email",
+        "type": "string"
+      },
+      "entityId": {
+        "nullable": true,
+        "title": "Entity ID",
+        "type": "string"
+      },
+      "firstName": {
+        "nullable": true,
+        "title": "First Name",
+        "type": "string"
+      },
+      "isPerson": {
+        "title": "Is Individual",
+        "type": "boolean"
+      },
+      "lastName": {
+        "nullable": true,
+        "title": "Last Name",
+        "type": "string"
+      },
+      "phone": {
+        "nullable": true,
+        "title": "Phone",
+        "type": "string"
+      },
+      "subsidiary": {
+        "type": "object"
+      }
+    },
+    "type": "object"
+  },
+  "success": true
+}

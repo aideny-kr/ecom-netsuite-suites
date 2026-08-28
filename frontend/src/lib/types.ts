@@ -839,17 +839,77 @@ export interface FeatureFlagsResponse {
 // of shape `{ type: "drive_sources", data: DriveSourcesMap }`.
 export type DriveSourcesMap = Record<string, string>;
 
+// A field the server (not the client) has declared fillable — one gap the
+// agent could not resolve itself. `allowed` is the closed set of values NetSuite
+// metadata permits (rendered as a <select>); null/absent means free text.
+// The server enforces this allowlist independently on submit (write_validator.py
+// EditableSlot / write_confirmation_service.py merge_slot_values) — this type
+// only drives what the human is offered, not what's actually accepted.
+export interface EditableSlot {
+  name: string;
+  label: string;
+  type: string;
+  allowed?: { value: string; label: string }[] | null;
+}
+
 export interface WriteConfirmationData {
   type: "write_confirmation";
   mutation_type: "create" | "update" | "delete" | "upsert";
   record_type: string;
   record_id: string | null;
   proposed_fields: Record<string, unknown>;
+  /** Display-only human labels for reference fields, e.g.
+   *  { subsidiary: "Framework Computer UK Ltd (ID 5)" }.
+   *  Server-resolved; never sent back and never written. */
+  field_labels?: Record<string, string>;
+  /** WHERE the write lands. Display-only; null = unknown, render nothing. */
+  target_account?: string | null;
+  target_environment?: string | null;
+  // Transaction line items (sales orders, invoices, ...). Absent/empty for
+  // header-only record types (e.g. customer).
+  proposed_lines?: Record<string, unknown>[];
   current_record: Record<string, unknown> | null;
   tool_name: string;
   tool_input: Record<string, unknown>;
   confirmation_token: string;
-  status: "pending" | "approved" | "rejected";
+  // Header-field gaps the human can fill in and submit. Empty for both a
+  // fully-resolved payload AND a recon group confirmation (which never has
+  // slots) — those render identically to today.
+  editable_slots?: EditableSlot[];
+  // Line-item fields the validator flagged as missing but that have no
+  // fill-in-the-blank UI (deferred: ClickUp 86bbgznjr). Non-empty makes the
+  // card terminal — name the gaps, no slot inputs, no Approve.
+  unfillable_line_fields?: string[];
+  // ValidationResult.invariant_errors — the server CHECKED this payload
+  // against a posting invariant (debits=credits, accounting period open)
+  // and it failed. Distinct from `unvalidated` ("we could not check" — the
+  // human is still the control, Approve stays enabled): this means "we
+  // checked and it IS wrong", so non-empty makes the card terminal with the
+  // same standing as `unfillable_line_fields` — no slot inputs, no Approve.
+  // Both can be non-empty at once; render both, never let one hide the other.
+  invariant_errors?: string[];
+  // True when NetSuite's field-requirement metadata was unavailable, so the
+  // payload was never checked against it. The two posting invariants (period
+  // freeze, debits=credits) still ran — this only means field validation was
+  // skipped. Approval is still allowed; the human is the control.
+  unvalidated?: boolean;
+  // NetSuite's own rejection message, set only when status is "failed".
+  error?: string;
+  // "executing" — the atomic pending->executing claim (a compare-and-swap
+  // committed before the NetSuite call, so a concurrent second approve of
+  // the same confirmation can't also execute it) won and the write is
+  // in flight. Non-actionable: no Approve/Reject render for it. A row can
+  // be stuck here after a server crash mid-write — see the claim site in
+  // orchestrator.py — which is deliberate: a human resolves it manually
+  // rather than the client guessing at a retry.
+  //
+  // "indeterminate" is NOT a failure: the write was sent and NetSuite
+  // never confirmed the result (timeout, unreadable response), so the
+  // record may exist. Kept separate from "failed" because the failed
+  // card asserts "Nothing was written" — on 2026-08-27 that was untrue
+  // (customer 5264348 existed) and would have invited a duplicate.
+  // Terminal, and never carries an Approve action.
+  status: "pending" | "approved" | "rejected" | "failed" | "executing" | "indeterminate";
 }
 
 // ---------------------------------------------------------------------------

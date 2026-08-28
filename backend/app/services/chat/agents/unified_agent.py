@@ -363,6 +363,16 @@ class UnifiedAgent(BaseSpecialistAgent):
         # instance routes them through this property where the LLM can see them.
         self._plan_mode_augmentation: str = ""
         self._plan_mode_resume_directive: str = ""
+        # Write-repair injection — set per-turn by the orchestrator ONLY on
+        # a re-entry after NetSuite rejects an approved write (agentic-repair
+        # design requirement B). Same attribute-based seam as the Plan Mode
+        # directives above: the orchestrator sets it right before
+        # construction, this property surfaces it into the prompt, and
+        # base_agent.py's mutation intercept reads the separate
+        # `_write_repair_context` dict (root id / attempt / mutation+record
+        # type) to stamp the NEXT card's repair_of/repair_attempt.
+        self._write_repair_directive: str = ""
+        self._write_repair_context: dict[str, Any] | None = None
 
     @property
     def agent_name(self) -> str:
@@ -730,6 +740,11 @@ class UnifiedAgent(BaseSpecialistAgent):
             parts.append("\n\n" + self._plan_mode_augmentation)
         if self._plan_mode_resume_directive:
             parts.append("\n\n" + self._plan_mode_resume_directive)
+        # Write-repair directive last — the most specific, most recent
+        # instruction on a repair turn, so it must be able to override
+        # anything framed above it (mirrors the Plan Mode ordering rule).
+        if self._write_repair_directive:
+            parts.append("\n\n" + self._write_repair_directive)
 
         prompt = "\n".join(parts)
 

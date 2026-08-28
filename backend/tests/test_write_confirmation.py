@@ -8,8 +8,10 @@ import pytest
 from app.services.chat.write_confirmation_service import (
     WriteConfirmationPayload,
     build_confirmation_payload,
+    uncovered_slot_names,
     validate_and_extract_confirmation,
 )
+from app.services.chat.write_validator import ValidationResult
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -197,17 +199,16 @@ class TestBuildConfirmationPayloadCreate:
         )
         assert result.tool_input == tool_input
 
-    def test_empty_body_yields_empty_proposed_fields(self):
-        tool_name = _ext("ns_createRecord")
+    def test_missing_payload_fails_closed(self):
         tool_input = {"recordType": "salesOrder"}
         result = build_confirmation_payload(
             mutation_type="create",
             record_type="salesOrder",
-            tool_name=tool_name,
+            tool_name=_ext("ns_createRecord"),
             tool_input=tool_input,
             session_id=_SESSION_ID,
         )
-        assert result.proposed_fields == {}
+        assert result is None
 
 
 # ---------------------------------------------------------------------------
@@ -324,6 +325,47 @@ class TestBuildConfirmationPayloadUpdate:
             session_id=_SESSION_ID,
         )
         assert result.mutation_type == "update"
+
+
+# ---------------------------------------------------------------------------
+# build_confirmation_payload — delete (no payload required)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildConfirmationPayloadDelete:
+    def test_delete_with_no_payload_is_valid(self):
+        """Delete legitimately has no field payload — only record ID.
+
+        Deletes should not fail closed on missing payload like other mutations.
+        """
+        tool_name = _ext("ns_deleteRecord")
+        tool_input = {"recordType": "customer", "id": "CUST-42"}
+        result = build_confirmation_payload(
+            mutation_type="delete",
+            record_type="customer",
+            tool_name=tool_name,
+            tool_input=tool_input,
+            session_id=_SESSION_ID,
+        )
+        assert result is not None
+        assert result.record_id == "CUST-42"
+        assert result.proposed_fields == {}
+        assert result.proposed_lines == []
+        assert result.mutation_type == "delete"
+
+    def test_delete_record_id_extracted_from_tool_input(self):
+        """Delete extracts record_id from top-level 'id' field."""
+        tool_name = _ext("ns_deleteRecord")
+        tool_input = {"recordType": "invoice", "id": "INV-999"}
+        result = build_confirmation_payload(
+            mutation_type="delete",
+            record_type="invoice",
+            tool_name=tool_name,
+            tool_input=tool_input,
+            session_id=_SESSION_ID,
+        )
+        assert result is not None
+        assert result.record_id == "INV-999"
 
 
 # ---------------------------------------------------------------------------
@@ -511,3 +553,322 @@ class TestValidateAndExtractConfirmation:
         assert is_valid is True
         assert extracted_tool_name == tool_name
         assert extracted_input == tool_input
+
+
+# ---------------------------------------------------------------------------
+# Normalizer integration — fix the live MCP shape (data as JSON string)
+# ---------------------------------------------------------------------------
+
+
+def test_proposed_fields_populated_for_live_mcp_shape():
+    """Regression: the card rendered empty for every NetSuite write.
+
+    `tool_input` uses `data` (a JSON string); the old code read `body`.
+    """
+    payload = build_confirmation_payload(
+        mutation_type="create",
+        record_type="customer",
+        tool_name="ext__" + "a" * 32 + "__ns_createRecord",
+        tool_input={
+            "recordType": "customer",
+            "data": '{"companyname": "test ai customer"}',
+        },
+        session_id="11111111-1111-1111-1111-111111111111",
+    )
+    assert payload is not None
+    assert payload.proposed_fields == {"companyname": "test ai customer"}
+
+
+def test_lines_surface_on_the_card():
+    payload = build_confirmation_payload(
+        mutation_type="create",
+        record_type="journalEntry",
+        tool_name="ext__" + "a" * 32 + "__ns_createRecord",
+        tool_input={
+            "recordType": "journalEntry",
+            "data": '{"subsidiary": "1", "line": [{"account": "10", "debit": 5}]}',
+        },
+        session_id="11111111-1111-1111-1111-111111111111",
+    )
+    assert payload is not None
+    assert payload.proposed_lines == [{"account": "10", "debit": 5}]
+
+
+def test_unparseable_payload_blocks_the_write():
+    payload = build_confirmation_payload(
+        mutation_type="create",
+        record_type="customer",
+        tool_name="ext__" + "a" * 32 + "__ns_createRecord",
+        tool_input={"recordType": "customer", "data": "{not json"},
+        session_id="11111111-1111-1111-1111-111111111111",
+    )
+    assert payload is None
+
+
+# ---------------------------------------------------------------------------
+# MF-1 — ValidationResult.invariant_errors must reach the card. Populated at
+# BOTH build sites: create/update/upsert AND delete — a prior task nearly
+# missed the delete branch, per the review.
+# ---------------------------------------------------------------------------
+
+
+class TestBuildConfirmationPayloadInvariantErrors:
+    def test_invariant_errors_populated_for_create(self):
+        validation = ValidationResult(
+            ok=False,
+            invariant_errors=["Journal entry does not balance: debits 100.00 != credits 90.00."],
+        )
+        result = build_confirmation_payload(
+            mutation_type="create",
+            record_type="journalEntry",
+            tool_name=_ext("ns_createRecord"),
+            tool_input={"recordType": "journalEntry", "body": {"subsidiary": "1"}},
+            session_id=_SESSION_ID,
+            validation=validation,
+        )
+        assert result is not None
+        assert result.invariant_errors == ["Journal entry does not balance: debits 100.00 != credits 90.00."]
+
+    def test_invariant_errors_populated_for_update(self):
+        validation = ValidationResult(
+            ok=False,
+            invariant_errors=["Accounting period 'Jan 2026' is closed — posting is not permitted."],
+        )
+        result = build_confirmation_payload(
+            mutation_type="update",
+            record_type="journalEntry",
+            tool_name=_ext("ns_updateRecord"),
+            tool_input={"recordType": "journalEntry", "id": "JE-1", "body": {"memo": "x"}},
+            session_id=_SESSION_ID,
+            validation=validation,
+        )
+        assert result is not None
+        assert result.invariant_errors == ["Accounting period 'Jan 2026' is closed — posting is not permitted."]
+
+    def test_delete_branch_carries_a_hand_built_invariant_violation_to_the_card(self):
+        """The delete branch is a separate code path — easy to miss (per the
+        review). This ValidationResult is hand-built, standing in for
+        whatever check_posting_invariants would produce — it does NOT prove
+        a real delete can produce a non-empty invariant_errors. It cannot
+        today: normalize_for_validation gives every delete fields={} and
+        lines=[], so the real check_posting_invariants can only return []
+        for a delete (no trandate for the period query; 0 == 0 always reads
+        as balanced). Resolving the period from the record being deleted is
+        tracked as ClickUp 86bbk2580, not done here. What this test DOES
+        prove: build_confirmation_payload's delete branch is not dead code —
+        if invariant_errors ever is populated, it reaches the card."""
+        validation = ValidationResult(
+            ok=False,
+            invariant_errors=["Accounting period 'Jan 2026' is closed — posting is not permitted."],
+        )
+        result = build_confirmation_payload(
+            mutation_type="delete",
+            record_type="journalEntry",
+            tool_name=_ext("ns_deleteRecord"),
+            tool_input={"recordType": "journalEntry", "id": "JE-1"},
+            session_id=_SESSION_ID,
+            validation=validation,
+        )
+        assert result is not None
+        assert result.invariant_errors == ["Accounting period 'Jan 2026' is closed — posting is not permitted."]
+
+    def test_invariant_errors_default_empty_without_validation(self):
+        """No `validation` passed at all — must not be dropped as None/missing."""
+        result = build_confirmation_payload(
+            mutation_type="create",
+            record_type="salesOrder",
+            tool_name=_ext("ns_createRecord"),
+            tool_input={"recordType": "salesOrder", "body": {"memo": "test"}},
+            session_id=_SESSION_ID,
+        )
+        assert result is not None
+        assert result.invariant_errors == []
+
+    def test_invariant_errors_empty_when_validation_clean(self):
+        validation = ValidationResult(ok=True)
+        result = build_confirmation_payload(
+            mutation_type="create",
+            record_type="salesOrder",
+            tool_name=_ext("ns_createRecord"),
+            tool_input={"recordType": "salesOrder", "body": {"memo": "test"}},
+            session_id=_SESSION_ID,
+            validation=validation,
+        )
+        assert result is not None
+        assert result.invariant_errors == []
+
+    def test_confirmation_token_still_validates_alongside_invariant_errors(self):
+        """`invariant_errors` is server-computed display data (like
+        `unfillable_line_fields`) — never resubmitted by the client on
+        approve, so it is not part of the signed envelope. Adding it to the
+        payload model must not disturb the existing token round trip."""
+        validation = ValidationResult(
+            ok=False,
+            invariant_errors=["Journal entry does not balance: debits 100.00 != credits 90.00."],
+        )
+        payload = build_confirmation_payload(
+            mutation_type="create",
+            record_type="journalEntry",
+            tool_name=_ext("ns_createRecord"),
+            tool_input={"recordType": "journalEntry", "body": {"subsidiary": "1"}},
+            session_id=_SESSION_ID,
+            validation=validation,
+        )
+        assert payload is not None
+        structured_output = {
+            "confirmation_token": payload.confirmation_token,
+            "tool_name": payload.tool_name,
+            "tool_input": payload.tool_input,
+            "editable_slots": [s.model_dump() for s in payload.editable_slots],
+        }
+        is_valid, _, _ = validate_and_extract_confirmation(structured_output, _SESSION_ID)
+        assert is_valid is True
+
+
+# ---------------------------------------------------------------------------
+# Finding D (D8) — uncovered_slot_names: the pure coverage-check helper the
+# orchestrator's approve gate uses to refuse an approve that doesn't cover
+# every server-declared editable slot.
+# ---------------------------------------------------------------------------
+
+_TRANDATE_SLOT = {"name": "trandate", "label": "Transaction Date", "type": "text", "allowed": None}
+_SUBSIDIARY_SLOT = {"name": "subsidiary", "label": "Subsidiary", "type": "select", "allowed": None}
+
+
+class TestUncoveredSlotNames:
+    def test_no_declared_slots_is_always_covered(self):
+        assert uncovered_slot_names([], {}) == []
+        assert uncovered_slot_names([], {"anything": "x"}) == []
+
+    def test_fully_covered_slots_return_empty(self):
+        assert (
+            uncovered_slot_names(
+                [_TRANDATE_SLOT, _SUBSIDIARY_SLOT],
+                {"trandate": "2026-01-15", "subsidiary": "1"},
+            )
+            == []
+        )
+
+    def test_absent_slot_values_key_is_uncovered(self):
+        assert uncovered_slot_names([_TRANDATE_SLOT], None) == ["trandate"]
+
+    def test_empty_dict_is_uncovered(self):
+        assert uncovered_slot_names([_TRANDATE_SLOT], {}) == ["trandate"]
+
+    def test_non_dict_slot_values_treated_as_zero_coverage(self):
+        assert uncovered_slot_names([_TRANDATE_SLOT], "trandate") == ["trandate"]
+        assert uncovered_slot_names([_TRANDATE_SLOT], ["trandate"]) == ["trandate"]
+        assert uncovered_slot_names([_TRANDATE_SLOT], 42) == ["trandate"]
+
+    def test_partial_coverage_names_only_the_uncovered_field(self):
+        assert uncovered_slot_names([_TRANDATE_SLOT, _SUBSIDIARY_SLOT], {"trandate": "2026-01-15"}) == ["subsidiary"]
+
+    def test_none_value_is_uncovered(self):
+        assert uncovered_slot_names([_TRANDATE_SLOT], {"trandate": None}) == ["trandate"]
+
+    def test_whitespace_only_string_is_uncovered(self):
+        assert uncovered_slot_names([_TRANDATE_SLOT], {"trandate": "   "}) == ["trandate"]
+
+    def test_falsy_scalars_are_not_treated_as_missing(self):
+        """0 / 0.0 / False are legitimate scalar values, not "missing"."""
+        assert uncovered_slot_names([_SUBSIDIARY_SLOT], {"subsidiary": 0}) == []
+        assert uncovered_slot_names([_SUBSIDIARY_SLOT], {"subsidiary": 0.0}) == []
+        assert uncovered_slot_names([_SUBSIDIARY_SLOT], {"subsidiary": False}) == []
+
+
+# ---------------------------------------------------------------------------
+# repair_of / repair_attempt — chain metadata for the bounded write-repair
+# loop (requirement D). Display-only: NOT part of the signed HMAC envelope,
+# same reasoning as invariant_errors — see write_confirmation_service.py's
+# _build_payload_json docstring.
+# ---------------------------------------------------------------------------
+
+
+class TestRepairChainMetadata:
+    def test_defaults_are_none_and_zero(self):
+        payload = WriteConfirmationPayload(
+            mutation_type="create",
+            record_type="salesOrder",
+            proposed_fields={},
+            tool_name=_ext("ns_createRecord"),
+            tool_input={},
+            confirmation_token="abc",
+        )
+        assert payload.repair_of is None
+        assert payload.repair_attempt == 0
+
+    def test_build_confirmation_payload_stamps_repair_of_and_attempt_on_create(self):
+        payload = build_confirmation_payload(
+            mutation_type="create",
+            record_type="salesOrder",
+            tool_name=_ext("ns_createRecord"),
+            tool_input={"data": '{"entity": "123"}'},
+            session_id=_SESSION_ID,
+            repair_of="11111111-1111-1111-1111-111111111111",
+            repair_attempt=1,
+        )
+        assert payload is not None
+        assert payload.repair_of == "11111111-1111-1111-1111-111111111111"
+        assert payload.repair_attempt == 1
+
+    def test_build_confirmation_payload_stamps_repair_of_and_attempt_on_delete(self):
+        payload = build_confirmation_payload(
+            mutation_type="delete",
+            record_type="salesOrder",
+            tool_name=_ext("ns_deleteRecord"),
+            tool_input={"id": "42"},
+            session_id=_SESSION_ID,
+            repair_of="11111111-1111-1111-1111-111111111111",
+            repair_attempt=2,
+        )
+        assert payload is not None
+        assert payload.repair_of == "11111111-1111-1111-1111-111111111111"
+        assert payload.repair_attempt == 2
+
+    def test_defaults_when_not_a_repair(self):
+        payload = build_confirmation_payload(
+            mutation_type="create",
+            record_type="salesOrder",
+            tool_name=_ext("ns_createRecord"),
+            tool_input={"data": '{"entity": "123"}'},
+            session_id=_SESSION_ID,
+        )
+        assert payload is not None
+        assert payload.repair_of is None
+        assert payload.repair_attempt == 0
+
+    def test_repair_of_and_attempt_are_not_signed_into_the_token(self):
+        """Changing repair_of/repair_attempt after minting must NOT
+        invalidate the token — they are display-only chain metadata, not an
+        authorization surface (unlike editable_slots)."""
+        tool_name = _ext("ns_createRecord")
+        tool_input = {"data": '{"entity": "123"}'}
+
+        payload_a = build_confirmation_payload(
+            mutation_type="create",
+            record_type="salesOrder",
+            tool_name=tool_name,
+            tool_input=tool_input,
+            session_id=_SESSION_ID,
+            repair_of=None,
+            repair_attempt=0,
+        )
+        payload_b = build_confirmation_payload(
+            mutation_type="create",
+            record_type="salesOrder",
+            tool_name=tool_name,
+            tool_input=tool_input,
+            session_id=_SESSION_ID,
+            repair_of="some-root-id",
+            repair_attempt=2,
+        )
+        assert payload_a is not None
+        assert payload_b is not None
+        assert payload_a.confirmation_token == payload_b.confirmation_token
+
+        # A structured_output carrying the repair fields still validates —
+        # proves validate_and_extract_confirmation doesn't fold them into
+        # the signed payload either.
+        so = {**payload_b.model_dump(), "status": "pending"}
+        is_valid, _, _ = validate_and_extract_confirmation(so, _SESSION_ID)
+        assert is_valid is True

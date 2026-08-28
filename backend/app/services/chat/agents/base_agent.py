@@ -21,6 +21,7 @@ from xml.sax.saxutils import escape as _xml_escape
 from app.services.chat import thinking
 from app.services.chat.llm_adapter import BaseLLMAdapter, LLMResponse, TokenUsage
 from app.services.chat.prompt_cache import split_system_prompt
+from app.services.chat.selector_app_redirect import build_selector_redirect, is_selector_app_call
 from app.services.chat.tool_call_results import (
     build_tool_call_log_entry,
     tool_call_had_error,
@@ -28,6 +29,307 @@ from app.services.chat.tool_call_results import (
 )
 from app.services.chat.tool_categories import categorize
 from app.services.chat.write_confirmation_service import build_confirmation_payload
+from app.services.chat.write_payload import PayloadParseError
+from app.services.chat.write_validation import validate_mutation
+from app.services.chat.write_validator import ValidationResult
+
+
+class WriteRepairState:
+    """Bounded repair budget for write validation, held in run state.
+
+    A cap the model is asked to respect is a request; a counter that persists
+    and decrements is a guarantee. Exits carry a reason, never a bare boolean.
+
+    Everything here is keyed by `record_type`, never by tool-call id. Stall
+    detection needs the failure fingerprint to persist ACROSS separate tool
+    calls within one repair cycle: the model reproposes a rejected write as a
+    brand-new tool_use block (a new `block.id`) after each rejection, so
+    keying on call id would make every repair attempt look like a fresh
+    write and stall detection would never fire.
+
+    Keying by `record_type` alone has its own failure mode: a turn that
+    creates one journalEntry (exhausting its repair budget) and later
+    proposes a second, unrelated journalEntry of the same type must not
+    inherit the first write's exhausted attempts. `should_repair` resets a
+    record_type's attempt count and fingerprint the moment its repair cycle
+    ends (done/stall/budget) — see `_finish_cycle` — so the NEXT logical
+    write of that type starts with a full budget. That reset only ever runs
+    AFTER a cycle has already been decided, so it cannot weaken stall
+    detection within a still-open cycle: the fingerprint comparison that
+    detects a stall runs earlier in the same call, against the fingerprint
+    left by the PREVIOUS call in that same cycle, before any reset happens.
+
+    Exit reasons are ALSO keyed by record_type (`exit_reason_for`) rather
+    than living on one instance-wide field — a turn that repairs record_type
+    A and then touches record_type B must never let A's exit reason read
+    through as B's.
+    """
+
+    def __init__(self, max_attempts: int = 2) -> None:
+        self.max_attempts = max_attempts
+        self._attempts: dict[str, int] = {}
+        self._fingerprints: dict[str, str] = {}
+        self._exit_reasons: dict[str, str | None] = {}
+
+    def should_repair(self, record_type: str, result: ValidationResult) -> bool:
+        if result.ok:
+            self._finish_cycle(record_type, "done")
+            return False
+
+        fingerprint = result.fingerprint()
+        if self._fingerprints.get(record_type) == fingerprint:
+            # Same failure as last time — recomposing will not help.
+            self._finish_cycle(record_type, "stall")
+            return False
+
+        attempts = self._attempts.get(record_type, 0)
+        if attempts >= self.max_attempts:
+            self._finish_cycle(record_type, "budget")
+            return False
+
+        self._attempts[record_type] = attempts + 1
+        self._fingerprints[record_type] = fingerprint
+        return True
+
+    def _finish_cycle(self, record_type: str, reason: str) -> None:
+        """Record why `record_type`'s repair cycle ended, then clear its
+        attempt count and fingerprint so a later, distinct write of the same
+        type starts fresh instead of inheriting this cycle's exhausted
+        budget (the reported bug)."""
+        self._exit_reasons[record_type] = reason
+        self._attempts.pop(record_type, None)
+        self._fingerprints.pop(record_type, None)
+
+    def exit_reason_for(self, record_type: str) -> str | None:
+        """Why `record_type`'s most recently DECIDED repair cycle ended.
+
+        `None` covers both "never seen" and "mid-cycle, still repairing".
+        Scoped per record_type so a caller checking record type B's outcome
+        never reads record type A's exit reason."""
+        return self._exit_reasons.get(record_type)
+
+
+def _validation_failure_detail(validation: ValidationResult) -> str:
+    """Human-readable summary of what a ``ValidationResult`` got wrong.
+
+    Shared by the repair loop's "requesting another attempt" log entry and
+    the confirmation-card log entry for a card shown despite an unresolved
+    failure (repair exhausted) — both need to name which categories failed,
+    not just that something did.
+    """
+    bits = [
+        f"missing required: {', '.join(validation.missing_required)}" if validation.missing_required else None,
+        f"missing line fields: {', '.join(validation.missing_line_required)}"
+        if validation.missing_line_required
+        else None,
+        f"invariant violations: {'; '.join(validation.invariant_errors)}" if validation.invariant_errors else None,
+    ]
+    return "; ".join(b for b in bits if b) or "validation failed"
+
+
+_WRITE_TOOL_SUFFIXES = ("ns_createRecord", "ns_updateRecord", "ns_upsertRecord", "ns_deleteRecord")
+
+# What the forced write-proposal hop may put on the model's menu — a strict
+# subset of the above, deliberately WITHOUT ns_deleteRecord. Forcing means the
+# model must pick one of these, so anything listed here can be manufactured
+# from a turn that never asked for it; a spurious delete proposal is a far
+# worse outcome than declining to force. Deletes still work by the ordinary
+# path, they just never get compelled. See _forced_write_tool_subset.
+_FORCEABLE_WRITE_TOOLS = ("ns_createRecord", "ns_updateRecord", "ns_upsertRecord")
+
+# The escape hatch on the forced hop's menu. A T2 gate major on this branch
+# established the constraint that governs here: "What fields does a customer
+# record require?" is correctly answered by fetching metadata and replying in
+# prose, so a guard that fires on metadata-then-prose CANNOT distinguish a
+# dodged write from an answered question, and must let the model decline.
+#
+# Forcing a tool choice removes prose as an exit — which would re-create that
+# major by coercing a write card in reply to a question. So the decline stays
+# available, but as a TOOL rather than as narration: the model can still say
+# "nothing to write here", it just has to say it in a form the server can
+# read. Never dispatched; seeing it chosen means "leave the prose alone".
+_DECLINE_WRITE_TOOL = "no_write_was_requested"
+_DECLINE_WRITE_TOOL_DEF = {
+    "name": _DECLINE_WRITE_TOOL,
+    "description": (
+        "Choose this if the user did NOT ask for a record to be created or changed — for "
+        "example they asked what fields a record type has, or any other informational "
+        "question. Choosing this leaves your written answer exactly as you wrote it."
+    ),
+    "input_schema": {"type": "object", "properties": {}},
+}
+
+
+def _bare_tool_name(logged_tool: Any) -> str:
+    """Strip the `ext__<connector>__` prefix off a logged tool name.
+
+    Delegates to `parse_external_tool_name`, the canonical parser that owns the
+    `ext__<connector>__<tool>` format (`mutation_guard._raw_tool_name` already
+    routes through it too). Three call sites here had grown their own
+    `.rsplit("__", 1)[-1]` (T2 gate, minor) — the format is one fact about
+    `_make_ext_tool_name`, and every private copy is a place to miss when it
+    changes.
+
+    Unlike the canonical parser this falls back to the name AS GIVEN rather
+    than None, because a tool_calls_log entry may be a LOCAL tool with no
+    `ext__` prefix at all — for those the bare name is already correct, and
+    returning None would silently drop them from every scan below.
+    """
+    from app.services.chat.tools import parse_external_tool_name
+
+    name = str(logged_tool or "")
+    parsed = parse_external_tool_name(name)
+    return parsed[1] if parsed else name
+
+
+def _write_proposed_this_turn(tool_calls_log: list[dict[str, Any]]) -> bool:
+    """True if the model has already proposed a NetSuite write this turn."""
+    return any(_bare_tool_name(e.get("tool")) in _WRITE_TOOL_SUFFIXES for e in tool_calls_log or [])
+
+
+def _last_metadata_call(tool_calls_log: list[dict[str, Any]]) -> tuple[str | None, str] | None:
+    """The turn's most recent USABLE ``ns_getRecordTypeMetadata`` call, as
+    ``(connector_id, record_type)`` — or None if there wasn't one.
+
+    Single resolver on purpose. The connector and the record type are two facts
+    about ONE tool call, and reading them from separately-scanned entries let
+    them disagree: a malformed follow-up metadata call (no ``recordType``)
+    would move the connector without moving the record type, so the forced
+    write hop could offer connector B's tools under an instruction naming
+    connector A's record. Both callers now read the same entry or neither does.
+
+    "Usable" means it carries a record type — an entry without one cannot name
+    a write, so it is skipped rather than allowed to win by recency.
+    ``connector_id`` is None for a non-external tool name, which callers must
+    treat as "cannot resolve a connector".
+    """
+    from app.services.chat.tools import parse_external_tool_name
+
+    for entry in reversed(tool_calls_log or []):
+        if _bare_tool_name(entry.get("tool")) != "ns_getRecordTypeMetadata":
+            continue
+        params = entry.get("params")
+        if not isinstance(params, dict):
+            continue
+        rt = params.get("recordType") or params.get("record_type")
+        if not rt:
+            continue
+        parsed = parse_external_tool_name(entry.get("tool", "") or "")
+        return (str(parsed[0]) if parsed else None, str(rt))
+    return None
+
+
+def _last_metadata_record_type(tool_calls_log: list[dict[str, Any]]) -> str | None:
+    """The record type this turn last fetched metadata for, or None.
+
+    Used to make the ns_selector_app redirect concrete ("call ns_createRecord
+    for customer") rather than generic. Read from the turn's own tool log
+    because `record_type` is bound only inside the mutation branch — naming it
+    at the dispatch site raises UnboundLocalError, which is precisely what a
+    live-path test caught here.
+    """
+    resolved = _last_metadata_call(tool_calls_log)
+    return resolved[1] if resolved else None
+
+
+def _write_reached_the_human(agent: Any) -> bool:
+    """True only once a confirmation card has actually been shown this turn.
+
+    This replaced `_write_proposed_this_turn` as the prose guard's stand-down
+    condition, and the difference is the whole bug. That helper asks "was a
+    write tool called this turn", which is True for a proposal the
+    investigation gate REJECTED — a write nobody ever saw.
+
+    Caught live on staging 2026-08-28 only after instrumenting the branch:
+
+        [FORCE_WRITE] prose branch step=2
+          tools_so_far=['..._ns_createRecord', '..._ns_getRecordTypeMetadata']
+          pending_write_type='customer' already_bounced=False
+
+    The model called ns_createRecord before fetching metadata, the gate
+    bounced it, the model fetched metadata and then answered in prose. Both
+    guard stages stood down because a write "had been proposed", so the
+    operator got a question and no card — and `already_bounced=False` shows
+    stage 1 never ran either. The guard exists precisely for turns where
+    nothing reached the human, so that is what it must test.
+    """
+    return bool(getattr(agent, "_write_confirmation_emitted", False))
+
+
+def _forced_write_tool_subset(
+    tool_calls_log: list[dict[str, Any]],
+    tool_definitions: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """The tool menu for the forced write-proposal hop: ONLY the write tools of
+    the connector this turn already fetched record metadata from.
+
+    Two properties earn the narrowness, and both were live failures first:
+
+    * **No read tool on the menu.** Given the whole toolset and a "you must
+      call something" tool_choice, the model has an escape hatch — call
+      ns_getSubsidiaries again, learn nothing new, and answer in prose anyway.
+      Removing chat as an option only works if the alternatives all constitute
+      a proposal.
+    * **No other connector's write tools.** A tenant with both a sandbox and a
+      production connection has two ns_createRecord tools. Forcing a write
+      must never widen the account the model already chose — that would turn a
+      UX fix into a wrong-account write, which is the failure this branch's
+      environment labelling exists to prevent.
+
+    Returns ``[]`` — meaning DO NOT FORCE — when the turn shows no metadata
+    call (no declared write intent to act on) or when that connector exposes
+    no write tools at all. Callers must treat an empty list as "leave the
+    model's prose alone": a forced tool_choice over an empty tool list is an
+    API error, and a read-only connector is an ordinary configuration here.
+    """
+    from app.services.chat.tools import parse_external_tool_name
+
+    # Connector and record type come from the SAME log entry, so the forced
+    # menu and the instruction text can never describe different connectors.
+    # They used to be resolved independently — this function took the most
+    # recent metadata call of any shape, while the instruction took the most
+    # recent one carrying a recordType — so a malformed follow-up call could
+    # offer connector B's write tools under an instruction naming connector A's
+    # record type. Two resolvers for one fact is the same shape as every other
+    # defect on this branch; there is now one.
+    resolved = _last_metadata_call(tool_calls_log)
+    if resolved is None:
+        return []
+    connector_id = resolved[0]
+
+    subset: list[dict[str, Any]] = []
+    for tool in tool_definitions or []:
+        parsed = parse_external_tool_name(str(tool.get("name", "")))
+        if not parsed:
+            continue
+        if str(parsed[0]) == connector_id and parsed[1] in _FORCEABLE_WRITE_TOOLS:
+            subset.append(tool)
+    return subset
+
+
+def _metadata_fetched_this_turn(tool_calls_log: list[dict[str, Any]], record_type: str) -> bool:
+    """True if `tool_calls_log` already contains a prior `ns_getRecordTypeMetadata`
+    call for *record_type* earlier in this turn.
+
+    Backs the investigation gate (agentic-repair design requirement A): a
+    create/upsert proposal reaching the mutation intercept with no prior
+    same-turn metadata lookup for its own record type is bounced back to the
+    model rather than validated. Matches on `record_type` only — a metadata
+    call logged for a DIFFERENT record type does not satisfy this one's gate.
+    """
+    from app.services.chat.tools import parse_external_tool_name
+
+    for entry in tool_calls_log:
+        parsed = parse_external_tool_name(entry.get("tool", ""))
+        if not parsed:
+            continue
+        _, raw_name = parsed
+        if raw_name != "ns_getRecordTypeMetadata":
+            continue
+        params = entry.get("params") or {}
+        if params.get("recordType") == record_type:
+            return True
+    return False
 
 
 def _build_learned_rules_block(learned_rules: list) -> str:
@@ -891,6 +1193,95 @@ class BaseSpecialistAgent(abc.ABC):
                 agent_name=self.agent_name,
             )
 
+    async def _compose_forced_write_proposal(
+        self,
+        *,
+        adapter: Any,
+        model: str,
+        prompt_parts: Any,
+        task: str,
+        tool_calls_log: list[dict[str, Any]],
+    ) -> Any | None:
+        """One extra hop whose only possible output is a write proposal.
+
+        Deliberately built on a FRESH, minimal message list rather than the
+        turn's own history. Two reasons, one of them a hard API constraint:
+
+        * A forced tool_choice is incompatible with extended thinking, and
+          this turn has been running with thinking on — replaying its history
+          (which carries thinking blocks) under a forced choice is the exact
+          combination `thinking.is_forced_tool_choice` exists to keep apart.
+          A clean list is ours to construct, so the question never arises.
+        * The model does not need the history. It needs the record type and
+          the values the user gave, both of which are in *task*; every
+          required field it cannot supply is filled by the server's own slot
+          declaration from the curated registry, not by the model guessing.
+
+        Returns ``None`` — meaning leave the model's prose alone — on any
+        failure, on a connector with no forceable write tools, and when the
+        turn shows no declared write intent. This hop may never be the reason
+        a turn breaks: the worst case it is allowed to produce is the
+        behaviour we already have.
+        """
+        # print(flush=True), not logger.info: structlog does not surface stdlib
+        # logger calls in container logs (.claude/rules/sqlalchemy-fastapi.md
+        # #8). A guard whose firing cannot be observed in production is how
+        # this path's first live diagnosis went wrong — absence of a marker
+        # was read as absence of the call, when the marker could never appear.
+        forced_tools = _forced_write_tool_subset(tool_calls_log, self.tool_definitions)
+        print(
+            f"[FORCE_WRITE] hop entered: menu={len(forced_tools)} "
+            f"record_type={_last_metadata_record_type(tool_calls_log)!r}",
+            flush=True,
+        )
+        if not forced_tools:
+            print("[FORCE_WRITE] no forceable write tool for that connector — leaving prose alone", flush=True)
+            return None
+
+        record_type = _last_metadata_record_type(tool_calls_log) or "record"
+        instruction = (
+            f"Compose the {record_type} write the user asked for, as a tool call. Include every "
+            "field value the user actually gave you. For each REQUIRED field whose value you "
+            'cannot determine from what they said, add "ask_user": ["<field name>"] to the SAME '
+            "tool call — the server looks up the real options and renders them as a dropdown on "
+            "the confirmation card the user has to approve anyway. In ask_user send field NAMES "
+            "only, never values and never your own list of options. Do not invent a value for a "
+            "field the user did not specify: an unanswered field belongs in ask_user."
+        )
+
+        try:
+            forced = await adapter.create_message(
+                model=model,
+                max_tokens=4096,
+                system=prompt_parts.static,
+                system_dynamic=prompt_parts.dynamic,
+                messages=[{"role": "user", "content": f"Task: {task}\n\n{instruction}"}],
+                tools=[*forced_tools, _DECLINE_WRITE_TOOL_DEF],
+                tool_choice={"type": "any"},
+                thinking_level="none",
+            )
+        except Exception:
+            logger.warning("forced write-proposal composition failed", exc_info=True)
+            import traceback
+
+            print(f"[FORCE_WRITE] hop FAILED: {traceback.format_exc()[-400:]}", flush=True)
+            return None
+
+        blocks = getattr(forced, "tool_use_blocks", None) or []
+        if not blocks:
+            return None
+        # The model used its decline. Return None so the turn delivers the
+        # answer it already wrote — the escape hatch only works if choosing it
+        # actually leaves the prose alone. `_DECLINE_WRITE_TOOL` must never
+        # reach the dispatcher: it is a local signal, not a real tool.
+        if all(getattr(b, "name", "") == _DECLINE_WRITE_TOOL for b in blocks):
+            print("[FORCE_WRITE] model DECLINED — no write was requested", flush=True)
+            return None
+        # A mixed response would otherwise dispatch the synthetic name and
+        # fail the whole turn on an unknown tool.
+        forced.tool_use_blocks = [b for b in blocks if getattr(b, "name", "") != _DECLINE_WRITE_TOOL]
+        return forced
+
     async def run_streaming(
         self,
         task: str,
@@ -1000,8 +1391,71 @@ class BaseSpecialistAgent(abc.ABC):
                 total_cache_creation += response.usage.cache_creation_input_tokens
                 total_cache_read += response.usage.cache_read_input_tokens
 
+                # ── Forced write-proposal composition (stage 2 of the
+                # prose-instead-of-proposing guard) ──
+                # Stage 1 below ASKS the model to propose instead of talking.
+                # It complies about a third of the time: driven live on
+                # staging 2026-08-28, one identical create prompt over three
+                # runs produced 1 card and 2 prose endings, plus two operator
+                # runs that both ended in prose. Asking harder is not an
+                # option we still have — this is the fifth prompt-shaped
+                # attempt at the same behaviour, and `.claude/rules/
+                # agent-graph.md` is explicit that a guardrail is code at the
+                # choke point, never prompt prose.
+                #
+                # So stage 2 stops asking and removes chat from the menu: one
+                # extra hop offering ONLY that connector's write tools with a
+                # forced tool_choice. The model still decides the operation
+                # and composes the payload; it simply cannot end the turn by
+                # narrating a question at an operator who has no way to answer
+                # one. Runs at most once per turn, and only AFTER stage 1 has
+                # already been ignored, so a turn that merely asked a question
+                # about customers is never forced into proposing a write.
+                if (
+                    not response.tool_use_blocks
+                    and getattr(self, "_prose_instead_of_write_bounced", False)
+                    and not getattr(self, "_write_proposal_forced", False)
+                    and not _write_reached_the_human(self)
+                ):
+                    self._write_proposal_forced = True
+                    print("[FORCE_WRITE] stage2 triggered", flush=True)
+                    _forced = await self._compose_forced_write_proposal(
+                        adapter=adapter,
+                        model=model,
+                        prompt_parts=prompt_parts,
+                        task=task,
+                        tool_calls_log=tool_calls_log,
+                    )
+                    if _forced is not None and _forced.tool_use_blocks:
+                        # Swap in the composed proposal and fall through to the
+                        # ordinary tool-handling path below — the mutation
+                        # intercept, the investigation gate, the HITL card and
+                        # the slot declaration all run exactly as they would
+                        # for a proposal the model had volunteered. Nothing
+                        # about the write is decided here.
+                        total_input_tokens += _forced.usage.input_tokens
+                        total_output_tokens += _forced.usage.output_tokens
+                        print(
+                            f"[FORCE_WRITE] PROPOSAL COMPOSED: {[b.name for b in _forced.tool_use_blocks]}",
+                            flush=True,
+                        )
+                        response = _forced
+                # ── End forced write-proposal composition ──
+
                 # Pure text response — done
                 if not response.tool_use_blocks:
+                    # Only on turns that declared write intent — an ordinary
+                    # answered question must not log. Kept in production
+                    # deliberately: this guard's first live diagnosis was wrong
+                    # for two deploys because every branch of it was silent.
+                    if _last_metadata_record_type(tool_calls_log):
+                        print(
+                            f"[FORCE_WRITE] prose on a write turn step={step} "
+                            f"record_type={_last_metadata_record_type(tool_calls_log)!r} "
+                            f"card_reached_human={_write_reached_the_human(self)} "
+                            f"already_bounced={getattr(self, '_prose_instead_of_write_bounced', False)}",
+                            flush=True,
+                        )
                     # Guard: if step 0 and task contains a SELECT query, the model
                     # is hallucinating from conversation history instead of executing.
                     # Force it to actually call the tool.
@@ -1020,6 +1474,53 @@ class BaseSpecialistAgent(abc.ABC):
                         )
                         continue
 
+                    # ── Prose-instead-of-proposing guard ──
+                    # The model called ns_getRecordTypeMetadata — declaring in
+                    # its own tool call that it means to write — and then
+                    # answered in chat without proposing anything. Observed
+                    # live three times: the operator is asked a question in
+                    # prose, the confirmation card never appears, and the slot
+                    # form stays unreachable. Neither the server-declared slot
+                    # (needs a proposal to attach to) nor the ns_selector_app
+                    # redirect (needs a selector call) can reach this path —
+                    # both hang off a tool call that never happens.
+                    #
+                    # The trigger is the model's OWN behaviour, not a guess at
+                    # user intent: it looked up how to write a record type and
+                    # then wrote nothing. Same shape as the step-0 query guard
+                    # directly above, and bounded the same way — ONE re-entry
+                    # per turn, so a model that answers in prose twice still
+                    # finishes instead of looping.
+                    _pending_write_type = _last_metadata_record_type(tool_calls_log)
+                    if (
+                        _pending_write_type
+                        and not _write_reached_the_human(self)
+                        and not getattr(self, "_prose_instead_of_write_bounced", False)
+                    ):
+                        self._prose_instead_of_write_bounced = True
+                        print(
+                            f"[FORCE_WRITE] stage1 bounce fired for {_pending_write_type!r}",
+                            flush=True,
+                        )
+                        messages.append(adapter.build_assistant_message(response))
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"IF the user asked you to create or change a {_pending_write_type}: do NOT "
+                                    "ask them about it in chat — they cannot act on a question here. Call the "
+                                    "write tool now with every field you already know, and for each required "
+                                    'value you cannot determine add "ask_user": ["<field name>"] to that same '
+                                    "tool call. The server fetches the real options itself and renders them as a "
+                                    "dropdown on the confirmation card they must approve anyway. Send field "
+                                    "NAMES only — never values, never your own list of options.\n\n"
+                                    "IF the user only asked a question and did not request a write, ignore all "
+                                    "of the above and simply answer them."
+                                ),
+                            }
+                        )
+                        continue
+                    # ── End prose-instead-of-proposing guard ──
                     final_text = "\n".join(response.text_blocks) if response.text_blocks else ""
 
                     # Extract confidence BEFORE stripping tag so agent self-score is used
@@ -1238,6 +1739,341 @@ class BaseSpecialistAgent(abc.ABC):
                     if mutation_type is not None:
                         record_type = block.input.get("recordType", "unknown")
 
+                        # ── ask_user hint pop (requirement C) — MUST happen
+                        # before anything else touches tool_input: this key
+                        # must never reach NetSuite, the signed HMAC
+                        # envelope, or execute_tool_call. The model may name
+                        # field NAMES ONLY it wants a human to choose; every
+                        # VALUE offered to the human comes from a
+                        # server-executed fetch (slot_option_sources.py),
+                        # resolved below once validation/the repair loop have
+                        # decided this attempt is the one shown as a card.
+                        _ask_user_hint = block.input.pop("ask_user", None)
+
+                        # Is this write headed for NetSuite at all? Everything
+                        # the agentic write loop adds below — the investigation
+                        # gate, validate_mutation, the ask_user slot fetch —
+                        # is built entirely out of NetSuite sibling tools
+                        # (ns_getRecordTypeMetadata, ns_getSubsidiaries). A
+                        # Celigo connector has none of them, so running any of
+                        # it there bounces the write with an instruction to
+                        # call a tool that does not exist in its toolset, and
+                        # the write can never proceed. Same `ns_` test the
+                        # ns_getRecord pre-fetch below already uses; a
+                        # non-NetSuite write keeps `validation = None` and
+                        # reaches the confirmation card exactly as it did
+                        # before this loop existed.
+                        from app.services.chat.tools import (
+                            parse_external_tool_name as _parse_write_tool_name,
+                        )
+
+                        _parsed_write = _parse_write_tool_name(block.name)
+                        _is_netsuite_write = bool(_parsed_write and _parsed_write[1].startswith("ns_"))
+
+                        # ── Investigation gate (requirement A) — mechanism,
+                        # not prompt (the write profile's metadata-first
+                        # prose has been ignored live on this branch before).
+                        # Only create/upsert are gated: partial payloads are
+                        # legitimate on update, and metadata cannot yield
+                        # required fields anyway (see write_validator.py's
+                        # honesty rule), so no pre-flight check could ever
+                        # prove a create complete — the gate enforces
+                        # BEHAVIOR (look before composing), the human
+                        # enforces correctness. Bounded by construction: at
+                        # most ONE bounce per (turn, record_type), tracked in
+                        # a per-instance set — a stubborn model's SECOND
+                        # proposal always reaches validation/the card.
+                        if _is_netsuite_write and mutation_type in ("create", "upsert"):
+                            if not hasattr(self, "_investigation_gate_bounced"):
+                                self._investigation_gate_bounced: set[str] = set()
+                            if record_type not in self._investigation_gate_bounced and not _metadata_fetched_this_turn(
+                                tool_calls_log, record_type
+                            ):
+                                self._investigation_gate_bounced.add(record_type)
+                                result_str = json.dumps(
+                                    {
+                                        "unexamined_write": True,
+                                        "instruction": (
+                                            f"Call ns_getRecordTypeMetadata for '{record_type}' first, "
+                                            "resolve any values you need (e.g. ns_getSubsidiaries, or a "
+                                            "SuiteQL lookup), then re-propose this write. If a value the "
+                                            "record needs has several valid options and the user's request "
+                                            "does not say which, do NOT pick one — add "
+                                            "'ask_user': ['<field name>'] to the write call so the user "
+                                            "is shown the real options."
+                                        ),
+                                    }
+                                )
+                                elapsed_ms = int((time.monotonic() - t0) * 1000)
+                                yield (
+                                    "tool_end",
+                                    {
+                                        "tool_name": block.name,
+                                        "step": step,
+                                        "duration_ms": elapsed_ms,
+                                        "success": False,
+                                        "result_summary": (
+                                            f"Investigation required — call ns_getRecordTypeMetadata for "
+                                            f"'{record_type}' before composing this {mutation_type}."
+                                        ),
+                                    },
+                                )
+                                tool_calls_log.append(
+                                    build_tool_call_log_entry(
+                                        step=step,
+                                        agent_name=self.agent_name,
+                                        tool_name=block.name,
+                                        params=block.input,
+                                        result_str=result_str,
+                                        duration_ms=elapsed_ms,
+                                    )
+                                )
+                                tool_results_content.append(
+                                    {
+                                        "type": "tool_result",
+                                        "tool_use_id": block.id,
+                                        "content": result_str,
+                                        "is_error": True,
+                                    }
+                                )
+                                continue
+                        # ── End investigation gate ──
+
+                        # ── Write validation + bounded repair ──
+                        if not hasattr(self, "_write_repair"):
+                            self._write_repair = WriteRepairState(max_attempts=2)
+
+                        # validate_mutation() is the single entry point that
+                        # owns normalize -> get_record_metadata ->
+                        # check_posting_invariants -> validate_write,
+                        # INCLUDING the delete shape (`{recordType, id}`, no
+                        # `data`/`body` key) — a delete used to raise
+                        # PayloadParseError out of normalize_write_payload, a
+                        # function whose contract it was never meant to
+                        # meet, which silently skipped this entire block for
+                        # every delete. See write_validation.py.
+                        validation = None
+                        if _is_netsuite_write:
+                            try:
+                                validation = await validate_mutation(
+                                    tool_name=block.name,
+                                    tool_input=block.input,
+                                    mutation_type=mutation_type,
+                                    record_type=record_type,
+                                    tenant_id=self.tenant_id,
+                                    actor_id=self.user_id,
+                                    correlation_id=self.correlation_id,
+                                    db=db,
+                                    session_id=session_id or str(self.tenant_id),
+                                )
+                            except PayloadParseError as exc:
+                                result_str = json.dumps({"error": f"Write payload could not be parsed: {exc}"})
+                                validation = None
+
+                        # ── ask_user resolution (requirement C) — MUST run
+                        # BEFORE the repair decision below, not after it.
+                        # `ask_user` is the model stating it CANNOT determine
+                        # a value and needs a human to choose. Deciding to
+                        # repair first would send exactly that field back to
+                        # the model to resolve on its own — the one action it
+                        # has just told us cannot work — so the proposal would
+                        # bounce, re-propose, and burn its repair budget to a
+                        # stall while the human who could answer in one click
+                        # never sees a card. Resolving first lets
+                        # `with_delegated_slots` reclassify a resolved field
+                        # from "missing" to "asked", which is what keeps the
+                        # question in front of the person who can answer it.
+                        #
+                        # Cost: a hint on a proposal that ends up bounced
+                        # anyway spends its option fetch for nothing. That is
+                        # accepted — the fetch is one cached MCP call, and it
+                        # is the only way to know whether the hint actually
+                        # covers the gap before ruling on it.
+                        #
+                        # The model contributes a NAME ONLY; every VALUE comes
+                        # from a server-executed fetch (slot_option_sources.py)
+                        # — see that module's docstring for the full boundary.
+                        _ask_user_rejected: list[dict[str, str]] = []
+
+                        # Which field names might become a slot on this card.
+                        #
+                        # Two sources, and the second is what makes the form
+                        # reachable at all. (1) names the MODEL asked about via
+                        # its ask_user hint. (2) names the SERVER already knows
+                        # are required, are missing from this payload, and have
+                        # a server-side option source — i.e. there is a real
+                        # list of valid values a human can just pick from.
+                        #
+                        # For (2) there is nothing left for the model to
+                        # discover: it can only guess, and guessing is exactly
+                        # what the confirmation card exists to prevent on a
+                        # financial write. Relying on the model to volunteer
+                        # ask_user did not work in practice either — live on
+                        # staging it narrated the options in prose, or called
+                        # ns_selector_app and announced a picker the UI cannot
+                        # render, so the form was effectively unreachable.
+                        #
+                        # The repair loop keeps every gap a human CANNOT pick
+                        # from a list (a company name, a line-level field):
+                        # those still bounce to the model, which is the only
+                        # party that can resolve them.
+                        _hint_names = (
+                            [n for n in _ask_user_hint if isinstance(n, str) and n]
+                            if isinstance(_ask_user_hint, list)
+                            else []
+                        )
+                        _slot_names = list(_hint_names)
+                        if validation is not None:
+                            from app.services.chat.slot_option_sources import (
+                                is_option_sourced as _is_option_sourced,
+                            )
+
+                            for _missing in validation.missing_required:
+                                if _missing not in _slot_names and _is_option_sourced(_missing):
+                                    _slot_names.append(_missing)
+
+                        if _slot_names and validation is not None:
+                            from app.services.chat.slot_option_sources import resolve_ask_user_slots
+                            from app.services.chat.write_validation import resolve_curated_metadata
+
+                            # MUST be the curated metadata, not raw
+                            # get_record_metadata — a T2 gate round found
+                            # these two paths split, so a field could be
+                            # reported `missing_required` by validation and
+                            # simultaneously rejected here as "not a
+                            # recognized field", bouncing to the repair loop
+                            # the exact question meant to reach a human.
+                            # Served from the same (connector_id,
+                            # record_type) 1h cache validate_mutation just
+                            # populated, so this is a cache hit, not a second
+                            # live MCP round trip.
+                            _ask_user_metadata = await resolve_curated_metadata(
+                                tool_name=block.name,
+                                tool_input=block.input,
+                                mutation_type=mutation_type,
+                                record_type=record_type,
+                                tenant_id=self.tenant_id,
+                                actor_id=self.user_id,
+                                correlation_id=self.correlation_id,
+                                db=db,
+                                session_id=session_id or str(self.tenant_id),
+                            )
+                            _ask_user_slots, _ask_user_rejected = await resolve_ask_user_slots(
+                                _slot_names,
+                                metadata=_ask_user_metadata,
+                                mutation_tool_name=block.name,
+                                tenant_id=self.tenant_id,
+                                actor_id=self.user_id,
+                                correlation_id=self.correlation_id,
+                                db=db,
+                                session_id=session_id or str(self.tenant_id),
+                                # Only slots that ALREADY carry a real
+                                # allow-set count as declared. A slot
+                                # `validate_write` derived for a missing
+                                # required field has `allowed=None` (the live
+                                # metadata shape has no options), which is
+                                # unusable to a human — they would have to
+                                # type a NetSuite internal id from memory.
+                                # Treating those as declared would skip the
+                                # fetch that is the entire point of the hint;
+                                # `with_delegated_slots` replaces the bare
+                                # slot with the resolved one by name.
+                                already_declared=[s.name for s in validation.editable_slots if s.allowed],
+                            )
+                            if _ask_user_slots:
+                                validation = validation.with_delegated_slots(_ask_user_slots)
+                        # ── End ask_user resolution ──
+
+                        if validation is not None:
+                            if self._write_repair.should_repair(record_type, validation):
+                                # Hand the model a structured error INSTEAD of a
+                                # card. The human never sees an invalid payload.
+                                # Same "feed error back to agent, retry within
+                                # the turn" shape as the Plan Mode InterceptError
+                                # branch above — result_str is what recomposes
+                                # the model's next attempt, not an SSE event.
+                                _model_error = validation.as_model_error()
+                                if _ask_user_rejected:
+                                    # The card path reports rejected hints to
+                                    # the model; this path must too. Without
+                                    # it a model whose hint named a bad field
+                                    # gets bounced with no clue WHY the
+                                    # delegation did not happen, so its next
+                                    # attempt repeats the same bad name and
+                                    # the repair budget drains on a mistake
+                                    # we already diagnosed.
+                                    # Front of the dict on purpose: the
+                                    # persisted `result_summary` is truncated,
+                                    # and a diagnostic that only exists past
+                                    # the cut is invisible to anyone reading
+                                    # the tool-call log afterwards.
+                                    _model_error = {
+                                        "unresolved_ask_user_fields": _ask_user_rejected,
+                                        **_model_error,
+                                    }
+                                result_str = json.dumps(_model_error)
+                                elapsed_ms = int((time.monotonic() - t0) * 1000)
+                                # success MUST be False here — a repair round that
+                                # logs as a success would make the whole loop
+                                # invisible in the tool-call log. The summary
+                                # names what actually failed (not exit_reason:
+                                # that field stays None on this branch by design
+                                # — the loop hasn't exited, it's mid-repair —
+                                # so it would misreport rather than diagnose).
+                                _failure_detail = _validation_failure_detail(validation)
+                                yield (
+                                    "tool_end",
+                                    {
+                                        "tool_name": block.name,
+                                        "step": step,
+                                        "duration_ms": elapsed_ms,
+                                        "success": False,
+                                        "result_summary": f"Write repair requested ({_failure_detail})",
+                                    },
+                                )
+                                tool_calls_log.append(
+                                    build_tool_call_log_entry(
+                                        step=step,
+                                        agent_name=self.agent_name,
+                                        tool_name=block.name,
+                                        params=block.input,
+                                        result_str=result_str,
+                                        duration_ms=elapsed_ms,
+                                    )
+                                )
+                                tool_results_content.append(
+                                    {
+                                        "type": "tool_result",
+                                        "tool_use_id": block.id,
+                                        "content": result_str,
+                                        "is_error": True,
+                                    }
+                                )
+                                continue
+
+                        # Consumed by Task 7 when the card learns about slots.
+                        self._last_validation = validation
+                        # ── End write validation + bounded repair ──
+
+                        # ── Repair-chain stamping + intent guard (D/E) —
+                        # server-stamped from orchestrator-held repair
+                        # context ONLY, never from block.input. A repair-turn
+                        # proposal whose (mutation_type, record_type) differs
+                        # from the root is NOT linked into the chain — it
+                        # becomes a plainly fresh proposal with a fresh
+                        # budget (the intent guard).
+                        _repair_context = getattr(self, "_write_repair_context", None)
+                        _card_repair_of: str | None = None
+                        _card_repair_attempt = 0
+                        if (
+                            _repair_context is not None
+                            and _repair_context.get("mutation_type") == mutation_type
+                            and _repair_context.get("record_type") == record_type
+                        ):
+                            _card_repair_of = _repair_context.get("root_id")
+                            _card_repair_attempt = _repair_context.get("attempt", 0)
+                        # ── End repair-chain stamping ──
+
                         # For updates/upserts: pre-fetch current record for
                         # before/after diff display (capped at 5s to avoid
                         # blocking the SSE stream on slow MCP calls)
@@ -1278,6 +2114,68 @@ class BaseSpecialistAgent(abc.ABC):
                                             record_id,
                                         )
 
+                        # Human labels for reference fields, so the card shows
+                        # "Framework Computer UK Ltd (ID 5)" rather than
+                        # {"id": "5"} on the one screen whose job is informed
+                        # consent. Display-only and server-sourced; see
+                        # reference_field_labels. NetSuite-only: the option
+                        # sources it reads are ns_* tools.
+                        _field_labels: dict[str, str] = {}
+                        if _is_netsuite_write:
+                            from app.services.chat.reference_field_labels import resolve_reference_labels
+                            from app.services.chat.write_payload import (
+                                PayloadParseError as _PPE,
+                            )
+                            from app.services.chat.write_validation import (
+                                normalize_for_validation as _normalize_for_labels,
+                            )
+
+                            try:
+                                _lbl_payload = _normalize_for_labels(mutation_type, block.input)
+                                _field_labels = await resolve_reference_labels(
+                                    _lbl_payload.fields,
+                                    mutation_tool_name=block.name,
+                                    tenant_id=self.tenant_id,
+                                    actor_id=self.user_id,
+                                    correlation_id=self.correlation_id,
+                                    db=db,
+                                    session_id=session_id or str(self.tenant_id),
+                                )
+                            except _PPE:
+                                # An unparseable payload is handled below by
+                                # build_confirmation_payload returning None;
+                                # labels are cosmetic, so say nothing here.
+                                _field_labels = {}
+
+                        # WHERE this write will land. Resolved from the
+                        # connector embedded in the tool name — the same one
+                        # that executes — so the card cannot name one account
+                        # while another receives the write. A tenant may hold
+                        # both a sandbox and a production NetSuite connector,
+                        # and an operator approving a card must be able to see
+                        # which books it hits.
+                        _target_account: str | None = None
+                        _target_environment: str | None = None
+                        if _is_netsuite_write and _parsed_write:
+                            try:
+                                from app.services.chat.tools import netsuite_environment_of
+                                from app.services.mcp_connector_service import (
+                                    get_mcp_connector as _get_conn_for_card,
+                                )
+
+                                _conn_row = await _get_conn_for_card(db, _parsed_write[0], self.tenant_id)
+                                _meta = getattr(_conn_row, "metadata_json", None) if _conn_row else None
+                                _acct = _meta.get("account_id") if isinstance(_meta, dict) else None
+                                if isinstance(_acct, str) and _acct.strip():
+                                    _target_account = _acct.strip()
+                                    _target_environment = netsuite_environment_of(_target_account)
+                            except Exception:
+                                # Display-only: an unknown target renders as
+                                # nothing. Never guess "PRODUCTION" onto a card
+                                # a human is about to approve, and never fail
+                                # the card over a label.
+                                logger.warning("could not resolve the write's target account", exc_info=True)
+
                         payload = build_confirmation_payload(
                             mutation_type=mutation_type,
                             record_type=record_type,
@@ -1285,31 +2183,66 @@ class BaseSpecialistAgent(abc.ABC):
                             tool_input=block.input,
                             session_id=session_id if session_id else str(self.tenant_id),
                             current_record=current_record,
+                            validation=getattr(self, "_last_validation", None),
+                            repair_of=_card_repair_of,
+                            repair_attempt=_card_repair_attempt,
+                            field_labels=_field_labels,
+                            target_account=_target_account,
+                            target_environment=_target_environment,
                         )
 
+                        payload_unparseable = False
                         if payload is None:
-                            # Blocked or unknown record type
-                            result_str = json.dumps(
-                                {
-                                    "error": f"Record type '{record_type}' is not allowed for "
-                                    f"AI-initiated {mutation_type} operations.",
-                                    "blocked": True,
-                                }
-                            )
+                            # `build_confirmation_payload` returns None for two distinct
+                            # reasons: the record type is blocked/unknown, or the record
+                            # type is allowed but the write payload could not be parsed.
+                            # Re-check the allowlist to report the right one to the model.
+                            from app.services.chat.mutation_guard import is_record_type_allowed
+
+                            if is_record_type_allowed(record_type):
+                                payload_unparseable = True
+                                result_str = json.dumps(
+                                    {
+                                        "error": f"The write payload for this {mutation_type} operation on "
+                                        f"{record_type} could not be read (missing or malformed data). "
+                                        f"The write was NOT sent to NetSuite.",
+                                        "blocked": True,
+                                    }
+                                )
+                            else:
+                                result_str = json.dumps(
+                                    {
+                                        "error": f"Record type '{record_type}' is not allowed for "
+                                        f"AI-initiated {mutation_type} operations.",
+                                        "blocked": True,
+                                    }
+                                )
                         else:
+                            # A card has now genuinely reached the human. This
+                            # — not "a write tool was called" — is what stands
+                            # the prose guard down; see _write_reached_the_human.
+                            self._write_confirmation_emitted = True
                             yield ("confirmation_required", payload.model_dump())
-                            result_str = json.dumps(
-                                {
-                                    "confirmation_required": True,
-                                    "mutation_type": mutation_type,
-                                    "record_type": record_type,
-                                    "message": (
-                                        f"This {mutation_type} operation on {record_type} requires human "
-                                        f"confirmation. The confirmation dialog has been shown to the user. "
-                                        f"Do NOT proceed until the user explicitly approves."
-                                    ),
-                                }
-                            )
+                            _confirmation_result: dict[str, Any] = {
+                                "confirmation_required": True,
+                                "mutation_type": mutation_type,
+                                "record_type": record_type,
+                                "message": (
+                                    f"This {mutation_type} operation on {record_type} requires human "
+                                    f"confirmation. The confirmation dialog has been shown to the user. "
+                                    f"Do NOT proceed until the user explicitly approves."
+                                ),
+                            }
+                            if _ask_user_rejected:
+                                # A hinted name that failed verification
+                                # produces NO slot — tell the model so here,
+                                # on the SAME result the card is announced
+                                # in, rather than silently dropping the
+                                # request. The write still proceeds to the
+                                # card either way (unresolved names are not a
+                                # validation failure).
+                                _confirmation_result["unresolved_ask_user_fields"] = _ask_user_rejected
+                            result_str = json.dumps(_confirmation_result)
 
                         elapsed_ms = int((time.monotonic() - t0) * 1000)
                         yield (
@@ -1320,20 +2253,35 @@ class BaseSpecialistAgent(abc.ABC):
                                 "duration_ms": elapsed_ms,
                                 "success": payload is not None,
                                 "result_summary": (
-                                    "Confirmation required" if payload is not None else "Blocked record type"
+                                    "Confirmation required"
+                                    if payload is not None
+                                    else ("Unparseable write payload" if payload_unparseable else "Blocked record type")
                                 ),
                             },
                         )
-                        tool_calls_log.append(
-                            build_tool_call_log_entry(
-                                step=step,
-                                agent_name=self.agent_name,
-                                tool_name=block.name,
-                                params=block.input,
-                                result_str=result_str,
-                                duration_ms=elapsed_ms,
-                            )
+                        _log_entry = build_tool_call_log_entry(
+                            step=step,
+                            agent_name=self.agent_name,
+                            tool_name=block.name,
+                            params=block.input,
+                            result_str=result_str,
+                            duration_ms=elapsed_ms,
                         )
+                        _last_validation = getattr(self, "_last_validation", None)
+                        if payload is not None and _last_validation is not None and not _last_validation.ok:
+                            # The repair loop gave up (exit_reason "stall" or
+                            # "budget", not "done") and this card is being shown
+                            # despite a still-invalid payload. Without this, the
+                            # persisted trail cannot distinguish "validated clean
+                            # on the first attempt" from "failed repeatedly, we
+                            # gave up, and showed a human an invalid payload
+                            # anyway" — very different events on a financial
+                            # write path. SSE/card behavior is unchanged; this
+                            # only annotates the persisted tool_calls_log entry.
+                            _log_entry["validation_failed_before_confirmation"] = _validation_failure_detail(
+                                _last_validation
+                            )
+                        tool_calls_log.append(_log_entry)
                         tool_results_content.append(
                             {
                                 "type": "tool_result",
@@ -1395,6 +2343,58 @@ class BaseSpecialistAgent(abc.ABC):
                         )
                         continue
                     # ── End recon group-approve intercept ──
+
+                    # ── ns_selector_app redirect ──
+                    # The model reaches for NetSuite's record picker when it
+                    # wants a human to choose a value. That picker is a
+                    # NetSuite-hosted UI with no surface in this client, so the
+                    # call is ANSWERED — never dispatched — with the name of
+                    # the mechanism that does work here: an ask_user slot on
+                    # the confirmation card. Measured on staging: 3 of 5
+                    # "create a customer" attempts ended here, two of them
+                    # under prompts explicitly telling the model to use
+                    # ask_user. Prompt wording has now been ignored three
+                    # times, so this is the choke point instead. Full evidence
+                    # in selector_app_redirect.
+                    if is_selector_app_call(block.name):
+                        result_str = build_selector_redirect(
+                            block.input,
+                            mutation_record_type=_last_metadata_record_type(tool_calls_log),
+                        )
+                        elapsed_ms = int((time.monotonic() - t0) * 1000)
+                        yield (
+                            "tool_end",
+                            {
+                                "tool_name": block.name,
+                                "step": step,
+                                "duration_ms": elapsed_ms,
+                                "success": False,
+                                "result_summary": (
+                                    "Selector app is not available in this client — "
+                                    "asking for the choice on the confirmation card instead."
+                                ),
+                            },
+                        )
+                        tool_calls_log.append(
+                            build_tool_call_log_entry(
+                                step=step,
+                                agent_name=self.agent_name,
+                                tool_name=block.name,
+                                params=block.input,
+                                result_str=result_str,
+                                duration_ms=elapsed_ms,
+                            )
+                        )
+                        tool_results_content.append(
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": block.id,
+                                "content": result_str,
+                                "is_error": True,
+                            }
+                        )
+                        continue
+                    # ── End ns_selector_app redirect ──
 
                     policy_result = policy_evaluate(active_policy, block.name, block.input)
                     if not policy_result["allowed"]:
