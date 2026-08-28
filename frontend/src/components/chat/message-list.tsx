@@ -106,11 +106,32 @@ function makeMdComponents(isTerminal: boolean): Components {
         </div>
       );
     },
+    a({ href, children, ...props }) {
+      // Chat links open in a NEW tab. The record link after a NetSuite write
+      // is the motivating case: following it in place would navigate the user
+      // out of the conversation they are mid-way through, losing the card and
+      // the thread. rel="noopener noreferrer" matches the convention already
+      // used by citation-renderer, docs-link-card and sheets-link-card — and
+      // noopener matters here because these point at an external ERP.
+      return (
+        <a
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-primary underline hover:no-underline"
+          {...props}
+        >
+          {children}
+        </a>
+      );
+    },
   };
 }
 
-/** Static default markdown components (no terminal styling) */
-const mdComponents: Components = makeMdComponents(false);
+/** Static default markdown components (no terminal styling).
+ *  Exported so tests assert against the SAME map production renders with — a
+ *  test that rebuilds its own component config proves nothing about the app. */
+export const mdComponents: Components = makeMdComponents(false);
 const mdComponentsTerminal: Components = makeMdComponents(true);
 
 /**
