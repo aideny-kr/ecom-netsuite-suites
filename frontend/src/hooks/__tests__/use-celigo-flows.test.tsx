@@ -15,6 +15,7 @@ import {
   useCeligoIntegrationFlows,
   useCeligoAllFlows,
   useCeligoFlowDetail,
+  useCeligoSyncStatus,
 } from "@/hooks/use-celigo-flows";
 
 function makeWrapper(qc: QueryClient) {
@@ -94,4 +95,16 @@ it("useCeligoAllFlows shares its cache key with useCeligoIntegrationFlows for th
   const qc = new QueryClient(qcOpts);
   renderHook(() => useCeligoAllFlows(["int-1"]), { wrapper: makeWrapper(qc) });
   await waitFor(() => expect(qc.getQueryState(["celigo", "integration-flows", "int-1"])).toBeDefined());
+});
+
+// Fix round 1 -- optional addition (team lead: "you MAY now wire that stat
+// in if it is cheap"). Task 8 added GET /celigo/sync-status for the
+// mockup's "Last synced" stat that Task 9 originally had to drop.
+it("useCeligoSyncStatus fetches GET /api/v1/celigo/sync-status under ['celigo','sync-status']", async () => {
+  api.get.mockResolvedValueOnce({ last_synced_at: "2026-08-27T12:00:00Z" });
+  const qc = new QueryClient(qcOpts);
+  const { result } = renderHook(() => useCeligoSyncStatus(), { wrapper: makeWrapper(qc) });
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(api.get).toHaveBeenCalledWith("/api/v1/celigo/sync-status");
+  expect(qc.getQueryState(["celigo", "sync-status"])).toBeDefined();
 });

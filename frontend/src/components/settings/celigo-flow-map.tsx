@@ -12,12 +12,19 @@
  *    number, volume is context.
  * 2. (plan-authorized) A paused (`disabled`) flow stays in the tree, dimmed
  *    with a "Paused" pill -- never filtered out.
- * 3. (forced by reality) The mockup's "Last synced" stat and "Sync now"
- *    button are DROPPED. Task 8 exposes no endpoint for either: the nightly
- *    sync's freshness cursor lives in `cursor_states` (object_type=
- *    "celigo_flow_map", see `app/workers/tasks/celigo_flow_map_sync.py`) but
- *    no GET here returns it, and no endpoint triggers a sync. Inventing a
- *    button with no working action would be worse than omitting it.
+ * 3. (forced by reality, then partially undone) The mockup's "Last synced"
+ *    stat and "Sync now" button were BOTH dropped at first: Task 8 exposed
+ *    no endpoint for either, and a button with no working action is worse
+ *    than no button. Fix round 1 added `GET /celigo/sync-status` (Task 8
+ *    follow-up), so "Last synced" is wired in below (`formatRelativeTime` +
+ *    the 4th `StatCard`). "Sync now" is STILL dropped -- no trigger endpoint
+ *    exists yet.
+ *
+ * Fix round 1 also added the rule this file now applies everywhere it calls
+ * a `useCeligo*` hook: an `isError` query state must render as a VISIBLY
+ * DIFFERENT state from "loading" or "genuinely empty" -- never silently as
+ * either. See `ErrorNotice` and its call sites for why (a misleading empty
+ * state is worse than a blank one; a stuck spinner has no escape).
  *
  * Every other field choice below is grounded in Task 8's response shape or
  * in `sanitizer.py`'s CONFIRMED-live Celigo schemas (schedule, filter,
@@ -30,11 +37,13 @@ import {
   useCeligoAllFlows,
   useCeligoFlowDetail,
   useCeligoIntegrations,
+  useCeligoSyncStatus,
   type CeligoFlowStep,
   type CeligoFlowSummary,
   type CeligoIntegration,
 } from "@/hooks/use-celigo-flows";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
@@ -44,7 +53,7 @@ import {
 } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { cn } from "@/lib/utils";
-import { ChevronDown, ChevronRight, Loader2 } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronRight, Loader2 } from "lucide-react";
 
 // ---------------------------------------------------------------------------
 // Formatters -- each grounded in a confirmed real shape, not the mockup.
@@ -61,6 +70,27 @@ export function formatSchedule(schedule: Record<string, unknown> | null): string
     return `every ${schedule.value} ${schedule.unit}`;
   }
   return "custom schedule";
+}
+
+/** `last_synced_at` is `cursor_states`' freshness cursor -- a real ISO
+ * timestamp (`GET /celigo/sync-status`, Task 8), never a fabricated
+ * value. `null` covers "no connection" and "connected but never synced"
+ * identically (see `CeligoSyncStatus`'s docstring) -- surfaced by the
+ * caller, not here, since only the caller knows whether the query itself
+ * is still loading/errored (this formatter only handles the resolved
+ * value). */
+function formatRelativeTime(iso: string | null): string {
+  if (!iso) return "Never synced";
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return "Never synced";
+  const diffMs = Date.now() - then;
+  const minutes = Math.floor(diffMs / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.floor(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
 }
 
 /** 'generator' == a pageGenerator (source/export); 'processor' == a
@@ -117,6 +147,40 @@ function KeyValueOrJson({ value }: { value: Record<string, unknown> }) {
   );
 }
 
+/** Fix round 1, Important: a query error must never render as (or alongside)
+ * an empty state -- an operator reading "0 flows" or a permanent spinner has
+ * no way to tell "genuinely nothing here" from "the request failed", and the
+ * former actively misleads them into troubleshooting the wrong thing (e.g.
+ * reconnecting a Celigo connection that's actually fine). Shared across all
+ * four `useCeligo*` call-sites in this file so the distinction reads the
+ * same everywhere. */
+function ErrorNotice({
+  message,
+  onRetry,
+  compact,
+}: {
+  message: string;
+  onRetry?: () => void;
+  compact?: boolean;
+}) {
+  return (
+    <div
+      className={cn(
+        "flex items-center gap-2 rounded-lg border border-destructive/50 bg-destructive/5 text-destructive",
+        compact ? "px-3 py-1.5 text-[12px]" : "px-3 py-2 text-[13px]",
+      )}
+    >
+      <AlertTriangle className={cn("shrink-0", compact ? "h-3 w-3" : "h-3.5 w-3.5")} />
+      <span className="flex-1">{message}</span>
+      {onRetry && (
+        <Button variant="outline" size="sm" className="h-6 px-2 text-[11px]" onClick={onRetry}>
+          Retry
+        </Button>
+      )}
+    </div>
+  );
+}
+
 function FlowStatusPill({ flow }: { flow: CeligoFlowSummary }) {
   if (flow.disabled) {
     return (
@@ -154,7 +218,7 @@ function StepRow({ step }: { step: CeligoFlowStep }) {
     <div className="flex items-center gap-2 py-1 text-[12px] text-muted-foreground">
       <span>
         {stepKindLabel(step.role)} ·{" "}
-        <span className="font-mono">{step.adaptor_type ?? "Unknown adaptor"}</span>
+        <span className="font-mono">{step.adaptor_type || "Unknown adaptor"}</span>
       </span>
       {step.attachments.length > 0 && (
         <Badge
@@ -184,7 +248,12 @@ function FlowRow({
   onToggle: () => void;
   onOpenDetail: () => void;
 }) {
-  const { data: detail, isLoading } = useCeligoFlowDetail(expanded ? flow.id : undefined);
+  const {
+    data: detail,
+    isLoading,
+    isError,
+    refetch,
+  } = useCeligoFlowDetail(expanded ? flow.id : undefined);
 
   return (
     <div className={cn("border-t", flow.disabled && "opacity-60")}>
@@ -218,9 +287,10 @@ function FlowRow({
               Loading steps…
             </div>
           )}
-          {detail?.steps.map((step) => (
-            <StepRow key={step.id} step={step} />
-          ))}
+          {isError && (
+            <ErrorNotice message="Couldn't load steps." onRetry={() => refetch()} compact />
+          )}
+          {!isLoading && !isError && detail?.steps.map((step) => <StepRow key={step.id} step={step} />)}
         </div>
       )}
     </div>
@@ -234,10 +304,14 @@ function FlowRow({
 function IntegrationTree({
   integration,
   flows,
+  flowsError,
+  onRetryFlows,
   onSelectFlow,
 }: {
   integration: CeligoIntegration;
   flows: CeligoFlowSummary[];
+  flowsError: boolean;
+  onRetryFlows: () => void;
   onSelectFlow: (flowId: string) => void;
 }) {
   const [treeExpanded, setTreeExpanded] = useState(true);
@@ -255,39 +329,51 @@ function IntegrationTree({
         </div>
       </div>
 
-      <button
-        type="button"
-        onClick={() => setTreeExpanded((v) => !v)}
-        className="flex w-full items-center gap-2 bg-muted/40 px-4 py-2 text-left"
-      >
-        {treeExpanded ? (
-          <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
-        ) : (
-          <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
-        )}
-        <span className="text-[13px] font-bold">
-          {flows.length} flow{flows.length === 1 ? "" : "s"}
-        </span>
-        {failingCount > 0 && (
-          <Badge
-            variant="outline"
-            className="text-[11px] border-red-500/50 bg-red-500/10 text-red-700 dark:text-red-400"
+      {flowsError ? (
+        // This integration's flows failed to load -- MUST NOT fall through
+        // to the "0 flows" tree header below, which would read as a
+        // healthy, empty integration rather than a failed request (fix
+        // round 1, Important).
+        <div className="px-4 py-3">
+          <ErrorNotice message="Couldn't load this integration's flows." onRetry={onRetryFlows} compact />
+        </div>
+      ) : (
+        <>
+          <button
+            type="button"
+            onClick={() => setTreeExpanded((v) => !v)}
+            className="flex w-full items-center gap-2 bg-muted/40 px-4 py-2 text-left"
           >
-            {failingCount} failing
-          </Badge>
-        )}
-      </button>
+            {treeExpanded ? (
+              <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+            ) : (
+              <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
+            )}
+            <span className="text-[13px] font-bold">
+              {flows.length} flow{flows.length === 1 ? "" : "s"}
+            </span>
+            {failingCount > 0 && (
+              <Badge
+                variant="outline"
+                className="text-[11px] border-red-500/50 bg-red-500/10 text-red-700 dark:text-red-400"
+              >
+                {failingCount} failing
+              </Badge>
+            )}
+          </button>
 
-      {treeExpanded &&
-        flows.map((flow) => (
-          <FlowRow
-            key={flow.id}
-            flow={flow}
-            expanded={expandedFlowId === flow.id}
-            onToggle={() => setExpandedFlowId((id) => (id === flow.id ? null : flow.id))}
-            onOpenDetail={() => onSelectFlow(flow.id)}
-          />
-        ))}
+          {treeExpanded &&
+            flows.map((flow) => (
+              <FlowRow
+                key={flow.id}
+                flow={flow}
+                expanded={expandedFlowId === flow.id}
+                onToggle={() => setExpandedFlowId((id) => (id === flow.id ? null : flow.id))}
+                onOpenDetail={() => onSelectFlow(flow.id)}
+              />
+            ))}
+        </>
+      )}
     </div>
   );
 }
@@ -308,7 +394,7 @@ function GraphNode({
   return (
     <div className={cn("min-w-[180px] rounded-lg border px-3 py-2", highlight && "border-green-500/50 bg-green-500/5")}>
       <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{kind}</p>
-      <p className="mt-0.5 font-mono text-[12px]">{step.adaptor_type ?? "Unknown adaptor"}</p>
+      <p className="mt-0.5 font-mono text-[12px]">{step.adaptor_type || "Unknown adaptor"}</p>
       {step.attachments.length > 0 && (
         <Badge
           variant="outline"
@@ -374,7 +460,12 @@ function FieldMappingPanel({ step }: { step: CeligoFlowStep }) {
 }
 
 function FlowDetailDialog({ flowId, onOpenChange }: { flowId: string | null; onOpenChange: (open: boolean) => void }) {
-  const { data: flow, isLoading } = useCeligoFlowDetail(flowId ?? undefined);
+  const {
+    data: flow,
+    isLoading,
+    isError,
+    refetch,
+  } = useCeligoFlowDetail(flowId ?? undefined);
   const sources = flow?.steps.filter((s) => s.role === "generator") ?? [];
   const destinations = flow?.steps.filter((s) => s.role === "processor") ?? [];
   const stepsWithFilter = flow?.steps.filter((s) => s.filter_json) ?? [];
@@ -383,7 +474,15 @@ function FlowDetailDialog({ flowId, onOpenChange }: { flowId: string | null; onO
   return (
     <Dialog open={!!flowId} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[85vh] max-w-3xl overflow-y-auto">
-        {isLoading || !flow ? (
+        {isError ? (
+          // MUST be checked before the loading/!flow branch below -- once a
+          // query errors, isLoading is false and `flow` stays undefined
+          // forever, so that branch alone gets stuck on "Loading flow…"
+          // with no escape but closing the dialog (fix round 1, Important).
+          <div className="flex flex-col items-center gap-3 py-8">
+            <ErrorNotice message="Couldn't load this flow." onRetry={() => refetch()} />
+          </div>
+        ) : isLoading || !flow ? (
           <div className="flex items-center justify-center gap-2 py-8 text-[13px] text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" />
             Loading flow…
@@ -397,21 +496,25 @@ function FlowDetailDialog({ flowId, onOpenChange }: { flowId: string | null; onO
               </DialogDescription>
             </DialogHeader>
 
-            <div className="flex items-start gap-3 overflow-x-auto py-2">
-              {sources.map((s) => (
-                <GraphNode key={s.id} step={s} kind="SOURCE" highlight />
-              ))}
-              {sources.length > 0 && destinations.length > 0 && (
-                <span className="mt-4 text-muted-foreground" aria-hidden>
-                  →
-                </span>
-              )}
-              <div className="flex flex-col gap-2">
-                {destinations.map((s) => (
-                  <GraphNode key={s.id} step={s} kind="DESTINATION" />
+            {flow.steps.length === 0 ? (
+              <p className="py-2 text-[12px] text-muted-foreground">No steps configured on this flow.</p>
+            ) : (
+              <div className="flex items-start gap-3 overflow-x-auto py-2">
+                {sources.map((s) => (
+                  <GraphNode key={s.id} step={s} kind="SOURCE" highlight />
                 ))}
+                {sources.length > 0 && destinations.length > 0 && (
+                  <span className="mt-4 text-muted-foreground" aria-hidden>
+                    →
+                  </span>
+                )}
+                <div className="flex flex-col gap-2">
+                  {destinations.map((s) => (
+                    <GraphNode key={s.id} step={s} kind="DESTINATION" />
+                  ))}
+                </div>
               </div>
-            </div>
+            )}
 
             <div className="grid gap-4 pt-2 sm:grid-cols-2">
               <div className="space-y-4">
@@ -440,18 +543,33 @@ function FlowDetailDialog({ flowId, onOpenChange }: { flowId: string | null; onO
 // Stats strip
 // ---------------------------------------------------------------------------
 
-function StatCard({ label, value, tone }: { label: string; value: number; tone?: "err" }) {
+function StatCard({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  /** A count (Integrations/Flows/Open errors) or a formatted string (Last
+   * synced's relative time / "Never synced" / a loading placeholder). */
+  value: number | string;
+  tone?: "err" | "ok";
+}) {
+  const isErrTone = tone === "err" && typeof value === "number" && value > 0;
   return (
     <div
       className={cn(
         "rounded-lg border border-l-2 bg-card px-3 py-2",
-        tone === "err" && value > 0 ? "border-l-red-500" : "border-l-primary/40",
+        isErrTone ? "border-l-red-500" : tone === "ok" ? "border-l-green-500" : "border-l-primary/40",
       )}
     >
       <p className="text-[11px] text-muted-foreground">{label}</p>
       <p
         data-testid="celigo-stat-value"
-        className={cn("text-[20px] font-semibold", tone === "err" && value > 0 && "text-red-600")}
+        className={cn(
+          "text-[20px] font-semibold",
+          isErrTone && "text-red-600",
+          tone === "ok" && "text-green-600",
+        )}
       >
         {value}
       </p>
@@ -464,9 +582,15 @@ function StatCard({ label, value, tone }: { label: string; value: number; tone?:
 // ---------------------------------------------------------------------------
 
 export function CeligoFlowMap() {
-  const { data: integrations, isLoading } = useCeligoIntegrations();
+  const {
+    data: integrations,
+    isLoading,
+    isError: integrationsError,
+    refetch: refetchIntegrations,
+  } = useCeligoIntegrations();
   const integrationIds = (integrations ?? []).map((i) => i.id);
   const flowQueries = useCeligoAllFlows(integrationIds);
+  const syncStatus = useCeligoSyncStatus();
   const [selectedFlowId, setSelectedFlowId] = useState<string | null>(null);
 
   if (isLoading) {
@@ -474,6 +598,22 @@ export function CeligoFlowMap() {
       <div className="rounded-xl border bg-card p-6 shadow-soft animate-pulse">
         <div className="h-6 w-40 bg-muted rounded" />
         <div className="mt-3 h-4 w-64 bg-muted rounded" />
+      </div>
+    );
+  }
+
+  if (integrationsError) {
+    // MUST be its own branch, never the "no integrations" copy below (fix
+    // round 1, Important) -- that copy tells the operator to (re)connect
+    // Celigo, which is actively misleading when the connection is fine and
+    // this request just failed.
+    return (
+      <div className="space-y-2">
+        <h3 className="text-lg font-semibold">Flow Map</h3>
+        <ErrorNotice
+          message="Couldn't load your Celigo integrations."
+          onRetry={() => refetchIntegrations()}
+        />
       </div>
     );
   }
@@ -495,6 +635,14 @@ export function CeligoFlowMap() {
   const allFlows = Array.from(flowsByIntegration.values()).flat();
   const totalOpenErrors = allFlows.reduce((sum, f) => sum + f.error_count, 0);
 
+  // Loading/error render a neutral placeholder rather than a fabricated
+  // "Never synced" -- that string is a real, meaningful claim (fix round
+  // 1's Important lesson applies here too, at smaller scale: don't let an
+  // unresolved query's silence read as a confident answer).
+  const syncedValue =
+    syncStatus.isLoading || syncStatus.isError ? "—" : formatRelativeTime(syncStatus.data?.last_synced_at ?? null);
+  const syncedOk = !syncStatus.isLoading && !syncStatus.isError && !!syncStatus.data?.last_synced_at;
+
   return (
     <div className="space-y-4">
       <div>
@@ -504,21 +652,27 @@ export function CeligoFlowMap() {
         </p>
       </div>
 
-      <div data-testid="celigo-stats-strip" className="grid grid-cols-3 gap-3">
+      <div data-testid="celigo-stats-strip" className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <StatCard label="Integrations" value={integrations.length} />
         <StatCard label="Flows" value={allFlows.length} />
         <StatCard label="Open errors" value={totalOpenErrors} tone="err" />
+        <StatCard label="Last synced" value={syncedValue} tone={syncedOk ? "ok" : undefined} />
       </div>
 
       <div className="space-y-3">
-        {integrations.map((integration) => (
-          <IntegrationTree
-            key={integration.id}
-            integration={integration}
-            flows={flowsByIntegration.get(integration.id) ?? []}
-            onSelectFlow={setSelectedFlowId}
-          />
-        ))}
+        {integrations.map((integration, index) => {
+          const flowsQuery = flowQueries[index];
+          return (
+            <IntegrationTree
+              key={integration.id}
+              integration={integration}
+              flows={flowsByIntegration.get(integration.id) ?? []}
+              flowsError={!!flowsQuery?.isError}
+              onRetryFlows={() => flowsQuery?.refetch()}
+              onSelectFlow={setSelectedFlowId}
+            />
+          );
+        })}
       </div>
 
       <p className="flex flex-wrap items-center gap-3 text-[11px] text-muted-foreground">

@@ -10,12 +10,14 @@ const mocks = vi.hoisted(() => ({
   integrations: vi.fn(),
   allFlows: vi.fn(),
   flowDetail: vi.fn(),
+  syncStatus: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-celigo-flows", () => ({
   useCeligoIntegrations: () => mocks.integrations(),
   useCeligoAllFlows: () => mocks.allFlows(),
   useCeligoFlowDetail: (flowId: string | undefined) => mocks.flowDetail(flowId),
+  useCeligoSyncStatus: () => mocks.syncStatus(),
 }));
 
 import { CeligoFlowMap } from "../celigo-flow-map";
@@ -125,6 +127,8 @@ beforeEach(() => {
   mocks.allFlows.mockReset();
   mocks.flowDetail.mockReset();
   mocks.flowDetail.mockReturnValue({ data: undefined, isLoading: false });
+  mocks.syncStatus.mockReset();
+  mocks.syncStatus.mockReturnValue({ data: undefined, isLoading: true });
 });
 
 describe("CeligoFlowMap — empty and loading states", () => {
@@ -147,15 +151,43 @@ describe("CeligoFlowMap — stats strip", () => {
   it("aggregates integration, flow, and open-error counts across every integration", () => {
     mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
     setLists([[healthyFlow, failingFlow, pausedFlow]]);
+    mocks.syncStatus.mockReturnValue({ data: { last_synced_at: null }, isLoading: false });
     wrap(<CeligoFlowMap />);
 
     const stripe = within(screen.getByTestId("celigo-stats-strip"));
     expect(stripe.getByText("Integrations")).toBeInTheDocument();
     expect(stripe.getByText("Flows")).toBeInTheDocument();
     expect(stripe.getByText("Open errors")).toBeInTheDocument();
-    // 1 integration, 3 flows, 12 open errors (only failingFlow has any)
+    expect(stripe.getByText("Last synced")).toBeInTheDocument();
+    // 1 integration, 3 flows, 12 open errors (only failingFlow has any), never synced
     const stats = stripe.getAllByTestId("celigo-stat-value").map((el) => el.textContent);
-    expect(stats).toEqual(["1", "3", "12"]);
+    expect(stats).toEqual(["1", "3", "12", "Never synced"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1 -- optional addition: Task 8 shipped GET /celigo/sync-status
+// for the mockup's "Last synced" stat this task originally had to drop.
+// ---------------------------------------------------------------------------
+
+describe("CeligoFlowMap — Last synced stat", () => {
+  it("shows a relative time when a sync has completed", () => {
+    mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
+    setLists([[healthyFlow]]);
+    const fiveMinutesAgo = new Date(Date.now() - 5 * 60_000).toISOString();
+    mocks.syncStatus.mockReturnValue({ data: { last_synced_at: fiveMinutesAgo }, isLoading: false });
+    wrap(<CeligoFlowMap />);
+
+    expect(screen.getByText(/5 min ago/i)).toBeInTheDocument();
+  });
+
+  it("shows 'Never synced' when no sync has ever completed, not a misleading blank", () => {
+    mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
+    setLists([[healthyFlow]]);
+    mocks.syncStatus.mockReturnValue({ data: { last_synced_at: null }, isLoading: false });
+    wrap(<CeligoFlowMap />);
+
+    expect(screen.getByText(/never synced/i)).toBeInTheDocument();
   });
 });
 
@@ -276,5 +308,157 @@ describe("CeligoFlowMap — flow detail (screen 03)", () => {
     // Field mapping table renders the CONFIRMED {fields:[{extract,generate}]} shape.
     expect(within(dialog).getByText("entity")).toBeInTheDocument();
     expect(within(dialog).getByText("customer.id")).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1 -- Important: a query error must never render as an empty
+// state. Reviewer's exact concern: `useCeligoIntegrations` failing renders
+// the SAME copy as "genuinely no integrations", telling the operator to
+// reconnect a connection that's actually fine.
+// ---------------------------------------------------------------------------
+
+describe("CeligoFlowMap — error states are distinct from empty states (fix round 1)", () => {
+  it("a failed integrations query shows an error, never the 'no integrations synced' copy", () => {
+    mocks.integrations.mockReturnValue({
+      data: undefined,
+      isLoading: false,
+      isError: true,
+      refetch: vi.fn(),
+    });
+    setLists([]);
+    wrap(<CeligoFlowMap />);
+
+    expect(screen.getByText(/couldn.?t load/i)).toBeInTheDocument();
+    expect(screen.queryByText(/no.*integrations.*synced/i)).not.toBeInTheDocument();
+  });
+
+  it("a failed integrations query offers a retry that calls refetch", () => {
+    const refetch = vi.fn();
+    mocks.integrations.mockReturnValue({ data: undefined, isLoading: false, isError: true, refetch });
+    setLists([]);
+    wrap(<CeligoFlowMap />);
+
+    fireEvent.click(screen.getByRole("button", { name: /retry/i }));
+    expect(refetch).toHaveBeenCalled();
+  });
+
+  it("a failed per-integration flows query marks that integration's card as errored, not silently 0 flows", () => {
+    mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
+    mocks.allFlows.mockReturnValue([
+      { data: undefined, isLoading: false, isError: true, refetch: vi.fn() },
+    ]);
+    wrap(<CeligoFlowMap />);
+
+    expect(screen.getByText(/couldn.?t load.*flows/i)).toBeInTheDocument();
+    expect(screen.queryByText(/0 flows/i)).not.toBeInTheDocument();
+  });
+
+  it("expanding a flow whose step-detail query failed shows an error, not silence", async () => {
+    mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
+    setLists([[healthyFlow]]);
+    mocks.flowDetail.mockImplementation((flowId: string | undefined) =>
+      flowId === "flow-healthy"
+        ? { data: undefined, isLoading: false, isError: true, refetch: vi.fn() }
+        : { data: undefined, isLoading: false },
+    );
+    wrap(<CeligoFlowMap />);
+
+    fireEvent.click(screen.getByRole("button", { name: /expand.*inventory sync|inventory sync.*expand/i }));
+
+    await waitFor(() => expect(screen.getByText(/couldn.?t load.*steps/i)).toBeInTheDocument());
+  });
+
+  it("the flow detail dialog shows an error instead of spinning forever when its query fails", async () => {
+    mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
+    setLists([[healthyFlow]]);
+    mocks.flowDetail.mockImplementation((flowId: string | undefined) =>
+      flowId === "flow-healthy"
+        ? { data: undefined, isLoading: false, isError: true, refetch: vi.fn() }
+        : { data: undefined, isLoading: false },
+    );
+    wrap(<CeligoFlowMap />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Inventory Sync" }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/couldn.?t load/i)).toBeInTheDocument();
+    expect(within(dialog).queryByText(/loading flow/i)).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1 -- Minor 2: the graph strip needs a "no steps" fallback,
+// matching the Filter/Field-mapping panels right below it.
+// ---------------------------------------------------------------------------
+
+describe("CeligoFlowMap — flow detail with zero steps (fix round 1)", () => {
+  it("shows a graph-strip empty state for a flow with no steps, matching the filter/mapping fallback style", async () => {
+    mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
+    setLists([[healthyFlow]]);
+    mocks.flowDetail.mockImplementation((flowId: string | undefined) =>
+      flowId === "flow-healthy"
+        ? {
+            data: { id: "flow-healthy", name: "Inventory Sync", schedule: null, steps: [], unassigned_attachments: [] },
+            isLoading: false,
+          }
+        : { data: undefined, isLoading: false },
+    );
+    wrap(<CeligoFlowMap />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Inventory Sync" }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/no steps configured/i)).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1 -- Minor 3: `adaptor_type: ""` must degrade the same as null
+// (the exact bug shape that shipped earlier this session for account_name).
+// ---------------------------------------------------------------------------
+
+describe("CeligoFlowMap — empty-string adaptor_type treated as missing (fix round 1)", () => {
+  it("renders 'Unknown adaptor' for a step whose adaptor_type is an empty string, at lvl3", async () => {
+    mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
+    setLists([[healthyFlow]]);
+    mocks.flowDetail.mockReturnValue({
+      data: {
+        id: "flow-healthy",
+        steps: [{ ...generatorStep, adaptor_type: "" }],
+        unassigned_attachments: [],
+      },
+      isLoading: false,
+    });
+    wrap(<CeligoFlowMap />);
+
+    fireEvent.click(screen.getByRole("button", { name: /expand.*inventory sync|inventory sync.*expand/i }));
+
+    await waitFor(() => expect(screen.getByText(/unknown adaptor/i)).toBeInTheDocument());
+  });
+
+  it("renders 'Unknown adaptor' for a step whose adaptor_type is an empty string, in the screen 03 graph node", async () => {
+    mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
+    setLists([[healthyFlow]]);
+    mocks.flowDetail.mockImplementation((flowId: string | undefined) =>
+      flowId === "flow-healthy"
+        ? {
+            data: {
+              id: "flow-healthy",
+              name: "Inventory Sync",
+              schedule: null,
+              steps: [{ ...generatorStep, adaptor_type: "" }],
+              unassigned_attachments: [],
+            },
+            isLoading: false,
+          }
+        : { data: undefined, isLoading: false },
+    );
+    wrap(<CeligoFlowMap />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Inventory Sync" }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/unknown adaptor/i)).toBeInTheDocument();
   });
 });

@@ -86,6 +86,21 @@ export function useCeligoIntegrations() {
   });
 }
 
+/** `null` covers BOTH "no active Celigo connection" and "connected, but no
+ * sync has ever completed" identically -- see `CeligoSyncStatusOut`'s
+ * docstring (backend/app/api/v1/celigo_flows.py). The stats strip has the
+ * same one thing to say either way. */
+export interface CeligoSyncStatus {
+  last_synced_at: string | null;
+}
+
+export function useCeligoSyncStatus() {
+  return useQuery<CeligoSyncStatus>({
+    queryKey: ["celigo", "sync-status"],
+    queryFn: () => apiClient.get<CeligoSyncStatus>("/api/v1/celigo/sync-status"),
+  });
+}
+
 function integrationFlowsQuery(integrationId: string) {
   return {
     queryKey: ["celigo", "integration-flows", integrationId] as const,
