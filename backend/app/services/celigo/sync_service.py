@@ -104,6 +104,7 @@ from app.services.celigo.client import get_resource, list_flow_errors_for_step, 
 from app.services.celigo.errors import upsert_errors
 from app.services.celigo.graph import ScriptRef, walk_script_refs
 from app.services.celigo.repository import (
+    backfill_attachment_script_ids,
     backfill_flow_step_reference_info,
     extract_flow_steps,
     insert_config_change,
@@ -138,6 +139,9 @@ class SyncSummary:
     exports_imports_skipped_no_flow: int = 0
     flow_steps_backfilled: int = 0
     attachments_synced: int = 0
+    # FIX (whole-branch review finding 6): rows Phase B wrote with script_id
+    # NULL, later filled in once Phase C's script_ids map existed.
+    attachment_script_ids_backfilled: int = 0
     steps_with_errors_checked: int = 0
     errors_snapshotted: int = 0
     config_changes_recorded: int = 0
@@ -663,6 +667,19 @@ async def sync_flow_map_for_connection(
                     changes=script_changes,
                 )
                 summary.config_changes_recorded += len(script_changes)
+
+        # Phase B's flow/router-level attachments (`_record_attachments` for
+        # the flow object itself, above) resolved `script_id` from
+        # `script_ids` while it was still empty -- Phase C, which actually
+        # populates it, had not run yet. FIX (whole-branch review finding 6):
+        # go back now that it has and fill in whatever Phase B left NULL.
+        # Phase D's own attachments never had this problem (Phase D runs
+        # after Phase C), so this call is scoped to what Phase B could not
+        # have resolved -- see `backfill_attachment_script_ids`'s own
+        # docstring for why this is safe to run unconditionally here.
+        summary.attachment_script_ids_backfilled = await backfill_attachment_script_ids(
+            db, tenant_id=tenant_id, connection_id=connection_id, script_ids=script_ids
+        )
 
         # Phase D -- exports and imports: backfill celigo_flow_steps.adaptor_type/
         # connection_celigo_id, and record script attachments per referencing flow.

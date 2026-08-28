@@ -29,7 +29,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from app.core.encryption import encrypt_credentials
-from app.models.celigo import CeligoConfigChange, CeligoFlowError, CeligoFlowStep, CeligoScript
+from app.models.celigo import (
+    CeligoConfigChange,
+    CeligoFlowError,
+    CeligoFlowStep,
+    CeligoScript,
+    CeligoScriptAttachment,
+)
 from app.services.celigo.repository import (
     extract_flow_steps,
     sync_flow_steps,
@@ -825,6 +831,98 @@ class TestExportImportAttachmentsAndStepBackfill:
         assert attachment.script_celigo_id == "script_router_1"
         assert attachment.flow_step_id is None  # a flow-level ref, not scoped to one step
         assert attachment.site_type == "router"
+
+
+class TestFlowLevelAttachmentScriptIdIsBackfilled:
+    """WHOLE-BRANCH REVIEW FINDING 6 (2026-08-27, PROVEN across two full
+    syncs -- not a first-run artifact): Phase B records flow/router-level
+    attachments (`_record_attachments` for the flow object itself) BEFORE
+    Phase C has synced any script, so `script_ids` -- reset to `{}` at the
+    top of Phase B every run -- is always empty at that call site.
+    `script_id` therefore stayed NULL forever, even after the referenced
+    script itself synced successfully in the SAME run (via Phase C, which
+    runs later) and on every subsequent resync (Phase B always runs before
+    Phase C again). `sync_flow_map_for_connection` now backfills flow/router-
+    level attachments' `script_id` once Phase C's script_ids map is
+    populated, mirroring Phase D's export/import-level attachments, which
+    already got a real `script_id` because Phase D runs AFTER Phase C."""
+
+    async def test_router_level_attachment_script_id_resolves_once_the_script_syncs_same_run(
+        self, db: AsyncSession, monkeypatch
+    ):
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        flow = _raw_flow("flow_1", integration_id="int_1", export_id="exp_1")
+        flow["routers"] = [
+            {
+                "id": "router_1",
+                "name": "",
+                "routeRecordsTo": "first_matching_branch",
+                "routeRecordsUsing": "script",
+                "branches": [],
+                "script": {"_scriptId": "script_router_1", "function": "branching"},
+            }
+        ]
+
+        await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_1")],
+            flows=[flow],
+            # The referenced script DOES sync, in the SAME run, via Phase C
+            # -- proving this is not a "script hasn't synced yet" gap.
+            scripts=[_raw_script("script_router_1")],
+        )
+
+        script_local_id = (
+            await db.execute(select(CeligoScript.id).where(CeligoScript.tenant_id == tenant.id))
+        ).scalar_one()
+        attachment = (
+            await db.execute(select(CeligoScriptAttachment).where(CeligoScriptAttachment.tenant_id == tenant.id))
+        ).scalar_one()
+        assert attachment.script_id == script_local_id
+
+    async def test_router_level_attachment_script_id_resolves_after_a_second_sync(self, db: AsyncSession, monkeypatch):
+        """PROVEN ACROSS TWO SYNCS, per the finding: the bug is not a
+        first-run artifact -- Phase B always runs before Phase C, on every
+        resync, so a naive "it'll catch up next time" fix would not actually
+        converge without this backfill."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        flow = _raw_flow("flow_1", integration_id="int_1", export_id="exp_1")
+        flow["routers"] = [
+            {
+                "id": "router_1",
+                "name": "",
+                "routeRecordsTo": "first_matching_branch",
+                "routeRecordsUsing": "script",
+                "branches": [],
+                "script": {"_scriptId": "script_router_1", "function": "branching"},
+            }
+        ]
+
+        for _ in range(2):
+            await _run_sync(
+                monkeypatch,
+                db,
+                tenant_id=tenant.id,
+                connection_id=conn_id,
+                integrations=[_raw_integration("int_1")],
+                flows=[flow],
+                scripts=[_raw_script("script_router_1")],
+            )
+
+        script_local_id = (
+            await db.execute(select(CeligoScript.id).where(CeligoScript.tenant_id == tenant.id))
+        ).scalar_one()
+        attachment = (
+            await db.execute(select(CeligoScriptAttachment).where(CeligoScriptAttachment.tenant_id == tenant.id))
+        ).scalar_one()
+        assert attachment.script_id == script_local_id
 
 
 # ---------------------------------------------------------------------------

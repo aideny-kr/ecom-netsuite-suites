@@ -764,6 +764,62 @@ async def upsert_script_attachment_from_ref(
     )
 
 
+async def backfill_attachment_script_ids(
+    db: AsyncSession, *, tenant_id: uuid.UUID, connection_id: uuid.UUID, script_ids: dict[str, uuid.UUID]
+) -> int:
+    """Bulk-fill `script_id` on any `celigo_script_attachments` row still
+    NULL, now that *script_ids* (celigo_id -> local id) has entries for it.
+
+    WHOLE-BRANCH REVIEW FINDING 6 (2026-08-27, PROVEN across two full syncs
+    -- not a first-run artifact): `sync_service.py`'s Phase B records
+    flow/router-level attachments (the flow object's own script refs, e.g. a
+    `routers[].script`) via `_record_attachments`, which resolves `script_id`
+    from a `script_ids` map that Phase C -- run LATER in the same pass -- is
+    what actually populates. Phase B's `script_ids` argument is therefore
+    always `{}` at that call site, every single run, so `script_id` stayed
+    NULL forever, exactly the same "column that can never be non-NULL" shape
+    as the already-fixed permanently-NULL `celigo_last_modified` bug. Phase
+    D's export/import-level attachments never had this problem because Phase
+    D runs AFTER Phase C, so its own `_record_attachments` call already sees
+    a populated map.
+
+    This function is `sync_flow_map_for_connection`'s fix: called once,
+    right after Phase C finishes syncing every script, it goes back and
+    fills in `script_id` for whatever Phase B already wrote with it NULL --
+    the same "backfill once the dependency exists" shape
+    `backfill_flow_step_reference_info` already uses for
+    `adaptor_type`/`connection_celigo_id`.
+
+    Scoped with `script_id IS NULL` so it only ever touches rows nothing has
+    resolved yet -- never overwrites a real value with a different one, and
+    a script that genuinely never syncs (deleted, or lagging past this run)
+    correctly leaves the attachment's `script_id` NULL rather than guessing.
+    One UPDATE per distinct `script_celigo_id` in *script_ids* -- Phase C's
+    script count is small (this codebase's own account has under a few
+    hundred), so a per-script round trip costs nothing meaningful; a single
+    `VALUES`-joined UPDATE would read no differently to a caller and was not
+    worth the extra complexity here. Returns the number of rows updated
+    across every script (`0` is legitimate: nothing was waiting on any of
+    these scripts)."""
+    if not script_ids:
+        return 0
+    total = 0
+    for script_celigo_id, script_local_id in script_ids.items():
+        stmt = (
+            update(CeligoScriptAttachment)
+            .where(
+                CeligoScriptAttachment.tenant_id == tenant_id,
+                CeligoScriptAttachment.celigo_connection_id == connection_id,
+                CeligoScriptAttachment.script_celigo_id == script_celigo_id,
+                CeligoScriptAttachment.script_id.is_(None),
+            )
+            .values(script_id=script_local_id, updated_at=func.now())
+        )
+        result = await db.execute(stmt)
+        total += result.rowcount
+    return total
+
+
 # ---------------------------------------------------------------------------
 # celigo_error_signatures
 # ---------------------------------------------------------------------------
