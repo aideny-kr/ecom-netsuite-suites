@@ -32,6 +32,16 @@ _ALLOWED_OTHER_CHAT_TOOLS: frozenset[str] = frozenset(
         # report.compose is now categorized as "report" in tool_categories._EXACT
         # (its SSE result is intercepted as report_ready), so it is no longer an
         # allow-"other" tool — see test_report_tool_registration.py.
+        # Returns raw cells from a file THE USER UPLOADED and can already open.
+        # Deliberately not intercepted as a data_table: interception condenses
+        # the result and tells the model "do not list numbers", which would
+        # defeat the tool's only purpose — composing a write proposal from the
+        # file's values. The trust boundary is the confirmation card, where a
+        # human reads every field before anything reaches NetSuite. That holds
+        # for ONE record; before any BATCH write ships, extraction must become
+        # deterministic server-side (nobody eyeballs 200 rows), which is a
+        # recorded precondition of the batch slice, not a hope.
+        "task_file.read",
         "suitescript.sync",  # control action, no data rows
         "tenant.save_learned_rule",  # write-side control action, no data rows
         "workspace.run_validate",  # validator output the LLM reads
