@@ -286,7 +286,41 @@ async def call_external_mcp_tool(
                 error=str(eg),
             )
         else:
-            raise
+            # Falls through to the `result is None` return below, which marks
+            # the outcome INDETERMINATE. This used to `raise`, and the raise was
+            # a hole: the dispatcher's blanket `except Exception` in
+            # chat/tools.py turned it into a plain {"error": ...} with no
+            # marker, so a connection dropped mid-write classified as a
+            # NetSuite REJECTION and re-entered the repair loop — the exact
+            # duplicate-inviting path this file's timeout branch was patched to
+            # close, still open on the commoner failure. Found by review, not
+            # by the fix that claimed to have closed it.
+            logger.error(
+                "mcp_client.transport_failed_outcome_unknown",
+                server_url=connector.server_url,
+                tool_name=tool_name,
+                error=str(eg),
+            )
+    except Exception as exc:
+        # Any other failure of the transport itself. Reaching here means we
+        # never read a response, so we cannot know whether NetSuite acted —
+        # which is the definition of indeterminate. Deliberately broad: the
+        # asymmetry is not close. A spurious "check NetSuite" costs a glance;
+        # a missed one costs a duplicate in a customer's general ledger.
+        #
+        # Pre-flight failures (unknown/disabled connector) return their own
+        # dicts before this point and never reach here, so this does not
+        # mislabel calls that were never sent.
+        logger.error(
+            "mcp_client.transport_failed_outcome_unknown",
+            server_url=connector.server_url,
+            tool_name=tool_name,
+            error=str(exc),
+        )
+        return {
+            "error": f"Tool '{tool_name}' failed in transport ({type(exc).__name__}: {exc})",
+            INDETERMINATE_KEY: True,
+        }
 
     if result is None:
         # Reached when the transport raised on cleanup with no result in hand

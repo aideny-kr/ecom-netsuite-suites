@@ -1470,7 +1470,7 @@ from app.services.chat.tool_call_results import (
     tool_call_row_count,
 )
 from app.services.chat.tools import build_all_tool_definitions, execute_tool_call
-from app.services.chat.write_outcome import classify_write_outcome
+from app.services.chat.write_outcome import classify_write_outcome, may_enter_repair_loop
 from app.services.prompt_template_service import get_active_template
 
 logger = logging.getLogger(__name__)
@@ -2327,7 +2327,7 @@ async def run_chat_turn(
                 _repair_current_attempt = 0
                 if _exec_succeeded:
                     _updated_so["status"] = "approved"
-                elif _write_outcome == "indeterminate":
+                elif not may_enter_repair_loop(_write_outcome):
                     # TERMINAL, and deliberately NOT "failed" — calling this a
                     # failure is a claim about NetSuite we cannot support, and
                     # it is what sent the operator toward a duplicate on
@@ -2339,7 +2339,15 @@ async def run_chat_turn(
                     # answer here would be a fresh card carrying the identical
                     # payload — an invitation to write the record twice. The
                     # record may already exist; a human checks, then decides.
-                    _updated_so["status"] = "indeterminate"
+                    #
+                    # Gated on may_enter_repair_loop rather than an inline
+                    # `== "indeterminate"`: the eligibility rule lived in
+                    # write_outcome.py AND was re-implemented here, so a future
+                    # fourth outcome would have been added to one and silently
+                    # fall through the other into the repair loop. Two copies of
+                    # a safety predicate is one copy too many — the same shape
+                    # that produced every other defect on this branch.
+                    _updated_so["status"] = _write_outcome
                     _updated_so["error"] = _exec_error
                 else:
                     # Terminal — a failed write must never revert to

@@ -187,6 +187,38 @@ def _write_proposed_this_turn(tool_calls_log: list[dict[str, Any]]) -> bool:
     return any(_bare_tool_name(e.get("tool")) in _WRITE_TOOL_SUFFIXES for e in tool_calls_log or [])
 
 
+def _last_metadata_call(tool_calls_log: list[dict[str, Any]]) -> tuple[str | None, str] | None:
+    """The turn's most recent USABLE ``ns_getRecordTypeMetadata`` call, as
+    ``(connector_id, record_type)`` — or None if there wasn't one.
+
+    Single resolver on purpose. The connector and the record type are two facts
+    about ONE tool call, and reading them from separately-scanned entries let
+    them disagree: a malformed follow-up metadata call (no ``recordType``)
+    would move the connector without moving the record type, so the forced
+    write hop could offer connector B's tools under an instruction naming
+    connector A's record. Both callers now read the same entry or neither does.
+
+    "Usable" means it carries a record type — an entry without one cannot name
+    a write, so it is skipped rather than allowed to win by recency.
+    ``connector_id`` is None for a non-external tool name, which callers must
+    treat as "cannot resolve a connector".
+    """
+    from app.services.chat.tools import parse_external_tool_name
+
+    for entry in reversed(tool_calls_log or []):
+        if _bare_tool_name(entry.get("tool")) != "ns_getRecordTypeMetadata":
+            continue
+        params = entry.get("params")
+        if not isinstance(params, dict):
+            continue
+        rt = params.get("recordType") or params.get("record_type")
+        if not rt:
+            continue
+        parsed = parse_external_tool_name(entry.get("tool", "") or "")
+        return (str(parsed[0]) if parsed else None, str(rt))
+    return None
+
+
 def _last_metadata_record_type(tool_calls_log: list[dict[str, Any]]) -> str | None:
     """The record type this turn last fetched metadata for, or None.
 
@@ -196,15 +228,8 @@ def _last_metadata_record_type(tool_calls_log: list[dict[str, Any]]) -> str | No
     at the dispatch site raises UnboundLocalError, which is precisely what a
     live-path test caught here.
     """
-    for entry in reversed(tool_calls_log or []):
-        if _bare_tool_name(entry.get("tool")) != "ns_getRecordTypeMetadata":
-            continue
-        params = entry.get("params")
-        if isinstance(params, dict):
-            rt = params.get("recordType") or params.get("record_type")
-            if rt:
-                return str(rt)
-    return None
+    resolved = _last_metadata_call(tool_calls_log)
+    return resolved[1] if resolved else None
 
 
 def _write_reached_the_human(agent: Any) -> bool:
@@ -259,14 +284,18 @@ def _forced_write_tool_subset(
     """
     from app.services.chat.tools import parse_external_tool_name
 
-    connector_id: str | None = None
-    for entry in reversed(tool_calls_log or []):
-        parsed = parse_external_tool_name(entry.get("tool", "") or "")
-        if parsed and parsed[1] == "ns_getRecordTypeMetadata":
-            connector_id = str(parsed[0])
-            break
-    if connector_id is None:
+    # Connector and record type come from the SAME log entry, so the forced
+    # menu and the instruction text can never describe different connectors.
+    # They used to be resolved independently — this function took the most
+    # recent metadata call of any shape, while the instruction took the most
+    # recent one carrying a recordType — so a malformed follow-up call could
+    # offer connector B's write tools under an instruction naming connector A's
+    # record type. Two resolvers for one fact is the same shape as every other
+    # defect on this branch; there is now one.
+    resolved = _last_metadata_call(tool_calls_log)
+    if resolved is None:
         return []
+    connector_id = resolved[0]
 
     subset: list[dict[str, Any]] = []
     for tool in tool_definitions or []:
