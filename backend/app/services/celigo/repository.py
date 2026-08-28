@@ -47,6 +47,30 @@ THREE DESIGN POINTS THAT AREN'T OBVIOUS FROM THE FUNCTION SIGNATURES ALONE:
    here would defeat the feature. `test_celigo_repository.py`'s
    `test_repository_module_exposes_no_delete_function_for_flow_errors` pins
    this as a live guard, not just a comment.
+
+4. **`upsert_error_signature`/`upsert_flow_error` require a REAL
+   `connection_id`, even though `celigo_connection_id` is a nullable column
+   on both tables.** Postgres treats NULL as DISTINCT for UNIQUE-constraint
+   purposes -- the exact trap `dedup_key`/`branch_key` were introduced to
+   solve for scripts/steps, and it re-enters here through the audit tables'
+   SET NULL fix (migration deviation 8): once a connection is deleted and
+   `celigo_connection_id` becomes NULL on the orphaned rows, `ON CONFLICT ON
+   CONSTRAINT uq_celigo_error_signatures_identity` / `..._flow_errors_identity`
+   NEVER fires for a subsequent call with `connection_id=None` (NULL is
+   never equal to NULL), so it would silently INSERT a new row every time
+   instead of updating -- unbounded duplication, not idempotent. The column
+   only ever becomes NULL via the migration's own SET NULL delete trigger,
+   an event outside any upsert caller's control and never something a
+   sync-loop should be choosing to pass in deliberately. Requiring a real
+   `connection_id` here removes the unsafe call shape by construction rather
+   than guarding around it after the fact ("remove the possibility, not the
+   instance") -- both functions also raise `ValueError` at runtime if `None`
+   slips through anyway, since Python type hints aren't enforced. A row that
+   has ALREADY been orphaned (via the DB's own SET NULL, not via this
+   module) is intentionally left alone: it's the audit trail, and a later
+   resync under a NEW connection creates its own fresh row rather than
+   reaching back to touch the orphaned one -- see
+   `test_orphaned_error_and_resync_under_a_new_connection_do_not_collide`.
 """
 
 from __future__ import annotations
@@ -593,7 +617,7 @@ async def upsert_error_signature(
     db: AsyncSession,
     *,
     tenant_id: uuid.UUID,
-    connection_id: uuid.UUID | None,
+    connection_id: uuid.UUID,
     fingerprint: str,
     source: str | None = None,
     code: str | None = None,
@@ -608,7 +632,17 @@ async def upsert_error_signature(
     (e.g. an error-normalizer) -- this function stores whatever values it's
     given, the same as every other upsert in this module; it does not invent
     increment-on-conflict SQL. `sample_message` is PII-bearing (never logged
-    by this function or any caller)."""
+    by this function or any caller).
+
+    `connection_id` is REQUIRED, not Optional, even though the underlying
+    column is nullable -- see module docstring point 4 (NULL-is-DISTINCT
+    trap: an upsert with `connection_id=None` would never conflict, so it
+    would silently insert a new row on every call instead of updating)."""
+    if connection_id is None:
+        raise ValueError(
+            "upsert_error_signature requires a real connection_id -- see module docstring point 4 "
+            "(NULL-is-DISTINCT would make ON CONFLICT never fire, silently duplicating rows)"
+        )
     values: dict = dict(
         tenant_id=tenant_id,
         celigo_connection_id=connection_id,
@@ -645,7 +679,7 @@ async def upsert_flow_error(
     db: AsyncSession,
     *,
     tenant_id: uuid.UUID,
-    connection_id: uuid.UUID | None,
+    connection_id: uuid.UUID,
     celigo_id: str,
     flow_id: uuid.UUID | None = None,
     flow_step_id: uuid.UUID | None = None,
@@ -664,7 +698,16 @@ async def upsert_flow_error(
     (sanitizer.py's own docstring: kept verbatim by design, "the message IS
     the diagnosis") -- this function never logs it, and no caller should
     either. See module docstring point 3: there is no delete function for
-    this table anywhere in this module."""
+    this table anywhere in this module.
+
+    `connection_id` is REQUIRED, not Optional, even though the underlying
+    column is nullable -- see module docstring point 4 (same NULL-is-DISTINCT
+    trap as `upsert_error_signature`)."""
+    if connection_id is None:
+        raise ValueError(
+            "upsert_flow_error requires a real connection_id -- see module docstring point 4 "
+            "(NULL-is-DISTINCT would make ON CONFLICT never fire, silently duplicating rows)"
+        )
     values = dict(
         tenant_id=tenant_id,
         celigo_connection_id=connection_id,

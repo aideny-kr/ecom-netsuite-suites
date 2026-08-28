@@ -604,6 +604,69 @@ class TestFlowErrorsAreNeverDeleted:
         assert delete_like == []
 
 
+class TestNullConnectionIdCannotSilentlyDuplicateAuditRows:
+    """`celigo_connection_id` is nullable/SET NULL on `celigo_error_signatures`
+    and `celigo_flow_errors` (the audit tables) -- Postgres treats NULL as
+    DISTINCT for UNIQUE-constraint purposes, so `ON CONFLICT ON CONSTRAINT
+    ...` never fires when `celigo_connection_id` is NULL. An upsert called
+    with `connection_id=None` would silently INSERT a new row every time
+    instead of updating. Both upsert functions require a real `connection_id`
+    (module docstring point 4) to remove that call shape entirely, with a
+    runtime `ValueError` guard since Python type hints aren't enforced."""
+
+    async def test_upsert_error_signature_rejects_none_connection_id(self, db: AsyncSession):
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        with pytest.raises(ValueError, match="connection_id"):
+            await upsert_error_signature(db, tenant_id=tenant.id, connection_id=None, fingerprint="fp_none")
+
+    async def test_upsert_flow_error_rejects_none_connection_id(self, db: AsyncSession):
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        with pytest.raises(ValueError, match="connection_id"):
+            await upsert_flow_error(db, tenant_id=tenant.id, connection_id=None, celigo_id="err_none")
+
+    async def test_orphaned_error_and_resync_under_a_new_connection_do_not_collide(self, db: AsyncSession):
+        """The real regression this guard exists to prevent: a row orphaned
+        by a connection deletion (celigo_connection_id -> NULL, via the DB's
+        own SET NULL, never via this module) must not corrupt or block a
+        LATER resync of the same celigo_id under a brand-new connection.
+        Because upsert always requires a real connection_id, the new sync
+        creates its own distinct row rather than silently duplicating
+        forever -- and the orphaned original is left untouched, exactly as
+        the audit trail requires."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        old_conn_id = await _make_connection(db, tenant.id)
+        original_id = await upsert_flow_error(
+            db, tenant_id=tenant.id, connection_id=old_conn_id, celigo_id="err_reused", code="E1"
+        )
+        await db.flush()
+
+        await db.execute(text("DELETE FROM connections WHERE id = :id").bindparams(id=old_conn_id))
+        await db.flush()
+
+        new_conn_id = await _make_connection(db, tenant.id)
+        new_id = await upsert_flow_error(
+            db, tenant_id=tenant.id, connection_id=new_conn_id, celigo_id="err_reused", code="E1"
+        )
+        await db.flush()
+
+        assert new_id != original_id  # a fresh row, not an update of the orphaned one
+
+        orphaned_row = (await db.execute(select(CeligoFlowError).where(CeligoFlowError.id == original_id))).scalar_one()
+        assert orphaned_row.celigo_connection_id is None  # untouched by the later resync
+
+        new_row = (await db.execute(select(CeligoFlowError).where(CeligoFlowError.id == new_id))).scalar_one()
+        assert new_row.celigo_connection_id == new_conn_id
+
+        count = (
+            await db.execute(
+                text(
+                    "SELECT COUNT(*) FROM celigo_flow_errors WHERE tenant_id = :t AND celigo_id = 'err_reused'"
+                ).bindparams(t=tenant.id)
+            )
+        ).scalar_one()
+        assert count == 2  # both rows coexist -- no silent overwrite, no unbounded duplication either
+
+
 class TestFlowStepInsertNeverSwallowsUnrelatedIntegrityErrors:
     async def test_missing_flow_fk_raises_not_silently_ignored(self, db: AsyncSession):
         """Not the role-collision case -- a plain FK violation (bad flow_id)
