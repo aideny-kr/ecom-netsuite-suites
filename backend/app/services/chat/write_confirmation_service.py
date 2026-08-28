@@ -48,6 +48,14 @@ class WriteConfirmationPayload(BaseModel):
     # untouched, so a label can never become a written value. Resolved
     # server-side (reference_field_labels), never model-supplied.
     field_labels: dict[str, str] = {}
+    # WHERE this write lands. Display-only, never signed, never sent.
+    # A tenant can hold both a sandbox and a production NetSuite
+    # connector; without these the operator approving the card cannot
+    # tell which books it hits — the same defect as a blank card, one
+    # level up: the decision is real, the information is absent.
+    # None means UNKNOWN and must render as nothing, never guessed.
+    target_account: str | None = None
+    target_environment: str | None = None
     proposed_lines: list[dict[str, Any]] = []
     current_record: dict[str, Any] | None = None
     tool_name: str
@@ -162,6 +170,8 @@ def build_confirmation_payload(
     repair_of: str | None = None,
     repair_attempt: int = 0,
     field_labels: dict[str, str] | None = None,
+    target_account: str | None = None,
+    target_environment: str | None = None,
 ) -> WriteConfirmationPayload | None:
     """Build a ``WriteConfirmationPayload`` for a pending write operation.
 
@@ -279,6 +289,8 @@ def build_confirmation_payload(
         record_id=normalized.record_id,
         proposed_fields=normalized.fields,
         field_labels=dict(field_labels or {}),
+        target_account=target_account,
+        target_environment=target_environment,
         proposed_lines=normalized.lines,
         current_record=current_record,
         tool_name=tool_name,

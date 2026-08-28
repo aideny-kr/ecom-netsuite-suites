@@ -862,6 +862,9 @@ export interface WriteConfirmationData {
    *  { subsidiary: "Framework Computer UK Ltd (ID 5)" }.
    *  Server-resolved; never sent back and never written. */
   field_labels?: Record<string, string>;
+  /** WHERE the write lands. Display-only; null = unknown, render nothing. */
+  target_account?: string | null;
+  target_environment?: string | null;
   // Transaction line items (sales orders, invoices, ...). Absent/empty for
   // header-only record types (e.g. customer).
   proposed_lines?: Record<string, unknown>[];

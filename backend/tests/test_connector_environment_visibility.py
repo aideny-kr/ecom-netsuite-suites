@@ -93,3 +93,50 @@ def test_the_original_description_is_preserved():
     """Oracle bakes SuiteQL dialect rules into these descriptions; the vs-MCP
     benchmark depends on passing them through unchanged."""
     assert "Create a record." in _desc(_Conn("6738075"))
+
+
+# ---------------------------------------------------------------------------
+# The human's half: the confirmation card must name where the write is going
+# ---------------------------------------------------------------------------
+#
+# Making the MODEL able to see the difference is not enough. The human is the
+# last gate, and the card they approve said nothing about which NetSuite
+# account it targets — so with a sandbox and a production connector both
+# connected, an operator could approve a write with no way to tell which books
+# it lands in. Same defect as the blank-cheque card, one level up: the decision
+# is real, the information needed to make it is absent.
+
+
+def _card(**kw):
+    from app.services.chat.write_confirmation_service import build_confirmation_payload
+
+    base = dict(
+        mutation_type="create",
+        record_type="customer",
+        tool_name="ext__" + "a" * 32 + "__ns_createRecord",
+        tool_input={"recordType": "customer", "data": '{"companyName": "Acme"}'},
+        session_id="s",
+        validation=None,
+    )
+    base.update(kw)
+    return build_confirmation_payload(**base)
+
+
+def test_card_names_the_target_environment_and_account():
+    p = _card(target_account="6738075", target_environment="PRODUCTION")
+    assert p is not None
+    assert p.target_account == "6738075"
+    assert p.target_environment == "PRODUCTION"
+
+
+def test_card_marks_a_sandbox_target():
+    p = _card(target_account="6738075_SB1", target_environment="SANDBOX")
+    assert p.target_environment == "SANDBOX"
+
+
+def test_card_omits_the_target_when_unknown():
+    """Never guess. An unknown target renders nothing rather than asserting
+    PRODUCTION on a card a human is about to approve."""
+    p = _card()
+    assert p.target_account is None
+    assert p.target_environment is None

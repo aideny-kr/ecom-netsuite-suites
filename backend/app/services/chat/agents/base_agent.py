@@ -1861,6 +1861,35 @@ class BaseSpecialistAgent(abc.ABC):
                                 # labels are cosmetic, so say nothing here.
                                 _field_labels = {}
 
+                        # WHERE this write will land. Resolved from the
+                        # connector embedded in the tool name — the same one
+                        # that executes — so the card cannot name one account
+                        # while another receives the write. A tenant may hold
+                        # both a sandbox and a production NetSuite connector,
+                        # and an operator approving a card must be able to see
+                        # which books it hits.
+                        _target_account: str | None = None
+                        _target_environment: str | None = None
+                        if _is_netsuite_write and _parsed_write:
+                            try:
+                                from app.services.chat.tools import netsuite_environment_of
+                                from app.services.mcp_connector_service import (
+                                    get_mcp_connector as _get_conn_for_card,
+                                )
+
+                                _conn_row = await _get_conn_for_card(db, _parsed_write[0], self.tenant_id)
+                                _meta = getattr(_conn_row, "metadata_json", None) if _conn_row else None
+                                _acct = _meta.get("account_id") if isinstance(_meta, dict) else None
+                                if isinstance(_acct, str) and _acct.strip():
+                                    _target_account = _acct.strip()
+                                    _target_environment = netsuite_environment_of(_target_account)
+                            except Exception:
+                                # Display-only: an unknown target renders as
+                                # nothing. Never guess "PRODUCTION" onto a card
+                                # a human is about to approve, and never fail
+                                # the card over a label.
+                                logger.warning("could not resolve the write's target account", exc_info=True)
+
                         payload = build_confirmation_payload(
                             mutation_type=mutation_type,
                             record_type=record_type,
@@ -1872,6 +1901,8 @@ class BaseSpecialistAgent(abc.ABC):
                             repair_of=_card_repair_of,
                             repair_attempt=_card_repair_attempt,
                             field_labels=_field_labels,
+                            target_account=_target_account,
+                            target_environment=_target_environment,
                         )
 
                         payload_unparseable = False

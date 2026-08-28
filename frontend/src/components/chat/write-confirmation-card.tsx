@@ -192,6 +192,27 @@ export function WriteConfirmationCard({
       </div>
 
       {/* Content */}
+      {data.target_environment && (
+        /* WHERE this write lands. A tenant can hold both a sandbox and a
+           production NetSuite connector, and the operator approving this card
+           is the last gate — they must be able to see which books it hits.
+           Production is styled as a warning, sandbox as neutral: the point is
+           that "this is real" reads differently from "this is a rehearsal". */
+        <div
+          className={cn(
+            "flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-[12px]",
+            data.target_environment === "PRODUCTION"
+              ? "border-amber-500/50 bg-amber-500/[0.06] text-amber-700 dark:text-amber-400"
+              : "border-border/60 bg-muted/30 text-muted-foreground",
+          )}
+        >
+          <span className="font-semibold uppercase tracking-wide">
+            {data.target_environment}
+          </span>
+          {data.target_account && <span className="font-mono">{data.target_account}</span>}
+        </div>
+      )}
+
       {hasDiff ? (
         <DiffTable
           proposedFields={visibleProposedFields}
