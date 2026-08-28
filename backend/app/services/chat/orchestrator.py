@@ -1470,6 +1470,7 @@ from app.services.chat.tool_call_results import (
     tool_call_row_count,
 )
 from app.services.chat.tools import build_all_tool_definitions, execute_tool_call
+from app.services.chat.write_outcome import classify_write_outcome
 from app.services.prompt_template_service import get_active_template
 
 logger = logging.getLogger(__name__)
@@ -2195,6 +2196,12 @@ async def run_chat_turn(
                 # path, or the exception route raises UnboundLocalError.
                 _updated_so_record_url: str | None = None
                 _exec_error: str | None = None
+                # Bound BEFORE the try/except, same invariant as the vars above
+                # (chat-orchestration.md #19, pinned by test_orchestrator_paths):
+                # every path below reads this, including the exception route.
+                # Defaults to the SAFE value — an outcome we have not
+                # established is unknown, never success.
+                _write_outcome: str = "indeterminate"
                 try:
                     _exec_result = json.loads(_exec_result_str)
                     # T2 gate round-2 finding: `.get("error")` alone missed a
@@ -2210,9 +2217,25 @@ async def run_chat_turn(
                     # True`, so a bare `{"id": "123"}` shape with no `success`
                     # key at all (ns_createRecord's ordinary response) still
                     # counts as success.
-                    if isinstance(_exec_result, dict) and (
-                        _extract_error_message(_exec_result) or _exec_result.get("success") is False
-                    ):
+                    # ...and that predicate now lives in write_outcome.py, which
+                    # adds the third case this branch was missing: a write whose
+                    # outcome we do not KNOW. A timeout is not a failure — on
+                    # 2026-08-27 one created customer 5264348 while this code
+                    # reported failure and opened a repair card carrying the
+                    # identical payload.
+                    _write_outcome = classify_write_outcome(_exec_result)
+                    if _write_outcome == "indeterminate":
+                        _exec_error = _extract_error_message(_exec_result) or (
+                            f"the {_mutation_type} did not complete within the time limit"
+                        )
+                        _confirm_content = (
+                            f"**This {_record_type} {_mutation_type} may or may not have completed.** "
+                            f"NetSuite did not confirm the result ({_exec_error}), which does NOT mean "
+                            "it was rejected — the record may already exist.\n\n"
+                            f"Check the {_record_type} in NetSuite before trying again. Re-running this "
+                            "now risks creating it twice."
+                        )
+                    elif _write_outcome == "failed":
                         _exec_error = _extract_error_message(_exec_result) or (
                             f"NetSuite reported this {_mutation_type} failed but returned no further "
                             f"detail — check the {_record_type} record directly in NetSuite to confirm "
@@ -2279,16 +2302,20 @@ async def run_chat_turn(
                         except Exception:
                             logger.warning("record link could not be built", exc_info=True)
                 except (json.JSONDecodeError, TypeError):
-                    # UNPARSEABLE result reported as success — deliberately
-                    # deferred, out of scope here. This is genuinely a
-                    # different problem (we cannot even determine success vs.
-                    # failure, let alone which), tracked as ClickUp
-                    # 86bbhmxd1: it needs an indeterminate outcome ("we
-                    # cannot confirm — check NetSuite") plus a new status
-                    # threaded to the frontend card, not a fold into the
-                    # failure branch above.
-                    _exec_succeeded = True
-                    _confirm_content = f"The {_mutation_type} operation has been executed."
+                    # UNPARSEABLE result. This used to report SUCCESS — telling
+                    # the operator a write had executed on the strength of a
+                    # response nobody could read. It is the same epistemic
+                    # position as a timeout, so it gets the same answer (the
+                    # indeterminate outcome ClickUp 86bbhmxd1 asked for).
+                    _write_outcome = "indeterminate"
+                    _exec_error = "NetSuite's response could not be read"
+                    _confirm_content = (
+                        f"**This {_record_type} {_mutation_type} may or may not have completed.** "
+                        "NetSuite's response could not be read, which does NOT mean it was "
+                        "rejected — the record may already exist.\n\n"
+                        f"Check the {_record_type} in NetSuite before trying again. Re-running this "
+                        "now risks creating it twice."
+                    )
 
                 _updated_so = dict(_so)
                 if _exec_succeeded and _updated_so_record_url:
@@ -2300,6 +2327,20 @@ async def run_chat_turn(
                 _repair_current_attempt = 0
                 if _exec_succeeded:
                     _updated_so["status"] = "approved"
+                elif _write_outcome == "indeterminate":
+                    # TERMINAL, and deliberately NOT "failed" — calling this a
+                    # failure is a claim about NetSuite we cannot support, and
+                    # it is what sent the operator toward a duplicate on
+                    # 2026-08-27 (customer 5264348 existed while the card said
+                    # the write had failed).
+                    #
+                    # No repair re-entry: write_repair_bound decides what to do
+                    # with a payload NETSUITE REJECTED, which is not this. Its
+                    # answer here would be a fresh card carrying the identical
+                    # payload — an invitation to write the record twice. The
+                    # record may already exist; a human checks, then decides.
+                    _updated_so["status"] = "indeterminate"
+                    _updated_so["error"] = _exec_error
                 else:
                     # Terminal — a failed write must never revert to
                     # "pending": that stranded the card with no way forward

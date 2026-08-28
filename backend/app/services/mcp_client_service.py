@@ -15,6 +15,7 @@ from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
 from app.core.encryption import decrypt_credentials, encrypt_credentials
+from app.services.chat.write_outcome import INDETERMINATE_KEY
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -264,7 +265,17 @@ async def call_external_mcp_tool(
                     result = await asyncio.wait_for(session.call_tool(tool_name, tool_params), timeout=timeout)
                 except asyncio.TimeoutError:
                     logger.error("mcp_client.tool_timeout", server_url=connector.server_url, tool_name=tool_name)
-                    return {"error": f"Tool execution exceeded {int(timeout)}-second timeout limit"}
+                    # Marked here because this is the ONLY place that knows the
+                    # call timed out rather than failed. Downstream must not
+                    # re-derive it from the message text: a timeout says what
+                    # our patience ran out on, never what NetSuite committed,
+                    # and on 2026-08-27 exactly this case created customer
+                    # 5264348 while the app reported failure and offered to
+                    # run the same payload again. See write_outcome.py.
+                    return {
+                        "error": f"Tool execution exceeded {int(timeout)}-second timeout limit",
+                        INDETERMINATE_KEY: True,
+                    }
     except (BaseExceptionGroup, ExceptionGroup) as eg:
         # The MCP streamable HTTP client sometimes raises on cleanup even
         # after a successful call_tool. If we got a result, use it.
@@ -278,7 +289,10 @@ async def call_external_mcp_tool(
             raise
 
     if result is None:
-        return {"error": f"Tool '{tool_name}' returned no result"}
+        # Reached when the transport raised on cleanup with no result in hand
+        # (see the ExceptionGroup branch above). Same epistemic position as a
+        # timeout: the call may or may not have been delivered.
+        return {"error": f"Tool '{tool_name}' returned no result", INDETERMINATE_KEY: True}
 
     if result.isError:
         error_text = str(result.content)

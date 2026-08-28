@@ -47,6 +47,12 @@ export function WriteConfirmationCard({
   const isApproved = data.status === "approved";
   const isRejected = data.status === "rejected";
   const isFailed = data.status === "failed";
+  // A write whose outcome NetSuite never confirmed — a timeout or an
+  // unreadable response. Deliberately NOT folded into isFailed: the
+  // failed panel asserts "Nothing was written", which on 2026-08-27 was
+  // untrue (customer 5264348 existed) and is the sentence that sends an
+  // operator off to create a duplicate.
+  const isIndeterminate = data.status === "indeterminate";
 
   const slots = data.editable_slots ?? [];
   const unfillableLineFields = data.unfillable_line_fields ?? [];
@@ -120,6 +126,7 @@ export function WriteConfirmationCard({
         isApproved && "border-emerald-500/60 bg-emerald-500/[0.02]",
         isRejected && "border-red-400/60 bg-red-500/[0.02]",
         isFailed && "border-red-400/60 bg-red-500/[0.02]",
+        isIndeterminate && "border-amber-400/60 bg-amber-500/[0.02]",
       )}
     >
       {/* Header */}
@@ -131,12 +138,14 @@ export function WriteConfirmationCard({
             isExecuting && "bg-blue-500/10",
             isApproved && "bg-emerald-500/10",
             (isRejected || isFailed) && "bg-red-500/10",
+            isIndeterminate && "bg-amber-500/10",
           )}
         >
           {isPending && <AlertTriangle className="h-4 w-4 text-amber-500" />}
           {isExecuting && <Loader2 className="h-4 w-4 animate-spin text-blue-500" />}
           {isApproved && <Check className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />}
           {(isRejected || isFailed) && <X className="h-4 w-4 text-red-500" />}
+          {isIndeterminate && <AlertTriangle className="h-4 w-4 text-amber-500" />}
         </div>
 
         <div className="flex items-center gap-1.5">
@@ -147,6 +156,7 @@ export function WriteConfirmationCard({
               isExecuting && "text-blue-600 dark:text-blue-400",
               isApproved && "text-emerald-600 dark:text-emerald-400",
               (isRejected || isFailed) && "text-red-500",
+              isIndeterminate && "text-amber-600 dark:text-amber-400",
             )}
           />
           <span className="text-[13px] font-semibold text-foreground">
@@ -180,6 +190,12 @@ export function WriteConfirmationCard({
             <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium text-red-600 bg-red-500/10 dark:text-red-400">
               <X className="h-3 w-3" />
               Failed
+            </span>
+          )}
+          {isIndeterminate && (
+            <span className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-medium text-amber-700 bg-amber-500/10 dark:text-amber-400">
+              <AlertTriangle className="h-3 w-3" />
+              Unconfirmed
             </span>
           )}
           {isPending && pendingBadgeLabel && (
@@ -237,6 +253,23 @@ export function WriteConfirmationCard({
               Review every value before approving.
             </p>
           </div>
+        </div>
+      )}
+
+      {isIndeterminate && (
+        <div className="rounded-lg border border-amber-400/40 bg-amber-500/[0.04] p-2.5">
+          <p className="text-[12px] font-medium text-amber-700 dark:text-amber-400">
+            This {data.mutation_type} may or may not have completed
+          </p>
+          <p className="mt-1 text-[12px] leading-snug text-muted-foreground">
+            NetSuite never confirmed the result
+            {data.error ? ` (${data.error})` : ""}. That is not the same as a rejection — the{" "}
+            {data.record_type} may already exist.
+          </p>
+          <p className="mt-2 text-[11px] italic text-muted-foreground">
+            Check the {data.record_type} in NetSuite before trying again. Re-running this now risks
+            creating it twice.
+          </p>
         </div>
       )}
 

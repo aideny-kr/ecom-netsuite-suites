@@ -349,3 +349,47 @@ describe("WriteConfirmationCard — write loop states", () => {
     expect(screen.getByRole("button", { name: /approve/i })).toBeEnabled();
   });
 });
+
+describe("WriteConfirmationCard — indeterminate outcome", () => {
+  // A write that timed out is not a write that failed. Live on 2026-08-27,
+  // sandbox 6738075-sb1: ns_createRecord exceeded the timeout, NetSuite
+  // created customer 5264348 anyway, and the app told the operator it had
+  // failed. The failed panel says "Nothing was written" — which was untrue,
+  // and is the sentence that sends someone off to create a duplicate.
+  const indeterminate: WriteConfirmationData = {
+    ...baseCreate,
+    status: "indeterminate",
+    error: "Tool execution exceeded 60-second timeout limit",
+  };
+
+  it("does not claim the write failed or that nothing was written", () => {
+    render(
+      <WriteConfirmationCard data={indeterminate} onConfirm={vi.fn()} onReject={vi.fn()} />,
+    );
+    expect(screen.queryByText(/NetSuite rejected this write/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Nothing was written/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Failed$/)).not.toBeInTheDocument();
+  });
+
+  it("tells the operator the record may already exist and to check first", () => {
+    render(
+      <WriteConfirmationCard data={indeterminate} onConfirm={vi.fn()} onReject={vi.fn()} />,
+    );
+    expect(screen.getByText(/may already exist/i)).toBeInTheDocument();
+    expect(screen.getByText(/check .* in NetSuite/i)).toBeInTheDocument();
+  });
+
+  it("surfaces the underlying reason", () => {
+    render(
+      <WriteConfirmationCard data={indeterminate} onConfirm={vi.fn()} onReject={vi.fn()} />,
+    );
+    expect(screen.getByText(/60-second timeout/i)).toBeInTheDocument();
+  });
+
+  it("offers no Approve button — re-running is exactly the wrong move", () => {
+    render(
+      <WriteConfirmationCard data={indeterminate} onConfirm={vi.fn()} onReject={vi.fn()} />,
+    );
+    expect(screen.queryByRole("button", { name: /approve/i })).not.toBeInTheDocument();
+  });
+});

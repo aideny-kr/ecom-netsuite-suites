@@ -902,7 +902,14 @@ export interface WriteConfirmationData {
   // be stuck here after a server crash mid-write — see the claim site in
   // orchestrator.py — which is deliberate: a human resolves it manually
   // rather than the client guessing at a retry.
-  status: "pending" | "approved" | "rejected" | "failed" | "executing";
+  //
+  // "indeterminate" is NOT a failure: the write was sent and NetSuite
+  // never confirmed the result (timeout, unreadable response), so the
+  // record may exist. Kept separate from "failed" because the failed
+  // card asserts "Nothing was written" — on 2026-08-27 that was untrue
+  // (customer 5264348 existed) and would have invited a duplicate.
+  // Terminal, and never carries an Approve action.
+  status: "pending" | "approved" | "rejected" | "failed" | "executing" | "indeterminate";
 }
 
 // ---------------------------------------------------------------------------

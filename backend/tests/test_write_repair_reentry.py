@@ -386,3 +386,143 @@ class TestWriteRepairInjectionWiring:
             "found a `return` statement between the reenter decision and the "
             "UnifiedAgent construction — this would silently defeat the fall-through"
         )
+
+
+class TestIndeterminateOutcomeNeverRepairs:
+    """A timed-out write is not a rejected write.
+
+    Live on 2026-08-27, sandbox 6738075-sb1: ns_createRecord exceeded the
+    timeout, NetSuite created customer 5264348 regardless, and this code
+    recorded `failed` and opened a repair card carrying the identical payload.
+    One approval away from a duplicate customer.
+
+    `write_repair_bound`'s own docstring scopes it to a write "rejected BY
+    NETSUITE" — a payload worth recomposing because the payload was wrong.
+    A transport failure is outside that contract: the payload may have been
+    perfect, and re-proposing it risks writing the record twice rather than
+    fixing anything.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_timeout_is_indeterminate_and_opens_no_repair_card(self):
+        from app.services.chat.orchestrator import run_chat_turn
+        from app.services.chat.write_outcome import INDETERMINATE_KEY
+
+        session_id = uuid.uuid4()
+        confirm_msg, tool_name, tool_input = _make_confirm_msg(session_id)
+        db = _make_db(confirm_msg)
+        session = _make_session(session_id)
+
+        # Exactly what mcp_client_service returns when the call times out.
+        mock_execute_tool_call = AsyncMock(
+            return_value=json.dumps(
+                {
+                    "error": "Tool execution exceeded 60-second timeout limit",
+                    INDETERMINATE_KEY: True,
+                }
+            )
+        )
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", new_callable=AsyncMock),
+        ):
+            async for _event in run_chat_turn(
+                db=db,
+                session=session,
+                user_message="create a customer",
+                user_id=_USER_ID,
+                tenant_id=_TENANT_ID,
+                write_confirm={"action": "approve", "confirmation_id": str(confirm_msg.id)},
+            ):
+                pass
+
+        so = confirm_msg.structured_output
+        assert so["status"] == "indeterminate", "a timeout must not be recorded as a NetSuite rejection"
+        # The repair loop must not have run at all — no fingerprint, no
+        # re-entry, and therefore no second card carrying the same payload.
+        assert "failure_fingerprint" not in so
+        assert "repair_exit_reason" not in so
+
+    @pytest.mark.asyncio
+    async def test_the_operator_is_told_the_record_may_already_exist(self):
+        """The message is the safety mechanism here: it has to stop someone
+        from immediately retrying. 'Failed' invites exactly that."""
+        from app.services.chat.orchestrator import run_chat_turn
+        from app.services.chat.write_outcome import INDETERMINATE_KEY
+
+        session_id = uuid.uuid4()
+        confirm_msg, tool_name, tool_input = _make_confirm_msg(session_id)
+        db = _make_db(confirm_msg)
+        session = _make_session(session_id)
+
+        mock_execute_tool_call = AsyncMock(
+            return_value=json.dumps(
+                {"error": "Tool execution exceeded 60-second timeout limit", INDETERMINATE_KEY: True}
+            )
+        )
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", new_callable=AsyncMock),
+        ):
+            events = [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="create a customer",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={"action": "approve", "confirmation_id": str(confirm_msg.id)},
+                )
+            ]
+
+        content = [e for e in events if e.get("type") == "message"][-1]["message"]["content"].lower()
+        assert "may or may not" in content
+        assert "may already exist" in content
+        assert "twice" in content
+        # It must NOT assert the write failed — that is the claim we cannot make.
+        assert "the operation failed" not in content
+
+    @pytest.mark.asyncio
+    async def test_a_real_netsuite_rejection_still_repairs(self):
+        """The other half: this must not disarm the repair loop for genuine
+        payload rejections, which are what it was built for."""
+        from app.services.chat.orchestrator import run_chat_turn
+
+        session_id = uuid.uuid4()
+        confirm_msg, tool_name, tool_input = _make_confirm_msg(
+            session_id, repair_of=str(uuid.uuid4()), repair_attempt=2
+        )
+        db = _make_db(confirm_msg)
+        session = _make_session(session_id)
+
+        mock_execute_tool_call = AsyncMock(
+            return_value=json.dumps({"error": "HTTP 400: Please enter value(s) for: Currency."})
+        )
+
+        with (
+            patch("app.services.chat.orchestrator.execute_tool_call", mock_execute_tool_call),
+            patch("app.services.chat.orchestrator.log_event", new_callable=AsyncMock),
+            patch(
+                "app.services.chat.orchestrator._resolve_repair_chain_previous_fingerprint",
+                new_callable=AsyncMock,
+                return_value="a-different-fingerprint",
+            ),
+        ):
+            [
+                event
+                async for event in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="create a customer",
+                    user_id=_USER_ID,
+                    tenant_id=_TENANT_ID,
+                    write_confirm={"action": "approve", "confirmation_id": str(confirm_msg.id)},
+                )
+            ]
+
+        so = confirm_msg.structured_output
+        assert so["status"] == "failed"
+        assert so["failure_fingerprint"] is not None
