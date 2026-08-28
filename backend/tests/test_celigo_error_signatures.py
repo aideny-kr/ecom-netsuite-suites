@@ -189,8 +189,8 @@ class TestFingerprintCollapsesSameShapeVariants:
         assert len(fps) == 1
 
     def test_two_email_only_variants_share_one_fingerprint(self):
-        fp1 = fingerprint("import", "value_lookup_failed", _value_lookup_message("mjj@example.test"))
-        fp2 = fingerprint("import", "value_lookup_failed", _value_lookup_message("jackplumer27@example.test"))
+        fp1 = fingerprint("import", "value_lookup_failed", _value_lookup_message("user_alpha@example.test"))
+        fp2 = fingerprint("import", "value_lookup_failed", _value_lookup_message("user_beta@example.test"))
         assert fp1 == fp2
 
     def test_structurally_different_error_gets_its_own_fingerprint(self):
@@ -263,12 +263,12 @@ class TestUpsertErrorsGroupsBySignature:
             _raw_error(
                 celigo_id="err_lookup_1",
                 code="value_lookup_failed",
-                message=_value_lookup_message("mjj@example.test"),
+                message=_value_lookup_message("user_alpha@example.test"),
             ),
             _raw_error(
                 celigo_id="err_lookup_2",
                 code="value_lookup_failed",
-                message=_value_lookup_message("jackplumer27@example.test"),
+                message=_value_lookup_message("user_beta@example.test"),
             ),
         ]
 
@@ -332,6 +332,65 @@ class TestUpsertErrorsGroupsBySignature:
         for fp in fingerprints:
             assert "@" not in fp
             assert re.search(r"\bR\d+\b", fp) is None
+
+
+class TestOccurrenceCountReflectsResolutionWithinSameCall:
+    """FIX ROUND 1 (team lead, 2026-08-27, caught by an executed repro, not
+    a reading): `mark_flow_errors_resolved` used to run AFTER the phase-3
+    occurrence_count recompute, so a signature's count stayed stale by
+    exactly the set THIS call just resolved -- and if that root cause never
+    reappears in any future batch, nothing ever corrects it. This test
+    fails against that ordering (occurrence_count_after would read 2, not
+    1) and passes now that resolution runs before the recompute."""
+
+    async def test_occurrence_count_drops_when_an_error_resolves_in_the_same_call(self, db: AsyncSession):
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+        step = await _seed_step(db, tenant.id, conn_id, suffix="occ")
+
+        first_sync = [
+            _raw_error(celigo_id="err_occ_stays", message=_ship_address_message(*_SHIP_ADDRESS_VARIANTS[0])),
+            _raw_error(celigo_id="err_occ_vanishes", message=_ship_address_message(*_SHIP_ADDRESS_VARIANTS[1])),
+        ]
+        await upsert_errors(db, tenant_id=tenant.id, connection_id=conn_id, step=step, raw_errors=first_sync)
+        await db.flush()
+
+        occurrence_count_before = (
+            await db.execute(
+                text("SELECT occurrence_count FROM celigo_error_signatures WHERE tenant_id = :t").bindparams(
+                    t=tenant.id
+                )
+            )
+        ).scalar_one()
+        assert occurrence_count_before == 2  # both errors open, same signature
+
+        # Resync: err_occ_vanishes is gone -- same signature, one fewer open
+        # error. This is the call that must both resolve AND recompute
+        # correctly, since nothing later is guaranteed to touch this
+        # signature again.
+        second_sync = [
+            _raw_error(celigo_id="err_occ_stays", message=_ship_address_message(*_SHIP_ADDRESS_VARIANTS[0])),
+        ]
+        await upsert_errors(db, tenant_id=tenant.id, connection_id=conn_id, step=step, raw_errors=second_sync)
+        await db.flush()
+
+        occurrence_count_after = (
+            await db.execute(
+                text("SELECT occurrence_count FROM celigo_error_signatures WHERE tenant_id = :t").bindparams(
+                    t=tenant.id
+                )
+            )
+        ).scalar_one()
+        assert occurrence_count_after == 1  # NOT 2 -- must reflect THIS call's own resolution
+
+        vanished = (
+            await db.execute(
+                select(CeligoFlowError).where(
+                    CeligoFlowError.tenant_id == tenant.id, CeligoFlowError.celigo_id == "err_occ_vanishes"
+                )
+            )
+        ).scalar_one()
+        assert vanished.resolved_at is not None  # row survives, resolved -- never deleted
 
 
 class TestUpsertErrorsIsIdempotent:

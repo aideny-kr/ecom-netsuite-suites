@@ -82,6 +82,17 @@ share the same fingerprint, not just the step this call is processing.
 `first_seen`/`last_seen` intentionally span resolved AND open rows (the
 full historical range); `occurrence_count` intentionally counts only
 currently-open rows (a resolved failure isn't still "occurring").
+
+ORDERING WITHIN ONE CALL (FIX ROUND 1, team lead, 2026-08-27 -- caught by an
+executed repro, not a reading): this call's own `mark_flow_errors_resolved`
+MUST run BEFORE the phase-3 recompute above, never after. The recompute
+filters `WHERE resolved_at IS NULL`; if resolution ran second, the count
+would be stale by exactly the set this call just resolved. That staleness
+is not self-healing -- if the underlying root cause is genuinely fixed and
+never appears in any future `raw_errors` batch, nothing ever touches that
+`signature_id` again, so a wrong-ordered call would leave `occurrence_count`
+frozen at its last-open value forever, permanently overstating an
+already-resolved root cause on any dashboard reading that column.
 """
 
 from __future__ import annotations
@@ -230,6 +241,19 @@ async def upsert_errors(
         fp = fingerprint(error.get("source"), error.get("code"), error.get("message"))
         groups[fp].append(error)
 
+    # Preservation: anything this step had open before, that's absent from
+    # *raw_errors* now, is resolved -- NEVER deleted. See module docstring
+    # for why this stops at resolved_at and never touches purged_at.
+    #
+    # MUST run BEFORE phase 3's aggregate recompute below, not after -- see
+    # module docstring's "ORDERING WITHIN ONE CALL" (FIX ROUND 1). Phase 3
+    # filters on `resolved_at IS NULL`; resolving first means this call's
+    # own resolutions are already reflected when that filter runs, instead
+    # of leaving the count stale by exactly the set just resolved here.
+    resolved_ids = previously_open_ids - now_open_ids
+    if resolved_ids:
+        await mark_flow_errors_resolved(db, tenant_id=tenant_id, connection_id=connection_id, celigo_ids=resolved_ids)
+
     # Phase 1: one signature row per fingerprint group, keyed by a
     # representative error's source/code/sample_message. Must happen BEFORE
     # phase 2 -- `celigo_flow_errors.signature_id` is a real (non-deferred)
@@ -308,10 +332,3 @@ async def upsert_errors(
             first_seen=first_seen,
             last_seen=last_seen,
         )
-
-    # Preservation: anything this step had open before, that's absent from
-    # *raw_errors* now, is resolved -- NEVER deleted. See module docstring
-    # for why this stops at resolved_at and never touches purged_at.
-    resolved_ids = previously_open_ids - now_open_ids
-    if resolved_ids:
-        await mark_flow_errors_resolved(db, tenant_id=tenant_id, connection_id=connection_id, celigo_ids=resolved_ids)
