@@ -315,7 +315,19 @@ async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_
         if existing_series_id is not None:
             existing = (
                 await db.execute(
-                    select(Report).where(Report.series_id == existing_series_id, Report.period == closed.name)
+                    # tenant_id is NOT redundant beside series_id: reports.series_id is a
+                    # plain single-column FK (migration 093), not tenant-composite, so
+                    # nothing at the schema level stops a row of another tenant pointing
+                    # at this series. Without this predicate the only thing standing
+                    # between that row and a cross-tenant read is RLS -- make the query
+                    # itself the guard. Same predicate on the conflict-resolution lookup
+                    # below; applying it to one and not its sibling is the exact shape
+                    # that produced rounds 3 and 4's findings.
+                    select(Report).where(
+                        Report.tenant_id == tenant_id,
+                        Report.series_id == existing_series_id,
+                        Report.period == closed.name,
+                    )
                 )
             ).scalar_one_or_none()
             if existing is not None:
@@ -451,8 +463,28 @@ async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_
         # return early: there is nothing of ours to audit-log or commit, exactly like
         # the pre-flight "already covered" early return further up.
         report = (
-            await db.execute(select(Report).where(Report.series_id == series_id, Report.period == period))
-        ).scalar_one()
+            await db.execute(
+                select(Report).where(
+                    Report.tenant_id == tenant_id,
+                    Report.series_id == series_id,
+                    Report.period == period,
+                )
+            )
+        ).scalar_one_or_none()
+        if report is None:
+            # We lost the ON CONFLICT race, but the row that beat us is not visible to
+            # THIS tenant. uq_reports_series_id_period is keyed on (series_id, period)
+            # with no tenant column, so the only way here is corrupt data: a report of
+            # another tenant pointing at this tenant's series (reports.series_id is a
+            # plain FK, not tenant-composite -- see migration 093). Fail loudly and
+            # legibly rather than fall through: a bare scalar_one() would raise
+            # NoResultFound as an opaque 500, and returning the other tenant's row
+            # would be a cross-tenant read. ValueError is what compose_playbook_endpoint
+            # already maps to a clean client error.
+            raise ValueError(
+                f"Report series {series_id} already has a {period!r} report owned by a "
+                "different tenant; refusing to read across tenants"
+            )
         return report
 
     report = (await db.execute(select(Report).where(Report.id == report_id))).scalar_one()

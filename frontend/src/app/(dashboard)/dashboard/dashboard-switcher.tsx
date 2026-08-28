@@ -83,6 +83,14 @@ export function DashboardSwitcher({
     });
   }
 
+  // T2 gate round 4: `activeId` is documented as meaningless while a tracking selection
+  // is active, but the caller passes activeId={report.id} unconditionally and, under a
+  // tracking selection, `report` IS the series' newest report — so a report that is both
+  // pinned and newest-in-series lit a ✓ in BOTH groups. Enforce the documented contract
+  // HERE, at the choke point, instead of relying on every caller to remember it: a
+  // switcher must name exactly one active thing.
+  const pinnedActiveId = activeSeriesId ? null : activeId;
+
   return (
     <>
       <DropdownMenu>
@@ -126,7 +134,7 @@ export function DashboardSwitcher({
                 onClick={() => select({ reportId: report.id })}
                 className="flex items-center gap-2"
               >
-                <span className="w-3.5 shrink-0">{report.id === activeId ? "✓" : ""}</span>
+                <span className="w-3.5 shrink-0">{report.id === pinnedActiveId ? "✓" : ""}</span>
                 <span className="min-w-0 flex-1 truncate">{report.title}</span>
                 {/* Always the literal word "snapshot" (mock §5) — a Pinned months
                  * entry is, by definition, a fixed single-period artifact, regardless

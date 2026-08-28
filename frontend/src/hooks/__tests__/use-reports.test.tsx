@@ -181,3 +181,21 @@ it("useComposePlaybook sends mode: 'tracking' when asked, with no params (the se
     mode: "tracking",
   });
 });
+
+it("useComposePlaybook busts the dashboard query too -- a tracking compose moves the wall", async () => {
+  // T2 gate round 4: this hook invalidated only ["reports"], while every other mutation
+  // in this file busts ["dashboard"] as well. A tracking compose changes which report is
+  // a series' newest -- i.e. what the wall shows and what the ribbon says -- so leaving
+  // ["dashboard"] cached meant the user composed the next period, went to the dashboard,
+  // and saw the OLD period for up to staleTime. That silently breaks the one promise the
+  // tracking mode makes: "moves forward on its own once you compose a newer one".
+  api.post.mockResolvedValueOnce({ id: "r-9", series_id: "s-1" });
+  const qc = new QueryClient(qcOpts);
+  const invalidate = vi.spyOn(qc, "invalidateQueries");
+  const { result } = renderHook(() => useComposePlaybook(), { wrapper: makeWrapper(qc) });
+  result.current.mutate({ key: "income_statement", params: {}, mode: "tracking" });
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  const keys = invalidate.mock.calls.map((c) => JSON.stringify(c[0]?.queryKey));
+  expect(keys).toContain(JSON.stringify(["reports"]));
+  expect(keys).toContain(JSON.stringify(["dashboard"]));
+});

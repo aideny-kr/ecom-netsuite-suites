@@ -956,6 +956,69 @@ async def test_compose_playbook_tracking_report_conflicting_row_reuses_existing_
     assert len(report_rows) == 1  # get-or-create resolved to the existing row, not a duplicate/IntegrityError
 
 
+async def test_compose_playbook_tracking_never_returns_another_tenants_report(db, monkeypatch):
+    """T2 gate round 4: the pre-flight idempotency lookup filtered ReportSeries by
+    tenant_id but the follow-up Report lookup keyed ONLY on (series_id, period) --
+    no tenant predicate. That is safe only while every reports.series_id is
+    guaranteed to point at a series of the SAME tenant, and nothing guarantees it:
+    reports.series_id is a plain single-column FK to report_series.id (migration
+    093), not a tenant-composite one, so Postgres will happily accept a row whose
+    tenant_id and series' tenant_id disagree.
+
+    This test constructs exactly that row -- and it is constructible here precisely
+    BECAUSE the CI role is BYPASSRLS, so RLS is not standing behind the query to
+    save it. Without an explicit tenant predicate the compose hands tenant A a
+    report belonging to tenant B: a cross-tenant read, the repo's hardest
+    invariant. The query filter is the guard, not RLS and not the FK."""
+    tenant_a = await create_test_tenant(db, name="TenantAlpha")
+    tenant_b = await create_test_tenant(db, name="TenantBeta")
+    user_a, _ = await create_test_user(db, tenant_a)
+    user_b, _ = await create_test_user(db, tenant_b)
+    _patch_resolver(monkeypatch, _JUN_CLOSED)
+
+    # Tenant A owns the series...
+    series_a = ReportSeries(tenant_id=tenant_a.id, playbook_key="income_statement", created_by=user_a.id)
+    db.add(series_a)
+    await db.flush()
+
+    # ...but a row belonging to TENANT B points at it for the same period. The plain
+    # FK permits this; only an explicit tenant predicate in the lookup excludes it.
+    foreign_report = Report(
+        tenant_id=tenant_b.id,
+        title="Tenant B private income statement",
+        spec_json={},
+        rendered_html="<html>tenant B numbers</html>",
+        created_by=user_b.id,
+        recipe_json={},
+        period="Jun 2026",
+        series_id=series_a.id,
+    )
+    db.add(foreign_report)
+    await db.flush()
+
+    async def fake_execute(tool_name, tool_input, tenant_id, actor_id, correlation_id, db, **kw):
+        by_params = _income_statement_by_params()
+        key = (tool_input.get("report_type"), tool_input.get("period"))
+        return by_params.get(key, _RESULT)
+
+    monkeypatch.setattr("app.services.chat.tools.execute_tool_call", fake_execute)
+
+    # The achievable guarantee is NOT "compose succeeds": uq_reports_series_id_period is
+    # keyed on (series_id, period) with no tenant column, so tenant B's row genuinely
+    # occupies that slot and tenant A cannot insert there. Full enforcement needs a
+    # tenant-composite FK/index (follow-up). What compose MUST guarantee, and does, is
+    # that it never silently hands back the other tenant's report -- it fails loudly.
+    with pytest.raises(ValueError, match="different tenant"):
+        await compose_playbook_report(
+            db, playbook_key="income_statement", params={}, tenant_id=tenant_a.id, actor_id=user_a.id, mode="tracking"
+        )
+
+    # And the foreign row is untouched -- no overwrite, no read-through.
+    still_b = (await db.execute(select(Report).where(Report.id == foreign_report.id))).scalar_one()
+    assert still_b.tenant_id == tenant_b.id
+    assert "tenant B numbers" in (still_b.rendered_html or "")
+
+
 async def test_compose_playbook_tracking_failed_compose_leaves_no_orphaned_series(db, monkeypatch):
     """MAJOR B (T2 gate, round 2): a failed tracking compose must never leave a
     ReportSeries row behind with zero linked reports. The series get-or-create used to

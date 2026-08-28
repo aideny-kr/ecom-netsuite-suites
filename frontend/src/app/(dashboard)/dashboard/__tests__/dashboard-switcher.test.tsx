@@ -166,7 +166,10 @@ it("selecting a Tracking the close item PUTs its series_id to /api/v1/dashboard/
 // --- Pinned months (renamed from "Published dashboards") ---------------------------
 
 it("opens to a Pinned months group listing every published report with a ✓ on the active one", async () => {
-  const { findByRole, findByText } = renderSwitcher();
+  // activeSeriesId null => the PINNED selection is the active one, so the ✓ belongs
+  // here. (With a series active the pinned group carries no ✓ at all — see the
+  // mutual-exclusivity test below.)
+  const { findByRole, findByText } = renderSwitcher({ activeSeriesId: null });
   const trigger = await findByRole("button", { name: /switch/i });
   openSwitcher(trigger);
 
@@ -175,6 +178,23 @@ it("opens to a Pinned months group listing every published report with a ✓ on 
   expect(activeItem.textContent).toContain("✓");
   const otherItem = await findByRole("menuitem", { name: /board snapshot/i });
   expect(otherItem.textContent).not.toContain("✓");
+});
+
+it("shows exactly one ✓ when the active series' newest report is ALSO individually pinned", async () => {
+  // T2 gate round 4: the caller passes activeId={report.id} unconditionally, and with a
+  // tracking selection active `report` IS the series' newest report -- so a report that
+  // is both pinned and newest-in-series lit up in BOTH groups, and a switcher whose one
+  // job is saying what you're on said two things. activeId is documented as "meaningless
+  // (and never matched) while a tracking selection is active"; enforce that in the
+  // component rather than trusting every caller to remember it.
+  const { findByRole } = renderSwitcher({ activeId: "r-2", activeSeriesId: "s-1" });
+  const trigger = await findByRole("button", { name: /switch/i });
+  openSwitcher(trigger);
+
+  const seriesItem = await findByRole("menuitem", { name: /income statement/i });
+  expect(seriesItem.textContent).toContain("✓");
+  const pinnedItem = await findByRole("menuitem", { name: /cash flow.*q2/i });
+  expect(pinnedItem.textContent).not.toContain("✓");
 });
 
 it("shows 'snapshot' as meta on every Pinned months item, regardless of its own auto_refresh cadence", async () => {

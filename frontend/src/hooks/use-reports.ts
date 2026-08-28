@@ -170,6 +170,14 @@ export function useComposePlaybook() {
         params: args.params,
         mode: args.mode ?? "period",
       }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["reports"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["reports"] });
+      // A tracking compose changes which report is a series' NEWEST — i.e. what the
+      // wall renders and what the ribbon says — so the cached /dashboard payload must
+      // be busted too, exactly as every other mutation in this file does. Without it
+      // the user composes the next period, returns to the dashboard, and still sees the
+      // previous one until staleTime expires — breaking tracking mode's only promise.
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    },
   });
 }
