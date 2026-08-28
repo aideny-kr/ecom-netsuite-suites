@@ -282,9 +282,7 @@ def test_a_field_merely_named_like_the_hint_is_untouched():
 def test_sanitize_removes_ask_user_from_the_executed_payload():
     from app.services.chat.write_payload import sanitize_tool_input
 
-    out = sanitize_tool_input(
-        {"recordType": "customer", "data": '{"companyName": "Acme", "ask_user": ["subsidiary"]}'}
-    )
+    out = sanitize_tool_input({"recordType": "customer", "data": '{"companyName": "Acme", "ask_user": ["subsidiary"]}'})
     assert "ask_user" not in json.dumps(out)
     # The payload key keeps its original ENCODING — data was a JSON string and
     # must stay one, or the external MCP receives a shape it does not expect.

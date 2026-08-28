@@ -765,3 +765,73 @@ class TestValidationNeverRanIsNotValidationPassed:
         )
         assert payload is not None
         assert payload.unvalidated is False
+
+
+class TestTheCardDescribesWhatWillExecute:
+    """The invariant behind BOTH gate rounds' majors.
+
+    Round 1: the card reported `unvalidated=False` when validation had never
+    run — display diverged from truth.
+    Round 2: `ask_user` was stripped from the displayed fields while the signed,
+    executed payload kept it — display diverged from execution.
+
+    Same shape twice, so this is a property test rather than a third point fix.
+    A human approves what the CARD shows; if the executed payload can differ
+    from it, their consent was obtained for something other than what happens.
+    """
+
+    @staticmethod
+    def _executed_fields(payload):
+        """The fields that will actually reach NetSuite on a plain approve."""
+        from app.services.chat.write_confirmation_service import validate_and_extract_confirmation
+        from app.services.chat.write_payload import normalize_write_payload
+
+        ok, _tool, tool_input = validate_and_extract_confirmation(json.loads(payload.model_dump_json()), "s")
+        assert ok, "the card must validate against its own token"
+        return normalize_write_payload(tool_input).fields
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            {"recordType": "customer", "data": '{"companyName": "Acme"}'},
+            {"recordType": "customer", "data": '{"companyName": "Acme", "ask_user": ["subsidiary"]}'},
+            {"recordType": "customer", "body": {"companyName": "Acme", "ask_user": ["subsidiary"]}},
+            {"recordType": "customer", "data": '{"companyName": "Acme", "subsidiary": {"id": "5"}}'},
+        ],
+    )
+    def test_displayed_fields_equal_executed_fields(self, raw):
+        from app.services.chat.write_confirmation_service import build_confirmation_payload
+
+        payload = build_confirmation_payload(
+            mutation_type="create",
+            record_type="customer",
+            tool_name=_ext("ns_createRecord"),
+            tool_input=raw,
+            session_id="s",
+            validation=None,
+        )
+        assert payload is not None
+        assert payload.proposed_fields == self._executed_fields(payload), (
+            "the card shows one payload and a different one executes — a human's approval "
+            "would then have been given for something other than what happens"
+        )
+
+    def test_no_out_of_band_key_survives_into_execution(self):
+        """Stated separately from equality: even if both sides agreed, an
+        internal hint must never reach the ERP as a record field."""
+        from app.services.chat.write_confirmation_service import build_confirmation_payload
+
+        payload = build_confirmation_payload(
+            mutation_type="create",
+            record_type="invoice",
+            tool_name=_ext("ns_createRecord"),
+            tool_input={
+                "recordType": "invoice",
+                "data": '{"entity": "5", "item": [{"amount": 100, "ask_user": ["account"]}]}',
+            },
+            session_id="s",
+            validation=None,
+        )
+        assert payload is not None
+        assert "ask_user" not in json.dumps(payload.tool_input)
+        assert "ask_user" not in json.dumps(payload.proposed_lines)
