@@ -140,6 +140,55 @@ def parse_external_tool_name(name: str) -> tuple[uuid.UUID, str] | None:
     return connector_id, raw_name
 
 
+# NetSuite account-id suffixes that mean "not the production books".
+# `_SB<n>` is a sandbox, `_RP` a release preview. Mirrors the pattern
+# `schemas/workspace.py` already validates sandbox deploy targets against.
+_NON_PRODUCTION_ACCOUNT_MARKERS = ("_SB", "_RP", "-SB", "-RP", "_TSTDRV", "TSTDRV")
+
+
+def netsuite_environment_of(account_id: str | None) -> str:
+    """ "SANDBOX" or "PRODUCTION" for a NetSuite account id.
+
+    Derived, never operator-asserted — `metadata_json['account_id']` is set
+    from the OAuth setup flow and is the closest thing to ground truth we hold.
+
+    Fails toward caution: an unrecognised id is called PRODUCTION. Mislabelling
+    production as sandbox invites a careless write; the reverse only invites
+    care.
+
+    NOTE the scope. This is DISPLAY: it lets the model and a human reading
+    tool_calls_log tell two connectors apart. It is not the enforcement in
+    docs/superpowers/specs/2026-08-27-sandbox-environment-binding-design.md,
+    which must refuse a write to the environment the session did not choose,
+    at the dispatcher. Seeing the difference is not the same as being unable
+    to get it wrong.
+    """
+    if not account_id:
+        return "PRODUCTION"
+    upper = str(account_id).upper()
+    return "SANDBOX" if any(m in upper for m in _NON_PRODUCTION_ACCOUNT_MARKERS) else "PRODUCTION"
+
+
+def _connector_tag(connector) -> str:
+    """The bracketed prefix on every external tool description.
+
+    NetSuite connectors additionally carry environment and account, because a
+    tenant can hold more than one and the difference is production money.
+    """
+    provider = getattr(connector, "provider", "") or "external"
+    if not str(provider).startswith("netsuite"):
+        return str(provider)
+    meta = getattr(connector, "metadata_json", None)
+    account = meta.get("account_id") if isinstance(meta, dict) else None
+    # Must be a real string. A test double or a malformed row can yield a
+    # truthy non-string here, and stringifying it would stamp a mock's repr
+    # into every tool description the model reads.
+    if not isinstance(account, str) or not account.strip():
+        return str(provider)
+    account = account.strip()
+    return f"{provider} · {netsuite_environment_of(account)} {account}"
+
+
 def build_external_tool_definitions(connectors: list) -> list[dict]:
     """Convert discovered MCP connector tools to Anthropic tool format.
 
@@ -185,7 +234,13 @@ def build_external_tool_definitions(connectors: list) -> list[dict]:
             tools.append(
                 {
                     "name": anthropic_name,
-                    "description": f"[{connector.provider}] {desc}",
+                    # Name the ENVIRONMENT and ACCOUNT, not just the provider.
+                    # Two NetSuite connectors previously produced byte-identical
+                    # descriptions, leaving an opaque connector UUID as the only
+                    # difference — so a model asked to "test in sandbox" chose
+                    # between them arbitrarily, and nobody could tell from the
+                    # log which one ran.
+                    "description": f"[{_connector_tag(connector)}] {desc}",
                     "input_schema": input_schema,
                 }
             )
