@@ -129,6 +129,36 @@ def _validation_failure_detail(validation: ValidationResult) -> str:
 
 _WRITE_TOOL_SUFFIXES = ("ns_createRecord", "ns_updateRecord", "ns_upsertRecord", "ns_deleteRecord")
 
+# What the forced write-proposal hop may put on the model's menu — a strict
+# subset of the above, deliberately WITHOUT ns_deleteRecord. Forcing means the
+# model must pick one of these, so anything listed here can be manufactured
+# from a turn that never asked for it; a spurious delete proposal is a far
+# worse outcome than declining to force. Deletes still work by the ordinary
+# path, they just never get compelled. See _forced_write_tool_subset.
+_FORCEABLE_WRITE_TOOLS = ("ns_createRecord", "ns_updateRecord", "ns_upsertRecord")
+
+# The escape hatch on the forced hop's menu. A T2 gate major on this branch
+# established the constraint that governs here: "What fields does a customer
+# record require?" is correctly answered by fetching metadata and replying in
+# prose, so a guard that fires on metadata-then-prose CANNOT distinguish a
+# dodged write from an answered question, and must let the model decline.
+#
+# Forcing a tool choice removes prose as an exit — which would re-create that
+# major by coercing a write card in reply to a question. So the decline stays
+# available, but as a TOOL rather than as narration: the model can still say
+# "nothing to write here", it just has to say it in a form the server can
+# read. Never dispatched; seeing it chosen means "leave the prose alone".
+_DECLINE_WRITE_TOOL = "no_write_was_requested"
+_DECLINE_WRITE_TOOL_DEF = {
+    "name": _DECLINE_WRITE_TOOL,
+    "description": (
+        "Choose this if the user did NOT ask for a record to be created or changed — for "
+        "example they asked what fields a record type has, or any other informational "
+        "question. Choosing this leaves your written answer exactly as you wrote it."
+    ),
+    "input_schema": {"type": "object", "properties": {}},
+}
+
 
 def _bare_tool_name(logged_tool: Any) -> str:
     """Strip the `ext__<connector>__` prefix off a logged tool name.
@@ -175,6 +205,53 @@ def _last_metadata_record_type(tool_calls_log: list[dict[str, Any]]) -> str | No
             if rt:
                 return str(rt)
     return None
+
+
+def _forced_write_tool_subset(
+    tool_calls_log: list[dict[str, Any]],
+    tool_definitions: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """The tool menu for the forced write-proposal hop: ONLY the write tools of
+    the connector this turn already fetched record metadata from.
+
+    Two properties earn the narrowness, and both were live failures first:
+
+    * **No read tool on the menu.** Given the whole toolset and a "you must
+      call something" tool_choice, the model has an escape hatch — call
+      ns_getSubsidiaries again, learn nothing new, and answer in prose anyway.
+      Removing chat as an option only works if the alternatives all constitute
+      a proposal.
+    * **No other connector's write tools.** A tenant with both a sandbox and a
+      production connection has two ns_createRecord tools. Forcing a write
+      must never widen the account the model already chose — that would turn a
+      UX fix into a wrong-account write, which is the failure this branch's
+      environment labelling exists to prevent.
+
+    Returns ``[]`` — meaning DO NOT FORCE — when the turn shows no metadata
+    call (no declared write intent to act on) or when that connector exposes
+    no write tools at all. Callers must treat an empty list as "leave the
+    model's prose alone": a forced tool_choice over an empty tool list is an
+    API error, and a read-only connector is an ordinary configuration here.
+    """
+    from app.services.chat.tools import parse_external_tool_name
+
+    connector_id: str | None = None
+    for entry in reversed(tool_calls_log or []):
+        parsed = parse_external_tool_name(entry.get("tool", "") or "")
+        if parsed and parsed[1] == "ns_getRecordTypeMetadata":
+            connector_id = str(parsed[0])
+            break
+    if connector_id is None:
+        return []
+
+    subset: list[dict[str, Any]] = []
+    for tool in tool_definitions or []:
+        parsed = parse_external_tool_name(str(tool.get("name", "")))
+        if not parsed:
+            continue
+        if str(parsed[0]) == connector_id and parsed[1] in _FORCEABLE_WRITE_TOOLS:
+            subset.append(tool)
+    return subset
 
 
 def _metadata_fetched_this_turn(tool_calls_log: list[dict[str, Any]], record_type: str) -> bool:
@@ -1063,6 +1140,81 @@ class BaseSpecialistAgent(abc.ABC):
                 agent_name=self.agent_name,
             )
 
+    async def _compose_forced_write_proposal(
+        self,
+        *,
+        adapter: Any,
+        model: str,
+        prompt_parts: Any,
+        task: str,
+        tool_calls_log: list[dict[str, Any]],
+    ) -> Any | None:
+        """One extra hop whose only possible output is a write proposal.
+
+        Deliberately built on a FRESH, minimal message list rather than the
+        turn's own history. Two reasons, one of them a hard API constraint:
+
+        * A forced tool_choice is incompatible with extended thinking, and
+          this turn has been running with thinking on — replaying its history
+          (which carries thinking blocks) under a forced choice is the exact
+          combination `thinking.is_forced_tool_choice` exists to keep apart.
+          A clean list is ours to construct, so the question never arises.
+        * The model does not need the history. It needs the record type and
+          the values the user gave, both of which are in *task*; every
+          required field it cannot supply is filled by the server's own slot
+          declaration from the curated registry, not by the model guessing.
+
+        Returns ``None`` — meaning leave the model's prose alone — on any
+        failure, on a connector with no forceable write tools, and when the
+        turn shows no declared write intent. This hop may never be the reason
+        a turn breaks: the worst case it is allowed to produce is the
+        behaviour we already have.
+        """
+        forced_tools = _forced_write_tool_subset(tool_calls_log, self.tool_definitions)
+        if not forced_tools:
+            return None
+
+        record_type = _last_metadata_record_type(tool_calls_log) or "record"
+        instruction = (
+            f"Compose the {record_type} write the user asked for, as a tool call. Include every "
+            "field value the user actually gave you. For each REQUIRED field whose value you "
+            'cannot determine from what they said, add "ask_user": ["<field name>"] to the SAME '
+            "tool call — the server looks up the real options and renders them as a dropdown on "
+            "the confirmation card the user has to approve anyway. In ask_user send field NAMES "
+            "only, never values and never your own list of options. Do not invent a value for a "
+            "field the user did not specify: an unanswered field belongs in ask_user."
+        )
+
+        try:
+            forced = await adapter.create_message(
+                model=model,
+                max_tokens=4096,
+                system=prompt_parts.static,
+                system_dynamic=prompt_parts.dynamic,
+                messages=[{"role": "user", "content": f"Task: {task}\n\n{instruction}"}],
+                tools=[*forced_tools, _DECLINE_WRITE_TOOL_DEF],
+                tool_choice={"type": "any"},
+                thinking_level="none",
+            )
+        except Exception:
+            logger.warning("forced write-proposal composition failed", exc_info=True)
+            return None
+
+        blocks = getattr(forced, "tool_use_blocks", None) or []
+        if not blocks:
+            return None
+        # The model used its decline. Return None so the turn delivers the
+        # answer it already wrote — the escape hatch only works if choosing it
+        # actually leaves the prose alone. `_DECLINE_WRITE_TOOL` must never
+        # reach the dispatcher: it is a local signal, not a real tool.
+        if all(getattr(b, "name", "") == _DECLINE_WRITE_TOOL for b in blocks):
+            logger.info("agent.write_proposal_forcing_declined agent=%s", self.agent_name)
+            return None
+        # A mixed response would otherwise dispatch the synthetic name and
+        # fail the whole turn on an unknown tool.
+        forced.tool_use_blocks = [b for b in blocks if getattr(b, "name", "") != _DECLINE_WRITE_TOOL]
+        return forced
+
     async def run_streaming(
         self,
         task: str,
@@ -1171,6 +1323,57 @@ class BaseSpecialistAgent(abc.ABC):
                 total_output_tokens += response.usage.output_tokens
                 total_cache_creation += response.usage.cache_creation_input_tokens
                 total_cache_read += response.usage.cache_read_input_tokens
+
+                # ── Forced write-proposal composition (stage 2 of the
+                # prose-instead-of-proposing guard) ──
+                # Stage 1 below ASKS the model to propose instead of talking.
+                # It complies about a third of the time: driven live on
+                # staging 2026-08-28, one identical create prompt over three
+                # runs produced 1 card and 2 prose endings, plus two operator
+                # runs that both ended in prose. Asking harder is not an
+                # option we still have — this is the fifth prompt-shaped
+                # attempt at the same behaviour, and `.claude/rules/
+                # agent-graph.md` is explicit that a guardrail is code at the
+                # choke point, never prompt prose.
+                #
+                # So stage 2 stops asking and removes chat from the menu: one
+                # extra hop offering ONLY that connector's write tools with a
+                # forced tool_choice. The model still decides the operation
+                # and composes the payload; it simply cannot end the turn by
+                # narrating a question at an operator who has no way to answer
+                # one. Runs at most once per turn, and only AFTER stage 1 has
+                # already been ignored, so a turn that merely asked a question
+                # about customers is never forced into proposing a write.
+                if (
+                    not response.tool_use_blocks
+                    and getattr(self, "_prose_instead_of_write_bounced", False)
+                    and not getattr(self, "_write_proposal_forced", False)
+                    and not _write_proposed_this_turn(tool_calls_log)
+                ):
+                    self._write_proposal_forced = True
+                    _forced = await self._compose_forced_write_proposal(
+                        adapter=adapter,
+                        model=model,
+                        prompt_parts=prompt_parts,
+                        task=task,
+                        tool_calls_log=tool_calls_log,
+                    )
+                    if _forced is not None and _forced.tool_use_blocks:
+                        # Swap in the composed proposal and fall through to the
+                        # ordinary tool-handling path below — the mutation
+                        # intercept, the investigation gate, the HITL card and
+                        # the slot declaration all run exactly as they would
+                        # for a proposal the model had volunteered. Nothing
+                        # about the write is decided here.
+                        total_input_tokens += _forced.usage.input_tokens
+                        total_output_tokens += _forced.usage.output_tokens
+                        logger.info(
+                            "agent.write_proposal_forced agent=%s tools=%d",
+                            self.agent_name,
+                            len(_forced.tool_use_blocks),
+                        )
+                        response = _forced
+                # ── End forced write-proposal composition ──
 
                 # Pure text response — done
                 if not response.tool_use_blocks:

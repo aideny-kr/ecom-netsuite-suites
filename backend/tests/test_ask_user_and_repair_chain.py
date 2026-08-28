@@ -57,14 +57,41 @@ def _make_agent():
     return agent
 
 
-def _make_adapter(responses):
+def _make_adapter(responses, forced=None):
+    """*forced* is what the stage-2 forced write-proposal hop returns from
+    `create_message`. Default is the model DECLINING (no write was requested),
+    which is the conservative answer: a test that does not opt in gets the
+    pre-stage-2 behaviour, so an accidental card can never pass unnoticed.
+
+    Explicitly async — a MagicMock's return value is not awaitable, so the hop
+    would swallow a TypeError and return None. Every test here would then pass
+    for the wrong reason, proving nothing about the forcing path.
+    """
     responses_iter = iter(responses)
 
     async def _fake_stream_message(**kwargs):
         yield "response", next(responses_iter)
 
+    if forced is None:
+        from app.services.chat.agents.base_agent import _DECLINE_WRITE_TOOL
+        from app.services.chat.llm_adapter import LLMResponse, TokenUsage, ToolUseBlock
+
+        forced = LLMResponse(
+            text_blocks=[],
+            tool_use_blocks=[ToolUseBlock(id="decline", name=_DECLINE_WRITE_TOOL, input={})],
+            usage=TokenUsage(input_tokens=1, output_tokens=1),
+        )
+
+    forced_calls: list[dict] = []
+
+    async def _fake_create_message(**kwargs):
+        forced_calls.append(kwargs)
+        return forced
+
     mock_adapter = MagicMock()
     mock_adapter.stream_message = _fake_stream_message
+    mock_adapter.create_message = _fake_create_message
+    mock_adapter.forced_calls = forced_calls
     mock_adapter.build_assistant_message = MagicMock(return_value={"role": "assistant", "content": []})
     mock_adapter.build_tool_result_message = MagicMock(
         return_value={"role": "user", "content": [{"type": "tool_result"}]}
@@ -989,3 +1016,152 @@ class TestProseGuardDoesNotHijackQuestions:
         # require the explicit decline branch.
         assert "IF the user only asked a question" in directive
         assert "ignore all" in directive
+
+
+class TestForcedWriteProposal:
+    """Stage 2: when asking twice has not worked, stop asking.
+
+    Stage 1 (above) sends the model a directive it may decline, which is what
+    keeps informational questions from being hijacked. It is also why the card
+    is a coin flip: measured live on staging 2026-08-28, one identical create
+    prompt over three runs produced 1 card and 2 prose endings, and the two
+    operator runs immediately before both ended in prose. Two thirds of the
+    time the operator is asked a question in a chat window that cannot answer
+    it, and the entire HITL surface — card, dropdown, approval — never appears.
+
+    Stage 2 removes prose as an exit without removing the model's ability to
+    decline: the hop offers that connector's write tools PLUS an explicit
+    decline tool, and forces a choice. The escape survives; only narration is
+    taken away. That is what keeps the earlier T2 gate major (a write card in
+    reply to "what fields does a customer need?") fixed.
+    """
+
+    @staticmethod
+    def _prose(text):
+        from app.services.chat.llm_adapter import LLMResponse, TokenUsage
+
+        return LLMResponse(text_blocks=[text], tool_use_blocks=[], usage=TokenUsage(10, 10))
+
+    @staticmethod
+    def _forced_create():
+        from app.services.chat.llm_adapter import LLMResponse, TokenUsage, ToolUseBlock
+
+        return LLMResponse(
+            text_blocks=[],
+            tool_use_blocks=[
+                ToolUseBlock(
+                    id="forced-1",
+                    name=_ext("ns_createRecord"),
+                    input={"recordType": "customer", "body": {"companyname": "Acme"}},
+                )
+            ],
+            usage=TokenUsage(10, 10),
+        )
+
+    @pytest.mark.asyncio
+    async def test_prose_twice_is_forced_into_a_proposal(self):
+        """THE regression this exists for. Against the pre-stage-2 code the
+        second prose ended the turn and no card was ever built."""
+        agent = _make_agent()
+        adapter = _make_adapter(
+            [
+                _metadata_step(_ext("ns_getRecordTypeMetadata")),
+                self._prose("Which subsidiary should this customer be created under?"),
+                self._prose("I still need you to pick a subsidiary."),
+                _final_step(),
+            ],
+            forced=self._forced_create(),
+        )
+
+        with _patches():
+            events = await _run(agent, adapter)
+
+        confirmations = [p for t, p in events if t == "confirmation_required"]
+        assert len(confirmations) == 1, "the operator must get a card, not a question they cannot answer"
+        # And it is a REAL card: the server still declares the slot for the
+        # required field the model left out, exactly as on a volunteered
+        # proposal. Forcing changes who starts the proposal, nothing else.
+        assert [s["name"] for s in confirmations[0]["editable_slots"]] == ["subsidiary"]
+
+    @pytest.mark.asyncio
+    async def test_declining_leaves_the_written_answer_alone(self):
+        """The decline has to actually work, or it is decoration and the
+        hijack major is back. Default `forced` IS the decline."""
+        agent = _make_agent()
+        adapter = _make_adapter(
+            [
+                _metadata_step(_ext("ns_getRecordTypeMetadata")),
+                self._prose("A customer needs companyName and subsidiary."),
+                self._prose("A customer requires companyName and subsidiary."),
+            ]
+        )
+
+        with _patches():
+            events = await _run(agent, adapter, task="What fields does a customer record require?")
+
+        assert [p for t, p in events if t == "confirmation_required"] == []
+        responses = [p for t, p in events if t == "response"]
+        assert "requires companyName" in (responses[0].data or "")
+
+    @pytest.mark.asyncio
+    async def test_the_forced_menu_carries_the_decline_and_no_read_tools(self):
+        """Inspect the menu actually sent. A read tool on it is an escape the
+        model took live; no decline tool on it is the hijack major."""
+        from app.services.chat.agents.base_agent import _DECLINE_WRITE_TOOL
+
+        agent = _make_agent()
+        adapter = _make_adapter(
+            [
+                _metadata_step(_ext("ns_getRecordTypeMetadata")),
+                self._prose("Which subsidiary?"),
+                self._prose("Still need the subsidiary."),
+            ]
+        )
+
+        with _patches():
+            await _run(agent, adapter)
+
+        assert len(adapter.forced_calls) == 1, "the hop must run exactly once per turn"
+        names = {t["name"] for t in adapter.forced_calls[0]["tools"]}
+        assert _DECLINE_WRITE_TOOL in names
+        assert _ext("ns_createRecord") in names
+        assert not any("SuiteQL" in n or "Metadata" in n for n in names)
+        assert adapter.forced_calls[0]["tool_choice"] == {"type": "any"}
+        # Thinking must be off: the Anthropic API 400s on a forced tool_choice
+        # combined with extended thinking (see thinking.is_forced_tool_choice).
+        assert adapter.forced_calls[0]["thinking_level"] == "none"
+
+    @pytest.mark.asyncio
+    async def test_a_turn_that_never_bounced_is_never_forced(self):
+        """Stage 2 is reachable only through stage 1. A single prose answer —
+        the ordinary end of an ordinary turn — must not trigger a hop."""
+        agent = _make_agent()
+        adapter = _make_adapter([self._prose("NetSuite subsidiaries are legal entities.")])
+
+        with _patches():
+            await _run(agent, adapter)
+
+        assert adapter.forced_calls == []
+
+    @pytest.mark.asyncio
+    async def test_a_failing_hop_never_breaks_the_turn(self):
+        """Worst case for this path is the behaviour we already had."""
+        agent = _make_agent()
+        adapter = _make_adapter(
+            [
+                _metadata_step(_ext("ns_getRecordTypeMetadata")),
+                self._prose("Which subsidiary?"),
+                self._prose("Still need the subsidiary."),
+            ]
+        )
+
+        async def _boom(**kwargs):
+            raise RuntimeError("anthropic 500")
+
+        adapter.create_message = _boom
+
+        with _patches():
+            events = await _run(agent, adapter)
+
+        responses = [p for t, p in events if t == "response"]
+        assert "Still need the subsidiary" in (responses[0].data or "")
