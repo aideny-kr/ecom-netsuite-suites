@@ -22,10 +22,23 @@ returned it; a positive `include=` allowlist on a real export still returned
 either direction; it is passed through anyway (it shrinks most responses and
 costs nothing) but relied on for NOTHING. Every fetcher in this module runs
 its response through `sanitize()` before returning -- unconditionally, on
-every branch, including partial/error-adjacent ones -- so a raw Celigo object
-can never leave this module. No fetcher here logs a response body; the only
-things logged (via exception messages) are status codes and resource
-identifiers, never payload content.
+every branch, including partial/error-adjacent ones -- so a raw Celigo
+RESOURCE OBJECT can never leave this module this way.
+
+NARROWED CLAIM (whole-branch review finding 10, 2026-08-27): the paragraph
+above used to end "...never payload content" -- false as stated. `_auth_
+message` (below) DOES put body-derived text into a raised `CeligoAuthError`:
+either Celigo's own `message` field from a parsed JSON 401/403 body, or
+`response.text` VERBATIM when that body isn't JSON at all. That exception's
+`str()` propagates uncaught to every caller, including `InstrumentedTask.
+on_failure`. This is Celigo's own human-readable auth-failure text, not a
+resource's payload-bearing fields (`mockResponse`/`mockOutput`/`rawData`,
+etc. -- those never reach this path, since 401/403 short-circuits before any
+`sanitize()` call), and nothing here logs a response body directly -- but it
+is body content reaching an exception message, so "never payload content" is
+not the accurate claim. Whether a real Celigo auth-failure body can ever
+carry more than a short human-readable string is unverified without live
+access; this module does not bound `_auth_message`'s output size or shape.
 
 TASK 3 PAGINATION: Celigo's documented pagination
 (developer.celigo.com/api/using-the-api/pagination.md, fetched 2026-08-27 --
