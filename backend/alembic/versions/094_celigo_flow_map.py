@@ -112,6 +112,27 @@ deviation is called out in task-4-report.md too.
    silently lost, and gives Task 7's drift-diff something to compare
    against.
 
+8. **FIX ROUND 1: `celigo_connection_id` is `SET NULL` on
+   `celigo_flow_errors` / `celigo_error_signatures`, not the shared `CASCADE`
+   helper used by the other five tables.** The original version of this
+   migration reused `_connection_fk()` (CASCADE, NOT NULL) everywhere,
+   including on these two -- which contradicted the audit-table block
+   comment two paragraphs above (flow_id/flow_step_id/signature_id are all
+   `SET NULL` "because this table must outlive its parents") one column
+   over. Deleting the parent `connections` row would have cascaded through
+   and destroyed every error row for that connection: exactly the data this
+   feature exists to preserve past Celigo's ~30-day purge. Currently latent
+   (the product's own delete paths refuse to touch a `provider='celigo'`
+   connection row -- see `celigo_write_guard.py`), but that guard's own
+   docstring lists raw-SQL writes below the ORM as an explicitly uncovered
+   path, so "latent" was never "safe". `_connection_fk_audit()` (nullable,
+   `ondelete="SET NULL"`) fixes both tables. The other five
+   (integrations/flows/steps/scripts/attachments) keep the CASCADE helper
+   on purpose: those rows are a live mirror of Celigo config and are
+   meaningless without the connection they came from, unlike the audit
+   trail. See `test_celigo_connection_delete_preserves_flow_errors` and
+   `test_celigo_connection_delete_preserves_error_signatures`.
+
 Revision ID: 094_celigo_flow_map
 Revises: 093_recon_reject_labels
 Create Date: 2026-08-27
@@ -150,8 +171,26 @@ def _tenant_fk() -> sa.Column:
 
 
 def _connection_fk() -> sa.Column:
+    """CASCADE, NOT NULL -- for the five tables that are a live mirror of
+    Celigo config (integrations/flows/steps/scripts/attachments): a row here
+    is meaningless without its connection, so deleting the connection should
+    remove them too. NOT the two audit tables below -- see
+    `_connection_fk_audit()`."""
     return sa.Column(
         "celigo_connection_id", UUID(as_uuid=True), sa.ForeignKey("connections.id", ondelete="CASCADE"), nullable=False
+    )
+
+
+def _connection_fk_audit() -> sa.Column:
+    """SET NULL, nullable -- for `celigo_flow_errors` / `celigo_error_signatures`
+    only. These two are the audit trail (design spec G2: "outlives the
+    source") -- the same reason flow_id/flow_step_id/signature_id on
+    celigo_flow_errors are SET NULL rather than CASCADE. Deleting the parent
+    `connections` row must tombstone these rows, never destroy them; a
+    CASCADE here would silently wipe the exact evidence this feature exists
+    to preserve past Celigo's ~30-day purge."""
+    return sa.Column(
+        "celigo_connection_id", UUID(as_uuid=True), sa.ForeignKey("connections.id", ondelete="SET NULL"), nullable=True
     )
 
 
@@ -344,7 +383,7 @@ def upgrade() -> None:
         "celigo_error_signatures",
         _pk(),
         _tenant_fk(),
-        _connection_fk(),
+        _connection_fk_audit(),
         sa.Column("fingerprint", sa.Text(), nullable=False),
         sa.Column("source", sa.Text(), nullable=True),
         sa.Column("code", sa.Text(), nullable=True),
@@ -363,17 +402,17 @@ def upgrade() -> None:
     op.create_index("ix_celigo_error_signatures_connection_id", "celigo_error_signatures", ["celigo_connection_id"])
 
     # ------------------------------------------------------------------
-    # celigo_flow_errors -- THE audit trail (design spec G2). flow_id /
-    # flow_step_id / signature_id are all SET NULL on delete, never CASCADE:
-    # this table must outlive its parents, the same way it must outlive
-    # Celigo's own 30-day purge. resolved_at/purged_at, never a DELETE
-    # (global constraint; design spec DON'T #1).
+    # celigo_flow_errors -- THE audit trail (design spec G2). celigo_connection_id /
+    # flow_id / flow_step_id / signature_id are ALL SET NULL on delete, never
+    # CASCADE: this table must outlive every one of its parents, the same
+    # way it must outlive Celigo's own 30-day purge. resolved_at/purged_at,
+    # never a DELETE (global constraint; design spec DON'T #1).
     # ------------------------------------------------------------------
     op.create_table(
         "celigo_flow_errors",
         _pk(),
         _tenant_fk(),
-        _connection_fk(),
+        _connection_fk_audit(),
         sa.Column("flow_id", UUID(as_uuid=True), sa.ForeignKey("celigo_flows.id", ondelete="SET NULL"), nullable=True),
         sa.Column(
             "flow_step_id",

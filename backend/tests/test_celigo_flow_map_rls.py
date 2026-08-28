@@ -40,9 +40,12 @@ below is RED on a migration that only does `ENABLE ROW LEVEL SECURITY`
 statements in the migration and re-running -- see task-4-report.md) and GREEN
 once FORCE is restored.
 
-Skips (both tests) when the connecting role lacks CREATEROLE, leaving the
-catalog-presence pin in migration review as the durable, always-checkable
-signal -- same posture as `test_metric_rls_policy.py`.
+`test_all_tables_force_rls_blocks_cross_tenant_owner_read` skips when the
+connecting role lacks CREATEROLE (it has to create a probe role), leaving
+`test_all_tables_have_rls_enabled_and_forced`'s catalog-presence pin -- a
+pure `pg_class`/`pg_policy` read, no role creation involved, never skips --
+as the durable, always-checkable signal in that environment. Same posture as
+`test_metric_rls_policy.py`.
 """
 
 from __future__ import annotations
@@ -190,6 +193,62 @@ async def _seed_chain(db: AsyncSession, tenant_id, connection_id) -> dict[str, u
 
     await db.flush()
     return ids
+
+
+async def test_celigo_connection_delete_preserves_flow_errors(db: AsyncSession):
+    """FIX ROUND 1: `celigo_flow_errors` is the audit trail (design spec G2,
+    "outlives the source") -- deleting the parent `connections` row must
+    tombstone the FK, never destroy the row. RED against the pre-fix
+    migration: `celigo_connection_id` reused the same CASCADE helper as the
+    five config-mirror tables, so the error row -- and the evidence it
+    carries specifically to survive Celigo's own ~30-day purge -- was
+    destroyed right along with the connection. GREEN once
+    `celigo_connection_id` is `SET NULL` (`_connection_fk_audit()` in the
+    migration).
+
+    Deletes via raw SQL, matching the actual threat: an operator script
+    writing below the ORM (`celigo_write_guard.py`'s own docstring names this
+    as an explicitly uncovered path), not the product's own
+    connect/disconnect endpoints, which currently refuse to touch a
+    `provider='celigo'` row at all."""
+    tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+    conn_id = await _make_connection(db, tenant.id)
+    ids = await _seed_chain(db, tenant.id, conn_id)
+    error_id = ids["celigo_flow_errors"]
+
+    await db.execute(text("DELETE FROM connections WHERE id = :id").bindparams(id=conn_id))
+    await db.flush()
+
+    row = (
+        await db.execute(
+            text("SELECT celigo_connection_id FROM celigo_flow_errors WHERE id = :id").bindparams(id=error_id)
+        )
+    ).first()
+    assert row is not None, "celigo_flow_errors row was destroyed when its connection was deleted -- audit trail lost"
+    assert row[0] is None, "celigo_flow_errors.celigo_connection_id must be SET NULL, not CASCADE-deleted"
+
+
+async def test_celigo_connection_delete_preserves_error_signatures(db: AsyncSession):
+    """Same guarantee, same fix, for `celigo_error_signatures` -- the
+    normalized-fingerprint table Task 6 builds on top of `celigo_flow_errors`.
+    `occurrence_count`/`first_seen`/`last_seen` are exactly the kind of
+    aggregate history that must not evaporate because a stale connection row
+    got cleaned up."""
+    tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+    conn_id = await _make_connection(db, tenant.id)
+    ids = await _seed_chain(db, tenant.id, conn_id)
+    signature_id = ids["celigo_error_signatures"]
+
+    await db.execute(text("DELETE FROM connections WHERE id = :id").bindparams(id=conn_id))
+    await db.flush()
+
+    row = (
+        await db.execute(
+            text("SELECT celigo_connection_id FROM celigo_error_signatures WHERE id = :id").bindparams(id=signature_id)
+        )
+    ).first()
+    assert row is not None, "celigo_error_signatures row was destroyed when its connection was deleted"
+    assert row[0] is None, "celigo_error_signatures.celigo_connection_id must be SET NULL, not CASCADE-deleted"
 
 
 @pytest.mark.parametrize("table_name", _TABLES)
