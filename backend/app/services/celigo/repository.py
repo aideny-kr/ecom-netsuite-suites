@@ -87,6 +87,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.celigo import (
+    CeligoConfigChange,
     CeligoErrorSignature,
     CeligoFlow,
     CeligoFlowError,
@@ -761,6 +762,51 @@ async def mark_flow_errors_resolved(
     )
     result = await db.execute(stmt)
     return result.rowcount
+
+
+# ---------------------------------------------------------------------------
+# celigo_config_changes -- Task 7's drift log (migration 095). Extends this
+# module's scope from the seven migration-094 tables to an eighth: still the
+# storage layer, still trusting an already-computed diff from its caller
+# (app.services.celigo.sync_service owns deciding WHAT changed; this function
+# only records that it did).
+# ---------------------------------------------------------------------------
+
+
+async def insert_config_change(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    connection_id: uuid.UUID,
+    object_kind: str,
+    object_id: uuid.UUID | None,
+    celigo_id: str,
+    flow_id: uuid.UUID | None,
+    field: str,
+    old_value: object,
+    new_value: object,
+) -> uuid.UUID:
+    """Append one drift-detection row. A plain INSERT, not an upsert --
+    unlike every other function in this module, each call is a genuinely NEW
+    historical fact ("field X changed from A to B, observed now"), not a
+    current-state mirror converging onto one row per identity. See
+    `app/models/celigo.py`'s `CeligoConfigChange` docstring for the
+    polymorphic `object_kind`/`object_id` design and why `old_value`/
+    `new_value` are untyped JSONB rather than per-field columns."""
+    change = CeligoConfigChange(
+        tenant_id=tenant_id,
+        celigo_connection_id=connection_id,
+        flow_id=flow_id,
+        object_kind=object_kind,
+        object_id=object_id,
+        celigo_id=celigo_id,
+        field=field,
+        old_value=old_value,
+        new_value=new_value,
+    )
+    db.add(change)
+    await db.flush()
+    return change.id
 
 
 async def mark_flow_errors_purged(

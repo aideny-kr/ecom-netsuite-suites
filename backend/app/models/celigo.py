@@ -362,3 +362,59 @@ class CeligoFlowError(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     retriable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     purged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # WE noticed it vanished
+
+
+class CeligoConfigChange(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    """Task 7 (migration 095): one field-level drift event, appended by
+    `app.services.celigo.sync_service` when a resynced object's watched field
+    differs from what was previously stored -- design spec §4.5's `disabled`,
+    `schedule`, `mapping_json`, `filter_json`, `content_hash`. Append-only,
+    like `CeligoFlowError`: a row here is a historical fact ("field X changed
+    from A to B at time T"), never updated or deleted by anything in this
+    branch.
+
+    Polymorphic over three object kinds (`object_kind`, DB-CHECK'd to 'flow' |
+    'flow_step' | 'script' in the migration) rather than three separate
+    tables, because the watched set spans three different config-mirror
+    tables (`celigo_flows.disabled`/`schedule`, `celigo_flow_steps.
+    mapping_json`/`filter_json`, `celigo_scripts.content_hash`) and a future
+    drift-history feed wants one table, not three to union. `object_id` has
+    NO foreign key -- a single column can't reference three different tables,
+    and the parent config-mirror rows are already CASCADE-deleted with their
+    connection (see migration 095's docstring), so an orphaned `object_id`
+    here is inert, the same way `celigo_script_attachments.script_celigo_id`
+    already tolerates a missing `celigo_scripts` row by design. `celigo_id`
+    (the drifted object's raw Celigo id) is stored alongside it for exactly
+    that reason: it survives even if `object_id`'s row is later gone.
+
+    `flow_id` (nullable, REAL FK to `celigo_flows`, CASCADE) is populated for
+    'flow' and 'flow_step' kinds -- both always belong to exactly one flow --
+    and left NULL for 'script' kind, since one script can be attached from
+    many flows or none.
+
+    `old_value`/`new_value` are JSONB rather than typed per field: the
+    watched set spans four different Python types across its five fields
+    (`disabled` is bool; `schedule`/`mapping_json`/`filter_json` are dicts;
+    `content_hash` is a string) and JSONB stores any of them without a lossy
+    string cast. Both being NULL together is a legitimate row (e.g. a
+    `schedule` dict that became explicitly null).
+    """
+
+    __tablename__ = "celigo_config_changes"
+    __table_args__ = (Index("ix_celigo_config_changes_tenant_object", "tenant_id", "object_kind", "object_id"),)
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    celigo_connection_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("connections.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    flow_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("celigo_flows.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    object_kind: Mapped[str] = mapped_column(Text, nullable=False)  # 'flow' | 'flow_step' | 'script'
+    object_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)  # polymorphic, no FK
+    celigo_id: Mapped[str] = mapped_column(Text, nullable=False)  # raw Celigo id of the object that drifted
+    field: Mapped[str] = mapped_column(Text, nullable=False)
+    old_value: Mapped[object | None] = mapped_column(JSONB, nullable=True)
+    new_value: Mapped[object | None] = mapped_column(JSONB, nullable=True)
