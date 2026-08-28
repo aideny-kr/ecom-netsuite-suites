@@ -99,6 +99,50 @@ def _raw_script(celigo_id: str, *, name: str = "Test Script", content: str | Non
     return {"_id": celigo_id, "name": name, "content": content}
 
 
+def _raw_export(
+    celigo_id: str,
+    *,
+    name: str = "Test Export",
+    adaptor_type: str | None = "NetSuiteExport",
+    connection_celigo_id: str | None = "conn_ns_synth",
+    transform: dict | None = None,
+) -> dict:
+    """Shaped like sanitizer.py's `_EXPORT` allowlist (observed-shapes.md:
+    `transform` carries either `type: "expression"` -- no script -- or
+    `type: "script"` with a nested `script: {_scriptId, function}`)."""
+    obj: dict = {"_id": celigo_id, "name": name, "adaptorType": adaptor_type, "_connectionId": connection_celigo_id}
+    if transform is not None:
+        obj["transform"] = transform
+    return obj
+
+
+def _raw_import(
+    celigo_id: str,
+    *,
+    name: str = "Test Import",
+    adaptor_type: str | None = "NetSuiteDistributedImport",
+    connection_celigo_id: str | None = "conn_ns_synth",
+    filter_json: dict | None = None,
+) -> dict:
+    """Shaped like sanitizer.py's `_IMPORT` allowlist."""
+    obj: dict = {"_id": celigo_id, "name": name, "adaptorType": adaptor_type, "_connectionId": connection_celigo_id}
+    if filter_json is not None:
+        obj["filter"] = filter_json
+    return obj
+
+
+def _script_ref_transform(script_celigo_id: str, function_name: str = "onTransform") -> dict:
+    """A `transform` in SCRIPT form (observed-shapes.md, fix round 2): "the
+    most-used script attachment site in the live account"."""
+    return {"type": "script", "script": {"_scriptId": script_celigo_id, "function": function_name}}
+
+
+def _expression_transform() -> dict:
+    """A `transform`/`filter` in EXPRESSION form -- live-confirmed negative
+    case, carries NO `_scriptId` (observed-shapes.md)."""
+    return {"type": "expression", "expression": {"rules": ["a"], "version": "1"}, "rules": ["a"], "version": "1"}
+
+
 def _raw_error(
     *,
     celigo_id: str,
@@ -154,6 +198,8 @@ async def _run_sync(
     integrations: list[dict] | None = None,
     flows: list[dict] | None = None,
     scripts: list[dict] | None = None,
+    exports: list[dict] | None = None,
+    imports: list[dict] | None = None,
     errors_by_step: dict[tuple[str, str], list[dict]] | None = None,
     error_calls: list | None = None,
 ) -> SyncSummary:
@@ -161,6 +207,8 @@ async def _run_sync(
         "integration": integrations or [],
         "flow": flows or [],
         "script": scripts or [],
+        "export": exports or [],
+        "import": imports or [],
     }
     monkeypatch.setattr(
         "app.services.celigo.sync_service.list_resource",
@@ -486,6 +534,278 @@ class TestDriftDetection:
             )
         ).scalar_one()
         assert count == 0
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1: export/import fetch phase -- script attachments +
+# celigo_flow_steps.adaptor_type/connection_celigo_id backfill. The refs live
+# on the EXPORT/IMPORT object (transform.script, filter.script), not on the
+# flow -- a flow only references them by id. See sync_service.py's module
+# docstring for the full "one missing stage explains three flagged gaps"
+# reasoning.
+# ---------------------------------------------------------------------------
+
+
+class TestExportImportAttachmentsAndStepBackfill:
+    async def test_script_form_transform_produces_an_attachment_row(self, db: AsyncSession, monkeypatch):
+        """THE regression case (observed-shapes.md, plan's Verified Facts):
+        transform.script is the most-used script attachment site live. A
+        flow-only walk finds nothing here -- the ref lives on the export."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        summary = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_1")],
+            flows=[_raw_flow("flow_1", integration_id="int_1", export_id="exp_1")],
+            exports=[_raw_export("exp_1", transform=_script_ref_transform("script_ref_1"))],
+        )
+
+        assert summary.attachments_synced == 1
+
+        from app.models.celigo import CeligoScriptAttachment
+
+        attachment = (
+            await db.execute(select(CeligoScriptAttachment).where(CeligoScriptAttachment.tenant_id == tenant.id))
+        ).scalar_one()
+        assert attachment.script_celigo_id == "script_ref_1"
+        assert attachment.function_name == "onTransform"
+        assert attachment.site_type == "transform"
+        assert attachment.json_path == "transform.script"
+        assert attachment.flow_id is not None
+
+    async def test_expression_form_transform_and_filter_produce_no_attachment(self, db: AsyncSession, monkeypatch):
+        """Both live-confirmed negative cases: type:'expression' carries NO
+        _scriptId on either an export's transform or an import's filter."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_1")],
+            flows=[_raw_flow("flow_1", integration_id="int_1", export_id="exp_1", filter_json=_expression_transform())],
+            exports=[_raw_export("exp_1", transform=_expression_transform())],
+            imports=[_raw_import("exp_1", filter_json=_expression_transform())],
+        )
+
+        count = (await db.execute(text("SELECT COUNT(*) FROM celigo_script_attachments"))).scalar_one()
+        assert count == 0
+
+    async def test_step_backfill_across_two_flows_sharing_one_export(self, db: AsyncSession, monkeypatch):
+        """The SAME export id referenced by steps in TWO DIFFERENT flows --
+        both flow-step rows get backfilled, and TWO attachment rows are
+        created (one per flow), per the team lead's explicit ruling."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        summary = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_1")],
+            flows=[
+                _raw_flow("flow_a", integration_id="int_1", export_id="exp_shared"),
+                _raw_flow("flow_b", integration_id="int_1", export_id="exp_shared"),
+            ],
+            exports=[
+                _raw_export(
+                    "exp_shared",
+                    adaptor_type="NetSuiteExport",
+                    connection_celigo_id="conn_ns_shared",
+                    transform=_script_ref_transform("script_shared"),
+                )
+            ],
+        )
+
+        assert summary.flow_steps_backfilled == 2
+        assert summary.attachments_synced == 2  # one per flow
+
+        steps = (await db.execute(select(CeligoFlowStep).where(CeligoFlowStep.tenant_id == tenant.id))).scalars().all()
+        assert len(steps) == 2
+        for step in steps:
+            assert step.adaptor_type == "NetSuiteExport"
+            assert step.connection_celigo_id == "conn_ns_shared"
+
+        from app.models.celigo import CeligoScriptAttachment
+
+        attachments = (
+            (await db.execute(select(CeligoScriptAttachment).where(CeligoScriptAttachment.tenant_id == tenant.id)))
+            .scalars()
+            .all()
+        )
+        assert len(attachments) == 2
+        assert {a.flow_id for a in attachments} == {s.flow_id for s in steps}
+
+    async def test_backfill_never_blanks_a_previously_known_value(self, db: AsyncSession, monkeypatch):
+        """A resync where the export fetch happens to omit adaptorType must
+        not wipe out a value a PREVIOUS sync already learned."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_1")],
+            flows=[_raw_flow("flow_1", integration_id="int_1", export_id="exp_1")],
+            exports=[_raw_export("exp_1", adaptor_type="NetSuiteExport")],
+        )
+        await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_1")],
+            flows=[_raw_flow("flow_1", integration_id="int_1", export_id="exp_1")],
+            exports=[_raw_export("exp_1", adaptor_type=None)],
+        )
+
+        step = (await db.execute(select(CeligoFlowStep).where(CeligoFlowStep.tenant_id == tenant.id))).scalar_one()
+        assert step.adaptor_type == "NetSuiteExport"
+
+    async def test_export_import_stage_is_idempotent(self, db: AsyncSession, monkeypatch):
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        for _ in range(2):
+            await _run_sync(
+                monkeypatch,
+                db,
+                tenant_id=tenant.id,
+                connection_id=conn_id,
+                integrations=[_raw_integration("int_1")],
+                flows=[_raw_flow("flow_1", integration_id="int_1", export_id="exp_1")],
+                exports=[_raw_export("exp_1", transform=_script_ref_transform("script_ref_1"))],
+            )
+
+        attachment_count = (await db.execute(text("SELECT COUNT(*) FROM celigo_script_attachments"))).scalar_one()
+        assert attachment_count == 1  # not 2
+
+        step = (await db.execute(select(CeligoFlowStep).where(CeligoFlowStep.tenant_id == tenant.id))).scalar_one()
+        assert step.adaptor_type == "NetSuiteExport"
+
+    async def test_export_with_no_referencing_flow_step_is_skipped_not_fatal(self, db: AsyncSession, monkeypatch):
+        """An export nobody's synced step currently references (a listing
+        gap, or genuinely unused) cannot be attached to any flow --
+        celigo_script_attachments.flow_id is NOT NULL -- so it is skipped,
+        never a crash."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        summary = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            exports=[_raw_export("exp_orphan", transform=_script_ref_transform("script_x"))],
+        )
+
+        assert summary.attachments_synced == 0
+        assert summary.exports_imports_skipped_no_flow == 1
+        count = (await db.execute(text("SELECT COUNT(*) FROM celigo_script_attachments"))).scalar_one()
+        assert count == 0
+
+    async def test_captured_payload_on_export_does_not_survive_into_anything_stored(
+        self, db: AsyncSession, monkeypatch
+    ):
+        """Composition property (Task 1's FIX ROUND 2/4): sanitize() must
+        strip payload fields while PRESERVING the script ref. Feeds a
+        payload-shaped export through the real sanitizer (mimicking exactly
+        what client.py does before this module ever sees it), then confirms
+        neither the sanitized object nor anything this phase stores carries
+        the captured value."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        raw_export_with_payload = {
+            "_id": "exp_1",
+            "name": "Test Export",
+            "adaptorType": "NetSuiteExport",
+            "_connectionId": "conn_ns_synth",
+            "transform": _script_ref_transform("script_ref_1"),
+            "mockOutput": {"_headers": {"set-cookie": "SENSITIVE_CAPTURED_VALUE"}},
+            "rawData": "SENSITIVE_CAPTURED_VALUE",
+        }
+        sanitized_export = sanitize("export", raw_export_with_payload)
+        assert "mockOutput" not in sanitized_export  # sanitizer's own guarantee, reasserted here
+        assert "rawData" not in sanitized_export
+
+        await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_1")],
+            flows=[_raw_flow("flow_1", integration_id="int_1", export_id="exp_1")],
+            exports=[sanitized_export],
+        )
+
+        from app.models.celigo import CeligoScriptAttachment
+
+        attachment = (
+            await db.execute(select(CeligoScriptAttachment).where(CeligoScriptAttachment.tenant_id == tenant.id))
+        ).scalar_one()
+        assert attachment.script_celigo_id == "script_ref_1"  # the ref survived sanitization
+
+        # Nothing stored anywhere carries the captured value -- there is no
+        # raw_json sink for exports/imports at all (no celigo_exports table),
+        # and the attachment/step columns only ever hold ids/paths/hashes.
+        step = (await db.execute(select(CeligoFlowStep).where(CeligoFlowStep.tenant_id == tenant.id))).scalar_one()
+        assert "SENSITIVE_CAPTURED_VALUE" not in repr(step.raw_json)
+        assert "SENSITIVE_CAPTURED_VALUE" not in repr(attachment.json_path)
+        assert "SENSITIVE_CAPTURED_VALUE" not in repr(attachment.function_name)
+
+    async def test_flow_level_router_script_ref_is_captured(self, db: AsyncSession, monkeypatch):
+        """The brief also asks to walk the FLOW object itself (routers can
+        carry `script`). Every router observed live has NO `_scriptId`
+        (site_type 'router', function 'branching') -- this test does NOT
+        claim that shape is observed reality (it demonstrably isn't); it
+        proves the walker's generic coverage using a SYNTHETIC router script
+        ref, on the one schema-permitted flow-level site
+        (sanitizer.py's `_FLOW["routers"]` -> `_ROUTER["script"]` --
+        `_FLOW` has no top-level `hooks` key at all, so that is not a real
+        site to fixture against)."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        flow = _raw_flow("flow_1", integration_id="int_1", export_id="exp_1")
+        flow["routers"] = [
+            {
+                "id": "router_1",
+                "name": "",
+                "routeRecordsTo": "first_matching_branch",
+                "routeRecordsUsing": "script",
+                "branches": [],
+                "script": {"_scriptId": "script_router_1", "function": "branching"},
+            }
+        ]
+
+        summary = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_1")],
+            flows=[flow],
+        )
+
+        assert summary.attachments_synced == 1
+        from app.models.celigo import CeligoScriptAttachment
+
+        attachment = (
+            await db.execute(select(CeligoScriptAttachment).where(CeligoScriptAttachment.tenant_id == tenant.id))
+        ).scalar_one()
+        assert attachment.script_celigo_id == "script_router_1"
+        assert attachment.flow_step_id is None  # a flow-level ref, not scoped to one step
+        assert attachment.site_type == "router"
 
 
 # ---------------------------------------------------------------------------

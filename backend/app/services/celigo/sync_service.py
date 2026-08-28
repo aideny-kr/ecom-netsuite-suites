@@ -12,17 +12,43 @@ docstring for why -- `celigo_write_guard.py` refuses writing the cursor onto
 the `connections` row, so it lives on `cursor_states` instead).
 
 SEQUENCING (brief: "integrations -> flows -> steps -> scripts -> errors per
-step"):
+step", extended by fix round 1 -- see below):
   Phase A: every integration (`client.list_resource("integration")`).
   Phase B: every flow (`client.list_resource("flow")`); for EACH flow, its
     steps are extracted (`repository.extract_flow_steps`) and upserted
     immediately after the flow itself. Flows and their own steps cannot be
     two fully separate phases -- Celigo has no "list steps" endpoint; a step
     only exists inside its flow's own payload -- so read this as one combined
-    "flows -> steps" phase, per-flow.
+    "flows -> steps" phase, per-flow. The flow object ITSELF is also walked
+    for script refs here (`graph.walk_script_refs`) -- routers can carry
+    `script` (see Phase D's docstring note for why this is separate from the
+    export/import walk below).
   Phase C: every script (`client.list_resource("script")`), independent of
     flow order.
-  Phase D: for every step collected during Phase B, in that same order, its
+  Phase D (FIX ROUND 1, added after the first cut of this module shipped):
+    every export AND import (`client.list_resource("export"/"import")`).
+    THE REASON THIS EXISTS: the plan's own live-probed Verified Facts say
+    `transform.script` is the MOST-USED script attachment site in the real
+    account, and `transform`/`filter` live on the EXPORT/IMPORT object, NOT
+    on the flow -- a flow only references an export/import BY ID inside
+    `pageGenerators`/`pageProcessors`. Walking only flow objects (as the
+    first cut of this module did) finds approximately nothing; the refs are
+    on objects that were never fetched. One missing stage explained three
+    separately-flagged gaps: `celigo_script_attachments` never populated,
+    and `celigo_flow_steps.adaptor_type`/`connection_celigo_id` unfillable
+    (both flagged by Task 4 AND Task 5, since those two columns live on the
+    REFERENCED export/import object per `upsert_flow_step`'s own docstring).
+    For each fetched export/import: (a) EVERY matching `celigo_flow_steps`
+    row (the same export id can be referenced by more than one flow, or more
+    than one branch within one flow) is backfilled with `adaptor_type`/
+    `connection_celigo_id` (`repository.backfill_flow_step_reference_info`);
+    (b) it is walked for script refs and each one is recorded as a
+    `celigo_script_attachments` row PER FLOW that references it (an export
+    used by 3 flows produces 3 rows -- see `_process_reference_object`'s
+    docstring for exactly how the one-export-many-flows case is modelled).
+    Uses `list_resource`'s collection-listing pattern (pagination + sanitize
+    for free), NOT per-id fetches -- same reasoning as Phase C's scripts.
+  Phase E: for every step collected during Phase B, in that same order, its
     open errors (`client.list_flow_errors_for_step`) are fetched and
     snapshotted (`errors.upsert_errors`). This is deliberately its OWN pass,
     after every step already exists as a real `celigo_flow_steps` row --
@@ -45,20 +71,7 @@ deliberately: this task's own brief states the rule unqualified ("a partial
 failure must not advance it"), unlike those two services' documented
 graceful-degradation contracts.
 
-WHAT THIS DELIBERATELY DOES NOT DO:
-  * Script attachments (`celigo_script_attachments` / `graph.walk_script_
-    refs`) are NOT synced here. The brief's Step 2 lists five sequencing
-    stages (integrations, flows, steps, scripts, errors); attachments is not
-    a sixth. Task 5 built the storage layer
-    (`repository.upsert_script_attachment_from_ref`) and Task 2 built the
-    pure walker, but nothing wires them into a fetch loop anywhere in this
-    branch -- `celigo_script_attachments` stays empty after this task runs.
-    Flagging this explicitly rather than silently expanding scope: resolving
-    a ref's `json_path` to a specific `flow_step_id` (vs. leaving it NULL,
-    which the model's own docstring anticipates for router-level refs) is not
-    a solved problem anywhere in this branch, and inventing that mapping
-    without a live-observed shape would repeat this session's core mistake
-    (see observed-shapes.md's repeated "do not invent, verify first" lesson).
+WHAT THIS DELIBERATELY STILL DOES NOT DO:
   * `_stepId` (the query param `client.list_flow_errors_for_step` sends) is
     populated with a step's OWN `celigo_id` -- the referenced export/import
     id, the only Celigo-native id a step has anywhere in this schema. Task
@@ -72,6 +85,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -82,7 +96,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.celigo import CeligoFlow, CeligoFlowError, CeligoFlowStep, CeligoScript
 from app.services.celigo.client import get_resource, list_flow_errors_for_step, list_resource
 from app.services.celigo.errors import upsert_errors
+from app.services.celigo.graph import ScriptRef, walk_script_refs
 from app.services.celigo.repository import (
+    backfill_flow_step_reference_info,
     extract_flow_steps,
     insert_config_change,
     mark_flow_errors_purged,
@@ -90,9 +106,15 @@ from app.services.celigo.repository import (
     upsert_flow_step,
     upsert_integration,
     upsert_script,
+    upsert_script_attachment_from_ref,
 )
 
 _HTTP_TIMEOUT = httpx.Timeout(connect=5.0, read=30.0, write=30.0, pool=30.0)
+
+# Kinds fetched by the export/import phase (Phase D) -- both carry
+# transform/filter, the two confirmed script-attachment sites that live off
+# the flow object. See module docstring's Phase D entry.
+_REFERENCE_OBJECT_KINDS = ("export", "import")
 
 
 @dataclass
@@ -106,6 +128,10 @@ class SyncSummary:
     flows_skipped_no_integration: int = 0
     steps_synced: int = 0
     scripts_synced: int = 0
+    exports_imports_synced: int = 0
+    exports_imports_skipped_no_flow: int = 0
+    flow_steps_backfilled: int = 0
+    attachments_synced: int = 0
     steps_with_errors_checked: int = 0
     errors_snapshotted: int = 0
     config_changes_recorded: int = 0
@@ -283,6 +309,106 @@ async def _resolve_integration_id(
     return local_id
 
 
+async def _record_attachments(
+    db: AsyncSession,
+    *,
+    tenant_id,
+    connection_id,
+    flow_id: uuid.UUID,
+    flow_step_id: uuid.UUID | None,
+    refs: list[ScriptRef],
+    script_ids: dict[str, uuid.UUID],
+) -> int:
+    """Upsert one `celigo_script_attachments` row per ref, resolving
+    `script_id` from this run's own Phase C map when available (`None` when
+    not -- script sync can lag flow sync; `upsert_script_attachment_from_ref`
+    tolerates that by design, per its own docstring). Returns the count
+    upserted."""
+    for ref in refs:
+        await upsert_script_attachment_from_ref(
+            db,
+            tenant_id=tenant_id,
+            connection_id=connection_id,
+            flow_id=flow_id,
+            flow_step_id=flow_step_id,
+            ref=ref,
+            script_id=script_ids.get(ref.script_id),
+        )
+    return len(refs)
+
+
+async def _process_reference_object(
+    db: AsyncSession,
+    *,
+    tenant_id,
+    connection_id,
+    obj: dict,
+    referencing_flow_steps: dict[uuid.UUID, uuid.UUID] | None,
+    script_ids: dict[str, uuid.UUID],
+) -> tuple[int, int]:
+    """One export/import object (Phase D): backfill EVERY matching
+    `celigo_flow_steps` row, then record its script refs against every flow
+    that references it.
+
+    ONE-EXPORT-MANY-FLOWS MODELLING (the part the team lead flagged as most
+    likely to be wrong -- spelled out here, not left implicit): the SAME
+    export/import object is walked ONCE (`walk_script_refs` runs a single
+    time, not once per flow -- the object's content doesn't change per
+    flow), but a `celigo_script_attachments` row is upserted ONCE PER FLOW
+    that references it (`celigo_script_attachments.flow_id` is NOT NULL, so
+    "no flow" is unrepresentable -- an attachment must belong to exactly one
+    flow row). If flow A and flow B both reference this export, this
+    produces TWO attachment rows with the SAME `json_path`/`script_celigo_
+    id` but DIFFERENT `flow_id` -- the unique key is `(tenant_id, flow_id,
+    json_path)`, so these are legitimately two distinct rows, not a
+    duplicate-of-one. `flow_step_id` is set to whichever step THAT flow's
+    entry in *referencing_flow_steps* names (Phase B's "first step per flow
+    wins" policy -- see `sync_flow_map_for_connection`) -- best-effort, per
+    the model's own docstring, never re-derived from `json_path`.
+
+    Returns `(rows_backfilled, attachments_upserted)`. `rows_backfilled`
+    comes straight from the repository call's own rowcount, NOT from
+    `len(referencing_flow_steps)` -- that map holds only the FIRST step seen
+    per flow (deliberately, for the attachment association below), so if one
+    flow references this object through more than one branch, the real
+    UPDATE touches more rows than the map has entries for. Undercounting the
+    summary would be a silent (if harmless) reporting bug, not a data bug --
+    still worth getting right. `referencing_flow_steps` being `None`/empty
+    means no currently-synced step references this object -- nothing to
+    backfill (there is no row to update) and nothing to attach to (no flow
+    to satisfy the NOT NULL column) -- the caller counts this as skipped,
+    not fatal."""
+    celigo_id = obj.get("_id")
+    if not celigo_id or not referencing_flow_steps:
+        return 0, 0
+
+    rows_backfilled = await backfill_flow_step_reference_info(
+        db,
+        tenant_id=tenant_id,
+        connection_id=connection_id,
+        celigo_id=celigo_id,
+        adaptor_type=obj.get("adaptorType"),
+        connection_celigo_id=obj.get("_connectionId"),
+    )
+
+    refs = walk_script_refs(obj)
+    if not refs:
+        return rows_backfilled, 0
+
+    attached = 0
+    for flow_id, flow_step_id in referencing_flow_steps.items():
+        attached += await _record_attachments(
+            db,
+            tenant_id=tenant_id,
+            connection_id=connection_id,
+            flow_id=flow_id,
+            flow_step_id=flow_step_id,
+            refs=refs,
+            script_ids=script_ids,
+        )
+    return rows_backfilled, attached
+
+
 async def _purge_expired_errors(db: AsyncSession, *, tenant_id, connection_id) -> int:
     """Mark every error whose OWN `purge_at` has passed (wall-clock `now()`)
     as purged -- independent of `resolved_at`, independent of any single
@@ -319,11 +445,12 @@ async def sync_flow_map_for_connection(
     http_client: httpx.AsyncClient | None = None,
 ) -> SyncSummary:
     """Full flow-map sync for one Celigo connection: integrations -> flows ->
-    steps -> scripts -> errors per step, plus drift detection and purge
-    marking. See module docstring for the phase-by-phase design and the
-    all-or-nothing failure posture. Never commits -- the caller (`app/
-    workers/tasks/celigo_flow_map_sync.py`) owns the transaction boundary and
-    the freshness cursor, both only reached if this function returns without
+    steps -> scripts -> exports/imports (attachments + step backfill) ->
+    errors per step, plus drift detection and purge marking. See module
+    docstring for the phase-by-phase design and the all-or-nothing failure
+    posture. Never commits -- the caller (`app/workers/tasks/
+    celigo_flow_map_sync.py`) owns the transaction boundary and the
+    freshness cursor, both only reached if this function returns without
     raising."""
     summary = SyncSummary()
     owns_client = http_client is None
@@ -343,6 +470,15 @@ async def sync_flow_map_for_connection(
 
         # Phase B -- flows, and each flow's own steps.
         pending_step_refs: list[tuple[str, str, _StepRef]] = []
+        # Populated across Phases B/C/D, consumed in Phase D:
+        #   script_ids: script's own celigo_id -> local id (Phase C).
+        #   export_import_flow_steps: an export/import's celigo_id -> {flow_local_id: first
+        #     step_local_id in that flow referencing it} -- built in Phase B's step loop, read
+        #     in Phase D. "First step per flow wins" (a deterministic, documented choice, not a
+        #     guess) is enough: flow_step_id on an attachment row is best-effort per the model's
+        #     own docstring, and the export/import's own json_path doesn't distinguish branches.
+        script_ids: dict[str, uuid.UUID] = {}
+        export_import_flow_steps: dict[str, dict[uuid.UUID, uuid.UUID]] = defaultdict(dict)
         async for flow in list_resource("flow", token=token, region=region, client=http):
             flow_celigo_id = flow.get("_id")
             if not flow_celigo_id:
@@ -389,6 +525,21 @@ async def sync_flow_map_for_connection(
                 )
                 summary.config_changes_recorded += len(flow_changes)
 
+            # The flow object itself is a script-attachment site too --
+            # routers can carry `script` (module docstring). flow_step_id is
+            # always None here: a router-level ref belongs to the router,
+            # not to any one step (celigo_script_attachments' own model
+            # docstring).
+            summary.attachments_synced += await _record_attachments(
+                db,
+                tenant_id=tenant_id,
+                connection_id=connection_id,
+                flow_id=flow_local_id,
+                flow_step_id=None,
+                refs=walk_script_refs(flow),
+                script_ids=script_ids,
+            )
+
             for step_input in extract_flow_steps(flow):
                 branch_key = step_input.branch_id or "$root"
                 existing_step = await _get_existing_step(
@@ -426,6 +577,8 @@ async def sync_flow_map_for_connection(
                 pending_step_refs.append(
                     (flow_celigo_id, step_input.celigo_id, _StepRef(id=step_local_id, flow_id=flow_local_id))
                 )
+                # "First step per flow wins" -- see the map's own comment above.
+                export_import_flow_steps[step_input.celigo_id].setdefault(flow_local_id, step_local_id)
 
         # Phase C -- scripts, independent of flow order.
         async for script in list_resource("script", token=token, region=region, client=http):
@@ -441,6 +594,7 @@ async def sync_flow_map_for_connection(
             script_local_id = await upsert_script(
                 db, tenant_id=tenant_id, connection_id=connection_id, sanitized=script
             )
+            script_ids[celigo_id] = script_local_id
             summary.scripts_synced += 1
 
             if script_changes:
@@ -456,7 +610,29 @@ async def sync_flow_map_for_connection(
                 )
                 summary.config_changes_recorded += len(script_changes)
 
-        # Phase D -- errors, per step, in the order steps were synced. Only
+        # Phase D -- exports and imports: backfill celigo_flow_steps.adaptor_type/
+        # connection_celigo_id, and record script attachments per referencing flow.
+        # See module docstring's Phase D entry for why this exists.
+        for kind in _REFERENCE_OBJECT_KINDS:
+            async for obj in list_resource(kind, token=token, region=region, client=http):
+                celigo_id = obj.get("_id")
+                referencing_flow_steps = export_import_flow_steps.get(celigo_id) if celigo_id else None
+                if not referencing_flow_steps:
+                    summary.exports_imports_skipped_no_flow += 1
+                    continue
+                rows_backfilled, attached = await _process_reference_object(
+                    db,
+                    tenant_id=tenant_id,
+                    connection_id=connection_id,
+                    obj=obj,
+                    referencing_flow_steps=referencing_flow_steps,
+                    script_ids=script_ids,
+                )
+                summary.exports_imports_synced += 1
+                summary.flow_steps_backfilled += rows_backfilled
+                summary.attachments_synced += attached
+
+        # Phase E -- errors, per step, in the order steps were synced. Only
         # reachable once every step above has a REAL celigo_flow_steps row.
         for flow_celigo_id, step_celigo_id, step_ref in pending_step_refs:
             raw_errors = await list_flow_errors_for_step(

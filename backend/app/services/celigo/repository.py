@@ -358,9 +358,26 @@ async def upsert_flow_step(
 ) -> uuid.UUID:
     """Upsert one `celigo_flow_steps` row. `adaptor_type`/`connection_celigo_id`
     live on the REFERENCED export/import object, not the step itself -- left
-    NULL unless a caller has already fetched that object and can supply real
-    values (never invented here). See module docstring point 2 for the
-    role-collision guard."""
+    NULL on a fresh row unless a caller has already fetched that object and
+    can supply real values (never invented here).
+
+    FIX ROUND 1 (Task 7, `sync_service.py`): these two columns are EXCLUDED
+    from the ON CONFLICT DO UPDATE's SET clause whenever the caller passes
+    `None` for them. Task 7's Phase B calls this function on every flow
+    resync, BEFORE it has fetched the referenced export/import object --
+    always with both params at their `None` default at that point in the
+    pipeline. `sync_service.backfill_flow_step_reference_info` fills them in
+    afterward, once per sync, from a LATER phase's export/import fetch. An
+    unconditional overwrite here would silently wipe that backfill back to
+    NULL on the very next flow resync -- confirmed by execution (a Task 7
+    test failed exactly this way before this guard existed: a value
+    backfilled in one sync run read back NULL after a second run's Phase B
+    re-upserted the step with its default `None`). A caller that DOES have a
+    real value still gets it written, on both the initial INSERT and a
+    conflict -- this guard only protects against a caller's absence of
+    information, never overrides one that has it.
+
+    See module docstring point 2 for the role-collision guard."""
     values = dict(
         tenant_id=tenant_id,
         celigo_connection_id=connection_id,
@@ -379,10 +396,15 @@ async def upsert_flow_step(
     )
     # branch_key and dedup_key are STORED GENERATED -- deliberately never in
     # `values`. See module + model docstrings.
+    conflict_exclude = {"tenant_id", "celigo_connection_id", "flow_id", "celigo_id", "role"}
+    if adaptor_type is None:
+        conflict_exclude.add("adaptor_type")
+    if connection_celigo_id is None:
+        conflict_exclude.add("connection_celigo_id")
     insert_stmt = insert(CeligoFlowStep).values(**values)
     stmt = insert_stmt.on_conflict_do_update(
         constraint="uq_celigo_flow_steps_identity",
-        set_=_set_clause(values, exclude={"tenant_id", "celigo_connection_id", "flow_id", "celigo_id", "role"}),
+        set_=_set_clause(values, exclude=conflict_exclude),
         # Guard: only apply the update if the existing row's role matches the
         # one being written. If it doesn't, this WHERE excludes the
         # conflicting row from the update entirely -- RETURNING yields zero
@@ -413,6 +435,54 @@ async def sync_flow_steps(
         await upsert_flow_step(db, tenant_id=tenant_id, connection_id=connection_id, flow_id=flow_id, step=step)
         for step in steps
     ]
+
+
+async def backfill_flow_step_reference_info(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    connection_id: uuid.UUID,
+    celigo_id: str,
+    adaptor_type: str | None,
+    connection_celigo_id: str | None,
+) -> int:
+    """Task 7's export/import fetch phase: bulk-backfill `adaptor_type`/
+    `connection_celigo_id` onto EVERY `celigo_flow_steps` row that references
+    `celigo_id` (the export/import object's own `_id`) -- filling in the two
+    columns `upsert_flow_step`'s own docstring flags as "live on the
+    REFERENCED export/import object... nullable here, filled in by whichever
+    sync step fetches that object". The SAME export/import id can be
+    referenced by more than one flow, or more than one branch within one
+    flow (module docstring point 1) -- a plain `db.get()`-and-update would
+    only touch the first row found; this statement updates ALL of them.
+
+    Only fields that are non-`None` are included in the `SET` clause: an
+    export/import fetch that happens to omit one of these on a resync (a
+    projection quirk, not a real config change) must never blank out a
+    previously-known value -- an unconditional `UPDATE ... SET x = NULL`
+    would silently regress a prior successful backfill. Returns the number
+    of rows updated (`0` is a legitimate result: no currently-synced step
+    references this `celigo_id` yet, or neither field had a real value to
+    write)."""
+    values: dict = {}
+    if adaptor_type is not None:
+        values["adaptor_type"] = adaptor_type
+    if connection_celigo_id is not None:
+        values["connection_celigo_id"] = connection_celigo_id
+    if not values:
+        return 0
+    values["updated_at"] = func.now()
+    stmt = (
+        update(CeligoFlowStep)
+        .where(
+            CeligoFlowStep.tenant_id == tenant_id,
+            CeligoFlowStep.celigo_connection_id == connection_id,
+            CeligoFlowStep.celigo_id == celigo_id,
+        )
+        .values(**values)
+    )
+    result = await db.execute(stmt)
+    return result.rowcount
 
 
 # ---------------------------------------------------------------------------
