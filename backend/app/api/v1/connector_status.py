@@ -96,10 +96,28 @@ class DepositSyncStatusResponse(BaseModel):
 
 class CeligoStatusResponse(BaseModel):
     connected: bool
+    # Celigo's /v1/tokenInfo returns no account name, so this is None for every
+    # real token -- None rather than "" deliberately, so the card's
+    # `account_name ?? "—"` fallback fires instead of rendering a blank field.
     account_name: str | None = None
+    # The only identifier Celigo exposes (`_userId`). Without it the connected
+    # card could not say WHICH account it was connected to, unlike the NetSuite
+    # section beside it which shows a real account id.
+    account_id: str | None = None
     region: str | None = None
     status: str | None = None
     agent_access: bool = False
+
+
+def _blank_to_none(value: object) -> str | None:
+    """Normalise "" to None so optional display fields stay genuinely optional.
+
+    An empty string is truthy-ish enough to defeat a `?? default` fallback in
+    the frontend while carrying no information, which renders as a blank field
+    that looks like a bug rather than an absent value.
+    """
+    text = str(value or "").strip()
+    return text or None
 
 
 class CeligoTestRequest(BaseModel):
@@ -570,26 +588,34 @@ async def _celigo_agent_access(db: AsyncSession, tenant_id) -> bool:
 
 
 def _celigo_accounts_match(rest_identity: dict, agent_identity: dict) -> bool:
-    """Best-effort proof the REST token and the agent token belong to the SAME
-    Celigo account -- not merely that both tokens are individually valid.
+    """Proof the REST token and the agent token resolve to the SAME Celigo
+    identity -- not merely that both tokens are individually valid.
 
-    KNOWN LIMITATION: Celigo's ``/v1/tokenInfo`` exposes only ``account_name``
-    (``name``) and ``user_email`` (``email``) -- no account id. ``account_name``
-    is the only account-level signal of the two: ``user_email`` is USER-level
-    and legitimately differs when two different Celigo users on the SAME
-    account each mint their own token (one for the REST connection, one for
-    agent access), so requiring email equality would reject that entirely
-    normal case. ``account_name`` is therefore the strongest signal available
-    here, but Celigo does not guarantee it is unique across customers -- this
-    is NOT a cryptographic proof of account identity, only the best this API
-    response can offer. Ambiguous input (either side missing account_name)
-    fails closed -- there is nothing to compare, so sameness is not proven.
+    Compares ``_userId`` (``user_id``), the only identity field Celigo's
+    ``/v1/tokenInfo`` actually returns. The previous implementation compared
+    ``account_name``, which was wrong twice over: Celigo never returns ``name``
+    from that endpoint, so on live data BOTH sides were always empty and this
+    could only ever return False; and even in principle Celigo "does not
+    guarantee it is unique across customers", so a display string was standing
+    in for identity.
+
+    ``user_id`` is a stable server-assigned id, so this is now a real
+    comparison rather than a best-effort one. Note it is USER-level: two
+    different Celigo users on the same account minting separate tokens will not
+    match. That is the deliberate, conservative direction -- it refuses a pair
+    it cannot prove identical rather than accepting one it cannot distinguish,
+    and the operator's fix (use one token, or re-supply both) is obvious from
+    the error.
+
+    Ambiguous input (either side missing ``user_id``) fails closed -- there is
+    nothing to compare, so sameness is not proven. That also covers rows
+    written before this change, whose ``metadata_json`` has no ``user_id``.
     """
-    rest_name = (rest_identity.get("account_name") or "").strip()
-    agent_name = (agent_identity.get("account_name") or "").strip()
-    if not rest_name or not agent_name:
+    rest_id = (rest_identity.get("user_id") or "").strip()
+    agent_id = (agent_identity.get("user_id") or "").strip()
+    if not rest_id or not agent_id:
         return False
-    return rest_name == agent_name
+    return rest_id == agent_id
 
 
 async def _disable_celigo_agent_access(db: AsyncSession, tenant_id, actor_id, reason: str) -> bool:
@@ -744,11 +770,11 @@ async def _upsert_celigo_mcp_connector_locked(
         if _celigo_accounts_match(rest_identity, agent_identity):
             identity_error = None
         else:
-            rest_name = rest_identity.get("account_name") or "unknown"
-            agent_name = agent_identity.get("account_name") or "unknown"
+            rest_name = rest_identity.get("user_id") or "unknown"
+            agent_name = agent_identity.get("user_id") or "unknown"
             identity_error = (
-                "Agent token belongs to a different Celigo account than the REST "
-                f"connection (REST account: {rest_name!r}, agent account: {agent_name!r})"
+                "Agent token belongs to a different Celigo identity than the REST "
+                f"connection (REST user: {rest_name!r}, agent user: {agent_name!r})"
             )
 
     if identity_error is not None:
@@ -826,7 +852,8 @@ async def get_celigo_status(
     metadata = connection.metadata_json or {}
     return CeligoStatusResponse(
         connected=True,
-        account_name=metadata.get("account_name"),
+        account_name=_blank_to_none(metadata.get("account_name")),
+        account_id=_blank_to_none(metadata.get("user_id")),
         region=metadata.get("region"),
         status=connection.status,
         agent_access=agent_access,
@@ -887,6 +914,12 @@ async def connect_celigo(
 
     metadata = {
         "region": request.region,
+        # The identity a later reconnect compares against (see
+        # _celigo_accounts_match). Persisted because `previous_identity` below
+        # is read back out of metadata_json, so this key is what makes the
+        # "did this reconnect move to a different account?" check possible at
+        # all. account_name is display-only and is empty for every real token.
+        "user_id": info.get("user_id"),
         "account_name": info.get("account_name"),
         "environment_scope": "all",
     }
@@ -1022,8 +1055,8 @@ async def connect_celigo(
         # identity we cannot prove unchanged is not an identity we can keep
         # agent access on.
         if not _celigo_accounts_match(previous_identity, info):
-            previous_name = previous_identity.get("account_name") or "unknown"
-            new_name = info.get("account_name") or "unknown"
+            previous_name = previous_identity.get("user_id") or "unknown"
+            new_name = info.get("user_id") or "unknown"
             disabled = await _disable_celigo_agent_access(
                 db,
                 user.tenant_id,
@@ -1044,7 +1077,8 @@ async def connect_celigo(
 
     return CeligoStatusResponse(
         connected=True,
-        account_name=metadata["account_name"],
+        account_name=_blank_to_none(metadata["account_name"]),
+        account_id=_blank_to_none(metadata["user_id"]),
         region=metadata["region"],
         status=connection.status,
         agent_access=agent_access,

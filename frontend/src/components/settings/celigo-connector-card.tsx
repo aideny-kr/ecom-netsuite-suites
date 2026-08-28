@@ -143,7 +143,13 @@ export default function CeligoConnectorCard() {
               <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
                 Account
               </p>
-              <p className="mt-1 text-[13px] text-foreground">{status?.account_name ?? "—"}</p>
+              {/* Celigo's /v1/tokenInfo returns no account name, so account_name
+                  is null for every real token. Fall back to account_id (Celigo's
+                  _userId) so this field identifies the connected account the way
+                  the NetSuite section does, instead of rendering blank. */}
+              <p className="mt-1 text-[13px] text-foreground">
+                {status?.account_name ?? status?.account_id ?? "—"}
+              </p>
             </div>
             <div>
               <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">

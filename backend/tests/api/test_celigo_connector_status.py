@@ -92,6 +92,77 @@ class TestCeligoStatus:
         assert r.status_code in (401, 403)
 
 
+class TestCeligoStatusIdentity:
+    """The connected card must say WHICH Celigo account it is connected to.
+
+    Found by looking at the rendered card: the ACCOUNT field was blank. Celigo's
+    /v1/tokenInfo returns no account name, so `account_name` is "" for every
+    real token -- and the card's `status?.account_name ?? "—"` fallback only
+    fires on null/undefined, so an empty string rendered as nothing at all.
+
+    The NetSuite section beside it shows a real identifier ("NetSuite 9758575 -
+    sb1"). Celigo exposes exactly one identifier, `_userId`, so surface that as
+    `account_id` and return `account_name` as null (not "") so the existing
+    frontend fallback works instead of silently rendering blank.
+    """
+
+    @staticmethod
+    def _stub_verify(monkeypatch, user_id="u-framework", account_name=""):
+        async def _verify(token, region="us", **kw):
+            return {
+                "user_id": user_id,
+                "scope": "",
+                "account_name": account_name,
+                "user_email": "",
+            }
+
+        monkeypatch.setattr("app.api.v1.connector_status.verify_token", _verify, raising=False)
+
+    async def _connect(self, client, headers):
+        return await client.post(
+            "/api/v1/connector-status/celigo/connect",
+            headers=headers,
+            json={"token": "tok", "region": "us", "label": "Celigo"},
+        )
+
+    async def test_status_exposes_account_id(self, client, admin_user, monkeypatch):
+        _, headers = admin_user
+        self._stub_verify(monkeypatch)
+
+        assert (await self._connect(client, headers)).status_code == 201
+
+        r = await client.get("/api/v1/connector-status/celigo", headers=headers)
+        assert r.status_code == 200, r.text
+        assert r.json()["account_id"] == "u-framework"
+
+    async def test_connect_response_exposes_account_id(self, client, admin_user, monkeypatch):
+        _, headers = admin_user
+        self._stub_verify(monkeypatch)
+
+        r = await self._connect(client, headers)
+        assert r.status_code == 201, r.text
+        assert r.json()["account_id"] == "u-framework"
+
+    async def test_absent_account_name_is_null_not_empty_string(self, client, admin_user, monkeypatch):
+        """Empty string defeats the card's `?? "—"` fallback and renders blank."""
+        _, headers = admin_user
+        self._stub_verify(monkeypatch, account_name="")
+
+        assert (await self._connect(client, headers)).status_code == 201
+
+        r = await client.get("/api/v1/connector-status/celigo", headers=headers)
+        assert r.json()["account_name"] is None
+
+    async def test_real_account_name_still_passes_through(self, client, admin_user, monkeypatch):
+        _, headers = admin_user
+        self._stub_verify(monkeypatch, account_name="Framework")
+
+        assert (await self._connect(client, headers)).status_code == 201
+
+        r = await client.get("/api/v1/connector-status/celigo", headers=headers)
+        assert r.json()["account_name"] == "Framework"
+
+
 class TestCeligoRegionValidation:
     """CeligoTestRequest/CeligoConnectRequest.region were bare `str`, and
     client.base_url() silently falls back to US on any unknown value. So
@@ -190,7 +261,7 @@ class TestCeligoTest:
         _, headers = admin_user
 
         async def _ok(token, region="us", **kw):
-            return {"account_name": "Framework", "user_email": "ops@frame.work"}
+            return {"user_id": "u-framework", "scope": "", "account_name": "Framework", "user_email": "ops@frame.work"}
 
         monkeypatch.setattr("app.api.v1.connector_status.verify_token", _ok, raising=False)
 
@@ -238,7 +309,7 @@ class TestCeligoConnect:
         user, headers = admin_user
 
         async def _ok(token, region="us", **kw):
-            return {"account_name": "Framework", "user_email": "ops@frame.work"}
+            return {"user_id": "u-framework", "scope": "", "account_name": "Framework", "user_email": "ops@frame.work"}
 
         monkeypatch.setattr("app.api.v1.connector_status.verify_token", _ok, raising=False)
 
@@ -366,7 +437,7 @@ class TestCeligoDisconnect:
         user, headers = admin_user
 
         async def _ok(token, region="us", **kw):
-            return {"account_name": "Framework", "user_email": "ops@frame.work"}
+            return {"user_id": "u-framework", "scope": "", "account_name": "Framework", "user_email": "ops@frame.work"}
 
         monkeypatch.setattr("app.api.v1.connector_status.verify_token", _ok, raising=False)
 
@@ -409,7 +480,7 @@ class TestCeligoAgentAccess:
         user, headers = admin_user
 
         async def _ok(token, region="us", **kw):
-            return {"account_name": "Framework", "user_email": "ops@frame.work"}
+            return {"user_id": "u-framework", "scope": "", "account_name": "Framework", "user_email": "ops@frame.work"}
 
         monkeypatch.setattr("app.api.v1.connector_status.verify_token", _ok, raising=False)
 
@@ -439,7 +510,7 @@ class TestCeligoAgentAccess:
         user, headers = admin_user
 
         async def _ok(token, region="us", **kw):
-            return {"account_name": "Framework", "user_email": "ops@frame.work"}
+            return {"user_id": "u-framework", "scope": "", "account_name": "Framework", "user_email": "ops@frame.work"}
 
         async def _discover(connector, db=None):
             return [{"name": "list_flows", "description": "List flows"}]
@@ -481,7 +552,7 @@ class TestCeligoAgentAccess:
         user, headers = admin_user
 
         async def _ok(token, region="us", **kw):
-            return {"account_name": "Framework", "user_email": "ops@frame.work"}
+            return {"user_id": "u-framework", "scope": "", "account_name": "Framework", "user_email": "ops@frame.work"}
 
         async def _discover(connector, db=None):
             return []
@@ -518,7 +589,7 @@ class TestCeligoAgentAccess:
         user, headers = admin_user
 
         async def _ok(token, region="us", **kw):
-            return {"account_name": "Framework", "user_email": "ops@frame.work"}
+            return {"user_id": "u-framework", "scope": "", "account_name": "Framework", "user_email": "ops@frame.work"}
 
         async def _discover(connector, db=None):
             return []
@@ -555,7 +626,7 @@ class TestCeligoAgentAccess:
         user, headers = admin_user
 
         async def _ok(token, region="us", **kw):
-            return {"account_name": "Framework", "user_email": "ops@frame.work"}
+            return {"user_id": "u-framework", "scope": "", "account_name": "Framework", "user_email": "ops@frame.work"}
 
         async def _discover(connector, db=None):
             return []
@@ -602,7 +673,7 @@ class TestCeligoAgentAccess:
         user, headers = admin_user
 
         async def _ok(token, region="us", **kw):
-            return {"account_name": "Framework", "user_email": "ops@frame.work"}
+            return {"user_id": "u-framework", "scope": "", "account_name": "Framework", "user_email": "ops@frame.work"}
 
         async def _boom(*args, **kwargs):
             raise RuntimeError("boom")
@@ -637,7 +708,7 @@ class TestCeligoAgentAccess:
         _, headers = admin_user
 
         async def _ok(token, region="us", **kw):
-            return {"account_name": "Framework", "user_email": "ops@frame.work"}
+            return {"user_id": "u-framework", "scope": "", "account_name": "Framework", "user_email": "ops@frame.work"}
 
         async def _discover(connector, db=None):
             return []
@@ -667,7 +738,7 @@ class TestCeligoAgentAccess:
         user, headers = admin_user
 
         async def _ok(token, region="us", **kw):
-            return {"account_name": "Framework", "user_email": "ops@frame.work"}
+            return {"user_id": "u-framework", "scope": "", "account_name": "Framework", "user_email": "ops@frame.work"}
 
         async def _discovery_fails(connector, db=None):
             raise RuntimeError("celigo mcp server unreachable")
@@ -716,7 +787,7 @@ class TestCeligoAgentAccess:
         user, headers = admin_user
 
         async def _ok(token, region="us", **kw):
-            return {"account_name": "Framework", "user_email": "ops@frame.work"}
+            return {"user_id": "u-framework", "scope": "", "account_name": "Framework", "user_email": "ops@frame.work"}
 
         async def _discover_ok(connector, db=None):
             return [{"name": "list_flows", "description": "List flows"}]
@@ -767,7 +838,7 @@ class TestCeligoAgentAccess:
         user, headers = admin_user
 
         async def _ok(token, region="us", **kw):
-            return {"account_name": "Framework", "user_email": "ops@frame.work"}
+            return {"user_id": "u-framework", "scope": "", "account_name": "Framework", "user_email": "ops@frame.work"}
 
         async def _discover_ok(connector, db=None):
             return [{"name": "list_flows", "description": "List flows"}]
@@ -825,7 +896,12 @@ class TestCeligoAgentAccessRegion:
         user, headers = admin_user
 
         async def _ok(token, region="us", **kw):
-            return {"account_name": "Framework EU", "user_email": "ops@frame.work"}
+            return {
+                "user_id": "u-framework-eu",
+                "scope": "",
+                "account_name": "Framework EU",
+                "user_email": "ops@frame.work",
+            }
 
         async def _discover(connector, db=None):
             return [{"name": "list_flows", "description": "List flows"}]
@@ -862,7 +938,7 @@ class TestCeligoAgentAccessRegion:
         user, headers = admin_user
 
         async def _ok(token, region="us", **kw):
-            return {"account_name": "Framework", "user_email": "ops@frame.work"}
+            return {"user_id": "u-framework", "scope": "", "account_name": "Framework", "user_email": "ops@frame.work"}
 
         async def _discover(connector, db=None):
             return [{"name": "list_flows", "description": "List flows"}]
@@ -909,7 +985,26 @@ class TestCeligoAccountsMatchHelper:
     the HTTP/DB plumbing exercised in TestCeligoAgentAccessIdentity below.
     """
 
-    def test_matching_account_names(self):
+    def test_matching_user_ids(self):
+        from app.api.v1.connector_status import _celigo_accounts_match
+
+        assert _celigo_accounts_match({"user_id": "u-acme"}, {"user_id": "u-acme"}) is True
+
+    def test_different_user_ids(self):
+        from app.api.v1.connector_status import _celigo_accounts_match
+
+        assert _celigo_accounts_match({"user_id": "u-acme"}, {"user_id": "u-widgets"}) is False
+
+    def test_account_name_does_not_substitute_for_user_id(self):
+        """A matching display name is NOT proof of a matching account.
+
+        This is the behavioural change from PR #202: the helper used to compare
+        ``account_name``, whose own docstring conceded Celigo "does not
+        guarantee it is unique across customers". Worse, ``/v1/tokenInfo``
+        never returns it, so on live data both sides were always empty and the
+        comparison could only ever fail closed -- it was dead code that looked
+        like a check. Identity is ``_userId`` or it is not proven.
+        """
         from app.api.v1.connector_status import _celigo_accounts_match
 
         assert (
@@ -917,40 +1012,15 @@ class TestCeligoAccountsMatchHelper:
                 {"account_name": "Acme Corp", "user_email": "a@acme.com"},
                 {"account_name": "Acme Corp", "user_email": "b@acme.com"},
             )
-            is True
+            is False
         )
 
-    def test_different_account_names(self):
+    def test_missing_user_id_on_either_side_fails_closed(self):
         from app.api.v1.connector_status import _celigo_accounts_match
 
-        assert (
-            _celigo_accounts_match(
-                {"account_name": "Acme Corp", "user_email": "a@acme.com"},
-                {"account_name": "Widgets Inc", "user_email": "a@acme.com"},
-            )
-            is False
-        )
-
-    def test_missing_account_name_on_either_side_fails_closed(self):
-        # tokenInfo guarantees at least one of name/email, not both -- if
-        # account_name is absent on either side there is no account-level
-        # signal to compare, and ambiguity must resolve to "not proven same".
-        from app.api.v1.connector_status import _celigo_accounts_match
-
-        assert (
-            _celigo_accounts_match(
-                {"account_name": "", "user_email": "a@acme.com"},
-                {"account_name": "Acme Corp", "user_email": "a@acme.com"},
-            )
-            is False
-        )
-        assert (
-            _celigo_accounts_match(
-                {"account_name": "Acme Corp", "user_email": "a@acme.com"},
-                {"account_name": "", "user_email": "a@acme.com"},
-            )
-            is False
-        )
+        assert _celigo_accounts_match({"user_id": ""}, {"user_id": "u-acme"}) is False
+        assert _celigo_accounts_match({"user_id": "u-acme"}, {"user_id": ""}) is False
+        assert _celigo_accounts_match({}, {}) is False
 
 
 class TestCeligoAgentAccessIdentity:
@@ -966,8 +1036,13 @@ class TestCeligoAgentAccessIdentity:
 
         async def _verify(token, region="us", **kw):
             if token == "rest-tok":
-                return {"account_name": "Acme Corp", "user_email": "rest@acme.com"}
-            return {"account_name": "Different Co", "user_email": "agent@different.com"}
+                return {"user_id": "u-acme", "scope": "", "account_name": "Acme Corp", "user_email": "rest@acme.com"}
+            return {
+                "user_id": "u-different",
+                "scope": "",
+                "account_name": "Different Co",
+                "user_email": "agent@different.com",
+            }
 
         async def _discover(connector, db=None):
             return [{"name": "list_flows", "description": "List flows"}]
@@ -1001,15 +1076,21 @@ class TestCeligoAgentAccessIdentity:
         assert row.error_reason, "a clear reason must be recorded for the mismatch"
         assert not row.discovered_tools, "discover_tools must never run for a token proven to be the wrong account"
 
-    async def test_matching_account_enables_agent_access(self, client, admin_user, db, monkeypatch):
+    async def test_matching_identity_enables_agent_access(self, client, admin_user, db, monkeypatch):
         user, headers = admin_user
 
         async def _verify(token, region="us", **kw):
-            # Same account, different token strings -- a REST admin and an
-            # agent-token-minting admin can be different Celigo USERS on the
-            # SAME account, so identity must key on the account, not the raw
-            # token or the user email.
-            return {"account_name": "Acme Corp", "user_email": f"{token}@acme.com"}
+            # Two DIFFERENT token strings resolving to the SAME Celigo identity
+            # -- identity keys on _userId, not on the raw token, so rotating to
+            # a freshly minted token for the same user still matches.
+            #
+            # NARROWED from PR #202: this used to assert that two different
+            # USERS on the same account matched, keyed on account_name. Celigo's
+            # /v1/tokenInfo returns no account-level id at all (only _userId),
+            # so that is not provable from this response -- and account_name,
+            # which the endpoint never returns, made the old check dead code.
+            # Both tokens must now belong to the same Celigo user.
+            return {"user_id": "u-acme", "scope": "", "account_name": "Acme Corp", "user_email": f"{token}@acme.com"}
 
         async def _discover(connector, db=None):
             return [{"name": "list_flows", "description": "List flows"}]
@@ -1050,7 +1131,7 @@ class TestCeligoAgentAccessIdentity:
 
         async def _verify(token, region="us", **kw):
             if token == "rest-tok":
-                return {"account_name": "Acme Corp", "user_email": "rest@acme.com"}
+                return {"user_id": "u-acme", "scope": "", "account_name": "Acme Corp", "user_email": "rest@acme.com"}
             raise CeligoAuthError("Invalid token")
 
         monkeypatch.setattr("app.api.v1.connector_status.verify_token", _verify, raising=False)
@@ -1088,7 +1169,7 @@ class TestCeligoMcpGuardIntegration:
         user, headers = admin_user
 
         async def _ok(token, region="us", **kw):
-            return {"account_name": "Framework", "user_email": "ops@frame.work"}
+            return {"user_id": "u-framework", "scope": "", "account_name": "Framework", "user_email": "ops@frame.work"}
 
         async def _discover(connector, db=None):
             return [
@@ -1194,7 +1275,7 @@ class TestCeligoTenantContextAfterCommit:
         events = self._spy(monkeypatch, db)
 
         async def _ok(token, region="us", **kw):
-            return {"account_name": "Framework", "user_email": "ops@frame.work"}
+            return {"user_id": "u-framework", "scope": "", "account_name": "Framework", "user_email": "ops@frame.work"}
 
         async def _discover(connector, db=None):
             return []
@@ -1240,7 +1321,7 @@ class TestCeligoTenantContextAfterCommit:
         )
 
         async def _ok(token, region="us", **kw):
-            return {"account_name": "Framework", "user_email": "ops@frame.work"}
+            return {"user_id": "u-framework", "scope": "", "account_name": "Framework", "user_email": "ops@frame.work"}
 
         monkeypatch.setattr("app.api.v1.connector_status.verify_token", _ok, raising=False)
 
@@ -1279,7 +1360,7 @@ class TestGuardExceptionsAreNotSwallowed:
     @staticmethod
     def _verify_ok(monkeypatch):
         async def _ok(token, region="us", **kw):
-            return {"account_name": "Framework", "user_email": "ops@frame.work"}
+            return {"user_id": "u-framework", "scope": "", "account_name": "Framework", "user_email": "ops@frame.work"}
 
         monkeypatch.setattr("app.api.v1.connector_status.verify_token", _ok, raising=False)
 
@@ -1381,7 +1462,12 @@ class TestReconnectToADifferentAccount:
     @staticmethod
     def _verify_by_token(monkeypatch, accounts: dict[str, str]):
         async def _verify(token, region="us", **kw):
-            return {"account_name": accounts[token], "user_email": "ops@frame.work"}
+            return {
+                "user_id": accounts[token],
+                "scope": "",
+                "account_name": accounts[token],
+                "user_email": "ops@frame.work",
+            }
 
         monkeypatch.setattr("app.api.v1.connector_status.verify_token", _verify, raising=False)
 

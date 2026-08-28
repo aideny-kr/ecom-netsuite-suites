@@ -5,7 +5,10 @@ import { apiClient } from "@/lib/api-client";
 
 export interface CeligoStatus {
   connected: boolean;
+  /** Celigo's /v1/tokenInfo returns no account name — null for every real token. */
   account_name: string | null;
+  /** Celigo's `_userId`, the only identifier it exposes. */
+  account_id: string | null;
   region: string | null;
   status: string | null;
   agent_access: boolean;
