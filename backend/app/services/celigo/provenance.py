@@ -70,7 +70,13 @@ async def derive_flow_record_writes(
     tenant_id` and `CeligoFlow.tenant_id`) -- RLS is a backstop here, not the
     control: the test harness runs as a superuser, under which RLS protects
     nothing, so an explicit predicate is the only thing that actually keeps
-    one tenant's rows out of another's result.
+    one tenant's rows out of another's result. BOTH are independently
+    load-bearing and both are mutation-proven, not asserted: every FK on
+    `celigo_flow_steps` is single-column (migration 094), so a step row whose
+    `tenant_id` differs from its joined flow's inserts cleanly, and
+    `TestBothTenantPredicatesAreLoadBearing` in the test module builds
+    exactly that row in each direction -- deleting either predicate turns
+    that direction's test red and leaves the other green.
 
     Reads ONLY `celigo_flow_steps.record_type`/`.operation` (never
     `raw_json`, never re-derives anything from the original wire shape),

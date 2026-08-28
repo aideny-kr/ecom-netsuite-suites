@@ -344,6 +344,111 @@ class TestTenantIsolation:
         assert [w.record_type for w in writes_b] == ["vendor"]
 
 
+class TestBothTenantPredicatesAreLoadBearing:
+    """FINAL REVIEW finding 8. `derive_flow_record_writes` filters on
+    `CeligoFlowStep.tenant_id` AND `CeligoFlow.tenant_id` (provenance.py:117,
+    :119). Until now nothing made either one fail on its own: every fixture
+    seeded a step and its flow under the SAME tenant, so both predicates
+    selected the same rows and dropping EITHER left all 73 provenance + sync
+    + API tests green -- the query's own docstring called the pair
+    "explicit... the only thing that actually keeps one tenant's rows out of
+    another's result" with no test able to demonstrate it.
+
+    The earlier ruling that this was untestable rested on a factually wrong
+    premise (it claimed the fixture would need one `connection_id` owned by
+    two tenants). Verified against the schema instead: EVERY foreign key on
+    `celigo_flow_steps` is single-column (migration 094 `:170`, `:180`,
+    `:269`) -- there is no composite `(tenant_id, flow_id)` FK and no CHECK
+    tying a step's tenant to its flow's or its connection's. A step row whose
+    `tenant_id` differs from its joined flow's therefore INSERTS CLEANLY, and
+    that mismatched row is the whole fixture both tests below need.
+
+    That mismatch is not a shape production writes -- `sync_service.py`
+    threads one `tenant_id` through every phase. It is precisely why the
+    predicates are defence in depth, and why proving them needs a row
+    production would never produce. Both tests are mutation-proven: deleting
+    the predicate each one names turns THAT test red and leaves the other
+    green.
+    """
+
+    async def _seed_cross_tenant_step(
+        self,
+        db: AsyncSession,
+        *,
+        flow_tenant_id,
+        step_tenant_id,
+        connection_id,
+        flow_connection_id,
+        flow_suffix: str,
+        celigo_id: str,
+    ):
+        """One `celigo_flow_steps` row deliberately owned by a DIFFERENT
+        tenant than the `celigo_flows` row it points at."""
+        _, flow_id = await _seed_integration_and_flow(db, flow_tenant_id, flow_connection_id, flow_suffix=flow_suffix)
+        await _add_step_with_provenance(
+            db,
+            tenant_id=step_tenant_id,
+            connection_id=connection_id,
+            flow_id=flow_id,
+            celigo_id=celigo_id,
+            record_type="returnauthorization",
+            operation="update",
+        )
+        return flow_id
+
+    async def test_flow_tenant_predicate_blocks_a_step_pointing_at_another_tenants_flow(self, db: AsyncSession):
+        """Pins `CeligoFlow.tenant_id == tenant_id` (provenance.py:119).
+
+        The step is B's (so `CeligoFlowStep.tenant_id`/`.celigo_connection_id`
+        both match B's query) but its `flow_id` points at tenant A's flow.
+        Only the FLOW-side tenant predicate can reject this row; without it,
+        A's flow NAME and `celigo_id` are returned inside B's result."""
+        tenant_a = await create_test_tenant(db, name=f"Tenant A {uuid.uuid4().hex[:6]}")
+        tenant_b = await create_test_tenant(db, name=f"Tenant B {uuid.uuid4().hex[:6]}")
+        conn_a = await _make_connection(db, tenant_a.id)
+        conn_b = await _make_connection(db, tenant_b.id)
+
+        await self._seed_cross_tenant_step(
+            db,
+            flow_tenant_id=tenant_a.id,
+            step_tenant_id=tenant_b.id,
+            connection_id=conn_b,
+            flow_connection_id=conn_a,
+            flow_suffix="leak-flow-side",
+            celigo_id="imp_flow_side_leak",
+        )
+
+        writes = await derive_flow_record_writes(db, tenant_id=tenant_b.id, connection_id=conn_b)
+
+        assert writes == []
+
+    async def test_step_tenant_predicate_blocks_another_tenants_step_on_our_flow(self, db: AsyncSession):
+        """Pins `CeligoFlowStep.tenant_id == tenant_id` (provenance.py:117).
+
+        The mirror image: the FLOW is B's (so the flow-side predicate
+        matches) and the step row sits on B's connection, but the step row
+        itself is owned by tenant A. Only the STEP-side tenant predicate can
+        reject it; without it, A's step id, record type and operation are
+        returned inside B's result."""
+        tenant_a = await create_test_tenant(db, name=f"Tenant A {uuid.uuid4().hex[:6]}")
+        tenant_b = await create_test_tenant(db, name=f"Tenant B {uuid.uuid4().hex[:6]}")
+        conn_b = await _make_connection(db, tenant_b.id)
+
+        await self._seed_cross_tenant_step(
+            db,
+            flow_tenant_id=tenant_b.id,
+            step_tenant_id=tenant_a.id,
+            connection_id=conn_b,
+            flow_connection_id=conn_b,
+            flow_suffix="leak-step-side",
+            celigo_id="imp_step_side_leak",
+        )
+
+        writes = await derive_flow_record_writes(db, tenant_id=tenant_b.id, connection_id=conn_b)
+
+        assert writes == []
+
+
 class TestGroupingHelpersArePure:
     """`group_by_record_type`/`group_by_flow` are plain list->dict regroups,
     no DB -- covered directly, no fixtures needed."""
