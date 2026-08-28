@@ -61,6 +61,20 @@ walk_script_refs(obj)` as sets) for every kind that can carry scripts, so a
 future 7th kind or attachment site that forgets the allowlist fails THAT
 test instead of the flow map silently losing scripts again.
 
+FIX ROUND 5 (2026-08-27, FINAL ROUND): the third instance of the same
+pattern -- round 2 dropped script refs, round 3 dropped flow topology, this
+one silently dropped `lastModified` for `_FLOW`/`_SCRIPT` (their
+`celigo_last_modified` columns, migration 094, stayed permanently NULL --
+`_INTEGRATION` already had it correctly). Rather than fix a fourth instance
+later, `TestSanitizerPreservesEveryRepositoryReadField` in the test file
+asserts, for every kind `app.services.celigo.repository`'s `upsert_*`
+functions actually consume a sanitized dict for, that every field those
+functions read survives sanitize() -- calling `extract_flow_steps` (the real
+pure consumer) directly for the flow case, the same "compose with the real
+downstream" pattern round 4 used for `walk_script_refs`. A future column
+with a repository read but no allowlist entry fails THAT test instead of
+landing permanently NULL.
+
 Allowlist, never denylist: a denylist of "known dangerous" field names only
 stops fields someone already thought to list. An allowlist stops everything
 by default and requires each field to be named IN before it survives, so an
@@ -264,6 +278,11 @@ _ROUTER: Schema = {
     "script": _SCRIPT_REF,
 }
 
+# FIX ROUND 5: `lastModified` was never allowlisted here, so
+# `celigo_flows.celigo_last_modified` (migration 094) was permanently NULL --
+# the API returns it (observed-shapes.md lists it on the live flow object),
+# the schema has the column, `upsert_flow` reads it, and only this allowlist
+# was dropping it. Also needed for Task 7's drift detection.
 _FLOW: Schema = {
     "_id": None,
     "name": None,
@@ -272,6 +291,7 @@ _FLOW: Schema = {
     "schedule": None,
     "timezone": None,
     "lastExecutedAt": None,
+    "lastModified": None,
     "_sourceId": None,
     "numOpenError": None,
     "lastErrorAt": None,
@@ -330,12 +350,17 @@ _IMPORT: Schema = {
     "aiDescription": _AI_DESCRIPTION,
 }
 
+# FIX ROUND 5: `lastModified` had the same gap as `_FLOW` -- observed live
+# (observed-shapes.md's script section), `celigo_scripts.celigo_last_modified`
+# column exists (migration 094), `upsert_script` reads it, but nothing here
+# allowlisted it.
 _SCRIPT: Schema = {
     "_id": None,
     "name": None,
     "content": None,
     "_sourceId": None,
     "sandbox": None,
+    "lastModified": None,
 }
 
 # Field names observed live (spec §3): "Error objects carry traceKey (source-

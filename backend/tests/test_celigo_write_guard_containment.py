@@ -11,10 +11,13 @@ Two properties, both executed against the tree rather than asserted about it:
   1. In PRODUCTION code, the allow token appears only where the trusted Celigo
      flow lives. A new production call site must edit this allowlist, which is
      the review-visible act the whole design depends on.
-  2. No textual SQL UPDATE/DELETE targets ``connections`` or ``mcp_connectors``.
-     ``do_orm_execute`` sees ORM constructs, not ``text("UPDATE ...")``, so that
-     is the one hole the guard cannot close at runtime. Zero exist today; this
-     keeps it that way.
+  2. No textual SQL UPDATE/DELETE targets ``connections`` or ``mcp_connectors``,
+     outside ``DML_TEST_ALLOWLIST`` -- a deliberately narrow, explicit set of
+     test files that exercise the FK's ON DELETE SET NULL behaviour, which
+     only raw SQL can trigger (celigo_write_guard refuses any ORM delete of a
+     celigo row). ``do_orm_execute`` sees ORM constructs, not
+     ``text("UPDATE ...")``, so that is the one hole the guard cannot close at
+     runtime; this keeps everywhere else clean.
 """
 
 import pathlib
@@ -60,6 +63,20 @@ SELF_DOCUMENTING = {
     "tests/test_celigo_write_guard_containment.py",
 }
 
+# FIX ROUND 5 (authorised by team lead 2026-08-27): unlike SELF_DOCUMENTING
+# above, these two files don't merely QUOTE the DML pattern as prose -- they
+# genuinely EXECUTE it, deliberately. Both seed a `provider='celigo'`
+# connection and must delete it with raw SQL, because celigo_write_guard
+# refuses any ORM flush/delete of a celigo row outside the paired
+# connect/disconnect flow -- raw SQL is the only way to exercise the FK's
+# ON DELETE SET NULL behaviour on celigo_flow_errors/celigo_error_signatures.
+# Kept as its own set (not folded into SELF_DOCUMENTING) so that set's own
+# name stays honest -- everything in it truly is prose, nothing here is.
+DML_TEST_ALLOWLIST = {
+    "tests/test_celigo_flow_map_rls.py",
+    "tests/test_celigo_repository.py",
+}
+
 
 def _python_files():
     for root in ("app", "tests", "scripts"):
@@ -102,7 +119,7 @@ def test_no_textual_sql_dml_targets_the_guarded_tables():
     )
     offenders = []
     for path, rel in _python_files():
-        if rel in SELF_DOCUMENTING:
+        if rel in SELF_DOCUMENTING or rel in DML_TEST_ALLOWLIST:
             continue
         for match in pattern.finditer(path.read_text()):
             offenders.append(f"{rel}: {match.group(0)!r}")

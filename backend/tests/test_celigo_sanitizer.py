@@ -25,6 +25,7 @@ import copy
 import json
 
 from app.services.celigo.graph import walk_script_refs
+from app.services.celigo.repository import FlowStepInput, extract_flow_steps
 from app.services.celigo.sanitizer import sanitize
 
 # Celigo's "test import"/"preview mapping" feature stores its last captured
@@ -817,3 +818,198 @@ class TestSanitizerAndWalkerCompose:
         dumped = _dumped(sanitized)
         assert "top-level-leak" not in dumped
         assert "branch-leak" not in dumped
+
+
+class TestSanitizerPreservesEveryRepositoryReadField:
+    """FIX ROUND 5: this is the THIRD time the sanitizer has silently dropped
+    something a later stage needed -- first script refs (round 2/4), then
+    flow topology (round 3), now `lastModified`. Each was fixed by adding
+    fields; this test stops the PATTERN instead of the next instance of it.
+
+    `app.services.celigo.repository` (Task 5, commit 93b89277) is the real
+    consumer of `sanitize()`'s output -- every `upsert_*` function's
+    docstring says its `sanitized` argument is "already through
+    `sanitizer.sanitize(kind, raw)`". For each resource kind the repository
+    actually reads a sanitized dict for (`integration`, `flow`, `script` --
+    `export`/`import` are never separately sanitized; their fields reach the
+    repository already flattened into a sanitized FLOW's `pageGenerators`/
+    `pageProcessors`, and `error` fields arrive as individual kwargs, not a
+    `sanitized` dict), this asserts every field the repository's own code
+    reads off that dict survives sanitize() -- with a captured-payload value
+    planted alongside every read site, so the property can't be satisfied by
+    weakening the sanitizer. If a future column gets a repository read but
+    the allowlist is never updated, THIS test fails instead of the column
+    staying permanently NULL.
+
+    The flow case goes one step further and calls `extract_flow_steps` --
+    the REAL, pure consumer function, not a hand-typed key list -- directly
+    on the sanitized output, the same pattern round 4's composition tests
+    used for `walk_script_refs`.
+    """
+
+    def test_upsert_integration_read_set_survives(self):
+        """`upsert_integration` (repository.py) reads exactly: _id, name,
+        sandbox, mode, description, lastModified (-> celigo_last_modified,
+        migration 094). All five were already correct before this round."""
+        raw = {
+            "_id": "int-1",
+            "name": "Solidus + NetSuite",
+            "sandbox": False,
+            "mode": "install",
+            "description": "Order sync",
+            "lastModified": "2026-08-27T14:06:38.932Z",
+            "mockResponse": {"_headers": {"set-cookie": ["integration-leak"]}},
+        }
+        out = sanitize("integration", raw)
+        assert out["_id"] == "int-1"
+        assert out["name"] == "Solidus + NetSuite"
+        assert out["sandbox"] is False
+        assert out["mode"] == "install"
+        assert out["description"] == "Order sync"
+        assert out["lastModified"] == "2026-08-27T14:06:38.932Z"
+        assert "set-cookie" not in _dumped(out)
+
+    def test_upsert_flow_and_extract_flow_steps_read_set_survives(self):
+        """`upsert_flow` reads: _id, name, disabled, schedule, timezone,
+        lastExecutedAt, _sourceId, aiDescription.{summary,detailed,
+        generatedOn}, lastModified (-> celigo_last_modified, migration 094
+        -- MISSING before this round, same gap as script). `extract_flow_steps`
+        -- called directly below, the real consumer -- reads
+        pageGenerators[].{_exportId,skipRetries},
+        pageProcessors[].{_exportId,_importId,filter,responseMapping,
+        proceedOnFailure} at BOTH the top level and inside
+        routers[].branches[].pageProcessors, plus routers[].id and
+        routers[].branches[].branchId to build the router/branch chain."""
+        raw = {
+            "_id": "f1",
+            "name": "NS - Create Sales Order",
+            "disabled": False,
+            "schedule": "0 * * * *",
+            "timezone": "America/New_York",
+            "lastExecutedAt": "2026-08-27T00:00:00.000Z",
+            "_sourceId": "src1",
+            "lastModified": "2026-08-27T14:06:38.932Z",
+            "aiDescription": {
+                "summary": "Creates sales orders",
+                "detailed": "Long form",
+                "generatedOn": "2026-08-20T00:00:00.000Z",
+            },
+            "pageGenerators": [{"_exportId": "exp-top", "skipRetries": True}],
+            "pageProcessors": [
+                {
+                    "type": "import",
+                    "_importId": "imp-top",
+                    "proceedOnFailure": False,
+                    "filter": {"type": "expression", "expression": {"rules": [], "version": "1"}},
+                    "responseMapping": {"fields": [{"extract": "id", "generate": "internalid"}]},
+                    "sampleData": {"customer": {"email": "top-processor-leak@example-shop.test"}},
+                }
+            ],
+            "routers": [
+                {
+                    "id": "rtr-A",
+                    "name": "",
+                    "mockOutput": {"leak": "router-leak"},
+                    "branches": [
+                        {
+                            "name": "",
+                            "branchId": "brn-A1",
+                            "rawData": "branch-leak",
+                            "pageProcessors": [
+                                {
+                                    "type": "import",
+                                    "_importId": "imp-branch",
+                                    "proceedOnFailure": True,
+                                    "filter": {"type": "expression", "expression": {"rules": [], "version": "1"}},
+                                    "responseMapping": {
+                                        "fields": [{"extract": "internalid", "generate": "id"}],
+                                        "rawData": "response-mapping-leak",
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+            "mockResponse": {"_headers": {"set-cookie": ["flow-leak"]}},
+        }
+        out = sanitize("flow", raw)
+
+        assert out["name"] == "NS - Create Sales Order"
+        assert out["disabled"] is False
+        assert out["schedule"] == "0 * * * *"
+        assert out["timezone"] == "America/New_York"
+        assert out["lastExecutedAt"] == "2026-08-27T00:00:00.000Z"
+        assert out["_sourceId"] == "src1"
+        assert out["lastModified"] == "2026-08-27T14:06:38.932Z"
+        assert out["aiDescription"] == {
+            "summary": "Creates sales orders",
+            "detailed": "Long form",
+            "generatedOn": "2026-08-20T00:00:00.000Z",
+        }
+
+        steps = extract_flow_steps(out)
+        assert steps == [
+            FlowStepInput(
+                celigo_id="exp-top",
+                role="generator",
+                router_id=None,
+                branch_id=None,
+                sequence=0,
+                filter_json=None,
+                mapping_json=None,
+                proceed_on_failure=None,
+                skip_retries=True,
+            ),
+            FlowStepInput(
+                celigo_id="imp-top",
+                role="processor",
+                router_id=None,
+                branch_id=None,
+                sequence=0,
+                filter_json={"type": "expression", "expression": {"rules": [], "version": "1"}},
+                mapping_json={"fields": [{"extract": "id", "generate": "internalid"}]},
+                proceed_on_failure=False,
+                skip_retries=None,
+            ),
+            FlowStepInput(
+                celigo_id="imp-branch",
+                role="processor",
+                router_id="rtr-A",
+                branch_id="brn-A1",
+                sequence=0,
+                filter_json={"type": "expression", "expression": {"rules": [], "version": "1"}},
+                mapping_json={"fields": [{"extract": "internalid", "generate": "id"}]},
+                proceed_on_failure=True,
+                skip_retries=None,
+            ),
+        ]
+
+        dumped = _dumped(out)
+        assert "set-cookie" not in dumped
+        assert "example-shop.test" not in dumped
+        assert "router-leak" not in dumped
+        assert "branch-leak" not in dumped
+        assert "response-mapping-leak" not in dumped
+
+    def test_upsert_script_read_set_survives(self):
+        """`upsert_script` reads: _id, name, content, _sourceId, sandbox,
+        lastModified (-> celigo_last_modified, migration 094 -- MISSING
+        before this round, the same gap as flow)."""
+        raw = {
+            "_id": "s1",
+            "name": "Null guard",
+            "content": "function main(options) { return options; }",
+            "_sourceId": "src3",
+            "sandbox": False,
+            "lastModified": "2026-03-13T00:44:05.606Z",
+            "mockOutput": {"result": "script-leak"},
+        }
+        out = sanitize("script", raw)
+        assert out["_id"] == "s1"
+        assert out["name"] == "Null guard"
+        assert out["content"] == "function main(options) { return options; }"
+        assert out["_sourceId"] == "src3"
+        assert out["sandbox"] is False
+        assert out["lastModified"] == "2026-03-13T00:44:05.606Z"
+        assert "script-leak" not in _dumped(out)
