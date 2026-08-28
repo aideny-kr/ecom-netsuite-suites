@@ -23,19 +23,37 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger()
 
-# Tools that legitimately exceed the default 15s ceiling. ns_getRecordTypeMetadata
-# was controller-verified live (2026-08-25) at 11-18s — under the old 15.0s
-# ceiling it failed roughly half the time, silently breaking both the
-# investigation gate (A) and the ask_user slot-name verification (C) that
-# depend on it succeeding. The 1h cache in record_metadata_service.py
-# amortizes the added latency to once per (connector, record_type)/hour.
-_EXTENDED_TIMEOUT_TOOLS = frozenset(
-    {"ns_runReport", "ns_runSavedSearch", "ns_runCustomSuiteQL", "ns_getRecordTypeMetadata"}
-)
+# One ceiling for every tool. There used to be two tiers — 60s for four named
+# read tools, 15s for everything else — which handed every irreversible WRITE
+# the shortest budget in the system while the reads got the headroom. That is
+# backwards on the risk axis, and it is not a hypothetical: on 2026-08-27
+# against sandbox 6738075-sb1, ns_createRecord blew the 15s ceiling, NetSuite
+# created the customer anyway (internal id 5264348), and the app recorded the
+# write as failed and offered to re-run the identical payload. A timeout is a
+# statement about our patience, never about what NetSuite committed.
+#
+# A per-tool table also cannot be complete here: the NetSuite tool surface is
+# discovered at runtime from Oracle's MCP server, so any name not in the table
+# silently inherited the short, write-orphaning default. Same fail-closed
+# reasoning as _NETSUITE_READ_ONLY_TOOLS in chat/tools.py — the safe value is
+# the one an unknown tool gets.
+#
+# 60s is the ceiling ns_getRecordTypeMetadata already earned (controller-
+# verified live 2026-08-25 at 11-18s). Slow tools were always the ones that
+# mattered; the 15s tier only ever bought a faster failure on tools that are
+# fast anyway. The residual — a write that exceeds even 60s — is handled as an
+# indeterminate outcome rather than by guessing, see write_outcome.py.
+_TOOL_TIMEOUT_SECONDS = 60.0
 
 
 def _tool_timeout_seconds(tool_name: str) -> float:
-    return 60.0 if tool_name in _EXTENDED_TIMEOUT_TOOLS else 15.0
+    """The wall-clock ceiling for one MCP tool call.
+
+    Takes *tool_name* so callers and tests keep a single named policy seam —
+    the current policy is deliberately uniform, and a future exception must be
+    argued for here rather than inherited by omission.
+    """
+    return _TOOL_TIMEOUT_SECONDS
 
 
 async def _get_oauth2_token(connector: McpConnector, db: AsyncSession | None) -> str | None:
