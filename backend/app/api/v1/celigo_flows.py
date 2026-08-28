@@ -25,9 +25,16 @@ next month silently API-visible with no review of whether it's safe to expose
 (`raw_json` on four of these tables is exactly the column that must never do
 that). The explicit-field boundary here IS the review point.
 
-EXPLICIT TENANT SCOPING IN EVERY QUERY -- RLS (FORCE, per
-`test_celigo_flow_map_rls.py`) is the backstop, not the plan. Every SELECT
-below filters on `tenant_id == user.tenant_id` in application code as well.
+EXPLICIT TENANT SCOPING ON EVERY QUERY AGAINST A tenant_id-BEARING TABLE --
+RLS (FORCE, per `test_celigo_flow_map_rls.py`) is the backstop, not the
+plan. Every SELECT below against one of the eight flow-map tables filters
+on `tenant_id == user.tenant_id` in application code as well. ONE
+exception, not an oversight (whole-branch review finding 11, 2026-08-27):
+`get_sync_status`'s `CursorState` select has no tenant predicate at all,
+because `cursor_states` has no `tenant_id` column to filter on -- see that
+function's own docstring for why it is still safe (the `connection` row
+scoping it is tenant-verified first, before it's ever used to build the
+cursor lookup).
 
 This module is READ-ONLY: no Celigo write verb, no mutation of any of the
 eight tables. It does not call `app.services.celigo.repository`'s upsert/mark
