@@ -121,7 +121,7 @@ from typing import Iterable
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.celigo import CeligoErrorSignature, CeligoFlowError, CeligoFlowStep
+from app.models.celigo import CeligoErrorSignature, CeligoFlowError, CeligoFlowStep, celigo_error_is_open
 from app.services.celigo.repository import (
     mark_flow_errors_resolved,
     upsert_error_signature,
@@ -362,7 +362,13 @@ async def upsert_errors(
         count, first_seen, last_seen = (
             await db.execute(
                 select(
-                    func.count(CeligoFlowError.id).filter(CeligoFlowError.resolved_at.is_(None)),
+                    # FIX ROUND 8 (whole-branch review finding 5): this used
+                    # to filter `resolved_at IS NULL` alone, disagreeing with
+                    # `celigo_flows.py`'s open-count query (which also
+                    # excludes `purged_at IS NOT NULL` rows) -- see
+                    # `celigo_error_is_open`'s own docstring for why they
+                    # must agree and why it lives there, not here.
+                    func.count(CeligoFlowError.id).filter(celigo_error_is_open()),
                     func.min(CeligoFlowError.occurred_at),
                     func.max(CeligoFlowError.occurred_at),
                 ).where(

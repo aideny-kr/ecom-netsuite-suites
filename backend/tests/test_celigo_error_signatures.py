@@ -31,6 +31,7 @@ from app.models.celigo import CeligoFlowError, CeligoFlowStep
 from app.services.celigo.errors import fingerprint, normalize_message, upsert_errors
 from app.services.celigo.repository import (
     extract_flow_steps,
+    mark_flow_errors_purged,
     sync_flow_steps,
     upsert_flow,
     upsert_integration,
@@ -682,6 +683,63 @@ class TestErrorsAreNeverDeletedOnlyResolved:
 
         delete_like = [name for name in dir(errors_module) if "delete" in name.lower()]
         assert delete_like == []
+
+
+class TestOccurrenceCountExcludesPurgedRows:
+    """WHOLE-BRANCH REVIEW FINDING 5 (2026-08-27): `celigo_flows.py`'s
+    open-count query and this module's `occurrence_count` recompute used to
+    disagree on what "open" means -- the API filtered `resolved_at IS NULL
+    AND purged_at IS NULL`, this module's phase 3 only filtered `resolved_at
+    IS NULL`. `_purge_expired_errors` (sync_service.py) sets `purged_at`
+    INDEPENDENTLY of `resolved_at` -- Celigo's own ~30-day purge can catch up
+    with an error this app never saw resolve -- so a purged-but-unresolved
+    row was counted here and not there. Both callers now share
+    `app.models.celigo.celigo_error_is_open()`."""
+
+    async def test_a_purged_but_unresolved_error_does_not_count_toward_occurrence_count(self, db: AsyncSession):
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+        step = await _seed_step(db, tenant.id, conn_id, suffix="purge")
+
+        raw_errors = [
+            _raw_error(celigo_id="err_purge_target", message=_ship_address_message(*_SHIP_ADDRESS_VARIANTS[0])),
+        ]
+        await upsert_errors(db, tenant_id=tenant.id, connection_id=conn_id, step=step, raw_errors=raw_errors)
+        await db.flush()
+
+        occurrence_count_before = (
+            await db.execute(
+                text("SELECT occurrence_count FROM celigo_error_signatures WHERE tenant_id = :t").bindparams(
+                    t=tenant.id
+                )
+            )
+        ).scalar_one()
+        assert occurrence_count_before == 1
+
+        # Celigo's own ~30-day purge window catches up with the error
+        # independently of whether this app ever saw it resolve --
+        # `resolved_at` stays NULL, only `purged_at` gets set.
+        purged = await mark_flow_errors_purged(
+            db, tenant_id=tenant.id, connection_id=conn_id, celigo_ids=["err_purge_target"]
+        )
+        assert purged == 1
+        await db.flush()
+
+        # Resync: Celigo (hypothetically) still reports this errorId as open
+        # -- this is what makes phase 3 recompute this row's signature again,
+        # so the recompute's OWN definition of "open" is what's under test,
+        # not just whether resolution ran.
+        await upsert_errors(db, tenant_id=tenant.id, connection_id=conn_id, step=step, raw_errors=raw_errors)
+        await db.flush()
+
+        occurrence_count_after = (
+            await db.execute(
+                text("SELECT occurrence_count FROM celigo_error_signatures WHERE tenant_id = :t").bindparams(
+                    t=tenant.id
+                )
+            )
+        ).scalar_one()
+        assert occurrence_count_after == 0, "a purged row must not count as open, even with resolved_at still NULL"
 
 
 class TestIncompleteRawErrorsNeverResolvesAnything:

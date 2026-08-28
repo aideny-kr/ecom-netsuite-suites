@@ -279,6 +279,36 @@ class TestListIntegrationFlows:
         assert flow_out["error_count"] == 2, "the resolved error must not count as open"
         assert flow_out["signature_count"] == 1, "both open errors share one signature -- one root cause"
 
+    async def test_purged_but_unresolved_error_does_not_count_as_open(self, client, admin_user, db):
+        """WHOLE-BRANCH REVIEW FINDING 5: this endpoint's own definition of
+        "open" (`resolved_at IS NULL AND purged_at IS NULL`, now sourced from
+        `app.models.celigo.celigo_error_is_open`) must exclude a row Celigo's
+        own ~30-day purge caught up with, even though this app never saw it
+        resolve -- `purged_at` is set independently of `resolved_at`
+        (`sync_service._purge_expired_errors`)."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+
+        db.add(
+            CeligoFlowError(
+                tenant_id=user.tenant_id,
+                celigo_connection_id=world["connection_id"],
+                flow_id=world["flow"].id,
+                signature_id=world["signature"].id,
+                celigo_id=f"err_purged_{world['suffix']}",
+                message=PII_MESSAGE,
+                occurred_at=datetime.now(timezone.utc),
+                purged_at=datetime.now(timezone.utc),  # resolved_at stays NULL, deliberately
+            )
+        )
+        await db.flush()
+
+        r = await client.get(f"/api/v1/celigo/integrations/{world['integration'].id}/flows", headers=headers)
+        assert r.status_code == 200, r.text
+        flow_out = r.json()[0]
+        assert flow_out["error_count"] == 1, "the purged-but-unresolved error must not count as open"
+        assert flow_out["signature_count"] == 1
+
     async def test_paused_flow_stays_visible(self, client, admin_user, db):
         """MUST NOT be filtered out of the list -- the UI dims it via `disabled`."""
         user, headers = admin_user

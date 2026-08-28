@@ -40,6 +40,7 @@ from datetime import datetime
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    ColumnElement,
     Computed,
     DateTime,
     ForeignKey,
@@ -47,6 +48,7 @@ from sqlalchemy import (
     Integer,
     Text,
     UniqueConstraint,
+    and_,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -386,6 +388,31 @@ class CeligoFlowError(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     retriable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     purged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)  # WE noticed it vanished
+
+
+def celigo_error_is_open() -> ColumnElement[bool]:
+    """The single, canonical definition of an OPEN `celigo_flow_errors` row:
+    not resolved AND not purged.
+
+    WHOLE-BRANCH REVIEW FINDING 5 (2026-08-27): `app/api/v1/celigo_flows.py`'s
+    flow-list open-count query and `app/services/celigo/errors.py`'s
+    `occurrence_count` aggregate used to compute "open" two different ways --
+    the former filtered `resolved_at IS NULL AND purged_at IS NULL`, the
+    latter only `resolved_at IS NULL`. `sync_service._purge_expired_errors`
+    sets `purged_at` independently of `resolved_at` (an error can be purged
+    by Celigo's own ~30-day window without this app ever having seen it
+    resolve), so a purged-but-unresolved row was counted by one and not the
+    other -- the flow card and the signature panel showed different totals
+    for the SAME errors, both presented as authoritative.
+
+    "Not purged" is part of "open" because `purged_at` means Celigo itself
+    has already destroyed the underlying record (`repository.
+    mark_flow_errors_purged`'s own docstring) -- there is nothing left to
+    action, the same as a resolved error, even though this app never saw it
+    resolve. Single-sourced HERE (not in either caller) so a third caller
+    added later has no way to invent a third definition -- it has to import
+    this one."""
+    return and_(CeligoFlowError.resolved_at.is_(None), CeligoFlowError.purged_at.is_(None))
 
 
 class CeligoConfigChange(Base, UUIDPrimaryKeyMixin, TimestampMixin):

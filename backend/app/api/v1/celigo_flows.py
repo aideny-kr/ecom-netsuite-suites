@@ -58,6 +58,7 @@ from app.models.celigo import (
     CeligoIntegration,
     CeligoScript,
     CeligoScriptAttachment,
+    celigo_error_is_open,
 )
 from app.models.pipeline import CursorState
 from app.models.user import User
@@ -386,11 +387,13 @@ async def list_integration_flows(
             func.count().label("error_count"),
             func.count(distinct(CeligoFlowError.signature_id)).label("signature_count"),
         )
+        # "Open" is single-sourced in `celigo_error_is_open()` (whole-branch
+        # review finding 5) so this query and errors.py's occurrence_count
+        # recompute can never disagree on what it means again.
         .where(
             CeligoFlowError.tenant_id == user.tenant_id,
             CeligoFlowError.flow_id.in_(flow_ids),
-            CeligoFlowError.resolved_at.is_(None),
-            CeligoFlowError.purged_at.is_(None),
+            celigo_error_is_open(),
         )
         .group_by(CeligoFlowError.flow_id)
     )
