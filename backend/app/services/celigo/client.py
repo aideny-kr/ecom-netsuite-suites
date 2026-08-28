@@ -35,7 +35,12 @@ hand-craft `after`/`limit`; a 204 with no body means nothing to list) and
 body-based (`{"errors": [...], "nextPageURL": "..."}`) for the per-step flow
 error endpoint specifically -- the docs' own worked example for body-based
 pagination IS that errors endpoint. `list_resource`/`get_resource` use the
-former; `list_flow_errors_for_step` uses the latter.
+former; `list_flow_errors_for_step` uses the latter. BOTH page-following
+loops are bounded (`_MAX_LIST_PAGES`, `_MAX_ERROR_PAGES`) -- but NOT
+identically: `list_resource` RAISES `CeligoError` when the bound is hit
+(FIX ROUND 2, see its own docstring); `list_flow_errors_for_step` still
+stops silently and returns whatever it collected, unchanged by FIX ROUND 2
+and out of that round's scope. Do not assume the two behave the same way.
 
 TASK 3 ERRORS ARE PER-STEP, NOT PER-FLOW (observed-shapes.md, live-probed
 2026-08-27): passing a flow id alone (no step id) returns `steps: []` even
@@ -71,11 +76,16 @@ _KIND_ENDPOINTS: dict[str, str] = {
     "script": "scripts",
 }
 
-# Bound on 429 retries and on error-page-following. Both are read-only GET
-# loops driven by server-supplied cursors, but neither should be allowed to
-# spin forever against a misbehaving or malicious response.
+# Bound on 429 retries, on `list_resource`'s Link-header following, and on
+# `list_flow_errors_for_step`'s `nextPageURL` following. All three are
+# read-only GET loops driven by server-supplied cursors, but none of them
+# may be allowed to spin forever against a misbehaving or malicious
+# response -- FIX ROUND 2 (2026-08-27): a self-referential Link header
+# drove `list_resource` to 500+ requests with no termination before
+# `_MAX_LIST_PAGES` existed. Confirmed by execution, not by reading.
 _MAX_RETRIES = 3
 _MAX_ERROR_PAGES = 200
+_MAX_LIST_PAGES = 200
 
 # Celigo's hosted MCP server -- a fixed URL per region, not tenant-configurable
 # (Plan A). Derived from CELIGO_BASE_URLS (never a second hardcoded map) so
@@ -294,6 +304,18 @@ async def list_resource(
     once the generator is exhausted (or explicitly aclosed). A caller that
     only partially iterates and never closes the generator should pass its
     own *client* instead, the same convention `verify_token` already uses.
+
+    Bounded by `_MAX_LIST_PAGES` (FIX ROUND 2, 2026-08-27): a
+    self-referential `Link: rel="next"` header -- malformed, or Celigo
+    genuinely misbehaving -- previously drove this loop to 500+ requests
+    with no termination, confirmed by execution. After `_MAX_LIST_PAGES`
+    pages, if the server still claims there's a next page, this RAISES
+    `CeligoError` rather than silently stopping and handing back a
+    truncated list -- Task 5's natural usage
+    (`[item async for item in list_resource(...)]`) drains eagerly, and a
+    caller that gets a short list back with no error would sync a partial
+    flow map and report success. A raised exception is the only signal
+    that survives that usage pattern.
     """
     endpoint = _KIND_ENDPOINTS.get(kind)
     if endpoint is None:
@@ -314,8 +336,17 @@ async def list_resource(
     # whatever filters were on the original query, plus the server's own
     # `after`/`limit`), so subsequent requests use it verbatim.
     next_params: dict | None = query
+    pages = 0
     try:
         while url:
+            if pages >= _MAX_LIST_PAGES:
+                raise CeligoError(
+                    f"Celigo's {kind} listing did not terminate within {_MAX_LIST_PAGES} pages "
+                    '(the Link header kept returning rel="next") -- refusing to keep following '
+                    "it and silently return a truncated listing. Either this kind genuinely has "
+                    f"more than {_MAX_LIST_PAGES} pages of results, or the Link header is "
+                    "malformed or looping."
+                )
             response = await _get_with_retry(http, url, headers=headers, params=next_params)
             next_params = None
             _raise_for_status(response, context=f"listing {kind}")
@@ -331,6 +362,7 @@ async def list_resource(
                 if isinstance(raw, dict):
                     yield sanitize(kind, raw)
             url = response.links.get("next", {}).get("url")
+            pages += 1
     finally:
         if owns_client:
             await http.aclose()

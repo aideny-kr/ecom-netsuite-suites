@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from app.services.celigo.client import (
+    _MAX_LIST_PAGES,
     CELIGO_BASE_URLS,
     CeligoAuthError,
     CeligoError,
@@ -382,6 +383,57 @@ class TestListResourcePagination:
             results = [item async for item in list_resource("flow", token="tok", client=c)]
 
         assert results == []
+
+
+class TestListResourcePageCap:
+    """FIX ROUND 2 (team lead, confirmed by execution 2026-08-27): a
+    self-referential Link header (`rel="next"` pointing back at a URL that
+    returns the same `rel="next"` header again) drove `list_resource` to
+    501+ requests with no termination -- unlike its sibling
+    `list_flow_errors_for_step`, which already had `_MAX_ERROR_PAGES`. Task
+    5's natural usage (`[item async for item in list_resource(...)]`) drains
+    eagerly, so an unbounded loop is a real availability risk, not a
+    theoretical one: a malformed or looping Link header would hang the sync
+    worker indefinitely.
+
+    Fix: `list_resource` now stops following `rel="next"` after
+    `_MAX_LIST_PAGES` pages and RAISES `CeligoError` rather than silently
+    yielding a truncated list -- silently truncating a resource listing is
+    the same silent-wrong-answer class as the `numOpenError` zero fixed in
+    FIX ROUND 1: a caller that sees an exception knows the sync is
+    incomplete, a caller that sees a short list does not.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_looping_link_header_raises_instead_of_spinning_forever(self):
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(1)
+            # A hard breaker INDEPENDENT of the cap under test: if
+            # list_resource's own cap is broken, this fails the test fast
+            # with a clear assertion instead of spinning for minutes or
+            # hanging the suite on a timeout -- exactly what the team lead
+            # asked for instead of relying on a timeout.
+            if len(calls) > 2 * _MAX_LIST_PAGES:
+                raise AssertionError(
+                    f"list_resource made over {2 * _MAX_LIST_PAGES} requests -- its page cap did not fire"
+                )
+            return httpx.Response(
+                200,
+                json=[{"_id": f"f{len(calls)}", "name": "Flow"}],
+                headers={"Link": '<https://api.integrator.io/v1/flows?after=loop>; rel="next"'},
+            )
+
+        async with _json_client(handler) as c:
+            with pytest.raises(CeligoError):
+                async for _ in list_resource("flow", token="tok", client=c):
+                    pass
+
+        # Confirms the cap is what stopped it, not the hard breaker above --
+        # if this were ever >= 2 * _MAX_LIST_PAGES the AssertionError branch
+        # would have fired instead of CeligoError.
+        assert len(calls) <= _MAX_LIST_PAGES
 
 
 class TestProjectionParamsReachTheWire:
