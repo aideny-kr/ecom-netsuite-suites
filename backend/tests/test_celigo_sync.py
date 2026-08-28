@@ -36,6 +36,7 @@ from app.models.celigo import (
     CeligoScript,
     CeligoScriptAttachment,
 )
+from app.services.celigo.client import CeligoIncompleteListingError
 from app.services.celigo.repository import (
     extract_flow_steps,
     sync_flow_steps,
@@ -199,12 +200,26 @@ def _fake_list_resource(data: dict[str, list[dict]]):
     return _fake
 
 
-def _fake_list_flow_errors_for_step(data: dict[tuple[str, str], list[dict]] | None = None, calls: list | None = None):
+def _fake_list_flow_errors_for_step(
+    data: dict[tuple[str, str], list[dict]] | None = None,
+    calls: list | None = None,
+    truncated: dict[tuple[str, str], list[dict]] | None = None,
+):
+    """*truncated* maps a step to the PARTIAL listing the real fetcher would
+    have collected before hitting `_MAX_ERROR_PAGES` -- it raises
+    `CeligoIncompleteListingError` carrying exactly that, the way client.py
+    does, instead of returning."""
     data = data or {}
+    truncated = truncated or {}
 
     async def _fake(flow_id, step_id, *, token, region="us", client=None):
         if calls is not None:
             calls.append((flow_id, step_id))
+        if (flow_id, step_id) in truncated:
+            raise CeligoIncompleteListingError(
+                f"error listing for flow {flow_id} step {step_id} did not terminate",
+                partial_errors=list(truncated[(flow_id, step_id)]),
+            )
         return list(data.get((flow_id, step_id), []))
 
     return _fake
@@ -223,6 +238,7 @@ async def _run_sync(
     imports: list[dict] | None = None,
     errors_by_step: dict[tuple[str, str], list[dict]] | None = None,
     error_calls: list | None = None,
+    truncated_steps: dict[tuple[str, str], list[dict]] | None = None,
 ) -> SyncSummary:
     resource_data = {
         "integration": integrations or [],
@@ -237,7 +253,7 @@ async def _run_sync(
     )
     monkeypatch.setattr(
         "app.services.celigo.sync_service.list_flow_errors_for_step",
-        _fake_list_flow_errors_for_step(errors_by_step, error_calls),
+        _fake_list_flow_errors_for_step(errors_by_step, error_calls, truncated_steps),
     )
     return await sync_flow_map_for_connection(
         db, tenant_id=tenant_id, connection_id=connection_id, token="unit-test-token", region="us"
@@ -1064,6 +1080,120 @@ class TestPurgeMarking:
         assert summary.errors_purged == 0
         row = (await db.execute(select(CeligoFlowError).where(CeligoFlowError.celigo_id == "err_future"))).scalar_one()
         assert row.purged_at is None
+
+
+class TestOneTruncatedStepIsContainedNotFatal:
+    """FIX ROUND 9 (scoped re-review R1b, 2026-08-27). Fix round 8 made
+    `list_flow_errors_for_step` raise instead of truncating silently -- right
+    call, wrong blast radius: ONE step exceeding `_MAX_ERROR_PAGES` aborted
+    the ENTIRE connection sync (phases A-E), on every run, until a human
+    intervened. Meanwhile the per-step escape hatch that exists precisely for
+    this (`upsert_errors(raw_errors_is_complete=False)`) had zero callers.
+
+    Two invariants, both proven below against the real orchestrator:
+
+      1. A truncated step can NEVER resolve an error. Its listing is
+         admittedly partial, so absence from it means nothing.
+      2. One truncated step cannot discard every OTHER step's results. The
+         sync continues, and the run reports that it was partial rather than
+         reporting nothing at all.
+    """
+
+    async def test_a_truncated_step_neither_resolves_nor_aborts_the_other_steps(self, db: AsyncSession, monkeypatch):
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        flows = [
+            _raw_flow("flow_trunc", integration_id="int_t", export_id="exp_trunc"),
+            _raw_flow("flow_ok", integration_id="int_t", export_id="exp_ok"),
+        ]
+
+        # Sync 1 -- everything complete. The soon-to-be-truncated step has two
+        # open errors; only one of them comes back in sync 2.
+        first = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_t")],
+            flows=flows,
+            errors_by_step={
+                ("flow_trunc", "exp_trunc"): [
+                    _raw_error(celigo_id="err_trunc_seen"),
+                    _raw_error(celigo_id="err_trunc_absent"),
+                ],
+            },
+        )
+        assert first.errors_snapshotted == 2
+        await db.flush()
+
+        # Sync 2 -- the FIRST step's listing truncates (it is first in flow
+        # order, so an abort here would take every later step with it). Its
+        # partial page carries one already-known error plus one brand-new
+        # one; the second flow's step answers normally.
+        error_calls: list = []
+        summary = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_t")],
+            flows=flows,
+            errors_by_step={("flow_ok", "exp_ok"): [_raw_error(celigo_id="err_ok_new")]},
+            truncated_steps={
+                ("flow_trunc", "exp_trunc"): [
+                    _raw_error(celigo_id="err_trunc_seen"),
+                    _raw_error(celigo_id="err_trunc_partial_new"),
+                ]
+            },
+            error_calls=error_calls,
+        )
+        await db.flush()
+
+        # Invariant 2: the sync ran to completion and every step was visited.
+        assert set(error_calls) == {("flow_trunc", "exp_trunc"), ("flow_ok", "exp_ok")}
+        assert summary.steps_with_errors_checked == 2
+        assert summary.steps_with_incomplete_errors == 1
+
+        # Invariant 1: absence from an admittedly-partial listing resolves
+        # nothing.
+        absent = (
+            await db.execute(select(CeligoFlowError).where(CeligoFlowError.celigo_id == "err_trunc_absent"))
+        ).scalar_one()
+        assert absent.resolved_at is None
+
+        # The partial page's own errors are still RECORDED -- "incomplete"
+        # means "cannot conclude an absence", not "throw the data away".
+        partial_new = (
+            await db.execute(select(CeligoFlowError).where(CeligoFlowError.celigo_id == "err_trunc_partial_new"))
+        ).scalar_one_or_none()
+        assert partial_new is not None
+
+        # And the step AFTER the truncated one was snapshotted normally.
+        ok_new = (
+            await db.execute(select(CeligoFlowError).where(CeligoFlowError.celigo_id == "err_ok_new"))
+        ).scalar_one_or_none()
+        assert ok_new is not None
+
+    async def test_a_clean_run_reports_zero_incomplete_steps(self, db: AsyncSession, monkeypatch):
+        """The counter is what makes a partial run VISIBLE, so it must be
+        honest in the ordinary case too -- a field that is always non-zero
+        surfaces nothing."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        summary = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_c")],
+            flows=[_raw_flow("flow_c", integration_id="int_c", export_id="exp_c")],
+            errors_by_step={("flow_c", "exp_c"): [_raw_error(celigo_id="err_c")]},
+        )
+
+        assert summary.steps_with_incomplete_errors == 0
+        assert summary.errors_snapshotted == 1
 
 
 # ---------------------------------------------------------------------------

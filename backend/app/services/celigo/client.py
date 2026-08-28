@@ -129,6 +129,28 @@ class CeligoError(Exception):
     """Celigo returned an unexpected non-2xx response."""
 
 
+class CeligoIncompleteListingError(CeligoError):
+    """One step's error listing did not terminate within `_MAX_ERROR_PAGES`
+    (FIX ROUND 9, scoped re-review R1b).
+
+    A `CeligoError` subclass, so a caller that only knows the base type keeps
+    the fail-closed behaviour fix round 8 introduced. It exists as its own
+    type because this is the one Celigo failure a per-step caller can
+    legitimately CONTAIN: unlike a rejected token, an unparseable body or a
+    5xx, "this listing is truncated" is a statement about one step, and the
+    other steps' listings are unaffected. Catching the base class instead
+    would quietly relabel every one of those unrelated failures as "partial".
+
+    *partial_errors* carries the sanitized errors the pages that DID come
+    back yielded, in order, so the caller can record them while passing
+    `raw_errors_is_complete=False` to `errors.upsert_errors` -- recording
+    what was seen without ever concluding anything from what was not."""
+
+    def __init__(self, message: str, *, partial_errors: list[dict]):
+        super().__init__(message)
+        self.partial_errors = partial_errors
+
+
 def base_url(region: str) -> str:
     """Return the API base URL for *region*, defaulting to US on an unknown value."""
     return CELIGO_BASE_URLS.get(region, CELIGO_BASE_URLS["us"])
@@ -472,12 +494,19 @@ async def list_flow_errors_for_step(
                 # instead, matching the sibling exactly -- a caller that sees
                 # an exception knows the sync is incomplete; one that sees a
                 # short list does not.
-                raise CeligoError(
+                #
+                # FIX ROUND 9 (re-review R1b): raised as the dedicated
+                # `CeligoIncompleteListingError` and carrying the pages that
+                # DID arrive, so a per-step caller can contain this to the one
+                # step it concerns instead of losing the whole connection's
+                # sync. See that class's own docstring.
+                raise CeligoIncompleteListingError(
                     f"Celigo's error listing for flow {flow_id} step {step_id} did not terminate within "
                     f"{_MAX_ERROR_PAGES} pages (nextPageURL kept being returned) -- refusing to keep "
                     "following it and silently return a truncated (and therefore falsely-resolving) "
                     "error list. Either this step genuinely has more than "
-                    f"{_MAX_ERROR_PAGES} pages of open errors, or nextPageURL is malformed or looping."
+                    f"{_MAX_ERROR_PAGES} pages of open errors, or nextPageURL is malformed or looping.",
+                    partial_errors=errors,
                 )
             response = await _get_with_retry(http, url, headers=headers, params=next_params)
             next_params = None

@@ -100,7 +100,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.celigo import CeligoFlow, CeligoFlowError, CeligoFlowStep, CeligoScript
-from app.services.celigo.client import get_resource, list_flow_errors_for_step, list_resource
+from app.services.celigo.client import (
+    CeligoIncompleteListingError,
+    get_resource,
+    list_flow_errors_for_step,
+    list_resource,
+)
 from app.services.celigo.errors import upsert_errors
 from app.services.celigo.graph import ScriptRef, walk_script_refs
 from app.services.celigo.repository import (
@@ -144,6 +149,12 @@ class SyncSummary:
     attachment_script_ids_backfilled: int = 0
     steps_with_errors_checked: int = 0
     errors_snapshotted: int = 0
+    # FIX ROUND 9 (re-review R1b): steps whose error listing came back
+    # TRUNCATED. Non-zero means this run is partial -- those steps' errors
+    # were recorded but nothing was resolved from them (see Phase E). It is
+    # how a partial run stays visible now that one truncated step no longer
+    # aborts the whole sync.
+    steps_with_incomplete_errors: int = 0
     config_changes_recorded: int = 0
     errors_purged: int = 0
 
@@ -706,9 +717,27 @@ async def sync_flow_map_for_connection(
         # Phase E -- errors, per step, in the order steps were synced. Only
         # reachable once every step above has a REAL celigo_flow_steps row.
         for flow_celigo_id, step_celigo_id, step_ref in pending_step_refs:
-            raw_errors = await list_flow_errors_for_step(
-                flow_celigo_id, step_celigo_id, token=token, region=region, client=http
-            )
+            # FIX ROUND 9 (re-review R1b): truncation is contained to the ONE
+            # step it concerns. Before this, a single step exceeding
+            # `_MAX_ERROR_PAGES` aborted the entire connection sync (phases
+            # A-E) on every run until a human intervened -- and the per-step
+            # escape hatch built for exactly this case had no caller. Only
+            # `CeligoIncompleteListingError` is caught, never the base
+            # `CeligoError`: a rejected token, an unparseable body or a 5xx
+            # says nothing about one step in particular and must still abort.
+            try:
+                raw_errors = await list_flow_errors_for_step(
+                    flow_celigo_id, step_celigo_id, token=token, region=region, client=http
+                )
+                # The fetcher raises rather than truncate, so a list that came
+                # back at all is this step's WHOLE current listing.
+                raw_errors_is_complete = True
+            except CeligoIncompleteListingError as exc:
+                # Record what did arrive; resolve nothing. Absence from an
+                # admittedly-partial listing is not evidence an error is gone.
+                raw_errors = exc.partial_errors
+                raw_errors_is_complete = False
+                summary.steps_with_incomplete_errors += 1
             summary.steps_with_errors_checked += 1
             summary.errors_snapshotted += len(raw_errors)
             await upsert_errors(
@@ -717,11 +746,9 @@ async def sync_flow_map_for_connection(
                 connection_id=connection_id,
                 step=step_ref,
                 raw_errors=raw_errors,
-                # `list_flow_errors_for_step` raises rather than truncate, so
-                # a list that came back at all is the step's WHOLE current
-                # listing. Stated explicitly because `upsert_errors` has no
-                # default for this (FIX ROUND 9) -- see its docstring.
-                raw_errors_is_complete=True,
+                # Stated explicitly because `upsert_errors` has no default for
+                # this (FIX ROUND 9) -- see its docstring.
+                raw_errors_is_complete=raw_errors_is_complete,
             )
 
         # Purge marking -- last, once per connection, independent of any

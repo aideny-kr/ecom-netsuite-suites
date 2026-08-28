@@ -12,6 +12,7 @@ from app.services.celigo.client import (
     CELIGO_BASE_URLS,
     CeligoAuthError,
     CeligoError,
+    CeligoIncompleteListingError,
     get_resource,
     list_error_summary_for_integration,
     list_flow_errors_for_step,
@@ -685,6 +686,46 @@ class TestFlowErrorsPageCap:
 
         # Confirms the cap is what stopped it, not the hard breaker above.
         assert len(calls) <= _MAX_ERROR_PAGES
+
+    @pytest.mark.asyncio
+    async def test_the_truncation_raise_is_its_own_type_and_carries_what_it_did_collect(self):
+        """FIX ROUND 9 (scoped re-review R1b). Raising was right, but a bare
+        `CeligoError` gave the orchestrator only two options: abort the whole
+        connection sync, or catch every Celigo failure alike (auth,
+        unparseable body, 5xx) and call them all "partial". A dedicated
+        subclass makes the ONE recoverable condition -- "this step's listing
+        is truncated" -- distinguishable, and carrying the pages already
+        collected lets the caller still RECORD those errors while refusing to
+        resolve anything from an admittedly-partial list. That is the
+        legitimate caller `upsert_errors(raw_errors_is_complete=False)` never
+        had."""
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(1)
+            if len(calls) > 2 * _MAX_ERROR_PAGES:
+                raise AssertionError(
+                    f"list_flow_errors_for_step made over {2 * _MAX_ERROR_PAGES} requests -- its page cap did not fire"
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "errors": [{"errorId": f"e{len(calls)}", "message": "boom"}],
+                    "nextPageURL": "/v1/flows/flow1/errors?after=loop",
+                },
+            )
+
+        async with _json_client(handler) as c:
+            with pytest.raises(CeligoIncompleteListingError) as excinfo:
+                await list_flow_errors_for_step("flow1", "step1", token="tok", client=c)
+
+        # Still a CeligoError: an older caller that only knows the base type
+        # keeps its existing fail-closed behaviour.
+        assert isinstance(excinfo.value, CeligoError)
+        # Every error from the pages that DID come back, sanitized, in order.
+        partial = excinfo.value.partial_errors
+        assert len(partial) == _MAX_ERROR_PAGES
+        assert partial[0]["errorId"] == "e1"
 
 
 class TestErrorSummaryForIntegration:

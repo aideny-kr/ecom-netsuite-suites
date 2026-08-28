@@ -39,6 +39,20 @@ a raise anywhere in that multi-stage walk propagates out of `_execute`
 uncaught, `InstrumentedTask.on_failure` records the job `failed`, and the
 cursor row is left exactly where the LAST fully successful run left it. That
 is what "advances only on success" means operationally.
+
+ONE DELIBERATE EXCEPTION TO "SUCCESS", STATED RATHER THAN HIDDEN (FIX ROUND
+9, re-review R1b): a step whose error listing comes back TRUNCATED no longer
+raises. `sync_flow_map_for_connection` records that step's partial errors,
+resolves nothing from them, counts it in `SyncSummary.steps_with_incomplete
+_errors`, and carries on -- so such a run returns normally and the cursor
+DOES advance. That is the trade: one over-long error listing used to abort
+the whole connection's sync (integrations, flows, steps, scripts, drift and
+every other step's errors) on every run until a human intervened. The
+partiality is not silent -- the returned summary is what `_execute` hands
+back as the job's result, so a non-zero `steps_with_incomplete_errors` is
+visible on the job row. Everything else (auth rejected, a malformed
+response, a DB constraint violation) still raises and still freezes the
+cursor.
 """
 
 from __future__ import annotations
