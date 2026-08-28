@@ -7,6 +7,7 @@ from app.api.v1 import (
     agents,
     audit,
     auth,
+    celigo_flows,
     chat,
     chat_api_keys,
     chat_integration,
@@ -83,6 +84,7 @@ api_router.include_router(task_files.router)
 api_router.include_router(agents.router)
 api_router.include_router(agent_instructions.router)
 api_router.include_router(connector_status.router)
+api_router.include_router(celigo_flows.router)
 api_router.include_router(drive_folders.router)
 api_router.include_router(reconciliation.router)
 api_router.include_router(metrics.router)
