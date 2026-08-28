@@ -644,10 +644,31 @@ def qualify_json_path(json_path: str, *, reference_object_celigo_id: str | None)
     `routers`/`hooks`/`transform`/`filter`/`script`/`$`), so the two forms
     stay distinguishable.
 
-    Deterministic and stable across syncs -- both halves come from Celigo's
-    own ids and the walker's own path, neither of which changes run to run.
-    That is what keeps `ON CONFLICT DO UPDATE` idempotent instead of
-    inserting a fresh row every night.
+    STABILITY -- TRUE FOR ONE HALF, NOT THE OTHER (corrected, scoped
+    re-review R5, 2026-08-27; the previous wording claimed both halves were
+    "stable across syncs", and the second half was proven false by
+    execution):
+
+      * QUALIFIED (`imp_1.transform.script`): stable. The prefix is Celigo's
+        own id and the suffix is a path INSIDE that object, so neither moves
+        when the flow around it changes. Two full syncs of an unchanged flow
+        stay at the same rows -- that is what keeps `ON CONFLICT DO UPDATE`
+        idempotent instead of inserting a fresh row every night.
+      * UNQUALIFIED (`routers[0].script`): NOT stable. A flow-relative path
+        is INDEX-BEARING, so removing the first router shifts the second one
+        from `routers[1]` to `routers[0]`.
+
+    PRE-EXISTING GAP, NAMED SO IT IS FINDABLE (not introduced here, and
+    deliberately not fixed here): index-bearing paths compose with the
+    absence of any prune -- nothing in this package ever DELETEs a
+    `celigo_script_attachments` row -- so a SHRINKING flow leaves the vacated
+    path behind while the surviving script is re-written at the index it
+    shifted into. The result is a phantom: one script shown as attached at
+    two router sites, one of which no longer exists. Pinned by
+    `tests/test_celigo_sync.py::TestAttachmentPathsAreIndexBasedNotStable`,
+    which executes the two syncs. Closing it takes a prune step keyed on what
+    the current sync actually observed (or attachment identity that does not
+    embed an array index) -- both bigger than a docstring, hence the test.
 
     Pure and separately callable so a reader can see the whole
     identity rule in one place; `upsert_script_attachment` applies it, no

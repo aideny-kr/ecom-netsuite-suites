@@ -1571,3 +1571,82 @@ class TestTwoReferenceObjectsInOneFlowKeepSeparateAttachments:
         assert attachment.script_celigo_id == "SCRIPT_ROUTER"
         assert attachment.json_path == "routers[0].script"
         assert attachment.flow_step_id is None
+
+
+class TestAttachmentPathsAreIndexBasedNotStable:
+    """SCOPED RE-REVIEW R5 (2026-08-27). `repository.qualify_json_path` claimed
+    its output is "deterministic and stable across syncs -- both halves come
+    from Celigo's own ids and the walker's own path, neither of which changes
+    run to run". The second half is FALSE: a flow-relative path is
+    INDEX-BEARING (`routers[0].script`), so removing a router shifts every
+    later router's path down one.
+
+    This test EXECUTES the two syncs and pins what actually happens, because
+    the claim was disproven that way: asserting the docstring's version --
+    one attachment, `routers[0].script -> script_b` -- fails with
+    `Left contains one more item: ('routers[1].script', 'script_b')`.
+
+    THE ROOT CAUSE IS PRE-EXISTING AND DELIBERATELY NOT FIXED HERE (team lead
+    ruling, 2026-08-27): index-bearing walker paths plus the absence of any
+    prune -- there is no DELETE of `celigo_script_attachments` anywhere in the
+    package -- so a shrinking flow leaves the vacated path behind, now
+    over-written to point at the script that shifted into it. The flow map
+    therefore shows one script attached at two router sites. This test exists
+    so the gap is VISIBLE and executable rather than described, and so
+    whoever adds a prune has a red test the moment they do."""
+
+    async def test_removing_a_router_leaves_a_phantom_attachment_pre_existing_gap(self, db: AsyncSession, monkeypatch):
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        def _flow_with(routers: list[dict]) -> dict:
+            flow = _raw_flow("flow_paths", integration_id="int_paths", export_id="exp_paths")
+            flow["routers"] = routers
+            return flow
+
+        def _router(router_id: str, script_celigo_id: str) -> dict:
+            return {
+                "id": router_id,
+                "name": "",
+                "routeRecordsTo": "first_matching_branch",
+                "routeRecordsUsing": "script",
+                "branches": [],
+                "script": {"_scriptId": script_celigo_id, "function": "branching"},
+            }
+
+        await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_paths")],
+            flows=[_flow_with([_router("rtr_1", "script_a"), _router("rtr_2", "script_b")])],
+        )
+        await db.flush()
+
+        await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_paths")],
+            flows=[_flow_with([_router("rtr_2", "script_b")])],
+        )
+        await db.flush()
+
+        rows = (
+            await db.execute(
+                select(CeligoScriptAttachment.json_path, CeligoScriptAttachment.script_celigo_id).where(
+                    CeligoScriptAttachment.tenant_id == tenant.id
+                )
+            )
+        ).all()
+        # WHAT ACTUALLY HAPPENS, not what the old docstring promised: the
+        # surviving router shifted from index 1 to index 0, so its attachment
+        # was written at the path the REMOVED router used to own, and the
+        # vacated `routers[1].script` row was never pruned -- it now claims
+        # the same script is attached at a second, non-existent site.
+        assert sorted((r.json_path, r.script_celigo_id) for r in rows) == [
+            ("routers[0].script", "script_b"),
+            ("routers[1].script", "script_b"),
+        ]
