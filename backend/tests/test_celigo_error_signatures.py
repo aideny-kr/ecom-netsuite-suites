@@ -682,3 +682,86 @@ class TestErrorsAreNeverDeletedOnlyResolved:
 
         delete_like = [name for name in dir(errors_module) if "delete" in name.lower()]
         assert delete_like == []
+
+
+class TestIncompleteRawErrorsNeverResolvesAnything:
+    """WHOLE-BRANCH REVIEW FINDING 4 (2026-08-27) -- defense-in-depth, second
+    layer: `client.list_flow_errors_for_step` now raises rather than truncate
+    (see that module's own fix), so today's only caller can never hand this
+    function a partial listing. But the invariant "resolving an absence is
+    only correct against a COMPLETE listing" used to live only in the
+    fetcher -- one layer away from the resolution logic that depends on it.
+    `raw_errors_is_complete=False` is that same invariant enforced a second
+    time, here, so a FUTURE fetcher that reintroduces truncation cannot
+    silently reopen this bug without also affirmatively (and wrongly)
+    claiming completeness."""
+
+    async def test_false_never_resolves_an_error_absent_from_a_partial_listing(self, db: AsyncSession):
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+        step = await _seed_step(db, tenant.id, conn_id, suffix="partial")
+
+        first_sync = [
+            _raw_error(celigo_id="err_partial_stays", message=_ship_address_message(*_SHIP_ADDRESS_VARIANTS[0])),
+            _raw_error(celigo_id="err_partial_missing", message=_ship_address_message(*_SHIP_ADDRESS_VARIANTS[1])),
+        ]
+        await upsert_errors(db, tenant_id=tenant.id, connection_id=conn_id, step=step, raw_errors=first_sync)
+        await db.flush()
+
+        # A hypothetical truncated re-fetch: only ONE of the two previously-
+        # open errors came back this time, but the caller KNOWS (and says
+        # so) that this is not the complete listing.
+        partial_resync = [
+            _raw_error(celigo_id="err_partial_stays", message=_ship_address_message(*_SHIP_ADDRESS_VARIANTS[0])),
+        ]
+        await upsert_errors(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            step=step,
+            raw_errors=partial_resync,
+            raw_errors_is_complete=False,
+        )
+        await db.flush()
+
+        missing = (
+            await db.execute(
+                select(CeligoFlowError).where(
+                    CeligoFlowError.tenant_id == tenant.id, CeligoFlowError.celigo_id == "err_partial_missing"
+                )
+            )
+        ).scalar_one()
+        # The whole point: absence from a KNOWN-partial listing must never
+        # be read as "this error is gone now".
+        assert missing.resolved_at is None
+
+    async def test_true_default_still_resolves_against_a_complete_listing(self, db: AsyncSession):
+        """Regression guard: the new parameter must not change today's
+        default (complete-listing) behavior, already pinned by
+        TestErrorsAreNeverDeletedOnlyResolved above -- restated here so this
+        test class stands alone as proof of both directions."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+        step = await _seed_step(db, tenant.id, conn_id, suffix="complete")
+
+        first_sync = [
+            _raw_error(celigo_id="err_complete_stays", message=_ship_address_message(*_SHIP_ADDRESS_VARIANTS[0])),
+            _raw_error(celigo_id="err_complete_vanishes", message=_ship_address_message(*_SHIP_ADDRESS_VARIANTS[1])),
+        ]
+        await upsert_errors(db, tenant_id=tenant.id, connection_id=conn_id, step=step, raw_errors=first_sync)
+        await db.flush()
+
+        second_sync = [
+            _raw_error(celigo_id="err_complete_stays", message=_ship_address_message(*_SHIP_ADDRESS_VARIANTS[0])),
+        ]
+        await upsert_errors(db, tenant_id=tenant.id, connection_id=conn_id, step=step, raw_errors=second_sync)
+        await db.flush()
+
+        vanished = (
+            await db.execute(
+                select(CeligoFlowError).where(
+                    CeligoFlowError.tenant_id == tenant.id, CeligoFlowError.celigo_id == "err_complete_vanishes"
+                )
+            )
+        ).scalar_one()
+        assert vanished.resolved_at is not None

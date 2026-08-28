@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from app.services.celigo.client import (
+    _MAX_ERROR_PAGES,
     _MAX_LIST_PAGES,
     CELIGO_BASE_URLS,
     CeligoAuthError,
@@ -641,6 +642,50 @@ class TestFlowErrorsForStep:
             errors = await list_flow_errors_for_step("flow1", "step1", token="tok", client=c)
 
         assert isinstance(errors, list)
+
+
+class TestFlowErrorsPageCap:
+    """WHOLE-BRANCH REVIEW FINDING 4 (2026-08-27, PROVEN by execution): unlike
+    `list_resource` (`TestListResourcePageCap` above), `list_flow_errors_for_step`
+    used to stop SILENTLY at `_MAX_ERROR_PAGES` and return whatever it had
+    collected -- no exception. `errors.upsert_errors` then treats every
+    previously-open error absent from that truncated list as RESOLVED, and
+    the sync completes "successfully", advancing the freshness cursor. The
+    sibling fetcher raises for the identical condition (FIX ROUND 2); this
+    one must too, for the same reason: a caller that sees an exception knows
+    the sync is incomplete, a caller that sees a short list does not.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_looping_next_page_url_raises_instead_of_truncating_silently(self):
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(1)
+            # Same hard breaker as TestListResourcePageCap's sibling test --
+            # fails fast with a clear assertion if the cap doesn't fire,
+            # instead of spinning or hanging the suite on a timeout.
+            if len(calls) > 2 * _MAX_ERROR_PAGES:
+                raise AssertionError(
+                    f"list_flow_errors_for_step made over {2 * _MAX_ERROR_PAGES} requests -- "
+                    "its page cap did not fire"
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "errors": [{"errorId": f"e{len(calls)}", "message": "boom"}],
+                    # Self-referential -- Celigo (or a malformed proxy) keeps
+                    # claiming there's a next page forever.
+                    "nextPageURL": "/v1/flows/flow1/errors?after=loop",
+                },
+            )
+
+        async with _json_client(handler) as c:
+            with pytest.raises(CeligoError):
+                await list_flow_errors_for_step("flow1", "step1", token="tok", client=c)
+
+        # Confirms the cap is what stopped it, not the hard breaker above.
+        assert len(calls) <= _MAX_ERROR_PAGES
 
 
 class TestErrorSummaryForIntegration:

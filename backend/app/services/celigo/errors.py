@@ -207,6 +207,7 @@ async def upsert_errors(
     connection_id: uuid.UUID,
     step: CeligoFlowStep,
     raw_errors: Iterable[dict],
+    raw_errors_is_complete: bool = True,
 ) -> None:
     """Snapshot *raw_errors* (one flow step's CURRENT open-error listing)
     into `celigo_error_signatures`/`celigo_flow_errors`.
@@ -220,6 +221,24 @@ async def upsert_errors(
     `repository.py`'s own "never deleted" guarantee) -- an error missing
     from *raw_errors* that was previously open for this step is marked
     resolved, not removed.
+
+    *raw_errors_is_complete* (FIX ROUND 8, whole-branch review finding 4)
+    defaults to `True`: resolving an error absent from *raw_errors* is only
+    correct if *raw_errors* is the step's WHOLE current open-error listing,
+    never a partial page of it. `client.list_flow_errors_for_step` now
+    raises rather than truncate (see its own docstring), so today's only
+    caller can never hand this function an incomplete list -- but that
+    invariant lived entirely in the fetcher, one layer away from the
+    resolution logic that depends on it. This parameter is the same
+    invariant enforced a second time, here, so a FUTURE fetcher that
+    reintroduces silent truncation (deliberately or by a refactor that drops
+    the raise) cannot silently re-open the exact bug this round fixed --
+    it would have to also affirmatively claim completeness to do so. Pass
+    `False` for a known-partial listing: no previously-open error is
+    resolved this call (new/updated errors from *raw_errors* are still
+    recorded and their signatures' stats still recomputed normally), which
+    is the strictly safer default absent proof the snapshot is whole --
+    "remove the possibility, don't just patch this instance."
     """
     raw_errors = list(raw_errors)
     sanitized_errors = [sanitize("error", raw) for raw in raw_errors]
@@ -263,12 +282,17 @@ async def upsert_errors(
     # *raw_errors* now, is resolved -- NEVER deleted. See module docstring
     # for why this stops at resolved_at and never touches purged_at.
     #
+    # GATED ON raw_errors_is_complete (FIX ROUND 8, finding 4): resolving an
+    # absence is only correct if *raw_errors* is provably the WHOLE current
+    # listing -- a caller that admits it handed over a partial one must never
+    # have that partiality read back as "these errors are gone now".
+    #
     # MUST run BEFORE phase 3's aggregate recompute below, not after -- see
     # module docstring's "ORDERING WITHIN ONE CALL" (FIX ROUND 1). Phase 3
     # filters on `resolved_at IS NULL`; resolving first means this call's
     # own resolutions are already reflected when that filter runs, instead
     # of leaving the count stale by exactly the set just resolved here.
-    resolved_ids = previously_open_ids - now_open_ids
+    resolved_ids: set[str] = previously_open_ids - now_open_ids if raw_errors_is_complete else set()
     resolved_signature_ids = {
         previously_open_signature_by_id[celigo_id]
         for celigo_id in resolved_ids

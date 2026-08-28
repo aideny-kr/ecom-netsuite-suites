@@ -36,11 +36,16 @@ body-based (`{"errors": [...], "nextPageURL": "..."}`) for the per-step flow
 error endpoint specifically -- the docs' own worked example for body-based
 pagination IS that errors endpoint. `list_resource`/`get_resource` use the
 former; `list_flow_errors_for_step` uses the latter. BOTH page-following
-loops are bounded (`_MAX_LIST_PAGES`, `_MAX_ERROR_PAGES`) -- but NOT
-identically: `list_resource` RAISES `CeligoError` when the bound is hit
-(FIX ROUND 2, see its own docstring); `list_flow_errors_for_step` still
-stops silently and returns whatever it collected, unchanged by FIX ROUND 2
-and out of that round's scope. Do not assume the two behave the same way.
+loops are bounded (`_MAX_LIST_PAGES`, `_MAX_ERROR_PAGES`) and, as of FIX
+ROUND 8, IDENTICALLY: both RAISE `CeligoError` when their bound is hit
+rather than returning a truncated collection. `list_flow_errors_for_step`
+used to stop silently and return whatever it had collected instead (a gap
+FIX ROUND 2 introduced the raise for `list_resource` but left unfixed on
+this sibling) -- whole-branch review finding 4 (2026-08-27) proved that gap
+composes with `errors.upsert_errors`: every previously-open error absent
+from a truncated-but-not-raised list gets treated as resolved, so a sync
+that silently truncated still completed "successfully" and advanced the
+freshness cursor. There is no longer an asymmetry to remember here.
 
 TASK 3 ERRORS ARE PER-STEP, NOT PER-FLOW (observed-shapes.md, live-probed
 2026-08-27): passing a flow id alone (no step id) returns `steps: []` even
@@ -442,7 +447,25 @@ async def list_flow_errors_for_step(
     errors: list[dict] = []
     try:
         pages = 0
-        while url and pages < _MAX_ERROR_PAGES:
+        while url:
+            if pages >= _MAX_ERROR_PAGES:
+                # FIX ROUND 8 (whole-branch review finding 4): this used to
+                # `break` here and return whatever it had collected so far --
+                # a SILENT truncation, unlike `list_resource`'s RAISE for the
+                # identical condition. `errors.upsert_errors` treats every
+                # previously-open error absent from this list as resolved,
+                # so a truncated-but-not-raised listing let a sync complete
+                # "successfully" and falsely resolve real open errors. Raise
+                # instead, matching the sibling exactly -- a caller that sees
+                # an exception knows the sync is incomplete; one that sees a
+                # short list does not.
+                raise CeligoError(
+                    f"Celigo's error listing for flow {flow_id} step {step_id} did not terminate within "
+                    f"{_MAX_ERROR_PAGES} pages (nextPageURL kept being returned) -- refusing to keep "
+                    "following it and silently return a truncated (and therefore falsely-resolving) "
+                    "error list. Either this step genuinely has more than "
+                    f"{_MAX_ERROR_PAGES} pages of open errors, or nextPageURL is malformed or looping."
+                )
             response = await _get_with_retry(http, url, headers=headers, params=next_params)
             next_params = None
             _raise_for_status(response, context=f"listing errors for flow {flow_id} step {step_id}")
