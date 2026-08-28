@@ -129,6 +129,7 @@ def _raw_import(
     adaptor_type: str | None = "NetSuiteDistributedImport",
     connection_celigo_id: str | None = "conn_ns_synth",
     filter_json: dict | None = None,
+    transform: dict | None = None,
     record_type: str | None = None,
     operation: str | None = None,
 ) -> dict:
@@ -138,6 +139,8 @@ def _raw_import(
     obj: dict = {"_id": celigo_id, "name": name, "adaptorType": adaptor_type, "_connectionId": connection_celigo_id}
     if filter_json is not None:
         obj["filter"] = filter_json
+    if transform is not None:
+        obj["transform"] = transform
     if record_type is not None or operation is not None:
         obj["netsuite_da"] = {"recordType": record_type, "operation": operation}
     return obj
@@ -586,7 +589,11 @@ class TestExportImportAttachmentsAndStepBackfill:
         assert attachment.script_celigo_id == "script_ref_1"
         assert attachment.function_name == "onTransform"
         assert attachment.site_type == "transform"
-        assert attachment.json_path == "transform.script"
+        # Qualified with the export the ref was walked off (finding 1): the
+        # walker emits `transform.script`, which is relative to exp_1, not to
+        # the flow, and two exports in one flow would otherwise collide. See
+        # TestTwoReferenceObjectsInOneFlowKeepSeparateAttachments.
+        assert attachment.json_path == "exp_1.transform.script"
         assert attachment.flow_id is not None
 
     async def test_expression_form_transform_and_filter_produce_no_attachment(self, db: AsyncSession, monkeypatch):
@@ -1172,3 +1179,167 @@ class TestTaskRegistration:
         scheduled_task_names = {entry["task"] for entry in celery_app.conf.beat_schedule.values()}
         assert "tasks.celigo_flow_map_sync" not in scheduled_task_names
         assert "tasks.celigo_flow_map_sync_all" not in scheduled_task_names
+
+
+class TestTwoReferenceObjectsInOneFlowKeepSeparateAttachments:
+    """FINAL REVIEW finding 1 -- silent data loss in the core deliverable.
+
+    `celigo_script_attachments`' unique key is `(tenant_id, flow_id,
+    json_path)`. Phase D walks each export/import object SEPARATELY, so
+    `ScriptRef.json_path` is relative to THAT object (`transform.script`),
+    not to the flow. Two imports in one flow that each carry a script at
+    `transform.script` therefore collided on `(flow_id, json_path)`, and the
+    second `ON CONFLICT DO UPDATE` overwrote the first -- including
+    `script_celigo_id`, the answer to "which script is attached here". No
+    error, no warning; the sync reported success.
+
+    `_process_reference_object`'s docstring reasoned carefully about
+    one-export-many-flows and got it right. Nobody considered
+    many-exports-one-flow -- and a NetSuite flow with two or more
+    import/export steps is the ordinary case, while `transform.script` is
+    "the most-used script attachment site in the live account" per the plan's
+    own Verified Facts.
+
+    THE FIX, and why it needed no migration: `json_path` is qualified with
+    the celigo id of the object it was walked from, so it is unique within
+    the flow BY CONSTRUCTION and the existing constraint stands unchanged.
+    Adding `flow_step_id` to the unique key instead would have reintroduced
+    NULL-is-distinct (that column is nullable -- router-level refs have no
+    step), which is exactly the trap `celigo_flow_steps` already solved with
+    a STORED GENERATED `branch_key`.
+    """
+
+    @staticmethod
+    def _flow_with_two_imports() -> dict:
+        return {
+            "_id": "flow_multi",
+            "name": "Multi-step NetSuite flow",
+            "_integrationId": "int_1",
+            "pageProcessors": [
+                {"type": "import", "_importId": "imp_1"},
+                {"type": "import", "_importId": "imp_2"},
+            ],
+        }
+
+    @staticmethod
+    def _two_imports() -> list[dict]:
+        return [
+            _raw_import("imp_1", transform=_script_ref_transform("SCRIPT_AAA", "onFirst")),
+            _raw_import("imp_2", transform=_script_ref_transform("SCRIPT_BBB", "onSecond")),
+        ]
+
+    async def _attachments(self, db: AsyncSession, tenant_id):
+        from app.models.celigo import CeligoScriptAttachment
+
+        return (
+            (await db.execute(select(CeligoScriptAttachment).where(CeligoScriptAttachment.tenant_id == tenant_id)))
+            .scalars()
+            .all()
+        )
+
+    async def test_two_imports_in_one_flow_keep_both_script_attachments(self, db: AsyncSession, monkeypatch):
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        summary = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_1")],
+            flows=[self._flow_with_two_imports()],
+            imports=self._two_imports(),
+        )
+
+        assert summary.attachments_synced == 2
+        attachments = await self._attachments(db, tenant.id)
+        assert len(attachments) == 2
+        # NEITHER script may be lost: before the fix SCRIPT_AAA was gone and
+        # SCRIPT_BBB sat in its row.
+        assert {a.script_celigo_id for a in attachments} == {"SCRIPT_AAA", "SCRIPT_BBB"}
+        assert {a.function_name for a in attachments} == {"onFirst", "onSecond"}
+        # Both rows belong to the one flow -- this is not a case of them
+        # being separated by landing under different flows.
+        assert len({a.flow_id for a in attachments}) == 1
+
+    async def test_qualified_json_path_names_the_object_the_ref_was_found_on(self, db: AsyncSession, monkeypatch):
+        """`json_path` is IDENTITY (it is in the unique key), so what makes
+        the two rows distinct has to be visible in the stored value -- and
+        that value is what the script viewer renders in its "Where" column."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_1")],
+            flows=[self._flow_with_two_imports()],
+            imports=self._two_imports(),
+        )
+
+        attachments = await self._attachments(db, tenant.id)
+        by_script = {a.script_celigo_id: a for a in attachments}
+        assert by_script["SCRIPT_AAA"].json_path == "imp_1.transform.script"
+        assert by_script["SCRIPT_BBB"].json_path == "imp_2.transform.script"
+        # site_type still comes from the walker's own unqualified path --
+        # qualifying must not change how a ref is classified.
+        assert {a.site_type for a in attachments} == {"transform"}
+
+    async def test_two_full_syncs_are_idempotent(self, db: AsyncSession, monkeypatch):
+        """The qualified path must be STABLE, not merely unique: a second
+        full sync has to update the same two rows, never insert two more."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        for _ in range(2):
+            await _run_sync(
+                monkeypatch,
+                db,
+                tenant_id=tenant.id,
+                connection_id=conn_id,
+                integrations=[_raw_integration("int_1")],
+                flows=[self._flow_with_two_imports()],
+                imports=self._two_imports(),
+            )
+
+        attachments = await self._attachments(db, tenant.id)
+        assert len(attachments) == 2
+        assert {a.script_celigo_id for a in attachments} == {"SCRIPT_AAA", "SCRIPT_BBB"}
+        assert {a.json_path for a in attachments} == {"imp_1.transform.script", "imp_2.transform.script"}
+
+    async def test_flow_level_refs_keep_unqualified_flow_relative_paths(self, db: AsyncSession, monkeypatch):
+        """A ref found on the FLOW object itself is already flow-relative and
+        must NOT be qualified -- there is no owning export/import, and
+        qualifying it would make the path depend on which object the walk
+        happened to start from."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        flow = {
+            "_id": "flow_router",
+            "name": "Flow with a router script",
+            "_integrationId": "int_1",
+            "routers": [
+                {
+                    "id": "rtr_1",
+                    "script": {"_scriptId": "SCRIPT_ROUTER", "function": "branching"},
+                    "branches": [{"name": "b", "branchId": "b1", "pageProcessors": []}],
+                }
+            ],
+        }
+
+        await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_1")],
+            flows=[flow],
+        )
+
+        attachment = (await self._attachments(db, tenant.id))[0]
+        assert attachment.script_celigo_id == "SCRIPT_ROUTER"
+        assert attachment.json_path == "routers[0].script"
+        assert attachment.flow_step_id is None

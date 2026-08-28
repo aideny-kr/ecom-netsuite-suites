@@ -242,10 +242,20 @@ class CeligoScript(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 class CeligoScriptAttachment(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     """One `graph.walk_script_refs` occurrence (a `ScriptRef`) -- not a
     Celigo-native object, so it has no Celigo id of its own. Its identity is
-    `(tenant_id, flow_id, json_path)`: `json_path` is computed by
-    `walk_script_refs` relative to the flow object root, so it is unique per
-    occurrence within one flow by construction. `json_path` is IDENTITY, not
-    decoration -- see `app/services/celigo/repository.py`'s module docstring.
+    `(tenant_id, flow_id, json_path)`, and `json_path` is IDENTITY, not
+    decoration.
+
+    `json_path` is unique within one flow BY CONSTRUCTION, but that is not
+    automatic and was originally wrong: `walk_script_refs` computes a path
+    relative to the object it walked, and a flow only REFERENCES its
+    exports/imports by id, so two of them in one flow each carrying
+    `transform.script` produced identical paths and silently overwrote each
+    other's row (whole-branch review finding 1). A path coming off an
+    export/import is therefore stored qualified with that object's celigo id
+    (`imp_1.transform.script`); a path coming off the flow object itself is
+    already flow-relative and stored as-is (`routers[0].script`).
+    `app/services/celigo/repository.py`'s `qualify_json_path` owns that rule
+    and is the only place allowed to apply it.
 
     Has BOTH `flow_id` (NOT NULL) and `flow_step_id` (nullable): a
     `routers[].script` ref belongs to the router, not to any one step, so
@@ -286,7 +296,9 @@ class CeligoScriptAttachment(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
     script_celigo_id: Mapped[str] = mapped_column(Text, nullable=False)  # raw _scriptId, always available
     function_name: Mapped[str | None] = mapped_column(Text, nullable=True)
-    json_path: Mapped[str] = mapped_column(Text, nullable=False)  # relative to the flow object root -- IDENTITY
+    # IDENTITY. Flow-relative, qualified with the owning export/import's
+    # celigo id when the ref was walked off one -- see the class docstring.
+    json_path: Mapped[str] = mapped_column(Text, nullable=False)
     site_type: Mapped[str | None] = mapped_column(Text, nullable=True)  # hook | filter | transform | router | unknown
 
 

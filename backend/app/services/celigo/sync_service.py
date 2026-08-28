@@ -323,13 +323,20 @@ async def _record_attachments(
     flow_id: uuid.UUID,
     flow_step_id: uuid.UUID | None,
     refs: list[ScriptRef],
+    reference_object_celigo_id: str | None,
     script_ids: dict[str, uuid.UUID],
 ) -> int:
     """Upsert one `celigo_script_attachments` row per ref, resolving
     `script_id` from this run's own Phase C map when available (`None` when
     not -- script sync can lag flow sync; `upsert_script_attachment_from_ref`
     tolerates that by design, per its own docstring). Returns the count
-    upserted."""
+    upserted.
+
+    `reference_object_celigo_id` is the celigo id of the object these refs
+    were WALKED FROM -- `None` for the flow object itself (Phase B), the
+    export/import's own id in Phase D. It is passed straight through to the
+    repository, which owns what it means for row identity; see
+    `repository.qualify_json_path`."""
     for ref in refs:
         await upsert_script_attachment_from_ref(
             db,
@@ -338,6 +345,7 @@ async def _record_attachments(
             flow_id=flow_id,
             flow_step_id=flow_step_id,
             ref=ref,
+            reference_object_celigo_id=reference_object_celigo_id,
             script_id=script_ids.get(ref.script_id),
         )
     return len(refs)
@@ -392,6 +400,17 @@ async def _process_reference_object(
     wins" policy -- see `sync_flow_map_for_connection`) -- best-effort, per
     the model's own docstring, never re-derived from `json_path`.
 
+    MANY-EXPORTS-ONE-FLOW, the case the paragraph above did NOT consider
+    (whole-branch review finding 1): this function is called once per
+    export/import, so two objects in the SAME flow that each carry a script
+    at `transform.script` used to write the same `(flow_id, json_path)` --
+    the second silently overwrote the first, `script_celigo_id` included.
+    Multi-step NetSuite flows are the ordinary case. `*obj*`'s own celigo id
+    is therefore passed to `_record_attachments` as
+    `reference_object_celigo_id`, and the repository qualifies the path with
+    it; see `repository.qualify_json_path` for why that beat widening the
+    unique key.
+
     Returns `(rows_backfilled, attachments_upserted)`. `rows_backfilled`
     comes straight from the repository call's own rowcount, NOT from
     `len(referencing_flow_steps)` -- that map holds only the FIRST step seen
@@ -434,6 +453,7 @@ async def _process_reference_object(
             flow_id=flow_id,
             flow_step_id=flow_step_id,
             refs=refs,
+            reference_object_celigo_id=celigo_id,
             script_ids=script_ids,
         )
     return rows_backfilled, attached
@@ -567,6 +587,10 @@ async def sync_flow_map_for_connection(
                 flow_id=flow_local_id,
                 flow_step_id=None,
                 refs=walk_script_refs(flow),
+                # The flow object IS the root these paths are relative to --
+                # nothing to qualify them with, and qualifying would make a
+                # path depend on where the walk started.
+                reference_object_celigo_id=None,
                 script_ids=script_ids,
             )
 

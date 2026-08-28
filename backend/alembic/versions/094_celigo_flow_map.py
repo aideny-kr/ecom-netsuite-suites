@@ -361,7 +361,11 @@ def upgrade() -> None:
         ),
         sa.Column("script_celigo_id", sa.Text(), nullable=False),  # raw _scriptId, always available
         sa.Column("function_name", sa.Text(), nullable=True),
-        sa.Column("json_path", sa.Text(), nullable=False),  # relative to the flow object root
+        # Flow-relative, qualified with the owning export/import's celigo id
+        # when the ref came off one -- see CeligoScriptAttachment's docstring
+        # and repository.qualify_json_path. That qualification is what keeps
+        # the unique key below correct for a multi-step flow.
+        sa.Column("json_path", sa.Text(), nullable=False),
         sa.Column("site_type", sa.Text(), nullable=True),  # hook | filter | transform | router | unknown
         *_timestamps(),
         sa.UniqueConstraint("tenant_id", "flow_id", "json_path", name="uq_celigo_script_attachments_identity"),

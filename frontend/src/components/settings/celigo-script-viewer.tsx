@@ -29,6 +29,15 @@
  * rendered verbatim below, never parsed. `site_type` is best-effort
  * (fragile path-segment matching), so the "Where" column shows `json_path`,
  * not `site_type`.
+ *
+ * That locator comes in two forms, and BOTH must render as-is. A ref found
+ * on the flow object is flow-relative (`routers[0].script`); a ref found on
+ * an export/import the flow only references by id is prefixed with that
+ * object's 24-char Celigo id (`6813b3ce...transform.script`) so two steps in
+ * one flow cannot collide on the same path. The prefixed form is the longer
+ * one and the reason the cell wraps rather than overflowing -- see the
+ * `break-all` below. Still opaque: do not split on the dot to "clean it up",
+ * the id is what makes the row identifiable.
  */
 
 import { useCeligoScript, type CeligoScriptAttachmentSite } from "@/hooks/use-celigo-flows";
@@ -176,7 +185,7 @@ export function CeligoScriptViewerDialog({
                         <p className="text-[13px]">{site.flow_name}</p>
                         <p className="text-[11px] text-muted-foreground">{siteLocationLabel(site)}</p>
                       </TableCell>
-                      <TableCell className="py-1.5 font-mono text-[12px]">{site.json_path}</TableCell>
+                      <TableCell className="py-1.5 font-mono text-[12px] break-all">{site.json_path}</TableCell>
                       <TableCell className="py-1.5 font-mono text-[12px]">
                         {displayOr(site.function_name)}
                       </TableCell>

@@ -168,6 +168,7 @@ class TestUpsertIsIdempotent:
             script_celigo_id="scr_att_1",
             function_name="preSavePage",
             json_path="pageProcessors[0].hooks.preSavePage",
+            reference_object_celigo_id=None,
             site_type="hook",
         )
         id1 = await upsert_script_attachment(db, **kwargs)
@@ -391,6 +392,7 @@ class TestScriptAttachmentJsonPathIsIdentity:
             script_celigo_id="scr_1",
             function_name="preSavePage",
             json_path="pageProcessors[0].hooks.preSavePage",
+            reference_object_celigo_id=None,
             site_type="hook",
         )
         await upsert_script_attachment(
@@ -403,6 +405,7 @@ class TestScriptAttachmentJsonPathIsIdentity:
             script_celigo_id="scr_1",  # SAME script, DIFFERENT attach site
             function_name="preSavePage",
             json_path="pageProcessors[1].hooks.preSavePage",
+            reference_object_celigo_id=None,
             site_type="hook",
         )
         await db.flush()
@@ -413,6 +416,102 @@ class TestScriptAttachmentJsonPathIsIdentity:
             .all()
         )
         assert len(count) == 2
+
+    async def test_same_path_on_two_reference_objects_does_not_collide(self, db: AsyncSession):
+        """FINAL REVIEW finding 1, at the repository layer. `walk_script_refs`
+        emits a path relative to the object it walked, so two exports in one
+        flow that each carry `transform.script` hand this function the SAME
+        `json_path`. Qualifying with the owning object's celigo id is what
+        keeps them two rows instead of one silent overwrite -- see
+        `qualify_json_path`. (`test_celigo_sync.py`'s
+        TestTwoReferenceObjectsInOneFlowKeepSeparateAttachments proves the
+        same thing through the real orchestrator.)"""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+        _, flow_id = await _seed_integration_and_flow(db, tenant.id, conn_id, flow_suffix="collide")
+
+        for reference_object, script in (("imp_1", "scr_aaa"), ("imp_2", "scr_bbb")):
+            await upsert_script_attachment(
+                db,
+                tenant_id=tenant.id,
+                connection_id=conn_id,
+                flow_id=flow_id,
+                flow_step_id=None,
+                script_id=None,
+                script_celigo_id=script,
+                function_name="onTransform",
+                json_path="transform.script",  # IDENTICAL, as the walker emits it
+                reference_object_celigo_id=reference_object,
+                site_type="transform",
+            )
+        await db.flush()
+
+        rows = (
+            (await db.execute(select(CeligoScriptAttachment).where(CeligoScriptAttachment.flow_id == flow_id)))
+            .scalars()
+            .all()
+        )
+        assert {r.script_celigo_id for r in rows} == {"scr_aaa", "scr_bbb"}
+        assert {r.json_path for r in rows} == {"imp_1.transform.script", "imp_2.transform.script"}
+
+    async def test_qualification_is_stable_so_reupserting_updates_in_place(self, db: AsyncSession):
+        """Unique is not enough -- the qualified path must also be the SAME
+        string next run, or every nightly sync inserts a duplicate."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+        _, flow_id = await _seed_integration_and_flow(db, tenant.id, conn_id, flow_suffix="stable")
+
+        kwargs = dict(
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            flow_id=flow_id,
+            flow_step_id=None,
+            script_id=None,
+            script_celigo_id="scr_stable",
+            function_name="onTransform",
+            json_path="transform.script",
+            reference_object_celigo_id="imp_1",
+            site_type="transform",
+        )
+        first = await upsert_script_attachment(db, **kwargs)
+        second = await upsert_script_attachment(db, **kwargs)
+        await db.flush()
+
+        assert first == second
+        rows = (
+            (await db.execute(select(CeligoScriptAttachment).where(CeligoScriptAttachment.flow_id == flow_id)))
+            .scalars()
+            .all()
+        )
+        assert len(rows) == 1
+        assert rows[0].json_path == "imp_1.transform.script"
+
+    async def test_flow_relative_paths_are_stored_unqualified(self, db: AsyncSession):
+        """A ref found on the flow object itself has no owning export/import;
+        qualifying it would make identity depend on where the walk began."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+        _, flow_id = await _seed_integration_and_flow(db, tenant.id, conn_id, flow_suffix="unqualified")
+
+        await upsert_script_attachment(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            flow_id=flow_id,
+            flow_step_id=None,
+            script_id=None,
+            script_celigo_id="scr_router",
+            function_name="branching",
+            json_path="routers[0].script",
+            reference_object_celigo_id=None,
+            site_type="router",
+        )
+        await db.flush()
+
+        row = (
+            await db.execute(select(CeligoScriptAttachment).where(CeligoScriptAttachment.flow_id == flow_id))
+        ).scalar_one()
+        assert row.json_path == "routers[0].script"
 
     async def test_walk_script_refs_output_stores_one_attachment_per_ref(self, db: AsyncSession):
         """Ties Task 2's walker directly to Task 5's storage, per the
@@ -439,7 +538,13 @@ class TestScriptAttachmentJsonPathIsIdentity:
 
         for ref in refs:
             await upsert_script_attachment_from_ref(
-                db, tenant_id=tenant.id, connection_id=conn_id, flow_id=flow_id, flow_step_id=None, ref=ref
+                db,
+                tenant_id=tenant.id,
+                connection_id=conn_id,
+                flow_id=flow_id,
+                flow_step_id=None,
+                ref=ref,
+                reference_object_celigo_id=None,
             )
         await db.flush()
 
@@ -496,6 +601,7 @@ class TestLogicalScriptDedup:
                 script_celigo_id=clone_id,
                 function_name=None,
                 json_path=f"pageProcessors[{i}].transform.script",
+                reference_object_celigo_id=None,
                 site_type="transform",
             )
         # The original also has one attachment site of its own.
@@ -509,6 +615,7 @@ class TestLogicalScriptDedup:
             script_celigo_id=original_id,
             function_name=None,
             json_path="pageProcessors[99].transform.script",
+            reference_object_celigo_id=None,
             site_type="transform",
         )
         await db.flush()

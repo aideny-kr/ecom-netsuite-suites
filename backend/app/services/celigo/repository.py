@@ -632,6 +632,32 @@ async def list_logical_scripts(
 # ---------------------------------------------------------------------------
 
 
+def qualify_json_path(json_path: str, *, reference_object_celigo_id: str | None) -> str:
+    """Make a `ScriptRef.json_path` unique within its flow.
+
+    A ref walked off the flow object is already flow-relative and is returned
+    unchanged. A ref walked off an export/import is relative to THAT object
+    (`transform.script`), which two different objects in the same flow can
+    produce identically -- so it is prefixed with the owning object's celigo
+    id (`imp_1.transform.script`). Celigo ids never collide with a
+    flow-relative path's first segment (`pageGenerators`/`pageProcessors`/
+    `routers`/`hooks`/`transform`/`filter`/`script`/`$`), so the two forms
+    stay distinguishable.
+
+    Deterministic and stable across syncs -- both halves come from Celigo's
+    own ids and the walker's own path, neither of which changes run to run.
+    That is what keeps `ON CONFLICT DO UPDATE` idempotent instead of
+    inserting a fresh row every night.
+
+    Pure and separately callable so a reader can see the whole
+    identity rule in one place; `upsert_script_attachment` applies it, no
+    caller should.
+    """
+    if reference_object_celigo_id is None:
+        return json_path
+    return f"{reference_object_celigo_id}.{json_path}"
+
+
 async def upsert_script_attachment(
     db: AsyncSession,
     *,
@@ -643,13 +669,44 @@ async def upsert_script_attachment(
     script_celigo_id: str,
     function_name: str | None,
     json_path: str,
+    reference_object_celigo_id: str | None,
     site_type: str | None,
 ) -> uuid.UUID:
-    """Upsert one `celigo_script_attachments` row. `json_path` is IDENTITY,
-    not decoration (migration's unique key is `(tenant_id, flow_id,
-    json_path)`) -- pass it through EXACTLY as `graph.walk_script_refs`
-    emitted it (`ScriptRef.json_path`); never normalise, trim, or reformat it
-    here or in any caller."""
+    """Upsert one `celigo_script_attachments` row.
+
+    `json_path` is IDENTITY, not decoration -- the unique key is `(tenant_id,
+    flow_id, json_path)`. Pass it EXACTLY as `graph.walk_script_refs` emitted
+    it (`ScriptRef.json_path`); never normalise, trim or reformat it. The one
+    transformation allowed is the QUALIFICATION below, and it happens here so
+    that no caller can do it differently or forget it.
+
+    `reference_object_celigo_id` says which object the ref was walked from,
+    and is REQUIRED -- there is no default, so a caller has to answer the
+    question rather than inherit a wrong guess (see finding 1 below):
+
+      * `None` -- the ref came from the FLOW object itself, so its path is
+        already flow-relative and is stored unchanged.
+      * a celigo id -- the ref came from an export/import that the flow only
+        REFERENCES by id, so its path is relative to that object, not to the
+        flow, and is qualified with the id (`qualify_json_path`).
+
+    WHY (whole-branch review finding 1): Phase D walks each export/import
+    separately, so two imports in one flow that each carry a script at
+    `transform.script` produced the SAME `(flow_id, json_path)`. The second
+    `ON CONFLICT DO UPDATE` overwrote the first -- including
+    `script_celigo_id` -- silently, with the sync reporting success. Multi-
+    step NetSuite flows are the ordinary case and `transform.script` is the
+    most-used attachment site live, so this was the core deliverable losing
+    data. Qualifying makes the path unique within the flow BY CONSTRUCTION,
+    which is why the constraint needed no migration.
+
+    Adding `flow_step_id` to the unique key instead would have been the wrong
+    fix twice over: that column is NULLABLE (a router-level ref belongs to no
+    step), so NULL-is-distinct would let two rows with the same path both
+    insert and break idempotency -- the exact trap `celigo_flow_steps` avoids
+    with its STORED GENERATED `branch_key`.
+    """
+    json_path = qualify_json_path(json_path, reference_object_celigo_id=reference_object_celigo_id)
     values = dict(
         tenant_id=tenant_id,
         celigo_connection_id=connection_id,
@@ -681,10 +738,17 @@ async def upsert_script_attachment_from_ref(
     flow_id: uuid.UUID,
     flow_step_id: uuid.UUID | None,
     ref: ScriptRef,
+    reference_object_celigo_id: str | None,
     script_id: uuid.UUID | None = None,
 ) -> uuid.UUID:
     """Convenience wrapper taking `graph.walk_script_refs`' own output type
-    directly -- the natural way Task 2's walker and this repository compose."""
+    directly -- the natural way Task 2's walker and this repository compose.
+
+    `reference_object_celigo_id` is required here for the same reason it is
+    required on `upsert_script_attachment`: a `ScriptRef` does not record
+    which object it was walked from, and guessing wrong silently overwrites
+    another step's attachment. A caller that does not pass it gets a
+    TypeError, not a collision."""
     return await upsert_script_attachment(
         db,
         tenant_id=tenant_id,
@@ -695,6 +759,7 @@ async def upsert_script_attachment_from_ref(
         script_celigo_id=ref.script_id,
         function_name=ref.function_name,
         json_path=ref.json_path,
+        reference_object_celigo_id=reference_object_celigo_id,
         site_type=ref.site_type,
     )
 
