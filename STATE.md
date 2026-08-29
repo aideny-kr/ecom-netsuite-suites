@@ -110,6 +110,33 @@ fresh branch off `main` and leave Track O behind pending its own decision.
 
 ## NEXT — ordered, with the why
 
+**Multimodal record creation (2026-08-28).** User asked for: upload xlsx/pdf/csv/photo →
+agent proposes NetSuite records → existing HITL card. Research (7-agent survey) found upload,
+storage, `file_id` plumbing and an injection-hardened preview ALREADY EXIST for
+xlsx/csv/xls/json. Slice ordering chosen by the user, recorded so it is not re-litigated:
+
+1. ~~**Slice 1** — one file → one record~~ **CERTIFIED LIVE 2026-08-28.** Driven end to end
+   on staging: a 1-row CSV produced a card targeting `SANDBOX 6738075-sb1` with every value
+   transcribed correctly and `subsidiary` resolved from the NAME "Framework Computer UK Ltd"
+   to internal id 5, then labelled back. Needed no new code — it was certify, not build.
+2. **Slice 2** — `task_file.read` tool, so the agent sees past the 20-row/12-col preview.
+   BUILT on branch `feat/read-task-file-tool` (`ef9ee29e`), **unpushed, unmerged,
+   `verify.sh` NOT-DONE** (celigo flakes, see OPEN). **Never driven live — its tests mock
+   `TaskFileService.get_file`, so nothing proves it reads a real upload.** Do that first.
+   Also: the frontend picker still rejects `.xls` though the backend accepts it.
+3. **Slice 3** — text-layer PDF via pdfplumber (already a dependency, wired only into
+   drive_rag). Scanned PDFs must fail with an honest "no text layer", never a guess.
+4. **Slice 4** — small-N sequential proposals, cap ≤10 enforced in CODE, shared
+   `correlation_id`. **BLOCKED** until the idempotency key + pre-call side-effect log exist
+   (agent-graph.md #10 — explicitly unbuilt).
+5. **Slice 5+** — true batch review surface, and photos via Anthropic vision (adapter-gated;
+   OpenAI/Gemini adapters are text-only). Both need mock-first design per report-design.md.
+
+**Decided, do not re-open:** values may pass through the model for a SINGLE record (the human
+reads every field on the card); deterministic server-side extraction is a hard precondition of
+any BATCH slice, because nobody eyeballs 200 rows. No OCR dependency for an accounting write
+path — OCR confidence is unquantified and the card cannot show what was misread.
+
 1. ~~Cut `agent-graph.md`~~ **DONE** — 35 rules → 15; the two that contradicted shipped
    code are now recorded as decisions not to re-litigate.
 2. ~~Cut the ceremonial layer~~ **DONE** — both false lines fixed; routine + verification
@@ -337,6 +364,34 @@ Written so the next session does not re-litigate these.
 - **Don't add a rule to CLAUDE.md when a docstring next to the code would carry it.**
 
 ## OPEN — needs a human, blocking something
+
+- **ROTATE THE `gh` OAUTH TOKEN — leaked twice on 2026-08-28, by me, both times the same way.**
+  The token is `gh auth token` for `aideny-kr` (scopes: repo, write:packages, read:org, gist).
+  Leak #1: authenticating the staging VM to GHCR, I wrote
+  `TOKEN=$(gh auth token); ssh vm "echo '$TOKEN' | docker login …"` — interpolating it into
+  the ssh command string puts it in the REMOTE process's argv, readable via `ps aux` on the
+  VM. Leak #2: after the user rotated, I verified the new token *using the same construction*,
+  burning the fresh one within minutes of having described the hazard. It is also in this
+  session's transcript `.jsonl` in plaintext, permanently.
+  **Do:** revoke at github.com → Settings → Applications → Authorized OAuth Apps → GitHub CLI
+  (logout alone may not revoke server-side), then `gh auth login` and
+  `gh auth refresh -h github.com -s write:packages` — the deploy needs write:packages for GHCR.
+  **The only safe form, use it every time:**
+  `gh auth token | ssh aidenyi@34.73.236.64 "sudo docker login ghcr.io -u aideny-kr --password-stdin"`
+  — the secret travels on stdin and never appears in any argv.
+  **The real lesson:** knowing the rule did not prevent the leak; I recited it and then broke
+  it because the unsafe form was one line shorter. Never put a secret in a shell variable that
+  a later command can interpolate — pipe it, or it will eventually end up in argv.
+- **Three test customers still active in PRODUCTION NetSuite (6738075)** — internal ids
+  `5803124`, `5800803`, `5795008`, created while proving the write path. Harmless but real
+  records in a real ledger; inactivate them. (Sandbox `6738075-sb1` also holds test rows —
+  `5264348` "Sandbox Smoke Test", plus the Card Rate Probe / Northwind Slice One rows — those
+  are sandbox and can stay.)
+- **`test_celigo_flows_api.py` is order-dependent** and makes `verify.sh` noisy for everyone:
+  `test_step_order_is_deterministic_across_a_three_way_sequence_tie` and
+  `test_used_by_never_includes_another_tenants_flow_or_step_context` fail inside the full run
+  but pass 3/3 in isolation. Head and baseline both totalled 123 failures, so it is flakiness,
+  not regression — but it means a NOT-DONE that has to be argued about rather than read.
 
 - ~~Framework's NetSuite connection dead~~ **RESOLVED 2026-08-04.** Re-authed; connection
   `active`, health-checked 02:55, deposit sync completed 02:00, data current to 02:13
