@@ -72,7 +72,16 @@ def _patch_file(content: bytes, file_type: str, filename: str = "f.csv"):
 
 
 async def _run(params):
-    return await task_file_tools.read_execute(params=params, context={"tenant_id": str(_TENANT)}, db=AsyncMock())
+    """Invoke EXACTLY as the dispatcher does.
+
+    governed_execute calls `execute_fn(validated_params, context=context)`
+    (governance.py:518) — positional params, keyword context, db INSIDE context.
+    The first version of this helper passed `db=` as its own kwarg, which is not
+    a shape any real caller uses; all 17 tests passed while the tool errored on
+    every live invocation with "missing 1 required positional argument: 'db'".
+    A test harness that invents its own calling convention tests nothing about
+    reachability."""
+    return await task_file_tools.read_execute({**params}, context={"tenant_id": str(_TENANT), "db": AsyncMock()})
 
 
 class TestReadsRealContent:
@@ -167,6 +176,33 @@ class TestFailsHonestly:
 
 
 class TestWiring:
+    @pytest.mark.asyncio
+    async def test_callable_the_way_the_dispatcher_actually_calls_it(self):
+        """THE regression this file exists for. governed_execute does
+        `execute_fn(params, context=context)` — nothing else. If the signature
+        drifts from that, every live call dies and no amount of direct-call
+        unit testing notices."""
+        import inspect
+
+        from app.mcp.registry import TOOL_REGISTRY
+
+        fn = TOOL_REGISTRY["task_file.read"]["execute"]
+        with _patch_file(_csv_bytes(2), "csv"):
+            # Positional params + keyword context, exactly as governance.py:518.
+            out = await fn({"file_id": str(_FILE_ID)}, context={"tenant_id": str(_TENANT), "db": AsyncMock()})
+        assert out.get("error") is not True, out
+        assert out["total_rows"] == 2
+        # And it must tolerate the extra kwargs a dispatcher may add later.
+        sig = inspect.signature(fn)
+        assert any(p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()), (
+            "must accept **kwargs — the dispatcher is free to pass more than params/context"
+        )
+
+    @pytest.mark.asyncio
+    async def test_missing_db_in_context_is_an_honest_error(self):
+        out = await task_file_tools.read_execute({"file_id": str(_FILE_ID)}, context={"tenant_id": str(_TENANT)})
+        assert out.get("error") is True
+
     def test_registered_and_exposed_to_chat(self):
         from app.mcp.registry import TOOL_REGISTRY
         from app.services.chat.nodes import ALLOWED_CHAT_TOOLS

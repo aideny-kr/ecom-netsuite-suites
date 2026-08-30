@@ -108,14 +108,27 @@ def _rows_from_json(content: bytes) -> tuple[list[str], list[list[str]]]:
     return ["value"], [[_cell(item)] for item in parsed]
 
 
-async def read_execute(params: dict, context: dict, db) -> dict:
+async def read_execute(params: dict, context: dict, **kwargs) -> dict:
     """Return a bounded page of an uploaded file's rows.
+
+    Signature is fixed by the dispatcher: ``governed_execute`` calls every tool
+    as ``execute_fn(validated_params, context=context)`` (governance.py:518),
+    so ``db`` arrives INSIDE context — it is not a positional argument. The
+    first version of this function took ``db`` positionally; every real
+    invocation therefore died with "missing 1 required positional argument",
+    while 17 unit tests passed because they called it the way I had imagined
+    rather than the way the dispatcher does. Match pricing_convert_execute,
+    which is the working precedent.
 
     Always reports ``total_rows`` and ``has_more`` so a partial read cannot be
     mistaken for a complete one — a silent cap reads as "I saw everything" when
     it didn't.
     """
+    context = context or {}
     tenant_id = context.get("tenant_id")
+    db = context.get("db")
+    if db is None or not tenant_id:
+        return {"error": True, "message": "Missing context — tenant_id and db are required."}
     raw_file_id = params.get("file_id")
     if not raw_file_id:
         return {"error": True, "message": "file_id is required"}
