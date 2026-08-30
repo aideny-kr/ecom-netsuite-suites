@@ -121,9 +121,23 @@ xlsx/csv/xls/json. Slice ordering chosen by the user, recorded so it is not re-l
    to internal id 5, then labelled back. Needed no new code — it was certify, not build.
 2. **Slice 2** — `task_file.read` tool, so the agent sees past the 20-row/12-col preview.
    BUILT on branch `feat/read-task-file-tool` (`ef9ee29e`), **unpushed, unmerged,
-   `verify.sh` NOT-DONE** (celigo flakes, see OPEN). **Never driven live — its tests mock
-   `TaskFileService.get_file`, so nothing proves it reads a real upload.** Do that first.
-   Also: the frontend picker still rejects `.xls` though the backend accepts it.
+   `verify.sh` NOT-DONE** (celigo flakes, see OPEN). **CERTIFIED LIVE 2026-08-29** — a
+   60-row xlsx with a random token planted at row 47 (past the 20-row preview): the agent
+   returned the exact token, which is unobtainable without reading the file.
+   *Two things this cost, both worth remembering: (a) the tool's signature was wrong
+   — the dispatcher calls `execute_fn(params, context=context)` with db INSIDE context,
+   so every live call died while 17 unit tests passed, because the test helper had invented
+   its own calling convention; (b) the first two certification designs were answerable from
+   the preview (CSV previews are not row-capped, and `Vendor NN Ltd` is extrapolable), so
+   "correct answer, zero tool calls" was the result. The third design planted an unguessable
+   value.*
+   *Correction: I twice claimed the frontend picker rejects `.xls`. It does not —
+   chat-input.tsx accepts it at both the handler and the accept attribute. The REAL gap was
+   the opposite: the tool advertised `.xls` while openpyxl cannot read legacy binary .xls
+   (BadZipFile) and xlrd is not a dependency. Now refused by name with a re-save remedy.*
+   *Note: a successful tool call logs NOTHING at the container's effective level (only
+   errors do), so `grep task_file.read` in docker logs is a false negative — do not read
+   its absence as "the tool was not called".*
 3. **Slice 3** — text-layer PDF via pdfplumber (already a dependency, wired only into
    drive_rag). Scanned PDFs must fail with an honest "no text layer", never a guess.
 4. **Slice 4** — small-N sequential proposals, cap ≤10 enforced in CODE, shared

@@ -175,6 +175,27 @@ class TestFailsHonestly:
         assert out["total_rows"] == 0
 
 
+class TestLegacyXlsIsNotPretendedToWork:
+    """The tool was written to stop the app pointing the model at affordances
+    that do not exist — and then claimed .xls support it does not have.
+    openpyxl reads .xlsx (a zip) and raises BadZipFile on legacy binary .xls;
+    xlrd is not a dependency. Upload accepts .xls, so a user CAN get here.
+
+    Honest failure with a fix the user can act on beats a BadZipFile."""
+
+    @pytest.mark.asyncio
+    async def test_xls_is_refused_by_name_with_a_remedy(self):
+        with _patch_file(b"\xd0\xcf\x11\xe0legacy-ole2", "xls", "old.xls"):
+            out = await _run({"file_id": str(_FILE_ID)})
+        assert out.get("error") is True
+        msg = out["message"].lower()
+        assert "xls" in msg
+        assert "xlsx" in msg, "must tell the user what to do, not just what failed"
+
+    def test_xls_is_not_advertised_as_supported(self):
+        assert "xls" not in task_file_tools._SUPPORTED
+
+
 class TestWiring:
     @pytest.mark.asyncio
     async def test_callable_the_way_the_dispatcher_actually_calls_it(self):

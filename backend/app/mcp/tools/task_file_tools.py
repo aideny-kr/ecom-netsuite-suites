@@ -47,7 +47,13 @@ _DEFAULT_ROWS = 100
 # spreadsheet should not be able to blow the turn's context on its own.
 _MAX_COLS = 50
 
-_SUPPORTED = {"csv", "xlsx", "xls", "json"}
+# Legacy binary .xls is deliberately NOT here. openpyxl reads .xlsx (a zip)
+# and raises BadZipFile on .xls; xlrd is not a dependency. Upload DOES accept
+# .xls, so a user can reach this — they get a named refusal with a remedy
+# rather than a parse error. Claiming a format we cannot read would be the
+# same asserted-affordance defect this tool exists to remove.
+_SUPPORTED = {"csv", "xlsx", "json"}
+_LEGACY_XLS = "xls"
 
 
 def _coerce_int(value: Any, default: int) -> int:
@@ -146,6 +152,15 @@ async def read_execute(params: dict, context: dict, **kwargs) -> dict:
         return {"error": True, "message": f"File not available: {exc}"}
 
     file_type = (getattr(task_file, "file_type", "") or "").lower()
+    if file_type == _LEGACY_XLS:
+        return {
+            "error": True,
+            "message": (
+                "This is a legacy .xls workbook, which cannot be read here — only the newer "
+                ".xlsx format is supported. Ask the user to re-save it as .xlsx (Excel: "
+                "File -> Save As -> Excel Workbook) and attach it again."
+            ),
+        }
     if file_type not in _SUPPORTED:
         # Named explicitly rather than attempted. A PDF or an image read as text
         # produces plausible garbage, and plausible garbage on a path that feeds
@@ -161,7 +176,7 @@ async def read_execute(params: dict, context: dict, **kwargs) -> dict:
 
     sheets: list[str] = []
     try:
-        if file_type in {"xlsx", "xls"}:
+        if file_type == "xlsx":
             columns, data_rows, sheets = _rows_from_xlsx(content, params.get("sheet"))
         elif file_type == "json":
             columns, data_rows = _rows_from_json(content)
