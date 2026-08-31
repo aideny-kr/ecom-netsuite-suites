@@ -91,6 +91,11 @@ function TrackingRibbon({ tracking, report }: { tracking: DashboardTrackingInfo 
   if (!tracking || !tracking.period) return null;
   const period = tracking.period;
 
+  // "ended", not "closed": the count comes from the accounting period's END DATE, which
+  // is not when NetSuite actually marked it closed (that can be days later). The period
+  // IS closed whenever this renders, but "closed N days ago" would state a number we do
+  // not have. "ended N days ago" is exactly what the data says (T2 gate round 1).
+  //
   // Amber — waiting. Gated on the backend SENDING `closed_days_ago`, never derived here
   // by comparing `period`/`resolved_period`: the backend sends it only when the series
   // is behind AND the scheduled compose is actually switched on, so the promise below
@@ -102,7 +107,7 @@ function TrackingRibbon({ tracking, report }: { tracking: DashboardTrackingInfo 
       <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border bg-muted/30 px-3 py-2 text-[13px]">
         <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" />
         <span className="text-muted-foreground">
-          {`${tracking.resolved_period} closed ${n} day${n === 1 ? "" : "s"} ago — ${fullMonth(tracking.resolved_period)}'s statement is scheduled and will appear within a day.`}
+          {`${tracking.resolved_period} ended ${n} day${n === 1 ? "" : "s"} ago — ${fullMonth(tracking.resolved_period)}'s statement is scheduled and will appear within a day.`}
         </span>
       </div>
     );

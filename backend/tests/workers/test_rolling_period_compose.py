@@ -27,7 +27,7 @@ from app.models.report import Report
 from app.models.report_series import ReportSeries
 from app.services.report.period_resolver import ClosedPeriod, PeriodUnavailableReason
 from app.services.report.refresh_service import RefreshError
-from app.workers.tasks.rolling_period_compose import sweep_tenant_series
+from app.workers.tasks.rolling_period_compose import REASON_BUDGET, sweep_tenant_series
 from tests.conftest import create_test_tenant, create_test_user
 
 _JUN_CLOSED = ClosedPeriod(name="Jun 2026", enddate=date(2026, 6, 30))
@@ -56,8 +56,26 @@ def _patch_compose(monkeypatch, behaviour):
     returns a Report-ish object or raises. Patched at the playbooks module boundary."""
     calls = []
 
-    async def fake_compose(db, *, playbook_key, params, tenant_id, actor_id, mode="period", actor_type="user"):
-        calls.append({"playbook_key": playbook_key, "mode": mode, "actor_id": actor_id, "actor_type": actor_type})
+    async def fake_compose(
+        db,
+        *,
+        playbook_key,
+        params,
+        tenant_id,
+        actor_id,
+        mode="period",
+        actor_type="user",
+        closed_period=None,
+    ):
+        calls.append(
+            {
+                "playbook_key": playbook_key,
+                "mode": mode,
+                "actor_id": actor_id,
+                "actor_type": actor_type,
+                "closed_period": closed_period,
+            }
+        )
         return await behaviour(playbook_key)
 
     monkeypatch.setattr("app.services.report.playbooks.compose_playbook_report", fake_compose)
@@ -104,6 +122,11 @@ async def test_composes_a_series_that_is_behind_the_closed_period(db, monkeypatc
     assert result["already_current"] == 0
     assert len(calls) == 1
     assert calls[0]["mode"] == "tracking"
+    # T2 gate round 1 (cost): the sweep resolves the period ONCE per tenant and hands it
+    # down. Without this the per-series compose re-resolves the same answer at 2 NetSuite
+    # round trips each, silently undoing the saving the docstring claims.
+    assert calls[0]["closed_period"] is not None
+    assert calls[0]["closed_period"].name == "Jun 2026"
 
 
 async def test_skips_a_series_already_on_the_closed_period_without_composing(db, monkeypatch, tenant_user):
@@ -327,3 +350,64 @@ async def test_fanout_dispatches_tenant_id_as_a_kwarg_not_positionally(db, monke
         assert kwargs.get("kwargs", {}).get("tenant_id"), "tenant_id must travel as a kwarg"
         assert len(args) == 1, "task name only — no positional tenant_id"
     assert str(tenant.id) in [k["kwargs"]["tenant_id"] for _a, k in sent]
+
+
+# --- T2 gate round 1: the cost ceiling must bound ATTEMPTS, not successes -----------
+
+
+async def test_budget_cap_bounds_attempts_not_just_successes(db, monkeypatch, tenant_user):
+    """T2 gate round 1 (major): the cap gated on stats["composed"], which only increments
+    on SUCCESS. During a NetSuite outage — precisely the condition the ceiling exists to
+    protect against — every compose fails, "composed" stays 0, the guard never trips, and
+    the sweep attempts EVERY behind series at 4-6 NetSuite round trips each against a
+    120/min limit shared with live chat. The module docstring claimed this satisfied
+    agent-graph.md #6 ("Bound cost, not just call count") while bounding neither in the
+    failure case. Cost is incurred by the ATTEMPT, so the attempt is what must be capped.
+    """
+    tenant, user = tenant_user
+    for key in ("income_statement", "balance_sheet", "trial_balance"):
+        await _series(db, tenant, user, key, newest_period="May 2026")
+    _patch_resolver(monkeypatch, _JUN_CLOSED)
+
+    async def always_fails(_key):
+        raise RefreshError(502, "NetSuite is down")
+
+    calls = _patch_compose(monkeypatch, always_fails)
+    result = await sweep_tenant_series(db, tenant.id, max_composes=2)
+
+    assert len(calls) == 2, "a failing compose still burns NetSuite calls — cap the attempts"
+    assert result["failed"] == 2
+    assert result["remaining"] == 1
+    assert result["reason"] == REASON_BUDGET
+
+
+async def test_a_failed_series_rolls_back_so_the_next_one_is_not_poisoned(db, monkeypatch, tenant_user):
+    """T2 gate round 1 (major): a DB-level failure inside compose_playbook_report (it has
+    no internal try/except, and it commits) leaves the shared AsyncSession in
+    pending-rollback. Without a rollback here, the NEXT series fails immediately with
+    PendingRollbackError on its first query — for a completely different reason than its
+    own — which defeats the per-series isolation this loop documents AND poisons the stall
+    fingerprint with a fabricated failure mode. report_auto_refresh.py:177 rolls back in
+    exactly this position for exactly this reason."""
+    tenant, user = tenant_user
+    for key in ("income_statement", "balance_sheet"):
+        await _series(db, tenant, user, key, newest_period="May 2026")
+    _patch_resolver(monkeypatch, _JUN_CLOSED)
+
+    rollbacks = {"n": 0}
+    real_rollback = db.rollback
+
+    async def counting_rollback():
+        rollbacks["n"] += 1
+        await real_rollback()
+
+    monkeypatch.setattr(db, "rollback", counting_rollback)
+
+    async def always_fails(_key):
+        raise RefreshError(502, "db blew up mid-compose")
+
+    _patch_compose(monkeypatch, always_fails)
+    result = await sweep_tenant_series(db, tenant.id)
+
+    assert result["failed"] == 2
+    assert rollbacks["n"] == 2, "every failed series must leave the session usable for the next"

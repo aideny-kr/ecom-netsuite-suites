@@ -236,7 +236,17 @@ def build_playbook_recipe(playbook_key: str, params: dict[str, str]) -> tuple[st
     return title, recipe
 
 
-async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_id, mode="period", actor_type="user"):
+async def compose_playbook_report(
+    db,
+    *,
+    playbook_key,
+    params,
+    tenant_id,
+    actor_id,
+    mode="period",
+    actor_type="user",
+    closed_period=None,
+):
     """Deterministic compose: recipe template → fail-closed source execution →
     frozen HTML → normal Report row. Reuses the refresh engine's execution seam
     on purpose — identical validation, identical failure semantics, and the
@@ -280,7 +290,15 @@ async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_
 
     series_id: uuid.UUID | None = None
     if mode == "tracking":
-        closed = await resolve_last_closed_period(db, tenant_id)
+        # `closed_period` lets a caller that ALREADY resolved this tenant's period hand
+        # it in (T2 gate round 1: the Stage 2 sweep resolves once per tenant, but every
+        # per-series compose re-resolved the same answer at 2 NetSuite round trips a
+        # time, silently undoing that saving). Injecting beats switching this call to
+        # the 300s-cached resolver: that would also make the INTERACTIVE path serve a
+        # stale period for up to 5 minutes after a close, which is exactly when a user
+        # clicks compose. The scheduled caller opts into reuse; a person always gets
+        # a live answer.
+        closed = closed_period or await resolve_last_closed_period(db, tenant_id)
         if not closed.resolved:
             raise PeriodUnavailableError(closed.reason)
         # Tracking mode resolves the period server-side — anything the caller typed

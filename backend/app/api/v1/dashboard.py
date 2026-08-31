@@ -1,6 +1,6 @@
 import logging
 import uuid
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -192,7 +192,10 @@ async def _build_tracking_info(
         and closed.name != active_report.period
         and closed.enddate is not None
     ):
-        closed_days_ago = max((date.today() - closed.enddate).days, 0)
+        # UTC, not the server's local wall clock: celery_app sets timezone="UTC" and the
+        # sweep this number describes runs on that clock, so a local-time `today()` can
+        # disagree with it by a day near midnight (T2 gate round 1).
+        closed_days_ago = max((datetime.now(timezone.utc).date() - closed.enddate).days, 0)
 
     return DashboardTrackingInfo(
         series_id=str(series.id),

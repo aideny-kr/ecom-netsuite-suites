@@ -20,7 +20,10 @@ Cost (#6) is bounded because it is real: one tracking compose is 4 NetSuite roun
 (balance_sheet, trial_balance) or 6 (income_statement — 2 for period resolution, 4 for
 sources), against a 120/min per-tenant ceiling that is SHARED with live chat traffic. An
 unbounded nightly sweep can therefore starve real users, so ``max_composes`` caps the
-work per tenant per run and leftover work is reported as ``budget`` rather than hidden.
+ATTEMPTS per tenant per run — not the successes: a failed compose has already spent its
+round trips, and the first version of this file capped successes, which meant that during
+an outage the guard never tripped at all. Leftover work is reported as ``budget`` rather
+than hidden.
 
 Termination (#5) returns a reason enum — ``done | budget | stall | error`` — never a
 boolean, so a human (and the ops digest) can route "finished" apart from "stuck".
@@ -134,9 +137,18 @@ async def sweep_tenant_series(
     behind = [row for row in series_rows if row.id not in covered]
     stats["already_current"] = len(series_rows) - len(behind)
 
+    # Imported once, not per iteration.
+    from app.services.report.playbooks import compose_playbook_report
+
     fingerprints: set[str] = set()
+    attempted = 0
     for index, row in enumerate(behind):
-        if stats["composed"] >= max_composes:
+        # Gate on ATTEMPTS, not successes (T2 gate round 1, major). A failed compose has
+        # already spent its 4-6 NetSuite round trips, so cost is incurred by the attempt.
+        # Counting only successes meant that during an outage — the exact condition this
+        # ceiling exists for — nothing ever incremented, the guard never tripped, and the
+        # sweep burned the full `behind` list against a rate limit shared with live chat.
+        if attempted >= max_composes:
             # Budget ceiling reached with work still on the table. Surfacing this as
             # `budget` (not `done`) is the whole point of the enum: `done` would tell
             # the next reader there is nothing left to do.
@@ -145,8 +157,7 @@ async def sweep_tenant_series(
             logger.info("rolling_period_compose.budget_reached", extra=dict(stats))
             return stats
 
-        from app.services.report.playbooks import compose_playbook_report
-
+        attempted += 1
         try:
             await compose_playbook_report(
                 db,
@@ -159,6 +170,9 @@ async def sweep_tenant_series(
                 # would put a false record in the audit trail; refresh_report threads
                 # actor_type="system" for exactly this reason.
                 actor_type="system",
+                # Already resolved once above for this tenant — hand it down so each
+                # series does not re-pay 2 NetSuite round trips for the same answer.
+                closed_period=closed,
             )
             stats["composed"] += 1
         except Exception as exc:  # per-series isolation: one bad series must not
@@ -169,6 +183,17 @@ async def sweep_tenant_series(
                 "rolling_period_compose.series_failed",
                 extra={"tenant_id": str(tenant_id), "playbook_key": row.playbook_key},
             )
+            # Roll back before the next series (T2 gate round 1, major).
+            # compose_playbook_report writes and commits, and wraps none of it in its own
+            # try/except — so a DB-level failure inside it leaves this shared session in
+            # pending-rollback. Without this, the NEXT series dies instantly on
+            # PendingRollbackError for a reason that is not its own: per-series isolation
+            # in name only, and a stall fingerprint poisoned by a fabricated failure mode.
+            # report_auto_refresh.py:177 rolls back in exactly this position.
+            try:
+                await db.rollback()
+            except Exception:
+                logger.warning("rolling_period_compose.rollback_failed", exc_info=True)
 
     if stats["composed"] == 0 and stats["failed"] > 0:
         if len(fingerprints) == 1:
