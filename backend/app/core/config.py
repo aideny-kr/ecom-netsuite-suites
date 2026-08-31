@@ -186,6 +186,25 @@ class Settings(BaseSettings):
     # an unbounded sweep can starve real users. Leftover work returns reason="budget".
     ROLLING_PERIOD_COMPOSE_MAX_PER_TENANT: int = 10
 
+    @property
+    def auto_compose_is_scheduled(self) -> bool:
+        """Is a rolling-period compose actually going to happen? THE single source of
+        truth, asked by both the Beat sweep and the dashboard's waiting ribbon.
+
+        Lives here, on settings, rather than in the worker module: the ribbon is an API
+        concern and the sweep is a worker concern, and an API module importing from
+        app.workers.tasks to ask this would be a layering inversion. The predicate is a
+        pure function of configuration, so configuration is where it belongs.
+
+        T2 gate round 2 found the hole this closes: the ribbon checked only ENABLED, so a
+        cap of 0 (a plausible throttle during a NetSuite rate-limit incident) stopped
+        every compose while the UI kept promising "will appear within a day" — the exact
+        defect the gating exists to prevent, reached through the other knob. Two callers
+        reading raw booleans is how that opened; one predicate is how it stays shut. Any
+        future condition on "will a compose happen" belongs HERE, never at a call site.
+        """
+        return self.ROLLING_PERIOD_AUTO_COMPOSE_ENABLED and self.ROLLING_PERIOD_COMPOSE_MAX_PER_TENANT > 0
+
     # Autonomous query improvement loop
     QUERY_IMPROVEMENT_ENABLED: bool = False
     QUERY_IMPROVEMENT_BUDGET_USD: float = 12.0

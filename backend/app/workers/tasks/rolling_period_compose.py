@@ -59,20 +59,9 @@ REASON_ERROR = "error"
 
 
 def auto_compose_is_scheduled() -> bool:
-    """Is a scheduled compose actually going to happen? THE single source of truth —
-    the dashboard ribbon imports this too, deliberately.
-
-    Round 2 of the T2 gate found the hole this closes: the ribbon gated only on
-    ROLLING_PERIOD_AUTO_COMPOSE_ENABLED, so setting the per-tenant cap to 0 (a plausible
-    way to throttle during a NetSuite rate-limit incident) left the sweep composing
-    nothing every night while the UI kept promising "will appear within a day" — the very
-    defect the gating exists to prevent, reached through the OTHER knob.
-
-    Two callers checking a raw boolean is how that hole opened; a shared predicate is how
-    it stays shut. Any future condition on "will a compose happen" belongs HERE, never at
-    a call site.
-    """
-    return settings.ROLLING_PERIOD_AUTO_COMPOSE_ENABLED and settings.ROLLING_PERIOD_COMPOSE_MAX_PER_TENANT > 0
+    """Thin delegate to `settings.auto_compose_is_scheduled` — the one definition. Kept
+    as a module-level name because this is where a reader of the sweep looks for it."""
+    return settings.auto_compose_is_scheduled
 
 
 def _fingerprint(exc: BaseException) -> str:
