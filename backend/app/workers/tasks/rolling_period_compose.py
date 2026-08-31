@@ -38,8 +38,8 @@ from app.core.config import settings
 from app.models.report import Report
 from app.models.report_series import ReportSeries
 from app.models.tenant import Tenant
-from app.workers.celery_app import celery_app
 from app.workers.base_task import InstrumentedTask
+from app.workers.celery_app import celery_app
 
 # stdlib logger, and every call site passes context via `extra=` — NOT structlog kwargs.
 # Celery hijacks the root logger, so a structlog-style `logger.info("x", key=v)` call

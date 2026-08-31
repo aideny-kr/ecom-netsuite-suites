@@ -19,12 +19,9 @@ tests are where it starts.
 
 from __future__ import annotations
 
-import uuid
 from datetime import date
 
-import pytest
 import pytest_asyncio
-from sqlalchemy import select
 
 from app.models.report import Report
 from app.models.report_series import ReportSeries
