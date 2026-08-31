@@ -186,6 +186,20 @@ path — OCR confidence is unquantified and the card cannot show what was misrea
 
 Written so the next session does not re-litigate these.
 
+- **2026-08-30 · Stage 2 gates the RIBBON DATA on the scheduler being enabled, not just the
+  wording** · because the amber ribbon promises a statement "is scheduled", and a promise
+  about a background job is only as true as the job's on/off switch. The approved Stage 1
+  mock said "building X's statement now"; on a daily cadence that is false for up to a day,
+  which is the SAME defect the T2 gate caught in the Stage 1 launcher copy ("composed
+  automatically...", no scheduler behind it) — the identical lie relocated to another
+  component. Two changes, and the second is the load-bearing one: the copy now says
+  "scheduled and will appear within a day", AND `closed_days_ago` is withheld entirely
+  unless the series is behind AND `ROLLING_PERIOD_AUTO_COMPOSE_ENABLED` is on. Wording
+  drifts; a withheld field cannot lie. The FE must therefore keep gating amber on the
+  field's PRESENCE and must never derive it by comparing `period`/`resolved_period` —
+  deriving it client-side puts "is scheduled" on a deployment where nothing is scheduled.
+  Recorded because deriving it looks like a harmless simplification.
+
 - **2026-08-27 · On `feat/rolling-period` we answered a repeating gate shape with a SIBLING
   AUDIT, not a 4th patch** · because two of round 3's three majors were regressions from
   round 2's *own* fixes, and both shared one shape: *a guard applied to one path but not to
