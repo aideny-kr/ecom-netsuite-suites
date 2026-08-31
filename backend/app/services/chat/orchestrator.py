@@ -2425,6 +2425,43 @@ async def run_chat_turn(
                     _updated_so["confirmation_token"] = _merged_confirmation_token
                     _updated_so["proposed_fields"] = _merged_normalized.fields
                     _updated_so["proposed_lines"] = _merged_normalized.lines
+                    # ...and the LABELS for those fields, for the same reason.
+                    # resolve_reference_labels runs once, when the card is first
+                    # built — at which point a slot field is empty, because being
+                    # empty is what made it a slot. So the two features did not
+                    # compose, and the gap landed exactly where it was least
+                    # wanted: the one reference a HUMAN personally chose rendered
+                    # as a bare internal id ("subsidiary · 1") while every
+                    # model-supplied reference rendered by name. Observed live
+                    # 2026-08-31 on customers 5264448/5264449.
+                    #
+                    # Merged over the existing labels rather than replacing them:
+                    # a transient lookup failure must not delete a label the card
+                    # already had. Best-effort by construction — this runs AFTER
+                    # the write, so nothing here may raise: a missing label is
+                    # cosmetic, an exception would corrupt a card whose write has
+                    # already happened.
+                    try:
+                        from app.services.chat.reference_field_labels import (
+                            resolve_reference_labels as _resolve_labels_after_merge,
+                        )
+
+                        _merged_labels = await _resolve_labels_after_merge(
+                            _merged_normalized.fields,
+                            mutation_tool_name=tool_name,
+                            tenant_id=tenant_id,
+                            actor_id=user_id,
+                            correlation_id=correlation_id,
+                            db=db,
+                            session_id=str(session.id),
+                        )
+                        if _merged_labels:
+                            _updated_so["field_labels"] = {
+                                **(_updated_so.get("field_labels") or {}),
+                                **_merged_labels,
+                            }
+                    except Exception:
+                        logger.warning("post-merge label resolution failed", exc_info=True)
                 _confirm_msg.structured_output = _updated_so
                 _wc_flag_modified(_confirm_msg, "structured_output")
 

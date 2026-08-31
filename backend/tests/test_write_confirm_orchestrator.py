@@ -637,6 +637,103 @@ class TestWriteConfirmFailedFlow:
         assert merged_data["subsidiary"] == "2"
         assert so["proposed_fields"]["subsidiary"] == "2"
 
+    @pytest.mark.asyncio
+    async def test_a_slot_filled_reference_gets_its_human_label(self):
+        """A subsidiary the HUMAN picked must render by name, not as a bare id.
+
+        Found live 2026-08-31. resolve_reference_labels runs only when the card
+        is first BUILT (base_agent.py). At that moment the field is empty —
+        that is WHY it became a slot — so there is nothing to label. The merge
+        then writes the chosen value into proposed_fields but never revisits
+        field_labels, so the approved card reads `subsidiary · 1`.
+
+        The two features do not compose, and the gap lands exactly where it is
+        least wanted: the slot exists for a MISSING required field, and the
+        labeller exists to make reference ids readable, so the one case where a
+        human personally chooses the reference is the one case rendered as a
+        raw internal id. Cosmetic at approval time (the dropdown showed names)
+        but the stored card and its audit trail keep the bare id.
+        """
+        from app.services.chat.mutation_guard import generate_confirmation_token
+        from app.services.chat.orchestrator import run_chat_turn
+        from app.services.chat.write_confirmation_service import _build_payload_json
+
+        session_id = uuid.uuid4()
+        tool_name = _ext("ns_createRecord")
+        tool_input = {"recordType": "customer", "data": '{"companyname": "test ai customer"}'}
+        slots = [
+            {
+                "name": "subsidiary",
+                "label": "Subsidiary",
+                "type": "select",
+                "allowed": [{"value": "2", "label": "Framework Computer B.V."}],
+            }
+        ]
+        structured_output = {
+            "type": "write_confirmation",
+            "mutation_type": "create",
+            "record_type": "customer",
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+            "editable_slots": slots,
+            "proposed_fields": {"companyname": "test ai customer"},
+            "proposed_lines": [],
+            "field_labels": {},
+            "confirmation_token": generate_confirmation_token(
+                str(session_id), _build_payload_json(tool_name, tool_input, slots)
+            ),
+            "status": "pending",
+            "repair_attempt": 2,
+        }
+        confirm_msg = ChatMessage(
+            session_id=session_id,
+            tenant_id=_TENANT_ID,
+            role="assistant",
+            content="",
+            structured_output=structured_output,
+            created_at=datetime.now(timezone.utc),
+        )
+        confirm_msg.id = uuid.uuid4()
+        db = _make_db(confirm_msg)
+        session = _make_session(session_id=str(session_id))
+
+        with (
+            # An ERROR result, like the sibling test above: it keeps this case on
+            # the merge-then-persist block and away from the record-URL builder,
+            # which needs a connector row the fake db does not serve. The label
+            # write lives in the same `_merged_confirmation_token` block on every
+            # outcome, so the assertion is unaffected by which one we take.
+            patch(
+                "app.services.chat.orchestrator.execute_tool_call",
+                AsyncMock(return_value=json.dumps({"error": "Invalid field value."})),
+            ),
+            patch("app.services.chat.orchestrator.log_event", new_callable=AsyncMock),
+            patch(
+                "app.services.chat.reference_field_labels.resolve_reference_labels",
+                new_callable=AsyncMock,
+                return_value={"subsidiary": "Framework Computer B.V. (ID 2)"},
+            ),
+        ):
+            async for _e in run_chat_turn(
+                db=db,
+                session=session,
+                user_message="approve",
+                user_id=_USER_ID,
+                tenant_id=_TENANT_ID,
+                write_confirm={
+                    "action": "approve",
+                    "confirmation_id": str(confirm_msg.id),
+                    "slot_values": {"subsidiary": "2"},
+                },
+            ):
+                pass
+
+        so = confirm_msg.structured_output
+        assert so["proposed_fields"]["subsidiary"] == "2"
+        assert so.get("field_labels", {}).get("subsidiary") == "Framework Computer B.V. (ID 2)", (
+            "the value the human chose must render by NAME on the stored card, not as a bare id"
+        )
+
 
 # ---------------------------------------------------------------------------
 # H2) Orchestrator: a PARSEABLE result that self-declares `success: false`
