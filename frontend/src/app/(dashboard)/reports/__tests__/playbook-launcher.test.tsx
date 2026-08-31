@@ -24,6 +24,14 @@ vi.mock("next/navigation", () => ({ useRouter: () => ({ push: routerPush }) }));
 
 import { PlaybookLauncher } from "../playbook-launcher";
 
+// Rolling-period Stage 1 (Task 5, mock §2): "Track the last closed period" is the
+// default-selected chooser option, so the period Input is hidden until the operator
+// explicitly switches to "One specific period" — this helper is that switch, shared
+// by every test below that needs today's period-mode UI.
+function chooseSpecificPeriod() {
+  fireEvent.click(screen.getByLabelText(/one specific period/i));
+}
+
 beforeEach(() => {
   composeState.isPending = false;
   mutate.mockClear();
@@ -31,13 +39,14 @@ beforeEach(() => {
 });
 
 describe("PlaybookLauncher", () => {
-  it("launches a playbook with the entered period", () => {
+  it("launches a playbook in period mode with the entered period", () => {
     render(<PlaybookLauncher />);
     fireEvent.click(screen.getByText("Income Statement"));
+    chooseSpecificPeriod();
     fireEvent.change(screen.getByPlaceholderText("Jun 2026"), { target: { value: "Jun 2026" } });
     fireEvent.click(screen.getByRole("button", { name: /create report/i }));
     expect(mutate).toHaveBeenCalledWith(
-      { key: "income_statement", params: { period: "Jun 2026" } },
+      { key: "income_statement", params: { period: "Jun 2026" }, mode: "period" },
       expect.anything(),
     );
   });
@@ -51,6 +60,7 @@ describe("PlaybookLauncher", () => {
   it("surfaces the mutation error (e.g. malformed period or no NetSuite connection)", () => {
     render(<PlaybookLauncher />);
     fireEvent.click(screen.getByText("Income Statement"));
+    chooseSpecificPeriod();
     fireEvent.change(screen.getByPlaceholderText("Jun 2026"), { target: { value: "June 2026" } });
     fireEvent.click(screen.getByRole("button", { name: /create report/i }));
 
@@ -73,6 +83,96 @@ describe("PlaybookLauncher", () => {
   });
 });
 
+// --- Rolling-period Stage 1 (Task 5): the compose chooser (mock §2) ----------------
+
+describe("PlaybookLauncher compose chooser", () => {
+  it("defaults to 'Track the last closed period' selected, with the period input hidden", () => {
+    render(<PlaybookLauncher />);
+    fireEvent.click(screen.getByText("Income Statement"));
+
+    expect(screen.getByLabelText(/track the last closed period/i)).toBeChecked();
+    expect(screen.getByLabelText(/one specific period/i)).not.toBeChecked();
+    expect(screen.queryByPlaceholderText("Jun 2026")).not.toBeInTheDocument();
+  });
+
+  it("describes tracking mode truthfully -- this branch is Stage 1, there is no scheduler", () => {
+    // MAJOR 3 (T2 gate, round 3): the shipped copy said "A new report is composed
+    // automatically when the next period closes" -- that's Stage 2 (a scheduled
+    // compose), which this branch does not build. Stage 1 only makes the dashboard
+    // wall FOLLOW the newest report in the series; nothing creates next period's
+    // report on its own -- someone must compose it. Shipping the Stage-2 copy as-is
+    // means the product lies to the user on first contact.
+    render(<PlaybookLauncher />);
+    fireEvent.click(screen.getByText("Income Statement"));
+
+    expect(screen.queryByText(/composed automatically/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/next period closes/i)).not.toBeInTheDocument();
+    // Absence alone would also pass against a DELETED description, so pin what the
+    // copy must actually say: the dashboard follows automatically, you compose.
+    expect(
+      screen.getByText(/moves forward on its own each time you compose a newer one/i),
+    ).toBeInTheDocument();
+  });
+
+  it("selecting 'One specific period' reveals the period input", () => {
+    render(<PlaybookLauncher />);
+    fireEvent.click(screen.getByText("Income Statement"));
+    chooseSpecificPeriod();
+
+    expect(screen.getByLabelText(/one specific period/i)).toBeChecked();
+    expect(screen.getByPlaceholderText("Jun 2026")).toBeInTheDocument();
+  });
+
+  it("switching back to 'Track the last closed period' hides the period input again", () => {
+    render(<PlaybookLauncher />);
+    fireEvent.click(screen.getByText("Income Statement"));
+    chooseSpecificPeriod();
+    expect(screen.getByPlaceholderText("Jun 2026")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText(/track the last closed period/i));
+    expect(screen.queryByPlaceholderText("Jun 2026")).not.toBeInTheDocument();
+  });
+
+  it("reselecting the same or another playbook resets the chooser back to tracking", () => {
+    render(<PlaybookLauncher />);
+    fireEvent.click(screen.getByText("Income Statement"));
+    chooseSpecificPeriod();
+    expect(screen.getByLabelText(/one specific period/i)).toBeChecked();
+
+    fireEvent.click(screen.getByText("Income Statement")); // reselect
+    expect(screen.getByLabelText(/track the last closed period/i)).toBeChecked();
+    expect(screen.queryByPlaceholderText("Jun 2026")).not.toBeInTheDocument();
+  });
+
+  it("submitting in tracking mode (the default) sends mode: 'tracking' and empty params, ignoring any stale typed period", () => {
+    render(<PlaybookLauncher />);
+    fireEvent.click(screen.getByText("Income Statement"));
+    fireEvent.click(screen.getByRole("button", { name: /create report/i }));
+
+    expect(mutate).toHaveBeenCalledWith(
+      { key: "income_statement", params: {}, mode: "tracking" },
+      expect.anything(),
+    );
+  });
+
+  it("surfaces the backend's 400 message when a tracking compose can't resolve a closed period", () => {
+    render(<PlaybookLauncher />);
+    fireEvent.click(screen.getByText("Income Statement"));
+    fireEvent.click(screen.getByRole("button", { name: /create report/i }));
+
+    const [, opts] = mutate.mock.calls[mutate.mock.calls.length - 1];
+    act(() =>
+      opts.onError(
+        new Error("NetSuite doesn't have a closed accounting period yet — there's nothing to track."),
+      ),
+    );
+
+    expect(
+      screen.getByText("NetSuite doesn't have a closed accounting period yet — there's nothing to track."),
+    ).toBeInTheDocument();
+  });
+});
+
 describe("PlaybookLauncher composing state", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -84,6 +184,7 @@ describe("PlaybookLauncher composing state", () => {
   it("replaces the parameter panel with a status card while pending, showing title and hint", () => {
     const { rerender } = render(<PlaybookLauncher />);
     fireEvent.click(screen.getByText("Income Statement"));
+    chooseSpecificPeriod();
     fireEvent.change(screen.getByPlaceholderText("Jun 2026"), { target: { value: "Jun 2026" } });
     composeState.isPending = true;
     rerender(<PlaybookLauncher />); // simulate the mutation flipping to pending after selection
@@ -97,13 +198,15 @@ describe("PlaybookLauncher composing state", () => {
       ),
     ).toBeInTheDocument();
 
-    // The parameter <Input> is gone — replaced by the composing card, not shown alongside it.
+    // The parameter <Input> and the chooser are gone — replaced by the composing
+    // card, not shown alongside it.
     expect(screen.queryByPlaceholderText("Jun 2026")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/track the last closed period/i)).not.toBeInTheDocument();
     // "Create report" is not part of the composing card.
     expect(screen.queryByRole("button", { name: /create report/i })).not.toBeInTheDocument();
   });
 
-  it("omits the period suffix when no period has been entered yet", () => {
+  it("omits the period suffix while composing in tracking mode (no period is known until the compose resolves it)", () => {
     const { rerender } = render(<PlaybookLauncher />);
     fireEvent.click(screen.getByText("Income Statement"));
     composeState.isPending = true;
@@ -143,6 +246,7 @@ describe("PlaybookLauncher composing state", () => {
     // composePlaybook.isPending has already flipped back to false.
     render(<PlaybookLauncher />);
     fireEvent.click(screen.getByText("Income Statement"));
+    chooseSpecificPeriod();
     fireEvent.change(screen.getByPlaceholderText("Jun 2026"), { target: { value: "June 2026" } });
     fireEvent.click(screen.getByRole("button", { name: /create report/i }));
 
@@ -159,6 +263,7 @@ describe("PlaybookLauncher composing state", () => {
   it("still navigates to the new report on success", () => {
     render(<PlaybookLauncher />);
     fireEvent.click(screen.getByText("Income Statement"));
+    chooseSpecificPeriod();
     fireEvent.change(screen.getByPlaceholderText("Jun 2026"), { target: { value: "Jun 2026" } });
     fireEvent.click(screen.getByRole("button", { name: /create report/i }));
 

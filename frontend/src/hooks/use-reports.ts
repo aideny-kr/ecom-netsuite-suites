@@ -157,11 +157,27 @@ export function usePlaybooks() {
   });
 }
 
+/** Rolling-period Stage 1 (Task 5): `mode` mirrors PlaybookComposeRequest's own
+ * default ("period" — today's behaviour, unchanged for every existing caller). Always
+ * sent explicitly (not omitted when unset) so the request body says exactly what's
+ * being asked for, matching the backend's own literal-default contract rather than
+ * relying on it silently. */
 export function useComposePlaybook() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (args: { key: string; params: Record<string, string> }) =>
-      apiClient.post<ReportSummary>(`/api/v1/reports/playbooks/${args.key}`, { params: args.params }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["reports"] }),
+    mutationFn: (args: { key: string; params: Record<string, string>; mode?: "period" | "tracking" }) =>
+      apiClient.post<ReportSummary>(`/api/v1/reports/playbooks/${args.key}`, {
+        params: args.params,
+        mode: args.mode ?? "period",
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["reports"] });
+      // A tracking compose changes which report is a series' NEWEST — i.e. what the
+      // wall renders and what the ribbon says — so the cached /dashboard payload must
+      // be busted too, exactly as every other mutation in this file does. Without it
+      // the user composes the next period, returns to the dashboard, and still sees the
+      // previous one until staleTime expires — breaking tracking mode's only promise.
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    },
   });
 }

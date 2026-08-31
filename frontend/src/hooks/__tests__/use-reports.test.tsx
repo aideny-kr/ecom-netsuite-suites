@@ -13,6 +13,7 @@ const api = vi.hoisted(() => ({
 vi.mock("@/lib/api-client", () => ({ apiClient: api }));
 
 import {
+  useComposePlaybook,
   useDeleteReport,
   usePinReport,
   useRefreshReport,
@@ -152,5 +153,49 @@ it("useUnpinReport DELETEs /pin and invalidates report + list + dashboard querie
   const keys = invalidate.mock.calls.map((c) => JSON.stringify(c[0]?.queryKey));
   expect(keys).toContain(JSON.stringify(["reports"]));
   expect(keys).toContain(JSON.stringify(["reports", "r-1"]));
+  expect(keys).toContain(JSON.stringify(["dashboard"]));
+});
+
+// --- Rolling-period Stage 1 (Task 5): compose with a tracking intent ---------------
+
+it("useComposePlaybook defaults to mode: 'period' when the caller doesn't specify one (today's behaviour, unchanged)", async () => {
+  api.post.mockResolvedValueOnce({ id: "r-1" });
+  const qc = new QueryClient(qcOpts);
+  const { result } = renderHook(() => useComposePlaybook(), { wrapper: makeWrapper(qc) });
+  result.current.mutate({ key: "income_statement", params: { period: "Jun 2026" } });
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(api.post).toHaveBeenCalledWith("/api/v1/reports/playbooks/income_statement", {
+    params: { period: "Jun 2026" },
+    mode: "period",
+  });
+});
+
+it("useComposePlaybook sends mode: 'tracking' when asked, with no params (the server resolves the period)", async () => {
+  api.post.mockResolvedValueOnce({ id: "r-1", series_id: "s-1" });
+  const qc = new QueryClient(qcOpts);
+  const { result } = renderHook(() => useComposePlaybook(), { wrapper: makeWrapper(qc) });
+  result.current.mutate({ key: "income_statement", params: {}, mode: "tracking" });
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(api.post).toHaveBeenCalledWith("/api/v1/reports/playbooks/income_statement", {
+    params: {},
+    mode: "tracking",
+  });
+});
+
+it("useComposePlaybook busts the dashboard query too -- a tracking compose moves the wall", async () => {
+  // T2 gate round 4: this hook invalidated only ["reports"], while every other mutation
+  // in this file busts ["dashboard"] as well. A tracking compose changes which report is
+  // a series' newest -- i.e. what the wall shows and what the ribbon says -- so leaving
+  // ["dashboard"] cached meant the user composed the next period, went to the dashboard,
+  // and saw the OLD period for up to staleTime. That silently breaks the one promise the
+  // tracking mode makes: "moves forward on its own once you compose a newer one".
+  api.post.mockResolvedValueOnce({ id: "r-9", series_id: "s-1" });
+  const qc = new QueryClient(qcOpts);
+  const invalidate = vi.spyOn(qc, "invalidateQueries");
+  const { result } = renderHook(() => useComposePlaybook(), { wrapper: makeWrapper(qc) });
+  result.current.mutate({ key: "income_statement", params: {}, mode: "tracking" });
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  const keys = invalidate.mock.calls.map((c) => JSON.stringify(c[0]?.queryKey));
+  expect(keys).toContain(JSON.stringify(["reports"]));
   expect(keys).toContain(JSON.stringify(["dashboard"]));
 });

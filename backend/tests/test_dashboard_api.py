@@ -8,12 +8,17 @@ gated (unlike reports.py's `_get_owned` + `_can_manage`) — any tenant member
 may choose any published report as their own wallpaper."""
 
 import uuid
+from datetime import date
 
+import pytest
 from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 
 from app.core.database import set_tenant_context
 from app.models.report import Report
+from app.models.report_series import ReportSeries
 from app.models.user_dashboard_preference import UserDashboardPreference
+from app.services.report.period_resolver import ClosedPeriod, PeriodUnavailableReason
 from tests.conftest import create_test_tenant, create_test_user, make_auth_headers
 
 
@@ -38,6 +43,61 @@ async def _pin(db, r):
     r.dashboard_pinned_at = datetime.now(timezone.utc)
     await db.flush()
     return r
+
+
+# --- Rolling-period Stage 1 (Task 4): series selection helpers -------------
+
+
+async def _seed_series(db, ta, ua, *, playbook_key: str = "income_statement") -> ReportSeries:
+    s = ReportSeries(tenant_id=ta.id, playbook_key=playbook_key, created_by=ua.id)
+    db.add(s)
+    await db.flush()
+    return s
+
+
+async def _seed_tracking_report(db, ta, ua, series, period: str, *, title: str | None = None, created_at=None):
+    """A report linked into a series (mode="tracking" compose, Task 3) — NOT pinned to
+    `dashboard_pinned_at`: series membership, not the workspace-published-set pin, is
+    what makes a tracking report reachable via its series."""
+    r = Report(
+        tenant_id=ta.id,
+        title=title or f"{series.playbook_key} {period}",
+        spec_json={"sections": []},
+        rendered_html=f"<html>{period}</html>",
+        created_by=ua.id,
+        series_id=series.id,
+        period=period,
+    )
+    db.add(r)
+    await db.flush()
+    if created_at is not None:
+        # Override the server_default `created_at` directly, then re-flush — needed to
+        # construct the "newest PERIOD composed FIRST" scenario a created_at sort would
+        # get wrong (Task 4 brief's required test case).
+        r.created_at = created_at
+        await db.flush()
+    return r
+
+
+def _patch_resolver(monkeypatch, closed: ClosedPeriod):
+    """Fake `resolve_last_closed_period`, mirroring test_report_playbooks.py's own
+    helper of the same name (duplicated, not imported — each test file owns its own
+    fixtures). Patched at the period_resolver module boundary, not
+    app.api.v1.dashboard: the endpoint imports it lazily inside the function body, so a
+    `from X import Y` executed at call time reads the CURRENT `X.Y` — patching the
+    source module is what a monkeypatch set up before the call actually reaches."""
+
+    async def fake_resolve(db, tenant_id):
+        return closed
+
+    monkeypatch.setattr("app.services.report.period_resolver.resolve_last_closed_period", fake_resolve)
+
+
+_JUN_CLOSED = ClosedPeriod(name="Jun 2026", enddate=date(2026, 6, 30))
+_JUN_CLOSED_JUL_OPEN = ClosedPeriod(
+    name="Jun 2026", enddate=date(2026, 6, 30), next_open_name="Jul 2026", next_open_enddate=date(2026, 7, 31)
+)
+_UNREACHABLE = ClosedPeriod(name=None, enddate=None, reason=PeriodUnavailableReason.UNREACHABLE)
 
 
 # --- GET /dashboard ---------------------------------------------------------
@@ -1090,3 +1150,473 @@ async def test_delete_active_unauth_401(client, db):
 
     resp = await client.delete("/api/v1/dashboard/active")
     assert resp.status_code == 401
+
+
+# --- Rolling-period Stage 1 (Task 4): the wall follows a series -------------
+
+
+async def test_put_active_series_resolves_to_newest_report_by_period_not_created_at(client, db, monkeypatch):
+    """The required Task 4 test case: the newest PERIOD ("Mar 2026") was composed
+    FIRST (oldest created_at) -- a created_at sort would pick "Jan 2026" instead. Only
+    a chronological period sort gets this right."""
+    ta = await create_test_tenant(db, name="SeriesChronological")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    from datetime import datetime, timedelta, timezone
+
+    series = await _seed_series(db, ta, ua)
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    r_mar = await _seed_tracking_report(db, ta, ua, series, "Mar 2026", created_at=base)
+    await _seed_tracking_report(db, ta, ua, series, "Jan 2026", created_at=base + timedelta(days=1))
+    await _seed_tracking_report(db, ta, ua, series, "Feb 2026", created_at=base + timedelta(days=2))
+    headers = make_auth_headers(ua)
+    _patch_resolver(monkeypatch, _JUN_CLOSED)
+
+    resp = await client.put("/api/v1/dashboard/active", headers=headers, json={"series_id": str(series.id)})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["active"]["id"] == str(r_mar.id)
+    assert body["active"]["period"] == "Mar 2026"
+    assert body["active_is_fallback"] is False
+
+    get_resp = await client.get("/api/v1/dashboard", headers=headers)
+    assert get_resp.json()["active"]["id"] == str(r_mar.id)
+
+
+async def test_put_and_get_series_no_reports_yet_is_sane_empty_shape_not_500(client, db, monkeypatch):
+    ta = await create_test_tenant(db, name="SeriesEmpty")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    series = await _seed_series(db, ta, ua)
+    headers = make_auth_headers(ua)
+
+    put_resp = await client.put("/api/v1/dashboard/active", headers=headers, json={"series_id": str(series.id)})
+    assert put_resp.status_code == 200, put_resp.text
+    body = put_resp.json()
+    assert body["active"] is None
+    assert body["active_is_fallback"] is False
+    assert body["active_tracking"]["series_id"] == str(series.id)
+    assert body["active_tracking"]["period"] is None
+    assert body["active_tracking"]["period_check_ok"] is False
+
+    get_resp = await client.get("/api/v1/dashboard", headers=headers)
+    assert get_resp.status_code == 200, get_resp.text
+    get_body = get_resp.json()
+    assert get_body["active"] is None
+    assert get_body["active_is_fallback"] is False
+    assert get_body["active_tracking"]["series_id"] == str(series.id)
+
+
+async def test_get_series_selection_resolver_failure_degrades_not_500(client, db, monkeypatch):
+    ta = await create_test_tenant(db, name="SeriesResolverDown")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    series = await _seed_series(db, ta, ua)
+    r = await _seed_tracking_report(db, ta, ua, series, "Jun 2026")
+    headers = make_auth_headers(ua)
+
+    _patch_resolver(monkeypatch, _JUN_CLOSED)
+    assert (
+        await client.put("/api/v1/dashboard/active", headers=headers, json={"series_id": str(series.id)})
+    ).status_code == 200
+
+    _patch_resolver(monkeypatch, _UNREACHABLE)
+    # T2-gate MAJOR 2: the PUT above cached the successful JUN_CLOSED resolution for
+    # this tenant. Without clearing it, the GET below would legitimately reuse that
+    # cached answer instead of calling the resolver again -- which is the whole point
+    # of the cache, but it would mask what THIS test exists to exercise (a resolver
+    # failure degrading gracefully). Clearing simulates the TTL having elapsed.
+    from app.services.report.period_resolver import clear_period_cache
+
+    clear_period_cache()
+    resp = await client.get("/api/v1/dashboard", headers=headers)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["active"]["id"] == str(r.id)
+    assert body["active_tracking"]["period_check_ok"] is False
+    assert body["active_tracking"]["period"] == "Jun 2026"
+    assert body["active_tracking"]["resolved_period"] is None
+    assert body["active_tracking"]["next_open_period"] is None
+
+
+async def test_get_series_selection_reports_resolved_period_and_next_open(client, db, monkeypatch):
+    ta = await create_test_tenant(db, name="SeriesGreenRibbon")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    series = await _seed_series(db, ta, ua)
+    await _seed_tracking_report(db, ta, ua, series, "Jun 2026")
+    headers = make_auth_headers(ua)
+
+    _patch_resolver(monkeypatch, _JUN_CLOSED_JUL_OPEN)
+    assert (
+        await client.put("/api/v1/dashboard/active", headers=headers, json={"series_id": str(series.id)})
+    ).status_code == 200
+
+    resp = await client.get("/api/v1/dashboard", headers=headers)
+    body = resp.json()
+    assert body["active_tracking"]["period_check_ok"] is True
+    assert body["active_tracking"]["resolved_period"] == "Jun 2026"
+    assert body["active_tracking"]["next_open_period"] == "Jul 2026"
+
+
+async def test_active_tracking_is_absent_for_a_report_selection(client, db):
+    """Mock section 3: "a pinned snapshot shows no ribbon" -- active_tracking must be
+    entirely absent (None), not merely empty, for an ordinary report selection."""
+    ta = await create_test_tenant(db, name="NoRibbonForSnapshot")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    r = await _seed_report(db, ta, ua)
+    await _pin(db, r)
+    headers = make_auth_headers(ua)
+
+    put_resp = await client.put("/api/v1/dashboard/active", headers=headers, json={"report_id": str(r.id)})
+    assert put_resp.json()["active_tracking"] is None
+
+    get_resp = await client.get("/api/v1/dashboard", headers=headers)
+    assert get_resp.json()["active_tracking"] is None
+
+
+async def test_put_active_both_ids_is_400(client, db):
+    ta = await create_test_tenant(db, name="BothIds")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    r = await _seed_report(db, ta, ua)
+    await _pin(db, r)
+    series = await _seed_series(db, ta, ua)
+    headers = make_auth_headers(ua)
+
+    resp = await client.put(
+        "/api/v1/dashboard/active", headers=headers, json={"report_id": str(r.id), "series_id": str(series.id)}
+    )
+    assert resp.status_code == 400
+
+
+async def test_put_active_neither_id_is_400(client, db):
+    ta = await create_test_tenant(db, name="NeitherId")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    headers = make_auth_headers(ua)
+
+    resp = await client.put("/api/v1/dashboard/active", headers=headers, json={})
+    assert resp.status_code == 400
+
+
+async def test_put_active_unknown_and_malformed_series_id_are_404(client, db):
+    ta = await create_test_tenant(db, name="SeriesNotFound")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    headers = make_auth_headers(ua)
+
+    unknown = await client.put("/api/v1/dashboard/active", headers=headers, json={"series_id": str(uuid.uuid4())})
+    assert unknown.status_code == 404
+    assert unknown.json()["detail"] == "Series not found"
+
+    malformed = await client.put("/api/v1/dashboard/active", headers=headers, json={"series_id": "not-a-uuid"})
+    assert malformed.status_code == 404
+    assert malformed.json()["detail"] == "Series not found"
+
+
+async def test_put_active_cross_tenant_series_is_404_even_without_rls(client, db):
+    tenant_a = await create_test_tenant(db, name="SeriesCrossA")
+    tenant_b = await create_test_tenant(db, name="SeriesCrossB")
+    user_a, _ = await create_test_user(db, tenant_a)
+    user_b, _ = await create_test_user(db, tenant_b)
+
+    await set_tenant_context(db, str(tenant_b.id))
+    series_b = await _seed_series(db, tenant_b, user_b)
+
+    await set_tenant_context(db, str(tenant_a.id))
+    resp = await client.put(
+        "/api/v1/dashboard/active", headers=make_auth_headers(user_a), json={"series_id": str(series_b.id)}
+    )
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "Series not found"
+
+
+async def test_put_active_switching_report_to_series_clears_report_id(client, db, monkeypatch):
+    ta = await create_test_tenant(db, name="SwitchReportToSeries")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    r = await _seed_report(db, ta, ua)
+    await _pin(db, r)
+    series = await _seed_series(db, ta, ua)
+    headers = make_auth_headers(ua)
+    _patch_resolver(monkeypatch, _JUN_CLOSED)
+
+    assert (
+        await client.put("/api/v1/dashboard/active", headers=headers, json={"report_id": str(r.id)})
+    ).status_code == 200
+    assert (
+        await client.put("/api/v1/dashboard/active", headers=headers, json={"series_id": str(series.id)})
+    ).status_code == 200
+
+    pref = (
+        await db.execute(
+            select(UserDashboardPreference).where(
+                UserDashboardPreference.tenant_id == ta.id, UserDashboardPreference.user_id == ua.id
+            )
+        )
+    ).scalar_one()
+    assert pref.report_id is None
+    assert pref.series_id == series.id
+
+
+async def test_put_active_switching_series_to_report_clears_series_id(client, db, monkeypatch):
+    ta = await create_test_tenant(db, name="SwitchSeriesToReport")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    series = await _seed_series(db, ta, ua)
+    r = await _seed_report(db, ta, ua)
+    await _pin(db, r)
+    headers = make_auth_headers(ua)
+    _patch_resolver(monkeypatch, _JUN_CLOSED)
+
+    assert (
+        await client.put("/api/v1/dashboard/active", headers=headers, json={"series_id": str(series.id)})
+    ).status_code == 200
+    assert (
+        await client.put("/api/v1/dashboard/active", headers=headers, json={"report_id": str(r.id)})
+    ).status_code == 200
+
+    pref = (
+        await db.execute(
+            select(UserDashboardPreference).where(
+                UserDashboardPreference.tenant_id == ta.id, UserDashboardPreference.user_id == ua.id
+            )
+        )
+    ).scalar_one()
+    assert pref.series_id is None
+    assert pref.report_id == r.id
+
+
+async def test_check_constraint_bites_both_ids_set_directly(db):
+    """DB-level proof (not just the API's 400) that
+    ck_user_dashboard_preference_one_selection exists and is enforced -- a direct
+    ORM write bypassing the endpoint entirely must still fail."""
+    ta = await create_test_tenant(db, name="CheckConstraintBites")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    r = await _seed_report(db, ta, ua)
+    series = await _seed_series(db, ta, ua)
+
+    pref = UserDashboardPreference(tenant_id=ta.id, user_id=ua.id, report_id=r.id, series_id=series.id)
+    db.add(pref)
+    with pytest.raises(IntegrityError):
+        await db.flush()
+    await db.rollback()
+
+
+async def test_published_series_lists_tenant_series_with_current_period_meta(client, db):
+    ta = await create_test_tenant(db, name="PublishedSeriesList")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    series = await _seed_series(db, ta, ua, playbook_key="balance_sheet")
+    r = await _seed_tracking_report(db, ta, ua, series, "May 2026")
+    headers = make_auth_headers(ua)
+
+    resp = await client.get("/api/v1/dashboard", headers=headers)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    entry = next(s for s in body["published_series"] if s["id"] == str(series.id))
+    assert entry["playbook_key"] == "balance_sheet"
+    assert entry["period"] == "May 2026"
+    assert entry["report_id"] == str(r.id)
+
+
+async def test_published_series_empty_series_has_null_period_and_report_id(client, db):
+    ta = await create_test_tenant(db, name="PublishedSeriesEmptyEntry")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    series = await _seed_series(db, ta, ua)
+    headers = make_auth_headers(ua)
+
+    resp = await client.get("/api/v1/dashboard", headers=headers)
+    body = resp.json()
+    entry = next(s for s in body["published_series"] if s["id"] == str(series.id))
+    assert entry["period"] is None
+    assert entry["report_id"] is None
+
+
+async def test_dismiss_does_not_clear_a_valid_series_selection(client, db, monkeypatch):
+    """Regression: `_clear_stale_selection`'s original predicate treated ANY row with
+    report_id IS NULL as stale (true before Task 4, when report_id NULL only ever meant
+    "tombstoned"). Task 4 makes report_id NULL the NORMAL state for a valid series
+    selection too -- dismiss must not delete it."""
+    ta = await create_test_tenant(db, name="DismissSpareSeries")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    series = await _seed_series(db, ta, ua)
+    await _seed_tracking_report(db, ta, ua, series, "Jun 2026")
+    headers = make_auth_headers(ua)
+    _patch_resolver(monkeypatch, _JUN_CLOSED)
+
+    assert (
+        await client.put("/api/v1/dashboard/active", headers=headers, json={"series_id": str(series.id)})
+    ).status_code == 200
+
+    dismiss_resp = await client.post("/api/v1/dashboard/notice/dismiss", headers=headers)
+    assert dismiss_resp.status_code == 200, dismiss_resp.text
+    assert dismiss_resp.json()["active"]["period"] == "Jun 2026"
+
+    pref = (
+        await db.execute(
+            select(UserDashboardPreference).where(
+                UserDashboardPreference.tenant_id == ta.id, UserDashboardPreference.user_id == ua.id
+            )
+        )
+    ).scalar_one_or_none()
+    assert pref is not None
+    assert pref.series_id == series.id
+
+
+async def test_get_tombstoned_series_selection_falls_back_with_flag_true(client, db, monkeypatch):
+    """Simulates `ON DELETE SET NULL` firing on the series FK (no series-delete
+    endpoint exists yet to trigger this for real) -- same self-heal-to-most-recent-
+    published-report story migration 092 already tells for a deleted report."""
+    ta = await create_test_tenant(db, name="SeriesTombstoned")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    series = await _seed_series(db, ta, ua)
+    await _seed_tracking_report(db, ta, ua, series, "Jun 2026")
+    fallback_report = await _seed_report(db, ta, ua, title="Fallback")
+    await _pin(db, fallback_report)
+    headers = make_auth_headers(ua)
+    _patch_resolver(monkeypatch, _JUN_CLOSED)
+
+    assert (
+        await client.put("/api/v1/dashboard/active", headers=headers, json={"series_id": str(series.id)})
+    ).status_code == 200
+
+    pref = (
+        await db.execute(
+            select(UserDashboardPreference).where(
+                UserDashboardPreference.tenant_id == ta.id, UserDashboardPreference.user_id == ua.id
+            )
+        )
+    ).scalar_one()
+    pref.series_id = None  # simulate the FK's ON DELETE SET NULL
+    await db.flush()
+
+    resp = await client.get("/api/v1/dashboard", headers=headers)
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["active"]["id"] == str(fallback_report.id)
+    assert body["active_is_fallback"] is True
+    assert body["active_tracking"] is None
+
+
+async def test_put_active_series_resolver_runs_before_commit_sees_tenant_context(client, db, monkeypatch):
+    """Regression for the mid-run-commit GUC-clearing failure mode (memory:
+    set_local_tenant_context_mid_commit -- bitten twice in this program already): the
+    resolver call touches an RLS-protected table (netsuite_suiteql.execute selects
+    Connection), so it MUST run before `db.commit()`, not after, or it would silently
+    see zero rows / report unreachable regardless of what's actually there."""
+    ta = await create_test_tenant(db, name="ResolverBeforeCommit")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    series = await _seed_series(db, ta, ua)
+    await _seed_tracking_report(db, ta, ua, series, "Jun 2026")
+    headers = make_auth_headers(ua)
+
+    seen = {}
+
+    async def fake_resolve(db_arg, tenant_id):
+        row = (await db_arg.execute(text("SELECT current_setting('app.current_tenant_id', true)"))).scalar_one()
+        seen["tenant_ctx"] = row
+        return _JUN_CLOSED
+
+    monkeypatch.setattr("app.services.report.period_resolver.resolve_last_closed_period", fake_resolve)
+
+    resp = await client.put("/api/v1/dashboard/active", headers=headers, json={"series_id": str(series.id)})
+    assert resp.status_code == 200, resp.text
+    assert seen["tenant_ctx"] == str(ta.id)
+
+
+# --- T2-gate fixes: tenant-context restore (defense in depth) + period-close cache --
+
+
+async def test_put_active_series_reestablishes_context_before_upsert_defense_in_depth(client, db, monkeypatch):
+    """MAJOR 1 defense-in-depth (T2 gate): set_active_dashboard's series branch must
+    re-set the tenant context itself immediately before its own RLS-protected write,
+    not rely solely on resolve_last_closed_period's own restore (period_resolver.py's
+    `finally` — see test_report_period_resolver.py's unit-level coverage of that) —
+    mirrors playbooks.py's own "tool calls may commit" re-set before its Report
+    insert. Asserted via CALL ORDERING (spy), the same idiom test_report_refresh.py
+    uses for the identical GUC-survives-commit constraint: the `db` test fixture wraps
+    everything in an outer transaction/savepoint, so a service-level db.commit() here
+    is RELEASE SAVEPOINT, not a real COMMIT, and (per conftest.py's own documented
+    caveat) does NOT clear SET LOCAL the way production does — asserting actual GUC
+    state across a commit in this fixture would pass identically whether or not the
+    guard exists at all."""
+    ta = await create_test_tenant(db, name="DefenseInDepthOrdering")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    series = await _seed_series(db, ta, ua)
+    await _seed_tracking_report(db, ta, ua, series, "Jun 2026")
+    headers = make_auth_headers(ua)
+
+    events: list[str] = []
+
+    async def spy_resolve(db_arg, tenant_id):
+        events.append("resolve")
+        return _JUN_CLOSED
+
+    real_commit = db.commit
+
+    async def spy_commit():
+        events.append("commit")
+        await real_commit()
+
+    async def spy_ctx(session, tenant_id):
+        events.append("ctx")
+        validated = str(uuid.UUID(str(tenant_id)))
+        await session.execute(text(f"SET LOCAL app.current_tenant_id = '{validated}'"))
+
+    monkeypatch.setattr("app.services.report.period_resolver.resolve_last_closed_period", spy_resolve)
+    monkeypatch.setattr("app.api.v1.dashboard.set_tenant_context", spy_ctx)
+    monkeypatch.setattr(db, "commit", spy_commit)
+
+    resp = await client.put("/api/v1/dashboard/active", headers=headers, json={"series_id": str(series.id)})
+    assert resp.status_code == 200, resp.text
+
+    assert "resolve" in events and "ctx" in events and "commit" in events
+    resolve_idx = events.index("resolve")
+    ctx_idx = events.index("ctx")
+    commit_idx = events.index("commit")
+    assert resolve_idx < ctx_idx < commit_idx, f"expected resolve -> ctx -> commit ordering, got {events}"
+
+
+async def test_get_dashboard_reuses_cached_period_resolution_within_ttl(client, db, monkeypatch):
+    """MAJOR 2 (T2 gate): GET /dashboard (and PUT/dismiss) must not re-query NetSuite
+    on every load for the same tracking selection — resolve_last_closed_period is
+    called at most once across N requests within the cache TTL. If _build_tracking_info
+    called the raw (uncached) resolver, this would be N calls, not 1."""
+    from app.services.report.period_resolver import clear_period_cache
+
+    clear_period_cache()
+    ta = await create_test_tenant(db, name="DashboardCacheReuse")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    series = await _seed_series(db, ta, ua)
+    await _seed_tracking_report(db, ta, ua, series, "Jun 2026")
+    headers = make_auth_headers(ua)
+
+    call_count = {"n": 0}
+
+    async def counting_resolve(db_arg, tenant_id):
+        call_count["n"] += 1
+        return _JUN_CLOSED
+
+    monkeypatch.setattr("app.services.report.period_resolver.resolve_last_closed_period", counting_resolve)
+
+    assert (
+        await client.put("/api/v1/dashboard/active", headers=headers, json={"series_id": str(series.id)})
+    ).status_code == 200
+    assert call_count["n"] == 1
+
+    for _ in range(3):
+        resp = await client.get("/api/v1/dashboard", headers=headers)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["active_tracking"]["period_check_ok"] is True
+
+    assert call_count["n"] == 1  # every subsequent GET served the cached resolution
