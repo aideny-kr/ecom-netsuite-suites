@@ -36,6 +36,7 @@ Updated at the end of every task, not "later".
 |---|---|---|---|
 | `feat/dev-loop-and-harness` | T2 | 21 commits, process only — gated ×3, blockers fixed, **frozen** | nothing |
 | `feat/agent-graph-operating-model` | T2 | Track O (22 majors) + reject action, **ungated** | needs Track O decision |
+| `feat/rolling-period` | T2 | Stage 1 done. **PR #209 open, NOT merged.** verify **PASS @ `7f494264`**. Gate ×4 (budget spent; all pinned+codex): majors 2→3→0. Round-4 fixes landed | human merge call — deploy agents active. Then **Stage 2: scheduled compose** |
 
 **SHIPPED 2026-08-17 — `fix/ns-account-switch-and-chat-burst` → PR #194, squashed to
 `54729804`, deployed and live-verified on staging.** Ticket 86bba299w closed. It had
@@ -144,6 +145,20 @@ fresh branch off `main` and leave Track O behind pending its own decision.
 
 Written so the next session does not re-litigate these.
 
+- **2026-08-27 · On `feat/rolling-period` we answered a repeating gate shape with a SIBLING
+  AUDIT, not a 4th patch** · because two of round 3's three majors were regressions from
+  round 2's *own* fixes, and both shared one shape: *a guard applied to one path but not to
+  its sibling* (ReportSeries insert got ON CONFLICT, the Report insert next to it did not;
+  the resolver's GUC-restore `finally` covered the cache MISS but not the HIT). CLAUDE.md's
+  PR #194 lesson is that when consecutive rounds' findings share a shape you stop looping
+  and make the shape unrepresentable. So instead of only fixing the two instances, we
+  enumerated every sibling of both classes on the branch: **all 3 insert sites** (
+  `UserDashboardPreference` upsert, `ReportSeries`, `Report`) now carry conflict handling,
+  and **all 6 `db.commit()` sites** in `dashboard.py` are followed only by in-memory
+  response building. The one asymmetry left — the `report_id` branch of
+  `set_active_dashboard` lacking the series branch's defense-in-depth `set_tenant_context`
+  — is deliberate: it does no live I/O between its read and its write, so nothing can clear
+  the GUC there. Recorded because a future reader will otherwise "fix" that asymmetry.
 - **2026-08-27 · The HITL guard lives at the DISPATCHER, default-denied, over "each caller checks"**
   · because a caller that forgets is a hole, and one already existed. Verified reachable: a chat
   session with `workspace_id` set skips the guarded unified-agent block
@@ -337,6 +352,67 @@ Written so the next session does not re-litigate these.
 - **Don't add a rule to CLAUDE.md when a docstring next to the code would carry it.**
 
 ## OPEN — needs a human, blocking something
+
+- **`feat/rolling-period` — resume here.** Worktree
+  `.claude/worktrees/feat-rolling-period`, HEAD `bbb28f8f` (verify PASS at that sha).
+  **There is UNCOMMITTED work in the tree** from a round-2 gate-fix agent that was still
+  running when the session ended — do NOT `git checkout --` it:
+  - DONE in tree: MAJOR A (`dashboard-tracking-empty-state.tsx` + `page.tsx` +
+    `dashboard-switcher.tsx`) — selecting a tracking series with no report yet used to
+    dump the user on the generic "nothing published" panel *with the switcher gone*, so
+    there was no way back. Also the resolver GUC-between-queries minor.
+  - IN PROGRESS: **MAJOR B** — `playbooks.py` creates the `ReportSeries` row BEFORE
+    `_execute_sources`, and a tool call in there can COMMIT mid-flight (OAuth token
+    refresh), so a later compose failure leaves a phantom series: zero reports, no audit,
+    still listed in `published_series`. Its two RED tests are already written
+    (`test_compose_playbook_tracking_failed_compose_leaves_no_orphaned_series`,
+    `..._series_conflicting_row_reuses_existing_not_500`) and currently FAIL — that is the
+    TDD red phase, not a regression. **Intended fix:** keep a read-only SELECT pre-check
+    before the compose (so a repeat compose still short-circuits cheaply) and move the
+    get-or-create upsert to AFTER the compose succeeds, immediately before the Report
+    insert — so the row that could be orphaned is never created.
+  - Then: `./scripts/verify.sh` (full — `--quick` is not evidence), then gate round 3
+    **pinned**: `Workflow({name:"code-review-multiangle", args:{target:"feat/rolling-period", base:"origin/main"}})`.
+  - **Do NOT merge** — deployment agents were active as of 2026-08-27, and merging
+    auto-deploys staging. The 093 collision is already resolved (main's
+    `093_recon_reject_labels` landed first; this branch re-parented onto it and merged main in).
+  - Gate history on this branch: round 1 → 2 majors (RLS GUC cleared by an in-request
+    OAuth commit; dashboard GET doing 2 live SuiteQL calls per page load) — both fixed in
+    `bbb28f8f`. Round 2 → 2 majors (the two above). Both rounds valid: target pinned,
+    `codex_used: true`, 0 UNVERIFIED. Expect a round 3 to find more; that has been the
+    pattern all the way through.
+
+- **`feat/rolling-period`'s last full `verify.sh` is RED — on two auth tests this branch
+  does not touch.** `test_auth_security.py::TestLoginRateLimit::test_rate_limit_blocks_after_10`
+  and `test_auth.py::TestLogin::test_login_creates_audit_event`. Evidence it is NOT a
+  regression from this branch: (a) the SAME code passed full verify twice earlier
+  (after Task 4 and Task 5, 5642 passed / 0 new failures each time) and failed on the
+  third run; (b) both tests pass in isolation and as an ordered pair; (c) the branch
+  contains zero auth/rate-limiter changes; (d) my tests cannot pollute them — the audit
+  assertion is scoped to its own tenant and action, and nothing here touches limiter state.
+  There is no `pytest-randomly`/`xdist`, so ordering is deterministic — which makes the
+  intermittency *more* suspicious, not less: it points at shared limiter state or a
+  time-window boundary crossed on a slow run. **This is very likely the risk already
+  logged as NEXT #9** (nothing globally prevents `rate_limit`/`redis_lock` from building a
+  live client from `settings.REDIS_URL`). Do not gate or land this branch on a red
+  record: get ONE clean full run, and if it recurs, treat it as the NEXT #9 investigation
+  rather than a rolling-period defect.
+
+- **TWO migrations are both numbered `093` off parent `092`, on different branches.**
+  `feat/rolling-period` has `093_report_series`; `feat/recon-reject-action` (and
+  `agent-graph`) has `093_recon_reject_labels`. They are schema-orthogonal
+  (`report_series`/`reports` vs `reconciliation_results`), so nothing conflicts
+  logically — but if BOTH merge as-is, `alembic upgrade head` sees **two heads and
+  fails**, and staging auto-migrates on every main merge, so that breaks deploys
+  fleet-wide. **Whichever merges SECOND must re-parent to `094` off the first**
+  (linearize — never a merge migration; see `memory/feedback_merge_migration_breaks_downgrade`).
+  Decide merge order deliberately, not by whoever pushes first.
+  *Local-only side effect:* the shared docker Postgres now has BOTH sets of DDL applied
+  but `alembic_version` stamped at `093_report_series`, so the recon worktree's
+  `alembic upgrade head` cannot locate its own revision. One shared local DB cannot track
+  two divergent branches — whoever works locally re-stamps to their own head
+  (`alembic stamp --purge <their 093>`); no DDL is lost either way. CI and staging use
+  their own databases and are unaffected.
 
 - ~~Framework's NetSuite connection dead~~ **RESOLVED 2026-08-04.** Re-authed; connection
   `active`, health-checked 02:55, deposit sync completed 02:00, data current to 02:13

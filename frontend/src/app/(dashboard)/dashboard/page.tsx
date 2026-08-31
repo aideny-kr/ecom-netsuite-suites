@@ -5,6 +5,7 @@ import { useAuth } from "@/providers/auth-provider";
 import { useDashboard } from "@/hooks/use-dashboard";
 import { DashboardWall, DashboardWallSkeleton } from "./dashboard-wall";
 import { DashboardEmptyState } from "./dashboard-empty-state";
+import { DashboardTrackingEmptyState } from "./dashboard-tracking-empty-state";
 import {
   Plug,
   ScrollText,
@@ -62,6 +63,11 @@ export default function DashboardPage() {
           report={active}
           published={data?.published ?? []}
           activeIsFallback={data?.active_is_fallback}
+          // Rolling-period Stage 1 (Task 5): threaded straight through from
+          // useDashboard() — both optional/defaulted on DashboardWall, so this stays
+          // a no-op for a tenant with no tracking series yet.
+          publishedSeries={data?.published_series}
+          activeTracking={data?.active_tracking}
           subtitle={<p className="text-[13px] text-muted-foreground">Welcome back, {firstName}</p>}
         />
       ) : isError ? (
@@ -79,6 +85,18 @@ export default function DashboardPage() {
             Couldn&apos;t load your dashboard. Try refreshing the page.
           </p>
         </div>
+      ) : data?.active_tracking ? (
+        // Round-2 T2-gate MAJOR A: a tracking series was selected but hasn't composed
+        // its first report yet (mode="tracking" get-or-creates the series row up front
+        // — see DashboardSwitcher's "Tracking the close" group, which deliberately lets
+        // you pick such a series). Distinct from "nothing published at all"
+        // (DashboardEmptyState, below) — and crucially still shows the switcher, so
+        // picking this series is never a dead end.
+        <DashboardTrackingEmptyState
+          tracking={data.active_tracking}
+          published={data?.published ?? []}
+          publishedSeries={data?.published_series ?? []}
+        />
       ) : (
         <DashboardEmptyState />
       )}

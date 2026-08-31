@@ -52,12 +52,18 @@ function ComposingCard({ playbook, period }: { playbook: PlaybookInfo; period: s
   );
 }
 
+// Rolling-period Stage 1 (Task 5, mock §2). Tracking is the default: composing a
+// playbook is overwhelmingly "give me the current statement," and a fixed one-off
+// period is the deliberate exception, not the common case.
+type ComposeMode = "period" | "tracking";
+
 export function PlaybookLauncher() {
   const { data, isLoading } = usePlaybooks();
   const composePlaybook = useComposePlaybook();
   const router = useRouter();
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [paramValues, setParamValues] = useState<Record<string, string>>({});
+  const [mode, setMode] = useState<ComposeMode>("tracking");
   const [actionMsg, setActionMsg] = useState<string | null>(null);
 
   if (isLoading || !data?.length) return null;
@@ -69,6 +75,7 @@ export function PlaybookLauncher() {
     if (isPending) return;
     setSelectedKey(playbook.key);
     setParamValues({});
+    setMode("tracking");
     setActionMsg(null);
   }
 
@@ -76,11 +83,18 @@ export function PlaybookLauncher() {
     if (!selected) return;
     setActionMsg(null);
     composePlaybook.mutate(
-      { key: selected.key, params: paramValues },
+      // Tracking mode sends no params — the server resolves the period from
+      // NetSuite's own close state and ignores anything typed here (see
+      // PlaybookComposeRequest's docstring); any stale value left in paramValues
+      // from a prior "One specific period" visit must never leak into the request.
+      { key: selected.key, params: mode === "period" ? paramValues : {}, mode },
       {
         onSuccess: (report) => router.push(`/reports/${report.id}`),
-        // The backend's detail strings are user-facing (400 malformed period, 502 no
-        // NetSuite connection) — surface them instead of failing silently.
+        // The backend's detail strings are user-facing (400 malformed/unresolvable
+        // period, 502 no NetSuite connection) — surface them instead of failing
+        // silently. Same path for both modes: a mode="tracking" 400 (e.g.
+        // PeriodUnavailableError — "NetSuite doesn't have a closed accounting period
+        // yet") is exactly as user-facing as a mode="period" one.
         onError: (e: Error) => setActionMsg(e.message || "Couldn't create report"),
       },
     );
@@ -108,25 +122,81 @@ export function PlaybookLauncher() {
       </div>
 
       {selected && isPending ? (
-        <ComposingCard playbook={selected} period={paramValues.period ?? ""} />
+        // Tracking mode has no known period until the compose itself resolves one
+        // server-side (Task 1's resolver) — this component has no live hint to show,
+        // so the composing title stays bare ("Composing {name}") in that mode, exactly
+        // like the pre-existing "no period entered yet" case did for period mode.
+        <ComposingCard playbook={selected} period={mode === "period" ? paramValues.period ?? "" : ""} />
       ) : selected ? (
-        <div className="flex flex-wrap items-center gap-2 rounded-xl border bg-card p-5 shadow-soft">
-          {selected.params.map((param) => (
-            <Input
-              key={param.key}
-              placeholder={param.example}
-              aria-label={param.label}
-              value={paramValues[param.key] ?? ""}
-              onChange={(event) =>
-                setParamValues((prev) => ({ ...prev, [param.key]: event.target.value }))
-              }
-              className="max-w-xs"
-            />
-          ))}
-          <Button onClick={handleCreate} disabled={isPending}>
-            Create report
-          </Button>
-          {actionMsg && <span className="text-[13px] text-destructive">{actionMsg}</span>}
+        <div className="space-y-3 rounded-xl border bg-card p-5 shadow-soft">
+          <div className="grid gap-2 sm:grid-cols-2">
+            <label
+              className={cn(
+                "flex cursor-pointer flex-col gap-1 rounded-xl border p-4 transition-colors",
+                mode === "tracking" ? "border-primary ring-1 ring-primary" : "border-border hover:bg-muted/30",
+              )}
+            >
+              <span className="flex items-center gap-2 text-[13px] font-medium text-foreground">
+                <input
+                  type="radio"
+                  name={`compose-mode-${selected.key}`}
+                  checked={mode === "tracking"}
+                  onChange={() => setMode("tracking")}
+                  className="h-3.5 w-3.5 accent-primary"
+                />
+                Track the last closed period
+              </span>
+              <span className="text-[12px] text-muted-foreground">
+                Your dashboard always shows the newest period in this series, and
+                moves forward on its own each time you compose a newer one.
+              </span>
+            </label>
+            <label
+              className={cn(
+                "flex cursor-pointer flex-col gap-1 rounded-xl border p-4 transition-colors",
+                mode === "period" ? "border-primary ring-1 ring-primary" : "border-border hover:bg-muted/30",
+              )}
+            >
+              <span className="flex items-center gap-2 text-[13px] font-medium text-foreground">
+                <input
+                  type="radio"
+                  name={`compose-mode-${selected.key}`}
+                  checked={mode === "period"}
+                  onChange={() => setMode("period")}
+                  className="h-3.5 w-3.5 accent-primary"
+                />
+                One specific period
+              </span>
+              <span className="text-[12px] text-muted-foreground">
+                A fixed artifact for one month. Refreshes its own numbers; never
+                moves. This is today&apos;s behaviour.
+              </span>
+            </label>
+          </div>
+
+          {mode === "period" && (
+            <div className="flex flex-wrap items-center gap-2">
+              {selected.params.map((param) => (
+                <Input
+                  key={param.key}
+                  placeholder={param.example}
+                  aria-label={param.label}
+                  value={paramValues[param.key] ?? ""}
+                  onChange={(event) =>
+                    setParamValues((prev) => ({ ...prev, [param.key]: event.target.value }))
+                  }
+                  className="max-w-xs"
+                />
+              ))}
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Button onClick={handleCreate} disabled={isPending}>
+              Create report
+            </Button>
+            {actionMsg && <span className="text-[13px] text-destructive">{actionMsg}</span>}
+          </div>
         </div>
       ) : null}
     </div>

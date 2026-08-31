@@ -7,14 +7,19 @@ statement-grade GL aggregates, not ad-hoc reconstructions.
 from __future__ import annotations
 
 import json
+from datetime import date
 
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import select
 
+from app.models.audit import AuditEvent
 from app.models.report import Report
+from app.models.report_series import ReportSeries
+from app.services.report.period_resolver import ClosedPeriod, PeriodUnavailableReason
 from app.services.report.playbooks import (
     PLAYBOOKS,
+    PeriodUnavailableError,
     build_playbook_recipe,
     compose_playbook_report,
     normalize_period,
@@ -749,3 +754,488 @@ async def test_compose_playbook_endpoint_tool_failure_passes_through_refresh_err
 # exactly-one <h1>, statement content) returns once Task 3/4 land the renderer and
 # assembly seam — assemble_spec cannot produce rendered_html for this section type yet
 # (see test_compose_playbook_income_statement_pending_renderer_fails_closed above).
+
+
+# ---------------------------------------------------------------------------
+# mode="tracking" (Task 3, rolling-period Stage 1): the period is resolved from
+# NetSuite's own close state (period_resolver.resolve_last_closed_period) instead of
+# being typed, and the compose links into a per-tenant, per-playbook ReportSeries.
+# mode="period" (the default) stays today's behaviour end to end — those existing
+# tests above are untouched — plus persisting `period` on the row.
+# ---------------------------------------------------------------------------
+
+
+def _patch_resolver(monkeypatch, closed: ClosedPeriod):
+    """Fake ``resolve_last_closed_period``. Patched at the period_resolver module
+    boundary (not app.services.report.playbooks) because compose_playbook_report
+    imports it lazily inside the function body -- a `from X import Y` executed at
+    call time reads the CURRENT `X.Y`, so patching the source module is what a
+    monkeypatch set up before the call actually reaches."""
+
+    async def fake_resolve(db, tenant_id):
+        return closed
+
+    monkeypatch.setattr("app.services.report.period_resolver.resolve_last_closed_period", fake_resolve)
+
+
+_JUN_CLOSED = ClosedPeriod(name="Jun 2026", enddate=date(2026, 6, 30))
+_JUL_CLOSED = ClosedPeriod(name="Jul 2026", enddate=date(2026, 7, 31))
+
+
+def _trial_balance_by_params_for(period: str, prior: str, *, r1=None, r2=None) -> dict:
+    """Like ``_trial_balance_by_params`` but for an arbitrary (period, prior) pair --
+    needed to compose a SECOND tracking report a month later without re-fixturing the
+    whole income_statement 4-source shape."""
+    payloads = fx.trial_balance_payloads()
+    return {
+        ("trial_balance", period): r1 or _raw_tool_result(payloads["r1"]),
+        ("trial_balance", prior): r2 or _raw_tool_result(payloads["r2"]),
+    }
+
+
+async def test_compose_playbook_tracking_ignores_caller_supplied_period(db, monkeypatch):
+    """Tracking mode resolves the period server-side -- a caller-supplied
+    params["period"] must never leak through and get composed instead."""
+    tenant = await create_test_tenant(db, name="TrackingIgnoresParamCorp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_resolver(monkeypatch, _JUN_CLOSED)
+    calls = _patch_executor(monkeypatch, by_params=_income_statement_by_params())
+
+    report = await compose_playbook_report(
+        db,
+        playbook_key="income_statement",
+        params={"period": "Dec 1999"},  # must be ignored entirely
+        tenant_id=tenant.id,
+        actor_id=user.id,
+        mode="tracking",
+    )
+
+    assert report.period == "Jun 2026"
+    assert calls[0]["params"]["period"] == "Jun 2026"
+
+
+async def test_compose_playbook_tracking_resolves_period_and_creates_series(db, monkeypatch):
+    tenant = await create_test_tenant(db, name="TrackingCorp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_resolver(monkeypatch, _JUN_CLOSED)
+    calls = _patch_executor(monkeypatch, by_params=_income_statement_by_params())
+
+    report = await compose_playbook_report(
+        db,
+        playbook_key="income_statement",
+        params={},
+        tenant_id=tenant.id,
+        actor_id=user.id,
+        mode="tracking",
+    )
+
+    assert len(calls) == 4  # composed exactly like today for the resolved period
+    assert report.period == "Jun 2026"
+    assert report.series_id is not None
+    series = (await db.execute(select(ReportSeries).where(ReportSeries.tenant_id == tenant.id))).scalar_one()
+    assert series.id == report.series_id
+    assert series.playbook_key == "income_statement"
+    assert series.created_by == user.id
+
+
+async def test_compose_playbook_tracking_series_conflicting_row_reuses_existing_not_500(db, monkeypatch):
+    """MINOR (T2 gate): compose_playbook_report's ReportSeries get-or-create must
+    resolve via a real Postgres upsert (ON CONFLICT), not a bare SELECT-then-INSERT —
+    two concurrent tracking composes for the same (tenant, playbook_key) both racing
+    the old SELECT would both see 'no row', both INSERT, and the loser would violate
+    uq_report_series_tenant_playbook as an unhandled IntegrityError -> 500 (the
+    endpoint only catches ValueError/RefreshError; verified this raises on
+    unmodified code via a SELECT-interception race simulation during development).
+
+    MAJOR B (T2 gate, round 2) moved the get-or-create's actual INSERT to AFTER
+    _execute_sources succeeds (see the orphan-series tests below) — a pre-flight
+    read-only SELECT now runs first and would simply find a row seeded BEFORE this
+    call, never reaching the INSERT/ON CONFLICT branch at all. So the racing writer
+    must land its row DURING _execute_sources (from the fake tool executor) — after
+    the pre-flight SELECT has already returned 'no row' but before the real INSERT —
+    to still exercise the ON CONFLICT path this test is actually about. Same
+    seed-the-conflicting-row idiom as test_put_active_conflicting_row_upserts_instead_of_500
+    in test_dashboard_api.py for the analogous dashboard.py race, just relocated to
+    where a genuine race would actually land now."""
+    tenant = await create_test_tenant(db, name="SeriesConflictCorp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_resolver(monkeypatch, _JUN_CLOSED)
+
+    winner_id: dict[str, object] = {}
+
+    async def fake_execute(tool_name, tool_input, tenant_id, actor_id, correlation_id, db, **kw):
+        if "id" not in winner_id:
+            # Simulate a concurrent tracking compose landing its series row WHILE this
+            # one is still executing sources — exactly the window the real ON CONFLICT
+            # upsert (in compose_playbook_report) exists to resolve gracefully.
+            winner = ReportSeries(tenant_id=tenant.id, playbook_key="income_statement", created_by=user.id)
+            db.add(winner)
+            await db.flush()
+            winner_id["id"] = winner.id
+        by_params = _income_statement_by_params()
+        key = (tool_input.get("report_type"), tool_input.get("period"))
+        return by_params.get(key, _RESULT)
+
+    monkeypatch.setattr("app.services.chat.tools.execute_tool_call", fake_execute)
+
+    report = await compose_playbook_report(
+        db, playbook_key="income_statement", params={}, tenant_id=tenant.id, actor_id=user.id, mode="tracking"
+    )
+
+    assert report.series_id == winner_id["id"]
+    series_rows = (await db.execute(select(ReportSeries).where(ReportSeries.tenant_id == tenant.id))).scalars().all()
+    assert len(series_rows) == 1  # get-or-create resolved to the existing row, not a duplicate
+
+
+async def test_compose_playbook_tracking_report_conflicting_row_reuses_existing_not_500(db, monkeypatch):
+    """MAJOR 1 (T2 gate, round 3): moving the Report creation to after
+    _execute_sources (to stop orphaned series -- see the orphan-series test below)
+    widened the window between the pre-flight "does a report already exist for this
+    (series_id, period)?" SELECT above and the actual Report insert further down --
+    _execute_sources is a full round of live NetSuite calls in between. Two
+    concurrent mode="tracking" composes for the same tenant/playbook/period
+    (double-click, retry-on-timeout, two tabs) both pass the pre-flight check, both
+    insert, and the second violates the partial unique index
+    uq_reports_series_id_period as an unhandled IntegrityError --
+    compose_playbook_endpoint only catches ValueError/RefreshError, so it would
+    surface as a 500.
+
+    The asymmetry was the tell: the ReportSeries insert lower down got ON CONFLICT DO
+    NOTHING + re-select with a documented rationale; the Report insert was a bare
+    db.add(report). Mirrors
+    test_compose_playbook_tracking_series_conflicting_row_reuses_existing_not_500, but
+    seeds a FULL competing compose (its own series AND its own Report row) during
+    _execute_sources -- the series get-or-create is already race-safe (see that test);
+    this one is about the very next insert."""
+    tenant = await create_test_tenant(db, name="ReportConflictCorp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_resolver(monkeypatch, _JUN_CLOSED)
+
+    winner: dict[str, object] = {}
+
+    async def fake_execute(tool_name, tool_input, tenant_id, actor_id, correlation_id, db, **kw):
+        if "report_id" not in winner:
+            # Simulate a concurrent tracking compose finishing ENTIRELY (its own
+            # series get-or-create AND its own Report insert) while this one is
+            # still executing sources -- exactly the widened window MAJOR 1 exists to
+            # guard.
+            series = ReportSeries(tenant_id=tenant.id, playbook_key="income_statement", created_by=user.id)
+            db.add(series)
+            await db.flush()
+            other_report = Report(
+                tenant_id=tenant.id,
+                title="Income Statement",
+                spec_json={},
+                rendered_html="<html></html>",
+                created_by=user.id,
+                recipe_json={},
+                period="Jun 2026",
+                series_id=series.id,
+            )
+            db.add(other_report)
+            await db.flush()
+            winner["series_id"] = series.id
+            winner["report_id"] = other_report.id
+        by_params = _income_statement_by_params()
+        key = (tool_input.get("report_type"), tool_input.get("period"))
+        return by_params.get(key, _RESULT)
+
+    monkeypatch.setattr("app.services.chat.tools.execute_tool_call", fake_execute)
+
+    report = await compose_playbook_report(
+        db, playbook_key="income_statement", params={}, tenant_id=tenant.id, actor_id=user.id, mode="tracking"
+    )
+
+    assert report.id == winner["report_id"]
+    assert report.series_id == winner["series_id"]
+    report_rows = (
+        (await db.execute(select(Report).where(Report.series_id == winner["series_id"], Report.period == "Jun 2026")))
+        .scalars()
+        .all()
+    )
+    assert len(report_rows) == 1  # get-or-create resolved to the existing row, not a duplicate/IntegrityError
+
+
+async def test_compose_playbook_tracking_never_returns_another_tenants_report(db, monkeypatch):
+    """T2 gate round 4: the pre-flight idempotency lookup filtered ReportSeries by
+    tenant_id but the follow-up Report lookup keyed ONLY on (series_id, period) --
+    no tenant predicate. That is safe only while every reports.series_id is
+    guaranteed to point at a series of the SAME tenant, and nothing guarantees it:
+    reports.series_id is a plain single-column FK to report_series.id (migration
+    093), not a tenant-composite one, so Postgres will happily accept a row whose
+    tenant_id and series' tenant_id disagree.
+
+    This test constructs exactly that row -- and it is constructible here precisely
+    BECAUSE the CI role is BYPASSRLS, so RLS is not standing behind the query to
+    save it. Without an explicit tenant predicate the compose hands tenant A a
+    report belonging to tenant B: a cross-tenant read, the repo's hardest
+    invariant. The query filter is the guard, not RLS and not the FK."""
+    tenant_a = await create_test_tenant(db, name="TenantAlpha")
+    tenant_b = await create_test_tenant(db, name="TenantBeta")
+    user_a, _ = await create_test_user(db, tenant_a)
+    user_b, _ = await create_test_user(db, tenant_b)
+    _patch_resolver(monkeypatch, _JUN_CLOSED)
+
+    # Tenant A owns the series...
+    series_a = ReportSeries(tenant_id=tenant_a.id, playbook_key="income_statement", created_by=user_a.id)
+    db.add(series_a)
+    await db.flush()
+
+    # ...but a row belonging to TENANT B points at it for the same period. The plain
+    # FK permits this; only an explicit tenant predicate in the lookup excludes it.
+    foreign_report = Report(
+        tenant_id=tenant_b.id,
+        title="Tenant B private income statement",
+        spec_json={},
+        rendered_html="<html>tenant B numbers</html>",
+        created_by=user_b.id,
+        recipe_json={},
+        period="Jun 2026",
+        series_id=series_a.id,
+    )
+    db.add(foreign_report)
+    await db.flush()
+
+    async def fake_execute(tool_name, tool_input, tenant_id, actor_id, correlation_id, db, **kw):
+        by_params = _income_statement_by_params()
+        key = (tool_input.get("report_type"), tool_input.get("period"))
+        return by_params.get(key, _RESULT)
+
+    monkeypatch.setattr("app.services.chat.tools.execute_tool_call", fake_execute)
+
+    # The achievable guarantee is NOT "compose succeeds": uq_reports_series_id_period is
+    # keyed on (series_id, period) with no tenant column, so tenant B's row genuinely
+    # occupies that slot and tenant A cannot insert there. Full enforcement needs a
+    # tenant-composite FK/index (follow-up). What compose MUST guarantee, and does, is
+    # that it never silently hands back the other tenant's report -- it fails loudly.
+    with pytest.raises(ValueError, match="different tenant"):
+        await compose_playbook_report(
+            db, playbook_key="income_statement", params={}, tenant_id=tenant_a.id, actor_id=user_a.id, mode="tracking"
+        )
+
+    # And the foreign row is untouched -- no overwrite, no read-through.
+    still_b = (await db.execute(select(Report).where(Report.id == foreign_report.id))).scalar_one()
+    assert still_b.tenant_id == tenant_b.id
+    assert "tenant B numbers" in (still_b.rendered_html or "")
+
+
+async def test_compose_playbook_tracking_failed_compose_leaves_no_orphaned_series(db, monkeypatch):
+    """MAJOR B (T2 gate, round 2): a failed tracking compose must never leave a
+    ReportSeries row behind with zero linked reports. The series get-or-create used to
+    run BEFORE _execute_sources — if a tool call inside _execute_sources commits the
+    session mid-flight (a real production risk: OAuth token refresh, see
+    netsuite_oauth_service.py, reached via get_valid_token) and compose then fails (a
+    required rid's own RefreshError, or the financial_statement_resolution_error 502
+    path), that mid-flight commit durably persisted the series INSERT even though the
+    exception propagated before any Report row or report.compose audit event ever
+    existed — a phantom series with zero reports, surfaced by GET /dashboard's
+    published_series as trackable, that the user never successfully created.
+
+    Reproduces the mid-flight commit with a fake tool executor that commits the
+    session (RELEASE SAVEPOINT under this fixture's create_savepoint mode — folds
+    prior writes into the outer scope, immune to a LATER rollback, exactly like a real
+    Postgres COMMIT durably persisting work mid-request — see conftest.py's db fixture
+    docstring) before failing r1 (the hard-dependency source), then rolls back — as the
+    endpoint's own except ValueError/RefreshError path leaves the session — and asserts
+    no series row survived that sequence."""
+    tenant = await create_test_tenant(db, name="OrphanSeriesCorp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_resolver(monkeypatch, _JUN_CLOSED)
+
+    async def fake_execute(tool_name, tool_input, tenant_id, actor_id, correlation_id, db, **kw):
+        await db.commit()  # simulates get_valid_token's token-refresh commit, mid-flight
+        return json.dumps({"success": False, "error": "No active NetSuite connection found"})
+
+    monkeypatch.setattr("app.services.chat.tools.execute_tool_call", fake_execute)
+
+    with pytest.raises(RefreshError):
+        await compose_playbook_report(
+            db, playbook_key="income_statement", params={}, tenant_id=tenant.id, actor_id=user.id, mode="tracking"
+        )
+    await db.rollback()
+
+    series_rows = (await db.execute(select(ReportSeries).where(ReportSeries.tenant_id == tenant.id))).scalars().all()
+    assert series_rows == []  # no orphan: the series is never durably created before a report exists
+    report_rows = (await db.execute(select(Report).where(Report.tenant_id == tenant.id))).scalars().all()
+    assert report_rows == []
+
+
+async def test_compose_playbook_tracking_second_compose_same_period_is_idempotent(db, monkeypatch):
+    tenant = await create_test_tenant(db, name="TrackingIdempotentCorp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_resolver(monkeypatch, _JUN_CLOSED)
+    calls = _patch_executor(monkeypatch, by_params=_income_statement_by_params())
+
+    first = await compose_playbook_report(
+        db, playbook_key="income_statement", params={}, tenant_id=tenant.id, actor_id=user.id, mode="tracking"
+    )
+    second = await compose_playbook_report(
+        db, playbook_key="income_statement", params={}, tenant_id=tenant.id, actor_id=user.id, mode="tracking"
+    )
+
+    assert second.id == first.id
+    assert len(calls) == 4  # the second compose never redispatched a single source
+    series_rows = (await db.execute(select(ReportSeries).where(ReportSeries.tenant_id == tenant.id))).scalars().all()
+    assert len(series_rows) == 1  # get-or-create, not a second series
+    report_rows = (await db.execute(select(Report).where(Report.tenant_id == tenant.id))).scalars().all()
+    assert len(report_rows) == 1  # no duplicate report for the same (series, period)
+
+
+async def test_compose_playbook_tracking_new_closed_period_rolls_the_series_forward(db, monkeypatch):
+    """A later tracking compose, once NetSuite closes the NEXT period, creates a new
+    report but reuses the SAME series -- the series tracks the playbook, not one period."""
+    tenant = await create_test_tenant(db, name="TrackingRollCorp")
+    user, _ = await create_test_user(db, tenant)
+
+    _patch_resolver(monkeypatch, _JUN_CLOSED)
+    _patch_executor(monkeypatch, by_params=_trial_balance_by_params_for("Jun 2026", "May 2026"))
+    june = await compose_playbook_report(
+        db, playbook_key="trial_balance", params={}, tenant_id=tenant.id, actor_id=user.id, mode="tracking"
+    )
+
+    _patch_resolver(monkeypatch, _JUL_CLOSED)
+    _patch_executor(monkeypatch, by_params=_trial_balance_by_params_for("Jul 2026", "Jun 2026"))
+    july = await compose_playbook_report(
+        db, playbook_key="trial_balance", params={}, tenant_id=tenant.id, actor_id=user.id, mode="tracking"
+    )
+
+    assert july.id != june.id
+    assert june.period == "Jun 2026" and july.period == "Jul 2026"
+    assert july.series_id == june.series_id
+    series_rows = (await db.execute(select(ReportSeries).where(ReportSeries.tenant_id == tenant.id))).scalars().all()
+    assert len(series_rows) == 1
+
+
+async def test_compose_playbook_period_mode_sets_period_column_but_no_series(db, monkeypatch):
+    """mode="period" (the default -- omitted here, exactly like every pre-Task-3
+    caller) keeps composing against the TYPED period; the only Task-3 change is that
+    `period` now persists on the row, and no series is ever touched."""
+    tenant = await create_test_tenant(db, name="PeriodModeCorp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_executor(monkeypatch, by_params=_income_statement_by_params())
+
+    report = await compose_playbook_report(
+        db, playbook_key="income_statement", params={"period": "Jun 2026"}, tenant_id=tenant.id, actor_id=user.id
+    )
+
+    assert report.period == "Jun 2026"
+    assert report.series_id is None
+    series_rows = (await db.execute(select(ReportSeries).where(ReportSeries.tenant_id == tenant.id))).scalars().all()
+    assert series_rows == []
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        PeriodUnavailableReason.NO_CLOSED_PERIOD,
+        PeriodUnavailableReason.UNSUPPORTED_PERIOD_NAME,
+        PeriodUnavailableReason.UNREACHABLE,
+    ],
+)
+async def test_compose_playbook_tracking_unresolved_period_raises_named_reason(db, monkeypatch, reason):
+    tenant = await create_test_tenant(db, name=f"Unresolved{reason.value}Corp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_resolver(monkeypatch, ClosedPeriod(name=None, enddate=None, reason=reason))
+    calls = _patch_executor(monkeypatch)
+
+    with pytest.raises(PeriodUnavailableError) as exc:
+        await compose_playbook_report(
+            db, playbook_key="income_statement", params={}, tenant_id=tenant.id, actor_id=user.id, mode="tracking"
+        )
+
+    assert exc.value.reason == reason
+    assert str(exc.value)  # a real message, never composed for a guessed period
+    assert calls == []  # never dispatches a single source when the period can't be resolved
+    rows = (await db.execute(select(Report).where(Report.tenant_id == tenant.id))).scalars().all()
+    assert rows == []
+    series_rows = (await db.execute(select(ReportSeries).where(ReportSeries.tenant_id == tenant.id))).scalars().all()
+    assert series_rows == []  # never gets far enough to get-or-create a series either
+
+
+async def test_compose_playbook_tracking_audit_log_includes_series_id(db, monkeypatch):
+    tenant = await create_test_tenant(db, name="AuditSeriesCorp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_resolver(monkeypatch, _JUN_CLOSED)
+    _patch_executor(monkeypatch, by_params=_income_statement_by_params())
+
+    report = await compose_playbook_report(
+        db, playbook_key="income_statement", params={}, tenant_id=tenant.id, actor_id=user.id, mode="tracking"
+    )
+
+    event = (
+        await db.execute(
+            select(AuditEvent).where(
+                AuditEvent.tenant_id == tenant.id,
+                AuditEvent.action == "report.compose",
+                AuditEvent.resource_id == str(report.id),
+            )
+        )
+    ).scalar_one()
+    assert event.payload["series_id"] == str(report.series_id)
+
+
+async def test_compose_playbook_period_mode_audit_log_has_no_series_id(db, monkeypatch):
+    tenant = await create_test_tenant(db, name="AuditNoSeriesCorp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_executor(monkeypatch, by_params=_income_statement_by_params())
+
+    report = await compose_playbook_report(
+        db, playbook_key="income_statement", params={"period": "Jun 2026"}, tenant_id=tenant.id, actor_id=user.id
+    )
+
+    event = (
+        await db.execute(
+            select(AuditEvent).where(
+                AuditEvent.tenant_id == tenant.id,
+                AuditEvent.action == "report.compose",
+                AuditEvent.resource_id == str(report.id),
+            )
+        )
+    ).scalar_one()
+    assert "series_id" not in event.payload
+
+
+async def test_compose_playbook_endpoint_tracking_returns_period_and_series_id(db, monkeypatch):
+    from app.api.v1.reports import PlaybookComposeRequest, compose_playbook_endpoint
+
+    tenant = await create_test_tenant(db, name="EndpointTrackingCorp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_resolver(monkeypatch, _JUN_CLOSED)
+    _patch_executor(monkeypatch, by_params=_income_statement_by_params())
+
+    response = await compose_playbook_endpoint(
+        "income_statement", PlaybookComposeRequest(mode="tracking"), user=user, db=db
+    )
+
+    assert response.period == "Jun 2026"
+    assert response.series_id is not None
+
+
+async def test_compose_playbook_endpoint_tracking_unresolved_period_is_400_naming_reason(db, monkeypatch):
+    from app.api.v1.reports import PlaybookComposeRequest, compose_playbook_endpoint
+
+    tenant = await create_test_tenant(db, name="Unresolved400Corp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_resolver(monkeypatch, ClosedPeriod(name=None, enddate=None, reason=PeriodUnavailableReason.NO_CLOSED_PERIOD))
+    _patch_executor(monkeypatch)
+
+    with pytest.raises(HTTPException) as exc:
+        await compose_playbook_endpoint(
+            "income_statement",
+            PlaybookComposeRequest(mode="tracking"),
+            user=user,
+            db=db,
+        )
+
+    assert exc.value.status_code == 400
+    # An operator-facing message, not a bare enum/reason code leaking to the UI.
+    assert exc.value.detail
+    assert "no_closed_period" not in exc.value.detail
+    assert "NO_CLOSED_PERIOD" not in exc.value.detail
+
+
+def test_playbook_compose_request_mode_defaults_to_period():
+    from app.schemas.report import PlaybookComposeRequest
+
+    assert PlaybookComposeRequest(params={"period": "Jun 2026"}).mode == "period"
+    assert PlaybookComposeRequest(params={"period": "Jun 2026"}, mode="tracking").mode == "tracking"
