@@ -58,6 +58,23 @@ REASON_STALL = "stall"
 REASON_ERROR = "error"
 
 
+def auto_compose_is_scheduled() -> bool:
+    """Is a scheduled compose actually going to happen? THE single source of truth —
+    the dashboard ribbon imports this too, deliberately.
+
+    Round 2 of the T2 gate found the hole this closes: the ribbon gated only on
+    ROLLING_PERIOD_AUTO_COMPOSE_ENABLED, so setting the per-tenant cap to 0 (a plausible
+    way to throttle during a NetSuite rate-limit incident) left the sweep composing
+    nothing every night while the UI kept promising "will appear within a day" — the very
+    defect the gating exists to prevent, reached through the OTHER knob.
+
+    Two callers checking a raw boolean is how that hole opened; a shared predicate is how
+    it stays shut. Any future condition on "will a compose happen" belongs HERE, never at
+    a call site.
+    """
+    return settings.ROLLING_PERIOD_AUTO_COMPOSE_ENABLED and settings.ROLLING_PERIOD_COMPOSE_MAX_PER_TENANT > 0
+
+
 def _fingerprint(exc: BaseException) -> str:
     """Collapse a failure to a comparable shape. Identical fingerprints across every
     attempt means re-running will not help — that is a stall, not a slow convergence,
@@ -96,6 +113,17 @@ async def sweep_tenant_series(
         "detail": None,
     }
 
+    # Cheapest filter first (agent-graph.md #14): resolving costs 2 NetSuite round trips,
+    # and a tenant with no series has nothing to compose whatever it returns. Most
+    # tenants track nothing, so this skips the majority of the sweep's live I/O.
+    series_rows = (
+        await db.execute(select(ReportSeries.id, ReportSeries.playbook_key).where(ReportSeries.tenant_id == tenant_id))
+    ).all()
+    stats["series_total"] = len(series_rows)
+    if not series_rows:
+        stats["reason"] = REASON_DONE
+        return stats
+
     closed = await resolve_last_closed_period_cached(db, tenant_id)
     if not closed.resolved or not closed.name:
         # The run cannot do its job. Report `error` and compose nothing — reporting
@@ -109,14 +137,6 @@ async def sweep_tenant_series(
         return stats
 
     stats["period"] = closed.name
-
-    series_rows = (
-        await db.execute(select(ReportSeries.id, ReportSeries.playbook_key).where(ReportSeries.tenant_id == tenant_id))
-    ).all()
-    stats["series_total"] = len(series_rows)
-    if not series_rows:
-        stats["reason"] = REASON_DONE
-        return stats
 
     # The cheap filter before the expensive call (#14): one indexed query tells us which
     # series already hold this period, instead of paying 4-6 NetSuite round trips per
@@ -196,7 +216,11 @@ async def sweep_tenant_series(
                 logger.warning("rolling_period_compose.rollback_failed", exc_info=True)
 
     if stats["composed"] == 0 and stats["failed"] > 0:
-        if len(fingerprints) == 1:
+        # A stall means "identical failures ACROSS ATTEMPTS, so re-running will not help".
+        # One attempt is not a pattern: classifying a single transient 502 as a stall
+        # tells the ops digest a mechanism change is needed when a retry tomorrow would
+        # have fixed it (round 2 of the T2 gate).
+        if len(fingerprints) == 1 and stats["failed"] > 1:
             stats["reason"] = REASON_STALL
             stats["detail"] = next(iter(fingerprints))
         else:
@@ -216,10 +240,14 @@ async def collect_and_dispatch(db: AsyncSession) -> dict:
     ``report_auto_refresh_all`` uses. Fail-closed: a deployment that has never heard of
     this feature does nothing rather than sweeping every tenant on first boot.
     """
-    stats = {"tenants": 0, "dispatched": 0, "failed": 0, "enabled": settings.ROLLING_PERIOD_AUTO_COMPOSE_ENABLED}
-    if not settings.ROLLING_PERIOD_AUTO_COMPOSE_ENABLED:
+    stats = {"tenants": 0, "dispatched": 0, "failed": 0, "enabled": auto_compose_is_scheduled()}
+    if not auto_compose_is_scheduled():
         stats["reason"] = REASON_DONE
-        stats["detail"] = "ROLLING_PERIOD_AUTO_COMPOSE_ENABLED is false"
+        stats["detail"] = (
+            "no compose is scheduled: enabled="
+            f"{settings.ROLLING_PERIOD_AUTO_COMPOSE_ENABLED} "
+            f"cap={settings.ROLLING_PERIOD_COMPOSE_MAX_PER_TENANT}"
+        )
         logger.info("rolling_period_compose_all.disabled", extra=dict(stats))
         return stats
 
@@ -239,6 +267,11 @@ async def collect_and_dispatch(db: AsyncSession) -> dict:
             )
             stats["dispatched"] += 1
         except Exception:
+            # Deliberately NO db.rollback() here, unlike the per-series except in
+            # sweep_tenant_series. What fails here is send_task — a broker (Redis) call
+            # that performs no DB write — so the session cannot be left in
+            # pending-rollback. The asymmetry is reasoned, not an oversight: rolling back
+            # a clean read-only transaction on every broker hiccup would be noise.
             stats["failed"] += 1
             logger.exception("rolling_period_compose_all.dispatch_failed", extra={"tenant_id": str(tenant_id)})
 

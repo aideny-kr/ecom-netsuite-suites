@@ -298,6 +298,14 @@ async def compose_playbook_report(
         # stale period for up to 5 minutes after a close, which is exactly when a user
         # clicks compose. The scheduled caller opts into reuse; a person always gets
         # a live answer.
+        if closed_period is not None:
+            # Trust nothing a caller injects. This parameter widened a previously
+            # tenant-safe function: a ClosedPeriod resolved for tenant A, passed with
+            # tenant B's id, would compose B's report under A's period — and this file
+            # already carries a cross-tenant guard on the ON CONFLICT path for exactly
+            # this class of mistake. The guard is cheap; the failure is silent and wrong.
+            if closed_period.tenant_id is not None and closed_period.tenant_id != tenant_id:
+                raise ValueError("closed_period was resolved for a different tenant than this compose")
         closed = closed_period or await resolve_last_closed_period(db, tenant_id)
         if not closed.resolved:
             raise PeriodUnavailableError(closed.reason)

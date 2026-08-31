@@ -27,7 +27,11 @@ from app.models.report import Report
 from app.models.report_series import ReportSeries
 from app.services.report.period_resolver import ClosedPeriod, PeriodUnavailableReason
 from app.services.report.refresh_service import RefreshError
-from app.workers.tasks.rolling_period_compose import REASON_BUDGET, sweep_tenant_series
+from app.workers.tasks.rolling_period_compose import (
+    REASON_BUDGET,
+    REASON_ERROR,
+    sweep_tenant_series,
+)
 from tests.conftest import create_test_tenant, create_test_user
 
 _JUN_CLOSED = ClosedPeriod(name="Jun 2026", enddate=date(2026, 6, 30))
@@ -411,3 +415,63 @@ async def test_a_failed_series_rolls_back_so_the_next_one_is_not_poisoned(db, mo
 
     assert result["failed"] == 2
     assert rollbacks["n"] == 2, "every failed series must leave the session usable for the next"
+
+
+# --- T2 gate round 2 --------------------------------------------------------------
+
+
+async def test_a_single_failure_is_an_error_not_a_stall(db, monkeypatch, tenant_user):
+    """A stall means "identical failures ACROSS ATTEMPTS, so re-running will not help".
+    One attempt is not a pattern. Calling a lone transient 502 a stall tells the ops
+    digest a mechanism change is needed when a retry tomorrow would have fixed it — and
+    the whole point of the reason enum is that a human can route on it."""
+    tenant, user = tenant_user
+    await _series(db, tenant, user, "income_statement", newest_period="May 2026")
+    _patch_resolver(monkeypatch, _JUN_CLOSED)
+
+    async def one_transient(_key):
+        raise RefreshError(502, "transient blip")
+
+    _patch_compose(monkeypatch, one_transient)
+    result = await sweep_tenant_series(db, tenant.id)
+
+    assert result["failed"] == 1
+    assert result["reason"] == REASON_ERROR, "one failure is not a stall"
+
+
+async def test_a_tenant_with_no_series_never_pays_for_period_resolution(db, monkeypatch, tenant_user):
+    """Resolving costs 2 NetSuite round trips and a tenant with no series has nothing to
+    compose whatever it returns. Most tenants track nothing, so resolving first would put
+    the sweep's dominant cost on the tenants that need it least."""
+    tenant, _user = tenant_user
+    resolved = {"n": 0}
+
+    async def counting_resolve(db_, tenant_id_):
+        resolved["n"] += 1
+        return _JUN_CLOSED
+
+    monkeypatch.setattr("app.services.report.period_resolver.resolve_last_closed_period_cached", counting_resolve)
+    result = await sweep_tenant_series(db, tenant.id)
+
+    assert result["reason"] == "done"
+    assert result["series_total"] == 0
+    assert resolved["n"] == 0, "must not resolve for a tenant with nothing to compose"
+
+
+def test_auto_compose_is_scheduled_is_false_when_the_cap_is_zero(monkeypatch):
+    """Gate round 2: the ribbon gated only on the ENABLED flag, so a cap of 0 — a
+    plausible way to throttle during a NetSuite rate-limit incident — stopped every
+    compose while the UI kept promising one. Both the sweep and the ribbon now ask this
+    ONE predicate; a raw flag read in two modules is how the hole opened."""
+    from app.core.config import settings as app_settings
+    from app.workers.tasks.rolling_period_compose import auto_compose_is_scheduled
+
+    monkeypatch.setattr(app_settings, "ROLLING_PERIOD_AUTO_COMPOSE_ENABLED", True)
+    monkeypatch.setattr(app_settings, "ROLLING_PERIOD_COMPOSE_MAX_PER_TENANT", 0)
+    assert auto_compose_is_scheduled() is False
+
+    monkeypatch.setattr(app_settings, "ROLLING_PERIOD_COMPOSE_MAX_PER_TENANT", 10)
+    assert auto_compose_is_scheduled() is True
+
+    monkeypatch.setattr(app_settings, "ROLLING_PERIOD_AUTO_COMPOSE_ENABLED", False)
+    assert auto_compose_is_scheduled() is False

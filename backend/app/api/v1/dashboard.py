@@ -8,7 +8,6 @@ from sqlalchemy import delete, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
 from app.core.database import get_db, set_tenant_context
 from app.core.dependencies import get_current_user
 from app.models.report import Report
@@ -186,10 +185,21 @@ async def _build_tracking_info(
     # scheduled"; with ROLLING_PERIOD_AUTO_COMPOSE_ENABLED false nothing is scheduled,
     # and a UI promising work no job will do is the same defect the T2 gate caught in
     # the Stage 1 launcher copy. Gate the DATA, not just the wording.
+    from app.workers.tasks.rolling_period_compose import auto_compose_is_scheduled
+
     closed_days_ago = None
     if (
-        settings.ROLLING_PERIOD_AUTO_COMPOSE_ENABLED
-        and closed.name != active_report.period
+        # THE shared predicate, not a raw flag read. Gate round 2: this module checked
+        # only ROLLING_PERIOD_AUTO_COMPOSE_ENABLED, so a cap of 0 (a plausible throttle
+        # during a rate-limit incident) stopped every compose while this ribbon kept
+        # promising one. Two modules reading a raw boolean is how that hole opened.
+        auto_compose_is_scheduled()
+        # BEHIND, not merely different. NetSuite periods can be REOPENED for corrections,
+        # so the resolved close can regress to a period this series already holds — and
+        # the sweep, which asks "does a report exist for closed.name", would find it
+        # covered and skip it. Comparing for inequality alone promised a compose that
+        # would never run, on a ribbon that would never clear (gate round 2).
+        and _period_sort_key(active_report.period) < _period_sort_key(closed.name)
         and closed.enddate is not None
     ):
         # UTC, not the server's local wall clock: celery_app sets timezone="UTC" and the
