@@ -770,7 +770,7 @@ class TestNetSuiteDateFormats:
     def test_whitespace_is_tolerated(self):
         assert _parse_period_date("  06/30/2026  ") == date(2026, 6, 30)
 
-    def test_an_ambiguous_date_is_REFUSED_never_guessed(self):
+    def test_an_ambiguous_date_is_refused_never_guessed(self):
         """Both components <= 12, so MM/DD and DD/MM are equally plausible. A month-end
         date can never look like this (no month ends on the 7th), so reaching here means
         an assumption broke. Guessing would silently attribute a financial statement to
