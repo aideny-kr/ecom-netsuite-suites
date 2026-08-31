@@ -91,17 +91,18 @@ function TrackingRibbon({ tracking, report }: { tracking: DashboardTrackingInfo 
   if (!tracking || !tracking.period) return null;
   const period = tracking.period;
 
-  // Amber — forward-compat ONLY. Stage 1's backend never sends `closed_days_ago` (see
-  // the field's own doc in use-dashboard.ts); gated on its presence rather than
-  // derived by comparing `period`/`resolved_period`, so this starts rendering the day
-  // a real backend reports it and never fires on today's traffic.
+  // Amber — waiting. Gated on the backend SENDING `closed_days_ago`, never derived here
+  // by comparing `period`/`resolved_period`: the backend sends it only when the series
+  // is behind AND the scheduled compose is actually switched on, so the promise below
+  // ("is scheduled") is true whenever this renders. Deriving it client-side would
+  // resurrect the Stage 1 bug where the UI promised a scheduler that did not exist.
   if (typeof tracking.closed_days_ago === "number" && tracking.resolved_period) {
     const n = tracking.closed_days_ago;
     return (
       <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border bg-muted/30 px-3 py-2 text-[13px]">
         <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" />
         <span className="text-muted-foreground">
-          {`${tracking.resolved_period} closed ${n} day${n === 1 ? "" : "s"} ago — building ${fullMonth(tracking.resolved_period)}'s statement now.`}
+          {`${tracking.resolved_period} closed ${n} day${n === 1 ? "" : "s"} ago — ${fullMonth(tracking.resolved_period)}'s statement is scheduled and will appear within a day.`}
         </span>
       </div>
     );

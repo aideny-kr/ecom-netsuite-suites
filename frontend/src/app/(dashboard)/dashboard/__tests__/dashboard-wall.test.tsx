@@ -458,7 +458,7 @@ it("renders the amber (building) copy verbatim when the API reports the forward-
     }),
   });
   expect(
-    await findByText("Jul 2026 closed 2 days ago — building July's statement now.")
+    await findByText("Jul 2026 closed 2 days ago — July's statement is scheduled and will appear within a day.")
   ).toBeTruthy();
 });
 
@@ -470,7 +470,9 @@ it("amber copy pluralizes singular days correctly", async () => {
       closed_days_ago: 1,
     }),
   });
-  expect(await findByText("Jul 2026 closed 1 day ago — building July's statement now.")).toBeTruthy();
+  expect(
+    await findByText("Jul 2026 closed 1 day ago — July's statement is scheduled and will appear within a day.")
+  ).toBeTruthy();
 });
 
 it("renders no ribbon (rather than a misleading green or a false 'couldn't reach') when the check succeeded but found a newer period than the active report's own, and there's no amber data yet", async () => {

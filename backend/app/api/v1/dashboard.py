@@ -1,6 +1,6 @@
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -8,6 +8,7 @@ from sqlalchemy import delete, or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.database import get_db, set_tenant_context
 from app.core.dependencies import get_current_user
 from app.models.report import Report
@@ -180,12 +181,26 @@ async def _build_tracking_info(
         return DashboardTrackingInfo(
             series_id=str(series.id), playbook_key=series.playbook_key, period=active_report.period
         )
+    # Only when the series is genuinely behind AND the sweep that would catch it up is
+    # switched on. `closed_days_ago` drives a ribbon that says a statement "is
+    # scheduled"; with ROLLING_PERIOD_AUTO_COMPOSE_ENABLED false nothing is scheduled,
+    # and a UI promising work no job will do is the same defect the T2 gate caught in
+    # the Stage 1 launcher copy. Gate the DATA, not just the wording.
+    closed_days_ago = None
+    if (
+        settings.ROLLING_PERIOD_AUTO_COMPOSE_ENABLED
+        and closed.name != active_report.period
+        and closed.enddate is not None
+    ):
+        closed_days_ago = max((date.today() - closed.enddate).days, 0)
+
     return DashboardTrackingInfo(
         series_id=str(series.id),
         playbook_key=series.playbook_key,
         period=active_report.period,
         period_check_ok=True,
         resolved_period=closed.name,
+        closed_days_ago=closed_days_ago,
         next_open_period=closed.next_open_name,
     )
 

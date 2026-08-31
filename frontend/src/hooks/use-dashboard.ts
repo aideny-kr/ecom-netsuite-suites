@@ -58,11 +58,13 @@ export interface DashboardTrackingInfo {
   /** Forward-compat only — Stage 1's backend NEVER sends this field (see the
    * DashboardTrackingInfo docstring in backend/app/schemas/dashboard.py: the ribbon's
    * amber "{period} closed {n} days ago — building {month}'s statement now" state
-   * needs Stage 2's scheduled compose, which is what would eventually populate it).
-   * The ribbon gates its amber render on this field's PRESENCE, never derives it by
-   * comparing `period`/`resolved_period` — so amber renders automatically the day a
-   * real backend starts sending it, and never before (a state that can't occur must
-   * not be faked). */
+   * is driven by this field, which Stage 2's scheduled compose populates).
+   * The backend sends it ONLY when the series is genuinely behind the last closed
+   * period AND ROLLING_PERIOD_AUTO_COMPOSE_ENABLED is on — so whenever it is present,
+   * a compose really is scheduled and the ribbon's promise is true. The ribbon gates
+   * its amber render on this field's PRESENCE and must NEVER derive it by comparing
+   * `period`/`resolved_period`: doing so would render "is scheduled" on a deployment
+   * with the sweep switched off, which is the Stage 1 false-promise bug returning. */
   closed_days_ago?: number;
 }
 
