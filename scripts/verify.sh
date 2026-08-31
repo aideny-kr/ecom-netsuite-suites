@@ -156,7 +156,11 @@ else
     # exit >=2 means pytest could not run at all (collection/usage/internal).
     # Scoring that as "0 failures" is how a totally broken suite passed before.
     [[ $rc -ge 2 ]] && { echo "DID-NOT-RUN (pytest exit $rc)"; return 2; }
-    printf '%s\n' "$out" | grep -E '^(FAILED|ERROR)' | awk '{print $2}' | sort -u > "$2"
+    # Trim anything after the test id. A -rfE line for an unraisable-exception
+    # warning appends a source path, so awk $2 gives "...::test_x/Users/.../foo.py:33:"
+    # — an id that matches NOTHING when re-run, which then looks like a failure.
+    printf '%s\n' "$out" | grep -E '^(FAILED|ERROR)' | awk '{print $2}' \
+      | sed -E 's#(::[A-Za-z0-9_]+)/.*#\1#' | sort -u > "$2"
     # Zero passing tests is not evidence however the comparison reads.
     local psd; psd="$(printf '%s' "$out" | grep -oE '[0-9]+ passed' | head -1 | grep -oE '[0-9]+')"
     [[ "${psd:-0}" -eq 0 ]] && { echo "NOTHING PASSED ($(printf '%s' "$out" | tail -1))"; return 2; }
@@ -221,7 +225,50 @@ else
             printf '        %s\n' $fixedids | head -8
           fi
         else
-          fail "NEW failing tests vs $BASE — these are yours" "$(echo "$new" | head -8)"
+          # A set-difference over a suite that contains ANY flaky test manufactures
+          # false "these are yours" verdicts: whichever flake happened to land in
+          # head-but-not-base gets attributed to the branch. Measured 2026-08-30 on
+          # feat/read-task-file-tool — three NOT-DONE verdicts, each naming DIFFERENT
+          # tests/api/test_celigo_flows_api.py tests, while head and base failure
+          # TOTALS were identical (123 = 123). Those tests pass 3/3 alone and 2/2
+          # across tests/api; the leak is somewhere in the wider suite and bisecting
+          # it costs ~6 min a run. So stop asking "did the set change" and ask the
+          # question that matters: DOES IT REPRODUCE.
+          #
+          # A regression reproduces when run by itself. A flake does not. Anything
+          # that survives isolation is still a hard failure; anything that does not
+          # is reported LOUDLY as a note rather than silently dropped — an
+          # interaction-only regression is real and rare, and the operator must see
+          # the name to judge it. Never let this print nothing.
+          confirmed=""; notrepro=""; unrunnable=""
+          while IFS= read -r _id; do
+            [[ -z "$_id" ]] && continue
+            # Read the REPORT, not the exit code. `pytest <bad-id>` exits non-zero
+            # with "no tests ran" — indistinguishable from a failure by rc alone, so
+            # a mangled id scored as a confirmed regression on the first run of this
+            # very check. An id we cannot run is NOT evidence either way.
+            _rr="$(cd "$REPO_ROOT/backend" && "$PY" -m pytest "$_id" -q --tb=no -p no:randomly 2>&1 | tail -3)"
+            if printf '%s' "$_rr" | grep -qE '[0-9]+ (failed|error)'; then
+              confirmed+="$_id"$'\n'
+            elif printf '%s' "$_rr" | grep -qE '[0-9]+ passed'; then
+              notrepro+="$_id"$'\n'
+            else
+              unrunnable+="$_id"$'\n'
+            fi
+          done <<< "$new"
+          if [[ -n "${unrunnable//[$'\n\t ']/}" ]]; then
+            fail "could not re-run these ids — extraction is broken, so there is NO evidence about them" \
+                 "$(printf '%s' "$unrunnable" | head -8)"
+          fi
+          if [[ -n "${confirmed//[$'\n\t ']/}" ]]; then
+            fail "NEW failing tests vs $BASE, reproduced in isolation — these are yours" \
+                 "$(printf '%s' "$confirmed" | head -8)"
+          else
+            pass "no NEW failing tests vs $BASE that reproduce in isolation (${fixed} pre-existing now fixed)"
+            note "failed in the SUITE but pass ALONE — flaky or interaction-dependent, NOT counted as yours:"
+            printf '        %s\n' $notrepro | head -8
+            note "if one of those is a real interaction bug, this run did not catch it — check the names above"
+          fi
         fi
         fi
       fi
