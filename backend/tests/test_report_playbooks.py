@@ -1239,3 +1239,28 @@ def test_playbook_compose_request_mode_defaults_to_period():
 
     assert PlaybookComposeRequest(params={"period": "Jun 2026"}).mode == "period"
     assert PlaybookComposeRequest(params={"period": "Jun 2026"}, mode="tracking").mode == "tracking"
+
+
+async def test_injected_closed_period_from_another_tenant_is_refused(db, monkeypatch):
+    """T2 gate round 2: Stage 2 added a `closed_period` argument so the scheduled sweep
+    can resolve once per tenant and hand the answer down. That widened a previously
+    tenant-safe function — a period resolved for tenant A, passed with tenant B's id,
+    would compose B's report under A's period, silently and wrongly. This file already
+    carries a cross-tenant guard on the ON CONFLICT path for the same class of mistake;
+    the callee verifies rather than trusting the caller."""
+    tenant_a = await create_test_tenant(db, name="InjectAlpha")
+    tenant_b = await create_test_tenant(db, name="InjectBeta")
+    user_b, _ = await create_test_user(db, tenant_b)
+
+    foreign = ClosedPeriod(name="Jun 2026", enddate=date(2026, 6, 30), tenant_id=tenant_a.id)
+
+    with pytest.raises(ValueError, match="different tenant"):
+        await compose_playbook_report(
+            db,
+            playbook_key="income_statement",
+            params={},
+            tenant_id=tenant_b.id,
+            actor_id=user_b.id,
+            mode="tracking",
+            closed_period=foreign,
+        )

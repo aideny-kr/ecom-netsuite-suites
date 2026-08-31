@@ -1620,3 +1620,74 @@ async def test_get_dashboard_reuses_cached_period_resolution_within_ttl(client, 
         assert resp.json()["active_tracking"]["period_check_ok"] is True
 
     assert call_count["n"] == 1  # every subsequent GET served the cached resolution
+
+
+# --- Stage 2: the "waiting" ribbon's data is gated on a compose actually being scheduled ---
+
+
+async def _behind_series_headers(client, db, monkeypatch, name):
+    """A series whose newest report is May while NetSuite's last closed period is Jun —
+    i.e. genuinely behind, the only situation the waiting ribbon describes."""
+    ta = await create_test_tenant(db, name=name)
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    series = await _seed_series(db, ta, ua)
+    await _seed_tracking_report(db, ta, ua, series, "May 2026")
+    headers = make_auth_headers(ua)
+    _patch_resolver(monkeypatch, _JUN_CLOSED)
+    assert (
+        await client.put("/api/v1/dashboard/active", headers=headers, json={"series_id": str(series.id)})
+    ).status_code == 200
+    return headers
+
+
+async def test_closed_days_ago_is_withheld_when_the_scheduled_compose_is_disabled(client, db, monkeypatch):
+    """The ribbon this field drives tells the user a statement "is scheduled". With
+    ROLLING_PERIOD_AUTO_COMPOSE_ENABLED false, NOTHING is scheduled — no sweep will ever
+    compose it — so sending the field would make the product promise work that never
+    happens. That is precisely the defect the T2 gate caught in the Stage 1 launcher copy
+    ("composed automatically when the next period closes", with no scheduler behind it).
+    Gate the DATA, not merely the wording: wording drifts, a withheld field cannot lie.
+    """
+    from app.core.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "ROLLING_PERIOD_AUTO_COMPOSE_ENABLED", False)
+    headers = await _behind_series_headers(client, db, monkeypatch, "RibbonDisabled")
+
+    body = (await client.get("/api/v1/dashboard", headers=headers)).json()
+    assert body["active_tracking"]["period"] == "May 2026"
+    assert body["active_tracking"]["resolved_period"] == "Jun 2026"
+    assert body["active_tracking"]["closed_days_ago"] is None
+
+
+async def test_closed_days_ago_is_sent_when_behind_and_the_sweep_is_enabled(client, db, monkeypatch):
+    from app.core.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "ROLLING_PERIOD_AUTO_COMPOSE_ENABLED", True)
+    headers = await _behind_series_headers(client, db, monkeypatch, "RibbonEnabled")
+
+    body = (await client.get("/api/v1/dashboard", headers=headers)).json()
+    assert body["active_tracking"]["resolved_period"] == "Jun 2026"
+    assert isinstance(body["active_tracking"]["closed_days_ago"], int)
+    assert body["active_tracking"]["closed_days_ago"] >= 0
+
+
+async def test_closed_days_ago_is_withheld_when_the_series_is_already_current(client, db, monkeypatch):
+    """Caught up is the GREEN ribbon's job. Sending the field here would render a
+    "waiting" state over a series that is not waiting for anything."""
+    from app.core.config import settings as app_settings
+
+    monkeypatch.setattr(app_settings, "ROLLING_PERIOD_AUTO_COMPOSE_ENABLED", True)
+    ta = await create_test_tenant(db, name="RibbonCurrent")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    series = await _seed_series(db, ta, ua)
+    await _seed_tracking_report(db, ta, ua, series, "Jun 2026")
+    headers = make_auth_headers(ua)
+    _patch_resolver(monkeypatch, _JUN_CLOSED)
+    assert (
+        await client.put("/api/v1/dashboard/active", headers=headers, json={"series_id": str(series.id)})
+    ).status_code == 200
+
+    body = (await client.get("/api/v1/dashboard", headers=headers)).json()
+    assert body["active_tracking"]["closed_days_ago"] is None

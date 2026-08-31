@@ -36,7 +36,8 @@ Updated at the end of every task, not "later".
 |---|---|---|---|
 | `feat/dev-loop-and-harness` | T2 | 21 commits, process only — gated ×3, blockers fixed, **frozen** | nothing |
 | `feat/agent-graph-operating-model` | T2 | Track O (22 majors) + reject action, **ungated** | needs Track O decision |
-| `feat/rolling-period` | T2 | Stage 1 done. **PR #209 open, NOT merged.** verify **PASS @ `7f494264`**. Gate ×4 (budget spent; all pinned+codex): majors 2→3→0. Round-4 fixes landed | human merge call — deploy agents active. Then **Stage 2: scheduled compose** |
+| `feat/rolling-period` | T2 | **SHIPPED** — squash-merged as main `f74b781f` (PR #209), deployed + live-verified on staging (backend recreated, `alembic current`=`094_dashboard_preference_series` head, FE digest `4a37ebf8`, BUILD_ID baked). Gate ×4: majors 2→3→0 | nothing |
+| `feat/rolling-period-stage2` | T2 | Scheduled compose built: daily Beat sweep, reason enum → `jobs.result_summary`, per-tenant cost ceiling, waiting ribbon lit (DATA-gated on the sweep being enabled). verify **PASS @ `fa793ce6`** (+15 tests). **T2 gate round 1 in flight** | gate verdict → PR |
 
 **SHIPPED 2026-08-17 — `fix/ns-account-switch-and-chat-burst` → PR #194, squashed to
 `54729804`, deployed and live-verified on staging.** Ticket 86bba299w closed. It had
@@ -185,6 +186,20 @@ path — OCR confidence is unquantified and the card cannot show what was misrea
 ## DECIDED — date · chose X over Y · because
 
 Written so the next session does not re-litigate these.
+
+- **2026-08-30 · Stage 2 gates the RIBBON DATA on the scheduler being enabled, not just the
+  wording** · because the amber ribbon promises a statement "is scheduled", and a promise
+  about a background job is only as true as the job's on/off switch. The approved Stage 1
+  mock said "building X's statement now"; on a daily cadence that is false for up to a day,
+  which is the SAME defect the T2 gate caught in the Stage 1 launcher copy ("composed
+  automatically...", no scheduler behind it) — the identical lie relocated to another
+  component. Two changes, and the second is the load-bearing one: the copy now says
+  "scheduled and will appear within a day", AND `closed_days_ago` is withheld entirely
+  unless the series is behind AND `ROLLING_PERIOD_AUTO_COMPOSE_ENABLED` is on. Wording
+  drifts; a withheld field cannot lie. The FE must therefore keep gating amber on the
+  field's PRESENCE and must never derive it by comparing `period`/`resolved_period` —
+  deriving it client-side puts "is scheduled" on a deployment where nothing is scheduled.
+  Recorded because deriving it looks like a harmless simplification.
 
 - **2026-08-27 · On `feat/rolling-period` we answered a repeating gate shape with a SIBLING
   AUDIT, not a 4th patch** · because two of round 3's three majors were regressions from
@@ -394,8 +409,12 @@ Written so the next session does not re-litigate these.
 
 ## OPEN — needs a human, blocking something
 
-- **`feat/rolling-period` — resume here.** Worktree
-  `.claude/worktrees/feat-rolling-period`, HEAD `bbb28f8f` (verify PASS at that sha).
+- **`feat/rolling-period-stage2` — resume here.** Worktree
+  `.claude/worktrees/feat-rolling-period` (branch switched), verify PASS @ `fa793ce6`.
+  Stage 1 is SHIPPED and live; this branch is Stage 2. NOTE: a re-parented migration can
+  strand the local DB at a head that SKIPS main's newer migrations, so `alembic upgrade
+  head` no-ops and ~123 celigo tests "fail" — repair with stamp/upgrade/stamp, see memory
+  `reference_worktree_db_stranded_behind_reparented_migrations`.
   **There is UNCOMMITTED work in the tree** from a round-2 gate-fix agent that was still
   running when the session ended — do NOT `git checkout --` it:
   - DONE in tree: MAJOR A (`dashboard-tracking-empty-state.tsx` + `page.tsx` +

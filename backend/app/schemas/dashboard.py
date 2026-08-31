@@ -22,9 +22,9 @@ class DashboardTrackingInfo(BaseModel):
     from a TRACKING (series) selection — entirely absent for a snapshot/report
     selection (mock §3: "a pinned snapshot shows no ribbon"). Backs the ribbon's green
     and grey states. The amber "{period} closed {n} days ago — building {month}'s
-    statement now" state needs Stage 2's scheduled compose and has no backing field
-    here yet — the frontend must never infer it from this shape's absence, only render
-    it if/when a future field says so.
+    statement now" state is driven by `closed_days_ago` below, which Stage 2 populates
+    only when a compose really is scheduled. The frontend must never infer that state
+    from this shape's absence — it renders only when that field says so.
 
     `period` is the ACTIVE report's own period ("Mon YYYY") — present whenever a
     report exists for the series, independent of whether the live NetSuite check below
@@ -45,6 +45,13 @@ class DashboardTrackingInfo(BaseModel):
     period_check_ok: bool = False
     resolved_period: str | None = None
     next_open_period: str | None = None
+    #: Days since the resolved closed period ended. Sent ONLY when all three hold: the
+    #: live check succeeded, this series is genuinely BEHIND that period, and Stage 2's
+    #: scheduled compose is actually enabled. That last condition is the point — the
+    #: ribbon this field drives tells the user a statement "is scheduled", and with the
+    #: sweep switched off nothing is scheduled, so sending it would make the UI promise
+    #: work that will never happen (the Stage 1 launcher copy shipped exactly that bug).
+    closed_days_ago: int | None = None
 
 
 class DashboardResponse(BaseModel):

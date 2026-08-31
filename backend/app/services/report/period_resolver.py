@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import re
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import date
 from enum import Enum
@@ -94,6 +95,13 @@ class ClosedPeriod:
     next_open_name: str | None = None
     next_open_enddate: date | None = None
     reason: PeriodUnavailableReason | None = None
+    #: Which tenant this answer was resolved FOR. Defaulted to None so existing
+    #: constructions (and tests) are unaffected, but the real resolver always sets it:
+    #: Stage 2 lets a caller inject an already-resolved period into
+    #: compose_playbook_report, and a period resolved for tenant A handed to a compose
+    #: for tenant B would silently compose the wrong period. Carrying the owner on the
+    #: value lets the callee verify instead of trusting the caller (T2 gate round 2).
+    tenant_id: uuid.UUID | None = None
 
     @property
     def resolved(self) -> bool:
@@ -261,7 +269,7 @@ async def resolve_last_closed_period(db, tenant_id) -> ClosedPeriod:
             # that detail only. It must not discard the closed period we already
             # resolved; that would turn a partial answer into a manufactured
             # UNREACHABLE for a query that actually succeeded.
-            return ClosedPeriod(name=name, enddate=enddate)
+            return ClosedPeriod(name=name, enddate=enddate, tenant_id=tenant_id)
 
         next_open_row = _first_row(open_result)
         next_open_name: str | None = None
@@ -276,6 +284,7 @@ async def resolve_last_closed_period(db, tenant_id) -> ClosedPeriod:
             enddate=enddate,
             next_open_name=next_open_name,
             next_open_enddate=next_open_enddate,
+            tenant_id=tenant_id,
         )
     finally:
         await set_tenant_context(db, str(tenant_id))

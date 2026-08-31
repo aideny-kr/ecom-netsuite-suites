@@ -236,11 +236,27 @@ def build_playbook_recipe(playbook_key: str, params: dict[str, str]) -> tuple[st
     return title, recipe
 
 
-async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_id, mode="period"):
+async def compose_playbook_report(
+    db,
+    *,
+    playbook_key,
+    params,
+    tenant_id,
+    actor_id,
+    mode="period",
+    actor_type="user",
+    closed_period=None,
+):
     """Deterministic compose: recipe template → fail-closed source execution →
     frozen HTML → normal Report row. Reuses the refresh engine's execution seam
     on purpose — identical validation, identical failure semantics, and the
     resulting report auto-refreshes like any composed one.
+
+    ``actor_type`` defaults to "user" because the HTTP endpoint (a real person) was the
+    only caller for Stage 1. Stage 2's scheduled sweep passes "system" with
+    ``actor_id=None``: a scheduled compose has no person behind it, and an audit event
+    claiming one is a false record. ``refresh_service.refresh_report`` threads the same
+    pair for the same reason.
 
     ``mode="period"`` (default): exactly the pre-Task-3 behaviour — ``params["period"]``
     is whatever the caller typed. ``mode="tracking"`` (rolling-period Stage 1, Task 3):
@@ -274,7 +290,23 @@ async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_
 
     series_id: uuid.UUID | None = None
     if mode == "tracking":
-        closed = await resolve_last_closed_period(db, tenant_id)
+        # `closed_period` lets a caller that ALREADY resolved this tenant's period hand
+        # it in (T2 gate round 1: the Stage 2 sweep resolves once per tenant, but every
+        # per-series compose re-resolved the same answer at 2 NetSuite round trips a
+        # time, silently undoing that saving). Injecting beats switching this call to
+        # the 300s-cached resolver: that would also make the INTERACTIVE path serve a
+        # stale period for up to 5 minutes after a close, which is exactly when a user
+        # clicks compose. The scheduled caller opts into reuse; a person always gets
+        # a live answer.
+        if closed_period is not None:
+            # Trust nothing a caller injects. This parameter widened a previously
+            # tenant-safe function: a ClosedPeriod resolved for tenant A, passed with
+            # tenant B's id, would compose B's report under A's period — and this file
+            # already carries a cross-tenant guard on the ON CONFLICT path for exactly
+            # this class of mistake. The guard is cheap; the failure is silent and wrong.
+            if closed_period.tenant_id is not None and closed_period.tenant_id != tenant_id:
+                raise ValueError("closed_period was resolved for a different tenant than this compose")
+        closed = closed_period or await resolve_last_closed_period(db, tenant_id)
         if not closed.resolved:
             raise PeriodUnavailableError(closed.reason)
         # Tracking mode resolves the period server-side — anything the caller typed
@@ -348,7 +380,7 @@ async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_
         referenced_result_ids(recipe["sections"]),
         tenant_id=tenant_id,
         actor_id=actor_id,
-        actor_type="user",
+        actor_type=actor_type,
         correlation_id=correlation_id,
         # Risk 2 (statement compare-degrade seam): only the CURRENT-period source (r1)
         # is a hard dependency for a financial_statement recipe — a prior/yoy/trend
@@ -497,7 +529,7 @@ async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_
         category="report",
         action="report.compose",
         actor_id=actor_id,
-        actor_type="user",
+        actor_type=actor_type,
         resource_type="report",
         resource_id=str(report.id),
         correlation_id=correlation_id,
