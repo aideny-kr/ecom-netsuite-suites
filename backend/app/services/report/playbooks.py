@@ -236,11 +236,17 @@ def build_playbook_recipe(playbook_key: str, params: dict[str, str]) -> tuple[st
     return title, recipe
 
 
-async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_id, mode="period"):
+async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_id, mode="period", actor_type="user"):
     """Deterministic compose: recipe template → fail-closed source execution →
     frozen HTML → normal Report row. Reuses the refresh engine's execution seam
     on purpose — identical validation, identical failure semantics, and the
     resulting report auto-refreshes like any composed one.
+
+    ``actor_type`` defaults to "user" because the HTTP endpoint (a real person) was the
+    only caller for Stage 1. Stage 2's scheduled sweep passes "system" with
+    ``actor_id=None``: a scheduled compose has no person behind it, and an audit event
+    claiming one is a false record. ``refresh_service.refresh_report`` threads the same
+    pair for the same reason.
 
     ``mode="period"`` (default): exactly the pre-Task-3 behaviour — ``params["period"]``
     is whatever the caller typed. ``mode="tracking"`` (rolling-period Stage 1, Task 3):
@@ -348,7 +354,7 @@ async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_
         referenced_result_ids(recipe["sections"]),
         tenant_id=tenant_id,
         actor_id=actor_id,
-        actor_type="user",
+        actor_type=actor_type,
         correlation_id=correlation_id,
         # Risk 2 (statement compare-degrade seam): only the CURRENT-period source (r1)
         # is a hard dependency for a financial_statement recipe — a prior/yoy/trend
@@ -497,7 +503,7 @@ async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_
         category="report",
         action="report.compose",
         actor_id=actor_id,
-        actor_type="user",
+        actor_type=actor_type,
         resource_type="report",
         resource_id=str(report.id),
         correlation_id=correlation_id,

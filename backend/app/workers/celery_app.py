@@ -52,6 +52,7 @@ celery_app.conf.include = [
     "app.workers.tasks.recon_envelope_dry_run",
     "app.workers.tasks.recon_resolution_agent",
     "app.workers.tasks.report_auto_refresh",
+    "app.workers.tasks.rolling_period_compose",
     "app.workers.tasks.suitescript_sync",
     "app.workers.tasks.suiteql_export",
     "app.workers.tasks.workspace_run",
@@ -127,6 +128,13 @@ celery_app.conf.beat_schedule = {
     "report-auto-refresh-hourly": {
         "task": "tasks.report_auto_refresh_all",
         "schedule": crontab(minute=10),
+    },
+    "rolling-period-compose": {
+        # Daily. A NetSuite period closes once a month, so a daily sweep is ~30x more
+        # often than strictly needed and still leaves the wall at most one day stale.
+        # 03:20 keeps it clear of the :10 hourly report refresh.
+        "task": "tasks.rolling_period_compose_all",
+        "schedule": crontab(hour=3, minute=20),
     },
     "oracle-skill-reseed": {
         "task": "tasks.oracle_skill_reseed",

@@ -177,6 +177,15 @@ class Settings(BaseSettings):
     # first, then production.
     REPORT_AUTO_REFRESH_ENABLED: bool = False
 
+    # Rolling period Stage 2 — the scheduled compose. OFF by default (fail-closed): a
+    # deployment that has never heard of this feature must do nothing rather than sweep
+    # every tenant on first boot.
+    ROLLING_PERIOD_AUTO_COMPOSE_ENABLED: bool = False
+    # Cost ceiling per tenant per run (agent-graph.md #6). One tracking compose is 4-6
+    # NetSuite round trips against a 120/min per-tenant limit SHARED with live chat, so
+    # an unbounded sweep can starve real users. Leftover work returns reason="budget".
+    ROLLING_PERIOD_COMPOSE_MAX_PER_TENANT: int = 10
+
     # Autonomous query improvement loop
     QUERY_IMPROVEMENT_ENABLED: bool = False
     QUERY_IMPROVEMENT_BUDGET_USD: float = 12.0
