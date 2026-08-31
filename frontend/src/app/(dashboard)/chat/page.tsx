@@ -434,7 +434,20 @@ export default function ChatPage() {
   }, [sessionDetail?.active_run_id, sessionDetail?.status, activeSessionId]);
 
   const handleSend = useCallback(
-    async (content: string, fileId?: string, opts: { write_confirm?: { action: "approve" | "reject"; confirmation_id: string } } = {}) => {
+    async (
+      content: string,
+      fileId?: string,
+      opts: {
+        write_confirm?: {
+          action: "approve" | "reject";
+          confirmation_id: string;
+          // Human-filled editable_slots values (Task 9 of the write-loop
+          // plan). The orchestrator reads this as write_confirm.slot_values
+          // (orchestrator.py:1759) to merge into the server-held payload.
+          slot_values?: Record<string, string>;
+        };
+      } = {},
+    ) => {
       if (isStreamingRef.current || createSession.isPending) return;
       setError(null);
       setPendingMessage(content);
@@ -513,7 +526,7 @@ export default function ChatPage() {
   );
 
   const handleWriteConfirm = useCallback(
-    async (messageId: string, action: "approve" | "reject") => {
+    async (messageId: string, action: "approve" | "reject", slotValues?: Record<string, string>) => {
       if (abortRef.current) {
         abortRef.current.abort();
         abortRef.current = null;
@@ -521,7 +534,7 @@ export default function ChatPage() {
       isStreamingRef.current = false;
       setIsStreaming(false);
       await handleSend("", undefined, {
-        write_confirm: { action, confirmation_id: messageId },
+        write_confirm: { action, confirmation_id: messageId, slot_values: slotValues },
       });
     },
     [handleSend],

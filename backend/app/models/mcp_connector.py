@@ -8,6 +8,10 @@ from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+# Installs the session-flush guard (see the identical note in
+# app/models/connection.py -- celigo_mcp is the other half of the guarded pair,
+# and either model can be the first one an entrypoint imports).
+import app.services.celigo_write_guard  # noqa: F401,E402  (import for side effect)
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 if TYPE_CHECKING:

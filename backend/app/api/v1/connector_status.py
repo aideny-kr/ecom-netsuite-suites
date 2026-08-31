@@ -6,26 +6,49 @@ Covers: Stripe connector status/test, NetSuite deposit sync status.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Annotated
+from typing import Annotated, Literal
 
+import httpx
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import get_db
-from app.core.dependencies import require_any_permission, require_permission
-from app.core.encryption import decrypt_credentials, encrypt_credentials
+from app.core.database import get_db, set_tenant_context
+from app.core.dependencies import require_any_permission, require_feature, require_permission
+from app.core.encryption import decrypt_credentials, encrypt_credentials, get_current_key_version
 from app.models.canonical import NetsuitePosting, Payout, PayoutLine
 from app.models.connection import Connection
+from app.models.mcp_connector import McpConnector
 from app.models.pipeline import CursorState
 from app.models.user import User
-from app.services import audit_service
+from app.services import audit_service, mcp_connector_service
+from app.services.celigo.client import (
+    CeligoAuthError,
+    CeligoError,
+    mcp_server_url,
+    verify_token,
+)
+from app.services.celigo_write_guard import (
+    CeligoInvariantError,
+    CeligoManagedElsewhereError,
+    celigo_writes_allowed,
+)
 
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/connector-status", tags=["connector-status"])
+
+# The write guard's refusals are not best-effort failures and must never be
+# demoted to a warning by the two "this side is optional" blocks below.
+# ``CeligoInvariantError`` means the TRUSTED path itself produced an incoherent
+# Celigo row; ``CeligoManagedElsewhereError`` means a write escaped the allow
+# window that was supposed to cover it. Both are programming errors, so both
+# belong at a 500 with a stack trace (see celigo_write_guard's class docstrings)
+# rather than surfacing as a quiet ``agent_access: false`` -- which is precisely
+# the silent-incoherence outcome the guard exists to prevent.
+_GUARD_ERRORS = (CeligoInvariantError, CeligoManagedElsewhereError)
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +92,59 @@ class DepositSyncStatusResponse(BaseModel):
     last_sync_at: str | None = None
     deposits_count: int = 0
     error_message: str | None = None
+
+
+class CeligoStatusResponse(BaseModel):
+    connected: bool
+    # Celigo's /v1/tokenInfo returns no account name, so this is None for every
+    # real token -- None rather than "" deliberately, so the card's
+    # `account_name ?? "—"` fallback fires instead of rendering a blank field.
+    account_name: str | None = None
+    # The only identifier Celigo exposes (`_userId`). Without it the connected
+    # card could not say WHICH account it was connected to, unlike the NetSuite
+    # section beside it which shows a real account id.
+    account_id: str | None = None
+    region: str | None = None
+    status: str | None = None
+    agent_access: bool = False
+
+
+def _blank_to_none(value: object) -> str | None:
+    """Normalise "" to None so optional display fields stay genuinely optional.
+
+    An empty string is truthy-ish enough to defeat a `?? default` fallback in
+    the frontend while carrying no information, which renders as a blank field
+    that looks like a bug rather than an absent value.
+    """
+    text = str(value or "").strip()
+    return text or None
+
+
+class CeligoTestRequest(BaseModel):
+    token: str
+    # Literal, not bare str: client.base_url() silently falls back to US on
+    # any unknown value, so region="EU" (capitalized) used to route to the US
+    # host, the EU token got rejected, and the operator saw a 400 "invalid
+    # token" -- blaming them for what was actually a routing bug.
+    region: Literal["us", "eu"] = "us"
+
+
+class CeligoTestResponse(BaseModel):
+    ok: bool
+    account_name: str | None = None
+    error: str | None = None
+
+
+class CeligoConnectRequest(BaseModel):
+    token: str
+    region: Literal["us", "eu"] = "us"
+    # Bounded like ConnectionCreate.label (app/schemas/connection.py) -- this
+    # schema had no bound at all, unlike every other label field on this surface.
+    label: str = Field(default="Celigo", min_length=1, max_length=255)
+    # Optional -- lets the chat agent read Celigo flows/scripts/errors via a
+    # separate celigo_mcp MCP connector row (Task 10). Omitting it must behave
+    # exactly like the REST-only connect that existed before this field.
+    agent_token: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -482,3 +558,585 @@ async def trigger_netsuite_deposit_sync(
         "records_updated": result.records_updated,
         "job_id": str(job.id),
     }
+
+
+# ---------------------------------------------------------------------------
+# Celigo endpoints (read-only connector -- Plan A: connect/test/disconnect only)
+# ---------------------------------------------------------------------------
+
+
+async def _get_celigo_connection(db: AsyncSession, tenant_id) -> Connection | None:
+    result = await db.execute(
+        select(Connection).where(
+            Connection.tenant_id == tenant_id,
+            Connection.provider == "celigo",
+            Connection.status != "revoked",
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def _celigo_agent_access(db: AsyncSession, tenant_id) -> bool:
+    """Whether the tenant has a live celigo_mcp connector giving the chat agent
+    read-only Celigo tools.
+
+    Reuses the generic active-connector lookup (rather than a bespoke query) so
+    this stays correct if "active" is ever redefined.
+    """
+    connectors = await mcp_connector_service.get_active_connectors_for_tenant(db, tenant_id)
+    return any(c.provider == "celigo_mcp" for c in connectors)
+
+
+def _celigo_accounts_match(rest_identity: dict, agent_identity: dict) -> bool:
+    """Proof the REST token and the agent token resolve to the SAME Celigo
+    identity -- not merely that both tokens are individually valid.
+
+    Compares ``_userId`` (``user_id``), the only identity field Celigo's
+    ``/v1/tokenInfo`` actually returns. The previous implementation compared
+    ``account_name``, which was wrong twice over: Celigo never returns ``name``
+    from that endpoint, so on live data BOTH sides were always empty and this
+    could only ever return False; and even in principle Celigo "does not
+    guarantee it is unique across customers", so a display string was standing
+    in for identity.
+
+    ``user_id`` is a stable server-assigned id, so this is now a real
+    comparison rather than a best-effort one. Note it is USER-level: two
+    different Celigo users on the same account minting separate tokens will not
+    match. That is the deliberate, conservative direction -- it refuses a pair
+    it cannot prove identical rather than accepting one it cannot distinguish,
+    and the operator's fix (use one token, or re-supply both) is obvious from
+    the error.
+
+    Ambiguous input (either side missing ``user_id``) fails closed -- there is
+    nothing to compare, so sameness is not proven. That also covers rows
+    written before this change, whose ``metadata_json`` has no ``user_id``.
+    """
+    rest_id = (rest_identity.get("user_id") or "").strip()
+    agent_id = (agent_identity.get("user_id") or "").strip()
+    if not rest_id or not agent_id:
+        return False
+    return rest_id == agent_id
+
+
+async def _disable_celigo_agent_access(db: AsyncSession, tenant_id, actor_id, reason: str) -> bool:
+    """Revoke the agent's Celigo tools because the row can no longer be trusted.
+
+    The other trusted celigo_mcp writer besides ``_upsert_celigo_mcp_connector``
+    and ``disconnect_celigo``, so it holds the write window itself.
+
+    Deliberately does NOT touch the token or attempt to re-verify anything --
+    it is called precisely when there is no agent token to verify. It leaves the
+    row in the same coherent shape a failed reconnect produces
+    (``is_enabled=False`` + ``status='error'`` + a reason), and clears
+    ``discovered_tools`` for the reason the discovery path does: a tool list
+    enumerated against the OLD account must not stay attached to a connector the
+    operator is being asked to re-authorize.
+
+    Returns whether a row was actually disabled.
+    """
+    result = await db.execute(
+        select(McpConnector).where(
+            McpConnector.tenant_id == tenant_id,
+            McpConnector.provider == "celigo_mcp",
+            McpConnector.status != "revoked",
+        )
+    )
+    connector = result.scalar_one_or_none()
+    if connector is None:
+        return False
+
+    with celigo_writes_allowed(db):
+        connector.is_enabled = False
+        connector.status = "error"
+        connector.error_reason = reason
+        connector.discovered_tools = None
+
+        await audit_service.log_event(
+            db=db,
+            tenant_id=tenant_id,
+            category="mcp_connector",
+            action="mcp_connector.update",
+            actor_id=actor_id,
+            resource_type="mcp_connector",
+            resource_id=str(connector.id),
+            payload={"provider": "celigo_mcp", "reason": reason},
+        )
+        await db.commit()
+    return True
+
+
+async def _upsert_celigo_mcp_connector(
+    db: AsyncSession,
+    tenant_id,
+    agent_token: str,
+    region: str,
+    rest_identity: dict,
+    created_by,
+) -> McpConnector:
+    """Trusted writer for the celigo_mcp row -- holds the write window.
+
+    Every celigo_mcp mutation in the application is supposed to happen here or
+    in ``disconnect_celigo``; the session-flush guard refuses it anywhere else.
+    This function flushes in three places (``create_mcp_connector``, the
+    identity-failure path, the discovery path), so the window wraps the whole
+    body rather than each write. It is re-entrant with ``connect_celigo``'s own
+    window, and holding it here too means a future second caller inherits the
+    permission instead of having to remember it.
+
+    Delegates to ``_upsert_celigo_mcp_connector_locked`` purely so opening the
+    window costs a wrapper rather than re-indenting the entire body -- there is
+    no behavioural difference.
+    """
+    with celigo_writes_allowed(db):
+        return await _upsert_celigo_mcp_connector_locked(
+            db=db,
+            tenant_id=tenant_id,
+            agent_token=agent_token,
+            region=region,
+            rest_identity=rest_identity,
+            created_by=created_by,
+        )
+
+
+async def _upsert_celigo_mcp_connector_locked(
+    db: AsyncSession,
+    tenant_id,
+    agent_token: str,
+    region: str,
+    rest_identity: dict,
+    created_by,
+) -> McpConnector:
+    """Create (or reactivate) the celigo_mcp connector that gives the chat agent
+    read-only Celigo tools -- Tasks 1-3's guards enforce the read-only boundary
+    once this row exists.
+
+    *region* pins server_url to the SAME Celigo region the REST connection's
+    token was verified against (verify_token(request.token, request.region)
+    in connect_celigo) -- an EU tenant's agent_token must be discovered
+    against the EU MCP host, never the US one, or discovery fails and
+    agent_access silently ends up False.
+
+    *rest_identity* is the account identity ``verify_token`` already returned
+    for the REST token in ``connect_celigo``. Without comparing the agent
+    token's identity against it, a tenant could end up with a REST connection
+    reading account A's flows while the agent silently reads account B's --
+    with the UI reporting one healthy Celigo connection.
+
+    Reuses ``mcp_connector_service.create_mcp_connector`` for the actual
+    construction rather than a second hand-rolled ``McpConnector(...)`` site.
+    Reactivating an existing (possibly revoked) row is not something that
+    generic helper does, so it's handled inline here -- mirroring how
+    ``connect_celigo`` itself reactivates a revoked Connection row.
+    """
+    existing_result = await db.execute(
+        select(McpConnector).where(
+            McpConnector.tenant_id == tenant_id,
+            McpConnector.provider == "celigo_mcp",
+        )
+    )
+    existing = existing_result.scalar_one_or_none()
+
+    if existing:
+        existing.encrypted_credentials = encrypt_credentials({"token": agent_token})
+        existing.encryption_key_version = get_current_key_version()
+        existing.auth_type = "bearer"
+        existing.server_url = mcp_server_url(region)
+        connector = existing
+    else:
+        connector = await mcp_connector_service.create_mcp_connector(
+            db=db,
+            tenant_id=tenant_id,
+            provider="celigo_mcp",
+            label="Celigo (agent access)",
+            server_url=mcp_server_url(region),
+            auth_type="bearer",
+            credentials={"token": agent_token},
+            created_by=created_by,
+            region=region,
+        )
+
+    # Identity check FIRST, before tool discovery -- a token that proves out
+    # to be the wrong Celigo account must never even attempt discover_tools,
+    # both because discovery against the wrong account is itself a leak
+    # surface and because the resulting error_reason must say WHY access was
+    # denied ("wrong account"), not the misleading "tool discovery failed".
+    try:
+        agent_identity = await verify_token(agent_token, region)
+    except CeligoAuthError as exc:
+        identity_error: str | None = f"Agent token was rejected by Celigo: {exc}"
+    except CeligoError as exc:
+        identity_error = f"Could not verify the agent token: {exc}"
+    else:
+        if _celigo_accounts_match(rest_identity, agent_identity):
+            identity_error = None
+        else:
+            rest_name = rest_identity.get("user_id") or "unknown"
+            agent_name = agent_identity.get("user_id") or "unknown"
+            identity_error = (
+                "Agent token belongs to a different Celigo identity than the REST "
+                f"connection (REST user: {rest_name!r}, agent user: {agent_name!r})"
+            )
+
+    if identity_error is not None:
+        logger.warning(
+            "celigo_mcp_connector.agent_identity_mismatch",
+            tenant_id=str(tenant_id),
+            reason=identity_error,
+        )
+        connector.discovered_tools = None
+        connector.is_enabled = False
+        connector.status = "error"
+        connector.error_reason = identity_error
+        await db.flush()
+        return connector
+
+    # Best-effort tool discovery -- must not fail the connector row itself.
+    # But "must not fail the row" is not the same as "must report success":
+    # discover_tools actually reaching the server and returning tools is the
+    # ONLY proof this token is good for anything BEYOND identifying an
+    # account (the identity check above proves WHICH account, not that the
+    # token can enumerate tools). `is_enabled` is what `agent_access`
+    # (both the API field and _celigo_agent_access, via
+    # get_active_connectors_for_tenant) key off, so it must reflect that proof
+    # rather than "a row exists". A failure also resets discovered_tools --
+    # a reconnect must not leave a PREVIOUS successful discovery's tool list
+    # attached to a token that just failed to enumerate tools.
+    #
+    # `status` and `is_enabled` are decided HERE, together, as one outcome --
+    # never independently. Setting them in separate branches previously let a
+    # failed reconnect land on status="active" + is_enabled=False: an
+    # incoherent pair only masked (not fixed) by get_active_connectors_for_tenant
+    # also filtering on is_enabled.
+    try:
+        from app.services.mcp_client_service import discover_tools
+
+        tools = await discover_tools(connector, db)
+        connector.discovered_tools = tools
+        connector.is_enabled = True
+        connector.status = "active"
+        connector.error_reason = None
+    except _GUARD_ERRORS:
+        # "Best-effort" covers Celigo being unreachable, not the guard refusing
+        # this function's own writes. Recording that as
+        # error_reason="Tool discovery failed" would not merely swallow the
+        # exception, it would state a wrong diagnosis.
+        raise
+    except Exception as exc:
+        logger.warning(
+            "celigo_mcp_connector.tool_discovery_failed",
+            tenant_id=str(tenant_id),
+            exc_info=True,
+        )
+        connector.discovered_tools = None
+        connector.is_enabled = False
+        connector.status = "error"
+        connector.error_reason = f"Tool discovery failed: {exc}"
+
+    await db.flush()
+    return connector
+
+
+@router.get("/celigo", response_model=CeligoStatusResponse)
+async def get_celigo_status(
+    user: Annotated[User, Depends(require_permission("connections.view"))],
+    _flag: Annotated[User, Depends(require_feature("celigo"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Get Celigo connector status."""
+    agent_access = await _celigo_agent_access(db, user.tenant_id)
+
+    connection = await _get_celigo_connection(db, user.tenant_id)
+    if not connection:
+        return CeligoStatusResponse(connected=False, agent_access=agent_access)
+
+    metadata = connection.metadata_json or {}
+    return CeligoStatusResponse(
+        connected=True,
+        account_name=_blank_to_none(metadata.get("account_name")),
+        account_id=_blank_to_none(metadata.get("user_id")),
+        region=metadata.get("region"),
+        status=connection.status,
+        agent_access=agent_access,
+    )
+
+
+@router.post("/celigo/test", response_model=CeligoTestResponse)
+async def test_celigo_connection(
+    request: CeligoTestRequest,
+    user: Annotated[User, Depends(require_permission("connections.manage"))],
+    _flag: Annotated[User, Depends(require_feature("celigo"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Validate a Celigo token without persisting it."""
+    try:
+        info = await verify_token(request.token, request.region)
+    except CeligoAuthError as exc:
+        return CeligoTestResponse(ok=False, error=str(exc))
+    except Exception as exc:
+        return CeligoTestResponse(ok=False, error=f"Connection failed: {exc}")
+
+    return CeligoTestResponse(ok=True, account_name=info.get("account_name"))
+
+
+@router.post("/celigo/connect", response_model=CeligoStatusResponse, status_code=status.HTTP_201_CREATED)
+async def connect_celigo(
+    request: CeligoConnectRequest,
+    user: Annotated[User, Depends(require_permission("connections.manage"))],
+    _flag: Annotated[User, Depends(require_feature("celigo"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Create (or reactivate) a Celigo connection.
+
+    Verifies the token BEFORE any database write -- an invalid token must
+    never create a row. When ``agent_token`` is supplied, also creates or
+    reactivates a read-only celigo_mcp MCP connector so the chat agent gets
+    Celigo tools -- but that side is best-effort: a failure there must never
+    fail the REST connection (agent access is a bonus, not a requirement of
+    "connected").
+    """
+    try:
+        info = await verify_token(request.token, request.region)
+    except CeligoAuthError as exc:
+        # The token itself was rejected -- this is genuinely the operator's mistake.
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    except (CeligoError, httpx.HTTPError) as exc:
+        # Celigo is unreachable or returned an unexpected non-2xx (5xx/429/etc), or the
+        # request itself failed at the transport level (timeout/DNS/connection refused
+        # -- verify_token does not wrap these, so httpx's own exceptions reach here).
+        # Deliberately 502, not 400 like the auth-error branch above: a 400 tells the
+        # operator they did something wrong, which is false when the failure is on
+        # Celigo's side -- and a spike of 400s reads as user error in monitoring while
+        # a spike of 502s correctly reads as an upstream outage.
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Could not reach Celigo: {exc}",
+        )
+
+    metadata = {
+        "region": request.region,
+        # The identity a later reconnect compares against (see
+        # _celigo_accounts_match). Persisted because `previous_identity` below
+        # is read back out of metadata_json, so this key is what makes the
+        # "did this reconnect move to a different account?" check possible at
+        # all. account_name is display-only and is empty for every real token.
+        "user_id": info.get("user_id"),
+        "account_name": info.get("account_name"),
+        "environment_scope": "all",
+    }
+    encrypted = encrypt_credentials({"token": request.token})
+    now = datetime.now(timezone.utc)
+
+    # Include revoked rows so a reconnect reactivates the same row instead of
+    # violating a one-connection-per-provider-per-tenant expectation.
+    existing_result = await db.execute(
+        select(Connection).where(
+            Connection.tenant_id == user.tenant_id,
+            Connection.provider == "celigo",
+        )
+    )
+    existing = existing_result.scalar_one_or_none()
+
+    # Captured BEFORE metadata_json is overwritten below: the account this
+    # connection was last verified against. The `else` branch at the bottom
+    # compares it with `info` to decide whether this reconnect moved the REST
+    # side to a different Celigo account.
+    previous_identity = dict(existing.metadata_json or {}) if existing else {}
+
+    # The trusted Celigo write window. It must span the db.commit() as well as
+    # the attribute writes: the guard fires at the FLUSH, and for the `existing`
+    # branch that flush is the audit log_event / commit below, not any statement
+    # in this block. Only THIS endpoint and disconnect_celigo verify the token
+    # and keep the REST row in step with its paired celigo_mcp connector, which
+    # is why every other path is refused.
+    with celigo_writes_allowed(db):
+        if existing:
+            existing.encrypted_credentials = encrypted
+            existing.status = "active"
+            existing.error_reason = None
+            existing.last_health_check_at = now
+            existing.label = request.label
+            existing.metadata_json = metadata
+            connection = existing
+        else:
+            connection = Connection(
+                tenant_id=user.tenant_id,
+                provider="celigo",
+                label=request.label,
+                status="active",
+                auth_type="api_key",
+                encrypted_credentials=encrypted,
+                created_by=user.id,
+                last_health_check_at=now,
+                metadata_json=metadata,
+            )
+            db.add(connection)
+            await db.flush()
+
+        await audit_service.log_event(
+            db=db,
+            tenant_id=user.tenant_id,
+            category="connection",
+            action="connection.create",
+            actor_id=user.id,
+            resource_type="connection",
+            resource_id=str(connection.id),
+        )
+        await db.commit()
+    # SET LOCAL app.current_tenant_id is transaction-scoped and the commit above
+    # just cleared it -- re-establish before ANY further DB work. That covers
+    # db.refresh(connection) right below, the celigo_mcp upsert + audit log in
+    # the `if request.agent_token` branch, and the `_celigo_agent_access` SELECT
+    # in the `else` branch -- all of it runs after this same commit.
+    await set_tenant_context(db, str(user.tenant_id))
+    await db.refresh(connection)
+
+    # Agent access (celigo_mcp) is a separate, best-effort concern from here on --
+    # the REST connection above is already committed and must stand regardless
+    # of what happens next. Scoped to its own SAVEPOINT (db.begin_nested()) rather
+    # than a bare try/except around a plain db.rollback(): a full session rollback
+    # expires EVERY object the session has loaded -- including the caller's own
+    # `user` and `connection` -- and touching them afterward (even just to read
+    # connection.status for the response below) throws MissingGreenlet outside
+    # the request's async context. A SAVEPOINT rollback only unwinds what this
+    # block itself touched.
+    agent_access = False
+    if request.agent_token:
+        try:
+            # Window spans the SAVEPOINT *and* the commit that follows it, for
+            # the same reason as above: the guard fires at the flush, and the
+            # commit is one. _upsert_celigo_mcp_connector opens its own window
+            # inside this one -- celigo_writes_allowed is re-entrant.
+            with celigo_writes_allowed(db):
+                async with db.begin_nested():
+                    mcp_connector = await _upsert_celigo_mcp_connector(
+                        db=db,
+                        tenant_id=user.tenant_id,
+                        agent_token=request.agent_token,
+                        region=request.region,
+                        rest_identity=info,
+                        created_by=user.id,
+                    )
+                    await audit_service.log_event(
+                        db=db,
+                        tenant_id=user.tenant_id,
+                        category="mcp_connector",
+                        action="mcp_connector.create",
+                        actor_id=user.id,
+                        resource_type="mcp_connector",
+                        resource_id=str(mcp_connector.id),
+                        payload={"provider": "celigo_mcp"},
+                    )
+                await db.commit()
+            agent_access = mcp_connector.is_enabled
+        except _GUARD_ERRORS:
+            # The REST connection is already committed above, so it still
+            # stands; what must NOT stand is a guard refusal reported as a
+            # routine agent-access failure.
+            raise
+        except Exception as exc:
+            logger.warning(
+                "celigo.agent_connector_create_failed",
+                tenant_id=str(user.tenant_id),
+                error=str(exc),
+            )
+    else:
+        # No agent token to verify -- and omitting it is the documented way to
+        # leave agent access alone. That is only safe while the REST side stays
+        # on the same Celigo account. Rotating the REST token to a DIFFERENT
+        # account would otherwise leave the agent's connector live against the
+        # OLD one: the UI says account B, the agent keeps reading account A's
+        # flows, and agent_access reports True over the split.
+        #
+        # We cannot re-verify a token we were not given, so the only correct
+        # move is to disable the paired connector and tell the operator to
+        # re-supply an agent token. Reuses _celigo_accounts_match so "is this
+        # the same account?" has ONE answer in this module, including its
+        # deliberate fail-closed behaviour on a missing account_name: an
+        # identity we cannot prove unchanged is not an identity we can keep
+        # agent access on.
+        if not _celigo_accounts_match(previous_identity, info):
+            previous_name = previous_identity.get("user_id") or "unknown"
+            new_name = info.get("user_id") or "unknown"
+            disabled = await _disable_celigo_agent_access(
+                db,
+                user.tenant_id,
+                user.id,
+                reason=(
+                    "Agent access was disabled because this connection was reconnected to a "
+                    f"different Celigo account (was: {previous_name!r}, now: {new_name!r}). "
+                    "Reconnect with an agent token for the new account to restore it."
+                ),
+            )
+            if disabled:
+                # That path commits, which clears the transaction-scoped
+                # SET LOCAL app.current_tenant_id -- re-establish it before the
+                # agent-access read below.
+                await set_tenant_context(db, str(user.tenant_id))
+
+        agent_access = await _celigo_agent_access(db, user.tenant_id)
+
+    return CeligoStatusResponse(
+        connected=True,
+        account_name=_blank_to_none(metadata["account_name"]),
+        account_id=_blank_to_none(metadata["user_id"]),
+        region=metadata["region"],
+        status=connection.status,
+        agent_access=agent_access,
+    )
+
+
+@router.delete("/celigo", status_code=status.HTTP_204_NO_CONTENT)
+async def disconnect_celigo(
+    user: Annotated[User, Depends(require_permission("connections.manage"))],
+    _flag: Annotated[User, Depends(require_feature("celigo"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Soft-delete the Celigo connection (matches connections.py's convention).
+
+    Also revokes the celigo_mcp connector, if one exists -- leaving the agent
+    with live Celigo tools after the user disconnected Celigo would be a real
+    defect (Task 10).
+    """
+    connection = await _get_celigo_connection(db, user.tenant_id)
+    if not connection:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No Celigo connection found")
+
+    # The other trusted window. This endpoint is the ONLY one that revokes both
+    # halves of the pair together -- which is exactly why the guard refuses the
+    # generic DELETE /connections/{id} and DELETE /mcp-connectors/{id}, each of
+    # which would revoke one half and leave the other live.
+    with celigo_writes_allowed(db):
+        connection.status = "revoked"
+
+        await audit_service.log_event(
+            db=db,
+            tenant_id=user.tenant_id,
+            category="connection",
+            action="connection.delete",
+            actor_id=user.id,
+            resource_type="connection",
+            resource_id=str(connection.id),
+        )
+
+        mcp_result = await db.execute(
+            select(McpConnector).where(
+                McpConnector.tenant_id == user.tenant_id,
+                McpConnector.provider == "celigo_mcp",
+                McpConnector.status != "revoked",
+            )
+        )
+        mcp_connector = mcp_result.scalar_one_or_none()
+        if mcp_connector:
+            mcp_connector.status = "revoked"
+            mcp_connector.is_enabled = False
+            await audit_service.log_event(
+                db=db,
+                tenant_id=user.tenant_id,
+                category="mcp_connector",
+                action="mcp_connector.delete",
+                actor_id=user.id,
+                resource_type="mcp_connector",
+                resource_id=str(mcp_connector.id),
+            )
+
+        await db.commit()

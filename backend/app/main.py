@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import text as sa_text
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
@@ -11,6 +12,7 @@ from app.api.v1.router import api_router
 from app.core.config import settings
 from app.core.logging import setup_logging
 from app.core.middleware import CorrelationIdMiddleware
+from app.services.celigo_write_guard import CeligoManagedElsewhereError
 
 
 def _validate_production_secrets() -> None:
@@ -133,6 +135,15 @@ async def lifespan(app: FastAPI):
     yield
 
 
+async def _celigo_managed_elsewhere_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Turn a flush-time Celigo refusal into the 400 the operator can act on.
+
+    `detail` (not `message`) matches the shape FastAPI's own HTTPException
+    produces, so the frontend's existing error surfacing needs no special case.
+    """
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
 def create_app() -> FastAPI:
     # Disable Swagger/ReDoc in non-development environments
     is_dev = settings.APP_ENV == "development"
@@ -158,6 +169,13 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # The Celigo write guard raises from inside the session flush, which can be
+    # anywhere: a service call, a router's own db.commit(), an audit log_event.
+    # Handling it once here is what makes every generic endpoint -- including
+    # ones nobody has written yet -- fail closed with a coherent, actionable
+    # 400 instead of a 500, with zero per-endpoint code.
+    application.add_exception_handler(CeligoManagedElsewhereError, _celigo_managed_elsewhere_handler)
 
     # Routes
     application.include_router(api_router)

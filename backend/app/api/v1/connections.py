@@ -240,7 +240,10 @@ async def delete_connection(
     user: Annotated[User, Depends(require_permission("connections.manage"))],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    deleted = await connection_service.delete_connection(db, connection_id, user.tenant_id)
+    try:
+        deleted = await connection_service.delete_connection(db, connection_id, user.tenant_id)
+    except connection_service.CeligoManagedElsewhereError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     if not deleted:
         raise HTTPException(status_code=404, detail="Connection not found")
 

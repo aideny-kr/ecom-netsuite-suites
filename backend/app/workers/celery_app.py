@@ -32,6 +32,7 @@ celery_app.conf.include = [
     "app.workers.tasks.auto_learning",
     "app.workers.tasks.auto_query_improvement",
     "app.workers.tasks.billing_sync",
+    "app.workers.tasks.celigo_flow_map_sync",
     "app.workers.tasks.connection_health",
     "app.workers.tasks.example_sync",
     "app.workers.tasks.knowledge_crawler",

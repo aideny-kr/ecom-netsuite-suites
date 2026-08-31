@@ -35,6 +35,27 @@ class TestCategorize:
     def test_external_mcp_suiteql_is_data_table(self):
         assert categorize("ext__ns_runCustomSuiteQL__abcd1234") == "data_table"
 
+    def test_external_mcp_celigo_list_tool_is_data_table(self):
+        # Celigo's hosted MCP server ships list_* read tools (list_flow_errors,
+        # list_flows, ...). Without this, categorize() falls through to "other",
+        # _is_data_table_tool returns False, _intercept_tool_result never runs,
+        # and the LLM restates raw counts from the tool's JSON in prose --
+        # exactly what SSE interception exists to prevent (feedback_no_llm_numbers).
+        connector_id = "ab" * 16  # 32 hex chars, matches _make_ext_tool_name's format
+        assert categorize(f"ext__{connector_id}__list_flow_errors") == "data_table"
+
+    def test_external_mcp_celigo_write_tool_is_mutation_not_data_table(self):
+        # Write verbs must stay classified as "mutation" (HITL path) even
+        # though they live in the same Celigo tool namespace as the reads.
+        connector_id = "ab" * 16
+        assert categorize(f"ext__{connector_id}__upsert_flow") == "mutation"
+
+    def test_external_mcp_celigo_unrecognized_tool_is_other(self):
+        # Fails closed: a name that isn't in Celigo's enumerated read catalog
+        # (celigo_tool_policy._READ_TOOLS) must not be guessed into data_table.
+        connector_id = "ab" * 16
+        assert categorize(f"ext__{connector_id}__some_unknown_celigo_tool") == "other"
+
     def test_unknown_tool_is_other(self):
         assert categorize("some_new_tool") == "other"
 

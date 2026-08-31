@@ -32,7 +32,13 @@ from sqlalchemy.dialects.postgresql import UUID
 from alembic import op
 
 revision = "093_report_series"
-down_revision = "093_recon_reject_labels"  # re-parented 2026-08-07: 093_recon_reject_labels
+down_revision = "096_celigo_flow_step_provenance"  # re-parented 2026-08-30: main landed
+# 094/095/096_celigo_* off the SAME parent (093_recon_reject_labels) while this branch was
+# in review, which would leave TWO heads. Linearized by re-parenting onto their tip rather
+# than adding a merge migration -- a merge migration breaks `downgrade -1` (see memory
+# feedback_merge_migration_breaks_downgrade). The 093_/094_ filename prefixes now sort
+# BEFORE the celigo files they depend on; alembic orders by revision graph, not filename,
+# so this is cosmetic only -- the ids are load-bearing and are left untouched.
 # landed on main first (PR #193) and also claimed 092 as its parent. Two children of
 # one revision is the parallel-head case that breaks `alembic upgrade head` on every
 # deploy. Re-parented (LINEARIZED) rather than resolved with a merge migration,

@@ -5,6 +5,13 @@ from pydantic import BaseModel, Field
 
 
 class ConnectionCreate(BaseModel):
+    # celigo is deliberately excluded: it is reachable only through
+    # connect_celigo (app/api/v1/connector_status.py), which builds
+    # Connection(...) directly and enforces the feature flag,
+    # verify-token-before-write, and reconnect semantics this generic schema
+    # knows nothing about. Widening this pattern to admit "celigo" would let
+    # POST /connections create a Celigo row that bypasses every one of those
+    # guards -- see tests/schemas/test_celigo_provider_schemas.py.
     provider: str = Field(pattern=r"^(shopify|stripe|netsuite)$")
     label: str = Field(min_length=1, max_length=255)
     credentials: dict

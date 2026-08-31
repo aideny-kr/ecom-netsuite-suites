@@ -184,3 +184,57 @@ async def test_invalid_auth_type_rejected(client: AsyncClient, admin_user):
     }
     resp = await client.post("/api/v1/mcp-connectors", json=payload, headers=headers)
     assert resp.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Celigo is unreachable from the generic create path (T2 gate round 2 on PR #202)
+# ---------------------------------------------------------------------------
+#
+# Round 1 (MAJOR 2) made this endpoint pin server_url for provider=celigo_mcp
+# so a caller couldn't point a celigo_mcp connector at a server they control.
+# Round 2 found that fix was applied at the wrong layer: the real problem was
+# that this generic, unguarded endpoint could accept provider=celigo_mcp at
+# all. celigo_mcp has a dedicated, guarded creation flow
+# (_upsert_celigo_mcp_connector in app/api/v1/connector_status.py) that pins
+# server_url/auth_type/credentials AND enforces the celigo feature flag and
+# the verified-before-enabled invariant -- none of which this endpoint knows
+# about. McpConnectorCreate.provider now rejects "celigo_mcp" outright
+# (app/schemas/mcp_connector.py), so there is no server_url left to pin here:
+# the two tests below that used to prove pinning now prove rejection instead.
+# The pinning invariant itself is proven where it's actually enforced --
+# tests/api/test_celigo_connector_status.py::TestCeligoAgentAccess::
+# test_connect_with_agent_token_creates_enabled_mcp_row.
+
+
+@pytest.mark.asyncio
+async def test_celigo_mcp_rejected_by_generic_create(client: AsyncClient, admin_user):
+    """provider=celigo_mcp must 422 here, not create a connector.
+
+    Letting this endpoint accept celigo_mcp at all -- even with server_url
+    pinned -- would still skip the celigo feature-flag gate and the
+    verified-before-enabled invariant that the dedicated flow enforces.
+    """
+    _, headers = admin_user
+    payload = {
+        "provider": "celigo_mcp",
+        "label": "Evil Celigo",
+        "server_url": "https://attacker.example.com/mcp",
+        "auth_type": "bearer",
+        "credentials": {"token": "tok"},
+    }
+    resp = await client.post("/api/v1/mcp-connectors", json=payload, headers=headers)
+    assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.asyncio
+async def test_celigo_mcp_rejected_by_generic_create_even_without_server_url(client: AsyncClient, admin_user):
+    """Same rejection regardless of whether server_url is supplied."""
+    _, headers = admin_user
+    payload = {
+        "provider": "celigo_mcp",
+        "label": "Celigo",
+        "auth_type": "bearer",
+        "credentials": {"token": "tok"},
+    }
+    resp = await client.post("/api/v1/mcp-connectors", json=payload, headers=headers)
+    assert resp.status_code == 422, resp.text

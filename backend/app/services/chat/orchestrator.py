@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.services.chat.prompt_cache import split_system_prompt
-from app.services.chat.tool_categories import categorize
+from app.services.chat.tool_categories import categorize, is_celigo_tool
 from app.services.drive_rag.retriever import retrieve_drive_chunks
 from app.services.metrics.metric_compute import condense_metric_for_llm, is_suppressed_metric_payload
 
@@ -725,11 +725,22 @@ def _compute_source_pin_update(tool_calls_log: list[dict]) -> str | None:
             # expression or missing source_kind → source-agnostic; contribute nothing
             continue
 
+        # Celigo read tools are categorized "data_table" (their output is row
+        # data that must be intercepted rather than restated by the model), but
+        # Celigo is a THIRD source -- not NetSuite, and build_source_pin_hint has
+        # no name for it. Treating it as NetSuite pinned a Celigo-only turn to
+        # NetSuite and made a Celigo+BigQuery turn look like a source conflict.
+        # Source-agnostic, so it contributes nothing either way -- the same
+        # treatment metric_compute's `expression` backend gets above.
+        if is_celigo_tool(name):
+            continue
+
         if cat == "bigquery":
             used_bq = True
         elif cat in {"data_table", "financial"}:
             # data_table covers netsuite_suiteql + pivot; financial covers report.
-            # bigquery is its own category so we only land here for NetSuite.
+            # bigquery and Celigo are excluded above, so we only land here for
+            # NetSuite.
             used_ns = True
 
     if used_bq and used_ns:
@@ -1459,6 +1470,7 @@ from app.services.chat.tool_call_results import (
     tool_call_row_count,
 )
 from app.services.chat.tools import build_all_tool_definitions, execute_tool_call
+from app.services.chat.write_outcome import classify_write_outcome, may_enter_repair_loop
 from app.services.prompt_template_service import get_active_template
 
 logger = logging.getLogger(__name__)
@@ -1679,6 +1691,160 @@ async def _ensure_session_messages_loaded(db: AsyncSession, session: ChatSession
         await db.refresh(session, attribute_names=["messages"])
 
 
+async def _cas_claim_write_confirmation(
+    db: AsyncSession,
+    confirm_msg: ChatMessage,
+    so: dict[str, Any],
+    new_status: str,
+) -> bool:
+    """Atomically claim a pending write-confirmation row: ``UPDATE ... WHERE
+    id = confirm_msg.id AND status = 'pending'``, setting ``status`` to
+    *new_status*.
+
+    Shared by BOTH the approve and reject branches of the write_confirm
+    short-circuit in ``run_chat_turn`` (T2 gate — the reject branch was
+    found to have no compare-and-swap while approve did; this is the SIXTH
+    instance on this branch of a race guard fixed at one site and not its
+    twin — see the module-level history around the write_confirm block).
+    Both branches read the SAME ``_so`` snapshot once at the top of the
+    block; that snapshot goes stale the instant either request commits a
+    transition, so neither branch may act on it directly — every write to
+    the row's status must go through this claim. DO NOT duplicate this CAS
+    inline at a new call site; call this instead.
+
+    Returns ``True`` iff THIS call won the claim (``rowcount == 1``) — on
+    success the UPDATE has already been committed, so the row is durably
+    *new_status* before this function returns; the caller may treat *so* as
+    the authoritative pre-claim state for whatever it does next (e.g.
+    approve still needs to execute the write and later persist a richer
+    final status; reject's *new_status* IS the final status, nothing further
+    to do). Returns ``False`` (without committing anything) when another
+    request already claimed or resolved the row first (``rowcount == 0``) —
+    the caller MUST refuse and MUST NOT touch ``confirm_msg.structured_output``
+    from its own now-stale *so*; the winner owns that transition.
+
+    Tenant context: ``SET LOCAL app.current_tenant_id`` is transaction-scoped
+    and this function's own commit clears it (bitten twice already in this
+    repo — see ``set_tenant_context``'s docstring). A caller that runs
+    further tenant-scoped DB statements AFTER a successful claim (approve's
+    ``execute_tool_call``, its audit log, its final message insert; reject's
+    own assistant-message insert) MUST re-establish it itself via
+    ``set_tenant_context(db, str(tenant_id))`` — this helper does not do
+    that, since not every caller has more tenant-scoped work left to do.
+    """
+    from sqlalchemy import update as _cas_update
+
+    cas_result = await db.execute(
+        _cas_update(ChatMessage)
+        .where(
+            ChatMessage.id == confirm_msg.id,
+            ChatMessage.structured_output["status"].astext == "pending",
+        )
+        .values(structured_output={**so, "status": new_status})
+    )
+    if cas_result.rowcount == 0:
+        return False
+    await db.commit()
+    return True
+
+
+async def _resolve_repair_chain_previous_fingerprint(
+    db: AsyncSession,
+    session_id: uuid.UUID,
+    root_id: str,
+    target_attempt: int,
+) -> str | None:
+    """Return the ``failure_fingerprint`` persisted on the chain entry (the
+    root card itself, or one of its repair cards) whose ``repair_attempt``
+    equals *target_attempt*, or ``None`` if no such row exists or it never
+    failed.
+
+    Reads the PERSISTED chain — rows that survive a process restart, a new
+    session, and ``/clear`` — never an in-memory object, per the bounding
+    ruling (agentic-repair design, ``bounding``). ``target_attempt < 0``
+    (the root's own first failure, attempt 0, has no predecessor to stall
+    against) returns ``None`` without issuing a query. Scoped to
+    *session_id* — a confirmation card is always session-scoped (the HMAC
+    token is bound to it), so the chain can never span sessions.
+    """
+    if target_attempt < 0:
+        return None
+
+    try:
+        root_uuid = uuid.UUID(root_id)
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+    from sqlalchemy import or_ as _rc_or
+    from sqlalchemy import select as _rc_select
+
+    result = await db.execute(
+        _rc_select(ChatMessage)
+        .where(
+            ChatMessage.session_id == session_id,
+            _rc_or(
+                ChatMessage.id == root_uuid,
+                ChatMessage.structured_output["repair_of"].astext == root_id,
+            ),
+            ChatMessage.structured_output["repair_attempt"].astext == str(target_attempt),
+        )
+        .limit(1)
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        return None
+    so = row.structured_output
+    if not isinstance(so, dict):
+        return None
+    return so.get("failure_fingerprint")
+
+
+def _build_write_repair_directive(
+    *,
+    mutation_type: str,
+    record_type: str,
+    attempted_payload: dict[str, Any],
+    error_details: list[str],
+    raw_error: str,
+) -> str:
+    """System-prompt directive injected on a repair re-entry (requirement
+    B). Scopes the agent to repairing the SAME write — guidance for
+    quality, not a control; the control is the card the human must still
+    approve. What the model receives is a mechanical JSON traversal of
+    NetSuite's own error (`error_details`) plus the exact payload that was
+    executed — never a title-matched guess at which field it means."""
+    details_block = "\n".join(f"- {d}" for d in error_details) if error_details else raw_error or "(no detail returned)"
+    return (
+        "<write_repair>\n"
+        f"Your previous {mutation_type} on {record_type} was approved by the user and "
+        "sent to NetSuite, but NetSuite REJECTED it. Investigate and repair the SAME "
+        "write — do not start a different write, and do not simply re-propose the "
+        "identical payload.\n\n"
+        f"What was sent:\n{json.dumps(attempted_payload, default=str)}\n\n"
+        f"What NetSuite said:\n{details_block}\n\n"
+        "Call ns_getRecordTypeMetadata for this record type and resolve any values you "
+        "need (ns_getSubsidiaries / SuiteQL) before re-proposing. If you cannot "
+        "determine a value a human must choose, use ask_user with the field NAME only "
+        "— do not guess a value.\n"
+        "</write_repair>"
+    )
+
+
+def _repair_exit_message(reason: str, last_detail: str) -> str:
+    """Human-facing message for a TERMINAL write-repair exit (stall/budget/
+    error) — names the reason and the last thing NetSuite said, per
+    requirement D. Never called on a "reenter" decision — that path stays
+    silent and lets the agent's own investigation narrate the turn."""
+    phrasing = {
+        "stall": "the revised proposal ran into the exact same problem NetSuite already rejected",
+        "budget": "the available repair attempts for this write have been used up",
+        "error": "NetSuite's response could not be understood well enough to safely retry",
+    }
+    explanation = phrasing.get(reason, "the write could not be completed")
+    detail = last_detail.strip() or "no further detail was returned"
+    return f"The write failed and could not be completed after retrying — {explanation}. NetSuite said: {detail}"
+
+
 async def run_chat_turn(
     db: AsyncSession,
     session: ChatSession,
@@ -1708,6 +1874,17 @@ async def run_chat_turn(
     # no-op revert path (still re-raises so callers see the failure).
     _revert_message_id_on_failure: uuid.UUID | None = None
 
+    # Bounded write-repair loop (agentic-repair design requirement B) — set
+    # ONLY on a re-entry after NetSuite rejects an approved write and the
+    # persisted bound still has budget. Consumed at the UnifiedAgent
+    # construction site below (mirrors the Plan Mode directive pattern):
+    # non-None means "inject _write_repair_directive/_write_repair_context
+    # onto the agent". Must be initialized here, before the write_confirm
+    # branch point, per this file's own variable-init invariant
+    # (test_orchestrator_paths.py).
+    write_repair_context: dict[str, Any] | None = None
+    write_repair_directive: str = ""
+
     # ── Write confirmation short-circuit (HITL) — runs before any expensive
     # context assembly (history, RAG, entity resolution). The approve/reject
     # path only needs a single DB lookup by message ID.
@@ -1719,7 +1896,15 @@ async def run_chat_turn(
             from sqlalchemy import select as _wc_select
             from sqlalchemy.orm.attributes import flag_modified as _wc_flag_modified
 
-            from app.services.chat.write_confirmation_service import validate_and_extract_confirmation
+            from app.core.database import set_tenant_context
+            from app.services.chat.write_confirmation_service import (
+                merge_slot_values,
+                mint_confirmation_token,
+                uncovered_slot_names,
+                validate_and_extract_confirmation,
+            )
+            from app.services.chat.write_payload import PayloadParseError, normalize_write_payload
+            from app.services.chat.write_validation import validate_mutation
 
             _confirm_result = await db.execute(
                 _wc_select(ChatMessage).where(
@@ -1744,7 +1929,253 @@ async def run_chat_turn(
                     yield {"type": "error", "error": "Confirmation token is invalid or tampered."}
                     return
 
+                # Terminal-condition gate (operator ruling): a card that
+                # carries a proven posting-invariant violation
+                # (`invariant_errors` — unbalanced journal entry, closed
+                # accounting period) or an unfillable line-level required
+                # field (`unfillable_line_fields`) must never be approved —
+                # not by a human, not by a modified client, not by a
+                # replayed request. The frontend already renders both
+                # conditions terminal (no Approve button), but that is a
+                # caller-side guard; this is the choke point
+                # (`.claude/rules/agent-graph.md` #3: guard here, not at the
+                # caller). Checked AFTER the HMAC/integrity check above, on
+                # purpose — a tampered card must fail on integrity grounds
+                # first, and these markers are only trustworthy once the
+                # card is proven untampered. Neither field is inside the
+                # signed envelope (see `_build_payload_json` — only
+                # `tool_name`/`tool_input`/`editable_slots` are signed), but
+                # that is fine here: both can only make this gate MORE
+                # restrictive, never less, so there is nothing for a tamperer
+                # to gain by adding or forging them. Do NOT add them to the
+                # signed payload — that would invalidate every already-
+                # pending card's token for no security benefit.
+                _invariant_errors = _so.get("invariant_errors") or []
+                _unfillable_line_fields = _so.get("unfillable_line_fields") or []
+                if _invariant_errors:
+                    yield {
+                        "type": "error",
+                        "error": (
+                            "This write cannot be approved — it violates a posting invariant: "
+                            + "; ".join(_invariant_errors)
+                        ),
+                    }
+                    return
+                if _unfillable_line_fields:
+                    yield {
+                        "type": "error",
+                        "error": (
+                            "This write cannot be approved — required line-level field(s) could "
+                            f"not be filled: {', '.join(_unfillable_line_fields)}. Ask the agent to "
+                            "retry with a complete payload."
+                        ),
+                    }
+                    return
+
+                # Server-declared editable slots (Task 7): the client may only
+                # submit values for fields `_so["editable_slots"]` names, and
+                # only values inside a slot's `allowed` set when one exists.
+                # `_so` is the DB-loaded, server-trusted card — only
+                # `slot_values` is client-controlled input. Merge happens
+                # here, after the token check above, so a tampered slot
+                # submission never reaches `execute_tool_call`.
+                _slot_values = write_confirm.get("slot_values") or {}
+                _merged_confirmation_token: str | None = None
+                if _slot_values:
+                    is_valid, tool_name, tool_input, _merge_err = merge_slot_values(_so, _slot_values, str(session.id))
+                    if not is_valid:
+                        yield {"type": "error", "error": _merge_err or "Confirmation token is invalid or tampered."}
+                        return
+                    # The contract: the token is re-minted over the merged
+                    # payload. The persisted card must show what was actually
+                    # written, not the agent's pre-merge payload — otherwise
+                    # the card would permanently misrepresent what got sent
+                    # to NetSuite (the audit log below still has the merged
+                    # truth regardless, via `tool_input` in its payload).
+                    # `editable_slots` is unchanged by the merge (only the
+                    # filled-in values change) — sign with the same slots
+                    # `_so` already carries.
+                    _merged_confirmation_token = mint_confirmation_token(
+                        tool_name, tool_input, _so.get("editable_slots", []), str(session.id)
+                    )
+
+                # Finding D (T2 gate wave): a card carrying non-empty
+                # editable_slots names field(s) the server itself proved
+                # missing — every declared slot must be COVERED by
+                # slot_values before this approve is allowed through, or a
+                # client that simply omits slot_values (or supplies only
+                # some of them) could approve an incomplete payload; the
+                # frontend disabling Approve is a caller-side guard only.
+                # Checked AFTER merge_slot_values's own per-key rejections
+                # above (undeclared key / value outside an allowlist) so
+                # those keep their specific error text — this only fires
+                # when the submission was otherwise legitimate but
+                # incomplete. Uses the RAW `_slot_values` the human actually
+                # submitted (not the merged tool_input), since coverage is
+                # about what the human supplied. Runs regardless of whether
+                # a merge happened above — an empty/omitted slot_values on a
+                # slotted card never enters the `if _slot_values:` branch at
+                # all, which is exactly the gap this closes.
+                _uncovered_slots = uncovered_slot_names(_so.get("editable_slots") or [], _slot_values)
+                if _uncovered_slots:
+                    yield {
+                        "type": "error",
+                        "error": (
+                            "This write cannot be approved — required field(s) were not "
+                            f"provided: {', '.join(_uncovered_slots)}. Fill in every field on the card."
+                        ),
+                    }
+                    return
+
+                # Finding B (T2 gate wave): a slot merge changes the payload
+                # about to execute — the pre-merge `_invariant_errors` check
+                # above was computed against a DIFFERENT payload (the
+                # agent's pre-merge proposal), which is exactly why a
+                # missing trandate could never trip `_check_period_open` at
+                # build time. Re-validate the MERGED payload here, right
+                # before it executes, so the payload that runs is the
+                # payload that was checked. Only runs when a merge actually
+                # happened (`_merged_confirmation_token is not None`) — a
+                # no-merge approve executes bytes identical to what the
+                # intercept already validated; re-checking the staleness
+                # window (a period closing between mint and approve) on
+                # EVERY approve is a named follow-up, not this fix.
+                # `_merged_normalized` is computed HERE, before the CAS, and
+                # reused verbatim at the persist site below (instead of a
+                # second `normalize_write_payload(tool_input)` call after
+                # execute_tool_call) — T2 gate finding B blast-radius
+                # hardening. `tool_input` is never reassigned between here
+                # and the persist site, so this makes a post-execution
+                # PayloadParseError impossible BY CONSTRUCTION rather than
+                # merely proven unreachable (merge_slot_values already
+                # enforces single-coerced-key on the pre-merge input, and
+                # its write-back only ever touches that one key).
+                _merged_normalized = None
+                if _merged_confirmation_token is not None:
+                    try:
+                        _merged_validation = await validate_mutation(
+                            tool_name=tool_name,
+                            tool_input=tool_input,
+                            mutation_type=_so.get("mutation_type", "update"),
+                            record_type=_so.get("record_type", "record"),
+                            tenant_id=tenant_id,
+                            actor_id=user_id,
+                            correlation_id=correlation_id,
+                            db=db,
+                            session_id=str(session.id),
+                        )
+                        _merged_normalized = normalize_write_payload(tool_input)
+                    except PayloadParseError as exc:
+                        # Should not normally happen — merge_slot_values
+                        # already proved tool_input re-parses via
+                        # normalize_write_payload — but fail closed rather
+                        # than execute an unvalidated payload.
+                        yield {
+                            "type": "error",
+                            "error": f"The merged write payload could not be validated: {exc}",
+                        }
+                        return
+                    if (
+                        _merged_validation.invariant_errors
+                        or _merged_validation.missing_required
+                        or _merged_validation.missing_line_required
+                    ):
+                        # `missing_line_required` entries arrive pre-formatted
+                        # as `line[<idx>].<field>` (see `validate_write` in
+                        # write_validator.py), so "missing required line
+                        # field: line[0].account" reads correctly — unlike
+                        # the header-field phrasing above, which needs the
+                        # "field: " prefix because its entries are bare
+                        # names. Without this branch, the post-merge gate
+                        # applied a narrower completeness bar than the
+                        # pre-merge gate it exists to replicate (which
+                        # treats missing_line_required as a hard block via
+                        # `_unfillable_line_fields` above) — a payload that
+                        # became line-incomplete only after the merge would
+                        # pass here and execute.
+                        _problems = (
+                            list(_merged_validation.invariant_errors)
+                            + [f"missing required field: {f}" for f in _merged_validation.missing_required]
+                            + [f"missing required line field: {f}" for f in _merged_validation.missing_line_required]
+                        )
+                        yield {
+                            "type": "error",
+                            "error": (
+                                "This write cannot be approved — the merged payload failed "
+                                "validation: " + "; ".join(_problems)
+                            ),
+                        }
+                        return
+                    # `_merged_validation.unvalidated` (metadata could not be
+                    # fetched) is deliberately NOT a refusal here — same
+                    # "requirements unknown, human is the control" default
+                    # as everywhere else in this plan. An infra failure
+                    # inside check_posting_invariants/get_record_metadata
+                    # fails OPEN by inheritance (both already catch their
+                    # own exceptions internally and return the "no violation
+                    # asserted" / "requirements unknown" defaults, so no
+                    # exception ever reaches here) — a human explicitly
+                    # approved this payload, and blocking every approve
+                    # during an MCP outage on a payload the human is looking
+                    # at is worse than the small residual risk. Pinned by
+                    # test_infra_failure_during_revalidation_fails_open_and_still_executes.
+
+                # T2 gate finding #9 — atomic claim, compare-and-swap
+                # 'pending' -> 'executing'. Sits after EVERY gate above
+                # (pending-status, HMAC, terminal markers, slot coverage,
+                # post-merge re-validation) and immediately before the
+                # external NetSuite call. Without this, two concurrent
+                # approve requests for the same confirmation_id both read
+                # status='pending' at the top of this block, both pass every
+                # gate above, and both would reach execute_tool_call — the
+                # race window is the NetSuite HTTP call itself (seconds, not
+                # microseconds) — producing a double-posted journal entry or
+                # a duplicate customer deposit. `rowcount == 0` means another
+                # request already won the claim between our read at the top
+                # of this block and here; refuse rather than execute.
+                #
+                # Deliberately NOT a `SELECT ... FOR UPDATE` held across the
+                # write: Supabase enforces a 2-minute statement timeout, and
+                # pinning a connection through a multi-second external call
+                # is how you exhaust the pool. Claim-then-release — commit
+                # the transition, then make the call on a connection
+                # returned to the pool — is the safe shape. Same
+                # compare-and-swap pattern as handle_plan_mode_choice's CAS
+                # in plan_mode/short_circuit.py. Shared with the reject
+                # branch below via `_cas_claim_write_confirmation` — see its
+                # docstring for why this is a helper, not an inline block.
+                _claimed = await _cas_claim_write_confirmation(db, _confirm_msg, _so, "executing")
+                if not _claimed:
+                    yield {
+                        "type": "error",
+                        "error": "This confirmation is already being processed by another request.",
+                    }
+                    return
+                # The claim above committed — clears `SET LOCAL app.current_tenant_id`
+                # (transaction-scoped — dies at the first COMMIT, see
+                # set_tenant_context's docstring; bitten twice already in
+                # this repo). Re-establish it before the next statement on
+                # this session: execute_tool_call reads tenant-scoped rows
+                # (e.g. the NetSuite connection record), and the audit log +
+                # final message write below are tenant-scoped writes.
+                await set_tenant_context(db, str(tenant_id))
+
+                # A crash between the claim above and the status write below
+                # (process kill, OOM, deploy) deliberately leaves this row
+                # at status='executing' forever — no automatic recovery.
+                # That is correct, not a bug: we genuinely do not know
+                # whether NetSuite received the write, and guessing (auto-
+                # retry, auto-revert-to-pending) risks a SECOND post for a
+                # write NetSuite already accepted. A human must check the
+                # NetSuite record and resolve it manually.
                 _exec_result_str = await execute_tool_call(
+                    # The ONE place this may be True. `tool_name`/`tool_input`
+                    # here came from validate_and_extract_confirmation, which
+                    # HMAC-verified the exact payload a human accepted — so
+                    # this is the approval, not a claim of one. Every other
+                    # caller of execute_tool_call leaves it default-False and
+                    # is refused at the dispatcher.
+                    human_approved=True,
                     tool_name=tool_name,
                     tool_input=tool_input,
                     tenant_id=tenant_id,
@@ -1758,19 +2189,242 @@ async def run_chat_turn(
                 _record_type = _so.get("record_type", "record")
 
                 _exec_succeeded = False
+                # Initialised BEFORE the try/except branches below —
+                # this file's own rule (chat-orchestration.md #19,
+                # pinned by test_orchestrator_paths.py): a variable
+                # read after an if/elif chain must be bound on every
+                # path, or the exception route raises UnboundLocalError.
+                _updated_so_record_url: str | None = None
+                _exec_error: str | None = None
+                # Bound BEFORE the try/except, same invariant as the vars above
+                # (chat-orchestration.md #19, pinned by test_orchestrator_paths):
+                # every path below reads this, including the exception route.
+                # Defaults to the SAFE value — an outcome we have not
+                # established is unknown, never success.
+                _write_outcome: str = "indeterminate"
                 try:
                     _exec_result = json.loads(_exec_result_str)
-                    if isinstance(_exec_result, dict) and _exec_result.get("error"):
-                        _confirm_content = f"The operation failed: {_exec_result['error']}"
+                    # T2 gate round-2 finding: `.get("error")` alone missed a
+                    # PARSEABLE result that self-declares `success: false` with
+                    # no `error` key — the external MCP write tools share the
+                    # exact same transport/parsing path as ns_runReport, which
+                    # is already CONFIRMED (T2 re-review #1) to drop `error`
+                    # while still sending `success: false`. Reuse the repo's
+                    # existing, precedented predicate instead of inventing a
+                    # third variant — identical to extract_result_payload
+                    # (tool_call_results.py:462) and this file's own sibling
+                    # SSE-intercept guard (~line 852): `is False`, not `is not
+                    # True`, so a bare `{"id": "123"}` shape with no `success`
+                    # key at all (ns_createRecord's ordinary response) still
+                    # counts as success.
+                    # ...and that predicate now lives in write_outcome.py, which
+                    # adds the third case this branch was missing: a write whose
+                    # outcome we do not KNOW. A timeout is not a failure — on
+                    # 2026-08-27 one created customer 5264348 while this code
+                    # reported failure and opened a repair card carrying the
+                    # identical payload.
+                    _write_outcome = classify_write_outcome(_exec_result)
+                    if _write_outcome == "indeterminate":
+                        _exec_error = _extract_error_message(_exec_result) or (
+                            f"the {_mutation_type} did not complete within the time limit"
+                        )
+                        _confirm_content = (
+                            f"**This {_record_type} {_mutation_type} may or may not have completed.** "
+                            f"NetSuite did not confirm the result ({_exec_error}), which does NOT mean "
+                            "it was rejected — the record may already exist.\n\n"
+                            f"Check the {_record_type} in NetSuite before trying again. Re-running this "
+                            "now risks creating it twice."
+                        )
+                    elif _write_outcome == "failed":
+                        _exec_error = _extract_error_message(_exec_result) or (
+                            f"NetSuite reported this {_mutation_type} failed but returned no further "
+                            f"detail — check the {_record_type} record directly in NetSuite to confirm "
+                            "whether it was created or changed."
+                        )
+                        _confirm_content = f"The operation failed: {_exec_error}"
                     else:
                         _exec_succeeded = True
                         _confirm_content = f"Done — the {_record_type} {_mutation_type} has been executed successfully."
+                        # Hand back a link to what was just written. Without
+                        # it the operator is told "Done" and left to find the
+                        # record by searching NetSuite for a name, or by
+                        # knowing the URL shape for an internal id. The id is
+                        # already in the response; only the link was missing.
+                        # Best-effort by construction: an unknown record type
+                        # or a tenant with no NetSuite account id yields no
+                        # link rather than a guessed one, and nothing here may
+                        # turn a SUCCESSFUL write into an error.
+                        try:
+                            from sqlalchemy import select as _sel
+
+                            from app.models.tenant import Tenant as _Tenant
+                            from app.services.chat.netsuite_record_url import build_record_url
+                            from app.services.chat.tools import parse_external_tool_name as _parse_ext
+                            from app.services.mcp_connector_service import get_mcp_connector as _get_conn
+
+                            _new_id = (
+                                _exec_result.get("recordId") or _exec_result.get("id") or _exec_result.get("internalId")
+                                if isinstance(_exec_result, dict)
+                                else None
+                            )
+                            if _new_id:
+                                # Resolve the account from the CONNECTOR that
+                                # executed this write, not from the tenant's
+                                # single netsuite_account_id. The moment a
+                                # tenant has both a sandbox and a production
+                                # connector, a tenant-wide value sends a
+                                # sandbox write's link into PRODUCTION — worse
+                                # than no link, because it invites someone to
+                                # conclude the write failed, or to go hunting
+                                # in production for a record deliberately kept
+                                # out of it. The connector id is recoverable
+                                # from the signed tool_name.
+                                _acct = None
+                                _parsed_conn = _parse_ext(tool_name)
+                                if _parsed_conn:
+                                    _conn_row = await _get_conn(db, _parsed_conn[0], tenant_id)
+                                    _acct = (
+                                        ((_conn_row.metadata_json or {}) or {}).get("account_id") if _conn_row else None
+                                    )
+                                if not _acct:
+                                    # Single-connector tenants have no
+                                    # ambiguity; fall back rather than drop the
+                                    # link entirely.
+                                    _acct = await db.scalar(
+                                        _sel(_Tenant.netsuite_account_id).where(_Tenant.id == tenant_id)
+                                    )
+                                _record_url = build_record_url(_acct, _record_type, _new_id)
+                                if _record_url:
+                                    _updated_so_record_url = _record_url
+                                    _confirm_content += (
+                                        f"\n\n[View {_record_type} {_new_id} in NetSuite]({_record_url})"
+                                    )
+                        except Exception:
+                            logger.warning("record link could not be built", exc_info=True)
                 except (json.JSONDecodeError, TypeError):
-                    _exec_succeeded = True
-                    _confirm_content = f"The {_mutation_type} operation has been executed."
+                    # UNPARSEABLE result. This used to report SUCCESS — telling
+                    # the operator a write had executed on the strength of a
+                    # response nobody could read. It is the same epistemic
+                    # position as a timeout, so it gets the same answer (the
+                    # indeterminate outcome ClickUp 86bbhmxd1 asked for).
+                    _write_outcome = "indeterminate"
+                    _exec_error = "NetSuite's response could not be read"
+                    _confirm_content = (
+                        f"**This {_record_type} {_mutation_type} may or may not have completed.** "
+                        "NetSuite's response could not be read, which does NOT mean it was "
+                        "rejected — the record may already exist.\n\n"
+                        f"Check the {_record_type} in NetSuite before trying again. Re-running this "
+                        "now risks creating it twice."
+                    )
 
                 _updated_so = dict(_so)
-                _updated_so["status"] = "approved" if _exec_succeeded else "pending"
+                if _exec_succeeded and _updated_so_record_url:
+                    # Display-only, like field_labels: never part of the
+                    # signed tool_input, never written to NetSuite.
+                    _updated_so["record_url"] = _updated_so_record_url
+                _repair_decision = None
+                _repair_root_id: str | None = None
+                _repair_current_attempt = 0
+                if _exec_succeeded:
+                    _updated_so["status"] = "approved"
+                elif not may_enter_repair_loop(_write_outcome):
+                    # TERMINAL, and deliberately NOT "failed" — calling this a
+                    # failure is a claim about NetSuite we cannot support, and
+                    # it is what sent the operator toward a duplicate on
+                    # 2026-08-27 (customer 5264348 existed while the card said
+                    # the write had failed).
+                    #
+                    # No repair re-entry: write_repair_bound decides what to do
+                    # with a payload NETSUITE REJECTED, which is not this. Its
+                    # answer here would be a fresh card carrying the identical
+                    # payload — an invitation to write the record twice. The
+                    # record may already exist; a human checks, then decides.
+                    #
+                    # Gated on may_enter_repair_loop rather than an inline
+                    # `== "indeterminate"`: the eligibility rule lived in
+                    # write_outcome.py AND was re-implemented here, so a future
+                    # fourth outcome would have been added to one and silently
+                    # fall through the other into the repair loop. Two copies of
+                    # a safety predicate is one copy too many — the same shape
+                    # that produced every other defect on this branch.
+                    _updated_so["status"] = _write_outcome
+                    _updated_so["error"] = _exec_error
+                else:
+                    # Terminal — a failed write must never revert to
+                    # "pending": that stranded the card with no way forward
+                    # (86bbgnw9g). `_exec_error` is only ever set on this
+                    # branch (see the try block above), so it's always a str
+                    # here — captured separately from `_confirm_content`
+                    # rather than stripped back out of that human-readable
+                    # sentence.
+                    _updated_so["status"] = "failed"
+                    _updated_so["error"] = _exec_error
+
+                    # ── Bounded write-repair loop (requirement B/D) —
+                    # decide whether this rejection may re-enter the agent
+                    # to compose a revised proposal, or must stop. See
+                    # write_repair_bound.py for the full decision table.
+                    # failure_fingerprint is ALWAYS persisted on a failure;
+                    # repair_exit_reason ONLY at a terminal exit (stall,
+                    # budget, or error) — its absence on a card that goes on
+                    # to re-enter is itself meaningful (this attempt hasn't
+                    # exited yet).
+                    from app.services.chat.write_repair_bound import (
+                        compute_failure_fingerprint,
+                        decide_repair_bound,
+                        extract_netsuite_error_details,
+                    )
+
+                    _repair_fingerprint, _ = compute_failure_fingerprint(_exec_result_str, _exec_error or "")
+                    _updated_so["failure_fingerprint"] = _repair_fingerprint
+
+                    _repair_root_id = _so.get("repair_of") or str(_confirm_msg.id)
+                    _repair_current_attempt = int(_so.get("repair_attempt") or 0)
+                    _repair_previous_fingerprint = await _resolve_repair_chain_previous_fingerprint(
+                        db, session.id, _repair_root_id, _repair_current_attempt - 1
+                    )
+                    _repair_decision = decide_repair_bound(
+                        current_attempt=_repair_current_attempt,
+                        current_fingerprint=_repair_fingerprint,
+                        previous_fingerprint=_repair_previous_fingerprint,
+                        max_attempts=2,
+                    )
+                    if _repair_decision.reason == "reenter":
+                        # Suppress the terminal "operation failed" narration
+                        # — double-narration risk: the human is about to
+                        # watch the agent investigate live via ordinary
+                        # tool_start/tool_end/message events, not read a
+                        # dead-end message immediately followed by more
+                        # activity.
+                        _confirm_content = None
+                    else:
+                        _updated_so["repair_exit_reason"] = _repair_decision.reason
+                        _repair_last_detail = "; ".join(extract_netsuite_error_details(_exec_result_str)) or (
+                            _exec_error or ""
+                        )
+                        _confirm_content = _repair_exit_message(_repair_decision.reason, _repair_last_detail)
+                    # ── End bounded write-repair loop ──
+                if _merged_confirmation_token is not None:
+                    # A slot merge happened above — persist what was
+                    # actually written and the token minted over it, so the
+                    # stored card agrees with the executed write. Also
+                    # recompute proposed_fields/proposed_lines: those are
+                    # the ONLY thing the confirmation card renders (the
+                    # frontend never reads tool_input) — leaving them at
+                    # the pre-merge values would flip the card to
+                    # "approved" while it still displays the payload
+                    # without the value the human typed and that was
+                    # actually written. `tool_input` is guaranteed
+                    # re-parseable here: merge_slot_values already proved
+                    # it by constructing it FROM a normalize_write_payload
+                    # call on the pre-merge payload. `_merged_normalized`
+                    # was already computed pre-CAS (see the comment there) —
+                    # reused as-is rather than recomputed here, so this site
+                    # can never raise post-execution.
+                    _updated_so["tool_input"] = tool_input
+                    _updated_so["confirmation_token"] = _merged_confirmation_token
+                    _updated_so["proposed_fields"] = _merged_normalized.fields
+                    _updated_so["proposed_lines"] = _merged_normalized.lines
                 _confirm_msg.structured_output = _updated_so
                 _wc_flag_modified(_confirm_msg, "structured_output")
 
@@ -1784,35 +2438,113 @@ async def run_chat_turn(
                     resource_id=str(session.id),
                     payload={"tool_name": tool_name, "tool_input": tool_input, "result": _exec_result_str[:1000]},
                 )
+                if _repair_decision is not None and _repair_decision.reason != "reenter":
+                    # Terminal exit — a SEPARATE audit event naming WHY the
+                    # loop stopped, distinct from the generic ...failed log
+                    # above (which fires on every failure, reenter or not).
+                    await log_event(
+                        db=db,
+                        tenant_id=tenant_id,
+                        category="chat",
+                        action=f"record.{_mutation_type}.repair_exhausted",
+                        actor_id=user_id,
+                        resource_type="chat_session",
+                        resource_id=str(session.id),
+                        payload={
+                            "reason": _repair_decision.reason,
+                            "repair_attempt": _repair_current_attempt,
+                            "root_confirmation_id": _repair_root_id,
+                        },
+                    )
 
-                _assistant_msg = ChatMessage(
-                    tenant_id=tenant_id,
-                    session_id=session.id,
-                    role="assistant",
-                    content=_confirm_content,
-                    created_at=datetime.now(timezone.utc),
-                )
-                db.add(_assistant_msg)
+                if _confirm_content is not None:
+                    _assistant_msg = ChatMessage(
+                        tenant_id=tenant_id,
+                        session_id=session.id,
+                        role="assistant",
+                        content=_confirm_content,
+                        created_at=datetime.now(timezone.utc),
+                    )
+                    db.add(_assistant_msg)
+                    await db.commit()
+                    await db.refresh(_assistant_msg)
+
+                    yield {
+                        "type": "message",
+                        "message": {
+                            "id": str(_assistant_msg.id),
+                            "role": "assistant",
+                            "content": _confirm_content,
+                            "tool_calls": None,
+                            "citations": None,
+                            "created_at": _assistant_msg.created_at.isoformat(),
+                        },
+                    }
+                    print(f"[WRITE-CONFIRM] approved {_mutation_type} on {_so.get('record_type')}", flush=True)
+                    return
+
+                # ── Fall through into the agent (requirement B) ──
+                # _confirm_content is None ONLY on a "reenter" decision — a
+                # NetSuite rejection with repair budget remaining. No
+                # `return` below: the turn continues into the normal agent
+                # path further down this function, exactly like the Plan
+                # Mode resume precedent in this same function ("NOTE: do
+                # NOT return — fall through into the regular flow.").
                 await db.commit()
-                await db.refresh(_assistant_msg)
-
-                yield {
-                    "type": "message",
-                    "message": {
-                        "id": str(_assistant_msg.id),
-                        "role": "assistant",
-                        "content": _confirm_content,
-                        "tool_calls": None,
-                        "citations": None,
-                        "created_at": _assistant_msg.created_at.isoformat(),
-                    },
+                # The commit above (and the CAS commit earlier in this
+                # block) clears `SET LOCAL app.current_tenant_id`
+                # (transaction-scoped, dies at COMMIT — bitten twice already
+                # in this repo, see set_tenant_context's docstring). The
+                # rest of this turn does tenant-scoped reads/writes.
+                await set_tenant_context(db, str(tenant_id))
+                write_repair_context = {
+                    "root_id": _repair_root_id,
+                    "attempt": _repair_decision.next_attempt,
+                    "mutation_type": _mutation_type,
+                    "record_type": _record_type,
                 }
-                print(f"[WRITE-CONFIRM] approved {_mutation_type} on {_so.get('record_type')}", flush=True)
-                return
+                write_repair_directive = _build_write_repair_directive(
+                    mutation_type=_mutation_type,
+                    record_type=_record_type,
+                    attempted_payload=tool_input,
+                    error_details=extract_netsuite_error_details(_exec_result_str),
+                    raw_error=(_exec_error or "")[:2000],
+                )
+                print(
+                    f"[WRITE-CONFIRM] repair re-entry attempt={_repair_decision.next_attempt} "
+                    f"for {_mutation_type} on {_record_type}",
+                    flush=True,
+                )
+                # ── End fall-through — do NOT return ──
 
             elif _wc_action == "reject":
-                _updated_so = dict(_so)
-                _updated_so["status"] = "rejected"
+                # T2 gate mirror finding — reject must only succeed from a
+                # still-pending row, exactly like approve above. Without
+                # this, a concurrent approve + reject (double-click, a
+                # retried request) let approve win the real race
+                # (execute_tool_call actually runs) while reject's
+                # unconditional overwrite — off the SAME stale `_so`
+                # snapshot both branches read at the top of this block —
+                # still flipped the row to 'rejected' and told the human
+                # "No changes were made", permanently misreporting whether
+                # the mutation happened. Shared helper with the approve CAS
+                # above — see `_cas_claim_write_confirmation`'s docstring.
+                _updated_so = {**_so, "status": "rejected"}
+                _claimed = await _cas_claim_write_confirmation(db, _confirm_msg, _so, "rejected")
+                if not _claimed:
+                    yield {
+                        "type": "error",
+                        "error": (
+                            "This confirmation is already being processed or was already resolved by another request."
+                        ),
+                    }
+                    return
+                # The claim above committed — clears `SET LOCAL
+                # app.current_tenant_id` (transaction-scoped, dies at
+                # COMMIT — same note as the approve CAS above). The
+                # assistant-message insert below is a tenant-scoped write,
+                # so re-establish it before that statement.
+                await set_tenant_context(db, str(tenant_id))
                 _confirm_msg.structured_output = _updated_so
                 _wc_flag_modified(_confirm_msg, "structured_output")
 
@@ -2823,6 +3555,17 @@ async def run_chat_turn(
                             unified_agent._plan_mode_augmentation = plan_mode_augmentation
                         if plan_mode_resume_directive:
                             unified_agent._plan_mode_resume_directive = plan_mode_resume_directive
+                        # Write-repair re-entry (requirement B) — set ONLY
+                        # when the write_confirm short-circuit above fell
+                        # through on a "reenter" decision. Same
+                        # attribute-injection seam as the Plan Mode
+                        # directives; _write_repair_context is separate from
+                        # the prompt text — base_agent.py's mutation
+                        # intercept reads it to stamp repair_of/repair_attempt
+                        # on the NEXT card and enforce the intent guard.
+                        if write_repair_context is not None:
+                            unified_agent._write_repair_directive = write_repair_directive
+                            unified_agent._write_repair_context = write_repair_context
 
                     # Classify follow-up intent (TRANSFORM vs NEW_DATA)
                     from app.services.chat.follow_up_classifier import FollowUpIntent, classify_follow_up
