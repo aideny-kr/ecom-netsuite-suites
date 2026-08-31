@@ -28,6 +28,7 @@ import pytest
 from app.services.report.period_resolver import (
     ClosedPeriod,
     PeriodUnavailableReason,
+    _parse_period_date,
     resolve_last_closed_period,
 )
 
@@ -59,11 +60,16 @@ class _FakeSession:
         COMMIT clearing SET LOCAL -- see the mid-call-commit test's own docstring."""
 
 
-def _fake_period_table(rows: list[dict]):
+def _fake_period_table(rows: list[dict], *, render=lambda iso: iso):
     """Build a fake `netsuite_suiteql.execute` that filters/orders/limits `rows`
     the way NetSuite would for the SQL text period_resolver actually sends —
     but ONLY applies a predicate if its literal text is present in the query,
     so a resolver bug that omits a filter is visible in the test output.
+
+    `rows` always carry ISO enddates because NetSuite filters and ORDERs on the real
+    DATE column; `render` formats them on the way OUT, which is the only place the
+    account's date-format preference applies. Keeping those two separate is what makes
+    the US-format test meaningful rather than merely reformatting the fixture.
     """
     calls: list[str] = []
 
@@ -97,7 +103,7 @@ def _fake_period_table(rows: list[dict]):
             return {"columns": ["periodname", "enddate"], "rows": [], "row_count": 0}
         return {
             "columns": ["periodname", "enddate"],
-            "rows": [[r["periodname"], r["enddate"]] for r in picked],
+            "rows": [[r["periodname"], render(r["enddate"])] for r in picked],
             "row_count": 1,
         }
 
@@ -154,6 +160,12 @@ _BASE_ROWS = [
         "isyear": "F",
     },
 ]
+
+
+def _to_us(iso: str) -> str:
+    """'2026-06-30' -> '06/30/2026' — how a US-preference NetSuite account renders it."""
+    y, m, d = iso.split("-")
+    return f"{m}/{d}/{y}"
 
 
 async def test_newest_closed_period_selected(monkeypatch):
@@ -711,3 +723,89 @@ async def test_cached_resolver_is_keyed_per_tenant(monkeypatch):
 
     await period_resolver.resolve_last_closed_period_cached(db, other_tenant)
     assert len(calls) == 4  # a different tenant is a cache miss, not a reuse
+
+
+# --- NetSuite renders dates in the ACCOUNT'S format, not ISO ------------------------
+
+
+class TestNetSuiteDateFormats:
+    """Live bug, staging 2026-08-31: composing a tracking report failed with
+    `Invalid isoformat string: '06/30/2026'`.
+
+    `_parse_period_date` called `date.fromisoformat` and its docstring asserted that
+    "NetSuite's REST SuiteQL path returns DATE columns as ISO 'YYYY-MM-DD' strings".
+    That premise is false: NetSuite renders DATE columns using the ACCOUNT'S date-format
+    preference, and this account uses US MM/DD/YYYY. The parser was deliberately narrow
+    on an assumption that had never been checked against a live account — Stage 1 was
+    "live-verified" against a tenant with zero reports, so this path never ran.
+
+    Disambiguation is safe HERE specifically: `_parse_period_date` is only reached after
+    the period NAME has already matched "Mon YYYY" (a monthly calendar), so the value is
+    a month END date whose day is always >= 28 — never <= 12. That makes the
+    day-versus-month component unambiguous by inspection. Anything genuinely ambiguous is
+    refused rather than guessed: silently picking the wrong month for a financial period
+    is far worse than a loud failure.
+    """
+
+    def test_the_exact_value_from_the_live_failure(self):
+        assert _parse_period_date("06/30/2026") == date(2026, 6, 30)
+
+    def test_iso_still_works(self):
+        assert _parse_period_date("2026-06-30") == date(2026, 6, 30)
+
+    def test_a_real_date_object_passes_through(self):
+        assert _parse_period_date(date(2026, 6, 30)) == date(2026, 6, 30)
+
+    def test_us_month_first_across_every_month_end(self):
+        for month, day in ((1, 31), (2, 28), (4, 30), (12, 31)):
+            assert _parse_period_date(f"{month:02d}/{day:02d}/2026") == date(2026, month, day)
+
+    def test_day_first_european_format(self):
+        # 30 > 12, so the first component can only be the day.
+        assert _parse_period_date("30/06/2026") == date(2026, 6, 30)
+
+    def test_dash_separated_non_iso(self):
+        assert _parse_period_date("06-30-2026") == date(2026, 6, 30)
+
+    def test_whitespace_is_tolerated(self):
+        assert _parse_period_date("  06/30/2026  ") == date(2026, 6, 30)
+
+    def test_an_ambiguous_date_is_refused_never_guessed(self):
+        """Both components <= 12, so MM/DD and DD/MM are equally plausible. A month-end
+        date can never look like this (no month ends on the 7th), so reaching here means
+        an assumption broke. Guessing would silently attribute a financial statement to
+        the wrong month."""
+        with pytest.raises(ValueError, match="ambiguous"):
+            _parse_period_date("06/07/2026")
+
+    def test_a_junk_value_still_raises(self):
+        with pytest.raises(ValueError):
+            _parse_period_date("not a date")
+
+    def test_an_impossible_date_still_raises(self):
+        with pytest.raises(ValueError):
+            _parse_period_date("13/45/2026")
+
+
+async def test_resolver_end_to_end_against_a_us_formatted_account(monkeypatch):
+    """The actual reported failure, through the real entry point rather than the helper.
+
+    Every row's enddate is MM/DD/YYYY, exactly as a US-preference NetSuite account
+    returns it. Before the fix this raised `Invalid isoformat string: '06/30/2026'` out
+    of resolve_last_closed_period, which the compose endpoint surfaced to the user as a
+    raw Python message, and which the dashboard mislabelled as "Couldn't reach NetSuite".
+
+    Testing the helper alone would not have caught the ordering interaction: `ORDER BY
+    enddate DESC` happens inside NetSuite on the real DATE column, so the resolver must
+    still pick Jun (not Dec, which is open) with the formatting only affecting parsing.
+    """
+    fake, _calls = _fake_period_table(_BASE_ROWS, render=_to_us)
+    monkeypatch.setattr("app.mcp.tools.netsuite_suiteql.execute", fake)
+
+    result = await resolve_last_closed_period(db=_FakeSession(), tenant_id=_TENANT_ID)
+
+    assert result.resolved is True, f"unresolved: {result.reason}"
+    assert result.name == "Jun 2026"
+    assert result.enddate == date(2026, 6, 30)
+    # the still-open later period is found too, in the same formatting
+    assert result.next_open_name == "Jul 2026"

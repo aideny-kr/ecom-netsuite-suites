@@ -25,6 +25,7 @@ it directly (no MCP round-trip): `metric_compute.py::_validate_and_execute_by_so
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass
 from datetime import date
@@ -103,18 +104,54 @@ def _unavailable(reason: PeriodUnavailableReason) -> ClosedPeriod:
     return ClosedPeriod(name=None, enddate=None, reason=reason)
 
 
+#: "06/30/2026", "6/30/2026", "06-30-2026" — a slash/dash date with a 4-digit year.
+_SLASH_DATE_RE = re.compile(r"^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$")
+
+
 def _parse_period_date(value: object) -> date:
     """Parse a SuiteQL DATE column value into a `date`.
 
-    NetSuite's REST SuiteQL path returns DATE columns as ISO 'YYYY-MM-DD'
-    strings. Deliberately narrow: a value that isn't a parseable ISO date is a
-    schema-drift condition, not one of our three defined reasons — it
-    propagates (a genuinely unexpected shape) rather than being mislabeled
-    'unreachable', which would claim a connectivity problem that didn't happen.
+    This function used to be ISO-only, on the stated assumption that "NetSuite's REST
+    SuiteQL path returns DATE columns as ISO 'YYYY-MM-DD' strings". That assumption was
+    wrong and it reached production: NetSuite renders DATE columns in the ACCOUNT'S
+    date-format preference, so a US account returns '06/30/2026' and every tracking
+    compose died with `Invalid isoformat string: '06/30/2026'` (staging, 2026-08-31).
+
+    Which component is the day is decided by INSPECTION, never by assuming a locale.
+    That is sound here because of where this sits in the flow: it is only reached after
+    the period NAME has already matched "Mon YYYY", i.e. a monthly calendar, so the value
+    is a month END date whose day is always >= 28 and therefore never <= 12. One
+    component above 12 identifies itself as the day.
+
+    A genuinely ambiguous value (both components <= 12) is REFUSED, not guessed. It
+    cannot occur for a validated monthly period, so reaching it means an assumption
+    broke — and silently attributing a financial statement to the wrong month is far
+    worse than a loud failure. Same reasoning as the UNSUPPORTED_PERIOD_NAME branch:
+    a name that would fail downstream validation is worse than no name at all.
     """
     if isinstance(value, date):
         return value
-    return date.fromisoformat(str(value).strip())
+
+    text = str(value).strip()
+    try:
+        return date.fromisoformat(text)
+    except ValueError:
+        pass
+
+    match = _SLASH_DATE_RE.match(text)
+    if match is None:
+        raise ValueError(f"unrecognised NetSuite date value: {text!r}")
+
+    first, second, year = int(match.group(1)), int(match.group(2)), int(match.group(3))
+    if second > 12 and first <= 12:
+        return date(year, first, second)  # MM/DD/YYYY (NetSuite US default)
+    if first > 12 and second <= 12:
+        return date(year, second, first)  # DD/MM/YYYY
+    raise ValueError(
+        f"ambiguous NetSuite date {text!r}: cannot tell the month from the day "
+        "without assuming the account's locale, and guessing would misattribute "
+        "a financial period"
+    )
 
 
 def _first_row(result: dict) -> dict[str, object] | None:
