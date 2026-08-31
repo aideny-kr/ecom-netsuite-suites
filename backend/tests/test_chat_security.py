@@ -45,6 +45,7 @@ class TestAllowedChatTools:
             "bigquery.sql",
             "bigquery.schema",
             "bigquery.cost_estimate",
+            "task_file.read",
             "pricing.convert",
             "pricing.config_read",
             "pricing.export",

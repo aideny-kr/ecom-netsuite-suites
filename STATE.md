@@ -111,6 +111,47 @@ fresh branch off `main` and leave Track O behind pending its own decision.
 
 ## NEXT — ordered, with the why
 
+**Multimodal record creation (2026-08-28).** User asked for: upload xlsx/pdf/csv/photo →
+agent proposes NetSuite records → existing HITL card. Research (7-agent survey) found upload,
+storage, `file_id` plumbing and an injection-hardened preview ALREADY EXIST for
+xlsx/csv/xls/json. Slice ordering chosen by the user, recorded so it is not re-litigated:
+
+1. ~~**Slice 1** — one file → one record~~ **CERTIFIED LIVE 2026-08-28.** Driven end to end
+   on staging: a 1-row CSV produced a card targeting `SANDBOX 6738075-sb1` with every value
+   transcribed correctly and `subsidiary` resolved from the NAME "Framework Computer UK Ltd"
+   to internal id 5, then labelled back. Needed no new code — it was certify, not build.
+2. **Slice 2** — `task_file.read` tool, so the agent sees past the 20-row/12-col preview.
+   BUILT on branch `feat/read-task-file-tool` (`ef9ee29e`), **unpushed, unmerged,
+   `verify.sh` NOT-DONE** (celigo flakes, see OPEN). **CERTIFIED LIVE 2026-08-29** — a
+   60-row xlsx with a random token planted at row 47 (past the 20-row preview): the agent
+   returned the exact token, which is unobtainable without reading the file.
+   *Two things this cost, both worth remembering: (a) the tool's signature was wrong
+   — the dispatcher calls `execute_fn(params, context=context)` with db INSIDE context,
+   so every live call died while 17 unit tests passed, because the test helper had invented
+   its own calling convention; (b) the first two certification designs were answerable from
+   the preview (CSV previews are not row-capped, and `Vendor NN Ltd` is extrapolable), so
+   "correct answer, zero tool calls" was the result. The third design planted an unguessable
+   value.*
+   *Correction: I twice claimed the frontend picker rejects `.xls`. It does not —
+   chat-input.tsx accepts it at both the handler and the accept attribute. The REAL gap was
+   the opposite: the tool advertised `.xls` while openpyxl cannot read legacy binary .xls
+   (BadZipFile) and xlrd is not a dependency. Now refused by name with a re-save remedy.*
+   *Note: a successful tool call logs NOTHING at the container's effective level (only
+   errors do), so `grep task_file.read` in docker logs is a false negative — do not read
+   its absence as "the tool was not called".*
+3. **Slice 3** — text-layer PDF via pdfplumber (already a dependency, wired only into
+   drive_rag). Scanned PDFs must fail with an honest "no text layer", never a guess.
+4. **Slice 4** — small-N sequential proposals, cap ≤10 enforced in CODE, shared
+   `correlation_id`. **BLOCKED** until the idempotency key + pre-call side-effect log exist
+   (agent-graph.md #10 — explicitly unbuilt).
+5. **Slice 5+** — true batch review surface, and photos via Anthropic vision (adapter-gated;
+   OpenAI/Gemini adapters are text-only). Both need mock-first design per report-design.md.
+
+**Decided, do not re-open:** values may pass through the model for a SINGLE record (the human
+reads every field on the card); deterministic server-side extraction is a hard precondition of
+any BATCH slice, because nobody eyeballs 200 rows. No OCR dependency for an accounting write
+path — OCR confidence is unquantified and the card cannot show what was misread.
+
 1. ~~Cut `agent-graph.md`~~ **DONE** — 35 rules → 15; the two that contradicted shipped
    code are now recorded as decisions not to re-litigate.
 2. ~~Cut the ceremonial layer~~ **DONE** — both false lines fixed; routine + verification
@@ -413,6 +454,45 @@ Written so the next session does not re-litigate these.
   two divergent branches — whoever works locally re-stamps to their own head
   (`alembic stamp --purge <their 093>`); no DDL is lost either way. CI and staging use
   their own databases and are unaffected.
+- **ROTATE THE `gh` OAUTH TOKEN — leaked twice on 2026-08-28, by me, both times the same way.**
+  The token is `gh auth token` for `aideny-kr` (scopes: repo, write:packages, read:org, gist).
+  Leak #1: authenticating the staging VM to GHCR, I wrote
+  `TOKEN=$(gh auth token); ssh vm "echo '$TOKEN' | docker login …"` — interpolating it into
+  the ssh command string puts it in the REMOTE process's argv, readable via `ps aux` on the
+  VM. Leak #2: after the user rotated, I verified the new token *using the same construction*,
+  burning the fresh one within minutes of having described the hazard. It is also in this
+  session's transcript `.jsonl` in plaintext, permanently.
+  **Do:** revoke at github.com → Settings → Applications → Authorized OAuth Apps → GitHub CLI
+  (logout alone may not revoke server-side), then `gh auth login` and
+  `gh auth refresh -h github.com -s write:packages` — the deploy needs write:packages for GHCR.
+  **The only safe form, use it every time:**
+  `gh auth token | ssh aidenyi@34.73.236.64 "sudo docker login ghcr.io -u aideny-kr --password-stdin"`
+  — the secret travels on stdin and never appears in any argv.
+  **The real lesson:** knowing the rule did not prevent the leak; I recited it and then broke
+  it because the unsafe form was one line shorter. Never put a secret in a shell variable that
+  a later command can interpolate — pipe it, or it will eventually end up in argv.
+- **Three test customers still active in PRODUCTION NetSuite (6738075)** — internal ids
+  `5803124`, `5800803`, `5795008`, created while proving the write path. Harmless but real
+  records in a real ledger; inactivate them. (Sandbox `6738075-sb1` also holds test rows —
+  `5264348` "Sandbox Smoke Test", plus the Card Rate Probe / Northwind Slice One rows — those
+  are sandbox and can stay.)
+- **`test_celigo_flows_api.py` leaks state from somewhere in the wider suite — UNLOCATED.**
+  Fails only in a full run, naming DIFFERENT tests each time while head and baseline failure
+  totals stay identical (123 = 123). Ruled out with evidence on 2026-08-30: in-file ordering
+  (3/3 clean alone), `tests/api` siblings (2/2 clean, 195 tests), and the module-level
+  `_FLAG_CACHE` in feature_flag_service (131 passed with four flag-mutating files ordered
+  first). The leaking file is elsewhere in ~5000 tests and bisecting costs ~6 min a run.
+  *Mostly defused rather than fixed:* `verify.sh` now re-runs each newly-failing test in
+  isolation, so a flake no longer produces a false "these are yours". Still worth locating —
+  a test that only fails in company can also hide a real interaction bug.
+- **Never deploy an unmerged branch to shared staging.** Any main merge auto-deploys and will
+  silently replace it — PR #209 did exactly that at 01:00:46 on 2026-08-31, wiping a build
+  whose live certification had passed 40 minutes earlier. Three failure modes: others testing
+  staging get YOUR branch (including the write path); your live certification decays the
+  moment someone merges; and your manual deploy can clobber their freshly-merged feature.
+  If a live test genuinely needs it, record `git rev-parse origin/main` BEFORE and AFTER and
+  treat any change as invalidating the result. "Verified live" needs a timestamp and a
+  main-sha beside it, not a checkmark.
 
 - ~~Framework's NetSuite connection dead~~ **RESOLVED 2026-08-04.** Re-authed; connection
   `active`, health-checked 02:55, deposit sync completed 02:00, data current to 02:13

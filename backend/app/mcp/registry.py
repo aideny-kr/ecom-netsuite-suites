@@ -24,6 +24,7 @@ from app.mcp.tools import (
     schedule_ops,
     sheets_tools,
     suitescript_sync_tool,
+    task_file_tools,
     web_search,
     workspace_tools,
 )
@@ -787,6 +788,29 @@ TOOL_REGISTRY = {
         "execute": pricing_tools.pricing_convert_execute,
         "params_schema": {
             "file_id": {"type": "string", "required": True, "description": "ID of the uploaded Excel file"},
+        },
+    },
+    "task_file.read": {
+        "description": (
+            "Read the FULL contents of a file the user attached to this chat (.xlsx, .csv, .xls, .json) "
+            "as structured rows. The attachment preview in your context is only the first 20 rows — use "
+            "this whenever the task depends on data past that, or on a sheet other than the first. "
+            "Returns total_rows and has_more; page with offset. Never describe rows you have not read."
+        ),
+        "execute": task_file_tools.read_execute,
+        "params_schema": {
+            "file_id": {"type": "string", "required": True, "description": "ID of the attached file"},
+            "sheet": {
+                "type": "string",
+                "required": False,
+                "description": "Worksheet name (xlsx only; defaults to the first)",
+            },
+            "offset": {
+                "type": "integer",
+                "required": False,
+                "description": "Row offset to start from (0-based, excludes the header)",
+            },
+            "limit": {"type": "integer", "required": False, "description": "Rows to return; capped server-side at 200"},
         },
     },
     "pricing.config_read": {
