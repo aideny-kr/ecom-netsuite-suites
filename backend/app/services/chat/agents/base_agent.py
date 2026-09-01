@@ -2176,6 +2176,61 @@ class BaseSpecialistAgent(abc.ABC):
                                 # the card over a label.
                                 logger.warning("could not resolve the write's target account", exc_info=True)
 
+                        # ── Idempotency key, stamped BEFORE the payload is
+                        # signed ──
+                        # It must be part of what the HMAC covers and what the
+                        # card displays, or the executed payload would differ
+                        # from the approved one — the precise defect this
+                        # branch already fixed once (ask_user stripped from the
+                        # display but not the execution).
+                        #
+                        # It rides in `externalId` because the MCP surface has
+                        # no header channel: ns_createRecord accepts only
+                        # recordType and data (read from the live server's
+                        # schema, 2026-09-01). NetSuite then enforces its
+                        # uniqueness itself and refuses a duplicate, which is
+                        # what makes a retry safe and a crash recoverable.
+                        #
+                        # Creates only: an update targets a recordId that
+                        # already exists, so stamping externalId would mutate a
+                        # business field the tenant may own, to no benefit.
+                        _idem_key: str | None = None
+                        if _is_netsuite_write and mutation_type == "create":
+                            try:
+                                from app.services.chat.write_payload import (
+                                    normalize_write_payload as _norm_for_idem,
+                                )
+                                from app.services.chat.write_side_effect import (
+                                    payload_with_idempotency_key,
+                                )
+
+                                _idem_parsed = _norm_for_idem(block.input)
+                                _stamped, _idem_key = payload_with_idempotency_key(
+                                    _idem_parsed.fields, batch_id=None, row_index=None
+                                )
+                                # Write back under the key the parser actually
+                                # READ FROM — tool_input carries the payload as
+                                # either "data" or "body" (_PAYLOAD_KEYS), and
+                                # normalize_write_payload reports which via
+                                # `payload_key` for exactly this reason.
+                                # Hardcoding "data" added a SECOND payload key
+                                # and broke 20 write-path tests: the card
+                                # stopped being emitted entirely.
+                                if _stamped != _idem_parsed.fields and _idem_parsed.payload_key:
+                                    import json as _json_idem
+
+                                    _blk = dict(block.input)
+                                    _blk[_idem_parsed.payload_key] = _json_idem.dumps(_stamped)
+                                    block.input = _blk
+                            except Exception:
+                                # Never fail a card over a key. Without it the
+                                # write is exactly as (un)recoverable as it was
+                                # before — no worse, and the human still sees
+                                # and approves the same payload.
+                                logger.warning("idempotency key not stamped", exc_info=True)
+                                _idem_key = None
+                        self._pending_idem_key = _idem_key
+
                         payload = build_confirmation_payload(
                             mutation_type=mutation_type,
                             record_type=record_type,

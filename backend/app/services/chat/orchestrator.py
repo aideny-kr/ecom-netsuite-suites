@@ -2168,6 +2168,44 @@ async def run_chat_turn(
                 # retry, auto-revert-to-pending) risks a SECOND post for a
                 # write NetSuite already accepted. A human must check the
                 # NetSuite record and resolve it manually.
+                # ── Side-effect log: recorded and COMMITTED before the call ──
+                # agent-graph.md #10. The ordering is the whole mechanism: a
+                # row written AFTER the call, or left uncommitted, vanishes in
+                # exactly the crash it exists to survive. Drilled with a real
+                # kill -9 (see the design spec) — resume then settles the row
+                # by ASKING NetSuite, never by retrying blind.
+                #
+                # Best-effort: a logging failure must not block a write a human
+                # already approved. It degrades to today's behaviour, which is
+                # the same unrecoverable timeout we have always had — no worse.
+                _idem_key_for_write: str | None = None
+                try:
+                    from app.services.chat.write_payload import normalize_write_payload as _norm_se
+                    from app.services.chat.write_side_effect import build_idempotency_key
+                    from app.services.chat.write_side_effect_repo import record_attempt
+
+                    _se_fields = _norm_se(tool_input).fields
+                    _idem_key_for_write = (
+                        _se_fields.get("externalId")
+                        or _se_fields.get("externalid")
+                        or build_idempotency_key(batch_id=None, row_index=None, payload=_se_fields)
+                    )
+                    await record_attempt(
+                        db,
+                        tenant_id=tenant_id,
+                        idempotency_key=_idem_key_for_write,
+                        record_type=_so.get("record_type", "record"),
+                        mutation_type=_so.get("mutation_type", "write"),
+                        payload=_se_fields,
+                        correlation_id=correlation_id,
+                        session_id=session.id,
+                    )
+                    await db.commit()
+                    await set_tenant_context(db, str(tenant_id))  # SET LOCAL dies at COMMIT
+                except Exception:
+                    logger.warning("side-effect log not recorded; write proceeds", exc_info=True)
+                    _idem_key_for_write = None
+
                 _exec_result_str = await execute_tool_call(
                     # The ONE place this may be True. `tool_name`/`tool_input`
                     # here came from validate_and_extract_confirmation, which
@@ -2184,6 +2222,23 @@ async def run_chat_turn(
                     db=db,
                     session_id=str(session.id),
                 )
+
+                # Settle the side-effect row from what NetSuite actually said.
+                # Only a DEFINITE answer moves it off 'attempted' — a timeout
+                # leaves it there, which is the state that means "go and look"
+                # and the one the system could not represent before.
+                if _idem_key_for_write:
+                    try:
+                        from app.services.chat.write_side_effect_repo import settle_from_result
+
+                        await settle_from_result(
+                            db,
+                            tenant_id=tenant_id,
+                            idempotency_key=_idem_key_for_write,
+                            raw_result=_exec_result_str,
+                        )
+                    except Exception:
+                        logger.warning("side-effect row not settled", exc_info=True)
 
                 _mutation_type = _so.get("mutation_type", "write")
                 _record_type = _so.get("record_type", "record")
