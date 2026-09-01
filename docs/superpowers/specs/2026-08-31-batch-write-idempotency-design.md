@@ -56,10 +56,66 @@ written *before* the call" and records that none of it is built. That is the blo
 - **`kill -9` mid-write drill is part of the acceptance**, per `agent-graph.md` #12:
   recovery code that has never run is not recovery code.
 
-**Open question for implementation:** NetSuite's REST API support for client-supplied
-idempotency keys is unverified. If absent, reconciliation must key on a natural
-identity (e.g. `externalId`), which changes the design — establish this *first*, before
-writing the schema.
+### SETTLED 2026-09-01 — measured against live sandbox `6738075-sb1`, not documentation
+
+**There is no header channel, and we do not need one. `externalId` gives us idempotency
+enforced by NetSuite itself.**
+
+*Evidence 1 — the MCP tool surface has no key slot.* `ns_createRecord` accepts exactly
+`recordType` and `data`; `ns_updateRecord` adds `recordId`. Nothing else. Read from the
+live server's own schema (`discover_tools`, 16 tools). So a transport-level idempotency
+header is not available to us regardless of what REST may support elsewhere.
+
+*Evidence 2 — `externalId` is settable and queryable.* The catalog exposes `externalId`;
+SuiteQL returns the column as `externalid`. **Note the case split** — the catalog is
+camelCase, the SuiteQL column is lowercase. This is the identical trap documented in
+`required_field_registry.field_value`, where lowercase rule names silently missed every
+real write. Any lookup must be case-insensitive.
+
+*Evidence 3 — NetSuite REJECTS a duplicate.* Two identical creates carrying the same
+`externalId`:
+
+```
+C1  {"success": true,  "recordId": "5264548", ...}
+C2  {"success": false, "error": "HTTP 400 ... o:errorDetails:
+     [{"detail":"Error while accessing a resource. This entity already exists.",
+       "o:errorCode":"USER_ERROR"}]"}
+C3  SELECT COUNT(*) ... WHERE externalid = '<key>'  →  1
+```
+
+This is **stronger** than a client-supplied header would be: the uniqueness is enforced
+server-side by NetSuite, not trusted from us. A blind retry cannot create a second record
+— it is refused — and the refusal is *distinguishable* (`This entity already exists`), so
+a retry hitting that error means **the original landed**, which is precisely the fact the
+`Unknown` state needs.
+
+**Design consequences, all load-bearing:**
+
+- The work-derived key goes in `data.externalId`, not a header.
+- Reconcile an `attempted` row with
+  `SELECT id FROM <type> WHERE externalid = '<key>'` — one query, definite answer.
+- A retry is *safe by construction*. If the first write landed, NetSuite refuses the
+  second; if it did not, the retry succeeds. Either way the end state is one record.
+- Distinguish `This entity already exists` from other `USER_ERROR`s and treat it as
+  **success-on-retry**, not failure. Match on `o:errorDetails[].detail`, reusing
+  `write_repair_bound.extract_netsuite_error_details` rather than a new parser.
+
+**RISK — `externalId` is not ours.** It is a real business field, and integrations
+commonly own it (Celigo among them). Writing our hash into it could collide with a
+tenant's own keying or overwrite meaning we do not understand. Mitigations, to decide
+before implementing:
+
+1. **Never overwrite** — if the payload already carries an `externalId`, use *that* as the
+   idempotency key and do not substitute ours. The user's key is a better natural identity
+   than our hash anyway.
+2. **Namespace ours** — `ss-idem-<sha256[:24]>`, so a value we generated is identifiable
+   on sight and cannot plausibly collide with a human-chosen key.
+3. **Per-tenant opt-out**, if a tenant's integration requires `externalId` to stay empty.
+   Then that tenant loses idempotency and batch must refuse to run for them — stated, not
+   silently degraded.
+
+*Probe residue:* sandbox customer `5264548` (`externalId=idem-probe-ab1b310b6b70`) was
+created by this probe and can be inactivated.
 
 ### Phase 2 — Deterministic server-side extraction
 
