@@ -112,6 +112,29 @@ fresh branch off `main` and leave Track O behind pending its own decision.
 
 ## NEXT — ordered, with the why
 
+**Batch NetSuite writes — scoped 2026-08-31, mock APPROVED, not built.**
+Spec: `docs/superpowers/specs/2026-08-31-batch-write-idempotency-design.md`.
+**Design reference (anti-drift): `docs/superpowers/specs/batch-write-review-mockup-reference.html`**
+— when implementation and mock disagree, decide deliberately and update both in one commit.
+
+Order is load-bearing, not preference:
+1. **Idempotency key + side-effect log written BEFORE the call.** Blocks everything else
+   (agent-graph #10, explicitly unbuilt). Ships alone and is independently valuable — it
+   fixes the single-record timeout case too. FIRST unknown to settle: does NetSuite REST
+   support a client-supplied idempotency key? If not, reconcile on natural identity
+   (externalId), which changes the schema. Establish before writing it.
+2. **Deterministic server-side extraction** — operator decision 2026-08-28: model
+   transcription is fine for ONE record, never for a batch.
+3. **The review surface** per the mock — every row's values shown, environment badge
+   loudest, resume BLOCKED on any `Unknown` row.
+4. **Server-enforced cap** in code, not prompt.
+
+*Rejected, do not re-propose: "approve once, auto-approve the rest".* The approval would
+precede the payloads — consent to content nobody has seen. PR #210's duplicate bug was
+survivable only because a human was there to reject the identical retry; under
+auto-approve it writes the duplicate silently, every row. Batch review costs the same one
+click and keeps the approval attached to rows actually seen.
+
 **Multimodal record creation (2026-08-28).** User asked for: upload xlsx/pdf/csv/photo →
 agent proposes NetSuite records → existing HITL card. Research (7-agent survey) found upload,
 storage, `file_id` plumbing and an injection-hardened preview ALREADY EXIST for
@@ -526,6 +549,15 @@ Written so the next session does not re-litigate these.
   *One sub-question deferred, not blocking: at what materiality would a controller prefer a
   prior-period adjustment over a current-period reversal? Only matters once a reversal is
   large enough to distort the current month — ask before the first material one, not now.*
+- **`.gitignore` also shadows `docs/` — every spec in the repo was force-added.**
+  `docs/` appears TWICE (`.gitignore:51` and `:69`) while ~40 files under
+  `docs/superpowers/specs|plans` are tracked. So a new spec silently fails to commit unless
+  you spot the "paths are ignored" hint and reach for `-f`; miss it and the design doc you
+  just wrote is simply absent from the branch. Hit on 2026-08-31 filing the batch-write
+  spec. A proper fix needs the un-ignore chain (`docs/*` + `!docs/superpowers/` +
+  `docs/superpowers/*` + `!docs/superpowers/specs/`…) and would surface whatever else under
+  `docs/` is currently hidden on purpose — check that before changing it, and do it as its
+  own commit rather than riding along with feature work.
 - **`.gitignore` still shadows tracked FRONTEND files.** `tasks/` was anchored on this
   branch, which immediately exposed 3 lint violations in worker modules CI had never
   linted. The same defect remains at `.gitignore:59` — unanchored `memory/` matches
