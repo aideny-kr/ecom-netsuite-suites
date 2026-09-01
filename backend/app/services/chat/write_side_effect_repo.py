@@ -168,6 +168,17 @@ async def reconcile_by_external_id(
     returns ``externalid``. Getting this wrong is the trap that once made
     required_field_registry miss every real customer create.
     """
+    # The question is only answerable if the key was actually SENT. A key we
+    # derived locally and did not put in the payload cannot be found in
+    # NetSuite whether or not the write landed, so an empty result says
+    # nothing — and reading it as "never landed, safe to retry" is precisely
+    # the proxy-predicate defect this table exists to end. Checked against
+    # payload_json, which IS what we sent, so a caller cannot get this wrong
+    # by forgetting to stamp: the row simply stays unsettled for a human.
+    _sent = row.payload_json or {}
+    if _sent.get("externalId") != row.idempotency_key and _sent.get("externalid") != row.idempotency_key:
+        return SideEffectStatus.ATTEMPTED
+
     key = row.idempotency_key.replace("'", "''")  # the key is ours, but never interpolate unescaped
     query = f"SELECT id FROM {row.record_type} WHERE externalid = '{key}' FETCH FIRST 1 ROWS ONLY"
     try:

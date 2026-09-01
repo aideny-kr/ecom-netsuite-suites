@@ -217,3 +217,65 @@ async def test_unsettled_lists_exactly_what_needs_resolving(db):
 
     pending = await unsettled_for_tenant(db, tenant_id=_TENANT)
     assert [p.idempotency_key for p in pending] == ["ss-idem-a"]
+
+
+async def test_reconcile_refuses_when_the_key_was_never_sent(db):
+    """A key we invented locally but did NOT put in the payload cannot be found
+    in NetSuite — not because the write failed, but because we never sent it.
+
+    Concluding 'rejected, safe to retry' from that empty result is the exact
+    proxy-predicate defect this table exists to end: the query tests a stand-in
+    (a key NetSuite never saw) for the real condition (did the write land).
+    Reached whenever a card is built by a path that does not stamp — so it must
+    be structurally impossible to get wrong, not merely avoided by callers.
+    """
+    from app.services.chat.write_side_effect_repo import reconcile_by_external_id
+
+    await record_attempt(
+        db,
+        tenant_id=_TENANT,
+        idempotency_key="ss-idem-unsent",
+        record_type="customer",
+        mutation_type="create",
+        payload={"companyName": "Acme"},  # <- no externalId: the key never left this process
+        correlation_id="c1",
+    )
+    await db.commit()
+
+    row = (await unsettled_for_tenant(db, tenant_id=_TENANT))[0]
+    asked = []
+
+    async def fake_suiteql(q: str) -> str:
+        asked.append(q)
+        return '{"data": []}'
+
+    status = await reconcile_by_external_id(db, tenant_id=_TENANT, row=row, suiteql=fake_suiteql)
+
+    assert status is SideEffectStatus.ATTEMPTED, "an unanswerable question must not settle the row"
+    assert asked == [], "must not even ask — an empty answer here would be meaningless"
+    assert await unsettled_for_tenant(db, tenant_id=_TENANT), "row stays on the worklist for a human"
+
+
+async def test_reconcile_still_works_when_the_key_was_sent(db):
+    """The stamped case is unaffected: the key IS in the payload, so an empty
+    result really does mean the write never landed."""
+    from app.services.chat.write_side_effect_repo import reconcile_by_external_id
+
+    await record_attempt(
+        db,
+        tenant_id=_TENANT,
+        idempotency_key="ss-idem-sent",
+        record_type="customer",
+        mutation_type="create",
+        payload={"companyName": "Acme", "externalId": "ss-idem-sent"},
+        correlation_id="c1",
+    )
+    await db.commit()
+
+    row = (await unsettled_for_tenant(db, tenant_id=_TENANT))[0]
+
+    async def fake_suiteql(q: str) -> str:
+        return '{"data": []}'
+
+    status = await reconcile_by_external_id(db, tenant_id=_TENANT, row=row, suiteql=fake_suiteql)
+    assert status is SideEffectStatus.REJECTED
