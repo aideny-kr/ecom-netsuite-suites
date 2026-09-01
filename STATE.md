@@ -37,6 +37,7 @@ Updated at the end of every task, not "later".
 | `feat/dev-loop-and-harness` | T2 | 21 commits, process only — gated ×3, blockers fixed, **frozen** | nothing |
 | `feat/agent-graph-operating-model` | T2 | Track O (22 majors) + reject action, **ungated** | needs Track O decision |
 | `feat/rolling-period` | T2 | **SHIPPED** — squash-merged as main `f74b781f` (PR #209), deployed + live-verified on staging (backend recreated, `alembic current`=`094_dashboard_preference_series` head, FE digest `4a37ebf8`, BUILD_ID baked). Gate ×4: majors 2→3→0 | nothing |
+| `feat/batch-write-idempotency` | T2 | Phase 1 of the batch-write plan, shipping alone: work-derived idempotency key in `externalId` + side-effect log committed BEFORE the call + settle-only-on-a-definite-answer. `kill -9` drill run in both branches. Also fixes the single-record case — a timed-out write is now answerable instead of reported `failed` and offered for blind retry | verify + T2 gate |
 | `feat/rolling-period-stage2` | T2 | Scheduled compose built: daily Beat sweep, reason enum → `jobs.result_summary`, per-tenant cost ceiling, waiting ribbon lit (DATA-gated on the sweep being enabled). verify **PASS @ `fa793ce6`** (+15 tests). **T2 gate round 1 in flight** | gate verdict → PR |
 
 **SHIPPED 2026-08-17 — `fix/ns-account-switch-and-chat-burst` → PR #194, squashed to
@@ -210,6 +211,24 @@ path — OCR confidence is unquantified and the card cannot show what was misrea
 
 Written so the next session does not re-litigate these.
 
+- **2026-09-01 · Idempotency rides in `externalId`, NOT in a request header** · because
+  there is no header channel to ride in: `ns_createRecord` accepts exactly `recordType`
+  and `data`, read from the live MCP server's own schema, so a header-based scheme was
+  not a worse option — it was an impossible one. `externalId` is strictly better than the
+  header would have been: NetSuite enforces uniqueness **server-side**, so the guarantee
+  is not trusted from us. Measured live in the sandbox, not read in docs: identical create
+  twice → `recordId 5264548`, then HTTP 400 "This entity already exists", then a count of
+  1. A blind retry therefore cannot duplicate, and hitting the refusal *proves* the
+  original landed — which is why `classify_retry_result` maps a duplicate refusal to
+  WRITTEN rather than to an error.
+- **2026-09-01 · The payload is stamped at CARD BUILD, before the HMAC — never at
+  execution** · because stamping after approval would make the executed payload differ
+  from the approved one, which is the precise defect this branch already fixed once. The
+  key is therefore part of what the human sees and what the signature covers. Creates
+  only: an update targets an existing `recordId`, so stamping there would mutate a
+  business field for no benefit. A caller-supplied `externalId` is never overwritten —
+  their key is the better natural identity, and replacing it would corrupt an integration
+  we do not own.
 - **2026-08-30 · Stage 2 gates the RIBBON DATA on the scheduler being enabled, not just the
   wording** · because the amber ribbon promises a statement "is scheduled", and a promise
   about a background job is only as true as the job's on/off switch. The approved Stage 1
