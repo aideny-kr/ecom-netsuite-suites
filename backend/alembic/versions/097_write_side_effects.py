@@ -49,7 +49,11 @@ from sqlalchemy.dialects import postgresql
 from alembic import op
 
 revision = "097_write_side_effects"
-down_revision = "096_celigo_flow_step_provenance"
+# The true head is `094_dashboard_preference_series`, NOT the highest number:
+# 096 -> 093_report_series -> 094_dashboard_preference_series. Parenting on 096
+# (which already has a child) forked the graph into two heads. RE-PARENTED, not
+# merged — a merge migration makes `downgrade -1` ambiguous and is banned here.
+down_revision = "094_dashboard_preference_series"  # current single head (verify: alembic heads)
 branch_labels = None
 depends_on = None
 
