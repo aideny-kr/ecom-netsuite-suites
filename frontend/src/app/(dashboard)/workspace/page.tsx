@@ -68,6 +68,9 @@ import { ChangesetPanel } from "@/components/workspace/changeset-panel";
 import { RunsPanel } from "@/components/workspace/runs-panel";
 import { ImportDialog } from "@/components/workspace/import-dialog";
 import { WorkspaceChatPanel } from "@/components/workspace/workspace-chat-panel";
+import { CeligoFlowMap } from "@/components/settings/celigo-flow-map";
+import { useFeature } from "@/hooks/use-features";
+import { CeligoSurfaceToggle, type WorkspaceSurface } from "./surface-toggle";
 import {
   useWorkspaces,
   useCreateWorkspace,
@@ -308,6 +311,16 @@ const BOTTOM_TAB_CONFIG: Record<BottomTab, { label: string; icon: React.ReactNod
 export default function WorkspacePage() {
   // ── State ───────────────────────────────────────────────────────────
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(null);
+  // Which surface the workspace is showing. "files" is the SuiteScript
+  // edit-and-deploy surface; "celigo" is a READ-ONLY view of the customer's
+  // integrator.io flows. They are deliberately mutually exclusive rather than
+  // two modes of one navigator: the files surface carries changesets, a diff
+  // viewer and a Deploy button, and Celigo scripts belong to the customer's own
+  // integrators and can never be edited or deployed from here. Rendering the
+  // Celigo surface INSTEAD OF the panel group -- not alongside it -- means those
+  // affordances are not merely hidden, they are never mounted.
+  const [surface, setSurface] = useState<WorkspaceSurface>("files");
+  const showCeligo = useFeature("celigo");
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null);
   const [selectedFilePath, setSelectedFilePath] = useState<string>("");
   const [searchQuery, setSearchQuery] = useState("");
@@ -563,6 +576,8 @@ export default function WorkspacePage() {
             onSelect={handleWorkspaceSwitch}
           />
 
+          <CeligoSurfaceToggle surface={surface} onChange={setSurface} enabled={showCeligo} />
+
           <Dialog open={createOpen} onOpenChange={setCreateOpen}>
             <DialogTrigger asChild>
               <Button size="sm" variant="outline" className="h-7 text-[11px]">
@@ -752,7 +767,15 @@ export default function WorkspacePage() {
         </div>
 
         {/* ═══ Main Layout ═══ */}
-        {isMounted ? (
+        {showCeligo && surface === "celigo" ? (
+          /* READ-ONLY surface. The panel group below -- and with it the file
+             tree, changesets, diff viewer and Deploy button -- is not rendered
+             at all in this branch, so no Celigo content can reach an
+             edit-or-deploy affordance by any path. */
+          <div className="flex-1 overflow-auto p-4">
+            <CeligoFlowMap />
+          </div>
+        ) : isMounted ? (
           <PanelGroup id="layout-final-v19" orientation="horizontal" className="flex w-full h-full overflow-hidden">
             {/* ─── Left: File Explorer ─── */}
             <Panel
