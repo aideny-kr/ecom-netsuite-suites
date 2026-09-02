@@ -2183,17 +2183,17 @@ async def run_chat_turn(
                     from app.services.chat.write_payload import PayloadParseError
                     from app.services.chat.write_payload import normalize_write_payload as _norm_se
                     from app.services.chat.write_side_effect import build_idempotency_key
-                    from app.services.chat.write_side_effect_repo import record_attempt
+                    from app.services.chat.write_side_effect_repo import record_attempt_isolated
 
                     # `.record`, not `.fields` — the FULL payload including line
                     # sublists. `.fields` strips them, which would log a
                     # header-only copy of a write that had lines and derive a
-                    # key that two different orders could share.
+                    # key two different orders could share.
                     try:
                         _se_payload = _norm_se(tool_input).record
                     except PayloadParseError:
-                        # A payload-less mutation shape. Nothing to key on;
-                        # caught by TYPE so a real parse bug still surfaces.
+                        # A payload-less mutation shape. Caught by TYPE so a
+                        # real parse bug still surfaces.
                         _se_payload = {}
 
                     _idem_key_for_write = (
@@ -2201,8 +2201,15 @@ async def run_chat_turn(
                         or _se_payload.get("externalid")
                         or build_idempotency_key(batch_id=None, row_index=None, payload=_se_payload)
                     )
-                    await record_attempt(
-                        db,
+                    # ISOLATED SESSION — the log shares no transactional fate
+                    # with this turn. It cannot commit our pending state, and
+                    # its failure cannot leave our session needing a rollback
+                    # (which would expire every ORM object here and make the
+                    # next `session.id` access raise MissingGreenlet). Returns
+                    # None instead of raising; never needs a compensating
+                    # rollback on the caller's session, because it never
+                    # touched it.
+                    _idem_key_for_write = await record_attempt_isolated(
                         tenant_id=tenant_id,
                         idempotency_key=_idem_key_for_write,
                         record_type=_so.get("record_type", "record"),
@@ -2211,25 +2218,9 @@ async def run_chat_turn(
                         correlation_id=correlation_id,
                         session_id=session.id,
                     )
-                    await db.commit()
-                    await set_tenant_context(db, str(tenant_id))  # SET LOCAL dies at COMMIT
                 except Exception:
                     logger.warning("side-effect log not recorded; write proceeds", exc_info=True)
                     _idem_key_for_write = None
-                    # A DB-level failure (connection drop, deadlock, the unique
-                    # constraint racing a concurrent identical write) leaves the
-                    # session needing a rollback. WITHOUT this, the very next
-                    # statement — execute_tool_call's tenant-scoped reads, or
-                    # the assistant-message commit at the end of the turn —
-                    # raises PendingRollbackError, converting a best-effort
-                    # LOGGING failure into a hard failure of a write the human
-                    # already approved. That is the exact opposite of what the
-                    # comment above promises.
-                    try:
-                        await db.rollback()
-                        await set_tenant_context(db, str(tenant_id))  # rollback clears SET LOCAL too
-                    except Exception:
-                        logger.warning("session rollback after side-effect failure failed", exc_info=True)
 
                 _exec_result_str = await execute_tool_call(
                     # The ONE place this may be True. `tool_name`/`tool_input`
@@ -2253,28 +2244,16 @@ async def run_chat_turn(
                 # leaves it there, which is the state that means "go and look"
                 # and the one the system could not represent before.
                 if _idem_key_for_write:
-                    try:
-                        from app.services.chat.write_side_effect_repo import settle_from_result
+                    # Also isolated: NetSuite has already acted by now, so a
+                    # bookkeeping failure must not be able to crash the turn
+                    # that reports it. Swallows and returns ATTEMPTED.
+                    from app.services.chat.write_side_effect_repo import settle_from_result_isolated
 
-                        await settle_from_result(
-                            db,
-                            tenant_id=tenant_id,
-                            idempotency_key=_idem_key_for_write,
-                            raw_result=_exec_result_str,
-                        )
-                    except Exception:
-                        logger.warning("side-effect row not settled", exc_info=True)
-                        # Same reasoning as the record_attempt block above, and
-                        # it matters MORE here: NetSuite has already accepted
-                        # the write by this point. A poisoned session would
-                        # crash the turn after the side effect happened, so the
-                        # human never sees the confirmation for a write that
-                        # really occurred.
-                        try:
-                            await db.rollback()
-                            await set_tenant_context(db, str(tenant_id))
-                        except Exception:
-                            logger.warning("session rollback after settle failure failed", exc_info=True)
+                    await settle_from_result_isolated(
+                        tenant_id=tenant_id,
+                        idempotency_key=_idem_key_for_write,
+                        raw_result=_exec_result_str,
+                    )
 
                 _mutation_type = _so.get("mutation_type", "write")
                 _record_type = _so.get("record_type", "record")

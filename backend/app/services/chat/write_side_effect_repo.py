@@ -224,3 +224,79 @@ async def reconcile_by_external_id(
 
 # Keep `text` imported for callers that pass a raw SQL executor in tests.
 _ = text
+
+
+def _resolve_factory(session_factory: Any) -> Any:
+    if session_factory is not None:
+        return session_factory
+    from app.core.database import async_session_factory
+
+    return async_session_factory
+
+
+async def record_attempt_isolated(*, session_factory: Any = None, **kwargs: Any) -> str | None:
+    """``record_attempt`` on its OWN session and transaction.
+
+    The side-effect log must share NO transactional fate with the chat turn.
+    Doing it on the caller's session was wrong three ways, and the third only
+    showed up when the failure path was finally executed:
+
+    1. Committing the caller's session mid-turn commits whatever else that
+       session had pending — the log has no business deciding that.
+    2. A failure left the caller's session needing a rollback, so the next
+       statement raised ``PendingRollbackError`` and killed a write the human
+       had already approved (T2 gate round 1, five findings).
+    3. Rolling back to fix (2) EXPIRES every ORM object in the session, so the
+       next attribute access (``session.id``) lazy-loads outside the greenlet
+       and raises ``MissingGreenlet``. The fix for the poisoned session
+       poisoned the session differently.
+
+    A separate session removes the shared fate rather than managing it: this
+    transaction can fail, roll back, and be discarded without the caller ever
+    observing it. It also makes the "committed BEFORE the call" guarantee
+    honest — an independent transaction, not a commit entangled with the turn.
+
+    Returns the key, or ``None`` if the log could not be written. Never raises:
+    a logging failure must not block an approved write.
+    """
+    tenant_id = kwargs.get("tenant_id")
+    try:
+        from app.core.database import set_tenant_context
+
+        async with _resolve_factory(session_factory)() as se_db:
+            await set_tenant_context(se_db, str(tenant_id))
+            key = await record_attempt(se_db, **kwargs)
+            await se_db.commit()
+            return key
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).warning("side-effect attempt not recorded", exc_info=True)
+        return None
+
+
+async def settle_from_result_isolated(
+    *,
+    tenant_id: uuid.UUID,
+    idempotency_key: str,
+    raw_result: str,
+    session_factory: Any = None,
+) -> SideEffectStatus:
+    """``settle_from_result`` on its own session. Same reasoning as above, and
+    it matters more here: NetSuite has already acted by this point, so a
+    bookkeeping failure must not be able to crash the turn that reports it."""
+    try:
+        from app.core.database import set_tenant_context
+
+        async with _resolve_factory(session_factory)() as se_db:
+            await set_tenant_context(se_db, str(tenant_id))
+            status = await settle_from_result(
+                se_db, tenant_id=tenant_id, idempotency_key=idempotency_key, raw_result=raw_result
+            )
+            await se_db.commit()
+            return status
+    except Exception:
+        import logging
+
+        logging.getLogger(__name__).warning("side-effect row not settled", exc_info=True)
+        return SideEffectStatus.ATTEMPTED

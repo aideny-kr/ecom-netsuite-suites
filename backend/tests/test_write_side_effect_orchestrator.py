@@ -44,30 +44,40 @@ def _ext(tool_name: str) -> str:
 
 @pytest_asyncio.fixture
 async def db():
+    """A drill-DB session, AND the app's session factory redirected to it.
+
+    The side-effect log now runs on its OWN session via
+    `record_attempt_isolated`, which resolves `app.core.database
+    .async_session_factory`. Unpatched, these tests would write to whatever
+    DATABASE_URL_DIRECT points at — which in this repo is REMOTE SUPABASE.
+    The redirect is in the fixture, not in individual tests, so a new test
+    cannot forget it and quietly write to production infrastructure.
+    """
     engine = create_async_engine(DRILL_URL)
     maker = async_sessionmaker(engine, expire_on_commit=False)
-    async with maker() as s:
-        await s.execute(text("DELETE FROM write_side_effects"))
-        await s.execute(text("DELETE FROM chat_messages"))
-        await s.execute(text("DELETE FROM chat_sessions"))
-        await s.execute(
-            text(
-                "INSERT INTO tenants (id, name, slug, created_at, updated_at) "
-                "VALUES (:i,'Drill','drill',now(),now()) ON CONFLICT (id) DO NOTHING"
-            ),
-            {"i": _TENANT_ID},
-        )
-        await s.execute(
-            text(
-                "INSERT INTO users (id, tenant_id, email, full_name, hashed_password, is_active, "
-                "created_at, updated_at) "
-                "VALUES (:i,:t,'drill@example.com','Drill User','x',true,now(),now()) "
-                "ON CONFLICT (id) DO NOTHING"
-            ),
-            {"i": _USER_ID, "t": _TENANT_ID},
-        )
-        await s.commit()
-        yield s
+    with patch("app.core.database.async_session_factory", maker):
+        async with maker() as s:
+            await s.execute(text("DELETE FROM write_side_effects"))
+            await s.execute(text("DELETE FROM chat_messages"))
+            await s.execute(text("DELETE FROM chat_sessions"))
+            await s.execute(
+                text(
+                    "INSERT INTO tenants (id, name, slug, created_at, updated_at) "
+                    "VALUES (:i,'Drill','drill',now(),now()) ON CONFLICT (id) DO NOTHING"
+                ),
+                {"i": _TENANT_ID},
+            )
+            await s.execute(
+                text(
+                    "INSERT INTO users (id, tenant_id, email, full_name, hashed_password, is_active, "
+                    "created_at, updated_at) "
+                    "VALUES (:i,:t,'drill@example.com','Drill User','x',true,now(),now()) "
+                    "ON CONFLICT (id) DO NOTHING"
+                ),
+                {"i": _USER_ID, "t": _TENANT_ID},
+            )
+            await s.commit()
+            yield s
     await engine.dispose()
 
 
@@ -242,3 +252,41 @@ async def test_an_unstamped_write_is_logged_but_never_falsely_settled(db):
     got = await reconcile_by_external_id(db, tenant_id=_TENANT_ID, row=pending[0], suiteql=_never_called)
     assert got is SideEffectStatus.ATTEMPTED
     assert await unsettled_for_tenant(db, tenant_id=_TENANT_ID), "stays for a human"
+
+
+async def test_a_side_effect_log_failure_does_not_poison_the_session(db):
+    """T2 gate round 1, majors x5 — and the fix's own second-order bug.
+
+    The log is best-effort: its comment promises a failure "must not block a
+    write a human already approved". Doing it on the caller's session broke
+    that twice over. Without a rollback, the poisoned session made the next
+    statement raise PendingRollbackError. WITH a rollback, every ORM object in
+    the session was expired, so the next `session.id` access lazy-loaded
+    outside the greenlet and raised MissingGreenlet — the fix for the poisoned
+    session poisoned it differently. Only running the failure path revealed
+    that (agent-graph.md #12).
+
+    An isolated session removes the shared fate instead of managing it. What
+    this proves is the property both earlier versions violated: after the log
+    fails, the caller's session is STILL USABLE and the turn completes.
+    """
+    session, msg = await _seed_pending_write(
+        db, {"recordType": "customer", "data": json.dumps({"companyName": "Drill Poison Co"})}
+    )
+    before = (await db.execute(text("SELECT count(*) FROM chat_messages"))).scalar()
+
+    boom = AsyncMock(side_effect=RuntimeError("simulated DB failure inside record_attempt"))
+    with patch("app.services.chat.write_side_effect_repo.record_attempt", boom):
+        await _approve(db, session, msg, json.dumps({"success": True, "recordId": "5264999"}))
+
+    assert boom.await_count == 1, "the failure path must actually have been taken"
+
+    # Would raise PendingRollbackError or MissingGreenlet if the session were
+    # poisoned by either earlier implementation.
+    after = (await db.execute(text("SELECT count(*) FROM chat_messages"))).scalar()
+    assert after > before, "the turn completed and persisted its assistant message"
+
+    # The approved write still went through — degraded to pre-log behaviour.
+    assert msg.structured_output["status"] == "approved"
+    # ...and nothing was logged, since logging is what failed.
+    assert await unsettled_for_tenant(db, tenant_id=_TENANT_ID) == []
