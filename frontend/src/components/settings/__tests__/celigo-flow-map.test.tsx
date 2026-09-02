@@ -93,6 +93,10 @@ const generatorStep = {
   mapping_json: null,
   proceed_on_failure: null,
   skip_retries: null,
+  kind: "source",
+  record_type: null,
+  operation: null,
+  search_id: null,
   attachments: [],
 };
 
@@ -111,6 +115,10 @@ const processorStep = {
   mapping_json: { fields: [{ extract: "customer.id", generate: "entity" }] },
   proceed_on_failure: null,
   skip_retries: null,
+  kind: "destination",
+  record_type: null,
+  operation: null,
+  search_id: null,
   attachments: [
     {
       id: "att-1",
@@ -121,6 +129,12 @@ const processorStep = {
       function_name: "transform",
       json_path: "pageProcessors[0].transform.script",
       site_type: "transform",
+      script_name: null,
+      script_size_chars: null,
+      script_copies_count: null,
+      script_versions_count: null,
+      script_version_letter: null,
+      script_content_diverged: null,
     },
   ],
 };

@@ -72,6 +72,7 @@ from app.models.celigo import (
 from app.models.pipeline import CursorState
 from app.models.user import User
 from app.services.celigo.repository import list_logical_scripts
+from app.services.celigo.topology import ScriptFamilyFact, project_routers, script_family_facts, step_kind
 
 router = APIRouter(prefix="/celigo", tags=["celigo"])
 
@@ -105,6 +106,18 @@ def _join_production_integration(stmt, tenant_id):
 # whatever Celigo sends; the API's job is to relay it, not to vouch for its
 # shape -- the frontend decides how to render what it gets.
 CeligoSchedule = JsonValue
+
+
+def _parse_iso(value: object) -> datetime | None:
+    """`raw_json["lastErrorAt"]` is Celigo's own ISO-8601 string (or absent) --
+    never a `datetime` (raw_json is a JSONB blob). Fails closed to `None`
+    rather than 500ing the flow on a shape nobody has seen yet."""
+    if not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 class CeligoIntegrationOut(BaseModel):
@@ -144,6 +157,17 @@ class CeligoAttachmentOut(BaseModel):
     function_name: str | None
     json_path: str
     site_type: str | None
+    # Script clone-family state, projected by `topology.script_family_facts`
+    # from the attachment's `script_id` -- `None` when the attachment's
+    # script row isn't (yet) synced locally, or is a sandbox copy (see
+    # `get_flow_detail`'s family query, which filters with
+    # `celigo_script_is_production()`).
+    script_name: str | None = None
+    script_size_chars: int | None = None
+    script_copies_count: int | None = None
+    script_versions_count: int | None = None
+    script_version_letter: str | None = None
+    script_content_diverged: bool | None = None
 
 
 class CeligoFlowStepOut(BaseModel):
@@ -166,7 +190,36 @@ class CeligoFlowStepOut(BaseModel):
     mapping_json: JsonValue
     proceed_on_failure: bool | None
     skip_retries: bool | None
+    # Celigo's own vocabulary (`topology.step_kind`): Source (generator),
+    # Lookup (a processor whose adaptor is an export), Destination (any
+    # other processor).
+    kind: str
+    record_type: str | None
+    operation: str | None
+    search_id: str | None
     attachments: list[CeligoAttachmentOut]
+
+
+class CeligoRouterBranchOut(BaseModel):
+    id: str | None
+    name: str | None
+    rule_count: int
+    next_router_id: str | None
+    order: int
+    declared_step_count: int
+
+
+class CeligoRouterOut(BaseModel):
+    """Projected from the synced flow object by `topology.project_routers` -- the
+    declared side of branching (names, order, rules, chain, mode) that step rows
+    cannot carry."""
+
+    id: str | None
+    name: str | None
+    route_records_to: str | None
+    route_records_using: str | None
+    has_script_slot: bool
+    branches: list[CeligoRouterBranchOut]
 
 
 class CeligoFlowDetailOut(BaseModel):
@@ -187,6 +240,13 @@ class CeligoFlowDetailOut(BaseModel):
     # belongs to the router itself, not to any one page-generator/processor
     # step (see `app/models/celigo.py`'s `CeligoScriptAttachment` docstring).
     unassigned_attachments: list[CeligoAttachmentOut]
+    routers: list[CeligoRouterOut]
+    # Celigo's OWN open-error count/timestamp, echoed from `raw_json`
+    # (`numOpenError`/`lastErrorAt`) -- distinct from this app's own
+    # `celigo_flow_errors` count, which Task 4 adds. `None` when the flow's
+    # raw object never carried the field (not yet observed, or omitted).
+    celigo_open_error_count: int | None
+    last_error_at: datetime | None
 
 
 class CeligoScriptAttachmentSiteOut(BaseModel):
@@ -561,9 +621,40 @@ async def get_flow_detail(
         .all()
     )
 
+    # Script clone-family state (name/size/copies/versions/version-letter/
+    # diverged), projected by `topology.script_family_facts` -- one query for
+    # every attached script's whole family, never N+1. PRODUCTION ONLY: a
+    # sandbox copy of a script must not be counted into a production
+    # attachment's family state (see `celigo_script_is_production`'s
+    # docstring for why this predicate belongs on every `celigo_scripts`
+    # read, not just the by-id lookups).
+    script_ids = {a.script_id for a in attachments if a.script_id is not None}
+    facts: dict[uuid.UUID, ScriptFamilyFact] = {}
+    if script_ids:
+        dedup_keys = select(CeligoScript.dedup_key).where(
+            CeligoScript.tenant_id == user.tenant_id,
+            CeligoScript.id.in_(script_ids),
+        )
+        family_rows = (
+            (
+                await db.execute(
+                    select(CeligoScript).where(
+                        CeligoScript.tenant_id == user.tenant_id,
+                        CeligoScript.celigo_connection_id == flow.celigo_connection_id,
+                        CeligoScript.dedup_key.in_(dedup_keys),
+                        celigo_script_is_production(),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        facts = script_family_facts(family_rows)
+
     attachments_by_step: dict[uuid.UUID, list[CeligoAttachmentOut]] = defaultdict(list)
     unassigned: list[CeligoAttachmentOut] = []
     for a in attachments:
+        fact = facts.get(a.script_id) if a.script_id is not None else None
         out = CeligoAttachmentOut(
             id=str(a.id),
             flow_id=str(a.flow_id),
@@ -573,6 +664,12 @@ async def get_flow_detail(
             function_name=a.function_name,
             json_path=a.json_path,
             site_type=a.site_type,
+            script_name=fact.name if fact else None,
+            script_size_chars=fact.size_chars if fact else None,
+            script_copies_count=fact.copies_count if fact else None,
+            script_versions_count=fact.versions_count if fact else None,
+            script_version_letter=fact.version_letter if fact else None,
+            script_content_diverged=fact.content_diverged if fact else None,
         )
         if a.flow_step_id is not None:
             attachments_by_step[a.flow_step_id].append(out)
@@ -595,10 +692,18 @@ async def get_flow_detail(
             mapping_json=s.mapping_json,
             proceed_on_failure=s.proceed_on_failure,
             skip_retries=s.skip_retries,
+            kind=step_kind(s.role, s.adaptor_type),
+            record_type=s.record_type,
+            operation=s.operation,
+            search_id=s.search_id,
             attachments=attachments_by_step.get(s.id, []),
         )
         for s in steps
     ]
+
+    raw_open_error_count = flow.raw_json.get("numOpenError") if isinstance(flow.raw_json, dict) else None
+    celigo_open_error_count = raw_open_error_count if isinstance(raw_open_error_count, int) else None
+    last_error_at = _parse_iso(flow.raw_json.get("lastErrorAt") if isinstance(flow.raw_json, dict) else None)
 
     return CeligoFlowDetailOut(
         id=str(flow.id),
@@ -615,6 +720,9 @@ async def get_flow_detail(
         celigo_last_modified=flow.celigo_last_modified,
         steps=step_outs,
         unassigned_attachments=unassigned,
+        routers=[CeligoRouterOut(**r) for r in project_routers(flow.raw_json)],
+        celigo_open_error_count=celigo_open_error_count,
+        last_error_at=last_error_at,
     )
 
 

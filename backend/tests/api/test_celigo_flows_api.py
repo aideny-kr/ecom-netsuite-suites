@@ -230,6 +230,224 @@ async def _seed_sandbox_world(db, world: dict) -> tuple[CeligoIntegration, Celig
     return integration, flow
 
 
+async def _seed_router_chain_flow(
+    db, world: dict, *, name: str = "New Sales Order to NetSuite - Multi-Subsidiary"
+) -> dict:
+    """The real Multi-Subsidiary shape: source -> router 1 (one pass-through branch
+    holding a lookup with a preSavePage hook) -> router 2 (two named branches, each:
+    NetSuite lookup, add customer, update customer, add salesorder with a preMap hook).
+    Two scripts: one single-copy, one 3-copy family with 2 differing versions."""
+    tenant_id = world["integration"].tenant_id
+    conn_id = world["connection_id"]
+    sfx = world["suffix"]
+    flow = CeligoFlow(
+        tenant_id=tenant_id,
+        celigo_connection_id=conn_id,
+        integration_id=world["integration"].id,
+        celigo_id=f"flow_chain_{sfx}",
+        name=name,
+        disabled=False,
+        schedule="? 5,20,35,50 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23 ? * *",
+        timezone="America/Los_Angeles",
+        last_executed_at=datetime(2026, 9, 2, 17, 51, tzinfo=timezone.utc),
+        celigo_last_modified=datetime(2026, 9, 2, tzinfo=timezone.utc),
+        raw_json={
+            "numOpenError": 0,
+            "lastErrorAt": None,
+            "routers": [
+                {
+                    "id": "r1",
+                    "name": "",
+                    "branches": [
+                        {
+                            "branchId": "b0",
+                            "name": "",
+                            "nextRouterId": "r2",
+                            "pageProcessors": [{"_exportId": f"lkp_{sfx}"}],
+                        }
+                    ],
+                },
+                {
+                    "id": "r2",
+                    "name": "",
+                    "routeRecordsTo": "first_matching_branch",
+                    "routeRecordsUsing": "input_filters",
+                    "branches": [
+                        {
+                            "branchId": "bIntl",
+                            "name": "Framework Intl",
+                            "inputFilter": {
+                                "rules": ["notequals", ["string", ["extract", "business_entity"]], "Framework Inc"]
+                            },
+                            "pageProcessors": [{}, {}, {}, {}],
+                        },
+                        {
+                            "branchId": "bInc",
+                            "name": "Framework Inc",
+                            "inputFilter": {
+                                "rules": ["equals", ["string", ["extract", "business_entity"]], "Framework Inc"]
+                            },
+                            "pageProcessors": [{}, {}, {}, {}],
+                        },
+                    ],
+                },
+            ],
+        },
+    )
+    db.add(flow)
+    await db.flush()
+
+    def step(
+        celigo_id,
+        role,
+        adaptor,
+        *,
+        router=None,
+        branch=None,
+        seq=0,
+        record_type=None,
+        operation=None,
+        search_id=None,
+        reference_name=None,
+        mapping=None,
+    ):
+        return CeligoFlowStep(
+            tenant_id=tenant_id,
+            celigo_connection_id=conn_id,
+            flow_id=flow.id,
+            celigo_id=celigo_id,
+            role=role,
+            adaptor_type=adaptor,
+            router_id=router,
+            branch_id=branch,
+            sequence=seq,
+            record_type=record_type,
+            operation=operation,
+            search_id=search_id,
+            reference_name=reference_name,
+            mapping_json=mapping,
+            raw_json={},
+        )
+
+    steps = [
+        step(f"src_{sfx}", "generator", "HTTPExport", reference_name="Get New Sales Orders"),
+        step(
+            f"lkp_{sfx}",
+            "processor",
+            "HTTPExport",
+            router="r1",
+            branch="b0",
+            reference_name="Lookup Sales Orders (Multi-Subsidiary)",
+            mapping={"fields": [{"extract": "a", "generate": "b"}] * 23},
+        ),
+    ]
+    for branch, suffix in (("bIntl", "BV"), ("bInc", "Inc")):
+        steps += [
+            step(
+                f"cust_lkp_{branch}_{sfx}",
+                "processor",
+                "NetSuiteExport",
+                router="r2",
+                branch=branch,
+                seq=0,
+                record_type="customer",
+                search_id="5090",
+                reference_name="Lookup Customer",
+            ),
+            step(
+                f"cust_add_{branch}_{sfx}",
+                "processor",
+                "NetSuiteDistributedImport",
+                router="r2",
+                branch=branch,
+                seq=1,
+                record_type="customer",
+                operation="add",
+                reference_name=f"Import Customer ({suffix})",
+            ),
+            step(
+                f"cust_upd_{branch}_{sfx}",
+                "processor",
+                "NetSuiteDistributedImport",
+                router="r2",
+                branch=branch,
+                seq=2,
+                record_type="customer",
+                operation="update",
+                reference_name="Update Currency",
+            ),
+            step(
+                f"so_add_{branch}_{sfx}",
+                "processor",
+                "NetSuiteDistributedImport",
+                router="r2",
+                branch=branch,
+                seq=3,
+                record_type="salesorder",
+                operation="add",
+                reference_name=f"Add New Sales Order ({suffix})",
+            ),
+        ]
+    db.add_all(steps)
+    await db.flush()
+
+    solo = CeligoScript(
+        tenant_id=tenant_id,
+        celigo_connection_id=conn_id,
+        celigo_id=f"scr_solo_{sfx}",
+        name="sales_order_script_v2",
+        content="x" * 34145,
+        content_hash="hsolo",
+        celigo_last_modified=datetime(2026, 8, 25, tzinfo=timezone.utc),
+    )
+    fam = [
+        CeligoScript(
+            tenant_id=tenant_id,
+            celigo_connection_id=conn_id,
+            celigo_id=f"scr_fam{i}_{sfx}",
+            source_id=f"scr_fam0_{sfx}" if i else None,
+            name="ns_sales_order_premap",
+            content=c,
+            content_hash=h,
+            celigo_last_modified=datetime(2026, 1, 1 + i, tzinfo=timezone.utc),
+        )
+        for i, (c, h) in enumerate((("a" * 2284, "hA"), ("b" * 2443, "hB"), ("b" * 2443, "hB")))
+    ]
+    db.add_all([solo, *fam])
+    await db.flush()
+    by_id = {s.celigo_id: s for s in steps}
+    atts = [
+        CeligoScriptAttachment(
+            tenant_id=tenant_id,
+            celigo_connection_id=conn_id,
+            flow_id=flow.id,
+            flow_step_id=by_id[f"lkp_{sfx}"].id,
+            script_id=solo.id,
+            script_celigo_id=solo.celigo_id,
+            function_name="preSavePage",
+            json_path=f"lkp_{sfx}.hooks.preSavePage",
+            site_type="hook",
+        )
+    ]
+    for branch in ("bIntl", "bInc"):
+        atts.append(
+            CeligoScriptAttachment(
+                tenant_id=tenant_id,
+                celigo_connection_id=conn_id,
+                flow_id=flow.id,
+                flow_step_id=by_id[f"so_add_{branch}_{sfx}"].id,
+                script_id=fam[1].id,
+                script_celigo_id=fam[1].celigo_id,
+                function_name="preMap",
+                json_path=f"so_add_{branch}_{sfx}.hooks.preMap",
+                site_type="hook",
+            )
+        )
+    db.add_all(atts)
+    await db.flush()
+    return {"flow": flow, "steps": by_id, "solo": solo, "family": fam, "attachments": atts}
+
+
 class TestListIntegrations:
     async def test_sandbox_integrations_are_not_listed(self, client, admin_user, db):
         """Production only -- operator directive 2026-09-01 ("don't bring sandbox
@@ -708,6 +926,50 @@ class TestGetFlowDetail:
         body = r.json()
         assert len(body["unassigned_attachments"]) == 1
         assert body["unassigned_attachments"][0]["json_path"] == "routers[0].script"
+
+    async def test_detail_projects_kinds_facts_routers_and_script_families(self, client, admin_user, db):
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        chain = await _seed_router_chain_flow(db, world)
+        r = await client.get(f"/api/v1/celigo/flows/{chain['flow'].id}", headers=headers)
+        assert r.status_code == 200
+        body = r.json()
+        kinds = {s["celigo_id"]: s["kind"] for s in body["steps"]}
+        sfx = world["suffix"]
+        assert (
+            kinds[f"src_{sfx}"] == "source"
+            and kinds[f"lkp_{sfx}"] == "lookup"
+            and kinds[f"cust_lkp_bIntl_{sfx}"] == "lookup"
+            and kinds[f"so_add_bInc_{sfx}"] == "destination"
+        )
+        so = next(s for s in body["steps"] if s["celigo_id"] == f"so_add_bIntl_{sfx}")
+        assert (so["record_type"], so["operation"], so["search_id"], so["reference_name"]) == (
+            "salesorder",
+            "add",
+            None,
+            "Add New Sales Order (BV)",
+        )
+        lk = next(s for s in body["steps"] if s["celigo_id"] == f"cust_lkp_bIntl_{sfx}")
+        assert (lk["record_type"], lk["search_id"]) == ("customer", "5090")
+        assert [rt["id"] for rt in body["routers"]] == ["r1", "r2"]
+        assert body["routers"][0]["branches"][0]["next_router_id"] == "r2"
+        assert [b["name"] for b in body["routers"][1]["branches"]] == ["Framework Intl", "Framework Inc"]
+        assert body["routers"][1]["branches"][0]["rule_count"] == 1
+        assert body["celigo_open_error_count"] == 0 and body["last_error_at"] is None
+        hook = next(s for s in body["steps"] if s["celigo_id"] == f"so_add_bInc_{sfx}")["attachments"][0]
+        assert (
+            hook["script_name"],
+            hook["script_copies_count"],
+            hook["script_versions_count"],
+            hook["script_version_letter"],
+            hook["script_content_diverged"],
+        ) == ("ns_sales_order_premap", 3, 2, "B", True)
+        solo = next(s for s in body["steps"] if s["celigo_id"] == f"lkp_{sfx}")["attachments"][0]
+        assert (solo["script_copies_count"], solo["script_version_letter"], solo["script_size_chars"]) == (
+            1,
+            None,
+            34145,
+        )
 
     async def test_404_for_unknown_flow(self, client, admin_user):
         _, headers = admin_user

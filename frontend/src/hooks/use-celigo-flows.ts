@@ -55,6 +55,14 @@ export interface CeligoAttachment {
   function_name: string | null;
   json_path: string;
   site_type: string | null;
+  /** Script clone-family state (`topology.script_family_facts`) -- null when
+   * the attachment's script isn't synced locally, or is a sandbox copy. */
+  script_name: string | null;
+  script_size_chars: number | null;
+  script_copies_count: number | null;
+  script_versions_count: number | null;
+  script_version_letter: string | null;
+  script_content_diverged: boolean | null;
 }
 
 export interface CeligoFlowStep {
@@ -73,7 +81,30 @@ export interface CeligoFlowStep {
   mapping_json: CeligoJson;
   proceed_on_failure: boolean | null;
   skip_retries: boolean | null;
+  /** Celigo's own vocabulary (`topology.step_kind`). */
+  kind: "source" | "lookup" | "destination";
+  record_type: string | null;
+  operation: string | null;
+  search_id: string | null;
   attachments: CeligoAttachment[];
+}
+
+export interface CeligoRouterBranch {
+  id: string | null;
+  name: string | null;
+  rule_count: number;
+  next_router_id: string | null;
+  order: number;
+  declared_step_count: number;
+}
+
+export interface CeligoRouter {
+  id: string | null;
+  name: string | null;
+  route_records_to: string | null;
+  route_records_using: string | null;
+  has_script_slot: boolean;
+  branches: CeligoRouterBranch[];
 }
 
 export interface CeligoFlowDetail {
@@ -91,6 +122,11 @@ export interface CeligoFlowDetail {
   celigo_last_modified: string | null;
   steps: CeligoFlowStep[];
   unassigned_attachments: CeligoAttachment[];
+  routers: CeligoRouter[];
+  /** Celigo's OWN open-error count/timestamp (`raw_json.numOpenError`/
+   * `lastErrorAt`) -- distinct from this app's own error tables. */
+  celigo_open_error_count: number | null;
+  last_error_at: string | null;
 }
 
 export function useCeligoIntegrations() {
