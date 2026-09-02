@@ -41,6 +41,7 @@
  */
 
 import { useCeligoScript, type CeligoScriptAttachmentSite } from "@/hooks/use-celigo-flows";
+import { queryState } from "@/lib/query-state";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -122,7 +123,9 @@ export function CeligoScriptViewerDialog({
   scriptId: string | null;
   onOpenChange: (open: boolean) => void;
 }) {
-  const { data: script, isLoading, isError, refetch } = useCeligoScript(scriptId ?? undefined);
+  const scriptQuery = useCeligoScript(scriptId ?? undefined);
+  const scriptState = queryState(scriptQuery);
+  const script = scriptQuery.data;
 
   const copyGroups = script ? groupSitesByCopy(script.used_by) : [];
   const shownSites = copyGroups[0] ?? [];
@@ -131,16 +134,16 @@ export function CeligoScriptViewerDialog({
   return (
     <Dialog open={!!scriptId} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[85vh] max-w-3xl overflow-y-auto">
-        {isError ? (
-          // Checked before the loading/!script branch below -- once a query
-          // errors, isLoading is false and `script` stays undefined
-          // forever, so that branch alone would spin forever with no escape
+        {scriptState === "error" ? (
+          // "error" first -- once a query errors, `script` stays undefined
+          // forever, so the branch below alone would spin with no escape
           // (the exact ordering Task 9's fix round 1 caught in
-          // FlowDetailDialog).
+          // FlowDetailDialog). `queryState` is the one mapping every query
+          // in the flow map goes through (see `lib/query-state.ts`).
           <div className="flex flex-col items-center gap-3 py-8">
-            <ErrorNotice message="Couldn't load this script." onRetry={() => refetch()} />
+            <ErrorNotice message="Couldn't load this script." onRetry={() => scriptQuery.refetch()} />
           </div>
-        ) : isLoading || !script ? (
+        ) : scriptState !== "success" || !script ? (
           <div className="flex items-center justify-center gap-2 py-8 text-[13px] text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" />
             Loading script…

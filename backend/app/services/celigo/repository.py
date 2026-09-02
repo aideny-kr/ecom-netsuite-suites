@@ -82,7 +82,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable
 
-from sqlalchemy import delete, func, not_, or_, select, update
+from sqlalchemy import and_, delete, func, not_, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -230,24 +230,49 @@ async def purge_sandbox_rows(
     What the FKs do with the rest: `celigo_flows.integration_id`, the flow's
     steps, script attachments and config changes are `ON DELETE CASCADE` and
     go with the integration. `celigo_flow_errors.flow_id` is `ON DELETE SET
-    NULL` and its rows are deliberately NOT touched here -- that table is
-    THE audit trail (design spec G2; `CeligoFlowError`'s docstring: "NEVER
-    DELETE A ROW HERE"), and SET NULL is the design, not a gap: an error
-    outlives its flow the same way it outlives Celigo's own ~30-day purge.
-    A purged sandbox flow's errors keep existing with `flow_id NULL`, exactly
-    as they would after any other flow deletion, and count nowhere because
-    every open-error count joins through a flow. (Round 1 of PR #216's gate
-    deleted them here; round 2 flagged that as a blocker. The name-based pin
-    in `test_celigo_repository.py` could not see an inline delete, so that
-    test now scans the source of every Celigo module for one.)"""
+    NULL` and its rows are NEVER deleted here -- that table is THE audit
+    trail (design spec G2; `CeligoFlowError`'s docstring: "NEVER DELETE A
+    ROW HERE"), and SET NULL is the design, not a gap: an error outlives its
+    flow the same way it outlives Celigo's own ~30-day purge. (Round 1 of PR
+    #216's gate deleted them here; round 2 flagged that as a blocker. The
+    name-based pin in `test_celigo_repository.py` could not see an inline
+    delete, so that test now scans the source of every Celigo module.)
+
+    They are, however, STAMPED `purged_at = now()` first (an UPDATE -- the
+    one kind of transition the table allows, same as `mark_flow_errors_
+    purged`): an error whose flow this app has stopped tracking is not an
+    OPEN error, and `errors.py`'s signature recompute counts by
+    `celigo_error_is_open()` alone, so an orphan left open would inflate a
+    production signature that happens to share its fingerprint, forever
+    (gate round 3)."""
+    doomed_integrations = or_(
+        not_(celigo_integration_is_production()),
+        CeligoIntegration.celigo_id.in_(list(integration_celigo_ids)),
+    )
+    doomed_flow_ids = (
+        select(CeligoFlow.id)
+        .join(CeligoIntegration, CeligoIntegration.id == CeligoFlow.integration_id)
+        .where(
+            CeligoFlow.tenant_id == tenant_id,
+            CeligoIntegration.tenant_id == tenant_id,
+            CeligoIntegration.celigo_connection_id == connection_id,
+            doomed_integrations,
+        )
+    )
+    await db.execute(
+        update(CeligoFlowError)
+        .where(
+            CeligoFlowError.tenant_id == tenant_id,
+            CeligoFlowError.flow_id.in_(doomed_flow_ids),
+            CeligoFlowError.purged_at.is_(None),
+        )
+        .values(purged_at=func.now())
+    )
     integrations_result = await db.execute(
         delete(CeligoIntegration).where(
             CeligoIntegration.tenant_id == tenant_id,
             CeligoIntegration.celigo_connection_id == connection_id,
-            or_(
-                not_(celigo_integration_is_production()),
-                CeligoIntegration.celigo_id.in_(list(integration_celigo_ids)),
-            ),
+            doomed_integrations,
         )
     )
     scripts_result = await db.execute(
@@ -654,8 +679,24 @@ async def list_logical_scripts(
         groups[script.dedup_key].append(script)
 
     all_celigo_ids = [s.celigo_id for s in scripts]
+    # Attachment sites are counted through their flow's integration so only
+    # PRODUCTION sites count -- the same join the API's `used_by` list makes
+    # (`celigo_flows.py`), so the two numbers describe one row set (gate
+    # round 3: they disagreed by exactly the sandbox sites before this).
     counts_result = await db.execute(
         select(CeligoScriptAttachment.script_celigo_id, func.count())
+        .join(
+            CeligoFlow,
+            and_(CeligoFlow.id == CeligoScriptAttachment.flow_id, CeligoFlow.tenant_id == tenant_id),
+        )
+        .join(
+            CeligoIntegration,
+            and_(
+                CeligoIntegration.id == CeligoFlow.integration_id,
+                CeligoIntegration.tenant_id == tenant_id,
+                celigo_integration_is_production(),
+            ),
+        )
         .where(
             CeligoScriptAttachment.tenant_id == tenant_id,
             CeligoScriptAttachment.celigo_connection_id == connection_id,

@@ -649,8 +649,11 @@ async def get_script_detail(
     # construction, so `group` is never actually None. Falls back to a
     # single-member view rather than a 500 if that invariant is ever violated.
     celigo_ids = group.celigo_ids if group is not None else (script.celigo_id,)
-    attachment_count = group.attachment_count if group is not None else 0
     content_diverged = group.content_diverged if group is not None else False
+    # `attachment_count` is NOT taken from the group: it is `len(used_by)`
+    # below, so the headline number and the list it summarises are one row
+    # set by construction (gate round 3 found them computed by two queries
+    # that agreed only when no sandbox site existed).
 
     # Tenant predicates on BOTH joined tables, not only on `CeligoScriptAttachment`
     # -- and on the JOIN's ON clause, not a trailing WHERE, which matters for
@@ -718,7 +721,7 @@ async def get_script_detail(
         content=script.content,
         content_hash=script.content_hash,
         copies_count=len(celigo_ids),
-        attachment_count=attachment_count,
+        attachment_count=len(used_by),
         integration_count=len(integration_ids),
         content_diverged=content_diverged,
         used_by=used_by,

@@ -211,6 +211,36 @@ def _is_sandbox(obj: dict) -> bool:
     return obj.get("sandbox") is True
 
 
+async def _list_production(
+    kind: str,
+    *,
+    token: str,
+    region: str,
+    http: httpx.AsyncClient,
+    summary: SyncSummary,
+    skipped_field: str,
+    skipped_ids: set[str] | None = None,
+):
+    """THE seam every listed object enters the sync through: `list_resource`
+    with `_is_sandbox` applied. A kind cannot be iterated in this module any
+    other way, so a kind cannot be forgotten -- the first cut of PR #216
+    checked integrations inline and missed scripts; round 3's gate found the
+    remaining four inline checks were the shape that kept producing majors.
+
+    A skipped object is counted on `summary.<skipped_field>` and, when the
+    caller needs to recognise it later (Phase B skipping a sandbox
+    integration's flows; the end-of-run purge catching a row whose stored
+    flag has gone stale), its Celigo id is added to *skipped_ids*."""
+    async for obj in list_resource(kind, token=token, region=region, client=http):
+        if _is_sandbox(obj):
+            celigo_id = obj.get("_id")
+            if skipped_ids is not None and celigo_id:
+                skipped_ids.add(celigo_id)
+            setattr(summary, skipped_field, getattr(summary, skipped_field) + 1)
+            continue
+        yield obj
+
+
 def _hash_content(content: str | None) -> str | None:
     """Independent copy of `repository._content_hash`'s algorithm (sha256 hex
     digest of the UTF-8 content) -- duplicated, not imported, matching this
@@ -585,13 +615,17 @@ async def sync_flow_map_for_connection(
         integration_ids: dict[str, uuid.UUID] = {}
         sandbox_integration_ids: set[str] = set()
         sandbox_script_ids: set[str] = set()
-        async for integration in list_resource("integration", token=token, region=region, client=http):
+        async for integration in _list_production(
+            "integration",
+            token=token,
+            region=region,
+            http=http,
+            summary=summary,
+            skipped_field="integrations_skipped_sandbox",
+            skipped_ids=sandbox_integration_ids,
+        ):
             celigo_id = integration.get("_id")
             if not celigo_id:
-                continue
-            if _is_sandbox(integration):
-                sandbox_integration_ids.add(celigo_id)
-                summary.integrations_skipped_sandbox += 1
                 continue
             local_id = await upsert_integration(
                 db, tenant_id=tenant_id, connection_id=connection_id, sanitized=integration
@@ -610,7 +644,9 @@ async def sync_flow_map_for_connection(
         #     own docstring, and the export/import's own json_path doesn't distinguish branches.
         script_ids: dict[str, uuid.UUID] = {}
         export_import_flow_steps: dict[str, dict[uuid.UUID, uuid.UUID]] = defaultdict(dict)
-        async for flow in list_resource("flow", token=token, region=region, client=http):
+        async for flow in _list_production(
+            "flow", token=token, region=region, http=http, summary=summary, skipped_field="flows_skipped_sandbox"
+        ):
             flow_celigo_id = flow.get("_id")
             if not flow_celigo_id:
                 continue
@@ -722,13 +758,17 @@ async def sync_flow_map_for_connection(
                 export_import_flow_steps[step_input.celigo_id].setdefault(flow_local_id, step_local_id)
 
         # Phase C -- scripts, independent of flow order.
-        async for script in list_resource("script", token=token, region=region, client=http):
+        async for script in _list_production(
+            "script",
+            token=token,
+            region=region,
+            http=http,
+            summary=summary,
+            skipped_field="scripts_skipped_sandbox",
+            skipped_ids=sandbox_script_ids,
+        ):
             celigo_id = script.get("_id")
             if not celigo_id:
-                continue
-            if _is_sandbox(script):
-                sandbox_script_ids.add(celigo_id)
-                summary.scripts_skipped_sandbox += 1
                 continue
             existing_script = await _get_existing_script(
                 db, tenant_id=tenant_id, connection_id=connection_id, celigo_id=celigo_id
@@ -772,11 +812,15 @@ async def sync_flow_map_for_connection(
         # connection_celigo_id, and record script attachments per referencing flow.
         # See module docstring's Phase D entry for why this exists.
         for kind in _REFERENCE_OBJECT_KINDS:
-            async for obj in list_resource(kind, token=token, region=region, client=http):
+            async for obj in _list_production(
+                kind,
+                token=token,
+                region=region,
+                http=http,
+                summary=summary,
+                skipped_field="exports_imports_skipped_sandbox",
+            ):
                 celigo_id = obj.get("_id")
-                if _is_sandbox(obj):
-                    summary.exports_imports_skipped_sandbox += 1
-                    continue
                 referencing_flow_steps = export_import_flow_steps.get(celigo_id) if celigo_id else None
                 if not referencing_flow_steps:
                     summary.exports_imports_skipped_no_flow += 1

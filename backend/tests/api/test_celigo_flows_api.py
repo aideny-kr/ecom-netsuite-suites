@@ -736,6 +736,39 @@ class TestGetScriptDetail:
         r = await client.get(f"/api/v1/celigo/scripts/{sandbox_script.id}", headers=headers)
         assert r.status_code == 404, r.text
 
+    async def test_attachment_count_and_used_by_are_the_same_production_rows(self, client, admin_user, db):
+        """GATE FINDING (round 3, major): `used_by` was production-joined but
+        `attachment_count` (from `list_logical_scripts`) counted every
+        attachment of the clone family, sandbox flows included, so the two
+        numbers on one response could disagree. Both now come from the same
+        production-filtered row set -- there is nothing left to keep in
+        step. Seeds the exact case: one script attached under a production
+        flow AND under a sandbox one."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        _, sandbox_flow = await _seed_sandbox_world(db, world)
+        db.add(
+            CeligoScriptAttachment(
+                tenant_id=user.tenant_id,
+                celigo_connection_id=world["connection_id"],
+                flow_id=sandbox_flow.id,
+                flow_step_id=None,
+                script_id=world["script"].id,
+                script_celigo_id=world["script"].celigo_id,
+                function_name="transform",
+                json_path="routers[0].script",
+                site_type="router",
+            )
+        )
+        await db.flush()
+
+        r = await client.get(f"/api/v1/celigo/scripts/{world['script'].id}", headers=headers)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert [site["flow_name"] for site in body["used_by"]] == ["Sales Order Sync"]
+        assert body["attachment_count"] == len(body["used_by"]) == 1
+        assert body["integration_count"] == 1
+
     async def test_returns_content_and_used_by(self, client, admin_user, db):
         user, headers = admin_user
         world = await _seed_world(db, user.tenant_id)

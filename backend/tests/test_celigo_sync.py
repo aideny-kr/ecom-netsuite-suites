@@ -627,12 +627,22 @@ class TestProductionOnlyHoldsAcrossKindsAndTime:
         assert summary.integrations_purged_sandbox == 1
         surviving = (
             await db.execute(
-                text("SELECT celigo_id, flow_id FROM celigo_flow_errors WHERE tenant_id = :t").bindparams(t=tenant.id)
+                text("SELECT celigo_id, flow_id, purged_at FROM celigo_flow_errors WHERE tenant_id = :t").bindparams(
+                    t=tenant.id
+                )
             )
         ).all()
         assert [(row.celigo_id, row.flow_id) for row in surviving] == [("err_sb", None)], (
             "the audit row must survive its flow's purge, with flow_id SET NULL -- never deleted"
         )
+        # GATE ROUND 3: the row survives, but it must not keep counting as an
+        # OPEN error -- an error signature's occurrence recompute
+        # (`errors.py`) only looks at `celigo_error_is_open()`, so an orphan
+        # left open would inflate a production signature it happens to share
+        # a fingerprint with, forever. `purged_at` is the state transition
+        # the model allows for "gone from what we track" (an UPDATE, which
+        # the never-delete pin permits); the purge stamps it.
+        assert surviving[0].purged_at is not None, "orphaned audit rows are marked purged, not left open"
 
     async def test_sandbox_scripts_are_skipped_and_previously_synced_ones_purged(self, db: AsyncSession, monkeypatch):
         """SINGLE-AGENT REVIEW: Phase C synced every script regardless of
@@ -693,6 +703,42 @@ class TestProductionOnlyHoldsAcrossKindsAndTime:
 
         assert summary.exports_imports_skipped_sandbox == 1
         assert summary.exports_imports_synced == 0
+
+
+class TestProductionOnlyIsOneSeam:
+    """GATE ROUND 3 (nit, but the shape that produced every round's major):
+    sandbox classification lived in four near-identical `if _is_sandbox(x)`
+    blocks, one per kind. Now every object of every kind enters the sync
+    through `_list_production`, so a kind cannot be listed without passing
+    the classifier -- and a flow object that carries the flag ITSELF (none
+    observed live, but the seam is kind-agnostic) is skipped the same way."""
+
+    async def test_a_flow_object_flagged_sandbox_is_skipped_even_under_a_production_integration(
+        self, db: AsyncSession, monkeypatch
+    ):
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        summary = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_prod", name="Production", sandbox=False)],
+            flows=[
+                {**_raw_flow("flow_flagged", integration_id="int_prod", export_id="exp_1"), "sandbox": True},
+                _raw_flow("flow_prod", integration_id="int_prod", export_id="exp_2"),
+            ],
+        )
+
+        assert summary.flows_synced == 1
+        assert summary.flows_skipped_sandbox == 1
+        flow_ids = (
+            (await db.execute(text("SELECT celigo_id FROM celigo_flows WHERE tenant_id = :t").bindparams(t=tenant.id)))
+            .scalars()
+            .all()
+        )
+        assert flow_ids == ["flow_prod"]
 
 
 class TestDriftDetection:
