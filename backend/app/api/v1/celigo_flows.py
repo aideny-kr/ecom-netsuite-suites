@@ -154,8 +154,9 @@ class CeligoFlowSummaryOut(BaseModel):
     semantics, which is exactly right: a step with no router/branch must not
     count as a router/branch of its own). `lookup_count` is steps whose role
     is `processor` and whose `adaptor_type` ends in "export"
-    (case-insensitive) -- Celigo's own "lookup" vocabulary (`topology.
-    step_kind`), NOT the same predicate as `signature_count` above.
+    (case-insensitive) -- the same rule `topology.step_kind` uses to call a
+    step a Lookup, restated here as a set-level GROUP BY count rather than
+    imported per-step (this endpoint never classifies individual steps).
     `writes` is every `(record_type, count)` pair actually posted from this
     flow (`record_type IS NOT NULL AND operation IS NOT NULL` -- a step can
     carry a `record_type` from a lookup export with no `operation`, which is
