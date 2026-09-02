@@ -19,11 +19,9 @@ def adaptor_family(adaptor_type: str | None) -> str | None:
     `adaptor_families` list -- Celigo's own `adaptor_type` values are
     connector-and-direction-specific (`NetSuiteExport`,
     `NetSuiteDistributedImport`, `HTTPExport`, ...); this collapses them to
-    the vendor/protocol a person recognizes. Checked in this order so a name
-    containing more than one keyword resolves the same way every time:
-    NetSuite first (its own import variants would otherwise also match no
-    other keyword, so order doesn't matter for it, but it reads first as the
-    dominant connector on this account), then AS2, FTP, RDBMS, REST, HTTP.
+    the vendor/protocol a person recognizes. Checked in a fixed order --
+    NetSuite, then AS2, FTP, RDBMS, REST, HTTP -- so the result is
+    deterministic if a name were ever to contain more than one keyword.
     `None` for an unmapped or absent adaptor_type -- never invented."""
     if not adaptor_type:
         return None
