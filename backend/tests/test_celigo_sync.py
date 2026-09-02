@@ -46,7 +46,7 @@ from app.services.celigo.repository import (
     upsert_script,
 )
 from app.services.celigo.sanitizer import sanitize
-from app.services.celigo.sync_service import SyncSummary, sync_flow_map_for_connection
+from app.services.celigo.sync_service import SyncSummary, _is_sandbox, sync_flow_map_for_connection
 from tests.conftest import create_test_tenant
 
 # ---------------------------------------------------------------------------
@@ -711,7 +711,24 @@ class TestProductionOnlyIsOneSeam:
     blocks, one per kind. Now every object of every kind enters the sync
     through `_list_production`, so a kind cannot be listed without passing
     the classifier -- and a flow object that carries the flag ITSELF (none
-    observed live, but the seam is kind-agnostic) is skipped the same way."""
+    observed live, but the seam is kind-agnostic) is skipped the same way.
+
+    Two tests, because they prove different halves. `_run_sync` fakes
+    `list_resource` and feeds RAW dicts to the seam, so the first test
+    proves the seam skips a flagged flow but says nothing about whether the
+    flag ever reaches it. The real client sanitizes every object first, and
+    the sanitizer's `_FLOW` allowlist did not carry `sandbox` (gate round
+    4, major) -- the second test goes through the real sanitizer."""
+
+    def test_the_flow_flag_survives_the_sanitizer_so_the_seam_can_see_it(self):
+        """GATE ROUND 4: before this, `sanitize("flow", ...)` stripped
+        `sandbox` -- allowlisted for integrations, scripts, exports and
+        imports but not flows -- so in production the seam could never see a
+        flow's own flag, and the test below was green for a path production
+        never takes (this repo's "docstring overclaims coverage" shape)."""
+        raw = {"_id": "flow_sb", "name": "Flagged", "sandbox": True, "pageProcessors": []}
+        assert _is_sandbox(sanitize("flow", raw)) is True
+        assert _is_sandbox(sanitize("flow", {"_id": "flow_prod", "name": "Plain"})) is False
 
     async def test_a_flow_object_flagged_sandbox_is_skipped_even_under_a_production_integration(
         self, db: AsyncSession, monkeypatch

@@ -413,6 +413,9 @@ async def _resolve_integration_id(
         return _FlowSkip.SANDBOX
     local_id = await upsert_integration(db, tenant_id=tenant_id, connection_id=connection_id, sanitized=fetched)
     integration_ids[celigo_integration_id] = local_id
+    # Written this run, same as a Phase A upsert -- the summary counts what
+    # was WRITTEN, and a listing-gap fallback is a write (gate round 4).
+    summary.integrations_synced += 1
     return local_id
 
 
