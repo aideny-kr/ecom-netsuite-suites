@@ -32,6 +32,16 @@ export interface CeligoIntegration {
   celigo_last_modified: string | null;
 }
 
+/** One `(record_type, count)` row of a flow's write mix (`CeligoRecordWriteOut`
+ * in `celigo_flows.py`) -- every record type actually POSTED from the flow
+ * (a lookup export's `record_type` with no `operation` is a read, not a
+ * write, and is excluded server-side), ordered by count desc then
+ * record_type. */
+export interface CeligoRecordWrite {
+  record_type: string;
+  count: number;
+}
+
 export interface CeligoFlowSummary {
   id: string;
   celigo_id: string;
@@ -44,6 +54,18 @@ export interface CeligoFlowSummary {
   error_count: number;
   /** Open DISTINCT root-cause count -- the plan's deviation 1 lead value. */
   signature_count: number;
+  /** Task 5 -- topology/script/write aggregates for the flow-list table
+   * columns, each a grouped query server-side (never N+1) -- see
+   * `CeligoFlowSummaryOut`'s docstring (backend/app/api/v1/celigo_flows.py)
+   * for what each one counts. */
+  step_count: number;
+  router_count: number;
+  branch_count: number;
+  lookup_count: number;
+  script_count: number;
+  diverged_family_count: number;
+  writes: CeligoRecordWrite[];
+  celigo_last_modified: string | null;
 }
 
 export interface CeligoAttachment {

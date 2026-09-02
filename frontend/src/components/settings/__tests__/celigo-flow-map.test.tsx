@@ -52,6 +52,14 @@ const healthyFlow = {
   last_executed_at: null,
   error_count: 0,
   signature_count: 0,
+  step_count: 0,
+  router_count: 0,
+  branch_count: 0,
+  lookup_count: 0,
+  script_count: 0,
+  diverged_family_count: 0,
+  writes: [],
+  celigo_last_modified: null,
 };
 
 const failingFlow = {
@@ -64,6 +72,14 @@ const failingFlow = {
   last_executed_at: null,
   error_count: 12,
   signature_count: 3,
+  step_count: 0,
+  router_count: 0,
+  branch_count: 0,
+  lookup_count: 0,
+  script_count: 0,
+  diverged_family_count: 0,
+  writes: [],
+  celigo_last_modified: null,
 };
 
 const pausedFlow = {
@@ -76,6 +92,14 @@ const pausedFlow = {
   last_executed_at: null,
   error_count: 0,
   signature_count: 0,
+  step_count: 0,
+  router_count: 0,
+  branch_count: 0,
+  lookup_count: 0,
+  script_count: 0,
+  diverged_family_count: 0,
+  writes: [],
+  celigo_last_modified: null,
 };
 
 const generatorStep = {

@@ -691,6 +691,23 @@ class TestListIntegrationFlows:
         r = await client.get(f"/api/v1/celigo/integrations/{world_a['integration'].id}/flows", headers=headers_b)
         assert r.status_code == 404, "tenant B must get 404, never tenant A's flows"
 
+    async def test_lists_topology_script_and_write_aggregates_per_flow(self, client, admin_user, db):
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        chain = await _seed_router_chain_flow(db, world)
+        r = await client.get(f"/api/v1/celigo/integrations/{world['integration'].id}/flows", headers=headers)
+        assert r.status_code == 200
+        row = next(f for f in r.json() if f["id"] == str(chain["flow"].id))
+        assert (row["step_count"], row["router_count"], row["branch_count"], row["lookup_count"]) == (10, 2, 3, 3)
+        assert (row["script_count"], row["diverged_family_count"]) == (2, 1)
+        assert sorted(row["writes"], key=lambda w: w["record_type"]) == [
+            {"record_type": "customer", "count": 4},
+            {"record_type": "salesorder", "count": 2},
+        ]
+        assert row["celigo_last_modified"].startswith("2026-09-02")
+        base = next(f for f in r.json() if f["id"] == str(world["flow"].id))
+        assert base["writes"] == [] or all("count" in w for w in base["writes"])
+
 
 # ---------------------------------------------------------------------------
 # GET /celigo/flows/{id}

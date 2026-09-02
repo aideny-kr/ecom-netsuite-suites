@@ -130,12 +130,43 @@ class CeligoIntegrationOut(BaseModel):
     celigo_last_modified: datetime | None
 
 
+class CeligoRecordWriteOut(BaseModel):
+    """One `(record_type, count)` row of a flow's write mix -- see
+    `CeligoFlowSummaryOut.writes`'s docstring."""
+
+    record_type: str
+    count: int
+
+
 class CeligoFlowSummaryOut(BaseModel):
     """One row of `GET /celigo/integrations/{id}/flows`. `error_count`/
     `signature_count` are OPEN counts (`resolved_at IS NULL AND purged_at IS
     NULL`) computed with one GROUP BY query across every flow in the
     integration -- never N+1. `disabled` flows are never filtered out (mockup
-    spec: paused flows stay visible, dimmed by the frontend on this flag)."""
+    spec: paused flows stay visible, dimmed by the frontend on this flag).
+
+    Task 5 -- topology/script/write aggregates for the flow-list table
+    columns, each computed with one GROUP BY query across every flow in the
+    integration, never N+1 (see `list_integration_flows`):
+    `step_count`/`router_count`/`branch_count` come from one query over
+    `celigo_flow_steps` (`COUNT(DISTINCT router_id)`/`COUNT(DISTINCT
+    branch_id)` -- NULLs excluded by SQL's own `COUNT(DISTINCT ...)`
+    semantics, which is exactly right: a step with no router/branch must not
+    count as a router/branch of its own). `lookup_count` is steps whose role
+    is `processor` and whose `adaptor_type` ends in "export"
+    (case-insensitive) -- Celigo's own "lookup" vocabulary (`topology.
+    step_kind`), NOT the same predicate as `signature_count` above.
+    `writes` is every `(record_type, count)` pair actually posted from this
+    flow (`record_type IS NOT NULL AND operation IS NOT NULL` -- a step can
+    carry a `record_type` from a lookup export with no `operation`, which is
+    a read, not a write), ordered by count desc then record_type so the
+    biggest write shows first. `script_count` is the DISTINCT script count
+    attached to this flow (production scripts only, `celigo_script_is_
+    production()`); `diverged_family_count` is how many of THIS flow's
+    attached script families have more than one distinct `content_hash`
+    across the family (a clone that has drifted from its original) -- see
+    `list_integration_flows`'s `diverged_keys` subquery. Every new field
+    defaults to 0 / `[]` for a flow with no steps/scripts, never omitted."""
 
     id: str
     celigo_id: str
@@ -146,6 +177,14 @@ class CeligoFlowSummaryOut(BaseModel):
     last_executed_at: datetime | None
     error_count: int
     signature_count: int
+    step_count: int
+    router_count: int
+    branch_count: int
+    lookup_count: int
+    script_count: int
+    diverged_family_count: int
+    writes: list[CeligoRecordWriteOut]
+    celigo_last_modified: datetime | None
 
 
 class CeligoAttachmentOut(BaseModel):
@@ -555,6 +594,84 @@ async def list_integration_flows(
         row.flow_id: (row.error_count, row.signature_count) for row in counts_result.all()
     }
 
+    # Task 5 -- topology (step/router/branch/lookup counts), one GROUP BY
+    # query over celigo_flow_steps for every flow in the integration at once.
+    # `lookups` mirrors `topology.step_kind`'s Lookup rule (a processor whose
+    # adaptor is an export) without importing that module's per-step
+    # projector -- this is a set-level count, not a per-step classification.
+    topo_result = await db.execute(
+        select(
+            CeligoFlowStep.flow_id,
+            func.count().label("steps"),
+            func.count(distinct(CeligoFlowStep.router_id)).label("routers"),
+            func.count(distinct(CeligoFlowStep.branch_id)).label("branches"),
+            func.count()
+            .filter(and_(CeligoFlowStep.role == "processor", CeligoFlowStep.adaptor_type.ilike("%export")))
+            .label("lookups"),
+        )
+        .where(CeligoFlowStep.tenant_id == user.tenant_id, CeligoFlowStep.flow_id.in_(flow_ids))
+        .group_by(CeligoFlowStep.flow_id)
+    )
+    topo_by_flow: dict[uuid.UUID, tuple[int, int, int, int]] = {
+        row.flow_id: (row.steps, row.routers, row.branches, row.lookups) for row in topo_result.all()
+    }
+
+    # This flow's actual write mix: `record_type IS NOT NULL AND operation IS
+    # NOT NULL` -- a lookup export step can carry `record_type` with no
+    # `operation` (a read, not a write), which must not show up here. Ordered
+    # by count desc then record_type in SQL so the frontend never has to sort.
+    writes_result = await db.execute(
+        select(CeligoFlowStep.flow_id, CeligoFlowStep.record_type, func.count().label("write_count"))
+        .where(
+            CeligoFlowStep.tenant_id == user.tenant_id,
+            CeligoFlowStep.flow_id.in_(flow_ids),
+            CeligoFlowStep.record_type.isnot(None),
+            CeligoFlowStep.operation.isnot(None),
+        )
+        .group_by(CeligoFlowStep.flow_id, CeligoFlowStep.record_type)
+        .order_by(func.count().desc(), CeligoFlowStep.record_type)
+    )
+    writes_by_flow: dict[uuid.UUID, list[CeligoRecordWriteOut]] = defaultdict(list)
+    for row in writes_result.all():
+        writes_by_flow[row.flow_id].append(CeligoRecordWriteOut(record_type=row.record_type, count=row.write_count))
+
+    # Script family state: a family "diverged" when its members' distinct
+    # `content_hash` count is > 1 (a clone has drifted from its original) --
+    # tenant- AND connection-scoped, so a same-`dedup_key` coincidence under a
+    # different Celigo connection can never leak in. `integration.
+    # celigo_connection_id` is the tenant-verified connection this
+    # integration (and therefore every flow under it) actually belongs to --
+    # there is no separate `connection` row resolved in this endpoint.
+    diverged_keys = (
+        select(CeligoScript.dedup_key)
+        .where(
+            CeligoScript.tenant_id == user.tenant_id,
+            CeligoScript.celigo_connection_id == integration.celigo_connection_id,
+            CeligoScript.content_hash.isnot(None),
+        )
+        .group_by(CeligoScript.dedup_key)
+        .having(func.count(distinct(CeligoScript.content_hash)) > 1)
+    )
+    scripts_result = await db.execute(
+        select(
+            CeligoScriptAttachment.flow_id,
+            func.count(distinct(CeligoScriptAttachment.script_id)).label("scripts"),
+            func.count(distinct(CeligoScript.dedup_key))
+            .filter(CeligoScript.dedup_key.in_(diverged_keys))
+            .label("diverged"),
+        )
+        .join(CeligoScript, CeligoScript.id == CeligoScriptAttachment.script_id)
+        .where(
+            CeligoScriptAttachment.tenant_id == user.tenant_id,
+            CeligoScriptAttachment.flow_id.in_(flow_ids),
+            celigo_script_is_production(),
+        )
+        .group_by(CeligoScriptAttachment.flow_id)
+    )
+    scripts_by_flow: dict[uuid.UUID, tuple[int, int]] = {
+        row.flow_id: (row.scripts, row.diverged) for row in scripts_result.all()
+    }
+
     return [
         CeligoFlowSummaryOut(
             id=str(f.id),
@@ -566,6 +683,14 @@ async def list_integration_flows(
             last_executed_at=f.last_executed_at,
             error_count=counts_by_flow.get(f.id, (0, 0))[0],
             signature_count=counts_by_flow.get(f.id, (0, 0))[1],
+            step_count=topo_by_flow.get(f.id, (0, 0, 0, 0))[0],
+            router_count=topo_by_flow.get(f.id, (0, 0, 0, 0))[1],
+            branch_count=topo_by_flow.get(f.id, (0, 0, 0, 0))[2],
+            lookup_count=topo_by_flow.get(f.id, (0, 0, 0, 0))[3],
+            script_count=scripts_by_flow.get(f.id, (0, 0))[0],
+            diverged_family_count=scripts_by_flow.get(f.id, (0, 0))[1],
+            writes=writes_by_flow.get(f.id, []),
+            celigo_last_modified=f.celigo_last_modified,
         )
         for f in flows
     ]
