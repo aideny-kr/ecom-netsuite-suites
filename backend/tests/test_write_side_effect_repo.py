@@ -172,7 +172,8 @@ async def test_duplicate_refusal_settles_to_written(db):
         idempotency_key="ss-idem-exists",
         record_type="customer",
         mutation_type="create",
-        payload={},
+        # The key must be IN what we sent — that is what makes the refusal proof.
+        payload={"externalId": "ss-idem-exists"},
         correlation_id="c1",
     )
     await db.commit()

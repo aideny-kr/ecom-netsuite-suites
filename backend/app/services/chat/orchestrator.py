@@ -2190,11 +2190,19 @@ async def run_chat_turn(
                     # header-only copy of a write that had lines and derive a
                     # key two different orders could share.
                     try:
-                        _se_payload = _norm_se(tool_input).record
+                        # Parse ONCE. `record` and `record_id` are independent:
+                        # a call shaped {"id": "42", "data": "{}"} parses fine
+                        # with an EMPTY record and a real id. Gating record_id
+                        # on `if _se_payload` treated that legitimate shape as
+                        # a parse failure and dropped the id from the key,
+                        # reintroducing the delete-5-vs-delete-99 collision the
+                        # key material exists to prevent.
+                        _se_parsed = _norm_se(tool_input)
+                        _se_payload, _se_record_id = _se_parsed.record, _se_parsed.record_id
                     except PayloadParseError:
                         # A payload-less mutation shape. Caught by TYPE so a
                         # real parse bug still surfaces.
-                        _se_payload = {}
+                        _se_payload, _se_record_id = {}, None
 
                     # Which account this write is aimed at. It participates
                     # in the key (sandbox and production are not the same
@@ -2226,7 +2234,7 @@ async def run_chat_turn(
                             # `tool_input["recordId"]` here instead made the
                             # orchestrator derive a DIFFERENT key than the one
                             # stamped on the card for identical work.
-                            record_id=_norm_se(tool_input).record_id if _se_payload else None,
+                            record_id=_se_record_id,
                         )
                     )
                     # ISOLATED SESSION — the log shares no transactional fate

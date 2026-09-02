@@ -147,7 +147,14 @@ class TestRetryClassification:
 
     def test_duplicate_refusal_means_the_original_landed(self):
         # Our own key: the refusal really does prove our original landed.
-        assert classify_retry_result(self.ALREADY, idempotency_key="ss-idem-abc123") is SideEffectStatus.WRITTEN
+        assert (
+            classify_retry_result(
+                self.ALREADY,
+                idempotency_key="ss-idem-abc123",
+                sent_payload={"externalId": "ss-idem-abc123"},
+            )
+            is SideEffectStatus.WRITTEN
+        )
 
     def test_an_ordinary_rejection_is_still_a_rejection(self):
         result = json.dumps(
@@ -358,7 +365,10 @@ class TestClassifyIsFailClosed:
                 'This entity already exists.","o:errorCode":"USER_ERROR"}]}',
             }
         )
-        assert classify_retry_result(raw, idempotency_key="ss-idem-abc") is SideEffectStatus.WRITTEN
+        assert (
+            classify_retry_result(raw, idempotency_key="ss-idem-abc", sent_payload={"externalId": "ss-idem-abc"})
+            is SideEffectStatus.WRITTEN
+        )
 
     def test_an_explicit_error_is_still_rejected(self):
         from app.services.chat.write_side_effect import classify_retry_result
@@ -484,7 +494,11 @@ class TestDuplicateRefusalOnlyProvesOurOwnWrite:
     def test_our_own_key_still_proves_the_write_landed(self):
         from app.services.chat.write_side_effect import classify_retry_result
 
-        got = classify_retry_result(self._DUP, idempotency_key="ss-idem-abc123")
+        got = classify_retry_result(
+            self._DUP,
+            idempotency_key="ss-idem-abc123",
+            sent_payload={"externalId": "ss-idem-abc123"},
+        )
         assert got is SideEffectStatus.WRITTEN
 
     def test_a_caller_key_is_not_proof_and_stays_attempted(self):
@@ -497,3 +511,68 @@ class TestDuplicateRefusalOnlyProvesOurOwnWrite:
         from app.services.chat.write_side_effect import classify_retry_result
 
         assert classify_retry_result(self._DUP, idempotency_key=None) is SideEffectStatus.ATTEMPTED
+
+
+class TestOnlyAKeyWeActuallySentProvesAnything:
+    """T2 gate round 4. The 'already exists' refusal proves OUR write landed
+    only if the key was IN the payload we sent. `_is_ours()` is a string-prefix
+    check — it says we MINTED the key, not that we TRANSMITTED it.
+
+    The gap was real: stamping is create-only (base_agent gates on
+    mutation_type == 'create'), while the orchestrator synthesised an
+    `ss-idem-` key for EVERY mutation type. So a genuine uniqueness collision on
+    an UPDATE settled as `written` — irreversibly, since a settled row cannot be
+    re-settled.
+
+    `reconcile_by_external_id` already had this guard. Rather than add a second
+    copy, the predicate now lives in ONE function both paths call.
+    """
+
+    _DUP = json.dumps(
+        {
+            "success": False,
+            "error": '{"o:errorDetails":[{"detail":"Error while accessing a resource. '
+            'This entity already exists.","o:errorCode":"USER_ERROR"}]}',
+        }
+    )
+
+    def test_key_present_in_the_sent_payload_is_proof(self):
+        from app.services.chat.write_side_effect import classify_retry_result
+
+        got = classify_retry_result(
+            self._DUP,
+            idempotency_key="ss-idem-abc",
+            sent_payload={"companyName": "Acme", "externalId": "ss-idem-abc"},
+        )
+        assert got is SideEffectStatus.WRITTEN
+
+    def test_a_key_we_minted_but_never_sent_is_not_proof(self):
+        """The update case. We generated the key for the ledger; nothing put it
+        in the payload; NetSuite's refusal is about something else entirely."""
+        from app.services.chat.write_side_effect import classify_retry_result
+
+        got = classify_retry_result(
+            self._DUP,
+            idempotency_key="ss-idem-abc",
+            sent_payload={"companyName": "Acme"},  # no externalId — never sent
+        )
+        assert got is SideEffectStatus.ATTEMPTED
+
+    def test_no_payload_information_fails_closed(self):
+        from app.services.chat.write_side_effect import classify_retry_result
+
+        assert (
+            classify_retry_result(self._DUP, idempotency_key="ss-idem-abc", sent_payload=None)
+            is SideEffectStatus.ATTEMPTED
+        )
+
+    def test_one_predicate_serves_both_paths(self):
+        """The reconcile path and the settle path must not drift apart — the
+        'fixed one of N call sites' shape this repo keeps paying for."""
+        from app.services.chat.write_side_effect import key_was_sent
+
+        assert key_was_sent("ss-idem-x", {"externalId": "ss-idem-x"}) is True
+        assert key_was_sent("ss-idem-x", {"externalid": "ss-idem-x"}) is True
+        assert key_was_sent("ss-idem-x", {"companyName": "Acme"}) is False
+        assert key_was_sent("ss-idem-x", None) is False
+        assert key_was_sent(None, {"externalId": "ss-idem-x"}) is False

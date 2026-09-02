@@ -26,7 +26,7 @@ from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.models.write_side_effect import WriteSideEffect
-from app.services.chat.write_side_effect import SideEffectStatus, classify_retry_result
+from app.services.chat.write_side_effect import SideEffectStatus, classify_retry_result, key_was_sent
 
 __all__ = ["record_attempt", "settle_from_result", "unsettled_for_tenant"]
 
@@ -117,7 +117,16 @@ async def settle_from_result(
     "go and look", and collapsing it into success or failure is the defect this
     table exists to end.
     """
-    status = classify_retry_result(raw_result, idempotency_key=idempotency_key)
+    # `payload_json` IS what we sent — the same source reconcile checks.
+    sent = (
+        await db.execute(
+            select(WriteSideEffect.payload_json).where(
+                WriteSideEffect.tenant_id == tenant_id,
+                WriteSideEffect.idempotency_key == idempotency_key,
+            )
+        )
+    ).scalar_one_or_none()
+    status = classify_retry_result(raw_result, idempotency_key=idempotency_key, sent_payload=sent)
 
     last = (raw_result or "")[:8000]
     if status is SideEffectStatus.ATTEMPTED:
@@ -226,8 +235,7 @@ async def reconcile_by_external_id(
     # the proxy-predicate defect this table exists to end. Checked against
     # payload_json, which IS what we sent, so a caller cannot get this wrong
     # by forgetting to stamp: the row simply stays unsettled for a human.
-    _sent = row.payload_json or {}
-    if _sent.get("externalId") != row.idempotency_key and _sent.get("externalid") != row.idempotency_key:
+    if not key_was_sent(row.idempotency_key, row.payload_json):
         return SideEffectStatus.ATTEMPTED
 
     # `record_type` lands in the FROM clause, where no bind parameter can go —

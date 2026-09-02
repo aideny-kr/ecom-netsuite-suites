@@ -44,6 +44,7 @@ __all__ = [
     "SideEffectStatus",
     "build_idempotency_key",
     "classify_retry_result",
+    "key_was_sent",
     "payload_with_idempotency_key",
 ]
 
@@ -83,6 +84,29 @@ def _is_ours(value: Any) -> bool:
     is decidable — it is what lets us replace a stale key of our own without
     ever touching a key an integration owns."""
     return isinstance(value, str) and value.startswith(IDEM_PREFIX)
+
+
+def key_was_sent(idempotency_key: str | None, sent_payload: dict[str, Any] | None) -> bool:
+    """Was this key actually TRANSMITTED to NetSuite, in the payload we sent?
+
+    THE distinction that `_is_ours` does not make. `_is_ours` says we MINTED the
+    key; this says we SENT it. Only the second licenses any conclusion from
+    NetSuite's uniqueness refusal.
+
+    They came apart in practice: stamping is create-only, while the ledger
+    synthesises a key for every mutation type — so an UPDATE carried a key we
+    minted and never sent, and a genuine uniqueness collision on some other
+    field was read as proof our write landed.
+
+    One function, called by BOTH the settle path and the reconcile path.
+    ``reconcile_by_external_id`` had this guard first; a second copy in
+    ``classify_retry_result`` would be the "fixed one of N call sites" shape
+    that has cost this repo repeatedly. Fails closed on missing information.
+    """
+    if not idempotency_key or not isinstance(sent_payload, dict):
+        return False
+    _, value = _external_id_in(sent_payload)
+    return value == idempotency_key
 
 
 def _external_id_in(payload: dict[str, Any]) -> tuple[str | None, Any]:
@@ -214,7 +238,12 @@ def payload_with_idempotency_key(
 _ALREADY_EXISTS = "this entity already exists"
 
 
-def classify_retry_result(raw_result: str, *, idempotency_key: str | None = None) -> SideEffectStatus:
+def classify_retry_result(
+    raw_result: str,
+    *,
+    idempotency_key: str | None = None,
+    sent_payload: dict[str, Any] | None = None,
+) -> SideEffectStatus:
     """Classify one write result into a side-effect status.
 
     The decisive case: NetSuite refusing a duplicate externalId means the
@@ -252,7 +281,7 @@ def classify_retry_result(raw_result: str, *, idempotency_key: str | None = None
         # with nothing to do with our attempt; reading it as WRITTEN would mark
         # a write successful that never happened. The `ss-idem-` namespace is
         # what makes this decidable. Unknown key => fail closed.
-        if _is_ours(idempotency_key):
+        if key_was_sent(idempotency_key, sent_payload):
             return SideEffectStatus.WRITTEN
         return SideEffectStatus.ATTEMPTED
 
