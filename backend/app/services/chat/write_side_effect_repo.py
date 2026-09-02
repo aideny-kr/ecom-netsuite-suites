@@ -354,3 +354,69 @@ async def settle_from_result_isolated(
 
         logging.getLogger(__name__).warning("side-effect row not settled", exc_info=True)
         return SideEffectStatus.ATTEMPTED
+
+
+async def reconcile_unsettled(
+    db: Any,
+    *,
+    tenant_id: uuid.UUID,
+    suiteql_for_connector: Any,
+    max_calls: int = 50,
+) -> dict[str, Any]:
+    """THE RESUME PATH. Settle rows a crash left in flight, by ASKING NetSuite.
+
+    This is the half that makes the ledger worth keeping: without it,
+    ``attempted`` rows accumulate and nobody ever resolves them. It never
+    retries a write — it asks whether the write is already there, and a blind
+    retry could not duplicate anyway, because the key sits in ``externalId``
+    where NetSuite enforces uniqueness.
+
+    Unattended-execution rules (``.claude/rules/agent-graph.md``) bind it:
+
+    * **Terminates with a REASON, not a boolean** — ``done | budget | error``.
+      "Stopped" merges "finished" with "stuck", and a human cannot route what
+      they cannot distinguish.
+    * **Bounds COST, not just row count.** ``max_calls`` caps the external calls
+      actually made; read-only is not free.
+    * **Asks each row against ITS OWN connector.** A write is only reconcilable
+      against the account it was sent to — sandbox and production are different
+      accounts, and asking the wrong one would settle a row from evidence about
+      a different system entirely.
+    * **Fails closed on an unattributed row.** No ``connector_id`` means no safe
+      account to ask, so the row is skipped and left for a human rather than
+      guessed at against an arbitrary connector.
+
+    ``suiteql_for_connector(connector_id, query) -> str`` is injected so the
+    caller owns connector resolution and credentials; this module stays free of
+    both. NOT yet scheduled — see STATE.md. It is callable and tested, which is
+    what makes the recovery half real rather than plumbing.
+    """
+    settled = skipped = calls = 0
+    reason = "done"
+
+    for row in await unsettled_for_tenant(db, tenant_id=tenant_id):
+        if row.connector_id is None:
+            skipped += 1
+            continue
+        if calls >= max_calls:
+            reason = "budget"
+            break
+        calls += 1
+        try:
+
+            async def _ask(query: str, _conn: Any = row.connector_id) -> str:
+                return await suiteql_for_connector(_conn, query)
+
+            status = await reconcile_by_external_id(db, tenant_id=tenant_id, row=row, suiteql=_ask)
+        except Exception:
+            # One row's failure must not abandon the rest; the row simply stays
+            # unsettled, which is the state that means "go and look".
+            import logging
+
+            logging.getLogger(__name__).warning("reconcile failed for %s", row.idempotency_key, exc_info=True)
+            reason = "error"
+            continue
+        if status is not SideEffectStatus.ATTEMPTED:
+            settled += 1
+
+    return {"reason": reason, "settled": settled, "skipped": skipped, "calls": calls}

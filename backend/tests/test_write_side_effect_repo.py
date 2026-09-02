@@ -493,3 +493,109 @@ async def test_settle_is_atomic_against_a_concurrent_settle(db):
     # Either outcome may win the race — what must NOT happen is a row left in
     # 'attempted' (both refused) or one that flipped twice.
     assert rows[0] in ("written", "rejected")
+
+
+async def test_resume_settles_from_evidence_and_reports_a_reason(db):
+    """Goal condition 4 + agent-graph #5. The recovery half must be CALLABLE,
+    bounded, and must terminate with a REASON — 'stopped' merges 'finished'
+    with 'stuck', and a human cannot route what they cannot distinguish."""
+    from app.services.chat.write_side_effect_repo import reconcile_unsettled
+
+    conn = uuid.uuid4()
+    for i, landed in enumerate([True, False]):
+        key = f"ss-idem-resume-{i}"
+        await record_attempt(
+            db,
+            tenant_id=_TENANT,
+            idempotency_key=key,
+            record_type="customer",
+            mutation_type="create",
+            payload={"externalId": key},
+            connector_id=conn,
+            correlation_id="c1",
+        )
+    await db.commit()
+
+    asked = []
+
+    async def suiteql_for(connector_id, query):
+        asked.append((connector_id, query))
+        # First row landed, second did not.
+        return '{"data": [{"id": 5264999}]}' if "resume-0" in query else '{"data": []}'
+
+    report = await reconcile_unsettled(db, tenant_id=_TENANT, suiteql_for_connector=suiteql_for)
+    await db.commit()
+
+    assert report["reason"] == "done"
+    assert report["settled"] == 2
+    assert [c for c, _ in asked] == [conn, conn], "each row asked against ITS OWN connector"
+    rows = dict(
+        (
+            await db.execute(
+                text("SELECT idempotency_key, status FROM write_side_effects WHERE tenant_id=:t"),
+                {"t": _TENANT},
+            )
+        ).all()
+    )
+    assert rows["ss-idem-resume-0"] == "written"
+    assert rows["ss-idem-resume-1"] == "rejected"
+    assert await unsettled_for_tenant(db, tenant_id=_TENANT) == []
+
+
+async def test_resume_refuses_a_row_with_no_connector(db):
+    """A write is only reconcilable against the account it was SENT to. With no
+    connector recorded there is no safe account to ask, so the row stays for a
+    human instead of being asked of an arbitrary one."""
+    from app.services.chat.write_side_effect_repo import reconcile_unsettled
+
+    await record_attempt(
+        db,
+        tenant_id=_TENANT,
+        idempotency_key="ss-idem-noconn",
+        record_type="customer",
+        mutation_type="create",
+        payload={"externalId": "ss-idem-noconn"},
+        connector_id=None,
+        correlation_id="c1",
+    )
+    await db.commit()
+
+    async def suiteql_for(connector_id, query):  # pragma: no cover - must not run
+        raise AssertionError("must not ask any connector about an unattributed write")
+
+    report = await reconcile_unsettled(db, tenant_id=_TENANT, suiteql_for_connector=suiteql_for)
+    assert report["reason"] == "done"
+    assert report["skipped"] == 1
+    assert len(await unsettled_for_tenant(db, tenant_id=_TENANT)) == 1
+
+
+async def test_resume_stops_on_its_budget_not_on_good_intentions(db):
+    """agent-graph #4/#6: the cap is a persisted counter, not a request. Bound
+    COST (calls made), not just rows considered."""
+    from app.services.chat.write_side_effect_repo import reconcile_unsettled
+
+    conn = uuid.uuid4()
+    for i in range(5):
+        key = f"ss-idem-budget-{i}"
+        await record_attempt(
+            db,
+            tenant_id=_TENANT,
+            idempotency_key=key,
+            record_type="customer",
+            mutation_type="create",
+            payload={"externalId": key},
+            connector_id=conn,
+            correlation_id="c1",
+        )
+    await db.commit()
+
+    calls = []
+
+    async def suiteql_for(connector_id, query):
+        calls.append(query)
+        return '{"data": []}'
+
+    report = await reconcile_unsettled(db, tenant_id=_TENANT, suiteql_for_connector=suiteql_for, max_calls=2)
+    assert report["reason"] == "budget"
+    assert len(calls) == 2, "the ceiling is enforced, not advisory"
+    assert len(await unsettled_for_tenant(db, tenant_id=_TENANT)) == 3
