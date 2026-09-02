@@ -708,6 +708,104 @@ class TestListIntegrationFlows:
         base = next(f for f in r.json() if f["id"] == str(world["flow"].id))
         assert base["writes"] == [] or all("count" in w for w in base["writes"])
 
+    async def test_diverged_family_count_ignores_sandbox_copies(self, client, admin_user, db):
+        """GATE FINDING (round 1, Important): `diverged_keys` must be scoped to
+        PRODUCTION scripts only (`celigo_script_is_production()`), same as
+        every other read of `celigo_scripts` in this module -- see that
+        predicate's own docstring ("a clone-family count that summed both
+        environments was wrong by about half"). Two scenarios:
+
+        1. A sandbox copy added to the ALREADY-diverged chain-flow family
+           (2 distinct hashes among its production members) must not change
+           `diverged_family_count` -- it's still exactly one diverged family,
+           counted once (`COUNT(DISTINCT dedup_key)`), regardless of how many
+           extra hash values a non-production copy contributes.
+        2. A SECOND family whose production members share ONE content hash
+           (genuinely not diverged) but whose ONLY sandbox copy carries a
+           different hash must NOT be flagged diverged -- before the fix,
+           `diverged_keys`' `HAVING COUNT(DISTINCT content_hash) > 1` counted
+           the sandbox row too, incorrectly marking this family diverged and
+           inflating `diverged_family_count` to 2."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        chain = await _seed_router_chain_flow(db, world)
+        conn_id = world["connection_id"]
+        sfx = world["suffix"]
+
+        # Scenario 1 -- junk sandbox copy in the family that's already diverged.
+        db.add(
+            CeligoScript(
+                tenant_id=user.tenant_id,
+                celigo_connection_id=conn_id,
+                celigo_id=f"scr_fam_sb_{sfx}",
+                source_id=f"scr_fam0_{sfx}",  # same family as chain["family"]
+                name="ns_sales_order_premap",
+                content="sandbox junk",
+                content_hash="hSandboxJunk",
+                sandbox=True,
+            )
+        )
+
+        # Scenario 2 -- a second family, NOT diverged among its production
+        # copies (both share "hSame"), with a sandbox-only clone carrying a
+        # different hash. The production original is attached to the chain
+        # flow so its (non-)divergence is actually exercised by this endpoint.
+        orig2 = CeligoScript(
+            tenant_id=user.tenant_id,
+            celigo_connection_id=conn_id,
+            celigo_id=f"scr_fam2_orig_{sfx}",
+            name="ns_customer_postmap",
+            content="x",
+            content_hash="hSame",
+            sandbox=False,
+        )
+        clone2 = CeligoScript(
+            tenant_id=user.tenant_id,
+            celigo_connection_id=conn_id,
+            celigo_id=f"scr_fam2_clone_{sfx}",
+            source_id=f"scr_fam2_orig_{sfx}",
+            name="ns_customer_postmap",
+            content="x",
+            content_hash="hSame",
+            sandbox=False,
+        )
+        sandbox2 = CeligoScript(
+            tenant_id=user.tenant_id,
+            celigo_connection_id=conn_id,
+            celigo_id=f"scr_fam2_sandbox_{sfx}",
+            source_id=f"scr_fam2_orig_{sfx}",
+            name="ns_customer_postmap",
+            content="y",
+            content_hash="hDifferentSandboxOnly",
+            sandbox=True,
+        )
+        db.add_all([orig2, clone2, sandbox2])
+        await db.flush()
+
+        db.add(
+            CeligoScriptAttachment(
+                tenant_id=user.tenant_id,
+                celigo_connection_id=conn_id,
+                flow_id=chain["flow"].id,
+                flow_step_id=chain["steps"][f"src_{sfx}"].id,
+                script_id=orig2.id,
+                script_celigo_id=orig2.celigo_id,
+                function_name="postMap",
+                json_path=f"src_{sfx}.hooks.postMap",
+                site_type="hook",
+            )
+        )
+        await db.flush()
+
+        r = await client.get(f"/api/v1/celigo/integrations/{world['integration'].id}/flows", headers=headers)
+        assert r.status_code == 200, r.text
+        row = next(f for f in r.json() if f["id"] == str(chain["flow"].id))
+        assert row["script_count"] == 3, "solo + fam[1] + the new family-2 original, all production"
+        assert row["diverged_family_count"] == 1, (
+            "only the original chain family is diverged; family 2's production copies "
+            "share one hash and its sandbox-only clone must not count"
+        )
+
 
 # ---------------------------------------------------------------------------
 # GET /celigo/flows/{id}

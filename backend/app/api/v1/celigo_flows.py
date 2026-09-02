@@ -636,19 +636,25 @@ async def list_integration_flows(
     for row in writes_result.all():
         writes_by_flow[row.flow_id].append(CeligoRecordWriteOut(record_type=row.record_type, count=row.write_count))
 
-    # Script family state: a family "diverged" when its members' distinct
-    # `content_hash` count is > 1 (a clone has drifted from its original) --
-    # tenant- AND connection-scoped, so a same-`dedup_key` coincidence under a
-    # different Celigo connection can never leak in. `integration.
-    # celigo_connection_id` is the tenant-verified connection this
-    # integration (and therefore every flow under it) actually belongs to --
-    # there is no separate `connection` row resolved in this endpoint.
+    # Script family state: a family "diverged" when its PRODUCTION members'
+    # distinct `content_hash` count is > 1 (a clone has drifted from its
+    # original) -- `celigo_script_is_production()` on this subquery too
+    # (gate finding, fix round 1): omitting it let a sandbox clone's hash
+    # flag a family whose production copies actually agree, or vice versa,
+    # exactly the "wrong by about half" failure mode that predicate's own
+    # docstring warns about. Tenant- AND connection-scoped, so a
+    # same-`dedup_key` coincidence under a different Celigo connection can
+    # never leak in. `integration.celigo_connection_id` is the
+    # tenant-verified connection this integration (and therefore every flow
+    # under it) actually belongs to -- there is no separate `connection` row
+    # resolved in this endpoint.
     diverged_keys = (
         select(CeligoScript.dedup_key)
         .where(
             CeligoScript.tenant_id == user.tenant_id,
             CeligoScript.celigo_connection_id == integration.celigo_connection_id,
             CeligoScript.content_hash.isnot(None),
+            celigo_script_is_production(),
         )
         .group_by(CeligoScript.dedup_key)
         .having(func.count(distinct(CeligoScript.content_hash)) > 1)
@@ -664,6 +670,11 @@ async def list_integration_flows(
         .join(CeligoScript, CeligoScript.id == CeligoScriptAttachment.script_id)
         .where(
             CeligoScriptAttachment.tenant_id == user.tenant_id,
+            # Explicit tenant scope on BOTH joined tables (gate finding, fix
+            # round 1) -- the `diverged_keys` subquery three lines above
+            # already does this; RLS (FORCE) is the backstop, not the plan,
+            # same discipline as every other join in this module.
+            CeligoScript.tenant_id == user.tenant_id,
             CeligoScriptAttachment.flow_id.in_(flow_ids),
             celigo_script_is_production(),
         )
