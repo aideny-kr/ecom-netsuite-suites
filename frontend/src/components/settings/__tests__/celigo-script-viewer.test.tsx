@@ -77,7 +77,7 @@ beforeEach(() => {
 
 describe("CeligoScriptViewerDialog — loading and error states", () => {
   it("shows a loading state while the query is in flight", () => {
-    mocks.script.mockReturnValue({ data: undefined, isLoading: true, isError: false, refetch: vi.fn() });
+    mocks.script.mockReturnValue({ data: undefined, isPending: true, isLoading: true, isError: false, refetch: vi.fn() });
     wrap(<CeligoScriptViewerDialog scriptId="scr-local-1" onOpenChange={vi.fn()} />);
     expect(screen.getByText(/loading script/i)).toBeInTheDocument();
   });
@@ -100,6 +100,7 @@ describe("CeligoScriptViewerDialog — loading and error states", () => {
   it("shows a genuinely-empty state (distinct from error) when a script has no recorded attachment sites", () => {
     mocks.script.mockReturnValue({
       data: { ...baseScript, used_by: [] },
+      isPending: false,
       isLoading: false,
       isError: false,
       refetch: vi.fn(),
@@ -112,7 +113,7 @@ describe("CeligoScriptViewerDialog — loading and error states", () => {
 
 describe("CeligoScriptViewerDialog — card head", () => {
   it("shows the script name and the copies/integrations pill", () => {
-    mocks.script.mockReturnValue({ data: baseScript, isLoading: false, isError: false, refetch: vi.fn() });
+    mocks.script.mockReturnValue({ data: baseScript, isPending: false, isLoading: false, isError: false, refetch: vi.fn() });
     wrap(<CeligoScriptViewerDialog scriptId="scr-local-1" onOpenChange={vi.fn()} />);
     expect(screen.getByText("BigQuery Data Warehouse Script[v1.1.0]")).toBeInTheDocument();
     expect(screen.getByText("1 copies · 1 integrations")).toBeInTheDocument();
@@ -121,7 +122,7 @@ describe("CeligoScriptViewerDialog — card head", () => {
 
 describe("CeligoScriptViewerDialog — attachment table", () => {
   it("renders BOTH sites for a script attached at both transform.script and hooks.preSavePage", () => {
-    mocks.script.mockReturnValue({ data: baseScript, isLoading: false, isError: false, refetch: vi.fn() });
+    mocks.script.mockReturnValue({ data: baseScript, isPending: false, isLoading: false, isError: false, refetch: vi.fn() });
     wrap(<CeligoScriptViewerDialog scriptId="scr-local-1" onOpenChange={vi.fn()} />);
     expect(screen.getByText("pageProcessors[0].transform.script")).toBeInTheDocument();
     expect(screen.getByText("hooks.preSavePage")).toBeInTheDocument();
@@ -129,7 +130,7 @@ describe("CeligoScriptViewerDialog — attachment table", () => {
   });
 
   it("collapses ~20 clone copies into a single summary row instead of 20 explicit rows", () => {
-    mocks.script.mockReturnValue({ data: cloneFamily(), isLoading: false, isError: false, refetch: vi.fn() });
+    mocks.script.mockReturnValue({ data: cloneFamily(), isPending: false, isLoading: false, isError: false, refetch: vi.fn() });
     wrap(<CeligoScriptViewerDialog scriptId="scr-local-1" onOpenChange={vi.fn()} />);
     const rows = screen.getAllByRole("row");
     // header row + 1 explicit attachment row + 1 collapse row
@@ -140,6 +141,7 @@ describe("CeligoScriptViewerDialog — attachment table", () => {
   it("guards an empty-string function_name the same as null (not just missing)", () => {
     mocks.script.mockReturnValue({
       data: { ...baseScript, used_by: [{ ...siteA, function_name: "" }] },
+      isPending: false,
       isLoading: false,
       isError: false,
       refetch: vi.fn(),
@@ -153,6 +155,7 @@ describe("CeligoScriptViewerDialog — content_diverged correction", () => {
   it("says 'identical source' when content_diverged is false", () => {
     mocks.script.mockReturnValue({
       data: cloneFamily({ content_diverged: false }),
+      isPending: false,
       isLoading: false,
       isError: false,
       refetch: vi.fn(),
@@ -164,6 +167,7 @@ describe("CeligoScriptViewerDialog — content_diverged correction", () => {
   it("says the copies differ, and that the shown source is only this copy's own version, when content_diverged is true", () => {
     mocks.script.mockReturnValue({
       data: cloneFamily({ content_diverged: true }),
+      isPending: false,
       isLoading: false,
       isError: false,
       refetch: vi.fn(),
@@ -177,7 +181,7 @@ describe("CeligoScriptViewerDialog — content_diverged correction", () => {
 
 describe("CeligoScriptViewerDialog — untrusted content", () => {
   it("renders the script source and the untrusted-content banner", () => {
-    mocks.script.mockReturnValue({ data: baseScript, isLoading: false, isError: false, refetch: vi.fn() });
+    mocks.script.mockReturnValue({ data: baseScript, isPending: false, isLoading: false, isError: false, refetch: vi.fn() });
     wrap(<CeligoScriptViewerDialog scriptId="scr-local-1" onOpenChange={vi.fn()} />);
     // The dialog renders into a portal on document.body, and the syntax
     // highlighter splits source into multiple token spans, so a
@@ -193,6 +197,7 @@ describe("CeligoScriptViewerDialog — untrusted content", () => {
   it("shows the 'no source recorded' placeholder when content is an empty string, not a blank code block", () => {
     mocks.script.mockReturnValue({
       data: { ...baseScript, content: "" },
+      isPending: false,
       isLoading: false,
       isError: false,
       refetch: vi.fn(),

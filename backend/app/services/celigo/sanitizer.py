@@ -482,6 +482,12 @@ _FLOW: Schema = {
     "_id": None,
     "name": None,
     "_integrationId": None,
+    # PRODUCTION ONLY (PR #216, gate round 4): the sync classifies every kind
+    # by `sandbox` at its ingestion seam, and this allowlist runs BEFORE that
+    # seam -- without the key here a flow's own flag was stripped and the
+    # seam could never see it. Integrations, scripts, exports and imports
+    # already carried it. A boolean flag; no payload can hide in it.
+    "sandbox": None,
     "disabled": None,
     "schedule": None,
     "timezone": None,

@@ -123,31 +123,51 @@ const processorStep = {
   ],
 };
 
+/** A RESOLVED per-integration flows query, shaped like TanStack v5's result:
+ * `status: "success"` with `isPending`/`isError` false. The component keys
+ * off `isPending || isError` (== `status !== "success"`), never `isLoading`
+ * -- see the "unresolved query" describe block for the live defect that
+ * distinction exists for. */
+function resolved(data: unknown) {
+  return { data, status: "success", isPending: false, isLoading: false, isError: false, isSuccess: true, refetch: vi.fn() };
+}
+
+/** A query with no data yet: fetching, paused for retry, or disabled --
+ * `status: "pending"`, `isLoading` deliberately false so a test cannot pass
+ * on the old, wrong predicate. */
+function pending() {
+  return { data: undefined, status: "pending", isPending: true, isLoading: false, isError: false, isSuccess: false, refetch: vi.fn() };
+}
+
+function errored(refetch = vi.fn()) {
+  return { data: undefined, status: "error", isPending: false, isLoading: false, isError: true, isSuccess: false, refetch };
+}
+
 function setLists(flows: unknown[][]) {
-  mocks.allFlows.mockReturnValue(flows.map((data) => ({ data, isLoading: false, isSuccess: true })));
+  mocks.allFlows.mockReturnValue(flows.map(resolved));
 }
 
 beforeEach(() => {
   mocks.integrations.mockReset();
   mocks.allFlows.mockReset();
   mocks.flowDetail.mockReset();
-  mocks.flowDetail.mockReturnValue({ data: undefined, isLoading: false });
+  mocks.flowDetail.mockReturnValue(pending());
   mocks.syncStatus.mockReset();
-  mocks.syncStatus.mockReturnValue({ data: undefined, isLoading: true });
+  mocks.syncStatus.mockReturnValue(pending());
   mocks.script.mockReset();
-  mocks.script.mockReturnValue({ data: undefined, isLoading: false, isError: false, refetch: vi.fn() });
+  mocks.script.mockReturnValue(pending());
 });
 
 describe("CeligoFlowMap — empty and loading states", () => {
   it("shows a graceful empty state when there are no synced integrations", () => {
-    mocks.integrations.mockReturnValue({ data: [], isLoading: false });
+    mocks.integrations.mockReturnValue(resolved([]));
     setLists([]);
     wrap(<CeligoFlowMap />);
     expect(screen.getByText(/no.*integrations.*synced/i)).toBeInTheDocument();
   });
 
   it("shows a loading state while integrations are still loading", () => {
-    mocks.integrations.mockReturnValue({ data: undefined, isLoading: true });
+    mocks.integrations.mockReturnValue(pending());
     setLists([]);
     wrap(<CeligoFlowMap />);
     expect(screen.queryByText(/no.*integrations.*synced/i)).not.toBeInTheDocument();
@@ -156,9 +176,9 @@ describe("CeligoFlowMap — empty and loading states", () => {
 
 describe("CeligoFlowMap — stats strip", () => {
   it("aggregates integration, flow, and open-error counts across every integration", () => {
-    mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
+    mocks.integrations.mockReturnValue(resolved([integration]));
     setLists([[healthyFlow, failingFlow, pausedFlow]]);
-    mocks.syncStatus.mockReturnValue({ data: { last_synced_at: null }, isLoading: false });
+    mocks.syncStatus.mockReturnValue(resolved({ last_synced_at: null }));
     wrap(<CeligoFlowMap />);
 
     const stripe = within(screen.getByTestId("celigo-stats-strip"));
@@ -173,25 +193,118 @@ describe("CeligoFlowMap — stats strip", () => {
 });
 
 // ---------------------------------------------------------------------------
+// LIVE DEFECT (Framework staging, 2026-09-01). 26 of 36 per-integration flow
+// queries failed at the transport layer (a backend 500 with no CORS headers
+// reads as "Failed to fetch") and sat in TanStack's `status: "pending"` /
+// `fetchStatus: "paused"` state. `isLoading` is pending AND fetching, so it
+// is FALSE for a paused query -- the old `isLoading || isError` predicate
+// treated those 26 as resolved: the tree printed "0 flows" for integrations
+// holding 23, and the stats strip summed the 10 that got through as if they
+// were the whole account. The predicate is `status !== "success"`; anything
+// else is a stand-in that drifts from it.
+// ---------------------------------------------------------------------------
+
+describe("CeligoFlowMap — an unresolved per-integration query never reads as an empty one", () => {
+  it('renders a pending (paused, not fetching) flows query as loading, not "0 flows"', () => {
+    mocks.integrations.mockReturnValue(resolved([integration]));
+    mocks.allFlows.mockReturnValue([
+      { data: undefined, status: "pending", isPending: true, isLoading: false, isError: false, isSuccess: false, refetch: vi.fn() },
+    ]);
+    mocks.syncStatus.mockReturnValue(resolved({ last_synced_at: null }));
+    wrap(<CeligoFlowMap />);
+
+    expect(screen.queryByText(/0 flows/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/loading flows/i)).toBeInTheDocument();
+    const stats = within(screen.getByTestId("celigo-stats-strip"))
+      .getAllByTestId("celigo-stat-value")
+      .map((el) => el.textContent);
+    expect(stats[1]).toBe("—");
+    expect(stats[2]).toBe("—");
+  });
+
+  // GATE ROUND 3 (major): the same shape survived one level up -- the
+  // top-level integrations query and the sync-status query still gated on
+  // `isLoading`. Every query in this file now goes through one `queryState`
+  // mapping, so there is no per-call-site predicate left to get wrong.
+  it("renders a pending (paused) integrations query as loading, never as 'no integrations synced'", () => {
+    mocks.integrations.mockReturnValue({
+      data: undefined,
+      status: "pending",
+      isPending: true,
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    });
+    setLists([]);
+    wrap(<CeligoFlowMap />);
+    expect(screen.queryByText(/no.*integrations.*synced/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/flow map/i)).not.toBeInTheDocument();
+  });
+
+  it('renders a pending (paused) sync-status query as "—", never as "Never synced"', () => {
+    mocks.integrations.mockReturnValue(resolved([integration]));
+    setLists([[healthyFlow]]);
+    mocks.syncStatus.mockReturnValue({
+      data: undefined,
+      status: "pending",
+      isPending: true,
+      isLoading: false,
+      isError: false,
+      refetch: vi.fn(),
+    });
+    wrap(<CeligoFlowMap />);
+    const stats = within(screen.getByTestId("celigo-stats-strip"))
+      .getAllByTestId("celigo-stat-value")
+      .map((el) => el.textContent);
+    expect(stats[3]).toBe("—");
+  });
+});
+
+describe("CeligoFlowMap — schedule is Celigo's real shape", () => {
+  it("renders a cron-string schedule verbatim (96 of 239 live flows carry one; none carry an object)", () => {
+    mocks.integrations.mockReturnValue(resolved([integration]));
+    setLists([[{ ...healthyFlow, schedule: "? 0 */6 * * *" }]]);
+    wrap(<CeligoFlowMap />);
+    expect(screen.getByText("? 0 */6 * * *")).toBeInTheDocument();
+    expect(screen.queryByText(/custom schedule/i)).not.toBeInTheDocument();
+  });
+
+  it("renders a shape nobody has seen yet (the API relays JSON as-is) as a generic label, never a crash", () => {
+    mocks.integrations.mockReturnValue(resolved([integration]));
+    setLists([[{ ...healthyFlow, schedule: [{ type: "cron", expr: "? 0 */6 * * *" }] }]]);
+    wrap(<CeligoFlowMap />);
+    expect(screen.getByText(/custom schedule/i)).toBeInTheDocument();
+  });
+
+  it('renders a JSON `false` schedule as the generic label, not as "on demand" (gate round 3)', () => {
+    mocks.integrations.mockReturnValue(resolved([integration]));
+    setLists([[{ ...healthyFlow, schedule: false }]]);
+    wrap(<CeligoFlowMap />);
+    expect(screen.getByText(/custom schedule/i)).toBeInTheDocument();
+    expect(screen.queryByText(/on demand/i)).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Fix round 1 -- optional addition: Task 8 shipped GET /celigo/sync-status
 // for the mockup's "Last synced" stat this task originally had to drop.
 // ---------------------------------------------------------------------------
 
 describe("CeligoFlowMap — Last synced stat", () => {
   it("shows a relative time when a sync has completed", () => {
-    mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
+    mocks.integrations.mockReturnValue(resolved([integration]));
     setLists([[healthyFlow]]);
     const fiveMinutesAgo = new Date(Date.now() - 5 * 60_000).toISOString();
-    mocks.syncStatus.mockReturnValue({ data: { last_synced_at: fiveMinutesAgo }, isLoading: false });
+    mocks.syncStatus.mockReturnValue(resolved({ last_synced_at: fiveMinutesAgo }));
     wrap(<CeligoFlowMap />);
 
     expect(screen.getByText(/5 min ago/i)).toBeInTheDocument();
   });
 
   it("shows 'Never synced' when no sync has ever completed, not a misleading blank", () => {
-    mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
+    mocks.integrations.mockReturnValue(resolved([integration]));
     setLists([[healthyFlow]]);
-    mocks.syncStatus.mockReturnValue({ data: { last_synced_at: null }, isLoading: false });
+    mocks.syncStatus.mockReturnValue(resolved({ last_synced_at: null }));
     wrap(<CeligoFlowMap />);
 
     expect(screen.getByText(/never synced/i)).toBeInTheDocument();
@@ -200,7 +313,7 @@ describe("CeligoFlowMap — Last synced stat", () => {
 
 describe("CeligoFlowMap — deviation 1: signature count leads, raw count secondary", () => {
   it("shows root-cause (signature) count as the lead, raw error count secondary", () => {
-    mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
+    mocks.integrations.mockReturnValue(resolved([integration]));
     setLists([[failingFlow]]);
     wrap(<CeligoFlowMap />);
 
@@ -209,7 +322,7 @@ describe("CeligoFlowMap — deviation 1: signature count leads, raw count second
   });
 
   it("shows a healthy pill for a flow with no open errors", () => {
-    mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
+    mocks.integrations.mockReturnValue(resolved([integration]));
     setLists([[healthyFlow]]);
     wrap(<CeligoFlowMap />);
     expect(screen.getByText(/healthy/i)).toBeInTheDocument();
@@ -218,7 +331,7 @@ describe("CeligoFlowMap — deviation 1: signature count leads, raw count second
 
 describe("CeligoFlowMap — deviation 2: paused flows stay visible", () => {
   it("renders a disabled flow dimmed with a Paused pill, never filtered out of the list", () => {
-    mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
+    mocks.integrations.mockReturnValue(resolved([integration]));
     setLists([[pausedFlow]]);
     wrap(<CeligoFlowMap />);
 
@@ -229,7 +342,7 @@ describe("CeligoFlowMap — deviation 2: paused flows stay visible", () => {
 
 describe("CeligoFlowMap — tree", () => {
   it("shows the integration's flow count and a failing-count pill at lvl1", () => {
-    mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
+    mocks.integrations.mockReturnValue(resolved([integration]));
     setLists([[healthyFlow, failingFlow]]);
     wrap(<CeligoFlowMap />);
 
@@ -238,29 +351,31 @@ describe("CeligoFlowMap — tree", () => {
   });
 
   it("shows each flow's schedule in monospace at lvl2", () => {
-    mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
+    mocks.integrations.mockReturnValue(resolved([integration]));
     setLists([[healthyFlow]]);
     wrap(<CeligoFlowMap />);
     expect(screen.getByText(/every 15 minutes/i)).toBeInTheDocument();
   });
 
   it('formats a flow with no schedule as "on demand"', () => {
-    mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
+    mocks.integrations.mockReturnValue(resolved([integration]));
     setLists([[failingFlow]]); // schedule: null
     wrap(<CeligoFlowMap />);
     expect(screen.getByText(/on demand/i)).toBeInTheDocument();
   });
 
   it("expanding a flow row shows its steps as Source / Destination", async () => {
-    mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
+    mocks.integrations.mockReturnValue(resolved([integration]));
     setLists([[healthyFlow]]);
     mocks.flowDetail.mockImplementation((flowId: string | undefined) =>
       flowId === "flow-healthy"
         ? {
             data: { id: "flow-healthy", steps: [generatorStep, processorStep], unassigned_attachments: [] },
             isLoading: false,
+            isPending: false,
+            isError: false,
           }
-        : { data: undefined, isLoading: false },
+        : pending(),
     );
     wrap(<CeligoFlowMap />);
 
@@ -273,11 +388,13 @@ describe("CeligoFlowMap — tree", () => {
   });
 
   it("shows an amber script-count pill only on a step that has attachments", async () => {
-    mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
+    mocks.integrations.mockReturnValue(resolved([integration]));
     setLists([[healthyFlow]]);
     mocks.flowDetail.mockReturnValue({
       data: { id: "flow-healthy", steps: [generatorStep, processorStep], unassigned_attachments: [] },
       isLoading: false,
+      isPending: false,
+      isError: false,
     });
     wrap(<CeligoFlowMap />);
 
@@ -289,7 +406,7 @@ describe("CeligoFlowMap — tree", () => {
 
 describe("CeligoFlowMap — flow detail (screen 03)", () => {
   it("clicking a flow name opens its detail with a source/destination graph and field mapping", async () => {
-    mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
+    mocks.integrations.mockReturnValue(resolved([integration]));
     setLists([[healthyFlow]]);
     mocks.flowDetail.mockImplementation((flowId: string | undefined) =>
       flowId === "flow-healthy"
@@ -302,8 +419,10 @@ describe("CeligoFlowMap — flow detail (screen 03)", () => {
               unassigned_attachments: [],
             },
             isLoading: false,
+            isPending: false,
+            isError: false,
           }
-        : { data: undefined, isLoading: false },
+        : pending(),
     );
     wrap(<CeligoFlowMap />);
 
@@ -327,12 +446,7 @@ describe("CeligoFlowMap — flow detail (screen 03)", () => {
 
 describe("CeligoFlowMap — error states are distinct from empty states (fix round 1)", () => {
   it("a failed integrations query shows an error, never the 'no integrations synced' copy", () => {
-    mocks.integrations.mockReturnValue({
-      data: undefined,
-      isLoading: false,
-      isError: true,
-      refetch: vi.fn(),
-    });
+    mocks.integrations.mockReturnValue(errored());
     setLists([]);
     wrap(<CeligoFlowMap />);
 
@@ -342,7 +456,7 @@ describe("CeligoFlowMap — error states are distinct from empty states (fix rou
 
   it("a failed integrations query offers a retry that calls refetch", () => {
     const refetch = vi.fn();
-    mocks.integrations.mockReturnValue({ data: undefined, isLoading: false, isError: true, refetch });
+    mocks.integrations.mockReturnValue(errored(refetch));
     setLists([]);
     wrap(<CeligoFlowMap />);
 
@@ -351,9 +465,9 @@ describe("CeligoFlowMap — error states are distinct from empty states (fix rou
   });
 
   it("a failed per-integration flows query marks that integration's card as errored, not silently 0 flows", () => {
-    mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
+    mocks.integrations.mockReturnValue(resolved([integration]));
     mocks.allFlows.mockReturnValue([
-      { data: undefined, isLoading: false, isError: true, refetch: vi.fn() },
+      errored(),
     ]);
     wrap(<CeligoFlowMap />);
 
@@ -362,12 +476,12 @@ describe("CeligoFlowMap — error states are distinct from empty states (fix rou
   });
 
   it("expanding a flow whose step-detail query failed shows an error, not silence", async () => {
-    mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
+    mocks.integrations.mockReturnValue(resolved([integration]));
     setLists([[healthyFlow]]);
     mocks.flowDetail.mockImplementation((flowId: string | undefined) =>
       flowId === "flow-healthy"
-        ? { data: undefined, isLoading: false, isError: true, refetch: vi.fn() }
-        : { data: undefined, isLoading: false },
+        ? errored()
+        : pending(),
     );
     wrap(<CeligoFlowMap />);
 
@@ -389,12 +503,14 @@ describe("CeligoFlowMap — error states are distinct from empty states (fix rou
     mocks.integrations.mockReturnValue({
       data: [integration, { ...integration, id: "int-2", celigo_id: "c-int-2", name: "Other ERP" }],
       isLoading: false,
+      isPending: false,
+      isError: false,
     });
     mocks.allFlows.mockReturnValue([
-      { data: [healthyFlow, failingFlow], isLoading: false, isSuccess: true },
-      { data: undefined, isLoading: false, isError: true, refetch: vi.fn() },
+      resolved([healthyFlow, failingFlow]),
+      errored(),
     ]);
-    mocks.syncStatus.mockReturnValue({ data: { last_synced_at: null }, isLoading: false });
+    mocks.syncStatus.mockReturnValue(resolved({ last_synced_at: null }));
     wrap(<CeligoFlowMap />);
 
     const stripe = within(screen.getByTestId("celigo-stats-strip"));
@@ -409,12 +525,12 @@ describe("CeligoFlowMap — error states are distinct from empty states (fix rou
   });
 
   it("the flow detail dialog shows an error instead of spinning forever when its query fails", async () => {
-    mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
+    mocks.integrations.mockReturnValue(resolved([integration]));
     setLists([[healthyFlow]]);
     mocks.flowDetail.mockImplementation((flowId: string | undefined) =>
       flowId === "flow-healthy"
-        ? { data: undefined, isLoading: false, isError: true, refetch: vi.fn() }
-        : { data: undefined, isLoading: false },
+        ? errored()
+        : pending(),
     );
     wrap(<CeligoFlowMap />);
 
@@ -433,15 +549,17 @@ describe("CeligoFlowMap — error states are distinct from empty states (fix rou
 
 describe("CeligoFlowMap — flow detail with zero steps (fix round 1)", () => {
   it("shows a graph-strip empty state for a flow with no steps, matching the filter/mapping fallback style", async () => {
-    mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
+    mocks.integrations.mockReturnValue(resolved([integration]));
     setLists([[healthyFlow]]);
     mocks.flowDetail.mockImplementation((flowId: string | undefined) =>
       flowId === "flow-healthy"
         ? {
             data: { id: "flow-healthy", name: "Inventory Sync", schedule: null, steps: [], unassigned_attachments: [] },
             isLoading: false,
+            isPending: false,
+            isError: false,
           }
-        : { data: undefined, isLoading: false },
+        : pending(),
     );
     wrap(<CeligoFlowMap />);
 
@@ -459,7 +577,7 @@ describe("CeligoFlowMap — flow detail with zero steps (fix round 1)", () => {
 
 describe("CeligoFlowMap — empty-string adaptor_type treated as missing (fix round 1)", () => {
   it("renders 'Unknown adaptor' for a step whose adaptor_type is an empty string, at lvl3", async () => {
-    mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
+    mocks.integrations.mockReturnValue(resolved([integration]));
     setLists([[healthyFlow]]);
     mocks.flowDetail.mockReturnValue({
       data: {
@@ -468,6 +586,8 @@ describe("CeligoFlowMap — empty-string adaptor_type treated as missing (fix ro
         unassigned_attachments: [],
       },
       isLoading: false,
+      isPending: false,
+      isError: false,
     });
     wrap(<CeligoFlowMap />);
 
@@ -477,7 +597,7 @@ describe("CeligoFlowMap — empty-string adaptor_type treated as missing (fix ro
   });
 
   it("renders 'Unknown adaptor' for a step whose adaptor_type is an empty string, in the screen 03 graph node", async () => {
-    mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
+    mocks.integrations.mockReturnValue(resolved([integration]));
     setLists([[healthyFlow]]);
     mocks.flowDetail.mockImplementation((flowId: string | undefined) =>
       flowId === "flow-healthy"
@@ -490,8 +610,10 @@ describe("CeligoFlowMap — empty-string adaptor_type treated as missing (fix ro
               unassigned_attachments: [],
             },
             isLoading: false,
+            isPending: false,
+            isError: false,
           }
-        : { data: undefined, isLoading: false },
+        : pending(),
     );
     wrap(<CeligoFlowMap />);
 
@@ -509,11 +631,13 @@ describe("CeligoFlowMap — empty-string adaptor_type treated as missing (fix ro
 
 describe("CeligoFlowMap — script viewer wiring (Task 10)", () => {
   it("clicking a step's script chip opens the script viewer for that attachment's script", async () => {
-    mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
+    mocks.integrations.mockReturnValue(resolved([integration]));
     setLists([[healthyFlow]]);
     mocks.flowDetail.mockReturnValue({
       data: { id: "flow-healthy", steps: [generatorStep, processorStep], unassigned_attachments: [] },
       isLoading: false,
+      isPending: false,
+      isError: false,
     });
     wrap(<CeligoFlowMap />);
 

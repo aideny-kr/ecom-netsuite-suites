@@ -710,6 +710,68 @@ class TestFlowErrorsAreNeverDeleted:
         delete_like = [name for name in dir(repo_module) if "delete" in name.lower() and "flow_error" in name.lower()]
         assert delete_like == []
 
+    def test_no_celigo_code_path_deletes_flow_error_rows(self):
+        """The test above checks FUNCTION NAMES, and a check that cannot fail is
+        not a check: PR #216's first fix round added `delete(CeligoFlowError)`
+        inline inside a function called `purge_sandbox_rows`, and the name
+        scan stayed green while the audit-trail invariant it pins was broken.
+        The independent-model review angle had (correctly) pointed out the FK
+        is SET NULL; the wrong lesson was drawn -- delete the rows -- instead
+        of the right one: SET NULL IS the design, an error outlives its flow.
+
+        So this scans the SOURCE of every Celigo module that can reach the
+        database for any DELETE aimed at `celigo_flow_errors`, whatever the
+        enclosing function is called: a SQLAlchemy `delete(CeligoFlowError)`,
+        a `CeligoFlowError.__table__.delete()`, or raw SQL naming the table.
+        A static scan is the right shape for an absence claim -- there is no
+        execution that proves "nothing anywhere deletes"."""
+        import ast
+        from pathlib import Path
+
+        import app.services.celigo.repository as repo_module
+
+        services_dir = Path(repo_module.__file__).parent
+        app_dir = services_dir.parents[1]
+        candidates = sorted(services_dir.glob("*.py")) + [
+            app_dir / "api" / "v1" / "celigo_flows.py",
+            app_dir / "workers" / "tasks" / "celigo_flow_map_sync.py",
+        ]
+        assert all(p.exists() for p in candidates), [str(p) for p in candidates if not p.exists()]
+
+        def _names_deleted(tree: ast.AST) -> list[str]:
+            hits: list[str] = []
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call):
+                    func = node.func
+                    # delete(CeligoFlowError) / sa.delete(CeligoFlowError)
+                    if (
+                        (isinstance(func, ast.Name) and func.id == "delete")
+                        or (isinstance(func, ast.Attribute) and func.attr == "delete")
+                    ) and node.args:
+                        target = node.args[0]
+                        if isinstance(target, ast.Name):
+                            hits.append(target.id)
+                    # CeligoFlowError.__table__.delete()
+                    if (
+                        isinstance(func, ast.Attribute)
+                        and func.attr == "delete"
+                        and isinstance(func.value, ast.Attribute)
+                        and func.value.attr == "__table__"
+                        and isinstance(func.value.value, ast.Name)
+                    ):
+                        hits.append(func.value.value.id)
+                if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    if "delete from celigo_flow_errors" in " ".join(node.value.lower().split()):
+                        hits.append("celigo_flow_errors (raw SQL)")
+            return hits
+
+        offenders: dict[str, list[str]] = {}
+        for path in candidates:
+            hits = [h for h in _names_deleted(ast.parse(path.read_text())) if "FlowError" in h or "flow_errors" in h]
+            if hits:
+                offenders[str(path.relative_to(app_dir.parent))] = hits
+        assert offenders == {}, f"celigo_flow_errors is the audit trail and is never deleted: {offenders}"
+
 
 class TestNullConnectionIdCannotSilentlyDuplicateAuditRows:
     """`celigo_connection_id` is nullable/SET NULL on `celigo_error_signatures`

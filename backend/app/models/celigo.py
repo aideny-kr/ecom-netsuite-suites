@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import (
     Boolean,
@@ -104,7 +105,13 @@ class CeligoFlow(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     celigo_id: Mapped[str] = mapped_column(Text, nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     disabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    schedule: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Whatever JSON Celigo sent, mirrored. The only shape seen live is a cron
+    # STRING ("? 0 */6 * * *"); the object form `dict | None` used to claim
+    # here was a fixture's, and the API models built on it 500d on the string
+    # (2026-09-01). `Any` on purpose, matching the API's `CeligoSchedule =
+    # JsonValue`: this column does not vouch for the shape, so its type must
+    # not pretend to either.
+    schedule: Mapped[Any] = mapped_column(JSONB, nullable=True)
     timezone: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Flows carry `_sourceId` too, not only scripts (observed-shapes.md finding
@@ -428,6 +435,37 @@ def celigo_error_is_open() -> ColumnElement[bool]:
     snapshot's WHERE clause now uses it); it is only wrong when it is used to
     mean OPEN."""
     return and_(CeligoFlowError.resolved_at.is_(None), CeligoFlowError.purged_at.is_(None))
+
+
+def celigo_integration_is_production() -> ColumnElement[bool]:
+    """The single definition of a PRODUCTION `celigo_integrations` row:
+    `sandbox IS NOT TRUE`.
+
+    The flow map is production only (operator directive 2026-09-01: "don't
+    bring sandbox celigo, just production"). `IS NOT TRUE`, not `= false`: a
+    NULL flag means Celigo omitted it, and hiding on an absent field would let
+    a sanitizer or API change silently erase real integrations.
+
+    Every read of these tables in `app/api/v1/celigo_flows.py` applies this
+    -- the list, the per-integration flows, the flow detail (through the
+    flow's integration) and the script sites. PR #216's first cut put the
+    filter in ONE endpoint's WHERE clause; the gate found the other routes
+    still served a sandbox row by id. Same lesson as `celigo_error_is_open`
+    above: nothing forces a future query to import this, but a named
+    predicate is what a reviewer greps for.
+
+    The sync's write-side twin is `sync_service._is_sandbox` (`obj.get(
+    "sandbox") is True` on the raw Celigo object) -- the same rule, stated
+    for a dict rather than a column."""
+    return CeligoIntegration.sandbox.isnot(True)
+
+
+def celigo_script_is_production() -> ColumnElement[bool]:
+    """`celigo_scripts` twin of `celigo_integration_is_production`. Scripts
+    carry their own `sandbox` flag (sanitizer `_SCRIPT` allowlist); on the
+    live account 132 of 259 were sandbox copies, and a clone-family count
+    that summed both environments was wrong by about half."""
+    return CeligoScript.sandbox.isnot(True)
 
 
 class CeligoConfigChange(Base, UUIDPrimaryKeyMixin, TimestampMixin):

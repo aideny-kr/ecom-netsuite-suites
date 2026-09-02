@@ -183,7 +183,88 @@ async def _seed_world(db, tenant_id, *, pii_message: str = PII_MESSAGE) -> dict:
 # ---------------------------------------------------------------------------
 
 
+async def _seed_cron_flow(db, world: dict, *, schedule="? 0 */6 * * *", name: str = "Nightly Backfill") -> CeligoFlow:
+    """A second flow under *world*'s integration carrying the schedule shape
+    Celigo actually sends -- a cron STRING (96 of 239 live flows; `_seed_world`'s
+    object form was a fixture invention never observed live). Shared by the
+    list and detail tests so the two cannot drift apart (gate nit, PR #216)."""
+    flow = CeligoFlow(
+        tenant_id=world["integration"].tenant_id,
+        celigo_connection_id=world["connection_id"],
+        integration_id=world["integration"].id,
+        celigo_id=f"flow_cron_{world['suffix']}",
+        name=name,
+        disabled=False,
+        schedule=schedule,
+        raw_json={},
+    )
+    db.add(flow)
+    await db.flush()
+    return flow
+
+
+async def _seed_sandbox_world(db, world: dict) -> tuple[CeligoIntegration, CeligoFlow]:
+    """A sandbox integration + one flow under it, on the same connection as
+    *world*. Every read endpoint must treat both as if they did not exist."""
+    integration = CeligoIntegration(
+        tenant_id=world["integration"].tenant_id,
+        celigo_connection_id=world["connection_id"],
+        celigo_id=f"int_sb_{world['suffix']}",
+        name="ACME ERP (sandbox)",
+        sandbox=True,
+        raw_json={},
+    )
+    db.add(integration)
+    await db.flush()
+    flow = CeligoFlow(
+        tenant_id=world["integration"].tenant_id,
+        celigo_connection_id=world["connection_id"],
+        integration_id=integration.id,
+        celigo_id=f"flow_sb_{world['suffix']}",
+        name="Sandbox Sales Order Sync",
+        disabled=False,
+        raw_json={},
+    )
+    db.add(flow)
+    await db.flush()
+    return integration, flow
+
+
 class TestListIntegrations:
+    async def test_sandbox_integrations_are_not_listed(self, client, admin_user, db):
+        """Production only -- operator directive 2026-09-01 ("don't bring sandbox
+        celigo, just production"). A sandbox integration synced under the same
+        connection must not appear. A NULL `sandbox` (Celigo omitted the flag)
+        is treated as production, never hidden: hiding on an absent flag would
+        let a missing field silently erase real integrations."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        db.add(
+            CeligoIntegration(
+                tenant_id=user.tenant_id,
+                celigo_connection_id=world["connection_id"],
+                celigo_id=f"int_sb_{world['suffix']}",
+                name="ACME ERP (sandbox)",
+                sandbox=True,
+                raw_json={},
+            )
+        )
+        db.add(
+            CeligoIntegration(
+                tenant_id=user.tenant_id,
+                celigo_connection_id=world["connection_id"],
+                celigo_id=f"int_null_{world['suffix']}",
+                name="ACME Legacy",
+                sandbox=None,
+                raw_json={},
+            )
+        )
+        await db.flush()
+
+        r = await client.get("/api/v1/celigo/integrations", headers=headers)
+        assert r.status_code == 200, r.text
+        assert sorted(i["name"] for i in r.json()) == ["ACME ERP", "ACME Legacy"]
+
     async def test_lists_integrations_for_the_tenant(self, client, admin_user, db):
         user, headers = admin_user
         world = await _seed_world(db, user.tenant_id)
@@ -235,6 +316,54 @@ class TestListIntegrations:
 
 
 class TestListIntegrationFlows:
+    async def test_a_cron_string_schedule_is_served_not_500(self, client, admin_user, db):
+        """LIVE DEFECT (2026-09-01, Framework staging): 96 of the 239 synced flows
+        carry `schedule` as Celigo's cron STRING, none as an object. The response
+        model declared `dict | None`, so every integration containing a scheduled
+        flow raised ResponseValidationError -> 500 -> (a 500 carries no CORS
+        headers) -> the browser saw "Failed to fetch" -> the flow map rendered
+        "0 flows" for 26 of 36 integrations. `_seed_world`'s object-shaped
+        schedule was a fixture invention; it was never observed live."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        await _seed_cron_flow(db, world)
+
+        r = await client.get(f"/api/v1/celigo/integrations/{world['integration'].id}/flows", headers=headers)
+        assert r.status_code == 200, r.text
+        by_name = {f["name"]: f for f in r.json()}
+        assert by_name["Nightly Backfill"]["schedule"] == "? 0 */6 * * *"
+        assert by_name["Sales Order Sync"]["schedule"] == {"type": "everyN", "unit": "minutes", "value": 15}
+
+    async def test_a_schedule_shape_nobody_has_seen_yet_is_served_not_500(self, client, admin_user, db):
+        """GATE FINDING (plausible, round 1): widening `dict | None` to
+        `dict | str | None` repeated the reasoning that caused the 500 -- an
+        enumeration of observed shapes. This column mirrors whatever Celigo
+        sends; the API's job is to relay it, not to vouch for its shape. So the
+        model is typed as JSON, and a list (or anything else) comes through."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        await _seed_cron_flow(db, world, schedule=[{"type": "cron", "expr": "? 0 */6 * * *"}], name="Listed")
+
+        r = await client.get(f"/api/v1/celigo/integrations/{world['integration'].id}/flows", headers=headers)
+        assert r.status_code == 200, r.text
+        by_name = {f["name"]: f for f in r.json()}
+        assert by_name["Listed"]["schedule"] == [{"type": "cron", "expr": "? 0 */6 * * *"}]
+
+    async def test_a_sandbox_integration_is_not_found_here_either(self, client, admin_user, db):
+        """GATE FINDING (round 1): production-only was enforced in
+        `/integrations`' WHERE clause alone; this route and the flow-detail
+        route looked rows up by tenant only, so a sandbox integration hidden
+        from the list was still fully readable by id (a bookmark, a stale
+        cache). `celigo_integration_is_production()` is now the ONE predicate
+        every read of these tables applies -- the `celigo_error_is_open()`
+        idiom, not a second call-site patch."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        sandbox_integration, _ = await _seed_sandbox_world(db, world)
+
+        r = await client.get(f"/api/v1/celigo/integrations/{sandbox_integration.id}/flows", headers=headers)
+        assert r.status_code == 404, r.text
+
     async def test_lists_flows_with_error_and_signature_counts(self, client, admin_user, db):
         user, headers = admin_user
         world = await _seed_world(db, user.tenant_id)
@@ -351,6 +480,28 @@ class TestListIntegrationFlows:
 
 
 class TestGetFlowDetail:
+    async def test_a_cron_string_schedule_is_served_not_500(self, client, admin_user, db):
+        """Twin of TestListIntegrationFlows' test: the detail model declared
+        `schedule: dict | None` too, so opening any scheduled flow 500d."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        cron_flow = await _seed_cron_flow(db, world)
+
+        r = await client.get(f"/api/v1/celigo/flows/{cron_flow.id}", headers=headers)
+        assert r.status_code == 200, r.text
+        assert r.json()["schedule"] == "? 0 */6 * * *"
+
+    async def test_a_flow_under_a_sandbox_integration_is_not_found(self, client, admin_user, db):
+        """Twin of TestListIntegrationFlows' sandbox test: the detail route
+        must apply the same shared production predicate, through the flow's
+        integration."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        _, sandbox_flow = await _seed_sandbox_world(db, world)
+
+        r = await client.get(f"/api/v1/celigo/flows/{sandbox_flow.id}", headers=headers)
+        assert r.status_code == 404, r.text
+
     async def test_returns_flow_with_steps_and_attachments(self, client, admin_user, db):
         user, headers = admin_user
         world = await _seed_world(db, user.tenant_id)
@@ -565,6 +716,59 @@ class TestGetFlowDetail:
 
 
 class TestGetScriptDetail:
+    async def test_a_sandbox_script_is_not_found(self, client, admin_user, db):
+        """Scripts carry their own `sandbox` flag (132 of the live account's 259
+        are sandbox copies). Same shared-predicate rule as the flow routes:
+        hidden means hidden by id too, not only from a listing."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        sandbox_script = CeligoScript(
+            tenant_id=user.tenant_id,
+            celigo_connection_id=world["connection_id"],
+            celigo_id=f"scr_sb_{world['suffix']}",
+            name="Sandbox Transform",
+            content="function transform(record) { return record; }",
+            sandbox=True,
+        )
+        db.add(sandbox_script)
+        await db.flush()
+
+        r = await client.get(f"/api/v1/celigo/scripts/{sandbox_script.id}", headers=headers)
+        assert r.status_code == 404, r.text
+
+    async def test_attachment_count_and_used_by_are_the_same_production_rows(self, client, admin_user, db):
+        """GATE FINDING (round 3, major): `used_by` was production-joined but
+        `attachment_count` (from `list_logical_scripts`) counted every
+        attachment of the clone family, sandbox flows included, so the two
+        numbers on one response could disagree. Both now come from the same
+        production-filtered row set -- there is nothing left to keep in
+        step. Seeds the exact case: one script attached under a production
+        flow AND under a sandbox one."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        _, sandbox_flow = await _seed_sandbox_world(db, world)
+        db.add(
+            CeligoScriptAttachment(
+                tenant_id=user.tenant_id,
+                celigo_connection_id=world["connection_id"],
+                flow_id=sandbox_flow.id,
+                flow_step_id=None,
+                script_id=world["script"].id,
+                script_celigo_id=world["script"].celigo_id,
+                function_name="transform",
+                json_path="routers[0].script",
+                site_type="router",
+            )
+        )
+        await db.flush()
+
+        r = await client.get(f"/api/v1/celigo/scripts/{world['script'].id}", headers=headers)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert [site["flow_name"] for site in body["used_by"]] == ["Sales Order Sync"]
+        assert body["attachment_count"] == len(body["used_by"]) == 1
+        assert body["integration_count"] == 1
+
     async def test_returns_content_and_used_by(self, client, admin_user, db):
         user, headers = admin_user
         world = await _seed_world(db, user.tenant_id)

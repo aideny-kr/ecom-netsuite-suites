@@ -40,6 +40,7 @@ import {
   useCeligoSyncStatus,
   type CeligoAttachment,
   type CeligoFlowStep,
+  type CeligoSchedule,
   type CeligoFlowSummary,
   type CeligoIntegration,
 } from "@/hooks/use-celigo-flows";
@@ -54,6 +55,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { queryState, type QueryState } from "@/lib/query-state";
 import { cn } from "@/lib/utils";
 import { AlertTriangle, ChevronDown, ChevronRight, Loader2 } from "lucide-react";
 
@@ -72,13 +74,21 @@ function firstOpenableScriptId(attachments: CeligoAttachment[]): string | null {
 // Formatters -- each grounded in a confirmed real shape, not the mockup.
 // ---------------------------------------------------------------------------
 
-/** Only `{type:"everyN", unit, value}` is CONFIRMED live (Task 8's own
- * fixture, `backend/tests/api/test_celigo_flows_api.py`'s `_seed_world`).
- * Any other schedule shape Celigo can send is real but unverified here --
- * falls back to a generic label rather than inventing a display string
- * (e.g. the mockup's ":05, :35") for a shape nobody has confirmed. */
-export function formatSchedule(schedule: Record<string, unknown> | null): string {
-  if (!schedule || Object.keys(schedule).length === 0) return "on demand";
+/** The one shape observed live (2026-09-01, Framework: 96 of 239 flows) is
+ * Celigo's own cron string, shown verbatim -- it is the real configuration,
+ * and any prettified rendering would be a claim this code cannot verify
+ * against Celigo's scheduler semantics. `{type:"everyN", unit, value}` was
+ * only ever a fixture shape (`_seed_world`), kept renderable because nothing
+ * rules it out. Anything else Celigo may send falls back to a generic label
+ * rather than a crash or an invented string. */
+export function formatSchedule(schedule: CeligoSchedule): string {
+  // Only null (or an empty string) means "no schedule". `false` / `0` are
+  // JSON values Celigo could in principle send -- unrecognised shapes, not
+  // the absence of one (gate round 3), so they fall through to the label.
+  if (schedule === null) return "on demand";
+  if (typeof schedule === "string") return schedule.trim() || "on demand";
+  if (typeof schedule !== "object" || Array.isArray(schedule)) return "custom schedule";
+  if (Object.keys(schedule).length === 0) return "on demand";
   if (schedule.type === "everyN" && typeof schedule.value === "number" && typeof schedule.unit === "string") {
     return `every ${schedule.value} ${schedule.unit}`;
   }
@@ -274,12 +284,9 @@ function FlowRow({
   onOpenDetail: () => void;
   onOpenScript: (scriptId: string) => void;
 }) {
-  const {
-    data: detail,
-    isLoading,
-    isError,
-    refetch,
-  } = useCeligoFlowDetail(expanded ? flow.id : undefined);
+  const detailQuery = useCeligoFlowDetail(expanded ? flow.id : undefined);
+  const detailState = queryState(detailQuery);
+  const detail = detailQuery.data;
 
   return (
     <div className={cn("border-t", flow.disabled && "opacity-60")}>
@@ -307,17 +314,16 @@ function FlowRow({
 
       {expanded && (
         <div className="pb-2 pl-16">
-          {isLoading && (
+          {detailState === "pending" && (
             <div className="flex items-center gap-1.5 py-1 text-[12px] text-muted-foreground">
               <Loader2 className="h-3 w-3 animate-spin" />
               Loading steps…
             </div>
           )}
-          {isError && (
-            <ErrorNotice message="Couldn't load steps." onRetry={() => refetch()} compact />
+          {detailState === "error" && (
+            <ErrorNotice message="Couldn't load steps." onRetry={() => detailQuery.refetch()} compact />
           )}
-          {!isLoading &&
-            !isError &&
+          {detailState === "success" &&
             detail?.steps.map((step) => <StepRow key={step.id} step={step} onOpenScript={onOpenScript} />)}
         </div>
       )}
@@ -332,14 +338,17 @@ function FlowRow({
 function IntegrationTree({
   integration,
   flows,
-  flowsError,
+  flowsState,
   onRetryFlows,
   onSelectFlow,
   onOpenScript,
 }: {
   integration: CeligoIntegration;
   flows: CeligoFlowSummary[];
-  flowsError: boolean;
+  /** `queryState(...)` of this integration's flows query. "pending" covers
+   * fetching AND a failed fetch paused for its retry -- rendered as loading,
+   * never as "0 flows"; only "success" may show a count. */
+  flowsState: QueryState;
   onRetryFlows: () => void;
   onSelectFlow: (flowId: string) => void;
   onOpenScript: (scriptId: string) => void;
@@ -359,13 +368,20 @@ function IntegrationTree({
         </div>
       </div>
 
-      {flowsError ? (
+      {flowsState === "error" ? (
         // This integration's flows failed to load -- MUST NOT fall through
         // to the "0 flows" tree header below, which would read as a
         // healthy, empty integration rather than a failed request (fix
         // round 1, Important).
         <div className="px-4 py-3">
           <ErrorNotice message="Couldn't load this integration's flows." onRetry={onRetryFlows} compact />
+        </div>
+      ) : flowsState === "pending" ? (
+        // Not resolved yet -- the same rule as the error branch: an
+        // unresolved query must never render as a confident "0 flows".
+        <div className="flex items-center gap-1.5 px-4 py-2 text-[12px] text-muted-foreground">
+          <Loader2 className="h-3 w-3 animate-spin" />
+          Loading flows…
         </div>
       ) : (
         <>
@@ -517,12 +533,9 @@ function FlowDetailDialog({
   onOpenChange: (open: boolean) => void;
   onOpenScript: (scriptId: string) => void;
 }) {
-  const {
-    data: flow,
-    isLoading,
-    isError,
-    refetch,
-  } = useCeligoFlowDetail(flowId ?? undefined);
+  const flowQuery = useCeligoFlowDetail(flowId ?? undefined);
+  const flowState = queryState(flowQuery);
+  const flow = flowQuery.data;
   const sources = flow?.steps.filter((s) => s.role === "generator") ?? [];
   const destinations = flow?.steps.filter((s) => s.role === "processor") ?? [];
   const stepsWithFilter = flow?.steps.filter((s) => s.filter_json) ?? [];
@@ -531,15 +544,15 @@ function FlowDetailDialog({
   return (
     <Dialog open={!!flowId} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[85vh] max-w-3xl overflow-y-auto">
-        {isError ? (
-          // MUST be checked before the loading/!flow branch below -- once a
-          // query errors, isLoading is false and `flow` stays undefined
-          // forever, so that branch alone gets stuck on "Loading flow…"
-          // with no escape but closing the dialog (fix round 1, Important).
+        {flowState === "error" ? (
+          // "error" is checked first -- once a query errors, `flow` stays
+          // undefined forever, so the branch below alone would spin on
+          // "Loading flow…" with no escape but closing the dialog (fix round
+          // 1, Important).
           <div className="flex flex-col items-center gap-3 py-8">
-            <ErrorNotice message="Couldn't load this flow." onRetry={() => refetch()} />
+            <ErrorNotice message="Couldn't load this flow." onRetry={() => flowQuery.refetch()} />
           </div>
-        ) : isLoading || !flow ? (
+        ) : flowState !== "success" || !flow ? (
           <div className="flex items-center justify-center gap-2 py-8 text-[13px] text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" />
             Loading flow…
@@ -639,19 +652,16 @@ function StatCard({
 // ---------------------------------------------------------------------------
 
 export function CeligoFlowMap() {
-  const {
-    data: integrations,
-    isLoading,
-    isError: integrationsError,
-    refetch: refetchIntegrations,
-  } = useCeligoIntegrations();
+  const integrationsQuery = useCeligoIntegrations();
+  const integrationsState = queryState(integrationsQuery);
+  const integrations = integrationsQuery.data;
   const integrationIds = (integrations ?? []).map((i) => i.id);
   const flowQueries = useCeligoAllFlows(integrationIds);
   const syncStatus = useCeligoSyncStatus();
   const [selectedFlowId, setSelectedFlowId] = useState<string | null>(null);
   const [scriptViewerId, setScriptViewerId] = useState<string | null>(null);
 
-  if (isLoading) {
+  if (integrationsState === "pending") {
     return (
       <div className="rounded-xl border bg-card p-6 shadow-soft animate-pulse">
         <div className="h-6 w-40 bg-muted rounded" />
@@ -660,7 +670,7 @@ export function CeligoFlowMap() {
     );
   }
 
-  if (integrationsError) {
+  if (integrationsState === "error") {
     // MUST be its own branch, never the "no integrations" copy below (fix
     // round 1, Important) -- that copy tells the operator to (re)connect
     // Celigo, which is actively misleading when the connection is fine and
@@ -670,7 +680,7 @@ export function CeligoFlowMap() {
         <h3 className="text-lg font-semibold">Flow Map</h3>
         <ErrorNotice
           message="Couldn't load your Celigo integrations."
-          onRetry={() => refetchIntegrations()}
+          onRetry={() => integrationsQuery.refetch()}
         />
       </div>
     );
@@ -700,15 +710,25 @@ export function CeligoFlowMap() {
   // below already guards against. Applying the identical pattern here: any
   // unresolved per-integration flows query marks BOTH stats "—" rather than
   // silently presenting a partial total as complete.
-  const anyFlowsQueryUnresolved = flowQueries.some((q) => q.isLoading || q.isError);
+  //
+  // LIVE DEFECT (staging, 2026-09-01): this used `isLoading || isError`.
+  // TanStack's `isLoading` is pending AND fetching, so a query whose fetch
+  // failed at the transport layer and sat PAUSED for its retry (`status:
+  // "pending"`, `fetchStatus: "paused"`) was neither -- 26 of 36 integrations
+  // were counted as resolved-and-empty, and the strip summed the other 10 as
+  // if they were the whole account. The predicate is `status !== "success"`,
+  // which is exactly `isPending || isError`; anything narrower is a stand-in
+  // that drifts from it.
+  const anyFlowsQueryUnresolved = flowQueries.some((q) => queryState(q) !== "success");
 
-  // Loading/error render a neutral placeholder rather than a fabricated
-  // "Never synced" -- that string is a real, meaningful claim (fix round
-  // 1's Important lesson applies here too, at smaller scale: don't let an
-  // unresolved query's silence read as a confident answer).
-  const syncedValue =
-    syncStatus.isLoading || syncStatus.isError ? "—" : formatRelativeTime(syncStatus.data?.last_synced_at ?? null);
-  const syncedOk = !syncStatus.isLoading && !syncStatus.isError && !!syncStatus.data?.last_synced_at;
+  // Anything but "success" renders a neutral placeholder rather than a
+  // fabricated "Never synced" -- that string is a real, meaningful claim
+  // (fix round 1's Important lesson at smaller scale: don't let an
+  // unresolved query's silence read as a confident answer). Gate round 3
+  // found this line still on `isLoading`; `queryState` is the one mapping.
+  const syncState = queryState(syncStatus);
+  const syncedValue = syncState !== "success" ? "—" : formatRelativeTime(syncStatus.data?.last_synced_at ?? null);
+  const syncedOk = syncState === "success" && !!syncStatus.data?.last_synced_at;
 
   return (
     <div className="space-y-4">
@@ -734,7 +754,7 @@ export function CeligoFlowMap() {
               key={integration.id}
               integration={integration}
               flows={flowsByIntegration.get(integration.id) ?? []}
-              flowsError={!!flowsQuery?.isError}
+              flowsState={flowsQuery ? queryState(flowsQuery) : "pending"}
               onRetryFlows={() => flowsQuery?.refetch()}
               onSelectFlow={setSelectedFlowId}
               onOpenScript={setScriptViewerId}

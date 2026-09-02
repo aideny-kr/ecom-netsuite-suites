@@ -50,7 +50,7 @@ from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, JsonValue
 from sqlalchemy import and_, case, distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -66,6 +66,8 @@ from app.models.celigo import (
     CeligoScript,
     CeligoScriptAttachment,
     celigo_error_is_open,
+    celigo_integration_is_production,
+    celigo_script_is_production,
 )
 from app.models.pipeline import CursorState
 from app.models.user import User
@@ -74,9 +76,35 @@ from app.services.celigo.repository import list_logical_scripts
 router = APIRouter(prefix="/celigo", tags=["celigo"])
 
 
+def _join_production_integration(stmt, tenant_id):
+    """INNER-join `CeligoIntegration` onto a statement whose FROM already
+    carries `CeligoFlow`, with the tenant predicate AND
+    `celigo_integration_is_production()` on the ON clause -- so the join is
+    the production filter, not a WHERE someone has to remember. Used by the
+    flow detail and the script sites query; one place to get it right."""
+    return stmt.join(
+        CeligoIntegration,
+        and_(
+            CeligoIntegration.id == CeligoFlow.integration_id,
+            CeligoIntegration.tenant_id == tenant_id,
+            celigo_integration_is_production(),
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Response schemas -- see module docstring: every field named by hand.
 # ---------------------------------------------------------------------------
+
+# A flow's `schedule`, relayed as the JSON Celigo sent. Typed as JSON rather
+# than as a union of observed shapes, deliberately: the first cut declared
+# `dict | None` off a fixture, and every integration with a scheduled flow
+# 500d because the live value is a cron STRING ("? 0 */6 * * *" -- 96 of 239
+# flows on the Framework account, 2026-09-01). Widening to `dict | str` would
+# have repeated the same reasoning one member wider. This column mirrors
+# whatever Celigo sends; the API's job is to relay it, not to vouch for its
+# shape -- the frontend decides how to render what it gets.
+CeligoSchedule = JsonValue
 
 
 class CeligoIntegrationOut(BaseModel):
@@ -100,7 +128,7 @@ class CeligoFlowSummaryOut(BaseModel):
     celigo_id: str
     name: str
     disabled: bool | None
-    schedule: dict | None
+    schedule: CeligoSchedule
     timezone: str | None
     last_executed_at: datetime | None
     error_count: int
@@ -141,7 +169,7 @@ class CeligoFlowDetailOut(BaseModel):
     celigo_id: str
     name: str
     disabled: bool | None
-    schedule: dict | None
+    schedule: CeligoSchedule
     timezone: str | None
     last_executed_at: datetime | None
     source_id: str | None
@@ -271,9 +299,14 @@ async def list_integrations(
     _flag: Annotated[User, Depends(require_feature("celigo"))],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Integrations synced under the tenant's currently active Celigo
-    connection. Empty (never 404) when there is no active connection -- that
-    is a legitimate "not connected yet" state, not an error."""
+    """PRODUCTION integrations synced under the tenant's currently active
+    Celigo connection. Empty (never 404) when there is no active connection
+    -- that is a legitimate "not connected yet" state, not an error.
+
+    Sandbox integrations are excluded (operator directive 2026-09-01: "don't
+    bring sandbox celigo, just production") through the ONE shared predicate,
+    `celigo_integration_is_production()` -- see its docstring for the NULL
+    rule and for why every other read in this module applies it too."""
     connection = await _get_celigo_connection(db, user.tenant_id)
     if connection is None:
         return []
@@ -285,6 +318,7 @@ async def list_integrations(
                 .where(
                     CeligoIntegration.tenant_id == user.tenant_id,
                     CeligoIntegration.celigo_connection_id == connection.id,
+                    celigo_integration_is_production(),
                 )
                 .order_by(CeligoIntegration.name)
             )
@@ -364,6 +398,9 @@ async def list_integration_flows(
             select(CeligoIntegration).where(
                 CeligoIntegration.id == integration_id,
                 CeligoIntegration.tenant_id == user.tenant_id,
+                # A sandbox integration is not found by id either -- hidden
+                # from the list must mean hidden, not merely unlisted.
+                celigo_integration_is_production(),
             )
         )
     ).scalar_one_or_none()
@@ -445,9 +482,11 @@ async def get_flow_detail(
     the step it belongs to. Attachments with no owning
     step (a `routers[].script` ref -- belongs to the router, not a step) come
     back in `unassigned_attachments` instead of being dropped."""
+    # Production only, through the flow's integration (flows carry no flag
+    # of their own) -- the join IS the filter.
     flow = (
         await db.execute(
-            select(CeligoFlow).where(
+            _join_production_integration(select(CeligoFlow), user.tenant_id).where(
                 CeligoFlow.id == flow_id,
                 CeligoFlow.tenant_id == user.tenant_id,
             )
@@ -595,6 +634,7 @@ async def get_script_detail(
             select(CeligoScript).where(
                 CeligoScript.id == script_id,
                 CeligoScript.tenant_id == user.tenant_id,
+                celigo_script_is_production(),
             )
         )
     ).scalar_one_or_none()
@@ -609,8 +649,11 @@ async def get_script_detail(
     # construction, so `group` is never actually None. Falls back to a
     # single-member view rather than a 500 if that invariant is ever violated.
     celigo_ids = group.celigo_ids if group is not None else (script.celigo_id,)
-    attachment_count = group.attachment_count if group is not None else 0
     content_diverged = group.content_diverged if group is not None else False
+    # `attachment_count` is NOT taken from the group: it is `len(used_by)`
+    # below, so the headline number and the list it summarises are one row
+    # set by construction (gate round 3 found them computed by two queries
+    # that agreed only when no sandbox site existed).
 
     # Tenant predicates on BOTH joined tables, not only on `CeligoScriptAttachment`
     # -- and on the JOIN's ON clause, not a trailing WHERE, which matters for
@@ -621,21 +664,22 @@ async def get_script_detail(
     # codebase's own test harness connects as a superuser, which bypasses RLS
     # unconditionally, so this explicit scoping is the only thing standing in
     # that context, not defence-in-depth.
+    sites_stmt = select(
+        CeligoScriptAttachment,
+        CeligoFlow.name.label("flow_name"),
+        CeligoFlow.integration_id.label("integration_id"),
+        CeligoFlowStep.role.label("step_role"),
+        CeligoFlowStep.adaptor_type.label("step_adaptor_type"),
+    ).join(
+        CeligoFlow,
+        and_(
+            CeligoFlow.id == CeligoScriptAttachment.flow_id,
+            CeligoFlow.tenant_id == user.tenant_id,
+        ),
+    )
+    # Production only: a site under a sandbox integration is not a site.
     sites_result = await db.execute(
-        select(
-            CeligoScriptAttachment,
-            CeligoFlow.name.label("flow_name"),
-            CeligoFlow.integration_id.label("integration_id"),
-            CeligoFlowStep.role.label("step_role"),
-            CeligoFlowStep.adaptor_type.label("step_adaptor_type"),
-        )
-        .join(
-            CeligoFlow,
-            and_(
-                CeligoFlow.id == CeligoScriptAttachment.flow_id,
-                CeligoFlow.tenant_id == user.tenant_id,
-            ),
-        )
+        _join_production_integration(sites_stmt, user.tenant_id)
         .outerjoin(
             CeligoFlowStep,
             and_(
@@ -677,7 +721,7 @@ async def get_script_detail(
         content=script.content,
         content_hash=script.content_hash,
         copies_count=len(celigo_ids),
-        attachment_count=attachment_count,
+        attachment_count=len(used_by),
         integration_count=len(integration_ids),
         content_diverged=content_diverged,
         used_by=used_by,

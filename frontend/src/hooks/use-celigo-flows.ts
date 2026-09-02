@@ -9,6 +9,13 @@ import { apiClient } from "@/lib/api-client";
 // backend keeps them explicit (no `raw_json` leakage): these types must stay
 // in lockstep with it by hand, the same discipline, not auto-generated.
 
+/** A flow's schedule, relayed by the API as whatever JSON Celigo sent
+ * (`CeligoSchedule` in `celigo_flows.py`). The only shape seen live is a
+ * six-field cron STRING (e.g. `? 0 0 6 * *`; 96 of 239 flows); `null` is on
+ * demand. `formatSchedule` renders anything else as a generic label -- the
+ * API deliberately does not vouch for the shape, so neither does this type. */
+export type CeligoSchedule = string | Record<string, unknown> | unknown[] | number | boolean | null;
+
 export interface CeligoIntegration {
   id: string;
   celigo_id: string;
@@ -24,7 +31,7 @@ export interface CeligoFlowSummary {
   celigo_id: string;
   name: string;
   disabled: boolean | null;
-  schedule: Record<string, unknown> | null;
+  schedule: CeligoSchedule;
   timezone: string | null;
   last_executed_at: string | null;
   /** Raw open-error count (`resolved_at IS NULL AND purged_at IS NULL`). */
@@ -68,7 +75,7 @@ export interface CeligoFlowDetail {
   celigo_id: string;
   name: string;
   disabled: boolean | null;
-  schedule: Record<string, unknown> | null;
+  schedule: CeligoSchedule;
   timezone: string | null;
   last_executed_at: string | null;
   source_id: string | null;
