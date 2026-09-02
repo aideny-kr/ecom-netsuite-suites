@@ -99,6 +99,12 @@ def upgrade() -> None:
         USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid)
         """
     )
+    # ENABLE alone does NOT constrain the table's OWNER, and on Supabase the
+    # application connects as the owner — so without FORCE the policy above is
+    # decorative and every tenant's rows are readable. Migrations 087/089/092/
+    # 093/094/095 all pair the two for this reason; this table holds write
+    # payloads, so it is not the one to break the pattern on.
+    op.execute(f"ALTER TABLE {_TABLE} FORCE ROW LEVEL SECURITY")  # load-bearing on Supabase (owner != BYPASSRLS)
 
 
 def downgrade() -> None:

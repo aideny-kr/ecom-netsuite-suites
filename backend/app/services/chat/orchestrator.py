@@ -2180,15 +2180,26 @@ async def run_chat_turn(
                 # the same unrecoverable timeout we have always had — no worse.
                 _idem_key_for_write: str | None = None
                 try:
+                    from app.services.chat.write_payload import PayloadParseError
                     from app.services.chat.write_payload import normalize_write_payload as _norm_se
                     from app.services.chat.write_side_effect import build_idempotency_key
                     from app.services.chat.write_side_effect_repo import record_attempt
 
-                    _se_fields = _norm_se(tool_input).fields
+                    # `.record`, not `.fields` — the FULL payload including line
+                    # sublists. `.fields` strips them, which would log a
+                    # header-only copy of a write that had lines and derive a
+                    # key that two different orders could share.
+                    try:
+                        _se_payload = _norm_se(tool_input).record
+                    except PayloadParseError:
+                        # A payload-less mutation shape. Nothing to key on;
+                        # caught by TYPE so a real parse bug still surfaces.
+                        _se_payload = {}
+
                     _idem_key_for_write = (
-                        _se_fields.get("externalId")
-                        or _se_fields.get("externalid")
-                        or build_idempotency_key(batch_id=None, row_index=None, payload=_se_fields)
+                        _se_payload.get("externalId")
+                        or _se_payload.get("externalid")
+                        or build_idempotency_key(batch_id=None, row_index=None, payload=_se_payload)
                     )
                     await record_attempt(
                         db,
@@ -2196,7 +2207,7 @@ async def run_chat_turn(
                         idempotency_key=_idem_key_for_write,
                         record_type=_so.get("record_type", "record"),
                         mutation_type=_so.get("mutation_type", "write"),
-                        payload=_se_fields,
+                        payload=_se_payload,
                         correlation_id=correlation_id,
                         session_id=session.id,
                     )
@@ -2205,6 +2216,20 @@ async def run_chat_turn(
                 except Exception:
                     logger.warning("side-effect log not recorded; write proceeds", exc_info=True)
                     _idem_key_for_write = None
+                    # A DB-level failure (connection drop, deadlock, the unique
+                    # constraint racing a concurrent identical write) leaves the
+                    # session needing a rollback. WITHOUT this, the very next
+                    # statement — execute_tool_call's tenant-scoped reads, or
+                    # the assistant-message commit at the end of the turn —
+                    # raises PendingRollbackError, converting a best-effort
+                    # LOGGING failure into a hard failure of a write the human
+                    # already approved. That is the exact opposite of what the
+                    # comment above promises.
+                    try:
+                        await db.rollback()
+                        await set_tenant_context(db, str(tenant_id))  # rollback clears SET LOCAL too
+                    except Exception:
+                        logger.warning("session rollback after side-effect failure failed", exc_info=True)
 
                 _exec_result_str = await execute_tool_call(
                     # The ONE place this may be True. `tool_name`/`tool_input`
@@ -2239,6 +2264,17 @@ async def run_chat_turn(
                         )
                     except Exception:
                         logger.warning("side-effect row not settled", exc_info=True)
+                        # Same reasoning as the record_attempt block above, and
+                        # it matters MORE here: NetSuite has already accepted
+                        # the write by this point. A poisoned session would
+                        # crash the turn after the side effect happened, so the
+                        # human never sees the confirmation for a write that
+                        # really occurred.
+                        try:
+                            await db.rollback()
+                            await set_tenant_context(db, str(tenant_id))
+                        except Exception:
+                            logger.warning("session rollback after settle failure failed", exc_info=True)
 
                 _mutation_type = _so.get("mutation_type", "write")
                 _record_type = _so.get("record_type", "record")

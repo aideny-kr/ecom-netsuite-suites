@@ -186,7 +186,78 @@ def classify_retry_result(raw_result: str) -> SideEffectStatus:
 
     outcome = classify_write_outcome(parsed)
     if outcome == "success":
-        return SideEffectStatus.WRITTEN
+        # POSITIVE EVIDENCE REQUIRED. classify_write_outcome answers "does this
+        # look like a failure?", so absence-of-error reads as success — fine
+        # for a chat status line, wrong for a side-effect ledger. The MCP layer
+        # emits `{"result": "No content returned"}` when the server sends
+        # nothing (mcp_client_service.py:344) and `{"result": <raw text>}` for
+        # anything unparseable (:350); both mean "I cannot tell you what
+        # happened", and both landed here as a definite WRITTEN and were
+        # dropped off the resume worklist.
+        #
+        # So: settle WRITTEN only on an explicit success flag or a record
+        # identifier. Anything else stays ATTEMPTED, where reconciliation can
+        # settle it from evidence by asking NetSuite directly.
+        if parsed.get("success") is True or any(
+            parsed.get(k) not in (None, "") for k in ("recordId", "id", "internalId")
+        ):
+            return SideEffectStatus.WRITTEN
+        return SideEffectStatus.ATTEMPTED
     if outcome == "failed":
         return SideEffectStatus.REJECTED
     return SideEffectStatus.ATTEMPTED
+
+
+def stamp_tool_input(
+    tool_input: dict[str, Any], *, batch_id: str | None = None, row_index: int | None = None
+) -> tuple[dict[str, Any], str | None]:
+    """Add the idempotency key to a write's payload WITHOUT losing anything else.
+
+    The single seam for stamping. It exists because the first implementation
+    open-coded this at the call site and stamped ``normalize_write_payload(...)
+    .fields`` — which excludes line sublists — so every transaction line
+    disappeared from the signed card and from what NetSuite received. A
+    salesOrder posted header-only. Doing it here, once, is what makes that
+    unrepresentable rather than merely fixed: there is no ``.fields`` in reach
+    of a caller who wants to stamp.
+
+    Three properties the open-coded version got wrong:
+
+    1. **Merges into ``.record``** (the raw, unsplit payload), per
+       ``NormalizedPayload.record``'s own docstring. Lines survive.
+    2. **Derives the key from the WHOLE record**, lines included. Two orders
+       with identical headers and different lines are different work; giving
+       them one key makes NetSuite refuse the second as a duplicate, and a
+       duplicate refusal classifies as WRITTEN — reporting an order created
+       that never existed.
+    3. **Preserves the payload's TYPE.** ``data`` arrives as a JSON string and
+       ``body`` as a dict; writing a string back where a dict was read changes
+       the shape against the schema the MCP server declared.
+
+    Returns ``(tool_input, key)`` — a new dict when it stamped, the original
+    object and ``None`` when there is no payload to stamp (a delete-shaped
+    call carries no ``data``/``body``). That no-op is explicit, not a broad
+    ``except`` swallowing a parse failure.
+    """
+    from app.services.chat.write_payload import PayloadParseError, normalize_write_payload
+
+    try:
+        parsed = normalize_write_payload(tool_input)
+    except PayloadParseError:
+        # No data/body at all — a delete-shaped call. Nothing to stamp, and
+        # this is the ONE expected reason to skip: caught by its specific type
+        # so a genuine parse bug still raises instead of silently no-opping.
+        return tool_input, None
+    if not parsed.payload_key:
+        return tool_input, None
+
+    stamped, key = payload_with_idempotency_key(parsed.record, batch_id=batch_id, row_index=row_index)
+    if stamped == parsed.record:
+        # Caller supplied their own externalId; nothing to rewrite. Their key
+        # is the better natural identity and is never overwritten.
+        return tool_input, key
+
+    out = dict(tool_input)
+    original = tool_input.get(parsed.payload_key)
+    out[parsed.payload_key] = json.dumps(stamped) if isinstance(original, str) else stamped
+    return out, key

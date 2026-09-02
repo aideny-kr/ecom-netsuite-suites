@@ -18,6 +18,7 @@ the write had failed.
 
 from __future__ import annotations
 
+import re
 import uuid
 from typing import Any
 
@@ -27,6 +28,10 @@ from app.models.write_side_effect import WriteSideEffect
 from app.services.chat.write_side_effect import SideEffectStatus, classify_retry_result
 
 __all__ = ["record_attempt", "settle_from_result", "unsettled_for_tenant"]
+
+# A bare SQL identifier. NetSuite record types are `customer`, `salesOrder`,
+# `customrecord_ecom_config` — never quoted, never spaced, never punctuated.
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 async def record_attempt(
@@ -177,6 +182,16 @@ async def reconcile_by_external_id(
     # by forgetting to stamp: the row simply stays unsettled for a human.
     _sent = row.payload_json or {}
     if _sent.get("externalId") != row.idempotency_key and _sent.get("externalid") != row.idempotency_key:
+        return SideEffectStatus.ATTEMPTED
+
+    # `record_type` lands in the FROM clause, where no bind parameter can go —
+    # SQL identifiers are not parameterizable — and it is MODEL/TOOL-supplied,
+    # not ours. So it is validated as an identifier rather than escaped:
+    # anything outside [A-Za-z_][A-Za-z0-9_]* cannot be a NetSuite record type
+    # and is refused. Fails CLOSED — the row stays unsettled for a human,
+    # because the alternative to asking safely is "do not ask", never "ask
+    # unsafely" against the customer's own account.
+    if not _IDENTIFIER_RE.fullmatch(row.record_type or ""):
         return SideEffectStatus.ATTEMPTED
 
     key = row.idempotency_key.replace("'", "''")  # the key is ours, but never interpolate unescaped

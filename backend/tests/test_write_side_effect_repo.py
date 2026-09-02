@@ -279,3 +279,84 @@ async def test_reconcile_still_works_when_the_key_was_sent(db):
 
     status = await reconcile_by_external_id(db, tenant_id=_TENANT, row=row, suiteql=fake_suiteql)
     assert status is SideEffectStatus.REJECTED
+
+
+async def test_reconcile_refuses_a_record_type_that_is_not_an_identifier(db):
+    """T2 gate round 1. `record_type` is interpolated into the FROM clause of a
+    raw SuiteQL string while only the key value was escaped — and record_type
+    is model/tool-supplied, not ours. A crafted value would run as SQL against
+    the customer's NetSuite account.
+
+    Fails CLOSED: an unusable record type leaves the row unsettled for a human
+    rather than guessing, because the alternative to asking safely is not
+    'ask unsafely', it is 'do not ask'.
+    """
+    from app.services.chat.write_side_effect_repo import reconcile_by_external_id
+
+    hostile = [
+        "customer WHERE 1=1 OR '1'='1",
+        "customer; DROP TABLE customer",
+        "customer--",
+        "custom er",
+        "",
+    ]
+    for i, bad in enumerate(hostile):
+        key = f"ss-idem-inj-{i}"
+        await record_attempt(
+            db,
+            tenant_id=_TENANT,
+            idempotency_key=key,
+            record_type=bad,
+            mutation_type="create",
+            payload={"companyName": "Acme", "externalId": key},
+            correlation_id="c1",
+        )
+        await db.commit()
+
+    asked = []
+
+    async def fake_suiteql(q: str) -> str:
+        asked.append(q)
+        return '{"data": []}'
+
+    for row in await unsettled_for_tenant(db, tenant_id=_TENANT):
+        status = await reconcile_by_external_id(db, tenant_id=_TENANT, row=row, suiteql=fake_suiteql)
+        assert status is SideEffectStatus.ATTEMPTED, f"{row.record_type!r} must not settle"
+
+    assert asked == [], f"must not build any query from hostile record types, got {asked}"
+
+
+async def test_reconcile_accepts_legitimate_record_types(db):
+    """The guard must not break real NetSuite type names, including the
+    custom-record and camelCase forms this repo actually uses."""
+    from app.services.chat.write_side_effect_repo import reconcile_by_external_id
+
+    good = ["customer", "salesOrder", "customrecord_ecom_config", "journalEntry"]
+    for i, name in enumerate(good):
+        key = f"ss-idem-good-{i}"
+        await record_attempt(
+            db,
+            tenant_id=_TENANT,
+            idempotency_key=key,
+            record_type=name,
+            mutation_type="create",
+            payload={"companyName": "Acme", "externalId": key},
+            correlation_id="c1",
+        )
+        await db.commit()
+
+    asked = []
+
+    async def fake_suiteql(q: str) -> str:
+        asked.append(q)
+        return '{"data": [{"id": 42}]}'
+
+    rows = await unsettled_for_tenant(db, tenant_id=_TENANT)
+    assert len(rows) == len(good)
+    for row in rows:
+        status = await reconcile_by_external_id(db, tenant_id=_TENANT, row=row, suiteql=fake_suiteql)
+        assert status is SideEffectStatus.WRITTEN, f"{row.record_type} must be queryable"
+
+    assert len(asked) == len(good)
+    for name in good:
+        assert any(name in q for q in asked), f"{name} was never queried"

@@ -191,3 +191,162 @@ def test_single_record_writes_get_a_key_too():
     assert out["externalId"] == key
     assert key.startswith(IDEM_PREFIX)
     assert uuid.UUID  # sanity: module imported cleanly
+
+
+# ---------------------------------------------------------------------------
+# Stamping must not destroy the payload it stamps.
+#
+# T2 gate round 1, BLOCKER. The first implementation stamped
+# `normalize_write_payload(...).fields` and wrote that back as the whole
+# payload. `.fields` deliberately EXCLUDES line sublists, so every transaction
+# line vanished from both the HMAC-signed card and the payload NetSuite
+# received. write_payload.NormalizedPayload.record exists precisely for this
+# and says so: "a merge that wants to add a field without losing line items has
+# to merge into `record` and write back under `payload_key`".
+#
+# 134 write-path tests missed it because every one of them used a header-only
+# customer create. Not one had a line item.
+# ---------------------------------------------------------------------------
+
+
+class TestStampToolInput:
+    def test_line_items_survive_stamping(self):
+        """The blocker. A salesOrder keeps its lines and gains an externalId."""
+        from app.services.chat.write_side_effect import stamp_tool_input
+
+        raw = {
+            "recordType": "salesOrder",
+            "data": json.dumps(
+                {
+                    "entity": 123,
+                    "item": [
+                        {"item": 101, "quantity": 2, "rate": 50.0},
+                        {"item": 202, "quantity": 1, "rate": 19.99},
+                    ],
+                }
+            ),
+        }
+        out, key = stamp_tool_input(raw, batch_id=None, row_index=None)
+        sent = json.loads(out["data"])
+
+        assert sent["item"] == json.loads(raw["data"])["item"], "lines must be untouched"
+        assert sent["externalId"] == key
+        assert sent["entity"] == 123
+
+    def test_the_key_covers_the_lines_not_just_the_header(self):
+        """Two orders with identical headers but DIFFERENT lines are different
+        work and must get different keys.
+
+        Deriving from header fields alone gave them the same key — NetSuite
+        would refuse the second as a duplicate externalId, and a duplicate
+        refusal is classified WRITTEN, so we would report an order as created
+        that never existed. Worse than the dropped lines it hid behind.
+        """
+        from app.services.chat.write_side_effect import stamp_tool_input
+
+        def _order(qty):
+            return {
+                "recordType": "salesOrder",
+                "data": json.dumps({"entity": 123, "item": [{"item": 101, "quantity": qty}]}),
+            }
+
+        _, key_a = stamp_tool_input(_order(2), batch_id=None, row_index=None)
+        _, key_b = stamp_tool_input(_order(99), batch_id=None, row_index=None)
+        assert key_a != key_b
+
+    def test_a_dict_payload_stays_a_dict(self):
+        """`body` arrives as a dict, `data` as a JSON string. Writing a string
+        back where a dict was read would change the tool_input's shape under
+        the schema the MCP server declared."""
+        from app.services.chat.write_side_effect import stamp_tool_input
+
+        raw = {"recordType": "customer", "body": {"companyName": "Acme"}}
+        out, key = stamp_tool_input(raw, batch_id=None, row_index=None)
+
+        assert isinstance(out["body"], dict), "a dict payload must not become a string"
+        assert out["body"]["externalId"] == key
+
+    def test_a_caller_supplied_externalid_is_returned_untouched(self):
+        from app.services.chat.write_side_effect import stamp_tool_input
+
+        raw = {"recordType": "customer", "data": json.dumps({"companyName": "A", "externalId": "THEIRS"})}
+        out, key = stamp_tool_input(raw, batch_id=None, row_index=None)
+
+        assert key == "THEIRS"
+        assert json.loads(out["data"])["externalId"] == "THEIRS"
+
+    def test_an_input_with_no_payload_is_left_alone(self):
+        """A delete-shaped call carries no data/body. It must no-op EXPLICITLY,
+        not by falling through a broad except."""
+        from app.services.chat.write_side_effect import stamp_tool_input
+
+        raw = {"recordType": "customer", "recordId": "5795008"}
+        out, key = stamp_tool_input(raw, batch_id=None, row_index=None)
+
+        assert out == raw
+        assert key is None
+
+
+class TestClassifyIsFailClosed:
+    """T2 gate round 1. `classify_retry_result`'s docstring promised "WRITTEN is
+    never a default" while delivering exactly that: the underlying outcome
+    classifier reads ABSENCE OF AN ERROR as success, so the MCP layer's own
+    indeterminate envelopes classified as a definite write.
+
+    mcp_client_service.py:344 returns `{"result": "No content returned"}` when
+    the server sends nothing back, and :350 returns `{"result": <raw text>}`
+    for anything unparseable. Both mean "I cannot tell you what happened" —
+    the one state this table exists to represent — and both were being
+    recorded as WRITTEN and dropped off the resume worklist.
+
+    The rule: WRITTEN requires POSITIVE evidence (an explicit success flag or a
+    record id), never the mere absence of an error.
+    """
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            '{"result": "No content returned"}',
+            '{"result": "some unparseable prose from the server"}',
+            '{"result": ""}',
+            '{"result": null}',
+        ],
+    )
+    def test_mcp_indeterminate_envelopes_stay_attempted(self, raw):
+        from app.services.chat.write_side_effect import classify_retry_result
+
+        assert classify_retry_result(raw) is SideEffectStatus.ATTEMPTED
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            '{"success": true, "recordId": "5264548"}',
+            '{"recordId": "5264548"}',
+            '{"id": 5264548}',
+            '{"success": true}',
+        ],
+    )
+    def test_positive_evidence_still_settles_written(self, raw):
+        """The guard must not make real successes unsettleable."""
+        from app.services.chat.write_side_effect import classify_retry_result
+
+        assert classify_retry_result(raw) is SideEffectStatus.WRITTEN
+
+    def test_a_duplicate_refusal_is_still_written(self):
+        """Unchanged: NetSuite refusing our externalId proves the first landed."""
+        from app.services.chat.write_side_effect import classify_retry_result
+
+        raw = json.dumps(
+            {
+                "success": False,
+                "error": '{"o:errorDetails":[{"detail":"Error while accessing a resource. '
+                'This entity already exists.","o:errorCode":"USER_ERROR"}]}',
+            }
+        )
+        assert classify_retry_result(raw) is SideEffectStatus.WRITTEN
+
+    def test_an_explicit_error_is_still_rejected(self):
+        from app.services.chat.write_side_effect import classify_retry_result
+
+        raw = '{"error": "Please enter value(s) for: Subsidiary."}'
+        assert classify_retry_result(raw) is SideEffectStatus.REJECTED

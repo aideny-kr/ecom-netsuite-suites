@@ -2197,31 +2197,19 @@ class BaseSpecialistAgent(abc.ABC):
                         _idem_key: str | None = None
                         if _is_netsuite_write and mutation_type == "create":
                             try:
-                                from app.services.chat.write_payload import (
-                                    normalize_write_payload as _norm_for_idem,
-                                )
-                                from app.services.chat.write_side_effect import (
-                                    payload_with_idempotency_key,
-                                )
+                                from app.services.chat.write_side_effect import stamp_tool_input
 
-                                _idem_parsed = _norm_for_idem(block.input)
-                                _stamped, _idem_key = payload_with_idempotency_key(
-                                    _idem_parsed.fields, batch_id=None, row_index=None
-                                )
-                                # Write back under the key the parser actually
-                                # READ FROM — tool_input carries the payload as
-                                # either "data" or "body" (_PAYLOAD_KEYS), and
-                                # normalize_write_payload reports which via
-                                # `payload_key` for exactly this reason.
-                                # Hardcoding "data" added a SECOND payload key
-                                # and broke 20 write-path tests: the card
-                                # stopped being emitted entirely.
-                                if _stamped != _idem_parsed.fields and _idem_parsed.payload_key:
-                                    import json as _json_idem
-
-                                    _blk = dict(block.input)
-                                    _blk[_idem_parsed.payload_key] = _json_idem.dumps(_stamped)
-                                    block.input = _blk
+                                # One seam, which owns every subtlety: merge
+                                # into the raw record so LINE ITEMS SURVIVE,
+                                # derive the key from the whole record so two
+                                # orders differing only in lines get different
+                                # keys, and write back under the key the parser
+                                # read from ("data" or "body") in that key's
+                                # original type. Open-coding this here is what
+                                # produced the T2 blocker — it stamped
+                                # `.fields`, which excludes line sublists, and
+                                # posted salesOrders header-only.
+                                block.input, _idem_key = stamp_tool_input(block.input, batch_id=None, row_index=None)
                             except Exception:
                                 # Never fail a card over a key. Without it the
                                 # write is exactly as (un)recoverable as it was
@@ -2229,7 +2217,13 @@ class BaseSpecialistAgent(abc.ABC):
                                 # and approves the same payload.
                                 logger.warning("idempotency key not stamped", exc_info=True)
                                 _idem_key = None
-                        self._pending_idem_key = _idem_key
+                        # Deliberately NOT stashed on `self`. The key now lives
+                        # in the payload the human approves and the HMAC signs,
+                        # so the orchestrator reads it back from there — the
+                        # authoritative copy. An attribute holding a second
+                        # copy was write-only state (nothing read it) and, had
+                        # anything started reading it, would have been a copy
+                        # that could disagree with what was actually signed.
 
                         payload = build_confirmation_payload(
                             mutation_type=mutation_type,
