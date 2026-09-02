@@ -145,7 +145,7 @@ function hasMappingFieldsShape(
 // Small shared bits
 // ---------------------------------------------------------------------------
 
-function KeyValueOrJson({ value }: { value: Record<string, unknown> }) {
+function KeyValueOrJson({ value }: { value: unknown }) {
   if (isFlatScalarObject(value)) {
     return (
       <Table>
@@ -495,7 +495,7 @@ function FieldMappingPanel({ step }: { step: CeligoFlowStep }) {
       <p className="text-[13px] font-medium">Field mapping</p>
       <p className="mt-0.5 text-[12px] text-muted-foreground">NetSuite field and the value written to it.</p>
       <div className="mt-2">
-        {hasMappingFieldsShape(mapping) ? (
+        {typeof mapping === "object" && mapping !== null && !Array.isArray(mapping) && hasMappingFieldsShape(mapping) ? (
           <Table>
             <TableHeader>
               <TableRow>

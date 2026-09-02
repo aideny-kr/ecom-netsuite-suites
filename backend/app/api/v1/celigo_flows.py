@@ -159,8 +159,11 @@ class CeligoFlowStepOut(BaseModel):
     reference_name: str | None
     """Celigo's own export/import name; null until synced -- the UI must
     fall back, never invent."""
-    filter_json: dict | None
-    mapping_json: dict | None
+    # JsonValue, not `dict | None`: see CeligoSchedule's rationale above -- the
+    # first cut declared these off a fixture too, and any shape other than a
+    # plain object would 500 the whole flow the same way the schedule did.
+    filter_json: JsonValue
+    mapping_json: JsonValue
     proceed_on_failure: bool | None
     skip_retries: bool | None
     attachments: list[CeligoAttachmentOut]

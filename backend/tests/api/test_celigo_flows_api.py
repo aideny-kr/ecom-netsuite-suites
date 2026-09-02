@@ -502,6 +502,19 @@ class TestGetFlowDetail:
         r = await client.get(f"/api/v1/celigo/flows/{sandbox_flow.id}", headers=headers)
         assert r.status_code == 404, r.text
 
+    async def test_a_list_shaped_filter_is_served_not_500(self, client, admin_user, db):
+        """filter_json/mapping_json are opaque Celigo config relayed as-is; a shape
+        nobody has seen yet must not 500 a whole flow (the schedule lesson)."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        world["step"].filter_json = ["and", ["equals", ["string", ["extract", "status"]], "open"]]
+        world["step"].mapping_json = "unexpected"
+        await db.flush()
+        r = await client.get(f"/api/v1/celigo/flows/{world['flow'].id}", headers=headers)
+        assert r.status_code == 200
+        assert r.json()["steps"][0]["filter_json"][0] == "and"
+        assert r.json()["steps"][0]["mapping_json"] == "unexpected"
+
     async def test_step_carries_its_celigo_name_when_synced(self, client, admin_user, db):
         user, headers = admin_user
         world = await _seed_world(db, user.tenant_id)

@@ -16,6 +16,12 @@ import { apiClient } from "@/lib/api-client";
  * API deliberately does not vouch for the shape, so neither does this type. */
 export type CeligoSchedule = string | Record<string, unknown> | unknown[] | number | boolean | null;
 
+/** `filter_json`/`mapping_json`'s type on the wire (`JsonValue` on
+ * `CeligoFlowStepOut` in `celigo_flows.py`) -- the same reasoning as
+ * `CeligoSchedule` above: these are opaque Celigo config relayed as-is, a
+ * shape nobody has seen yet must not break the whole flow response. */
+export type CeligoJson = Record<string, unknown> | unknown[] | string | number | boolean | null;
+
 export interface CeligoIntegration {
   id: string;
   celigo_id: string;
@@ -63,8 +69,8 @@ export interface CeligoFlowStep {
   adaptor_type: string | null;
   connection_celigo_id: string | null;
   reference_name: string | null;
-  filter_json: Record<string, unknown> | null;
-  mapping_json: Record<string, unknown> | null;
+  filter_json: CeligoJson;
+  mapping_json: CeligoJson;
   proceed_on_failure: boolean | null;
   skip_retries: boolean | null;
   attachments: CeligoAttachment[];
