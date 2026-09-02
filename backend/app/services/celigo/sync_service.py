@@ -23,8 +23,11 @@ step", extended by fix round 1 -- see below):
     for script refs here (`graph.walk_script_refs`) -- routers can carry
     `script` (see Phase D's docstring note for why this is separate from the
     export/import walk below).
-  Phase C: every script (`client.list_resource("script")`), independent of
-    flow order.
+  Phase C: every script -- LISTED (`client.list_resource("script")`) and
+    then FETCHED BY ID (`client.get_resource("script", id)`), because the
+    list omits `content` and the single GET omits `_sourceId`; the two are
+    merged. Independent of flow order. (Until 2026-09-02 this phase listed
+    only, and every stored script was empty.)
   Phase D (FIX ROUND 1, added after the first cut of this module shipped):
     every export AND import (`client.list_resource("export"/"import")`).
     THE REASON THIS EXISTS: the plan's own live-probed Verified Facts say
@@ -773,6 +776,16 @@ async def sync_flow_map_for_connection(
             celigo_id = script.get("_id")
             if not celigo_id:
                 continue
+            # Celigo's LIST omits `content` for every script (probed live,
+            # 2026-09-02: 0 of 261 carried it; the 2026-08-17 spec said so and
+            # this phase listed anyway -- 129 empty rows in production, and a
+            # viewer that said "No source recorded" for all of them). Only the
+            # per-id GET returns the body, and that object has NO `_sourceId`
+            # (the clone-family key), so the two are MERGED: list item first,
+            # fetched fields on top. One extra call per PRODUCTION script --
+            # sandbox ones never reach this line. `get_resource` sanitizes.
+            fetched = await get_resource("script", celigo_id, token=token, region=region, client=http)
+            script = {**script, **fetched}
             existing_script = await _get_existing_script(
                 db, tenant_id=tenant_id, connection_id=connection_id, celigo_id=celigo_id
             )

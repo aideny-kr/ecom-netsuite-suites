@@ -207,6 +207,21 @@ def _fake_list_resource(data: dict[str, list[dict]]):
     return _fake
 
 
+def _fake_get_resource(data: dict[str, list[dict]]):
+    """Fake for client.get_resource, serving the listed item of that kind by
+    id. Phase C fetches every production script by id because the live LIST
+    omits `content`; here the list item already carries whatever the test
+    gave it, so the merge is a no-op unless a test supplies its own fake."""
+
+    async def _fake(kind, celigo_id, *, token, region="us", include=None, exclude=None, client=None):
+        for item in data.get(kind, []):
+            if item.get("_id") == celigo_id:
+                return dict(item)
+        raise AssertionError(f"get_resource fake: no {kind} with id {celigo_id!r}")
+
+    return _fake
+
+
 def _fake_list_flow_errors_for_step(
     data: dict[tuple[str, str], list[dict]] | None = None,
     calls: list | None = None,
@@ -246,6 +261,7 @@ async def _run_sync(
     errors_by_step: dict[tuple[str, str], list[dict]] | None = None,
     error_calls: list | None = None,
     truncated_steps: dict[tuple[str, str], list[dict]] | None = None,
+    get_resource=None,
 ) -> SyncSummary:
     resource_data = {
         "integration": integrations or [],
@@ -257,6 +273,10 @@ async def _run_sync(
     monkeypatch.setattr(
         "app.services.celigo.sync_service.list_resource",
         _fake_list_resource(resource_data),
+    )
+    monkeypatch.setattr(
+        "app.services.celigo.sync_service.get_resource",
+        get_resource or _fake_get_resource(resource_data),
     )
     monkeypatch.setattr(
         "app.services.celigo.sync_service.list_flow_errors_for_step",
@@ -401,13 +421,12 @@ class TestProductionOnly:
             fallback_fetches.append((kind, celigo_id))
             raise AssertionError(f"listing-gap fallback fetched {kind} {celigo_id}")
 
-        monkeypatch.setattr("app.services.celigo.sync_service.get_resource", _fallback_must_not_run)
-
         summary = await _run_sync(
             monkeypatch,
             db,
             tenant_id=tenant.id,
             connection_id=conn_id,
+            get_resource=_fallback_must_not_run,
             integrations=[
                 _raw_integration("int_prod", name="Production", sandbox=False),
                 _raw_integration("int_sb", name="Sandbox Copy", sandbox=True),
@@ -756,6 +775,63 @@ class TestProductionOnlyIsOneSeam:
             .all()
         )
         assert flow_ids == ["flow_prod"]
+
+
+class TestScriptContentIsFetchedPerScript:
+    """LIVE (2026-09-02): all 129 production scripts in staging had EMPTY
+    content, so the script viewer said "No source recorded" for every one --
+    "it doesn't really show scripts". Celigo's `GET /v1/scripts` LIST omits
+    `content` for every item (probed: 0 of 261 carry it); only `GET
+    /v1/scripts/{id}` returns it (`/content` 404s). The 2026-08-17 design spec
+    recorded exactly that ("list omits content; requires GET per script") and
+    Phase C listed anyway. Phase C now fetches each PRODUCTION script by id.
+
+    The per-id object is not a superset of the list item: the single GET has
+    no `_sourceId` (probed), and `_sourceId` is the clone-family key. So the
+    two are MERGED, list item first, fetched fields on top."""
+
+    async def test_content_comes_from_the_per_id_fetch_and_source_id_survives_the_merge(
+        self, db: AsyncSession, monkeypatch
+    ):
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        fetched_ids: list[str] = []
+        body = "function preMap(options) { return options.data; }"
+
+        async def _fetch_like_the_live_single_get(kind, celigo_id, *, token, region="us", client=None, **kw):
+            fetched_ids.append(f"{kind}:{celigo_id}")
+            assert kind == "script"
+            # Shaped like the live single GET: content present, `_sourceId` ABSENT.
+            return {"_id": celigo_id, "name": "Fetched Name", "content": body, "sandbox": False}
+
+        summary = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            get_resource=_fetch_like_the_live_single_get,
+            integrations=[_raw_integration("int_prod", name="Production", sandbox=False)],
+            flows=[_raw_flow("flow_prod", integration_id="int_prod", export_id="exp_1")],
+            scripts=[
+                # Shaped like the live LIST: no content, but the clone-family key.
+                {"_id": "scr_clone", "name": "FW Sales Order Hook", "_sourceId": "scr_original"},
+                {"_id": "scr_sb", "name": "Sandbox Copy", "sandbox": True},
+            ],
+        )
+
+        assert summary.scripts_synced == 1
+        assert fetched_ids == ["script:scr_clone"], "one fetch per PRODUCTION script; the sandbox one is never fetched"
+        row = (
+            await db.execute(
+                text(
+                    "SELECT content, content_hash, source_id FROM celigo_scripts WHERE tenant_id = :t AND celigo_id = 'scr_clone'"
+                ).bindparams(t=tenant.id)
+            )
+        ).one()
+        assert row.content == body
+        assert row.content_hash is not None
+        assert row.source_id == "scr_original", "the list's _sourceId must survive the merge with the per-id object"
 
 
 class TestDriftDetection:
