@@ -358,3 +358,37 @@ export function useCeligoFlowErrors(flowId: string | undefined, status: "open" |
     enabled: !!flowId,
   });
 }
+
+// ---------------------------------------------------------------------------
+// Task 7 -- config-change routes (`CeligoConfigChangeOut` in celigo_flows.py),
+// mirrored field-for-field. `object_id` carries no FK (the model has none
+// either -- polymorphic over three object kinds), so it is relayed as-is.
+// ---------------------------------------------------------------------------
+
+export interface CeligoConfigChange {
+  id: string;
+  object_kind: string;
+  object_id: string | null;
+  celigo_id: string;
+  field: string;
+  old_value: CeligoJson;
+  new_value: CeligoJson;
+  flow_id: string | null;
+  created_at: string;
+}
+
+export function useCeligoIntegrationChanges(integrationId: string | undefined) {
+  return useQuery<CeligoConfigChange[]>({
+    queryKey: ["celigo", "integration", integrationId, "changes"],
+    queryFn: () => apiClient.get<CeligoConfigChange[]>(`/api/v1/celigo/integrations/${integrationId}/changes`),
+    enabled: !!integrationId,
+  });
+}
+
+export function useCeligoFlowChanges(flowId: string | undefined) {
+  return useQuery<CeligoConfigChange[]>({
+    queryKey: ["celigo", "flow", flowId, "changes"],
+    queryFn: () => apiClient.get<CeligoConfigChange[]>(`/api/v1/celigo/flows/${flowId}/changes`),
+    enabled: !!flowId,
+  });
+}

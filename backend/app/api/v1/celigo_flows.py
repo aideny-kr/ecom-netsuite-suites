@@ -484,6 +484,39 @@ class CeligoFlowErrorsOut(BaseModel):
     groups: list[CeligoFlowErrorGroupOut]
 
 
+class CeligoConfigChangeOut(BaseModel):
+    """Task 7 -- one row of `celigo_config_changes` (see that model's own
+    docstring for the polymorphic `object_kind`/`object_id`/`celigo_id` shape
+    and why `old_value`/`new_value` are JSON rather than typed per field).
+    `object_id` is stringified like every other id in this module; it carries
+    no FK (the model has none either), so it is relayed as-is, never resolved
+    or joined against here."""
+
+    id: str
+    object_kind: str
+    object_id: str | None
+    celigo_id: str
+    field: str
+    old_value: JsonValue
+    new_value: JsonValue
+    flow_id: str | None
+    created_at: datetime
+
+
+def _config_change_out(c: CeligoConfigChange) -> CeligoConfigChangeOut:
+    return CeligoConfigChangeOut(
+        id=str(c.id),
+        object_kind=c.object_kind,
+        object_id=str(c.object_id) if c.object_id is not None else None,
+        celigo_id=c.celigo_id,
+        field=c.field,
+        old_value=c.old_value,
+        new_value=c.new_value,
+        flow_id=str(c.flow_id) if c.flow_id is not None else None,
+        created_at=c.created_at,
+    )
+
+
 class CeligoSyncStatusOut(BaseModel):
     """`last_synced_at` is the freshness cursor Task 7's nightly sync worker
     writes to `cursor_states` (`object_type="celigo_flow_map"`) ONLY after a
@@ -1578,3 +1611,106 @@ async def list_flow_errors(
         total=len(errors),
         groups=groups,
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /celigo/integrations/{id}/changes
+# ---------------------------------------------------------------------------
+
+
+@router.get("/integrations/{integration_id}/changes", response_model=list[CeligoConfigChangeOut])
+async def list_integration_changes(
+    integration_id: uuid.UUID,
+    user: Annotated[User, Depends(require_permission("connections.view"))],
+    _flag: Annotated[User, Depends(require_feature("celigo"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: int = Query(200, ge=1, le=500, description="Max changes returned, most recent first"),
+):
+    """Every drift event (Task 7) attributed to a flow under this integration,
+    newest first. Resolves the integration through the same production
+    lookup `list_integration_flows` uses (404 for another tenant's row or a
+    sandbox integration -- hidden means hidden by id too, same discipline as
+    every other route in this module), then scopes `celigo_config_changes` to
+    flows under it via `flow_id IN (...)`. A 'script'-kind change (`flow_id`
+    IS NULL -- a script can be attached from many flows or none, see the
+    model's own docstring) is therefore never returned by THIS route; it has
+    no single owning integration to attribute it to."""
+    integration = (
+        await db.execute(
+            select(CeligoIntegration).where(
+                CeligoIntegration.id == integration_id,
+                CeligoIntegration.tenant_id == user.tenant_id,
+                celigo_integration_is_production(),
+            )
+        )
+    ).scalar_one_or_none()
+    if integration is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Integration not found")
+
+    flow_ids = select(CeligoFlow.id).where(
+        CeligoFlow.tenant_id == user.tenant_id,
+        CeligoFlow.integration_id == integration_id,
+    )
+    changes = (
+        (
+            await db.execute(
+                select(CeligoConfigChange)
+                .where(
+                    CeligoConfigChange.tenant_id == user.tenant_id,
+                    CeligoConfigChange.flow_id.in_(flow_ids),
+                )
+                .order_by(CeligoConfigChange.created_at.desc(), CeligoConfigChange.id.desc())
+                .limit(limit)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [_config_change_out(c) for c in changes]
+
+
+# ---------------------------------------------------------------------------
+# GET /celigo/flows/{id}/changes
+# ---------------------------------------------------------------------------
+
+
+@router.get("/flows/{flow_id}/changes", response_model=list[CeligoConfigChangeOut])
+async def list_flow_changes(
+    flow_id: uuid.UUID,
+    user: Annotated[User, Depends(require_permission("connections.view"))],
+    _flag: Annotated[User, Depends(require_feature("celigo"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: int = Query(200, ge=1, le=500, description="Max changes returned, most recent first"),
+):
+    """This flow's own drift events (Task 7) plus its steps' ('flow' and
+    'flow_step' kinds both carry THIS flow's id -- see the model's own
+    docstring), newest first. Resolves the flow through the same production
+    join `get_flow_detail`/`list_flow_errors` use (404 for another tenant's
+    row or a flow under a sandbox integration)."""
+    flow = (
+        await db.execute(
+            _join_production_integration(select(CeligoFlow), user.tenant_id).where(
+                CeligoFlow.id == flow_id,
+                CeligoFlow.tenant_id == user.tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if flow is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Flow not found")
+
+    changes = (
+        (
+            await db.execute(
+                select(CeligoConfigChange)
+                .where(
+                    CeligoConfigChange.tenant_id == user.tenant_id,
+                    CeligoConfigChange.flow_id == flow_id,
+                )
+                .order_by(CeligoConfigChange.created_at.desc(), CeligoConfigChange.id.desc())
+                .limit(limit)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [_config_change_out(c) for c in changes]

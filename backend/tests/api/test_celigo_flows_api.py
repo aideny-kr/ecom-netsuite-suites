@@ -30,6 +30,7 @@ import pytest
 from sqlalchemy import text
 
 from app.models.celigo import (
+    CeligoConfigChange,
     CeligoErrorSignature,
     CeligoFlow,
     CeligoFlowError,
@@ -1612,3 +1613,75 @@ class TestSyncStatus:
         r = await client.get("/api/v1/celigo/sync-status", headers=headers_b)
         assert r.status_code == 200, r.text
         assert r.json()["last_synced_at"] is None, "tenant B must not see tenant A's sync cursor"
+
+
+# ---------------------------------------------------------------------------
+# GET /celigo/integrations/{id}/changes, GET /celigo/flows/{id}/changes
+# ---------------------------------------------------------------------------
+
+
+class TestChanges:
+    """Task 7 -- config-change routes. Both resolve their parent through the
+    same production join `list_integration_flows`/`get_flow_detail` use (404
+    otherwise, same as every other route in this module), tenant-scope the
+    `celigo_config_changes` rows, and order newest first (`created_at desc,
+    id desc` -- `id desc` breaks a tie deterministically when two rows land
+    in the same instant)."""
+
+    async def test_integration_and_flow_changes_newest_first(self, client, admin_user, admin_user_b, db):
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+
+        # Two `db.add` + `flush()` pairs, not one `add_all` + single flush --
+        # a single flush can leave both rows sharing one `created_at`
+        # (subsecond DB clock resolution), which would make the "newest
+        # first" assertion below flaky rather than deterministic.
+        older = CeligoConfigChange(
+            tenant_id=user.tenant_id,
+            celigo_connection_id=world["connection_id"],
+            flow_id=world["flow"].id,
+            object_kind="flow",
+            object_id=world["flow"].id,
+            celigo_id=world["flow"].celigo_id,
+            field="disabled",
+            old_value=False,
+            new_value=True,
+        )
+        db.add(older)
+        await db.flush()
+
+        newer = CeligoConfigChange(
+            tenant_id=user.tenant_id,
+            celigo_connection_id=world["connection_id"],
+            flow_id=world["flow"].id,
+            object_kind="flow_step",
+            object_id=world["step"].id,
+            celigo_id=world["step"].celigo_id,
+            field="mapping_json",
+            old_value={"a": 1},
+            new_value=["x"],
+        )
+        db.add(newer)
+        await db.flush()
+
+        r = await client.get(f"/api/v1/celigo/integrations/{world['integration'].id}/changes", headers=headers)
+        assert r.status_code == 200 and [c["field"] for c in r.json()] == ["mapping_json", "disabled"]
+        assert r.json()[0]["new_value"] == ["x"]
+
+        r = await client.get(f"/api/v1/celigo/flows/{world['flow'].id}/changes", headers=headers)
+        assert r.status_code == 200 and len(r.json()) == 2
+
+        assert (
+            await client.get(f"/api/v1/celigo/integrations/{uuid.uuid4()}/changes", headers=headers)
+        ).status_code == 404
+
+        # CONTROLLER RULING R6 (overrides the brief's literal test): every
+        # OTHER tenant-isolation test in this file enables the flag for
+        # tenant B first (see e.g. TestGetFlowDetail's own
+        # test_tenant_isolation) -- without it this request 403s on the flag
+        # and proves nothing about tenant isolation.
+        user_b, headers_b = admin_user_b
+        await enable_feature_flag(db, user_b.tenant_id, "celigo")
+        assert (
+            await client.get(f"/api/v1/celigo/flows/{world['flow'].id}/changes", headers=headers_b)
+        ).status_code == 404
