@@ -40,6 +40,22 @@ const integration = {
   mode: "settings",
   description: null,
   celigo_last_modified: null,
+  // Task 6 -- dashboard summaries (`CeligoIntegrationOut` in celigo_flows.py).
+  flow_count: 3,
+  scheduled_count: 2,
+  on_demand_count: 0,
+  paused_count: 1,
+  step_count: 11,
+  router_count: 2,
+  lookup_count: 3,
+  script_count: 3,
+  no_run_count: 2,
+  error_count: 1,
+  changes_last_24h: 0,
+  last_run_at: "2026-09-02T17:51:00+00:00",
+  writes: [{ record_type: "salesorder", count: 2 }],
+  adaptor_families: ["NetSuite", "HTTP"],
+  flow_schedules: [],
 };
 
 const healthyFlow = {

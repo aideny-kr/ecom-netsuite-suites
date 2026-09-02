@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime, timezone
 
 from app.models.celigo import CeligoScript
-from app.services.celigo.topology import count_rules, project_routers, script_family_facts, step_kind
+from app.services.celigo.topology import adaptor_family, count_rules, project_routers, script_family_facts, step_kind
 
 MULTI_SUB_RAW = {
     "routers": [
@@ -133,3 +133,19 @@ def test_script_family_facts_single_copy_has_no_letter_and_is_not_diverged():
     s = _script("solo", "h", "x", 1)
     f = script_family_facts([s])[s.id]
     assert (f.copies_count, f.versions_count, f.version_letter, f.content_diverged) == (1, 1, None, False)
+
+
+def test_adaptor_family_groups_case_insensitively_netsuite_first():
+    assert adaptor_family("NetSuiteExport") == "NetSuite"
+    assert adaptor_family("NetSuiteDistributedImport") == "NetSuite"
+    assert adaptor_family("netsuite_da") == "NetSuite"
+    assert adaptor_family("AS2Export") == "AS2"
+    assert adaptor_family("FTPImport") == "FTP"
+    assert adaptor_family("RDBMSExport") == "RDBMS"
+    assert adaptor_family("RESTImport") == "REST"
+    assert adaptor_family("HTTPExport") == "HTTP"
+
+
+def test_adaptor_family_unknown_and_none_are_none():
+    assert adaptor_family("SmartsheetExport") is None
+    assert adaptor_family(None) is None

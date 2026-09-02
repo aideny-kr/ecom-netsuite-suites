@@ -22,16 +22,6 @@ export type CeligoSchedule = string | Record<string, unknown> | unknown[] | numb
  * shape nobody has seen yet must not break the whole flow response. */
 export type CeligoJson = Record<string, unknown> | unknown[] | string | number | boolean | null;
 
-export interface CeligoIntegration {
-  id: string;
-  celigo_id: string;
-  name: string;
-  sandbox: boolean | null;
-  mode: string | null;
-  description: string | null;
-  celigo_last_modified: string | null;
-}
-
 /** One `(record_type, count)` row of a flow's write mix (`CeligoRecordWriteOut`
  * in `celigo_flows.py`) -- every record type actually POSTED from the flow
  * (a lookup export's `record_type` with no `operation` is a read, not a
@@ -40,6 +30,47 @@ export interface CeligoIntegration {
 export interface CeligoRecordWrite {
   record_type: string;
   count: number;
+}
+
+/** One row of `CeligoIntegration.flow_schedules` (`CeligoFlowScheduleOut` in
+ * `celigo_flows.py`) -- the per-flow detail behind the card's aggregate
+ * schedule counts. */
+export interface CeligoFlowSchedule {
+  id: string;
+  name: string;
+  disabled: boolean | null;
+  schedule: CeligoSchedule;
+  last_executed_at: string | null;
+}
+
+export interface CeligoIntegration {
+  id: string;
+  celigo_id: string;
+  name: string;
+  sandbox: boolean | null;
+  mode: string | null;
+  description: string | null;
+  celigo_last_modified: string | null;
+  /** Task 6 -- dashboard summaries, each a grouped query server-side across
+   * every integration at once (never N+1) -- see `CeligoIntegrationOut`'s
+   * docstring (backend/app/api/v1/celigo_flows.py) for what each one counts
+   * and why `scheduled_count + on_demand_count + paused_count ===
+   * flow_count` always. */
+  flow_count: number;
+  scheduled_count: number;
+  on_demand_count: number;
+  paused_count: number;
+  step_count: number;
+  router_count: number;
+  lookup_count: number;
+  script_count: number;
+  no_run_count: number;
+  error_count: number;
+  changes_last_24h: number;
+  last_run_at: string | null;
+  writes: CeligoRecordWrite[];
+  adaptor_families: string[];
+  flow_schedules: CeligoFlowSchedule[];
 }
 
 export interface CeligoFlowSummary {

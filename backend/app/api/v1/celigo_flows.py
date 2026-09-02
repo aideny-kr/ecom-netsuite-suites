@@ -51,13 +51,14 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, JsonValue
-from sqlalchemy import and_, case, distinct, func, select
+from sqlalchemy import and_, case, distinct, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.connector_status import _get_celigo_connection
 from app.core.database import get_db
 from app.core.dependencies import require_feature, require_permission
 from app.models.celigo import (
+    CeligoConfigChange,
     CeligoErrorSignature,
     CeligoFlow,
     CeligoFlowError,
@@ -66,13 +67,20 @@ from app.models.celigo import (
     CeligoScript,
     CeligoScriptAttachment,
     celigo_error_is_open,
+    celigo_flow_is_on_demand,
     celigo_integration_is_production,
     celigo_script_is_production,
 )
 from app.models.pipeline import CursorState
 from app.models.user import User
 from app.services.celigo.repository import list_logical_scripts
-from app.services.celigo.topology import ScriptFamilyFact, project_routers, script_family_facts, step_kind
+from app.services.celigo.topology import (
+    ScriptFamilyFact,
+    adaptor_family,
+    project_routers,
+    script_family_facts,
+    step_kind,
+)
 
 router = APIRouter(prefix="/celigo", tags=["celigo"])
 
@@ -120,7 +128,48 @@ def _parse_iso(value: object) -> datetime | None:
         return None
 
 
+class CeligoFlowScheduleOut(BaseModel):
+    """One row of `CeligoIntegrationOut.flow_schedules` -- the per-flow detail
+    behind the integration card's aggregate schedule counts, so the frontend
+    can list "which flows are on demand / paused / on what cron" without a
+    second call per integration."""
+
+    id: str
+    name: str
+    disabled: bool | None
+    schedule: CeligoSchedule
+    last_executed_at: datetime | None
+
+
 class CeligoIntegrationOut(BaseModel):
+    """Task 6 -- one request for the whole dashboard: every flow-schedule
+    bucket, topology/script/write aggregate, and open-error/config-change
+    count for this integration, each computed with one GROUP BY query across
+    every integration at once (never N+1 per integration).
+
+    `flow_count`/`paused_count`/`on_demand_count`/`scheduled_count` partition
+    every flow under the integration into exactly one bucket: `disabled IS
+    TRUE` is paused regardless of its schedule; among the rest, `celigo_flow_
+    is_on_demand()` (models.py) decides on-demand vs scheduled -- so
+    `scheduled_count + on_demand_count + paused_count == flow_count` always,
+    by construction (each bucket's SQL filter is mutually exclusive with the
+    other two, not derived by subtraction). `no_run_count` is flows whose
+    `last_executed_at` is NULL; `last_run_at` is the MAX across all of them.
+    `step_count`/`router_count`/`lookup_count` mirror `CeligoFlowSummaryOut`'s
+    same-named fields, rolled up to the integration. `writes` and
+    `adaptor_families` are set-level, not per-flow: `writes` sums a
+    `(record_type, count)` pair across every flow in the integration (same
+    write definition as `CeligoFlowSummaryOut.writes` --
+    `record_type IS NOT NULL AND operation IS NOT NULL`); `adaptor_families`
+    is the DISTINCT set of `topology.adaptor_family(adaptor_type)` results
+    across every step in the integration, dropping `None`. `script_count` is
+    DISTINCT production scripts attached anywhere in the integration.
+    `error_count` is OPEN (`celigo_error_is_open()`); `changes_last_24h` is
+    `celigo_config_changes` rows in the last rolling 24h -- a coarse "has
+    anything drifted recently" signal, not itself a health verdict.
+    `flow_schedules` is a second, plain per-flow projection (no aggregation)
+    for a drill-down list, not the buckets above."""
+
     id: str
     celigo_id: str
     name: str
@@ -128,6 +177,21 @@ class CeligoIntegrationOut(BaseModel):
     mode: str | None
     description: str | None
     celigo_last_modified: datetime | None
+    flow_count: int
+    scheduled_count: int
+    on_demand_count: int
+    paused_count: int
+    step_count: int
+    router_count: int
+    lookup_count: int
+    script_count: int
+    no_run_count: int
+    error_count: int
+    changes_last_24h: int
+    last_run_at: datetime | None
+    writes: list[CeligoRecordWriteOut]
+    adaptor_families: list[str]
+    flow_schedules: list[CeligoFlowScheduleOut]
 
 
 class CeligoRecordWriteOut(BaseModel):
@@ -476,18 +540,227 @@ async def list_integrations(
         .scalars()
         .all()
     )
-    return [
-        CeligoIntegrationOut(
-            id=str(i.id),
-            celigo_id=i.celigo_id,
-            name=i.name,
-            sandbox=i.sandbox,
-            mode=i.mode,
-            description=i.description,
-            celigo_last_modified=i.celigo_last_modified,
+    if not integrations:
+        return []
+
+    integration_ids = [i.id for i in integrations]
+
+    # Flow-schedule buckets: ONE grouped query, every bucket its own SQL
+    # filter (not derived by subtraction) so `scheduled_count + on_demand_count
+    # + paused_count == flow_count` holds by construction -- a flow can never
+    # land in more than one bucket's filter, or in none. `disabled IS TRUE`
+    # wins first regardless of schedule shape (a paused flow's schedule is
+    # irrelevant to the operator); `celigo_flow_is_on_demand()` (models.py)
+    # decides on-demand vs scheduled only among the rest.
+    on_demand_pred = celigo_flow_is_on_demand()
+    not_paused = CeligoFlow.disabled.isnot(True)
+    bucket_rows = (
+        await db.execute(
+            select(
+                CeligoFlow.integration_id,
+                func.count().label("flow_count"),
+                func.count().filter(CeligoFlow.disabled.is_(True)).label("paused_count"),
+                func.count().filter(and_(not_paused, on_demand_pred)).label("on_demand_count"),
+                func.count().filter(and_(not_paused, ~on_demand_pred)).label("scheduled_count"),
+                func.count().filter(CeligoFlow.last_executed_at.is_(None)).label("no_run_count"),
+                func.max(CeligoFlow.last_executed_at).label("last_run_at"),
+            )
+            .where(CeligoFlow.tenant_id == user.tenant_id, CeligoFlow.integration_id.in_(integration_ids))
+            .group_by(CeligoFlow.integration_id)
         )
-        for i in integrations
-    ]
+    ).all()
+    buckets_by_integration = {row.integration_id: row for row in bucket_rows}
+
+    # Per-flow schedule list -- a second, PLAIN (non-aggregated) projection
+    # for the drill-down list; the buckets above never touch this query.
+    schedule_rows = (
+        await db.execute(
+            select(
+                CeligoFlow.integration_id,
+                CeligoFlow.id,
+                CeligoFlow.name,
+                CeligoFlow.disabled,
+                CeligoFlow.schedule,
+                CeligoFlow.last_executed_at,
+            )
+            .where(CeligoFlow.tenant_id == user.tenant_id, CeligoFlow.integration_id.in_(integration_ids))
+            .order_by(CeligoFlow.name)
+        )
+    ).all()
+    schedules_by_integration: dict[uuid.UUID, list[CeligoFlowScheduleOut]] = defaultdict(list)
+    for row in schedule_rows:
+        schedules_by_integration[row.integration_id].append(
+            CeligoFlowScheduleOut(
+                id=str(row.id),
+                name=row.name,
+                disabled=row.disabled,
+                schedule=row.schedule,
+                last_executed_at=row.last_executed_at,
+            )
+        )
+
+    # Topology rollup (step/router/lookup counts) -- same Lookup rule as
+    # `list_integration_flows`'s topo query (a processor whose adaptor is an
+    # export), grouped by integration instead of by flow. Explicit tenant
+    # scope on BOTH joined tables, same discipline as every other join here.
+    topo_rows = (
+        await db.execute(
+            select(
+                CeligoFlow.integration_id,
+                func.count().label("steps"),
+                func.count(distinct(CeligoFlowStep.router_id)).label("routers"),
+                func.count()
+                .filter(and_(CeligoFlowStep.role == "processor", CeligoFlowStep.adaptor_type.ilike("%export")))
+                .label("lookups"),
+            )
+            .select_from(CeligoFlowStep)
+            .join(CeligoFlow, CeligoFlow.id == CeligoFlowStep.flow_id)
+            .where(
+                CeligoFlowStep.tenant_id == user.tenant_id,
+                CeligoFlow.tenant_id == user.tenant_id,
+                CeligoFlow.integration_id.in_(integration_ids),
+            )
+            .group_by(CeligoFlow.integration_id)
+        )
+    ).all()
+    topo_by_integration = {row.integration_id: (row.steps, row.routers, row.lookups) for row in topo_rows}
+
+    # Adaptor families -- DISTINCT adaptor_type per integration, mapped to a
+    # coarse family in Python (`topology.adaptor_family`) and deduped there;
+    # not a SQL-level aggregate because the family mapping is a Python rule,
+    # not a column.
+    adaptor_type_rows = (
+        await db.execute(
+            select(CeligoFlow.integration_id, CeligoFlowStep.adaptor_type)
+            .distinct()
+            .select_from(CeligoFlowStep)
+            .join(CeligoFlow, CeligoFlow.id == CeligoFlowStep.flow_id)
+            .where(
+                CeligoFlowStep.tenant_id == user.tenant_id,
+                CeligoFlow.tenant_id == user.tenant_id,
+                CeligoFlow.integration_id.in_(integration_ids),
+            )
+        )
+    ).all()
+    families_by_integration: dict[uuid.UUID, set[str]] = defaultdict(set)
+    for row in adaptor_type_rows:
+        family = adaptor_family(row.adaptor_type)
+        if family:
+            families_by_integration[row.integration_id].add(family)
+
+    # Write mix -- same definition as `CeligoFlowSummaryOut.writes`
+    # (`record_type IS NOT NULL AND operation IS NOT NULL`), rolled up to the
+    # integration instead of the flow.
+    write_rows = (
+        await db.execute(
+            select(CeligoFlow.integration_id, CeligoFlowStep.record_type, func.count().label("write_count"))
+            .select_from(CeligoFlowStep)
+            .join(CeligoFlow, CeligoFlow.id == CeligoFlowStep.flow_id)
+            .where(
+                CeligoFlowStep.tenant_id == user.tenant_id,
+                CeligoFlow.tenant_id == user.tenant_id,
+                CeligoFlow.integration_id.in_(integration_ids),
+                CeligoFlowStep.record_type.isnot(None),
+                CeligoFlowStep.operation.isnot(None),
+            )
+            .group_by(CeligoFlow.integration_id, CeligoFlowStep.record_type)
+            .order_by(func.count().desc(), CeligoFlowStep.record_type)
+        )
+    ).all()
+    writes_by_integration: dict[uuid.UUID, list[CeligoRecordWriteOut]] = defaultdict(list)
+    for row in write_rows:
+        writes_by_integration[row.integration_id].append(
+            CeligoRecordWriteOut(record_type=row.record_type, count=row.write_count)
+        )
+
+    # Scripts -- DISTINCT production script ids attached anywhere in the
+    # integration (`celigo_script_is_production()`, tenant-scoped on every
+    # joined table, same as `list_integration_flows`'s equivalent query).
+    scripts_rows = (
+        await db.execute(
+            select(CeligoFlow.integration_id, func.count(distinct(CeligoScriptAttachment.script_id)).label("scripts"))
+            .select_from(CeligoScriptAttachment)
+            .join(CeligoFlow, CeligoFlow.id == CeligoScriptAttachment.flow_id)
+            .join(CeligoScript, CeligoScript.id == CeligoScriptAttachment.script_id)
+            .where(
+                CeligoScriptAttachment.tenant_id == user.tenant_id,
+                CeligoFlow.tenant_id == user.tenant_id,
+                CeligoScript.tenant_id == user.tenant_id,
+                CeligoFlow.integration_id.in_(integration_ids),
+                celigo_script_is_production(),
+            )
+            .group_by(CeligoFlow.integration_id)
+        )
+    ).all()
+    scripts_by_integration = {row.integration_id: row.scripts for row in scripts_rows}
+
+    # Open errors -- single-sourced via `celigo_error_is_open()`, same rule as
+    # every other open-error count in this module.
+    error_rows = (
+        await db.execute(
+            select(CeligoFlow.integration_id, func.count().label("errors"))
+            .select_from(CeligoFlowError)
+            .join(CeligoFlow, CeligoFlow.id == CeligoFlowError.flow_id)
+            .where(
+                CeligoFlowError.tenant_id == user.tenant_id,
+                CeligoFlow.tenant_id == user.tenant_id,
+                CeligoFlow.integration_id.in_(integration_ids),
+                celigo_error_is_open(),
+            )
+            .group_by(CeligoFlow.integration_id)
+        )
+    ).all()
+    errors_by_integration = {row.integration_id: row.errors for row in error_rows}
+
+    # Config changes in the last rolling 24h -- a coarse "something drifted
+    # recently" signal, not a health verdict on its own.
+    change_rows = (
+        await db.execute(
+            select(CeligoFlow.integration_id, func.count().label("changes"))
+            .select_from(CeligoConfigChange)
+            .join(CeligoFlow, CeligoFlow.id == CeligoConfigChange.flow_id)
+            .where(
+                CeligoConfigChange.tenant_id == user.tenant_id,
+                CeligoFlow.tenant_id == user.tenant_id,
+                CeligoFlow.integration_id.in_(integration_ids),
+                CeligoConfigChange.created_at >= func.now() - text("interval '24 hours'"),
+            )
+            .group_by(CeligoFlow.integration_id)
+        )
+    ).all()
+    changes_by_integration = {row.integration_id: row.changes for row in change_rows}
+
+    out: list[CeligoIntegrationOut] = []
+    for i in integrations:
+        bucket = buckets_by_integration.get(i.id)
+        steps, routers, lookups = topo_by_integration.get(i.id, (0, 0, 0))
+        out.append(
+            CeligoIntegrationOut(
+                id=str(i.id),
+                celigo_id=i.celigo_id,
+                name=i.name,
+                sandbox=i.sandbox,
+                mode=i.mode,
+                description=i.description,
+                celigo_last_modified=i.celigo_last_modified,
+                flow_count=bucket.flow_count if bucket else 0,
+                scheduled_count=bucket.scheduled_count if bucket else 0,
+                on_demand_count=bucket.on_demand_count if bucket else 0,
+                paused_count=bucket.paused_count if bucket else 0,
+                step_count=steps,
+                router_count=routers,
+                lookup_count=lookups,
+                script_count=scripts_by_integration.get(i.id, 0),
+                no_run_count=bucket.no_run_count if bucket else 0,
+                error_count=errors_by_integration.get(i.id, 0),
+                changes_last_24h=changes_by_integration.get(i.id, 0),
+                last_run_at=bucket.last_run_at if bucket else None,
+                writes=writes_by_integration.get(i.id, []),
+                adaptor_families=sorted(families_by_integration.get(i.id, set())),
+                flow_schedules=schedules_by_integration.get(i.id, []),
+            )
+        )
+    return out
 
 
 # ---------------------------------------------------------------------------

@@ -527,6 +527,32 @@ class TestListIntegrations:
         assert len(body) == 1
         assert body[0]["id"] == str(world_b["integration"].id), "tenant B must not see tenant A's integration"
 
+    async def test_lists_summary_counts_writes_families_and_flow_schedules(self, client, admin_user, db):
+        """Task 6: one request carries every dashboard summary the integration
+        card needs -- flow-schedule buckets, topology/script aggregates, the
+        write mix, and the per-flow schedule list -- so the list page never
+        makes N follow-up calls per integration."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        chain = await _seed_router_chain_flow(db, world)
+        paused = await _seed_cron_flow(db, world, name="Paused one")
+        paused.disabled = True
+        await db.flush()
+
+        r = await client.get("/api/v1/celigo/integrations", headers=headers)
+        assert r.status_code == 200, r.text
+        row = next(i for i in r.json() if i["id"] == str(world["integration"].id))
+        assert row["flow_count"] == 3 and row["paused_count"] == 1 and row["scheduled_count"] >= 1
+        assert row["scheduled_count"] + row["on_demand_count"] + row["paused_count"] == row["flow_count"]
+        assert row["step_count"] >= 10 and row["router_count"] >= 2 and row["lookup_count"] >= 3
+        assert row["script_count"] >= 2 and row["error_count"] >= 0 and row["changes_last_24h"] == 0
+        assert row["last_run_at"].startswith("2026-09-02T17:51")
+        assert {"record_type": "salesorder", "count": 2} in row["writes"]
+        assert "NetSuite" in row["adaptor_families"] and "HTTP" in row["adaptor_families"]
+        sched = next(f for f in row["flow_schedules"] if f["id"] == str(chain["flow"].id))
+        assert sched["disabled"] is False and sched["schedule"].startswith("? 5,20,35,50")
+        assert sched["last_executed_at"] is not None
+
 
 # ---------------------------------------------------------------------------
 # GET /celigo/integrations/{id}/flows

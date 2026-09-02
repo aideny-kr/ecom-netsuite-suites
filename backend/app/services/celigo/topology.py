@@ -14,6 +14,28 @@ from dataclasses import dataclass
 from app.models.celigo import CeligoScript
 
 
+def adaptor_family(adaptor_type: str | None) -> str | None:
+    """Coarse connector family for the dashboard's per-integration
+    `adaptor_families` list -- Celigo's own `adaptor_type` values are
+    connector-and-direction-specific (`NetSuiteExport`,
+    `NetSuiteDistributedImport`, `HTTPExport`, ...); this collapses them to
+    the vendor/protocol a person recognizes. Checked in this order so a name
+    containing more than one keyword resolves the same way every time:
+    NetSuite first (its own import variants would otherwise also match no
+    other keyword, so order doesn't matter for it, but it reads first as the
+    dominant connector on this account), then AS2, FTP, RDBMS, REST, HTTP.
+    `None` for an unmapped or absent adaptor_type -- never invented."""
+    if not adaptor_type:
+        return None
+    lowered = adaptor_type.lower()
+    if "netsuite" in lowered:
+        return "NetSuite"
+    for keyword, family in (("as2", "AS2"), ("ftp", "FTP"), ("rdbms", "RDBMS"), ("rest", "REST"), ("http", "HTTP")):
+        if keyword in lowered:
+            return family
+    return None
+
+
 def step_kind(role: str, adaptor_type: str | None) -> str:
     """Celigo's own vocabulary: Source (generator), Lookup (a processor that is an
     export), Destination (any other processor)."""
