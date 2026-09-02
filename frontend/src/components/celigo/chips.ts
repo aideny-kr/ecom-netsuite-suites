@@ -55,7 +55,7 @@ function filterChip(slot: "input_filter" | "output_filter", filterJson: CeligoJs
 
 function responseMappingChip(mappingJson: CeligoJson): Chip {
   const n = mappingFieldsCount(mappingJson);
-  if (n === null) return { slot: "response_mapping", state: "none", label: "no response mapping" };
+  if (n === null) return { slot: "response_mapping", state: "none", label: "no resp. map" };
   return { slot: "response_mapping", state: "configured", label: `⇄ response · ${n} field${n === 1 ? "" : "s"}` };
 }
 
@@ -106,7 +106,7 @@ export function affordanceChips(step: CeligoFlowStep): Chip[] {
       return [
         filterChip("input_filter", step.filter_json, "no input filter"),
         NS_MAPPING_CHIP,
-        { slot: "response_mapping", state: "none", label: "no response mapping" },
+        { slot: "response_mapping", state: "none", label: "no resp. map" },
         hooks,
       ];
   }
