@@ -2219,7 +2219,23 @@ class BaseSpecialistAgent(abc.ABC):
                                 # produced the T2 blocker — it stamped
                                 # `.fields`, which excludes line sublists, and
                                 # posted salesOrders header-only.
-                                block.input, _idem_key = stamp_tool_input(block.input, batch_id=None, row_index=None)
+                                block.input, _idem_key = stamp_tool_input(
+                                    block.input,
+                                    batch_id=None,
+                                    row_index=None,
+                                    # The key must identify the WORK, not just
+                                    # the payload: a customer and a vendor
+                                    # named "Acme" are different writes, and
+                                    # the same payload sent to sandbox vs
+                                    # production is not the same write either.
+                                    # Omitting these silently collapses both
+                                    # onto one externalId — NetSuite refuses
+                                    # the second, and a duplicate refusal
+                                    # classifies as WRITTEN.
+                                    connector_id=str(_connector_id_for_idem) if _connector_id_for_idem else None,
+                                    record_type=record_type,
+                                    mutation_type=mutation_type,
+                                )
                             except Exception:
                                 # Never fail a card over a key. Without it the
                                 # write is exactly as (un)recoverable as it was

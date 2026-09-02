@@ -22,7 +22,7 @@ import re
 import uuid
 from typing import Any
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.models.write_side_effect import WriteSideEffect
@@ -87,7 +87,19 @@ async def record_attempt(
         )
         .on_conflict_do_update(
             constraint="uq_write_side_effect_tenant_key",
-            set_={"payload_json": payload},
+            set_={
+                "payload_json": payload,
+                # Core-level pg_insert bypasses the ORM unit of work, so
+                # TimestampMixin's onupdate never fires — an upserted row would
+                # keep its original updated_at and look untouched.
+                "updated_at": func.now(),
+                # A caller-supplied externalId can legitimately be re-sent to a
+                # DIFFERENT connector (our own keys can't — connector_id
+                # participates in them). Refresh it, or the row would keep
+                # pointing at the account the FIRST attempt used, which is the
+                # one value reconciliation cannot afford to have wrong.
+                "connector_id": connector_id,
+            },
             where=WriteSideEffect.__table__.c.status == SideEffectStatus.ATTEMPTED.value,
         )
     )
@@ -107,41 +119,66 @@ async def settle_from_result(
     """
     status = classify_retry_result(raw_result, idempotency_key=idempotency_key)
 
-    row = (
+    last = (raw_result or "")[:8000]
+    if status is SideEffectStatus.ATTEMPTED:
+        # No definite answer. Record WHAT we could not read — that text is what
+        # a human resolving the row has to work from — but leave the status
+        # exactly where it is.
         await db.execute(
-            select(WriteSideEffect).where(
+            update(WriteSideEffect)
+            .where(
                 WriteSideEffect.tenant_id == tenant_id,
                 WriteSideEffect.idempotency_key == idempotency_key,
             )
+            .values(last_result=last, updated_at=func.now())
         )
-    ).scalar_one_or_none()
-    if row is None:
         return status
 
-    row.last_result = (raw_result or "")[:8000]
-    if status is SideEffectStatus.ATTEMPTED:
-        return status  # unchanged on purpose — no definite answer arrived
-
-    if row.status != SideEffectStatus.ATTEMPTED.value:
-        # Already settled. A definite answer is FINAL: a late or replayed
-        # settlement must not rewrite a recorded outcome (and its NetSuite
-        # record id) after the fact. Returns what the row actually says, not
-        # what this late message claimed.
-        return SideEffectStatus(row.status)
-
-    row.status = status.value
+    record_id = None
     if status is SideEffectStatus.WRITTEN:
         import json
 
         try:
             parsed = json.loads(raw_result)
             rid = parsed.get("recordId") or parsed.get("id") or parsed.get("internalId")
-            if rid:
-                row.netsuite_record_id = str(rid)
+            record_id = str(rid) if rid else None
         except Exception:
             # A duplicate-refusal carries no id. The row is still 'written' —
             # reconciliation can recover the id by externalId when needed.
-            pass
+            record_id = None
+
+    values: dict[str, Any] = {"status": status.value, "last_result": last, "updated_at": func.now()}
+    if record_id is not None:
+        values["netsuite_record_id"] = record_id
+
+    # ONE guarded UPDATE. The `status = 'attempted'` predicate lives in the
+    # WHERE clause so the DATABASE decides who wins — a definite answer is
+    # final, and a late or replayed settlement cannot rewrite it. Doing this as
+    # SELECT-check-mutate in Python let two settlements on separate sessions
+    # both read 'attempted' and both proceed; since settlement now runs on an
+    # ISOLATED session, that race is an ordinary path rather than a theoretical
+    # one.
+    result = await db.execute(
+        update(WriteSideEffect)
+        .where(
+            WriteSideEffect.tenant_id == tenant_id,
+            WriteSideEffect.idempotency_key == idempotency_key,
+            WriteSideEffect.status == SideEffectStatus.ATTEMPTED.value,
+        )
+        .values(**values)
+    )
+    if result.rowcount == 0:
+        # Either no such row, or it was already settled. Report what the row
+        # actually says rather than what this late message claimed.
+        existing = (
+            await db.execute(
+                select(WriteSideEffect.status).where(
+                    WriteSideEffect.tenant_id == tenant_id,
+                    WriteSideEffect.idempotency_key == idempotency_key,
+                )
+            )
+        ).scalar_one_or_none()
+        return SideEffectStatus(existing) if existing else status
     return status
 
 

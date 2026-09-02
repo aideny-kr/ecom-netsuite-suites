@@ -441,3 +441,54 @@ async def test_concurrent_identical_attempts_do_not_lose_the_log(db):
         await db.execute(text("SELECT count(*) FROM write_side_effects WHERE idempotency_key='ss-idem-race'"))
     ).scalar()
     assert n == 1, "one row for one key — and both callers got a usable log"
+
+
+async def test_settle_is_atomic_against_a_concurrent_settle(db):
+    """T2 gate round 3. The guarded transition lived in Python — SELECT, check
+    status, mutate, let the caller commit. Two settlements racing on separate
+    connections both read 'attempted', both pass the check, and the later
+    commit wins. Since settlements now run on ISOLATED sessions, that race is
+    reachable in the ordinary path, not just in theory.
+
+    The guard belongs in the UPDATE's WHERE clause, where the database decides.
+    """
+    await record_attempt(
+        db,
+        tenant_id=_TENANT,
+        idempotency_key="ss-idem-atomic",
+        record_type="customer",
+        mutation_type="create",
+        payload={"externalId": "ss-idem-atomic"},
+        correlation_id="c1",
+    )
+    await db.commit()
+
+    engine_a = create_async_engine(DRILL_URL)
+    engine_b = create_async_engine(DRILL_URL)
+    maker_a = async_sessionmaker(engine_a, expire_on_commit=False)
+    maker_b = async_sessionmaker(engine_b, expire_on_commit=False)
+
+    async def settle(maker, raw):
+        async with maker() as s:
+            out = await settle_from_result(s, tenant_id=_TENANT, idempotency_key="ss-idem-atomic", raw_result=raw)
+            await s.commit()
+            return out
+
+    # A success and a rejection arrive at the same instant.
+    await asyncio.gather(
+        settle(maker_a, json.dumps({"success": True, "recordId": "5264999"})),
+        settle(maker_b, json.dumps({"error": "Please enter value(s) for: Subsidiary."})),
+        return_exceptions=True,
+    )
+    await engine_a.dispose()
+    await engine_b.dispose()
+
+    rows = (
+        (await db.execute(text("SELECT status FROM write_side_effects WHERE idempotency_key='ss-idem-atomic'")))
+        .scalars()
+        .all()
+    )
+    assert len(rows) == 1
+    # Either outcome may win the race — what must NOT happen is a row left in
+    # 'attempted' (both refused) or one that flipped twice.
+    assert rows[0] in ("written", "rejected")

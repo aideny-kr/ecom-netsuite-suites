@@ -402,3 +402,104 @@ class TestMutationPrefetchGuardSkipsNonNetSuite:
         payload = confirmations[0]
         assert payload["mutation_type"] == "upsert"
         assert payload["tool_name"] == _ext("upsert_flow")
+
+
+# ---------------------------------------------------------------------------
+# The idempotency key, asserted AT THE CALL SITE.
+#
+# T2 gate round 3, BLOCKER. Round 2 gave build_idempotency_key a full work
+# identity (connector, record type, mutation type, ...) and 8 unit tests
+# pinning each input. Every one passed. But the production call site in
+# base_agent.py still called `stamp_tool_input(block.input, batch_id=None,
+# row_index=None)` — an edit that silently didn't apply — so in the running
+# system NONE of that identity participated and the collisions were exactly as
+# live as before the "fix".
+#
+# The unit tests could not catch it: they call the helper directly with
+# explicit kwargs, so they test the helper's contract, never the wiring. This
+# test drives the REAL card-building path and asserts on the payload a human
+# would actually be shown and sign.
+# ---------------------------------------------------------------------------
+
+
+async def _external_id_from_card(record_type: str, payload: dict, connector_hex: str) -> str:
+    """Build a real confirmation card through run_streaming; return its externalId.
+
+    The turn does what a real one does: calls ns_getRecordTypeMetadata FIRST
+    (the investigation gate bounces an unexamined create), then proposes the
+    write. Without that first hop no card is ever emitted, which is the same
+    gate that made the card appear only 1-in-3 times in an earlier session.
+    """
+    agent = UnifiedAgent(tenant_id=uuid.uuid4(), user_id=uuid.uuid4(), correlation_id=str(uuid.uuid4()))
+    meta_block = ToolUseBlock(
+        id="tu_meta",
+        name=f"ext__{connector_hex}__ns_getRecordTypeMetadata",
+        input={"recordType": record_type},
+    )
+    write_block = ToolUseBlock(
+        id="tu_1",
+        name=f"ext__{connector_hex}__ns_createRecord",
+        input={"recordType": record_type, "data": json.dumps(payload)},
+    )
+
+    mock_adapter = MagicMock()
+    mock_adapter.stream_message = _stream_replay(
+        [
+            _llm_response(tool_blocks=[meta_block]),
+            _llm_response(tool_blocks=[write_block]),
+            _llm_response(text="Done."),
+        ]
+    )
+    mock_adapter.build_assistant_message = MagicMock(return_value={"role": "assistant", "content": []})
+    mock_adapter.build_tool_result_message = MagicMock(return_value={"role": "user", "content": []})
+
+    meta_result = json.dumps({"fields": [{"id": "companyName", "label": "Company Name", "mandatory": True}]})
+
+    with (
+        patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
+        patch(
+            "app.services.chat.tools.execute_tool_call",
+            AsyncMock(return_value=meta_result),
+        ),
+    ):
+        events = [
+            e
+            async for e in BaseSpecialistAgent.run_streaming(
+                agent,
+                task=f"create a {record_type}",
+                context={},
+                db=AsyncMock(spec=AsyncSession),
+                adapter=mock_adapter,
+                model="claude-sonnet-4-20250514",
+            )
+        ]
+
+    cards = [p for t, p in events if t == "confirmation_required"]
+    assert len(cards) == 1, f"expected one card, got event types {[t for t, _ in events]}"
+    sent = json.loads(cards[0]["tool_input"]["data"])
+    assert "externalId" in sent, f"card payload was never stamped: {sent}"
+    return sent["externalId"]
+
+
+class TestTheStampedCardCarriesTheWorkIdentity:
+    _HEX_A = "a1b2c3d4e5f67890a1b2c3d4e5f67890"
+    _HEX_B = "ffffffffffffffffffffffffffffffff"
+
+    @pytest.mark.asyncio
+    async def test_different_record_types_get_different_external_ids(self):
+        """A customer and a vendor named 'Acme' are different work. Colliding
+        makes NetSuite refuse the second, which classifies as WRITTEN — so we
+        would report a vendor created that never existed."""
+        body = {"companyName": "Acme"}
+        cust = await _external_id_from_card("customer", body, self._HEX_A)
+        vend = await _external_id_from_card("vendor", body, self._HEX_A)
+        assert cust != vend, "record_type must reach the key from the real call site"
+
+    @pytest.mark.asyncio
+    async def test_different_connectors_get_different_external_ids(self):
+        """The same payload sent to sandbox and to production is not the same
+        write, and the connector is what decides which account receives it."""
+        body = {"companyName": "Acme"}
+        a = await _external_id_from_card("customer", body, self._HEX_A)
+        b = await _external_id_from_card("customer", body, self._HEX_B)
+        assert a != b, "connector_id must reach the key from the real call site"

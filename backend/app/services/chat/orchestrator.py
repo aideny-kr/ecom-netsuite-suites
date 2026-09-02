@@ -2220,7 +2220,13 @@ async def run_chat_turn(
                             connector_id=str(_conn_for_idem) if _conn_for_idem else None,
                             record_type=_so.get("record_type"),
                             mutation_type=_so.get("mutation_type"),
-                            record_id=str(tool_input.get("recordId") or "") or None,
+                            # record_id from the SAME source the card used
+                            # (normalize_write_payload, which reads tool_input
+                            # "id" or the payload's own "id"). Reading
+                            # `tool_input["recordId"]` here instead made the
+                            # orchestrator derive a DIFFERENT key than the one
+                            # stamped on the card for identical work.
+                            record_id=_norm_se(tool_input).record_id if _se_payload else None,
                         )
                     )
                     # ISOLATED SESSION — the log shares no transactional fate
