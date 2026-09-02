@@ -896,6 +896,50 @@ class TestScriptContentIsFetchedPerScript:
         assert row.content_hash == before
 
 
+class TestAnEmptiedScriptIsObserved:
+    """GATE (PR #217, round 2): "no body in the response" and "the body is
+    empty" are different facts. A per-id GET that returns `content: ""` is a
+    script someone cleared in Celigo -- a real edit that must land (and be
+    hashed) rather than be counted as missing and leave the old source in
+    place forever. Only an ABSENT `content` key is the no-body case."""
+
+    async def test_content_cleared_to_empty_string_is_stored_not_dropped(self, db: AsyncSession, monkeypatch):
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+        await upsert_script(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            sanitized={"_id": "scr_cleared", "name": "Cleared", "content": "function old() { return 1; }"},
+        )
+        await db.flush()
+
+        async def _fetch_emptied(kind, celigo_id, *, token, region="us", client=None, **kw):
+            return {"_id": celigo_id, "name": "Cleared", "content": "", "sandbox": False}
+
+        summary = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            get_resource=_fetch_emptied,
+            integrations=[_raw_integration("int_prod", name="Production", sandbox=False)],
+            flows=[_raw_flow("flow_prod", integration_id="int_prod", export_id="exp_1")],
+            scripts=[{"_id": "scr_cleared", "name": "Cleared"}],
+        )
+
+        assert summary.scripts_without_content == 0, "an empty body is a body, not a missing one"
+        row = (
+            await db.execute(
+                text(
+                    "SELECT content, content_hash FROM celigo_scripts WHERE tenant_id = :t AND celigo_id = 'scr_cleared'"
+                ).bindparams(t=tenant.id)
+            )
+        ).one()
+        assert row.content == ""
+        assert row.content_hash is not None
+
+
 class TestDriftDetection:
     async def test_first_sync_of_a_flow_records_no_drift(self, db: AsyncSession, monkeypatch):
         tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")

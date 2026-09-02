@@ -796,8 +796,14 @@ async def sync_flow_map_for_connection(
             # ones never reach this line. `get_resource` sanitizes.
             fetched = await get_resource("script", celigo_id, token=token, region=region, client=http)
             fetched_content = fetched.get("content")
-            if isinstance(fetched_content, str) and fetched_content:
+            if isinstance(fetched_content, str):
+                # An EMPTY string is a body too -- someone cleared the script
+                # in Celigo, and that edit must land and be hashed. Only an
+                # ABSENT key is the no-body case (gate round 2). The body and
+                # its timestamp come from the same object.
                 script = {**script, "content": fetched_content}
+                if "lastModified" in fetched:
+                    script["lastModified"] = fetched["lastModified"]
             else:
                 summary.scripts_without_content += 1
             existing_script = await _get_existing_script(
