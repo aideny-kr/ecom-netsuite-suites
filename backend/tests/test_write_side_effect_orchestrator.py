@@ -290,3 +290,26 @@ async def test_a_side_effect_log_failure_does_not_poison_the_session(db):
     assert msg.structured_output["status"] == "approved"
     # ...and nothing was logged, since logging is what failed.
     assert await unsettled_for_tenant(db, tenant_id=_TENANT_ID) == []
+
+
+async def test_the_row_records_which_connector_the_write_went_to(db):
+    """T2 gate round 2. Every row was persisted with connector_id=NULL, while
+    the model's own docstring said "a write is only reconcilable against the
+    connector it was sent to — the same value that decides sandbox vs
+    production". For a tenant with both, an unsettled row gave a resume path no
+    way to know which account to ask."""
+    session, msg = await _seed_pending_write(
+        db,
+        {"recordType": "customer", "data": json.dumps({"companyName": "Drill Connector Co"})},
+    )
+
+    await _approve(
+        db,
+        session,
+        msg,
+        json.dumps({"error": "exceeded 60-second timeout limit", INDETERMINATE_KEY: True}),
+    )
+
+    row = (await unsettled_for_tenant(db, tenant_id=_TENANT_ID))[0]
+    assert row.connector_id is not None, "the row must say which account it was sent to"
+    assert str(row.connector_id) == "a1b2c3d4-e5f6-7890-a1b2-c3d4e5f67890"

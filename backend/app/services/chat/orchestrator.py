@@ -2196,10 +2196,32 @@ async def run_chat_turn(
                         # real parse bug still surfaces.
                         _se_payload = {}
 
+                    # Which account this write is aimed at. It participates
+                    # in the key (sandbox and production are not the same
+                    # write) AND is stored on the row, because a write is only
+                    # reconcilable against the connector it was sent to — the
+                    # model's own docstring says so, and nothing was setting it.
+                    _conn_for_idem = None
+                    try:
+                        from app.services.chat.tools import parse_external_tool_name
+
+                        _parsed_tool = parse_external_tool_name(tool_name)
+                        _conn_for_idem = _parsed_tool[0] if _parsed_tool else None
+                    except Exception:
+                        _conn_for_idem = None
+
                     _idem_key_for_write = (
                         _se_payload.get("externalId")
                         or _se_payload.get("externalid")
-                        or build_idempotency_key(batch_id=None, row_index=None, payload=_se_payload)
+                        or build_idempotency_key(
+                            batch_id=None,
+                            row_index=None,
+                            payload=_se_payload,
+                            connector_id=str(_conn_for_idem) if _conn_for_idem else None,
+                            record_type=_so.get("record_type"),
+                            mutation_type=_so.get("mutation_type"),
+                            record_id=str(tool_input.get("recordId") or "") or None,
+                        )
                     )
                     # ISOLATED SESSION — the log shares no transactional fate
                     # with this turn. It cannot commit our pending state, and
@@ -2215,6 +2237,7 @@ async def run_chat_turn(
                         record_type=_so.get("record_type", "record"),
                         mutation_type=_so.get("mutation_type", "write"),
                         payload=_se_payload,
+                        connector_id=_conn_for_idem,
                         correlation_id=correlation_id,
                         session_id=session.id,
                     )

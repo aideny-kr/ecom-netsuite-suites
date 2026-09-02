@@ -78,6 +78,13 @@ class SideEffectStatus(str, Enum):
     UNKNOWN = "unknown"
 
 
+def _is_ours(value: Any) -> bool:
+    """Did WE mint this externalId? The ``ss-idem-`` namespace exists so this
+    is decidable — it is what lets us replace a stale key of our own without
+    ever touching a key an integration owns."""
+    return isinstance(value, str) and value.startswith(IDEM_PREFIX)
+
+
 def _external_id_in(payload: dict[str, Any]) -> tuple[str | None, Any]:
     """Find a caller-supplied externalId, ignoring case.
 
@@ -93,20 +100,58 @@ def _external_id_in(payload: dict[str, Any]) -> tuple[str | None, Any]:
     return None, None
 
 
-def build_idempotency_key(*, batch_id: str | None, row_index: int | None, payload: Any) -> str:
+def build_idempotency_key(
+    *,
+    batch_id: str | None,
+    row_index: int | None,
+    payload: Any,
+    connector_id: str | None = None,
+    record_type: str | None = None,
+    mutation_type: str | None = None,
+    record_id: str | None = None,
+) -> str:
     """A key derived from the WORK, never random.
 
     A random key would make every retry a new write — the defect wearing a
     disguise. Same work in, same key out; different work, different key.
 
+    "The work" is the COMPLETE identity, not just the payload. Deriving from
+    the payload alone produced three separate collisions, each of which makes
+    NetSuite refuse the second write as a duplicate externalId — and a
+    duplicate refusal classifies as WRITTEN, so we report a record created that
+    never existed:
+
+    - **record_type**: a customer and a vendor named "Acme" are different work.
+    - **mutation_type / record_id**: a delete carries NO payload, so EVERY
+      payload-less mutation in a tenant hashed to one constant key; the second
+      silently no-op'd onto the first's ledger row and overwrote its record id.
+    - **connector_id**: the same write to sandbox and to production is not the
+      same write, and it is the value that decides which account gets it.
+
     ``row_index`` participates because two rows of one file may legitimately be
     the same company (different contacts, say). That is different work and must
     not collapse onto a single key, which would silently drop the second.
+
+    OUR OWN externalId is excluded from the material so that re-deriving a key
+    for unchanged work is stable — otherwise stamping twice would churn the key
+    and turn a retry of the same work into a new write.
     """
     if not isinstance(payload, dict):
         raise TypeError(f"payload must be a dict, got {type(payload).__name__}")
+
+    scrubbed = {
+        k: v for k, v in payload.items() if not (isinstance(k, str) and k.lower() == "externalid" and _is_ours(v))
+    }
     material = json.dumps(
-        {"batch": batch_id, "row": row_index, "payload": payload},
+        {
+            "batch": batch_id,
+            "row": row_index,
+            "connector": connector_id,
+            "record_type": record_type,
+            "mutation_type": mutation_type,
+            "record_id": record_id,
+            "payload": scrubbed,
+        },
         sort_keys=True,  # canonical: two serialisations of one payload must not retry as two writes
         separators=(",", ":"),
         default=str,
@@ -115,15 +160,30 @@ def build_idempotency_key(*, batch_id: str | None, row_index: int | None, payloa
 
 
 def payload_with_idempotency_key(
-    payload: dict[str, Any], *, batch_id: str | None, row_index: int | None
+    payload: dict[str, Any],
+    *,
+    batch_id: str | None,
+    row_index: int | None,
+    connector_id: str | None = None,
+    record_type: str | None = None,
+    mutation_type: str | None = None,
+    record_id: str | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Return ``(payload_with_external_id, key_actually_used)``.
 
-    A caller-supplied ``externalId`` is **never** overwritten. Their key is a
+    A CALLER-supplied ``externalId`` is **never** overwritten. Their key is a
     better natural identity than our hash — it is the one their other systems
     already reconcile against — and silently replacing it would corrupt an
     integration we do not own. In that case the returned key is theirs, because
     reconciliation must query the value that was actually written.
+
+    OUR OWN key, by contrast, is always RECOMPUTED from the current payload.
+    That is what keeps the key honest across the card's life: it is stamped at
+    build time, the human then fills required-field slots, and the payload
+    changes. Leaving the original key there gave two differently-completed
+    drafts one externalId — NetSuite refuses the second, and we would classify
+    that refusal as WRITTEN. Recomputation is stable for unchanged work,
+    because our own key is scrubbed from the hash material.
 
     Non-mutating: the caller's dict is left alone, so a failed write cannot
     leave a half-decorated payload behind.
@@ -132,10 +192,18 @@ def payload_with_idempotency_key(
         raise TypeError(f"payload must be a dict, got {type(payload).__name__}")
 
     existing_key, existing_value = _external_id_in(payload)
-    if existing_value:
+    if existing_value and not _is_ours(existing_value):
         return dict(payload), existing_value
 
-    key = build_idempotency_key(batch_id=batch_id, row_index=row_index, payload=payload)
+    key = build_idempotency_key(
+        batch_id=batch_id,
+        row_index=row_index,
+        payload=payload,
+        connector_id=connector_id,
+        record_type=record_type,
+        mutation_type=mutation_type,
+        record_id=record_id,
+    )
     out = dict(payload)
     # Reuse the caller's spelling if they supplied an empty one, so we do not
     # end up with both externalId and externalid in the same payload.
@@ -143,14 +211,10 @@ def payload_with_idempotency_key(
     return out, key
 
 
-# NetSuite's wording for the uniqueness refusal, observed live 2026-09-01:
-#   "Error while accessing a resource. This entity already exists."
-# Matched on the o:errorDetails detail text rather than the HTTP status, because
-# 400/USER_ERROR is also what an ordinary validation rejection returns.
 _ALREADY_EXISTS = "this entity already exists"
 
 
-def classify_retry_result(raw_result: str) -> SideEffectStatus:
+def classify_retry_result(raw_result: str, *, idempotency_key: str | None = None) -> SideEffectStatus:
     """Classify one write result into a side-effect status.
 
     The decisive case: NetSuite refusing a duplicate externalId means the
@@ -182,7 +246,15 @@ def classify_retry_result(raw_result: str) -> SideEffectStatus:
     if not haystack:
         haystack = json.dumps(parsed).lower()
     if _ALREADY_EXISTS in haystack:
-        return SideEffectStatus.WRITTEN
+        # Proof that OUR original landed — but only if the externalId was
+        # OURS. For a CALLER-supplied externalId the identical refusal means
+        # "your own integration already used that id", an everyday collision
+        # with nothing to do with our attempt; reading it as WRITTEN would mark
+        # a write successful that never happened. The `ss-idem-` namespace is
+        # what makes this decidable. Unknown key => fail closed.
+        if _is_ours(idempotency_key):
+            return SideEffectStatus.WRITTEN
+        return SideEffectStatus.ATTEMPTED
 
     outcome = classify_write_outcome(parsed)
     if outcome == "success":
@@ -209,7 +281,13 @@ def classify_retry_result(raw_result: str) -> SideEffectStatus:
 
 
 def stamp_tool_input(
-    tool_input: dict[str, Any], *, batch_id: str | None = None, row_index: int | None = None
+    tool_input: dict[str, Any],
+    *,
+    batch_id: str | None = None,
+    row_index: int | None = None,
+    connector_id: str | None = None,
+    record_type: str | None = None,
+    mutation_type: str | None = None,
 ) -> tuple[dict[str, Any], str | None]:
     """Add the idempotency key to a write's payload WITHOUT losing anything else.
 
@@ -251,7 +329,15 @@ def stamp_tool_input(
     if not parsed.payload_key:
         return tool_input, None
 
-    stamped, key = payload_with_idempotency_key(parsed.record, batch_id=batch_id, row_index=row_index)
+    stamped, key = payload_with_idempotency_key(
+        parsed.record,
+        batch_id=batch_id,
+        row_index=row_index,
+        connector_id=connector_id,
+        record_type=record_type,
+        mutation_type=mutation_type,
+        record_id=parsed.record_id,
+    )
     if stamped == parsed.record:
         # Caller supplied their own externalId; nothing to rewrite. Their key
         # is the better natural identity and is never overwritten.

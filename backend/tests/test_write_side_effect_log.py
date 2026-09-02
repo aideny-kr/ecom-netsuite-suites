@@ -23,7 +23,6 @@ that matters: `attempted` is written BEFORE the call and is the state a crash
 leaves behind. Nothing may set `written` without a definite answer.
 """
 
-import hashlib
 import json
 import uuid
 
@@ -75,12 +74,27 @@ class TestKeyIsWorkDerived:
         assert len(k) <= 40, "NetSuite externalId is length-bounded; keep it short"
 
     def test_key_is_a_pure_function_of_its_inputs(self):
+        """Deterministic and non-random: the SAME work must always produce the
+        SAME key, or a retry becomes a new write.
+
+        Deliberately NOT pinned to a hardcoded digest. The previous version
+        rebuilt the hash material inline and compared — a second copy of the
+        implementation that had to be edited in lockstep with it, and which
+        could only ever restate what the code already said. Which inputs
+        participate is pinned behaviourally instead, one property per test, in
+        TestTheKeyIdentifiesTheWork.
+        """
         payload = {"companyName": "Acme"}
-        expected_material = json.dumps(
-            {"batch": "b1", "row": 0, "payload": {"companyName": "Acme"}}, sort_keys=True, separators=(",", ":")
+        first = build_idempotency_key(batch_id="b1", row_index=0, payload=payload)
+        second = build_idempotency_key(batch_id="b1", row_index=0, payload=dict(payload))
+
+        assert first == second
+        assert first.startswith("ss-idem-")
+        # Key order in the dict must not change the key — two serialisations of
+        # one payload must not retry as two writes.
+        assert build_idempotency_key(batch_id="b1", row_index=0, payload={"b": 2, "a": 1}) == build_idempotency_key(
+            batch_id="b1", row_index=0, payload={"a": 1, "b": 2}
         )
-        digest = hashlib.sha256(expected_material.encode()).hexdigest()
-        assert build_idempotency_key(batch_id="b1", row_index=0, payload=payload).endswith(digest[:24])
 
 
 class TestPayloadCarriesTheKey:
@@ -132,7 +146,8 @@ class TestRetryClassification:
     )
 
     def test_duplicate_refusal_means_the_original_landed(self):
-        assert classify_retry_result(self.ALREADY) is SideEffectStatus.WRITTEN
+        # Our own key: the refusal really does prove our original landed.
+        assert classify_retry_result(self.ALREADY, idempotency_key="ss-idem-abc123") is SideEffectStatus.WRITTEN
 
     def test_an_ordinary_rejection_is_still_a_rejection(self):
         result = json.dumps(
@@ -343,10 +358,142 @@ class TestClassifyIsFailClosed:
                 'This entity already exists.","o:errorCode":"USER_ERROR"}]}',
             }
         )
-        assert classify_retry_result(raw) is SideEffectStatus.WRITTEN
+        assert classify_retry_result(raw, idempotency_key="ss-idem-abc") is SideEffectStatus.WRITTEN
 
     def test_an_explicit_error_is_still_rejected(self):
         from app.services.chat.write_side_effect import classify_retry_result
 
         raw = '{"error": "Please enter value(s) for: Subsidiary."}'
         assert classify_retry_result(raw) is SideEffectStatus.REJECTED
+
+
+class TestTheKeyIdentifiesTheWork:
+    """T2 gate round 2 — and the SHAPE shared with round 1's blocker.
+
+    Round 1: the key was derived from `.fields`, so line items did not
+    participate. Round 2: three more collisions, all the same defect wearing
+    different clothes — the key does not identify the work.
+
+    An idempotency key IS an identity claim. When two different writes share
+    one, NetSuite refuses the second as a duplicate externalId, and a duplicate
+    refusal classifies as WRITTEN — so we report an order created that never
+    existed. Every case below was verified colliding before this change.
+
+    The mechanism, rather than three patches: the key is a function of the
+    COMPLETE work identity — connector, record type, mutation type, record id,
+    batch/row, and the full payload — and is recomputed whenever the payload
+    changes, replacing OUR key (the `ss-idem-` namespace exists for exactly
+    this) while never touching a caller's.
+    """
+
+    def _key(self, **kw):
+        from app.services.chat.write_side_effect import build_idempotency_key
+
+        base = dict(batch_id=None, row_index=None, payload={"companyName": "Acme"})
+        base.update(kw)
+        return build_idempotency_key(**base)
+
+    def test_record_type_participates(self):
+        """A customer and a vendor with identical payloads are different work."""
+        assert self._key(record_type="customer") != self._key(record_type="vendor")
+
+    def test_mutation_type_participates(self):
+        assert self._key(mutation_type="create") != self._key(mutation_type="update")
+
+    def test_record_id_participates(self):
+        """Deleting record 5 and record 99 are different work — and both carry
+        NO payload, which is how they collided onto one ledger row."""
+        assert self._key(payload={}, record_id="5") != self._key(payload={}, record_id="99")
+
+    def test_connector_participates(self):
+        """The same write to sandbox and to production is not the same write."""
+        assert self._key(connector_id="conn-sandbox") != self._key(connector_id="conn-prod")
+
+    def test_payload_less_deletes_do_not_all_collide(self):
+        """The worst case: with no payload, every delete in a tenant hashed to
+        one constant key, so the second delete silently no-op'd on the first's
+        row and then overwrote its record id."""
+        a = self._key(payload={}, record_type="customer", mutation_type="delete", record_id="5")
+        b = self._key(payload={}, record_type="salesOrder", mutation_type="delete", record_id="99")
+        assert a != b
+
+    def test_a_changed_payload_changes_our_key(self):
+        """THE dangerous one. The key is stamped at card build; the human then
+        fills required-field slots and the payload changes. Our key must follow
+        it. Two drafts completed differently are two different writes, and
+        giving them one externalId makes NetSuite refuse the second — which we
+        would classify as WRITTEN."""
+        from app.services.chat.write_side_effect import payload_with_idempotency_key
+
+        draft, _ = payload_with_idempotency_key(
+            {"companyName": "Acme"}, batch_id=None, row_index=None, record_type="customer"
+        )
+        a, ka = payload_with_idempotency_key(
+            {**draft, "subsidiary": 1}, batch_id=None, row_index=None, record_type="customer"
+        )
+        b, kb = payload_with_idempotency_key(
+            {**draft, "subsidiary": 2}, batch_id=None, row_index=None, record_type="customer"
+        )
+        assert ka != kb, "different completed writes must not share an externalId"
+        assert a["externalId"] == ka and b["externalId"] == kb
+
+    def test_recomputing_is_stable_for_unchanged_work(self):
+        """Idempotent: stamping an already-stamped, unchanged payload must not
+        churn the key, or a retry of the SAME work would become a new write."""
+        from app.services.chat.write_side_effect import payload_with_idempotency_key
+
+        once, k1 = payload_with_idempotency_key(
+            {"companyName": "Acme"}, batch_id=None, row_index=None, record_type="customer"
+        )
+        twice, k2 = payload_with_idempotency_key(once, batch_id=None, row_index=None, record_type="customer")
+        assert k1 == k2
+        assert once == twice
+
+    def test_a_caller_supplied_key_is_still_never_touched(self):
+        """Unchanged contract: their key is the better natural identity."""
+        from app.services.chat.write_side_effect import payload_with_idempotency_key
+
+        out, key = payload_with_idempotency_key(
+            {"companyName": "Acme", "externalId": "THEIRS-123"},
+            batch_id=None,
+            row_index=None,
+            record_type="customer",
+        )
+        assert key == "THEIRS-123"
+        assert out["externalId"] == "THEIRS-123"
+
+
+class TestDuplicateRefusalOnlyProvesOurOwnWrite:
+    """T2 gate round 2. 'This entity already exists' proves OUR write landed
+    only if the externalId was OURS. For a CALLER-supplied externalId the same
+    refusal equally means "your own integration already used that id" — an
+    everyday collision that has nothing to do with our attempt.
+
+    Reading it as WRITTEN there marks a write successful that never happened.
+    The `ss-idem-` namespace is what makes the distinction decidable.
+    """
+
+    _DUP = json.dumps(
+        {
+            "success": False,
+            "error": '{"o:errorDetails":[{"detail":"Error while accessing a resource. '
+            'This entity already exists.","o:errorCode":"USER_ERROR"}]}',
+        }
+    )
+
+    def test_our_own_key_still_proves_the_write_landed(self):
+        from app.services.chat.write_side_effect import classify_retry_result
+
+        got = classify_retry_result(self._DUP, idempotency_key="ss-idem-abc123")
+        assert got is SideEffectStatus.WRITTEN
+
+    def test_a_caller_key_is_not_proof_and_stays_attempted(self):
+        from app.services.chat.write_side_effect import classify_retry_result
+
+        got = classify_retry_result(self._DUP, idempotency_key="THEIRS-123")
+        assert got is SideEffectStatus.ATTEMPTED
+
+    def test_an_unknown_key_fails_closed(self):
+        from app.services.chat.write_side_effect import classify_retry_result
+
+        assert classify_retry_result(self._DUP, idempotency_key=None) is SideEffectStatus.ATTEMPTED

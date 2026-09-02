@@ -2195,6 +2195,16 @@ class BaseSpecialistAgent(abc.ABC):
                         # already exists, so stamping externalId would mutate a
                         # business field the tenant may own, to no benefit.
                         _idem_key: str | None = None
+                        # Which ACCOUNT this write is aimed at participates in
+                        # the key: the same payload sent to sandbox and to
+                        # production is not the same write.
+                        _connector_id_for_idem: str | None = None
+                        try:
+                            from app.services.chat.tools import parse_external_tool_name
+
+                            _connector_id_for_idem = (parse_external_tool_name(block.name) or (None, None))[0]
+                        except Exception:
+                            _connector_id_for_idem = None
                         if _is_netsuite_write and mutation_type == "create":
                             try:
                                 from app.services.chat.write_side_effect import stamp_tool_input

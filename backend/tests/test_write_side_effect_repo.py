@@ -10,6 +10,7 @@ when the caller never gets to set it, and a unique constraint that makes a
 second attempt update one row instead of appending a second.
 """
 
+import asyncio
 import json
 import os
 import uuid
@@ -360,3 +361,83 @@ async def test_reconcile_accepts_legitimate_record_types(db):
     assert len(asked) == len(good)
     for name in good:
         assert any(name in q for q in asked), f"{name} was never queried"
+
+
+async def test_a_settled_row_is_never_re_settled(db):
+    """T2 gate round 2. settle_from_result had no guarded transition, so a late
+    or duplicate settlement could overwrite a terminal status — turning a
+    recorded 'written' (with its NetSuite record id) into something else after
+    the fact. The ledger's whole value is that a definite answer is final."""
+    await record_attempt(
+        db,
+        tenant_id=_TENANT,
+        idempotency_key="ss-idem-final",
+        record_type="customer",
+        mutation_type="create",
+        payload={"externalId": "ss-idem-final"},
+        correlation_id="c1",
+    )
+    await db.commit()
+
+    await settle_from_result(
+        db,
+        tenant_id=_TENANT,
+        idempotency_key="ss-idem-final",
+        raw_result=json.dumps({"success": True, "recordId": "5264999"}),
+    )
+    await db.commit()
+
+    # A late duplicate answer arrives — a retry, a replayed queue message.
+    await settle_from_result(
+        db,
+        tenant_id=_TENANT,
+        idempotency_key="ss-idem-final",
+        raw_result=json.dumps({"error": "Please enter value(s) for: Subsidiary."}),
+    )
+    await db.commit()
+
+    row = (
+        await db.execute(
+            text("SELECT status, netsuite_record_id FROM write_side_effects WHERE idempotency_key='ss-idem-final'")
+        )
+    ).first()
+    assert row.status == "written", "a terminal status must not be overwritten"
+    assert row.netsuite_record_id == "5264999"
+
+
+async def test_concurrent_identical_attempts_do_not_lose_the_log(db):
+    """T2 gate round 2. record_attempt was SELECT-then-INSERT despite a
+    docstring claiming "Upserts" — a check-then-act race against
+    UNIQUE(tenant_id, idempotency_key). Two concurrent attempts on one key both
+    saw no row, both inserted, and the loser's IntegrityError was swallowed by
+    the isolated wrapper — so its write proceeded with NO side-effect log at
+    all, silently defeating the one guarantee this module exists to provide.
+    """
+    engine_a = create_async_engine(DRILL_URL)
+    engine_b = create_async_engine(DRILL_URL)
+    maker_a = async_sessionmaker(engine_a, expire_on_commit=False)
+    maker_b = async_sessionmaker(engine_b, expire_on_commit=False)
+
+    async def attempt(maker):
+        async with maker() as s:
+            await record_attempt(
+                s,
+                tenant_id=_TENANT,
+                idempotency_key="ss-idem-race",
+                record_type="customer",
+                mutation_type="create",
+                payload={"externalId": "ss-idem-race"},
+                correlation_id="c1",
+            )
+            await s.commit()
+
+    # Genuinely concurrent: separate engines, separate connections.
+    results = await asyncio.gather(attempt(maker_a), attempt(maker_b), return_exceptions=True)
+    await engine_a.dispose()
+    await engine_b.dispose()
+
+    assert [r for r in results if isinstance(r, Exception)] == [], f"neither attempt may raise; got {results}"
+    n = (
+        await db.execute(text("SELECT count(*) FROM write_side_effects WHERE idempotency_key='ss-idem-race'"))
+    ).scalar()
+    assert n == 1, "one row for one key — and both callers got a usable log"

@@ -23,6 +23,7 @@ import uuid
 from typing import Any
 
 from sqlalchemy import select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.models.write_side_effect import WriteSideEffect
 from app.services.chat.write_side_effect import SideEffectStatus, classify_retry_result
@@ -57,25 +58,20 @@ async def record_attempt(
 
     Returns the key, so a caller can thread it straight into the payload.
     """
-    existing = (
-        await db.execute(
-            select(WriteSideEffect).where(
-                WriteSideEffect.tenant_id == tenant_id,
-                WriteSideEffect.idempotency_key == idempotency_key,
-            )
-        )
-    ).scalar_one_or_none()
-
-    if existing is not None:
-        # A retry of work already recorded. Deliberately does NOT reset a
-        # settled status back to 'attempted' — once NetSuite has told us the
-        # answer, re-attempting must not erase it.
-        if existing.status == SideEffectStatus.ATTEMPTED.value:
-            existing.payload_json = payload
-        return idempotency_key
-
-    db.add(
-        WriteSideEffect(
+    # ATOMIC UPSERT, not select-then-insert. The old version checked for a row
+    # and then inserted — a check-then-act race against
+    # UNIQUE(tenant_id, idempotency_key). Two concurrent attempts on one key
+    # both saw nothing, both inserted, and the loser's IntegrityError was
+    # swallowed upstream, so its write proceeded with NO log at all: exactly
+    # the guarantee this module exists to provide, silently absent. The
+    # docstring claimed "Upserts" the whole time.
+    #
+    # DO UPDATE is deliberately guarded on `status = 'attempted'`: re-attempting
+    # work must refresh a still-open row's payload, but must NEVER reset a
+    # SETTLED row — once NetSuite has told us the answer, nothing may erase it.
+    stmt = (
+        pg_insert(WriteSideEffect.__table__)
+        .values(
             id=uuid.uuid4(),
             tenant_id=tenant_id,
             idempotency_key=idempotency_key,
@@ -89,7 +85,13 @@ async def record_attempt(
             session_id=session_id,
             payload_json=payload,
         )
+        .on_conflict_do_update(
+            constraint="uq_write_side_effect_tenant_key",
+            set_={"payload_json": payload},
+            where=WriteSideEffect.__table__.c.status == SideEffectStatus.ATTEMPTED.value,
+        )
     )
+    await db.execute(stmt)
     return idempotency_key
 
 
@@ -103,7 +105,7 @@ async def settle_from_result(
     "go and look", and collapsing it into success or failure is the defect this
     table exists to end.
     """
-    status = classify_retry_result(raw_result)
+    status = classify_retry_result(raw_result, idempotency_key=idempotency_key)
 
     row = (
         await db.execute(
@@ -119,6 +121,13 @@ async def settle_from_result(
     row.last_result = (raw_result or "")[:8000]
     if status is SideEffectStatus.ATTEMPTED:
         return status  # unchanged on purpose — no definite answer arrived
+
+    if row.status != SideEffectStatus.ATTEMPTED.value:
+        # Already settled. A definite answer is FINAL: a late or replayed
+        # settlement must not rewrite a recorded outcome (and its NetSuite
+        # record id) after the fact. Returns what the row actually says, not
+        # what this late message claimed.
+        return SideEffectStatus(row.status)
 
     row.status = status.value
     if status is SideEffectStatus.WRITTEN:
