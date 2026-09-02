@@ -24,7 +24,7 @@ the eight flow-map tables themselves, which the guard does not cover.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import text
@@ -1625,17 +1625,30 @@ class TestChanges:
     same production join `list_integration_flows`/`get_flow_detail` use (404
     otherwise, same as every other route in this module), tenant-scope the
     `celigo_config_changes` rows, and order newest first (`created_at desc,
-    id desc` -- `id desc` breaks a tie deterministically when two rows land
-    in the same instant)."""
+    id desc` -- `id desc` is only a tiebreak for rows that share the exact
+    same `created_at`; the test below pins two rows to distinct explicit
+    `created_at` values so the ordering assertion exercises `created_at desc`
+    itself, not the tiebreak)."""
 
     async def test_integration_and_flow_changes_newest_first(self, client, admin_user, admin_user_b, db):
         user, headers = admin_user
         world = await _seed_world(db, user.tenant_id)
 
-        # Two `db.add` + `flush()` pairs, not one `add_all` + single flush --
-        # a single flush can leave both rows sharing one `created_at`
-        # (subsecond DB clock resolution), which would make the "newest
-        # first" assertion below flaky rather than deterministic.
+        # Explicit, distinct `created_at` values on each row -- NOT reliance
+        # on flushing between two `db.add` calls. Postgres's `now()` (which
+        # `TimestampMixin.created_at`'s server_default uses) is fixed for the
+        # whole transaction, so two statements in the same still-open
+        # transaction get the IDENTICAL `now()` regardless of how many
+        # flushes separate them; `db.flush()` pushes pending SQL over the
+        # same connection, it does not start a new transaction. That made
+        # the two rows tie on `created_at`, and the "newest first" ordering
+        # then fell through to `id desc` on a random UUID4 -- a coin flip,
+        # confirmed by running this test 8x back-to-back pre-fix (5/8
+        # failed with the exact assertion shape below). Passing `created_at`
+        # explicitly bypasses the server default entirely, so the ordering
+        # assertion actually exercises `created_at desc`.
+        t_older = datetime.now(timezone.utc) - timedelta(milliseconds=10)
+        t_newer = datetime.now(timezone.utc)
         older = CeligoConfigChange(
             tenant_id=user.tenant_id,
             celigo_connection_id=world["connection_id"],
@@ -1646,10 +1659,8 @@ class TestChanges:
             field="disabled",
             old_value=False,
             new_value=True,
+            created_at=t_older,
         )
-        db.add(older)
-        await db.flush()
-
         newer = CeligoConfigChange(
             tenant_id=user.tenant_id,
             celigo_connection_id=world["connection_id"],
@@ -1660,7 +1671,9 @@ class TestChanges:
             field="mapping_json",
             old_value={"a": 1},
             new_value=["x"],
+            created_at=t_newer,
         )
+        db.add(older)
         db.add(newer)
         await db.flush()
 
