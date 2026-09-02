@@ -40,6 +40,7 @@ import {
   useCeligoSyncStatus,
   type CeligoAttachment,
   type CeligoFlowStep,
+  type CeligoSchedule,
   type CeligoFlowSummary,
   type CeligoIntegration,
 } from "@/hooks/use-celigo-flows";
@@ -72,18 +73,17 @@ function firstOpenableScriptId(attachments: CeligoAttachment[]): string | null {
 // Formatters -- each grounded in a confirmed real shape, not the mockup.
 // ---------------------------------------------------------------------------
 
-/** Only `{type:"everyN", unit, value}` is CONFIRMED live (Task 8's own
- * fixture, `backend/tests/api/test_celigo_flows_api.py`'s `_seed_world`).
- * Any other schedule shape Celigo can send is real but unverified here --
- * falls back to a generic label rather than inventing a display string
- * (e.g. the mockup's ":05, :35") for a shape nobody has confirmed. */
-export function formatSchedule(schedule: Record<string, unknown> | string | null): string {
+/** The one shape observed live (2026-09-01, Framework: 96 of 239 flows) is
+ * Celigo's own cron string, shown verbatim -- it is the real configuration,
+ * and any prettified rendering would be a claim this code cannot verify
+ * against Celigo's scheduler semantics. `{type:"everyN", unit, value}` was
+ * only ever a fixture shape (`_seed_world`), kept renderable because nothing
+ * rules it out. Anything else Celigo may send falls back to a generic label
+ * rather than a crash or an invented string. */
+export function formatSchedule(schedule: CeligoSchedule): string {
   if (!schedule) return "on demand";
-  // The shape actually observed live (2026-09-01, Framework: 96 of 239
-  // flows): Celigo's own cron string. Shown verbatim -- it is the real
-  // configuration, and any prettified rendering of it would be a claim this
-  // code cannot verify against Celigo's scheduler semantics.
   if (typeof schedule === "string") return schedule.trim() || "on demand";
+  if (typeof schedule !== "object" || Array.isArray(schedule)) return "custom schedule";
   if (Object.keys(schedule).length === 0) return "on demand";
   if (schedule.type === "everyN" && typeof schedule.value === "number" && typeof schedule.unit === "string") {
     return `every ${schedule.value} ${schedule.unit}`;

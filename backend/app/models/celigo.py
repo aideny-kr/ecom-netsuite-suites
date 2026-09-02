@@ -433,6 +433,37 @@ def celigo_error_is_open() -> ColumnElement[bool]:
     return and_(CeligoFlowError.resolved_at.is_(None), CeligoFlowError.purged_at.is_(None))
 
 
+def celigo_integration_is_production() -> ColumnElement[bool]:
+    """The single definition of a PRODUCTION `celigo_integrations` row:
+    `sandbox IS NOT TRUE`.
+
+    The flow map is production only (operator directive 2026-09-01: "don't
+    bring sandbox celigo, just production"). `IS NOT TRUE`, not `= false`: a
+    NULL flag means Celigo omitted it, and hiding on an absent field would let
+    a sanitizer or API change silently erase real integrations.
+
+    Every read of these tables in `app/api/v1/celigo_flows.py` applies this
+    -- the list, the per-integration flows, the flow detail (through the
+    flow's integration) and the script sites. PR #216's first cut put the
+    filter in ONE endpoint's WHERE clause; the gate found the other routes
+    still served a sandbox row by id. Same lesson as `celigo_error_is_open`
+    above: nothing forces a future query to import this, but a named
+    predicate is what a reviewer greps for.
+
+    The sync's write-side twin is `sync_service._is_sandbox` (`obj.get(
+    "sandbox") is True` on the raw Celigo object) -- the same rule, stated
+    for a dict rather than a column."""
+    return CeligoIntegration.sandbox.isnot(True)
+
+
+def celigo_script_is_production() -> ColumnElement[bool]:
+    """`celigo_scripts` twin of `celigo_integration_is_production`. Scripts
+    carry their own `sandbox` flag (sanitizer `_SCRIPT` allowlist); on the
+    live account 132 of 259 were sandbox copies, and a clone-family count
+    that summed both environments was wrong by about half."""
+    return CeligoScript.sandbox.isnot(True)
+
+
 class CeligoConfigChange(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     """Task 7 (migration 095): one field-level drift event, appended by
     `app.services.celigo.sync_service` when a resynced object's watched field

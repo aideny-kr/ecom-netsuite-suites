@@ -220,6 +220,13 @@ describe("CeligoFlowMap — schedule is Celigo's real shape", () => {
     expect(screen.getByText("? 0 */6 * * *")).toBeInTheDocument();
     expect(screen.queryByText(/custom schedule/i)).not.toBeInTheDocument();
   });
+
+  it("renders a shape nobody has seen yet (the API relays JSON as-is) as a generic label, never a crash", () => {
+    mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
+    setLists([[{ ...healthyFlow, schedule: [{ type: "cron", expr: "? 0 */6 * * *" }] }]]);
+    wrap(<CeligoFlowMap />);
+    expect(screen.getByText(/custom schedule/i)).toBeInTheDocument();
+  });
 });
 
 // ---------------------------------------------------------------------------

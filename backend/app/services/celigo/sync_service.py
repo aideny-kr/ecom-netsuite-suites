@@ -111,10 +111,10 @@ from app.services.celigo.graph import ScriptRef, walk_script_refs
 from app.services.celigo.repository import (
     backfill_attachment_script_ids,
     backfill_flow_step_reference_info,
-    delete_sandbox_integrations,
     extract_flow_steps,
     insert_config_change,
     mark_flow_errors_purged,
+    purge_sandbox_rows,
     upsert_flow,
     upsert_flow_step,
     upsert_integration,
@@ -149,7 +149,10 @@ class SyncSummary:
     flows_skipped_no_integration: int = 0
     steps_synced: int = 0
     scripts_synced: int = 0
+    scripts_skipped_sandbox: int = 0
+    scripts_purged_sandbox: int = 0
     exports_imports_synced: int = 0
+    exports_imports_skipped_sandbox: int = 0
     exports_imports_skipped_no_flow: int = 0
     flow_steps_backfilled: int = 0
     attachments_synced: int = 0
@@ -181,6 +184,21 @@ class _StepRef:
 
     id: uuid.UUID
     flow_id: uuid.UUID
+
+
+def _is_sandbox(obj: dict) -> bool:
+    """PRODUCTION ONLY's one classifier, applied at the ingestion boundary of
+    EVERY kind the sync reads (integration, script, export, import -- flows
+    carry no flag of their own and follow their integration). One function
+    so a kind cannot be forgotten: the first cut of PR #216 checked
+    integrations inline and left scripts (132 of 259 on the live account)
+    and exports/imports unchecked.
+
+    `is True`, never truthiness: an absent flag is production. Hiding on a
+    missing field would let a sanitizer or API change silently erase real
+    objects. Read-side twin: `app.models.celigo.celigo_integration_is_
+    production` / `celigo_script_is_production` (`sandbox IS NOT TRUE`)."""
+    return obj.get("sandbox") is True
 
 
 def _hash_content(content: str | None) -> str | None:
@@ -343,7 +361,7 @@ async def _resolve_integration_id(
     if local_id is not None:
         return local_id
     fetched = await get_resource("integration", celigo_integration_id, token=token, region=region, client=http)
-    if fetched.get("sandbox") is True:
+    if _is_sandbox(fetched):
         sandbox_integration_ids.add(celigo_integration_id)
         return None
     local_id = await upsert_integration(db, tenant_id=tenant_id, connection_id=connection_id, sanitized=fetched)
@@ -542,19 +560,19 @@ async def sync_flow_map_for_connection(
     owns_client = http_client is None
     http = http_client or httpx.AsyncClient(timeout=_HTTP_TIMEOUT)
     try:
-        # Phase A -- integrations. PRODUCTION ONLY: a `sandbox: true`
-        # integration is remembered (so Phase B can skip its flows without
-        # the listing-gap fallback re-fetching it) and never written. `is
-        # True`, not truthiness, and only `True` skips: an absent flag is
-        # production -- hiding on a missing field would let a sanitizer or
-        # API change silently erase real integrations.
+        # Phase A -- integrations. PRODUCTION ONLY (`_is_sandbox`): a sandbox
+        # integration is remembered -- so Phase B can skip its flows without
+        # the listing-gap fallback re-fetching it, and so the end-of-run
+        # purge can remove a stored row whose flag has gone stale -- and is
+        # never written. Same for scripts in Phase C (`sandbox_script_ids`).
         integration_ids: dict[str, uuid.UUID] = {}
         sandbox_integration_ids: set[str] = set()
+        sandbox_script_ids: set[str] = set()
         async for integration in list_resource("integration", token=token, region=region, client=http):
             celigo_id = integration.get("_id")
             if not celigo_id:
                 continue
-            if integration.get("sandbox") is True:
+            if _is_sandbox(integration):
                 sandbox_integration_ids.add(celigo_id)
                 summary.integrations_skipped_sandbox += 1
                 continue
@@ -563,12 +581,6 @@ async def sync_flow_map_for_connection(
             )
             integration_ids[celigo_id] = local_id
             summary.integrations_synced += 1
-        # Rows synced before this rule existed (the live account held 19 of
-        # them, with 118 flows) go too, so the DB matches the product
-        # promise; FK CASCADE takes their flows/steps/attachments/errors.
-        summary.integrations_purged_sandbox = await delete_sandbox_integrations(
-            db, tenant_id=tenant_id, connection_id=connection_id
-        )
 
         # Phase B -- flows, and each flow's own steps.
         pending_step_refs: list[tuple[str, str, _StepRef]] = []
@@ -699,6 +711,10 @@ async def sync_flow_map_for_connection(
             celigo_id = script.get("_id")
             if not celigo_id:
                 continue
+            if _is_sandbox(script):
+                sandbox_script_ids.add(celigo_id)
+                summary.scripts_skipped_sandbox += 1
+                continue
             existing_script = await _get_existing_script(
                 db, tenant_id=tenant_id, connection_id=connection_id, celigo_id=celigo_id
             )
@@ -743,6 +759,9 @@ async def sync_flow_map_for_connection(
         for kind in _REFERENCE_OBJECT_KINDS:
             async for obj in list_resource(kind, token=token, region=region, client=http):
                 celigo_id = obj.get("_id")
+                if _is_sandbox(obj):
+                    summary.exports_imports_skipped_sandbox += 1
+                    continue
                 referencing_flow_steps = export_import_flow_steps.get(celigo_id) if celigo_id else None
                 if not referencing_flow_steps:
                     summary.exports_imports_skipped_no_flow += 1
@@ -800,6 +819,23 @@ async def sync_flow_map_for_connection(
         # single step's sync.
         summary.errors_purged = await _purge_expired_errors(db, tenant_id=tenant_id, connection_id=connection_id)
 
+        # PRODUCTION ONLY, the purge half -- last, once every phase has said
+        # what it saw: rows flagged sandbox in the DB (written before the
+        # rule existed: 19 integrations, 118 flows, 132 scripts on the live
+        # account), plus rows whose Celigo object THIS run reported as
+        # sandbox even though the stored flag still says production (an
+        # integration flipped after an earlier sync -- gate finding, PR
+        # #216). `purge_sandbox_rows` also deletes the flow-error rows the
+        # FK would only SET NULL. Unconditional on purpose: the stored-flag
+        # half has no in-run signal to gate on, and it is one indexed
+        # statement per kind.
+        summary.integrations_purged_sandbox, summary.scripts_purged_sandbox = await purge_sandbox_rows(
+            db,
+            tenant_id=tenant_id,
+            connection_id=connection_id,
+            integration_celigo_ids=sandbox_integration_ids,
+            script_celigo_ids=sandbox_script_ids,
+        )
         return summary
     finally:
         if owns_client:

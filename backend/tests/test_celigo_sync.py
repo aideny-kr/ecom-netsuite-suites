@@ -43,6 +43,7 @@ from app.services.celigo.repository import (
     upsert_flow,
     upsert_flow_error,
     upsert_integration,
+    upsert_script,
 )
 from app.services.celigo.sanitizer import sanitize
 from app.services.celigo.sync_service import SyncSummary, sync_flow_map_for_connection
@@ -502,6 +503,183 @@ class TestProductionOnly:
             .all()
         )
         assert flow_ids == ["flow_prod"], "the sandbox flow must go with its integration (FK CASCADE)"
+
+
+class TestProductionOnlyHoldsAcrossKindsAndTime:
+    """PR #216 gate, round 1. The first cut enforced "production only" with
+    three separate mechanisms that each covered one kind (integrations) and
+    one moment (this run). Every test here is a way that shape leaked."""
+
+    async def test_an_integration_that_flips_to_sandbox_is_purged_despite_its_stored_flag(
+        self, db: AsyncSession, monkeypatch
+    ):
+        """GATE FINDING (major): Phase A never upserts a sandbox integration, so a
+        row stored as production by an earlier sync keeps `sandbox=false`
+        forever after Celigo flips it -- and a purge keyed on the STORED flag
+        alone never touches it. The purge must also be driven by what THIS run
+        saw."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+        stored_id = await upsert_integration(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            sanitized={"_id": "int_flip", "name": "Was Production", "sandbox": False},
+        )
+        await upsert_flow(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integration_id=stored_id,
+            sanitized={"_id": "flow_flip", "name": "Flip Flow"},
+        )
+        await db.flush()
+
+        summary = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[
+                _raw_integration("int_flip", name="Was Production", sandbox=True),
+                _raw_integration("int_prod", name="Production", sandbox=False),
+            ],
+            flows=[
+                _raw_flow("flow_flip", integration_id="int_flip", export_id="exp_1"),
+                _raw_flow("flow_prod", integration_id="int_prod", export_id="exp_2"),
+            ],
+        )
+
+        assert summary.integrations_purged_sandbox == 1
+        assert summary.flows_skipped_sandbox == 1
+        names = (
+            (
+                await db.execute(
+                    text("SELECT name FROM celigo_integrations WHERE tenant_id = :t").bindparams(t=tenant.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert names == ["Production"]
+        flow_ids = (
+            (await db.execute(text("SELECT celigo_id FROM celigo_flows WHERE tenant_id = :t").bindparams(t=tenant.id)))
+            .scalars()
+            .all()
+        )
+        assert flow_ids == ["flow_prod"]
+
+    async def test_purging_a_sandbox_integration_takes_its_flow_errors_with_it(self, db: AsyncSession, monkeypatch):
+        """CODEX FINDING (the independent-model angle; the Claude verifier
+        'refuted' it by looking at a checkout without the purge function):
+        `celigo_flow_errors.flow_id` is ON DELETE SET NULL, not CASCADE -- by
+        the model's own design, an error outlives its flow. So the FK alone
+        leaves a purged sandbox flow's errors behind as orphans with
+        `flow_id NULL`, counted nowhere and attributable to nothing. The purge
+        deletes them explicitly, first."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+        sb_id = await upsert_integration(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            sanitized={"_id": "int_sb", "name": "Sandbox", "sandbox": True},
+        )
+        sb_flow_id = await upsert_flow(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integration_id=sb_id,
+            sanitized={"_id": "flow_sb", "name": "Sandbox Flow"},
+        )
+        db.add(
+            CeligoFlowError(
+                tenant_id=tenant.id,
+                celigo_connection_id=conn_id,
+                flow_id=sb_flow_id,
+                celigo_id="err_sb",
+                message="synthetic sandbox error",
+                occurred_at=datetime.now(timezone.utc),
+            )
+        )
+        await db.flush()
+
+        summary = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_prod", name="Production", sandbox=False)],
+            flows=[_raw_flow("flow_prod", integration_id="int_prod", export_id="exp_1")],
+        )
+
+        assert summary.integrations_purged_sandbox == 1
+        orphaned = (
+            await db.execute(
+                text("SELECT COUNT(*) FROM celigo_flow_errors WHERE tenant_id = :t").bindparams(t=tenant.id)
+            )
+        ).scalar_one()
+        assert orphaned == 0, "SET NULL would have kept the row with flow_id NULL"
+
+    async def test_sandbox_scripts_are_skipped_and_previously_synced_ones_purged(self, db: AsyncSession, monkeypatch):
+        """SINGLE-AGENT REVIEW: Phase C synced every script regardless of
+        environment -- 132 of the live account's 259 scripts are sandbox
+        copies, and the script viewer's clone-family counts summed both
+        environments. Scripts carry their own `sandbox` flag (sanitizer
+        `_SCRIPT` allowlist), so the one classifier applies to them too."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+        await upsert_script(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            sanitized={"_id": "scr_old_sb", "name": "Old Sandbox Script", "content": "x", "sandbox": True},
+        )
+        await db.flush()
+
+        summary = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_prod", name="Production", sandbox=False)],
+            flows=[_raw_flow("flow_prod", integration_id="int_prod", export_id="exp_1")],
+            scripts=[_raw_script("scr_prod"), {**_raw_script("scr_sb"), "sandbox": True}],
+        )
+
+        assert summary.scripts_synced == 1
+        assert summary.scripts_skipped_sandbox == 1
+        assert summary.scripts_purged_sandbox == 1
+        remaining = (
+            (
+                await db.execute(
+                    text("SELECT celigo_id FROM celigo_scripts WHERE tenant_id = :t").bindparams(t=tenant.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert remaining == ["scr_prod"]
+
+    async def test_a_sandbox_export_is_skipped_even_when_a_flow_references_it(self, db: AsyncSession, monkeypatch):
+        """Exports/imports carry `sandbox` too. The classifier sits at the
+        ingestion boundary for EVERY kind, so a kind cannot be forgotten the
+        way scripts were in the first cut."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        summary = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_prod", name="Production", sandbox=False)],
+            flows=[_raw_flow("flow_prod", integration_id="int_prod", export_id="exp_sb")],
+            exports=[{**_raw_export("exp_sb"), "sandbox": True}],
+        )
+
+        assert summary.exports_imports_skipped_sandbox == 1
+        assert summary.exports_imports_synced == 0
 
 
 class TestDriftDetection:

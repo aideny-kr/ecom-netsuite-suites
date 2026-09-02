@@ -50,7 +50,7 @@ from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, JsonValue
 from sqlalchemy import and_, case, distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -66,6 +66,8 @@ from app.models.celigo import (
     CeligoScript,
     CeligoScriptAttachment,
     celigo_error_is_open,
+    celigo_integration_is_production,
+    celigo_script_is_production,
 )
 from app.models.pipeline import CursorState
 from app.models.user import User
@@ -77,6 +79,16 @@ router = APIRouter(prefix="/celigo", tags=["celigo"])
 # ---------------------------------------------------------------------------
 # Response schemas -- see module docstring: every field named by hand.
 # ---------------------------------------------------------------------------
+
+# A flow's `schedule`, relayed as the JSON Celigo sent. Typed as JSON rather
+# than as a union of observed shapes, deliberately: the first cut declared
+# `dict | None` off a fixture, and every integration with a scheduled flow
+# 500d because the live value is a cron STRING ("? 0 */6 * * *" -- 96 of 239
+# flows on the Framework account, 2026-09-01). Widening to `dict | str` would
+# have repeated the same reasoning one member wider. This column mirrors
+# whatever Celigo sends; the API's job is to relay it, not to vouch for its
+# shape -- the frontend decides how to render what it gets.
+CeligoSchedule = JsonValue
 
 
 class CeligoIntegrationOut(BaseModel):
@@ -100,12 +112,7 @@ class CeligoFlowSummaryOut(BaseModel):
     celigo_id: str
     name: str
     disabled: bool | None
-    # Celigo's real `schedule` is a cron STRING (e.g. "? 0 */6 * * *"); on the
-    # live Framework account 96 of 239 flows carry one and none carry an
-    # object. `dict | None` here came from a fixture, and it 500d every
-    # integration that had a scheduled flow (2026-09-01). `dict` stays
-    # accepted -- an object form is not ruled out, only unobserved.
-    schedule: dict | str | None
+    schedule: CeligoSchedule
     timezone: str | None
     last_executed_at: datetime | None
     error_count: int
@@ -146,12 +153,7 @@ class CeligoFlowDetailOut(BaseModel):
     celigo_id: str
     name: str
     disabled: bool | None
-    # Celigo's real `schedule` is a cron STRING (e.g. "? 0 */6 * * *"); on the
-    # live Framework account 96 of 239 flows carry one and none carry an
-    # object. `dict | None` here came from a fixture, and it 500d every
-    # integration that had a scheduled flow (2026-09-01). `dict` stays
-    # accepted -- an object form is not ruled out, only unobserved.
-    schedule: dict | str | None
+    schedule: CeligoSchedule
     timezone: str | None
     last_executed_at: datetime | None
     source_id: str | None
@@ -286,12 +288,9 @@ async def list_integrations(
     -- that is a legitimate "not connected yet" state, not an error.
 
     Sandbox integrations are excluded (operator directive 2026-09-01: "don't
-    bring sandbox celigo, just production"). `IS NOT TRUE`, not `= false`:
-    a NULL flag (Celigo omitted it) is production, never hidden -- hiding on
-    an absent field would let a missing key silently erase real
-    integrations. The sync skips and purges sandbox rows too
-    (`sync_service.py`, Phase A); this filter is what makes the promise hold
-    for rows synced before that rule existed."""
+    bring sandbox celigo, just production") through the ONE shared predicate,
+    `celigo_integration_is_production()` -- see its docstring for the NULL
+    rule and for why every other read in this module applies it too."""
     connection = await _get_celigo_connection(db, user.tenant_id)
     if connection is None:
         return []
@@ -303,7 +302,7 @@ async def list_integrations(
                 .where(
                     CeligoIntegration.tenant_id == user.tenant_id,
                     CeligoIntegration.celigo_connection_id == connection.id,
-                    CeligoIntegration.sandbox.isnot(True),
+                    celigo_integration_is_production(),
                 )
                 .order_by(CeligoIntegration.name)
             )
@@ -383,6 +382,9 @@ async def list_integration_flows(
             select(CeligoIntegration).where(
                 CeligoIntegration.id == integration_id,
                 CeligoIntegration.tenant_id == user.tenant_id,
+                # A sandbox integration is not found by id either -- hidden
+                # from the list must mean hidden, not merely unlisted.
+                celigo_integration_is_production(),
             )
         )
     ).scalar_one_or_none()
@@ -466,9 +468,21 @@ async def get_flow_detail(
     back in `unassigned_attachments` instead of being dropped."""
     flow = (
         await db.execute(
-            select(CeligoFlow).where(
+            select(CeligoFlow)
+            # Production only, through the flow's integration (flows carry no
+            # flag of their own). Tenant predicate on the JOIN's ON clause
+            # like every other join in this module.
+            .join(
+                CeligoIntegration,
+                and_(
+                    CeligoIntegration.id == CeligoFlow.integration_id,
+                    CeligoIntegration.tenant_id == user.tenant_id,
+                ),
+            )
+            .where(
                 CeligoFlow.id == flow_id,
                 CeligoFlow.tenant_id == user.tenant_id,
+                celigo_integration_is_production(),
             )
         )
     ).scalar_one_or_none()
@@ -614,6 +628,7 @@ async def get_script_detail(
             select(CeligoScript).where(
                 CeligoScript.id == script_id,
                 CeligoScript.tenant_id == user.tenant_id,
+                celigo_script_is_production(),
             )
         )
     ).scalar_one_or_none()
@@ -653,6 +668,16 @@ async def get_script_detail(
             and_(
                 CeligoFlow.id == CeligoScriptAttachment.flow_id,
                 CeligoFlow.tenant_id == user.tenant_id,
+            ),
+        )
+        # Production only: a site under a sandbox integration is not a site.
+        # INNER join, so the predicate on the ON clause is a filter.
+        .join(
+            CeligoIntegration,
+            and_(
+                CeligoIntegration.id == CeligoFlow.integration_id,
+                CeligoIntegration.tenant_id == user.tenant_id,
+                celigo_integration_is_production(),
             ),
         )
         .outerjoin(

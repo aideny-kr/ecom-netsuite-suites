@@ -82,7 +82,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -95,6 +95,7 @@ from app.models.celigo import (
     CeligoIntegration,
     CeligoScript,
     CeligoScriptAttachment,
+    celigo_script_is_production,
 )
 from app.services.celigo.graph import ScriptRef
 
@@ -201,27 +202,75 @@ async def upsert_integration(
     return (await db.execute(stmt)).scalar_one()
 
 
-async def delete_sandbox_integrations(db: AsyncSession, *, tenant_id: uuid.UUID, connection_id: uuid.UUID) -> int:
-    """Delete every `sandbox IS TRUE` integration under one connection and
-    return how many went. The flow map is PRODUCTION ONLY (operator
-    directive 2026-09-01); `sync_service.py`'s Phase A stops writing sandbox
-    rows and calls this so rows written before that rule are removed too.
+async def purge_sandbox_rows(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    connection_id: uuid.UUID,
+    integration_celigo_ids: Iterable[str],
+    script_celigo_ids: Iterable[str],
+) -> tuple[int, int]:
+    """Remove every sandbox integration and sandbox script under one
+    connection; returns `(integrations_purged, scripts_purged)`. The flow map
+    is PRODUCTION ONLY (operator directive 2026-09-01); `sync_service.py`
+    stops writing sandbox rows and calls this at the end of every run so the
+    DB matches that promise.
 
-    Only the integration rows are named here: `celigo_flows.integration_id`
-    is `ON DELETE CASCADE` (migration 094 / `app/models/celigo.py`), and the
-    flow's own dependents (steps, attachments, errors, config changes)
-    cascade from the flow the same way -- one statement, no per-table sweep
-    that could drift out of step with the schema. `IS TRUE`, not `= true`
-    or a Python truthiness check: a NULL flag is production and must never
-    be swept."""
-    result = await db.execute(
+    A row is sandbox if its STORED flag says so (rows written before the
+    rule existed) OR if its Celigo id is in the set THIS run classified as
+    sandbox. The second half is not redundant (PR #216 gate finding, major):
+    the sync never upserts a sandbox object, so an integration that was
+    production when first synced and flipped to sandbox since keeps
+    `sandbox = false` in the DB forever -- a purge keyed on the stored flag
+    alone would never see it.
+
+    Cascade is NOT enough on its own. `celigo_flows.integration_id`, the
+    flow's steps, script attachments and config changes are `ON DELETE
+    CASCADE`, but `celigo_flow_errors.flow_id` is `ON DELETE SET NULL` by
+    design (an error outlives its flow -- see `CeligoFlowError`). Left to the
+    FK, a purged sandbox flow's errors would survive as orphans with
+    `flow_id NULL`, counted nowhere and attributable to nothing (the
+    independent-model review angle caught this; the Claude verifier had
+    'refuted' it against a checkout without the purge). So the doomed flows'
+    errors are deleted explicitly, first, inside the same transaction.
+
+    `IS TRUE` / `is_(True)`, never truthiness: a NULL flag is production and
+    must never be swept."""
+    doomed_integrations = or_(
+        CeligoIntegration.sandbox.is_(True),
+        CeligoIntegration.celigo_id.in_(list(integration_celigo_ids)),
+    )
+    doomed_flow_ids = (
+        select(CeligoFlow.id)
+        .join(CeligoIntegration, CeligoIntegration.id == CeligoFlow.integration_id)
+        .where(
+            CeligoFlow.tenant_id == tenant_id,
+            CeligoIntegration.tenant_id == tenant_id,
+            CeligoIntegration.celigo_connection_id == connection_id,
+            doomed_integrations,
+        )
+    )
+    await db.execute(
+        delete(CeligoFlowError).where(
+            CeligoFlowError.tenant_id == tenant_id,
+            CeligoFlowError.flow_id.in_(doomed_flow_ids),
+        )
+    )
+    integrations_result = await db.execute(
         delete(CeligoIntegration).where(
             CeligoIntegration.tenant_id == tenant_id,
             CeligoIntegration.celigo_connection_id == connection_id,
-            CeligoIntegration.sandbox.is_(True),
+            doomed_integrations,
         )
     )
-    return result.rowcount or 0
+    scripts_result = await db.execute(
+        delete(CeligoScript).where(
+            CeligoScript.tenant_id == tenant_id,
+            CeligoScript.celigo_connection_id == connection_id,
+            or_(CeligoScript.sandbox.is_(True), CeligoScript.celigo_id.in_(list(script_celigo_ids))),
+        )
+    )
+    return (integrations_result.rowcount or 0), (scripts_result.rowcount or 0)
 
 
 # ---------------------------------------------------------------------------
@@ -598,6 +647,9 @@ async def list_logical_scripts(
                 select(CeligoScript).where(
                     CeligoScript.tenant_id == tenant_id,
                     CeligoScript.celigo_connection_id == connection_id,
+                    # Production only -- a clone family must not count its
+                    # sandbox copies (132 of 259 scripts on the live account).
+                    celigo_script_is_production(),
                 )
             )
         )
