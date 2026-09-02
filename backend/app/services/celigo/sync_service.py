@@ -542,6 +542,8 @@ async def _process_reference_object(
         return 0, 0
 
     record_type, operation, search_id = _extract_provenance(obj)
+    raw_name = obj.get("name")
+    reference_name = raw_name if isinstance(raw_name, str) and raw_name.strip() else None
     rows_backfilled = await backfill_flow_step_reference_info(
         db,
         tenant_id=tenant_id,
@@ -552,6 +554,7 @@ async def _process_reference_object(
         record_type=record_type,
         operation=operation,
         search_id=search_id,
+        reference_name=reference_name,
     )
 
     refs = walk_script_refs(obj)

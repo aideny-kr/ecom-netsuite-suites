@@ -31,10 +31,11 @@ import sqlalchemy.exc
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.celigo import CeligoFlowError, CeligoScriptAttachment
+from app.models.celigo import CeligoFlow, CeligoFlowError, CeligoFlowStep, CeligoIntegration, CeligoScriptAttachment
 from app.services.celigo.graph import walk_script_refs
 from app.services.celigo.repository import (
     FlowStepRoleCollisionError,
+    backfill_flow_step_reference_info,
     extract_flow_steps,
     list_logical_scripts,
     mark_flow_errors_purged,
@@ -850,3 +851,60 @@ class TestFlowStepInsertNeverSwallowsUnrelatedIntegrityErrors:
 
         with pytest.raises(sqlalchemy.exc.IntegrityError):
             await sync_flow_steps(db, tenant_id=tenant.id, connection_id=conn_id, flow_id=bogus_flow_id, steps=steps)
+
+
+async def test_backfill_writes_reference_name_and_none_never_clobbers(db):
+    tenant = await create_test_tenant(db)
+    conn_id = await _make_connection(db, tenant.id)
+    integration = CeligoIntegration(
+        tenant_id=tenant.id, celigo_connection_id=conn_id, celigo_id="int_names", name="Names", raw_json={}
+    )
+    db.add(integration)
+    await db.flush()
+    flow = CeligoFlow(
+        tenant_id=tenant.id,
+        celigo_connection_id=conn_id,
+        integration_id=integration.id,
+        celigo_id="flow_names",
+        name="Names flow",
+        raw_json={},
+    )
+    db.add(flow)
+    await db.flush()
+    step = CeligoFlowStep(
+        tenant_id=tenant.id,
+        celigo_connection_id=conn_id,
+        flow_id=flow.id,
+        celigo_id="exp_names",
+        role="generator",
+        sequence=0,
+        raw_json={},
+    )
+    db.add(step)
+    await db.flush()
+
+    n = await backfill_flow_step_reference_info(
+        db,
+        tenant_id=tenant.id,
+        connection_id=conn_id,
+        celigo_id="exp_names",
+        adaptor_type="HTTPExport",
+        connection_celigo_id=None,
+        reference_name="Get New Sales Orders",
+    )
+    assert n == 1
+    await db.refresh(step)
+    assert step.reference_name == "Get New Sales Orders"
+
+    # A later backfill with no name (Celigo omitted it) must not blank the stored one.
+    await backfill_flow_step_reference_info(
+        db,
+        tenant_id=tenant.id,
+        connection_id=conn_id,
+        celigo_id="exp_names",
+        adaptor_type="HTTPExport",
+        connection_celigo_id=None,
+        reference_name=None,
+    )
+    await db.refresh(step)
+    assert step.reference_name == "Get New Sales Orders"

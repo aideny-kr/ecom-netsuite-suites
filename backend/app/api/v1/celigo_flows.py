@@ -156,6 +156,9 @@ class CeligoFlowStepOut(BaseModel):
     sequence: int
     adaptor_type: str | None
     connection_celigo_id: str | None
+    reference_name: str | None
+    """Celigo's own export/import name; null until synced -- the UI must
+    fall back, never invent."""
     filter_json: dict | None
     mapping_json: dict | None
     proceed_on_failure: bool | None
@@ -584,6 +587,7 @@ async def get_flow_detail(
             sequence=s.sequence,
             adaptor_type=s.adaptor_type,
             connection_celigo_id=s.connection_celigo_id,
+            reference_name=s.reference_name,
             filter_json=s.filter_json,
             mapping_json=s.mapping_json,
             proceed_on_failure=s.proceed_on_failure,

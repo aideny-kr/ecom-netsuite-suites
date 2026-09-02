@@ -502,6 +502,15 @@ class TestGetFlowDetail:
         r = await client.get(f"/api/v1/celigo/flows/{sandbox_flow.id}", headers=headers)
         assert r.status_code == 404, r.text
 
+    async def test_step_carries_its_celigo_name_when_synced(self, client, admin_user, db):
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        world["step"].reference_name = "Lookup Customer"
+        await db.flush()
+        r = await client.get(f"/api/v1/celigo/flows/{world['flow'].id}", headers=headers)
+        assert r.status_code == 200
+        assert r.json()["steps"][0]["reference_name"] == "Lookup Customer"
+
     async def test_returns_flow_with_steps_and_attachments(self, client, admin_user, db):
         user, headers = admin_user
         world = await _seed_world(db, user.tenant_id)

@@ -2298,3 +2298,47 @@ class TestAttachmentPathsAreIndexBasedNotStable:
             ("routers[0].script", "script_b"),
             ("routers[1].script", "script_b"),
         ]
+
+
+class TestStepNamesAreBackfilledFromTheReferencedObject:
+    async def test_export_and_import_names_land_on_every_referencing_step(self, monkeypatch, db):
+        tenant = await create_test_tenant(db)
+        conn_id = await _make_connection(db, tenant.id)
+        await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int1")],
+            flows=[_raw_flow("flow1", integration_id="int1", export_id="exp1")],
+            exports=[_raw_export("exp1", name="Get New Sales Orders", adaptor_type="HTTPExport")],
+        )
+        row = (
+            await db.execute(
+                select(CeligoFlowStep).where(CeligoFlowStep.tenant_id == tenant.id, CeligoFlowStep.celigo_id == "exp1")
+            )
+        ).scalar_one()
+        assert row.reference_name == "Get New Sales Orders"
+
+    async def test_a_listing_without_a_name_keeps_the_stored_one(self, monkeypatch, db):
+        tenant = await create_test_tenant(db)
+        conn_id = await _make_connection(db, tenant.id)
+        common = dict(
+            integrations=[_raw_integration("int1")], flows=[_raw_flow("flow1", integration_id="int1", export_id="exp1")]
+        )
+        await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            exports=[_raw_export("exp1", name="Get New Sales Orders", adaptor_type="HTTPExport")],
+            **common,
+        )
+        nameless = {**_raw_export("exp1", adaptor_type="HTTPExport"), "name": None}
+        await _run_sync(monkeypatch, db, tenant_id=tenant.id, connection_id=conn_id, exports=[nameless], **common)
+        row = (
+            await db.execute(
+                select(CeligoFlowStep).where(CeligoFlowStep.tenant_id == tenant.id, CeligoFlowStep.celigo_id == "exp1")
+            )
+        ).scalar_one()
+        assert row.reference_name == "Get New Sales Orders"

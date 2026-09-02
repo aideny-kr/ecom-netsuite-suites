@@ -535,17 +535,18 @@ async def backfill_flow_step_reference_info(
     record_type: str | None = None,
     operation: str | None = None,
     search_id: str | None = None,
+    reference_name: str | None = None,
 ) -> int:
     """Task 7's export/import fetch phase: bulk-backfill `adaptor_type`/
-    `connection_celigo_id`/`record_type`/`operation`/`search_id` onto EVERY
-    `celigo_flow_steps` row that references `celigo_id` (the export/import
-    object's own `_id`) -- filling in columns `upsert_flow_step`'s own
-    docstring flags as "live on the REFERENCED export/import object...
-    nullable here, filled in by whichever sync step fetches that object".
-    The SAME export/import id can be referenced by more than one flow, or
-    more than one branch within one flow (module docstring point 1) -- a
-    plain `db.get()`-and-update would only touch the first row found; this
-    statement updates ALL of them.
+    `connection_celigo_id`/`record_type`/`operation`/`search_id`/
+    `reference_name` onto EVERY `celigo_flow_steps` row that references
+    `celigo_id` (the export/import object's own `_id`) -- filling in columns
+    `upsert_flow_step`'s own docstring flags as "live on the REFERENCED
+    export/import object... nullable here, filled in by whichever sync step
+    fetches that object". The SAME export/import id can be referenced by
+    more than one flow, or more than one branch within one flow (module
+    docstring point 1) -- a plain `db.get()`-and-update would only touch the
+    first row found; this statement updates ALL of them.
 
     `record_type`/`operation`/`search_id` are Task 11's provenance input
     (fix round 2, migration 096) -- `record_type` is shared across import
@@ -554,6 +555,10 @@ async def backfill_flow_step_reference_info(
     `operation` is import-only and `search_id` is export-only, so a caller
     backfilling from the "wrong" kind simply never passes the other one,
     same as `adaptor_type`/`connection_celigo_id` already worked.
+
+    `reference_name` is Task 1's addition (migration 097) -- the export/
+    import's own `name` as typed in Celigo. It follows the same non-None-
+    only rule: a listing that omits the name never blanks a stored one.
 
     Only fields that are non-`None` are included in the `SET` clause: an
     export/import fetch that happens to omit one of these on a resync (a
@@ -576,6 +581,8 @@ async def backfill_flow_step_reference_info(
         values["operation"] = operation
     if search_id is not None:
         values["search_id"] = search_id
+    if reference_name is not None:
+        values["reference_name"] = reference_name
     if not values:
         return 0
     values["updated_at"] = func.now()

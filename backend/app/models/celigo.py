@@ -194,6 +194,12 @@ class CeligoFlowStep(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     record_type: Mapped[str | None] = mapped_column(Text, nullable=True)
     operation: Mapped[str | None] = mapped_column(Text, nullable=True)
     search_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reference_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    """The export/import's own `name` as typed in Celigo ("Get New Sales Orders",
+    "Update Currency"). Lives on the REFERENCED object, so sync Phase D backfills
+    it onto every step row that references that celigo_id (migration 097). NULL
+    until the first post-097 sync; the UI then shows an honest fallback, never an
+    invented name."""
     # filter/responseMapping ARE present directly on the pageProcessor entry
     # (sanitizer.py's _PAGE_PROCESSOR) -- no extra fetch needed for these two.
     filter_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

@@ -62,6 +62,7 @@ export interface CeligoFlowStep {
   sequence: number;
   adaptor_type: string | null;
   connection_celigo_id: string | null;
+  reference_name: string | null;
   filter_json: Record<string, unknown> | null;
   mapping_json: Record<string, unknown> | null;
   proceed_on_failure: boolean | null;
