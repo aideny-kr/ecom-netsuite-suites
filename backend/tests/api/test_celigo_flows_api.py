@@ -184,6 +184,40 @@ async def _seed_world(db, tenant_id, *, pii_message: str = PII_MESSAGE) -> dict:
 
 
 class TestListIntegrations:
+    async def test_sandbox_integrations_are_not_listed(self, client, admin_user, db):
+        """Production only -- operator directive 2026-09-01 ("don't bring sandbox
+        celigo, just production"). A sandbox integration synced under the same
+        connection must not appear. A NULL `sandbox` (Celigo omitted the flag)
+        is treated as production, never hidden: hiding on an absent flag would
+        let a missing field silently erase real integrations."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        db.add(
+            CeligoIntegration(
+                tenant_id=user.tenant_id,
+                celigo_connection_id=world["connection_id"],
+                celigo_id=f"int_sb_{world['suffix']}",
+                name="ACME ERP (sandbox)",
+                sandbox=True,
+                raw_json={},
+            )
+        )
+        db.add(
+            CeligoIntegration(
+                tenant_id=user.tenant_id,
+                celigo_connection_id=world["connection_id"],
+                celigo_id=f"int_null_{world['suffix']}",
+                name="ACME Legacy",
+                sandbox=None,
+                raw_json={},
+            )
+        )
+        await db.flush()
+
+        r = await client.get("/api/v1/celigo/integrations", headers=headers)
+        assert r.status_code == 200, r.text
+        assert sorted(i["name"] for i in r.json()) == ["ACME ERP", "ACME Legacy"]
+
     async def test_lists_integrations_for_the_tenant(self, client, admin_user, db):
         user, headers = admin_user
         world = await _seed_world(db, user.tenant_id)
@@ -235,6 +269,36 @@ class TestListIntegrations:
 
 
 class TestListIntegrationFlows:
+    async def test_a_cron_string_schedule_is_served_not_500(self, client, admin_user, db):
+        """LIVE DEFECT (2026-09-01, Framework staging): 96 of the 239 synced flows
+        carry `schedule` as Celigo's cron STRING, none as an object. The response
+        model declared `dict | None`, so every integration containing a scheduled
+        flow raised ResponseValidationError -> 500 -> (a 500 carries no CORS
+        headers) -> the browser saw "Failed to fetch" -> the flow map rendered
+        "0 flows" for 26 of 36 integrations. `_seed_world`'s object-shaped
+        schedule was a fixture invention; it was never observed live."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        db.add(
+            CeligoFlow(
+                tenant_id=user.tenant_id,
+                celigo_connection_id=world["connection_id"],
+                integration_id=world["integration"].id,
+                celigo_id=f"flow_cron_{world['suffix']}",
+                name="Nightly Backfill",
+                disabled=False,
+                schedule="? 0 */6 * * *",
+                raw_json={},
+            )
+        )
+        await db.flush()
+
+        r = await client.get(f"/api/v1/celigo/integrations/{world['integration'].id}/flows", headers=headers)
+        assert r.status_code == 200, r.text
+        by_name = {f["name"]: f for f in r.json()}
+        assert by_name["Nightly Backfill"]["schedule"] == "? 0 */6 * * *"
+        assert by_name["Sales Order Sync"]["schedule"] == {"type": "everyN", "unit": "minutes", "value": 15}
+
     async def test_lists_flows_with_error_and_signature_counts(self, client, admin_user, db):
         user, headers = admin_user
         world = await _seed_world(db, user.tenant_id)
@@ -351,6 +415,28 @@ class TestListIntegrationFlows:
 
 
 class TestGetFlowDetail:
+    async def test_a_cron_string_schedule_is_served_not_500(self, client, admin_user, db):
+        """Twin of TestListIntegrationFlows' test: the detail model declared
+        `schedule: dict | None` too, so opening any scheduled flow 500d."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        cron_flow = CeligoFlow(
+            tenant_id=user.tenant_id,
+            celigo_connection_id=world["connection_id"],
+            integration_id=world["integration"].id,
+            celigo_id=f"flow_cron_{world['suffix']}",
+            name="Nightly Backfill",
+            disabled=False,
+            schedule="? 0 */6 * * *",
+            raw_json={},
+        )
+        db.add(cron_flow)
+        await db.flush()
+
+        r = await client.get(f"/api/v1/celigo/flows/{cron_flow.id}", headers=headers)
+        assert r.status_code == 200, r.text
+        assert r.json()["schedule"] == "? 0 */6 * * *"
+
     async def test_returns_flow_with_steps_and_attachments(self, client, admin_user, db):
         user, headers = admin_user
         world = await _seed_world(db, user.tenant_id)

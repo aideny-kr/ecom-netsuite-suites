@@ -100,7 +100,12 @@ class CeligoFlowSummaryOut(BaseModel):
     celigo_id: str
     name: str
     disabled: bool | None
-    schedule: dict | None
+    # Celigo's real `schedule` is a cron STRING (e.g. "? 0 */6 * * *"); on the
+    # live Framework account 96 of 239 flows carry one and none carry an
+    # object. `dict | None` here came from a fixture, and it 500d every
+    # integration that had a scheduled flow (2026-09-01). `dict` stays
+    # accepted -- an object form is not ruled out, only unobserved.
+    schedule: dict | str | None
     timezone: str | None
     last_executed_at: datetime | None
     error_count: int
@@ -141,7 +146,12 @@ class CeligoFlowDetailOut(BaseModel):
     celigo_id: str
     name: str
     disabled: bool | None
-    schedule: dict | None
+    # Celigo's real `schedule` is a cron STRING (e.g. "? 0 */6 * * *"); on the
+    # live Framework account 96 of 239 flows carry one and none carry an
+    # object. `dict | None` here came from a fixture, and it 500d every
+    # integration that had a scheduled flow (2026-09-01). `dict` stays
+    # accepted -- an object form is not ruled out, only unobserved.
+    schedule: dict | str | None
     timezone: str | None
     last_executed_at: datetime | None
     source_id: str | None
@@ -271,9 +281,17 @@ async def list_integrations(
     _flag: Annotated[User, Depends(require_feature("celigo"))],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Integrations synced under the tenant's currently active Celigo
-    connection. Empty (never 404) when there is no active connection -- that
-    is a legitimate "not connected yet" state, not an error."""
+    """PRODUCTION integrations synced under the tenant's currently active
+    Celigo connection. Empty (never 404) when there is no active connection
+    -- that is a legitimate "not connected yet" state, not an error.
+
+    Sandbox integrations are excluded (operator directive 2026-09-01: "don't
+    bring sandbox celigo, just production"). `IS NOT TRUE`, not `= false`:
+    a NULL flag (Celigo omitted it) is production, never hidden -- hiding on
+    an absent field would let a missing key silently erase real
+    integrations. The sync skips and purges sandbox rows too
+    (`sync_service.py`, Phase A); this filter is what makes the promise hold
+    for rows synced before that rule existed."""
     connection = await _get_celigo_connection(db, user.tenant_id)
     if connection is None:
         return []
@@ -285,6 +303,7 @@ async def list_integrations(
                 .where(
                     CeligoIntegration.tenant_id == user.tenant_id,
                     CeligoIntegration.celigo_connection_id == connection.id,
+                    CeligoIntegration.sandbox.isnot(True),
                 )
                 .order_by(CeligoIntegration.name)
             )

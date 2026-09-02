@@ -82,7 +82,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -199,6 +199,29 @@ async def upsert_integration(
         .returning(CeligoIntegration.id)
     )
     return (await db.execute(stmt)).scalar_one()
+
+
+async def delete_sandbox_integrations(db: AsyncSession, *, tenant_id: uuid.UUID, connection_id: uuid.UUID) -> int:
+    """Delete every `sandbox IS TRUE` integration under one connection and
+    return how many went. The flow map is PRODUCTION ONLY (operator
+    directive 2026-09-01); `sync_service.py`'s Phase A stops writing sandbox
+    rows and calls this so rows written before that rule are removed too.
+
+    Only the integration rows are named here: `celigo_flows.integration_id`
+    is `ON DELETE CASCADE` (migration 094 / `app/models/celigo.py`), and the
+    flow's own dependents (steps, attachments, errors, config changes)
+    cascade from the flow the same way -- one statement, no per-table sweep
+    that could drift out of step with the schema. `IS TRUE`, not `= true`
+    or a Python truthiness check: a NULL flag is production and must never
+    be swept."""
+    result = await db.execute(
+        delete(CeligoIntegration).where(
+            CeligoIntegration.tenant_id == tenant_id,
+            CeligoIntegration.celigo_connection_id == connection_id,
+            CeligoIntegration.sandbox.is_(True),
+        )
+    )
+    return result.rowcount or 0
 
 
 # ---------------------------------------------------------------------------

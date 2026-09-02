@@ -75,8 +75,14 @@ async def _make_connection(db: AsyncSession, tenant_id, *, status: str = "active
     return conn_id
 
 
-def _raw_integration(celigo_id: str, name: str = "Test Integration") -> dict:
-    return {"_id": celigo_id, "name": name}
+def _raw_integration(celigo_id: str, name: str = "Test Integration", *, sandbox: bool | None = None) -> dict:
+    """`sandbox` is emitted only when given -- a live Celigo integration always
+    carries the flag, but an absent one must be exercised too (see
+    TestProductionOnly: absent means production, never hidden)."""
+    raw: dict = {"_id": celigo_id, "name": name}
+    if sandbox is not None:
+        raw["sandbox"] = sandbox
+    return raw
 
 
 def _raw_flow(
@@ -370,6 +376,132 @@ class TestSyncSequencingAndPersistence:
 # Drift detection -- disabled/schedule (flow), mapping_json/filter_json
 # (step), content_hash (script).
 # ---------------------------------------------------------------------------
+
+
+class TestProductionOnly:
+    """Operator directive 2026-09-01: "don't bring sandbox celigo, just
+    production". Phase A skips a `sandbox: true` integration, Phase B skips
+    every flow under it, and -- the part that is easy to get wrong -- a flow
+    whose `_integrationId` names a skipped sandbox integration must NOT reach
+    `_resolve_integration_id`'s listing-gap fallback, which would fetch and
+    upsert that very integration straight back in.
+
+    On the live account this halves the work: 19 of 36 integrations and 118
+    of 239 flows were sandbox copies, each flow costing a per-step error
+    listing call."""
+
+    async def test_sandbox_integrations_and_their_flows_are_skipped(self, db: AsyncSession, monkeypatch):
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        fallback_fetches: list[tuple[str, str]] = []
+
+        async def _fallback_must_not_run(kind, celigo_id, *, token, region="us", client=None):
+            fallback_fetches.append((kind, celigo_id))
+            raise AssertionError(f"listing-gap fallback fetched {kind} {celigo_id}")
+
+        monkeypatch.setattr("app.services.celigo.sync_service.get_resource", _fallback_must_not_run)
+
+        summary = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[
+                _raw_integration("int_prod", name="Production", sandbox=False),
+                _raw_integration("int_sb", name="Sandbox Copy", sandbox=True),
+                # No flag at all: production. Hiding on an absent field would
+                # let a missing key silently erase real integrations.
+                _raw_integration("int_legacy", name="Legacy"),
+            ],
+            flows=[
+                _raw_flow("flow_prod", integration_id="int_prod", export_id="exp_1"),
+                _raw_flow("flow_sb", integration_id="int_sb", export_id="exp_2"),
+                _raw_flow("flow_legacy", integration_id="int_legacy", export_id="exp_3"),
+            ],
+        )
+
+        assert summary.integrations_synced == 2
+        assert summary.integrations_skipped_sandbox == 1
+        assert summary.flows_synced == 2
+        assert summary.flows_skipped_sandbox == 1
+        assert summary.flows_skipped_no_integration == 0, "a sandbox skip is its own count, not a listing gap"
+        assert fallback_fetches == []
+
+        names = (
+            (
+                await db.execute(
+                    text("SELECT name FROM celigo_integrations WHERE tenant_id = :t ORDER BY name").bindparams(
+                        t=tenant.id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert names == ["Legacy", "Production"]
+        flow_ids = (
+            (
+                await db.execute(
+                    text("SELECT celigo_id FROM celigo_flows WHERE tenant_id = :t ORDER BY celigo_id").bindparams(
+                        t=tenant.id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert flow_ids == ["flow_legacy", "flow_prod"]
+
+    async def test_a_sandbox_integration_synced_before_this_rule_is_purged(self, db: AsyncSession, monkeypatch):
+        """The staging DB already holds 19 sandbox integrations (118 flows, their
+        steps and attachments) from syncs that predate this rule. A clean run
+        removes them so the DB matches the product promise; the FK CASCADEs
+        (`app/models/celigo.py`) take the dependent rows with them."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        old_sb_id = await upsert_integration(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            sanitized={"_id": "int_old_sb", "name": "Old Sandbox", "sandbox": True},
+        )
+        await upsert_flow(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integration_id=old_sb_id,
+            sanitized={"_id": "flow_old_sb", "name": "Old Sandbox Flow"},
+        )
+        await db.flush()
+
+        summary = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_prod", name="Production", sandbox=False)],
+            flows=[_raw_flow("flow_prod", integration_id="int_prod", export_id="exp_1")],
+        )
+
+        assert summary.integrations_purged_sandbox == 1
+        names = (
+            (
+                await db.execute(
+                    text("SELECT name FROM celigo_integrations WHERE tenant_id = :t").bindparams(t=tenant.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert names == ["Production"]
+        flow_ids = (
+            (await db.execute(text("SELECT celigo_id FROM celigo_flows WHERE tenant_id = :t").bindparams(t=tenant.id)))
+            .scalars()
+            .all()
+        )
+        assert flow_ids == ["flow_prod"], "the sandbox flow must go with its integration (FK CASCADE)"
 
 
 class TestDriftDetection:

@@ -77,8 +77,14 @@ function firstOpenableScriptId(attachments: CeligoAttachment[]): string | null {
  * Any other schedule shape Celigo can send is real but unverified here --
  * falls back to a generic label rather than inventing a display string
  * (e.g. the mockup's ":05, :35") for a shape nobody has confirmed. */
-export function formatSchedule(schedule: Record<string, unknown> | null): string {
-  if (!schedule || Object.keys(schedule).length === 0) return "on demand";
+export function formatSchedule(schedule: Record<string, unknown> | string | null): string {
+  if (!schedule) return "on demand";
+  // The shape actually observed live (2026-09-01, Framework: 96 of 239
+  // flows): Celigo's own cron string. Shown verbatim -- it is the real
+  // configuration, and any prettified rendering of it would be a claim this
+  // code cannot verify against Celigo's scheduler semantics.
+  if (typeof schedule === "string") return schedule.trim() || "on demand";
+  if (Object.keys(schedule).length === 0) return "on demand";
   if (schedule.type === "everyN" && typeof schedule.value === "number" && typeof schedule.unit === "string") {
     return `every ${schedule.value} ${schedule.unit}`;
   }
@@ -332,6 +338,7 @@ function FlowRow({
 function IntegrationTree({
   integration,
   flows,
+  flowsPending,
   flowsError,
   onRetryFlows,
   onSelectFlow,
@@ -339,6 +346,10 @@ function IntegrationTree({
 }: {
   integration: CeligoIntegration;
   flows: CeligoFlowSummary[];
+  /** `status === "pending"` on this integration's flows query -- true while
+   * fetching AND while a failed fetch sits paused for its retry. Rendered as
+   * loading, never as "0 flows" (see `anyFlowsQueryUnresolved`). */
+  flowsPending: boolean;
   flowsError: boolean;
   onRetryFlows: () => void;
   onSelectFlow: (flowId: string) => void;
@@ -366,6 +377,13 @@ function IntegrationTree({
         // round 1, Important).
         <div className="px-4 py-3">
           <ErrorNotice message="Couldn't load this integration's flows." onRetry={onRetryFlows} compact />
+        </div>
+      ) : flowsPending ? (
+        // Not resolved yet -- the same rule as the error branch: an
+        // unresolved query must never render as a confident "0 flows".
+        <div className="flex items-center gap-1.5 px-4 py-2 text-[12px] text-muted-foreground">
+          <Loader2 className="h-3 w-3 animate-spin" />
+          Loading flows…
         </div>
       ) : (
         <>
@@ -700,7 +718,16 @@ export function CeligoFlowMap() {
   // below already guards against. Applying the identical pattern here: any
   // unresolved per-integration flows query marks BOTH stats "—" rather than
   // silently presenting a partial total as complete.
-  const anyFlowsQueryUnresolved = flowQueries.some((q) => q.isLoading || q.isError);
+  //
+  // LIVE DEFECT (staging, 2026-09-01): this used `isLoading || isError`.
+  // TanStack's `isLoading` is pending AND fetching, so a query whose fetch
+  // failed at the transport layer and sat PAUSED for its retry (`status:
+  // "pending"`, `fetchStatus: "paused"`) was neither -- 26 of 36 integrations
+  // were counted as resolved-and-empty, and the strip summed the other 10 as
+  // if they were the whole account. The predicate is `status !== "success"`,
+  // which is exactly `isPending || isError`; anything narrower is a stand-in
+  // that drifts from it.
+  const anyFlowsQueryUnresolved = flowQueries.some((q) => q.isPending || q.isError);
 
   // Loading/error render a neutral placeholder rather than a fabricated
   // "Never synced" -- that string is a real, meaningful claim (fix round
@@ -734,6 +761,7 @@ export function CeligoFlowMap() {
               key={integration.id}
               integration={integration}
               flows={flowsByIntegration.get(integration.id) ?? []}
+              flowsPending={!!flowsQuery?.isPending}
               flowsError={!!flowsQuery?.isError}
               onRetryFlows={() => flowsQuery?.refetch()}
               onSelectFlow={setSelectedFlowId}

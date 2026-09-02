@@ -111,6 +111,7 @@ from app.services.celigo.graph import ScriptRef, walk_script_refs
 from app.services.celigo.repository import (
     backfill_attachment_script_ids,
     backfill_flow_step_reference_info,
+    delete_sandbox_integrations,
     extract_flow_steps,
     insert_config_change,
     mark_flow_errors_purged,
@@ -136,7 +137,15 @@ class SyncSummary:
     codebase's other sync summary dataclasses, e.g. `DepositSyncResult`)."""
 
     integrations_synced: int = 0
+    # PRODUCTION ONLY (operator directive 2026-09-01: "don't bring sandbox
+    # celigo, just production"). Sandbox integrations are skipped in Phase A,
+    # their flows in Phase B, and rows synced before this rule are purged --
+    # three counts so a run's summary says what happened to the sandbox half
+    # of the account (19 of 36 integrations, 118 of 239 flows on the live one).
+    integrations_skipped_sandbox: int = 0
+    integrations_purged_sandbox: int = 0
     flows_synced: int = 0
+    flows_skipped_sandbox: int = 0
     flows_skipped_no_integration: int = 0
     steps_synced: int = 0
     scripts_synced: int = 0
@@ -305,6 +314,7 @@ async def _resolve_integration_id(
     tenant_id,
     connection_id,
     integration_ids: dict[str, uuid.UUID],
+    sandbox_integration_ids: set[str],
     celigo_integration_id: str | None,
     token: str,
     region: str,
@@ -314,17 +324,28 @@ async def _resolve_integration_id(
     when present. Falls back to an on-demand `get_resource` + upsert for the
     rare case a flow references an integration Phase A's listing didn't
     return -- never silently drop the flow over a listing gap. Returns `None`
-    ONLY when `celigo_integration_id` itself is falsy (a malformed flow, no
-    id to even try) -- a genuine fetch failure for a REAL id propagates
-    uncaught, same as everything else in this module (no swallowed
-    exceptions here: a network/auth failure fetching the fallback must abort
-    the whole run, not silently skip one flow)."""
-    local_id = integration_ids.get(celigo_integration_id) if celigo_integration_id else None
-    if local_id is not None:
-        return local_id
+    when `celigo_integration_id` itself is falsy (a malformed flow, no id to
+    even try) OR when the integration is a SANDBOX one (already in
+    `sandbox_integration_ids` from Phase A, or discovered to be one by the
+    fallback fetch -- which then records it there so the caller can tell the
+    two `None`s apart and count the flow as skipped-sandbox, not as a listing
+    gap). Without that second check the fallback would fetch-and-upsert the
+    very sandbox integration Phase A just refused, one flow at a time. A
+    genuine fetch failure for a REAL id propagates uncaught, same as
+    everything else in this module (no swallowed exceptions here: a
+    network/auth failure fetching the fallback must abort the whole run, not
+    silently skip one flow)."""
     if not celigo_integration_id:
         return None
+    if celigo_integration_id in sandbox_integration_ids:
+        return None
+    local_id = integration_ids.get(celigo_integration_id)
+    if local_id is not None:
+        return local_id
     fetched = await get_resource("integration", celigo_integration_id, token=token, region=region, client=http)
+    if fetched.get("sandbox") is True:
+        sandbox_integration_ids.add(celigo_integration_id)
+        return None
     local_id = await upsert_integration(db, tenant_id=tenant_id, connection_id=connection_id, sanitized=fetched)
     integration_ids[celigo_integration_id] = local_id
     return local_id
@@ -521,17 +542,33 @@ async def sync_flow_map_for_connection(
     owns_client = http_client is None
     http = http_client or httpx.AsyncClient(timeout=_HTTP_TIMEOUT)
     try:
-        # Phase A -- integrations.
+        # Phase A -- integrations. PRODUCTION ONLY: a `sandbox: true`
+        # integration is remembered (so Phase B can skip its flows without
+        # the listing-gap fallback re-fetching it) and never written. `is
+        # True`, not truthiness, and only `True` skips: an absent flag is
+        # production -- hiding on a missing field would let a sanitizer or
+        # API change silently erase real integrations.
         integration_ids: dict[str, uuid.UUID] = {}
+        sandbox_integration_ids: set[str] = set()
         async for integration in list_resource("integration", token=token, region=region, client=http):
             celigo_id = integration.get("_id")
             if not celigo_id:
+                continue
+            if integration.get("sandbox") is True:
+                sandbox_integration_ids.add(celigo_id)
+                summary.integrations_skipped_sandbox += 1
                 continue
             local_id = await upsert_integration(
                 db, tenant_id=tenant_id, connection_id=connection_id, sanitized=integration
             )
             integration_ids[celigo_id] = local_id
             summary.integrations_synced += 1
+        # Rows synced before this rule existed (the live account held 19 of
+        # them, with 118 flows) go too, so the DB matches the product
+        # promise; FK CASCADE takes their flows/steps/attachments/errors.
+        summary.integrations_purged_sandbox = await delete_sandbox_integrations(
+            db, tenant_id=tenant_id, connection_id=connection_id
+        )
 
         # Phase B -- flows, and each flow's own steps.
         pending_step_refs: list[tuple[str, str, _StepRef]] = []
@@ -549,18 +586,26 @@ async def sync_flow_map_for_connection(
             if not flow_celigo_id:
                 continue
 
+            flow_integration_celigo_id = flow.get("_integrationId")
             integration_local_id = await _resolve_integration_id(
                 db,
                 tenant_id=tenant_id,
                 connection_id=connection_id,
                 integration_ids=integration_ids,
-                celigo_integration_id=flow.get("_integrationId"),
+                sandbox_integration_ids=sandbox_integration_ids,
+                celigo_integration_id=flow_integration_celigo_id,
                 token=token,
                 region=region,
                 http=http,
             )
             if integration_local_id is None:
-                summary.flows_skipped_no_integration += 1
+                # Two different `None`s -- see `_resolve_integration_id`: a
+                # sandbox flow is a deliberate skip; a missing integration is
+                # a listing gap worth noticing in the summary.
+                if flow_integration_celigo_id in sandbox_integration_ids:
+                    summary.flows_skipped_sandbox += 1
+                else:
+                    summary.flows_skipped_no_integration += 1
                 continue
 
             existing_flow = await _get_existing_flow(

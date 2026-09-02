@@ -24,7 +24,10 @@ export interface CeligoFlowSummary {
   celigo_id: string;
   name: string;
   disabled: boolean | null;
-  schedule: Record<string, unknown> | null;
+  /** Celigo's real value is a six-field cron STRING (e.g. `? 0 0 6 * *`) --
+   * 96 of 239 live flows carry one, none carry an object. The object form is
+   * kept only because nothing rules it out; it was never observed. */
+  schedule: Record<string, unknown> | string | null;
   timezone: string | null;
   last_executed_at: string | null;
   /** Raw open-error count (`resolved_at IS NULL AND purged_at IS NULL`). */
@@ -68,7 +71,10 @@ export interface CeligoFlowDetail {
   celigo_id: string;
   name: string;
   disabled: boolean | null;
-  schedule: Record<string, unknown> | null;
+  /** Celigo's real value is a six-field cron STRING (e.g. `? 0 0 6 * *`) --
+   * 96 of 239 live flows carry one, none carry an object. The object form is
+   * kept only because nothing rules it out; it was never observed. */
+  schedule: Record<string, unknown> | string | null;
   timezone: string | null;
   last_executed_at: string | null;
   source_id: string | null;

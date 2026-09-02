@@ -123,8 +123,17 @@ const processorStep = {
   ],
 };
 
+/** A RESOLVED per-integration flows query, shaped like TanStack v5's result:
+ * `status: "success"` with `isPending`/`isError` false. The component keys
+ * off `isPending || isError` (== `status !== "success"`), never `isLoading`
+ * -- see the "unresolved query" describe block for the live defect that
+ * distinction exists for. */
+function resolved(data: unknown) {
+  return { data, status: "success", isPending: false, isLoading: false, isError: false, isSuccess: true, refetch: vi.fn() };
+}
+
 function setLists(flows: unknown[][]) {
-  mocks.allFlows.mockReturnValue(flows.map((data) => ({ data, isLoading: false, isSuccess: true })));
+  mocks.allFlows.mockReturnValue(flows.map(resolved));
 }
 
 beforeEach(() => {
@@ -169,6 +178,47 @@ describe("CeligoFlowMap — stats strip", () => {
     // 1 integration, 3 flows, 12 open errors (only failingFlow has any), never synced
     const stats = stripe.getAllByTestId("celigo-stat-value").map((el) => el.textContent);
     expect(stats).toEqual(["1", "3", "12", "Never synced"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// LIVE DEFECT (Framework staging, 2026-09-01). 26 of 36 per-integration flow
+// queries failed at the transport layer (a backend 500 with no CORS headers
+// reads as "Failed to fetch") and sat in TanStack's `status: "pending"` /
+// `fetchStatus: "paused"` state. `isLoading` is pending AND fetching, so it
+// is FALSE for a paused query -- the old `isLoading || isError` predicate
+// treated those 26 as resolved: the tree printed "0 flows" for integrations
+// holding 23, and the stats strip summed the 10 that got through as if they
+// were the whole account. The predicate is `status !== "success"`; anything
+// else is a stand-in that drifts from it.
+// ---------------------------------------------------------------------------
+
+describe("CeligoFlowMap — an unresolved per-integration query never reads as an empty one", () => {
+  it('renders a pending (paused, not fetching) flows query as loading, not "0 flows"', () => {
+    mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
+    mocks.allFlows.mockReturnValue([
+      { data: undefined, status: "pending", isPending: true, isLoading: false, isError: false, isSuccess: false, refetch: vi.fn() },
+    ]);
+    mocks.syncStatus.mockReturnValue({ data: { last_synced_at: null }, isLoading: false });
+    wrap(<CeligoFlowMap />);
+
+    expect(screen.queryByText(/0 flows/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/loading flows/i)).toBeInTheDocument();
+    const stats = within(screen.getByTestId("celigo-stats-strip"))
+      .getAllByTestId("celigo-stat-value")
+      .map((el) => el.textContent);
+    expect(stats[1]).toBe("—");
+    expect(stats[2]).toBe("—");
+  });
+});
+
+describe("CeligoFlowMap — schedule is Celigo's real shape", () => {
+  it("renders a cron-string schedule verbatim (96 of 239 live flows carry one; none carry an object)", () => {
+    mocks.integrations.mockReturnValue({ data: [integration], isLoading: false });
+    setLists([[{ ...healthyFlow, schedule: "? 0 */6 * * *" }]]);
+    wrap(<CeligoFlowMap />);
+    expect(screen.getByText("? 0 */6 * * *")).toBeInTheDocument();
+    expect(screen.queryByText(/custom schedule/i)).not.toBeInTheDocument();
   });
 });
 
