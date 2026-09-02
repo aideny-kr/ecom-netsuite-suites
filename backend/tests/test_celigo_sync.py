@@ -23,6 +23,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
+import httpx
 import pytest
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -36,7 +37,12 @@ from app.models.celigo import (
     CeligoScript,
     CeligoScriptAttachment,
 )
-from app.services.celigo.client import CeligoIncompleteListingError
+from app.services.celigo.client import (
+    CeligoError,
+    CeligoIncompleteListingError,
+    CeligoNotFoundError,
+    get_resource,
+)
 from app.services.celigo.repository import (
     extract_flow_steps,
     sync_flow_steps,
@@ -938,6 +944,80 @@ class TestAnEmptiedScriptIsObserved:
         ).one()
         assert row.content == ""
         assert row.content_hash is not None
+
+
+class TestAScriptGoneBetweenListAndFetchIsContainedNotFatal:
+    """GATE (PR #217, round 3): Phase C's per-script GET is a new failure point
+    inside a walk whose rule is "any exception aborts the run". That rule is
+    right for auth, network and upstream 5xx (they mean the run cannot be
+    trusted). It is wrong for a 404 on a script the LIST just returned: that
+    is one object deleted in the seconds between two calls, self-healing on
+    the next run, and it must not throw away a whole night's sync -- the same
+    narrowing Phase E already makes for one step's truncated error listing.
+
+    Two halves: the client names a 404 as its own error type (a subclass, so
+    every existing `except CeligoError` keeps working), and Phase C contains
+    exactly that type -- counting it, keeping stored content -- while a 500
+    still aborts."""
+
+    async def test_the_client_raises_a_not_found_subclass_for_404(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"errors": [{"message": "not found"}]})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            with pytest.raises(CeligoNotFoundError):
+                await get_resource("script", "scr_gone", token="tok", client=http)
+        assert issubclass(CeligoNotFoundError, CeligoError)
+
+    async def test_a_404_on_one_script_is_counted_and_the_run_completes(self, db: AsyncSession, monkeypatch):
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        async def _fetch_second_is_gone(kind, celigo_id, *, token, region="us", client=None, **kw):
+            if celigo_id == "scr_gone":
+                raise CeligoNotFoundError("Celigo returned 404 while fetching script scr_gone")
+            return {"_id": celigo_id, "name": "Alive", "content": "function alive() {}", "sandbox": False}
+
+        summary = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            get_resource=_fetch_second_is_gone,
+            integrations=[_raw_integration("int_prod", name="Production", sandbox=False)],
+            flows=[_raw_flow("flow_prod", integration_id="int_prod", export_id="exp_1")],
+            scripts=[{"_id": "scr_alive", "name": "Alive"}, {"_id": "scr_gone", "name": "Gone"}],
+        )
+
+        assert summary.scripts_synced == 2, "the vanished script's list row is still written; only its body is missing"
+        assert summary.scripts_without_content == 1
+        rows = (
+            await db.execute(
+                text(
+                    "SELECT celigo_id, content FROM celigo_scripts WHERE tenant_id = :t ORDER BY celigo_id"
+                ).bindparams(t=tenant.id)
+            )
+        ).all()
+        assert [(r.celigo_id, r.content) for r in rows] == [("scr_alive", "function alive() {}"), ("scr_gone", None)]
+
+    async def test_any_other_fetch_failure_still_aborts_the_run(self, db: AsyncSession, monkeypatch):
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        async def _fetch_500(kind, celigo_id, *, token, region="us", client=None, **kw):
+            raise CeligoError("Celigo returned 500 while fetching script scr_x")
+
+        with pytest.raises(CeligoError):
+            await _run_sync(
+                monkeypatch,
+                db,
+                tenant_id=tenant.id,
+                connection_id=conn_id,
+                get_resource=_fetch_500,
+                integrations=[_raw_integration("int_prod", name="Production", sandbox=False)],
+                flows=[_raw_flow("flow_prod", integration_id="int_prod", export_id="exp_1")],
+                scripts=[{"_id": "scr_x", "name": "X"}],
+            )
 
 
 class TestDriftDetection:

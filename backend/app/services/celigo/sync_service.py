@@ -108,6 +108,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.celigo import CeligoFlow, CeligoFlowError, CeligoFlowStep, CeligoScript
 from app.services.celigo.client import (
     CeligoIncompleteListingError,
+    CeligoNotFoundError,
     get_resource,
     list_flow_errors_for_step,
     list_resource,
@@ -794,7 +795,16 @@ async def sync_flow_map_for_connection(
             # the payload has none, so this path can never re-empty a script
             # (PR #217 gate). One extra call per PRODUCTION script; sandbox
             # ones never reach this line. `get_resource` sanitizes.
-            fetched = await get_resource("script", celigo_id, token=token, region=region, client=http)
+            try:
+                fetched = await get_resource("script", celigo_id, token=token, region=region, client=http)
+            except CeligoNotFoundError:
+                # The script was deleted in the seconds between the LIST and
+                # this GET. One object, self-healing next run (the list will
+                # not name it again) -- the same narrowing Phase E makes for
+                # one step's truncated error listing (gate round 3). Counted
+                # as body-less; stored content is kept. Auth, network and
+                # upstream 5xx still abort the run, as the module rule says.
+                fetched = {}
             fetched_content = fetched.get("content")
             if isinstance(fetched_content, str):
                 # An EMPTY string is a body too -- someone cleared the script
