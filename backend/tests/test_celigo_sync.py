@@ -23,6 +23,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
+import httpx
 import pytest
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -36,7 +37,12 @@ from app.models.celigo import (
     CeligoScript,
     CeligoScriptAttachment,
 )
-from app.services.celigo.client import CeligoIncompleteListingError
+from app.services.celigo.client import (
+    CeligoError,
+    CeligoIncompleteListingError,
+    CeligoNotFoundError,
+    get_resource,
+)
 from app.services.celigo.repository import (
     extract_flow_steps,
     sync_flow_steps,
@@ -207,6 +213,21 @@ def _fake_list_resource(data: dict[str, list[dict]]):
     return _fake
 
 
+def _fake_get_resource(data: dict[str, list[dict]]):
+    """Fake for client.get_resource, serving the listed item of that kind by
+    id. Phase C fetches every production script by id because the live LIST
+    omits `content`; here the list item already carries whatever the test
+    gave it, so the merge is a no-op unless a test supplies its own fake."""
+
+    async def _fake(kind, celigo_id, *, token, region="us", include=None, exclude=None, client=None):
+        for item in data.get(kind, []):
+            if item.get("_id") == celigo_id:
+                return dict(item)
+        raise AssertionError(f"get_resource fake: no {kind} with id {celigo_id!r}")
+
+    return _fake
+
+
 def _fake_list_flow_errors_for_step(
     data: dict[tuple[str, str], list[dict]] | None = None,
     calls: list | None = None,
@@ -246,6 +267,7 @@ async def _run_sync(
     errors_by_step: dict[tuple[str, str], list[dict]] | None = None,
     error_calls: list | None = None,
     truncated_steps: dict[tuple[str, str], list[dict]] | None = None,
+    get_resource=None,
 ) -> SyncSummary:
     resource_data = {
         "integration": integrations or [],
@@ -257,6 +279,10 @@ async def _run_sync(
     monkeypatch.setattr(
         "app.services.celigo.sync_service.list_resource",
         _fake_list_resource(resource_data),
+    )
+    monkeypatch.setattr(
+        "app.services.celigo.sync_service.get_resource",
+        get_resource or _fake_get_resource(resource_data),
     )
     monkeypatch.setattr(
         "app.services.celigo.sync_service.list_flow_errors_for_step",
@@ -397,17 +423,16 @@ class TestProductionOnly:
 
         fallback_fetches: list[tuple[str, str]] = []
 
-        async def _fallback_must_not_run(kind, celigo_id, *, token, region="us", client=None):
+        async def _fallback_must_not_run(kind, celigo_id, *, token, region="us", client=None, **kw):
             fallback_fetches.append((kind, celigo_id))
             raise AssertionError(f"listing-gap fallback fetched {kind} {celigo_id}")
-
-        monkeypatch.setattr("app.services.celigo.sync_service.get_resource", _fallback_must_not_run)
 
         summary = await _run_sync(
             monkeypatch,
             db,
             tenant_id=tenant.id,
             connection_id=conn_id,
+            get_resource=_fallback_must_not_run,
             integrations=[
                 _raw_integration("int_prod", name="Production", sandbox=False),
                 _raw_integration("int_sb", name="Sandbox Copy", sandbox=True),
@@ -756,6 +781,243 @@ class TestProductionOnlyIsOneSeam:
             .all()
         )
         assert flow_ids == ["flow_prod"]
+
+
+class TestScriptContentIsFetchedPerScript:
+    """LIVE (2026-09-02): all 129 production scripts in staging had EMPTY
+    content, so the script viewer said "No source recorded" for every one --
+    "it doesn't really show scripts". Celigo's `GET /v1/scripts` LIST omits
+    `content` for every item (probed: 0 of 261 carry it); only `GET
+    /v1/scripts/{id}` returns it (`/content` 404s). The 2026-08-17 design spec
+    recorded exactly that ("list omits content; requires GET per script") and
+    Phase C listed anyway. Phase C now fetches each PRODUCTION script by id.
+
+    The per-id object is not a superset of the list item: the single GET has
+    no `_sourceId` (probed), and `_sourceId` is the clone-family key. So the
+    two are MERGED, list item first, fetched fields on top."""
+
+    async def test_content_comes_from_the_per_id_fetch_and_source_id_survives_the_merge(
+        self, db: AsyncSession, monkeypatch
+    ):
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        fetched_ids: list[str] = []
+        body = "function preMap(options) { return options.data; }"
+
+        async def _fetch_like_the_live_single_get(kind, celigo_id, *, token, region="us", client=None, **kw):
+            fetched_ids.append(f"{kind}:{celigo_id}")
+            assert kind == "script"
+            # Shaped like the live single GET: content present, `_sourceId` ABSENT --
+            # and, to prove only `content` is taken from it, a DIFFERENT name and
+            # a sandbox flag that contradicts the list (the list decided routing).
+            return {"_id": celigo_id, "name": "Fetched Name", "content": body, "sandbox": True}
+
+        summary = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            get_resource=_fetch_like_the_live_single_get,
+            integrations=[_raw_integration("int_prod", name="Production", sandbox=False)],
+            flows=[_raw_flow("flow_prod", integration_id="int_prod", export_id="exp_1")],
+            scripts=[
+                # Shaped like the live LIST: no content, but the clone-family key.
+                {"_id": "scr_clone", "name": "FW Sales Order Hook", "_sourceId": "scr_original"},
+                {"_id": "scr_second", "name": "Inventory Filter"},
+                {"_id": "scr_sb", "name": "Sandbox Copy", "sandbox": True},
+            ],
+        )
+
+        assert summary.scripts_synced == 2
+        assert summary.scripts_without_content == 0
+        assert fetched_ids == ["script:scr_clone", "script:scr_second"], (
+            "one fetch per PRODUCTION script, in list order; the sandbox one is never fetched"
+        )
+        row = (
+            await db.execute(
+                text(
+                    "SELECT name, content, content_hash, source_id, sandbox FROM celigo_scripts "
+                    "WHERE tenant_id = :t AND celigo_id = 'scr_clone'"
+                ).bindparams(t=tenant.id)
+            )
+        ).one()
+        assert row.content == body
+        assert row.content_hash is not None
+        assert row.source_id == "scr_original", "the list's _sourceId must survive the merge with the per-id object"
+        assert row.name == "FW Sales Order Hook", (
+            "only `content` comes from the per-id object; the list item is the record"
+        )
+        assert row.sandbox is None, "the per-id object's sandbox flag must not override what the list decided"
+
+    async def test_a_fetch_without_content_never_clobbers_stored_content(self, db: AsyncSession, monkeypatch):
+        """GATE (PR #217, plausible major): if the per-id GET ever answers 200
+        without `content`, the merged object has no content, `_script_drift`
+        deliberately ignores a null hash, and the upsert would overwrite real
+        stored content with NULL -- the exact defect this PR closes, back
+        through a different door, and silent. So an absent body never
+        clobbers a stored one (`upsert_script` keeps the existing value), and
+        the run counts it (`scripts_without_content`) instead of pretending."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+        await upsert_script(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            sanitized={"_id": "scr_keep", "name": "Keeper", "content": "function keep() { return 1; }"},
+        )
+        await db.flush()
+        before = (
+            await db.execute(
+                text(
+                    "SELECT content_hash FROM celigo_scripts WHERE tenant_id = :t AND celigo_id = 'scr_keep'"
+                ).bindparams(t=tenant.id)
+            )
+        ).scalar_one()
+
+        async def _fetch_without_content(kind, celigo_id, *, token, region="us", client=None, **kw):
+            return {"_id": celigo_id, "name": "Keeper", "sandbox": False}
+
+        summary = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            get_resource=_fetch_without_content,
+            integrations=[_raw_integration("int_prod", name="Production", sandbox=False)],
+            flows=[_raw_flow("flow_prod", integration_id="int_prod", export_id="exp_1")],
+            scripts=[{"_id": "scr_keep", "name": "Keeper"}],
+        )
+
+        assert summary.scripts_synced == 1
+        assert summary.scripts_without_content == 1
+        row = (
+            await db.execute(
+                text(
+                    "SELECT content, content_hash FROM celigo_scripts WHERE tenant_id = :t AND celigo_id = 'scr_keep'"
+                ).bindparams(t=tenant.id)
+            )
+        ).one()
+        assert row.content == "function keep() { return 1; }", "stored content must survive a body-less fetch"
+        assert row.content_hash == before
+
+
+class TestAnEmptiedScriptIsObserved:
+    """GATE (PR #217, round 2): "no body in the response" and "the body is
+    empty" are different facts. A per-id GET that returns `content: ""` is a
+    script someone cleared in Celigo -- a real edit that must land (and be
+    hashed) rather than be counted as missing and leave the old source in
+    place forever. Only an ABSENT `content` key is the no-body case."""
+
+    async def test_content_cleared_to_empty_string_is_stored_not_dropped(self, db: AsyncSession, monkeypatch):
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+        await upsert_script(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            sanitized={"_id": "scr_cleared", "name": "Cleared", "content": "function old() { return 1; }"},
+        )
+        await db.flush()
+
+        async def _fetch_emptied(kind, celigo_id, *, token, region="us", client=None, **kw):
+            return {"_id": celigo_id, "name": "Cleared", "content": "", "sandbox": False}
+
+        summary = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            get_resource=_fetch_emptied,
+            integrations=[_raw_integration("int_prod", name="Production", sandbox=False)],
+            flows=[_raw_flow("flow_prod", integration_id="int_prod", export_id="exp_1")],
+            scripts=[{"_id": "scr_cleared", "name": "Cleared"}],
+        )
+
+        assert summary.scripts_without_content == 0, "an empty body is a body, not a missing one"
+        row = (
+            await db.execute(
+                text(
+                    "SELECT content, content_hash FROM celigo_scripts WHERE tenant_id = :t AND celigo_id = 'scr_cleared'"
+                ).bindparams(t=tenant.id)
+            )
+        ).one()
+        assert row.content == ""
+        assert row.content_hash is not None
+
+
+class TestAScriptGoneBetweenListAndFetchIsContainedNotFatal:
+    """GATE (PR #217, round 3): Phase C's per-script GET is a new failure point
+    inside a walk whose rule is "any exception aborts the run". That rule is
+    right for auth, network and upstream 5xx (they mean the run cannot be
+    trusted). It is wrong for a 404 on a script the LIST just returned: that
+    is one object deleted in the seconds between two calls, self-healing on
+    the next run, and it must not throw away a whole night's sync -- the same
+    narrowing Phase E already makes for one step's truncated error listing.
+
+    Two halves: the client names a 404 as its own error type (a subclass, so
+    every existing `except CeligoError` keeps working), and Phase C contains
+    exactly that type -- counting it, keeping stored content -- while a 500
+    still aborts."""
+
+    async def test_the_client_raises_a_not_found_subclass_for_404(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"errors": [{"message": "not found"}]})
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+            with pytest.raises(CeligoNotFoundError):
+                await get_resource("script", "scr_gone", token="tok", client=http)
+        assert issubclass(CeligoNotFoundError, CeligoError)
+
+    async def test_a_404_on_one_script_is_counted_and_the_run_completes(self, db: AsyncSession, monkeypatch):
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        async def _fetch_second_is_gone(kind, celigo_id, *, token, region="us", client=None, **kw):
+            if celigo_id == "scr_gone":
+                raise CeligoNotFoundError("Celigo returned 404 while fetching script scr_gone")
+            return {"_id": celigo_id, "name": "Alive", "content": "function alive() {}", "sandbox": False}
+
+        summary = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            get_resource=_fetch_second_is_gone,
+            integrations=[_raw_integration("int_prod", name="Production", sandbox=False)],
+            flows=[_raw_flow("flow_prod", integration_id="int_prod", export_id="exp_1")],
+            scripts=[{"_id": "scr_alive", "name": "Alive"}, {"_id": "scr_gone", "name": "Gone"}],
+        )
+
+        assert summary.scripts_synced == 2, "the vanished script's list row is still written; only its body is missing"
+        assert summary.scripts_without_content == 1
+        rows = (
+            await db.execute(
+                text(
+                    "SELECT celigo_id, content FROM celigo_scripts WHERE tenant_id = :t ORDER BY celigo_id"
+                ).bindparams(t=tenant.id)
+            )
+        ).all()
+        assert [(r.celigo_id, r.content) for r in rows] == [("scr_alive", "function alive() {}"), ("scr_gone", None)]
+
+    async def test_any_other_fetch_failure_still_aborts_the_run(self, db: AsyncSession, monkeypatch):
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        async def _fetch_500(kind, celigo_id, *, token, region="us", client=None, **kw):
+            raise CeligoError("Celigo returned 500 while fetching script scr_x")
+
+        with pytest.raises(CeligoError):
+            await _run_sync(
+                monkeypatch,
+                db,
+                tenant_id=tenant.id,
+                connection_id=conn_id,
+                get_resource=_fetch_500,
+                integrations=[_raw_integration("int_prod", name="Production", sandbox=False)],
+                flows=[_raw_flow("flow_prod", integration_id="int_prod", export_id="exp_1")],
+                scripts=[{"_id": "scr_x", "name": "X"}],
+            )
 
 
 class TestDriftDetection:

@@ -129,6 +129,14 @@ class CeligoError(Exception):
     """Celigo returned an unexpected non-2xx response."""
 
 
+class CeligoNotFoundError(CeligoError):
+    """Celigo returned 404: the object named in the request does not exist
+    (any more). A SUBCLASS so every existing `except CeligoError` keeps its
+    meaning; named so the one caller that can legitimately contain it --
+    `sync_service`'s Phase C, for a script deleted between the LIST and the
+    per-id GET -- can catch exactly this and nothing broader (PR #217)."""
+
+
 class CeligoIncompleteListingError(CeligoError):
     """One step's error listing did not terminate within `_MAX_ERROR_PAGES`
     (FIX ROUND 9, scoped re-review R1b).
@@ -259,6 +267,8 @@ def _raise_for_status(response: httpx.Response, *, context: str) -> None:
     fetched -- so a raw Celigo object can never end up in a traceback."""
     if response.status_code in (401, 403):
         raise CeligoAuthError(_auth_message(response))
+    if response.status_code == 404:
+        raise CeligoNotFoundError(f"Celigo returned 404 while {context}")
     if not (200 <= response.status_code < 300):
         raise CeligoError(f"Celigo returned {response.status_code} while {context}")
 

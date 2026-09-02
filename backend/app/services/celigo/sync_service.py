@@ -23,8 +23,13 @@ step", extended by fix round 1 -- see below):
     for script refs here (`graph.walk_script_refs`) -- routers can carry
     `script` (see Phase D's docstring note for why this is separate from the
     export/import walk below).
-  Phase C: every script (`client.list_resource("script")`), independent of
-    flow order.
+  Phase C: every script -- LISTED (`client.list_resource("script")`) and
+    then FETCHED BY ID (`client.get_resource("script", id)`), because the
+    list omits `content` and the single GET omits `_sourceId`. Only
+    `content` is taken from the GET; the list item is the record. A GET
+    without a body is counted (`scripts_without_content`) and never
+    overwrites stored content. Independent of flow order. (Until
+    2026-09-02 this phase listed only, and every stored script was empty.)
   Phase D (FIX ROUND 1, added after the first cut of this module shipped):
     every export AND import (`client.list_resource("export"/"import")`).
     THE REASON THIS EXISTS: the plan's own live-probed Verified Facts say
@@ -103,6 +108,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.celigo import CeligoFlow, CeligoFlowError, CeligoFlowStep, CeligoScript
 from app.services.celigo.client import (
     CeligoIncompleteListingError,
+    CeligoNotFoundError,
     get_resource,
     list_flow_errors_for_step,
     list_resource,
@@ -152,6 +158,10 @@ class SyncSummary:
     scripts_synced: int = 0
     scripts_skipped_sandbox: int = 0
     scripts_purged_sandbox: int = 0
+    # A per-id GET that answered without a body. The stored content is kept
+    # (repository.upsert_script never overwrites it with NULL); this count is
+    # how a run says so instead of pretending every script has source.
+    scripts_without_content: int = 0
     exports_imports_synced: int = 0
     exports_imports_skipped_sandbox: int = 0
     exports_imports_skipped_no_flow: int = 0
@@ -773,6 +783,39 @@ async def sync_flow_map_for_connection(
             celigo_id = script.get("_id")
             if not celigo_id:
                 continue
+            # Celigo's LIST omits `content` for every script (probed live,
+            # 2026-09-02: 0 of 261 carried it; the 2026-08-17 spec said so and
+            # this phase listed anyway -- 129 empty rows in production, and a
+            # viewer that said "No source recorded" for all of them). Only the
+            # per-id GET returns the body. ONLY `content` is taken from it: the
+            # list item is the record (it decided sandbox routing, and it is
+            # the one carrying `_sourceId`, the clone-family key, which the
+            # single GET lacks). A GET that answers without a body is counted
+            # and changes nothing -- `upsert_script` keeps stored content when
+            # the payload has none, so this path can never re-empty a script
+            # (PR #217 gate). One extra call per PRODUCTION script; sandbox
+            # ones never reach this line. `get_resource` sanitizes.
+            try:
+                fetched = await get_resource("script", celigo_id, token=token, region=region, client=http)
+            except CeligoNotFoundError:
+                # The script was deleted in the seconds between the LIST and
+                # this GET. One object, self-healing next run (the list will
+                # not name it again) -- the same narrowing Phase E makes for
+                # one step's truncated error listing (gate round 3). Counted
+                # as body-less; stored content is kept. Auth, network and
+                # upstream 5xx still abort the run, as the module rule says.
+                fetched = {}
+            fetched_content = fetched.get("content")
+            if isinstance(fetched_content, str):
+                # An EMPTY string is a body too -- someone cleared the script
+                # in Celigo, and that edit must land and be hashed. Only an
+                # ABSENT key is the no-body case (gate round 2). The body and
+                # its timestamp come from the same object.
+                script = {**script, "content": fetched_content}
+                if "lastModified" in fetched:
+                    script["lastModified"] = fetched["lastModified"]
+            else:
+                summary.scripts_without_content += 1
             existing_script = await _get_existing_script(
                 db, tenant_id=tenant_id, connection_id=connection_id, celigo_id=celigo_id
             )
