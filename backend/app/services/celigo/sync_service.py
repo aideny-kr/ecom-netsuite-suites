@@ -25,9 +25,11 @@ step", extended by fix round 1 -- see below):
     export/import walk below).
   Phase C: every script -- LISTED (`client.list_resource("script")`) and
     then FETCHED BY ID (`client.get_resource("script", id)`), because the
-    list omits `content` and the single GET omits `_sourceId`; the two are
-    merged. Independent of flow order. (Until 2026-09-02 this phase listed
-    only, and every stored script was empty.)
+    list omits `content` and the single GET omits `_sourceId`. Only
+    `content` is taken from the GET; the list item is the record. A GET
+    without a body is counted (`scripts_without_content`) and never
+    overwrites stored content. Independent of flow order. (Until
+    2026-09-02 this phase listed only, and every stored script was empty.)
   Phase D (FIX ROUND 1, added after the first cut of this module shipped):
     every export AND import (`client.list_resource("export"/"import")`).
     THE REASON THIS EXISTS: the plan's own live-probed Verified Facts say
@@ -155,6 +157,10 @@ class SyncSummary:
     scripts_synced: int = 0
     scripts_skipped_sandbox: int = 0
     scripts_purged_sandbox: int = 0
+    # A per-id GET that answered without a body. The stored content is kept
+    # (repository.upsert_script never overwrites it with NULL); this count is
+    # how a run says so instead of pretending every script has source.
+    scripts_without_content: int = 0
     exports_imports_synced: int = 0
     exports_imports_skipped_sandbox: int = 0
     exports_imports_skipped_no_flow: int = 0
@@ -780,12 +786,20 @@ async def sync_flow_map_for_connection(
             # 2026-09-02: 0 of 261 carried it; the 2026-08-17 spec said so and
             # this phase listed anyway -- 129 empty rows in production, and a
             # viewer that said "No source recorded" for all of them). Only the
-            # per-id GET returns the body, and that object has NO `_sourceId`
-            # (the clone-family key), so the two are MERGED: list item first,
-            # fetched fields on top. One extra call per PRODUCTION script --
-            # sandbox ones never reach this line. `get_resource` sanitizes.
+            # per-id GET returns the body. ONLY `content` is taken from it: the
+            # list item is the record (it decided sandbox routing, and it is
+            # the one carrying `_sourceId`, the clone-family key, which the
+            # single GET lacks). A GET that answers without a body is counted
+            # and changes nothing -- `upsert_script` keeps stored content when
+            # the payload has none, so this path can never re-empty a script
+            # (PR #217 gate). One extra call per PRODUCTION script; sandbox
+            # ones never reach this line. `get_resource` sanitizes.
             fetched = await get_resource("script", celigo_id, token=token, region=region, client=http)
-            script = {**script, **fetched}
+            fetched_content = fetched.get("content")
+            if isinstance(fetched_content, str) and fetched_content:
+                script = {**script, "content": fetched_content}
+            else:
+                summary.scripts_without_content += 1
             existing_script = await _get_existing_script(
                 db, tenant_id=tenant_id, connection_id=connection_id, celigo_id=celigo_id
             )

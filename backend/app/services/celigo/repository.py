@@ -602,7 +602,16 @@ async def upsert_script(
 ) -> uuid.UUID:
     """Upsert one `celigo_scripts` row from a SANITIZED script payload
     (already through `sanitizer.sanitize("script", raw)`). `content_hash` is
-    computed here, never trusted from a caller (see `_content_hash`)."""
+    computed here, never trusted from a caller (see `_content_hash`).
+
+    A payload WITHOUT a body never empties a stored one: on conflict,
+    `content`/`content_hash` take the incoming value only when it is
+    non-NULL (`COALESCE(EXCLUDED.content, celigo_scripts.content)`). Celigo's
+    list mode omits `content` and its per-id GET is not guaranteed to carry
+    it either; before this rule a body-less payload silently overwrote real
+    source with NULL, and `_script_drift` ignores null hashes by design, so
+    nothing would have said so (PR #217 gate). A body that is present still
+    updates normally -- edits are not suppressed, only absence is."""
     content = sanitized.get("content")
     values = dict(
         tenant_id=tenant_id,
@@ -616,15 +625,11 @@ async def upsert_script(
         celigo_last_modified=_parse_celigo_timestamp(sanitized.get("lastModified")),
     )
     # dedup_key is STORED GENERATED -- deliberately never in `values`.
-    stmt = (
-        insert(CeligoScript)
-        .values(**values)
-        .on_conflict_do_update(
-            constraint="uq_celigo_scripts_identity",
-            set_=_set_clause(values, exclude={"tenant_id", "celigo_connection_id", "celigo_id"}),
-        )
-        .returning(CeligoScript.id)
-    )
+    stmt = insert(CeligoScript).values(**values)
+    set_ = _set_clause(values, exclude={"tenant_id", "celigo_connection_id", "celigo_id"})
+    set_["content"] = func.coalesce(stmt.excluded.content, CeligoScript.content)
+    set_["content_hash"] = func.coalesce(stmt.excluded.content_hash, CeligoScript.content_hash)
+    stmt = stmt.on_conflict_do_update(constraint="uq_celigo_scripts_identity", set_=set_).returning(CeligoScript.id)
     return (await db.execute(stmt)).scalar_one()
 
 

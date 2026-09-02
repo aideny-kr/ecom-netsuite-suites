@@ -417,7 +417,7 @@ class TestProductionOnly:
 
         fallback_fetches: list[tuple[str, str]] = []
 
-        async def _fallback_must_not_run(kind, celigo_id, *, token, region="us", client=None):
+        async def _fallback_must_not_run(kind, celigo_id, *, token, region="us", client=None, **kw):
             fallback_fetches.append((kind, celigo_id))
             raise AssertionError(f"listing-gap fallback fetched {kind} {celigo_id}")
 
@@ -802,8 +802,10 @@ class TestScriptContentIsFetchedPerScript:
         async def _fetch_like_the_live_single_get(kind, celigo_id, *, token, region="us", client=None, **kw):
             fetched_ids.append(f"{kind}:{celigo_id}")
             assert kind == "script"
-            # Shaped like the live single GET: content present, `_sourceId` ABSENT.
-            return {"_id": celigo_id, "name": "Fetched Name", "content": body, "sandbox": False}
+            # Shaped like the live single GET: content present, `_sourceId` ABSENT --
+            # and, to prove only `content` is taken from it, a DIFFERENT name and
+            # a sandbox flag that contradicts the list (the list decided routing).
+            return {"_id": celigo_id, "name": "Fetched Name", "content": body, "sandbox": True}
 
         summary = await _run_sync(
             monkeypatch,
@@ -816,22 +818,82 @@ class TestScriptContentIsFetchedPerScript:
             scripts=[
                 # Shaped like the live LIST: no content, but the clone-family key.
                 {"_id": "scr_clone", "name": "FW Sales Order Hook", "_sourceId": "scr_original"},
+                {"_id": "scr_second", "name": "Inventory Filter"},
                 {"_id": "scr_sb", "name": "Sandbox Copy", "sandbox": True},
             ],
         )
 
-        assert summary.scripts_synced == 1
-        assert fetched_ids == ["script:scr_clone"], "one fetch per PRODUCTION script; the sandbox one is never fetched"
+        assert summary.scripts_synced == 2
+        assert summary.scripts_without_content == 0
+        assert fetched_ids == ["script:scr_clone", "script:scr_second"], (
+            "one fetch per PRODUCTION script, in list order; the sandbox one is never fetched"
+        )
         row = (
             await db.execute(
                 text(
-                    "SELECT content, content_hash, source_id FROM celigo_scripts WHERE tenant_id = :t AND celigo_id = 'scr_clone'"
+                    "SELECT name, content, content_hash, source_id, sandbox FROM celigo_scripts "
+                    "WHERE tenant_id = :t AND celigo_id = 'scr_clone'"
                 ).bindparams(t=tenant.id)
             )
         ).one()
         assert row.content == body
         assert row.content_hash is not None
         assert row.source_id == "scr_original", "the list's _sourceId must survive the merge with the per-id object"
+        assert row.name == "FW Sales Order Hook", (
+            "only `content` comes from the per-id object; the list item is the record"
+        )
+        assert row.sandbox is None, "the per-id object's sandbox flag must not override what the list decided"
+
+    async def test_a_fetch_without_content_never_clobbers_stored_content(self, db: AsyncSession, monkeypatch):
+        """GATE (PR #217, plausible major): if the per-id GET ever answers 200
+        without `content`, the merged object has no content, `_script_drift`
+        deliberately ignores a null hash, and the upsert would overwrite real
+        stored content with NULL -- the exact defect this PR closes, back
+        through a different door, and silent. So an absent body never
+        clobbers a stored one (`upsert_script` keeps the existing value), and
+        the run counts it (`scripts_without_content`) instead of pretending."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+        await upsert_script(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            sanitized={"_id": "scr_keep", "name": "Keeper", "content": "function keep() { return 1; }"},
+        )
+        await db.flush()
+        before = (
+            await db.execute(
+                text(
+                    "SELECT content_hash FROM celigo_scripts WHERE tenant_id = :t AND celigo_id = 'scr_keep'"
+                ).bindparams(t=tenant.id)
+            )
+        ).scalar_one()
+
+        async def _fetch_without_content(kind, celigo_id, *, token, region="us", client=None, **kw):
+            return {"_id": celigo_id, "name": "Keeper", "sandbox": False}
+
+        summary = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            get_resource=_fetch_without_content,
+            integrations=[_raw_integration("int_prod", name="Production", sandbox=False)],
+            flows=[_raw_flow("flow_prod", integration_id="int_prod", export_id="exp_1")],
+            scripts=[{"_id": "scr_keep", "name": "Keeper"}],
+        )
+
+        assert summary.scripts_synced == 1
+        assert summary.scripts_without_content == 1
+        row = (
+            await db.execute(
+                text(
+                    "SELECT content, content_hash FROM celigo_scripts WHERE tenant_id = :t AND celigo_id = 'scr_keep'"
+                ).bindparams(t=tenant.id)
+            )
+        ).one()
+        assert row.content == "function keep() { return 1; }", "stored content must survive a body-less fetch"
+        assert row.content_hash == before
 
 
 class TestDriftDetection:
