@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import (
     Boolean,
@@ -104,10 +105,13 @@ class CeligoFlow(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     celigo_id: Mapped[str] = mapped_column(Text, nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     disabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-    # A cron STRING on every live flow that has one ("? 0 */6 * * *"); the
-    # object form was never observed. Typed honestly so the API models built
-    # from this column don't inherit a lie (they 500d on the string, 2026-09-01).
-    schedule: Mapped[dict | str | None] = mapped_column(JSONB, nullable=True)
+    # Whatever JSON Celigo sent, mirrored. The only shape seen live is a cron
+    # STRING ("? 0 */6 * * *"); the object form `dict | None` used to claim
+    # here was a fixture's, and the API models built on it 500d on the string
+    # (2026-09-01). `Any` on purpose, matching the API's `CeligoSchedule =
+    # JsonValue`: this column does not vouch for the shape, so its type must
+    # not pretend to either.
+    schedule: Mapped[Any] = mapped_column(JSONB, nullable=True)
     timezone: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     # Flows carry `_sourceId` too, not only scripts (observed-shapes.md finding

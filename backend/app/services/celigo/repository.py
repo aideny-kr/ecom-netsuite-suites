@@ -82,7 +82,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable
 
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import delete, func, not_, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -95,6 +95,7 @@ from app.models.celigo import (
     CeligoIntegration,
     CeligoScript,
     CeligoScriptAttachment,
+    celigo_integration_is_production,
     celigo_script_is_production,
 )
 from app.services.celigo.graph import ScriptRef
@@ -222,52 +223,41 @@ async def purge_sandbox_rows(
     the sync never upserts a sandbox object, so an integration that was
     production when first synced and flipped to sandbox since keeps
     `sandbox = false` in the DB forever -- a purge keyed on the stored flag
-    alone would never see it.
+    alone would never see it. "Sandbox" is spelled as the negation of the
+    read side's `celigo_*_is_production()` predicates so there is one
+    definition of it (NULL is production; only TRUE is swept).
 
-    Cascade is NOT enough on its own. `celigo_flows.integration_id`, the
-    flow's steps, script attachments and config changes are `ON DELETE
-    CASCADE`, but `celigo_flow_errors.flow_id` is `ON DELETE SET NULL` by
-    design (an error outlives its flow -- see `CeligoFlowError`). Left to the
-    FK, a purged sandbox flow's errors would survive as orphans with
-    `flow_id NULL`, counted nowhere and attributable to nothing (the
-    independent-model review angle caught this; the Claude verifier had
-    'refuted' it against a checkout without the purge). So the doomed flows'
-    errors are deleted explicitly, first, inside the same transaction.
-
-    `IS TRUE` / `is_(True)`, never truthiness: a NULL flag is production and
-    must never be swept."""
-    doomed_integrations = or_(
-        CeligoIntegration.sandbox.is_(True),
-        CeligoIntegration.celigo_id.in_(list(integration_celigo_ids)),
-    )
-    doomed_flow_ids = (
-        select(CeligoFlow.id)
-        .join(CeligoIntegration, CeligoIntegration.id == CeligoFlow.integration_id)
-        .where(
-            CeligoFlow.tenant_id == tenant_id,
-            CeligoIntegration.tenant_id == tenant_id,
-            CeligoIntegration.celigo_connection_id == connection_id,
-            doomed_integrations,
-        )
-    )
-    await db.execute(
-        delete(CeligoFlowError).where(
-            CeligoFlowError.tenant_id == tenant_id,
-            CeligoFlowError.flow_id.in_(doomed_flow_ids),
-        )
-    )
+    What the FKs do with the rest: `celigo_flows.integration_id`, the flow's
+    steps, script attachments and config changes are `ON DELETE CASCADE` and
+    go with the integration. `celigo_flow_errors.flow_id` is `ON DELETE SET
+    NULL` and its rows are deliberately NOT touched here -- that table is
+    THE audit trail (design spec G2; `CeligoFlowError`'s docstring: "NEVER
+    DELETE A ROW HERE"), and SET NULL is the design, not a gap: an error
+    outlives its flow the same way it outlives Celigo's own ~30-day purge.
+    A purged sandbox flow's errors keep existing with `flow_id NULL`, exactly
+    as they would after any other flow deletion, and count nowhere because
+    every open-error count joins through a flow. (Round 1 of PR #216's gate
+    deleted them here; round 2 flagged that as a blocker. The name-based pin
+    in `test_celigo_repository.py` could not see an inline delete, so that
+    test now scans the source of every Celigo module for one.)"""
     integrations_result = await db.execute(
         delete(CeligoIntegration).where(
             CeligoIntegration.tenant_id == tenant_id,
             CeligoIntegration.celigo_connection_id == connection_id,
-            doomed_integrations,
+            or_(
+                not_(celigo_integration_is_production()),
+                CeligoIntegration.celigo_id.in_(list(integration_celigo_ids)),
+            ),
         )
     )
     scripts_result = await db.execute(
         delete(CeligoScript).where(
             CeligoScript.tenant_id == tenant_id,
             CeligoScript.celigo_connection_id == connection_id,
-            or_(CeligoScript.sandbox.is_(True), CeligoScript.celigo_id.in_(list(script_celigo_ids))),
+            or_(
+                not_(celigo_script_is_production()),
+                CeligoScript.celigo_id.in_(list(script_celigo_ids)),
+            ),
         )
     )
     return (integrations_result.rowcount or 0), (scripts_result.rowcount or 0)

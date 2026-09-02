@@ -76,6 +76,22 @@ from app.services.celigo.repository import list_logical_scripts
 router = APIRouter(prefix="/celigo", tags=["celigo"])
 
 
+def _join_production_integration(stmt, tenant_id):
+    """INNER-join `CeligoIntegration` onto a statement whose FROM already
+    carries `CeligoFlow`, with the tenant predicate AND
+    `celigo_integration_is_production()` on the ON clause -- so the join is
+    the production filter, not a WHERE someone has to remember. Used by the
+    flow detail and the script sites query; one place to get it right."""
+    return stmt.join(
+        CeligoIntegration,
+        and_(
+            CeligoIntegration.id == CeligoFlow.integration_id,
+            CeligoIntegration.tenant_id == tenant_id,
+            celigo_integration_is_production(),
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Response schemas -- see module docstring: every field named by hand.
 # ---------------------------------------------------------------------------
@@ -466,23 +482,13 @@ async def get_flow_detail(
     the step it belongs to. Attachments with no owning
     step (a `routers[].script` ref -- belongs to the router, not a step) come
     back in `unassigned_attachments` instead of being dropped."""
+    # Production only, through the flow's integration (flows carry no flag
+    # of their own) -- the join IS the filter.
     flow = (
         await db.execute(
-            select(CeligoFlow)
-            # Production only, through the flow's integration (flows carry no
-            # flag of their own). Tenant predicate on the JOIN's ON clause
-            # like every other join in this module.
-            .join(
-                CeligoIntegration,
-                and_(
-                    CeligoIntegration.id == CeligoFlow.integration_id,
-                    CeligoIntegration.tenant_id == user.tenant_id,
-                ),
-            )
-            .where(
+            _join_production_integration(select(CeligoFlow), user.tenant_id).where(
                 CeligoFlow.id == flow_id,
                 CeligoFlow.tenant_id == user.tenant_id,
-                celigo_integration_is_production(),
             )
         )
     ).scalar_one_or_none()
@@ -655,31 +661,22 @@ async def get_script_detail(
     # codebase's own test harness connects as a superuser, which bypasses RLS
     # unconditionally, so this explicit scoping is the only thing standing in
     # that context, not defence-in-depth.
+    sites_stmt = select(
+        CeligoScriptAttachment,
+        CeligoFlow.name.label("flow_name"),
+        CeligoFlow.integration_id.label("integration_id"),
+        CeligoFlowStep.role.label("step_role"),
+        CeligoFlowStep.adaptor_type.label("step_adaptor_type"),
+    ).join(
+        CeligoFlow,
+        and_(
+            CeligoFlow.id == CeligoScriptAttachment.flow_id,
+            CeligoFlow.tenant_id == user.tenant_id,
+        ),
+    )
+    # Production only: a site under a sandbox integration is not a site.
     sites_result = await db.execute(
-        select(
-            CeligoScriptAttachment,
-            CeligoFlow.name.label("flow_name"),
-            CeligoFlow.integration_id.label("integration_id"),
-            CeligoFlowStep.role.label("step_role"),
-            CeligoFlowStep.adaptor_type.label("step_adaptor_type"),
-        )
-        .join(
-            CeligoFlow,
-            and_(
-                CeligoFlow.id == CeligoScriptAttachment.flow_id,
-                CeligoFlow.tenant_id == user.tenant_id,
-            ),
-        )
-        # Production only: a site under a sandbox integration is not a site.
-        # INNER join, so the predicate on the ON clause is a filter.
-        .join(
-            CeligoIntegration,
-            and_(
-                CeligoIntegration.id == CeligoFlow.integration_id,
-                CeligoIntegration.tenant_id == user.tenant_id,
-                celigo_integration_is_production(),
-            ),
-        )
+        _join_production_integration(sites_stmt, user.tenant_id)
         .outerjoin(
             CeligoFlowStep,
             and_(

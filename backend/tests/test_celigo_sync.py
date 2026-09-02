@@ -569,14 +569,25 @@ class TestProductionOnlyHoldsAcrossKindsAndTime:
         )
         assert flow_ids == ["flow_prod"]
 
-    async def test_purging_a_sandbox_integration_takes_its_flow_errors_with_it(self, db: AsyncSession, monkeypatch):
-        """CODEX FINDING (the independent-model angle; the Claude verifier
-        'refuted' it by looking at a checkout without the purge function):
-        `celigo_flow_errors.flow_id` is ON DELETE SET NULL, not CASCADE -- by
-        the model's own design, an error outlives its flow. So the FK alone
-        leaves a purged sandbox flow's errors behind as orphans with
-        `flow_id NULL`, counted nowhere and attributable to nothing. The purge
-        deletes them explicitly, first."""
+    async def test_purging_a_sandbox_integration_leaves_its_flow_errors_as_audit_rows(
+        self, db: AsyncSession, monkeypatch
+    ):
+        """Two review rounds, opposite conclusions, and the second one is right.
+
+        Round 1 (codex, the independent-model angle): `celigo_flow_errors.
+        flow_id` is ON DELETE SET NULL, not CASCADE, so the purge's docstring
+        overclaimed that errors cascade away. True. The fix drawn from it --
+        delete the rows explicitly -- was wrong.
+
+        Round 2 (blocker): `celigo_flow_errors` is THE audit trail (design
+        spec G2, `CeligoFlowError`'s own docstring: "NEVER DELETE A ROW
+        HERE"). SET NULL is not an accident to work around; it is the design.
+        An error must outlive its flow, its integration and its connection,
+        the same way it outlives Celigo's own ~30-day purge. So a purged
+        sandbox flow's errors stay, with `flow_id NULL`, exactly as they
+        would if the flow were deleted for any other reason -- and they are
+        counted nowhere, because every open-error count joins through a flow.
+        """
         tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
         conn_id = await _make_connection(db, tenant.id)
         sb_id = await upsert_integration(
@@ -614,12 +625,14 @@ class TestProductionOnlyHoldsAcrossKindsAndTime:
         )
 
         assert summary.integrations_purged_sandbox == 1
-        orphaned = (
+        surviving = (
             await db.execute(
-                text("SELECT COUNT(*) FROM celigo_flow_errors WHERE tenant_id = :t").bindparams(t=tenant.id)
+                text("SELECT celigo_id, flow_id FROM celigo_flow_errors WHERE tenant_id = :t").bindparams(t=tenant.id)
             )
-        ).scalar_one()
-        assert orphaned == 0, "SET NULL would have kept the row with flow_id NULL"
+        ).all()
+        assert [(row.celigo_id, row.flow_id) for row in surviving] == [("err_sb", None)], (
+            "the audit row must survive its flow's purge, with flow_id SET NULL -- never deleted"
+        )
 
     async def test_sandbox_scripts_are_skipped_and_previously_synced_ones_purged(self, db: AsyncSession, monkeypatch):
         """SINGLE-AGENT REVIEW: Phase C synced every script regardless of
