@@ -37,7 +37,7 @@ Updated at the end of every task, not "later".
 | `feat/dev-loop-and-harness` | T2 | 21 commits, process only — gated ×3, blockers fixed, **frozen** | nothing |
 | `feat/agent-graph-operating-model` | T2 | Track O (22 majors) + reject action, **ungated** | needs Track O decision |
 | `feat/rolling-period` | T2 | **SHIPPED** — squash-merged as main `f74b781f` (PR #209), deployed + live-verified on staging (backend recreated, `alembic current`=`094_dashboard_preference_series` head, FE digest `4a37ebf8`, BUILD_ID baked). Gate ×4: majors 2→3→0 | nothing |
-| `feat/batch-write-idempotency` | T2 | Phase 1 of the batch-write plan, shipping alone: work-derived idempotency key in `externalId` + side-effect log committed BEFORE the call + settle-only-on-a-definite-answer. `kill -9` drill run in both branches. Also fixes the single-record case — a timed-out write is now answerable instead of reported `failed` and offered for blind retry | verify + T2 gate |
+| `feat/batch-write-idempotency` | T2 | **BLOCKED ON A DESIGN CALL — do not merge.** verify PASS @ `27f2ad15`. Gate ×4 (ceiling reached): rounds found 1 shipped blocker (line items stripped from every transaction write), 1 blocker I had wrongly declared fixed, and ~18 real defects. Round 4 was the strongest (`codex_used=true`) and still found a FOURTH variant of one shape. See OPEN → "one key, three jobs" | a human's design decision | Phase 1 of the batch-write plan, shipping alone: work-derived idempotency key in `externalId` + side-effect log committed BEFORE the call + settle-only-on-a-definite-answer. `kill -9` drill run in both branches. Also fixes the single-record case — a timed-out write is now answerable instead of reported `failed` and offered for blind retry | verify + T2 gate |
 | `feat/rolling-period-stage2` | T2 | Scheduled compose built: daily Beat sweep, reason enum → `jobs.result_summary`, per-tenant cost ceiling, waiting ribbon lit (DATA-gated on the sweep being enabled). verify **PASS @ `fa793ce6`** (+15 tests). **T2 gate round 1 in flight** | gate verdict → PR |
 
 **SHIPPED 2026-08-17 — `fix/ns-account-switch-and-chat-burst` → PR #194, squashed to
@@ -450,6 +450,59 @@ Written so the next session does not re-litigate these.
 - **Don't add a rule to CLAUDE.md when a docstring next to the code would carry it.**
 
 ## OPEN — needs a human, blocking something
+
+### The idempotency key is doing three jobs at once (2026-09-02) — BLOCKING `feat/batch-write-idempotency`
+
+Four T2 gate rounds each found a fresh variant of ONE defect. Listing them in order,
+because the pattern is the finding:
+
+| round | variant |
+|---|---|
+| 1 | key derived from `.fields` — line items didn't participate; salesOrders posted header-only |
+| 2 | `record_type`/`connector`/`mutation_type` absent; payload-less mutations hashed to a CONSTANT; key frozen at card build while slot-fill changed the payload |
+| 3 | the round-2 fix never reached the call site (un-asserted `.replace()`); `record_id` read from a different source than the card used |
+| 4 | `record_id` dropped when the record is empty but an id exists; `merge_slot_values` still never recomputes; a synthesized key trusted as "sent" when it never was |
+
+**Root cause — one value, three jobs, three different validity conditions:**
+
+1. **NetSuite-enforced dedupe.** Must be INSIDE the payload as `externalId`. Only works for
+   CREATES (`base_agent.py:2208` gates stamping on `mutation_type == "create"`), and only if
+   the payload is final when stamped.
+2. **Ledger row identity.** `write_side_effects` needs a key for EVERY mutation type,
+   including the updates and deletes that job 1 never stamps.
+3. **Proof-of-landing.** "This entity already exists" ⇒ WRITTEN — valid ONLY if the key was
+   actually transmitted.
+
+Every defect above is these three pulling apart. The sharpest: the orchestrator synthesizes
+an `ss-idem-` key for an UPDATE (job 2), nothing stamps it into the payload (job 1 is
+create-only), and then `classify_retry_result` sees the `ss-idem-` prefix and treats a genuine
+"already exists" as proof our write landed (job 3) — **settling a failed update as `written`,
+irreversibly.** `reconcile_by_external_id` already implements the correct guard for this
+(agent-graph.md 12a: only conclude from a key that was actually SENT); `classify_retry_result`
+does not. Fixing it there too would be patching the second of N call sites — the shape this
+repo has been bitten by repeatedly.
+
+**Two ways forward. This is a design decision, not a bug fix, which is why it is here:**
+
+- **A — split the concept (bigger, correct).** A `ledger_key` that always exists and is never
+  sent, plus a nullable `netsuite_external_id` set ONLY when actually stamped into a create.
+  Proof-of-landing becomes conditional on that column being non-null and matching
+  `payload_json` — structurally, not by a prefix check. Recomputation then only concerns the
+  external id, only up to approval.
+- **B — narrow phase 1 to creates (smaller, shippable now).** Stamping is already create-only;
+  make the LEDGER create-only to match, and refuse to settle non-create mutations through this
+  path. Kills the job-2/job-3 conflict outright. Costs the update/delete audit trail until A
+  lands.
+
+**Recommendation: B now, A as its own slice.** The branch's real value — a timed-out CREATE
+becomes answerable instead of being reported `failed` and offered for blind retry — is
+delivered entirely by B, and B is a deletion rather than an addition.
+
+Not to be re-litigated: the key must stay in `externalId` (there is no header channel — the
+MCP tool takes only `recordType` and `data`), and NetSuite's server-side uniqueness is the
+guarantee. Both measured live, see DECIDED.
+
+
 
 - **`feat/rolling-period-stage2` — resume here.** Worktree
   `.claude/worktrees/feat-rolling-period` (branch switched), verify PASS @ `fa793ce6`.
