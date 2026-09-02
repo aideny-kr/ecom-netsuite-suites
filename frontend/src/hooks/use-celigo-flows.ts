@@ -87,6 +87,8 @@ export interface CeligoFlowStep {
   operation: string | null;
   search_id: string | null;
   attachments: CeligoAttachment[];
+  /** Open (`celigo_error_is_open()`) error count attributed to THIS step. */
+  error_count: number;
 }
 
 export interface CeligoRouterBranch {
@@ -127,6 +129,12 @@ export interface CeligoFlowDetail {
    * `lastErrorAt`) -- distinct from this app's own error tables. */
   celigo_open_error_count: number | null;
   last_error_at: string | null;
+  /** This app's OWN open counts (Task 4). `error_count` is the sum of every
+   * step's `error_count` above; `signature_count` is DISTINCT root causes
+   * across the whole flow (not a per-step sum, which would over-count a
+   * signature spanning multiple steps). */
+  error_count: number;
+  signature_count: number;
 }
 
 export function useCeligoIntegrations() {
@@ -235,5 +243,65 @@ export function useCeligoScript(scriptId: string | undefined) {
     queryKey: ["celigo", "script", scriptId],
     queryFn: () => apiClient.get<CeligoScript>(`/api/v1/celigo/scripts/${scriptId}`),
     enabled: !!scriptId,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Task 4 -- grouped flow errors (`CeligoFlowErrorGroupOut`/`CeligoFlowErrorsOut`
+// in celigo_flows.py), mirrored field-for-field. `CeligoErrorSignature`/
+// `CeligoError` mirror `CeligoErrorSignatureOut`/`CeligoErrorOut` the same way.
+// ---------------------------------------------------------------------------
+
+export interface CeligoErrorSignature {
+  id: string;
+  fingerprint: string;
+  source: string | null;
+  code: string | null;
+  sample_message: string | null;
+  occurrence_count: number;
+  first_seen: string | null;
+  last_seen: string | null;
+}
+
+export interface CeligoError {
+  id: string;
+  celigo_id: string;
+  flow_id: string | null;
+  flow_step_id: string | null;
+  trace_key: string | null;
+  source: string | null;
+  code: string | null;
+  message: string | null;
+  occurred_at: string | null;
+  purge_at: string | null;
+  resolved_at: string | null;
+  purged_at: string | null;
+  retriable: boolean | null;
+}
+
+export interface CeligoFlowErrorGroup {
+  signature: CeligoErrorSignature | null;
+  count: number;
+  step_ids: (string | null)[];
+  first_seen_at: string | null;
+  last_seen_at: string | null;
+  retriable: boolean | null;
+  purge_at: string | null;
+  trace_keys: string[];
+  errors: CeligoError[];
+}
+
+export interface CeligoFlowErrors {
+  flow_id: string;
+  status: "open" | "resolved";
+  total: number;
+  groups: CeligoFlowErrorGroup[];
+}
+
+export function useCeligoFlowErrors(flowId: string | undefined, status: "open" | "resolved" = "open") {
+  return useQuery<CeligoFlowErrors>({
+    queryKey: ["celigo", "flow", flowId, "errors", status],
+    queryFn: () => apiClient.get<CeligoFlowErrors>(`/api/v1/celigo/flows/${flowId}/errors?status=${status}`),
+    enabled: !!flowId,
   });
 }

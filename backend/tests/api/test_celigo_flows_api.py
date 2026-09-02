@@ -995,6 +995,106 @@ class TestGetFlowDetail:
 
 
 # ---------------------------------------------------------------------------
+# GET /celigo/flows/{id}/errors
+# ---------------------------------------------------------------------------
+
+
+class TestFlowErrors:
+    async def _seed_two_step_errors(self, db, world, chain):
+        sfx = world["suffix"]
+        tenant_id = world["integration"].tenant_id
+        sig = world["signature"]
+        rows = []
+        for i, step_key in enumerate((f"lkp_{sfx}", f"lkp_{sfx}", f"so_add_bIntl_{sfx}")):
+            rows.append(
+                CeligoFlowError(
+                    tenant_id=tenant_id,
+                    celigo_connection_id=world["connection_id"],
+                    flow_id=chain["flow"].id,
+                    flow_step_id=chain["steps"][step_key].id,
+                    signature_id=sig.id,
+                    celigo_id=f"err_{i}_{sfx}",
+                    trace_key=f"1582211{i}",
+                    source="pre_save_page_hook",
+                    code="script_error",
+                    message="TypeError: null",
+                    occurred_at=datetime(2026, 8, 17, 6 + i, tzinfo=timezone.utc),
+                    purge_at=datetime(2026, 9, 16, tzinfo=timezone.utc),
+                    retriable=False,
+                )
+            )
+        rows.append(
+            CeligoFlowError(
+                tenant_id=tenant_id,
+                celigo_connection_id=world["connection_id"],
+                flow_id=chain["flow"].id,
+                flow_step_id=chain["steps"][f"lkp_{sfx}"].id,
+                signature_id=sig.id,
+                celigo_id=f"err_resolved_{sfx}",
+                source="pre_save_page_hook",
+                code="script_error",
+                message="old",
+                occurred_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+                resolved_at=datetime(2026, 8, 2, tzinfo=timezone.utc),
+            )
+        )
+        db.add_all(rows)
+        await db.flush()
+
+    async def test_detail_carries_open_counts_per_step_and_per_flow(self, client, admin_user, db):
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        chain = await _seed_router_chain_flow(db, world)
+        await self._seed_two_step_errors(db, world, chain)
+        body = (await client.get(f"/api/v1/celigo/flows/{chain['flow'].id}", headers=headers)).json()
+        sfx = world["suffix"]
+        counts = {s["celigo_id"]: s["error_count"] for s in body["steps"]}
+        assert counts[f"lkp_{sfx}"] == 2 and counts[f"so_add_bIntl_{sfx}"] == 1 and counts[f"src_{sfx}"] == 0
+        assert body["error_count"] == 3 and body["signature_count"] == 1
+
+    async def test_grouped_errors_by_signature_with_step_attribution_and_trace_keys(self, client, admin_user, db):
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        chain = await _seed_router_chain_flow(db, world)
+        await self._seed_two_step_errors(db, world, chain)
+        r = await client.get(f"/api/v1/celigo/flows/{chain['flow'].id}/errors", headers=headers)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "open" and body["total"] == 3 and len(body["groups"]) == 1
+        g = body["groups"][0]
+        assert g["signature"]["id"] == str(world["signature"].id)
+        assert g["count"] == 3 and sorted(g["trace_keys"]) == ["15822110", "15822111", "15822112"]
+        assert set(g["step_ids"]) == {
+            str(chain["steps"][f"lkp_{world['suffix']}"].id),
+            str(chain["steps"][f"so_add_bIntl_{world['suffix']}"].id),
+        }
+        assert g["first_seen_at"].startswith("2026-08-17T06") and g["last_seen_at"].startswith("2026-08-17T08")
+        assert g["retriable"] is False and g["purge_at"].startswith("2026-09-16")
+        assert "message" in g["errors"][0]
+
+    async def test_resolved_filter_and_404s(self, client, admin_user, admin_user_b, db):
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        chain = await _seed_router_chain_flow(db, world)
+        await self._seed_two_step_errors(db, world, chain)
+        r = await client.get(f"/api/v1/celigo/flows/{chain['flow'].id}/errors?status=resolved", headers=headers)
+        assert r.status_code == 200 and r.json()["total"] == 1
+        assert (
+            await client.get(f"/api/v1/celigo/flows/{chain['flow'].id}/errors?status=bogus", headers=headers)
+        ).status_code == 422
+        assert (await client.get(f"/api/v1/celigo/flows/{uuid.uuid4()}/errors", headers=headers)).status_code == 404
+        user_b, headers_b = admin_user_b
+        # Brief's literal test omitted this -- every OTHER tenant-isolation test in
+        # this file enables the flag for tenant B first (see TestGetFlowDetail's
+        # own test_tenant_isolation) so the 404 asserted below is proven by the
+        # flow lookup, not a 403 from a flag this tenant never had.
+        await enable_feature_flag(db, user_b.tenant_id, "celigo")
+        assert (
+            await client.get(f"/api/v1/celigo/flows/{chain['flow'].id}/errors", headers=headers_b)
+        ).status_code == 404
+
+
+# ---------------------------------------------------------------------------
 # GET /celigo/scripts/{id}
 # ---------------------------------------------------------------------------
 

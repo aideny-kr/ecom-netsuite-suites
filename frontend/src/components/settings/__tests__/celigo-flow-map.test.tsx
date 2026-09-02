@@ -98,6 +98,7 @@ const generatorStep = {
   operation: null,
   search_id: null,
   attachments: [],
+  error_count: 0,
 };
 
 const processorStep = {
@@ -137,6 +138,7 @@ const processorStep = {
       script_content_diverged: null,
     },
   ],
+  error_count: 0,
 };
 
 /** A RESOLVED per-integration flows query, shaped like TanStack v5's result:

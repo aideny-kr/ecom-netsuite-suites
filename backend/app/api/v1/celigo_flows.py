@@ -47,7 +47,7 @@ from __future__ import annotations
 import uuid
 from collections import defaultdict
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, JsonValue
@@ -198,6 +198,10 @@ class CeligoFlowStepOut(BaseModel):
     operation: str | None
     search_id: str | None
     attachments: list[CeligoAttachmentOut]
+    # Open (per `celigo_error_is_open()`) `celigo_flow_errors` count attributed
+    # to THIS step -- Task 4. Computed by `get_flow_detail`'s per-step GROUP BY
+    # query, never N+1; 0 when the step has no open error.
+    error_count: int
 
 
 class CeligoRouterBranchOut(BaseModel):
@@ -247,6 +251,14 @@ class CeligoFlowDetailOut(BaseModel):
     # raw object never carried the field (not yet observed, or omitted).
     celigo_open_error_count: int | None
     last_error_at: datetime | None
+    # This app's OWN open counts (Task 4) -- `error_count` is the sum of every
+    # step's `error_count` above (so it always agrees with what the steps show,
+    # by construction, not by a second independent aggregate); `signature_count`
+    # is DISTINCT root causes across the whole flow, which a per-step sum would
+    # over-count when one signature spans multiple steps (see `get_flow_detail`'s
+    # second, non-grouped query).
+    error_count: int
+    signature_count: int
 
 
 class CeligoScriptAttachmentSiteOut(BaseModel):
@@ -334,6 +346,38 @@ class CeligoErrorSignatureOut(BaseModel):
 class CeligoErrorsResponse(BaseModel):
     signature: CeligoErrorSignatureOut
     errors: list[CeligoErrorOut]
+
+
+class CeligoFlowErrorGroupOut(BaseModel):
+    """One root cause's worth of a flow's errors (Task 4) -- grouped by
+    `signature_id` in Python (never a SQL GROUP BY: the group also needs the
+    raw rows themselves, capped at `limit`, which a GROUP BY can't return
+    alongside its aggregates without a second query anyway). `signature` is
+    `None` for the (rare, pre-classification) rows a signature was never
+    assigned to -- still a real group, just an unclassified one."""
+
+    signature: CeligoErrorSignatureOut | None
+    count: int
+    step_ids: list[str | None]
+    first_seen_at: datetime | None
+    last_seen_at: datetime | None
+    # None only when every row in the group has retriable=NULL; False if ANY
+    # row is non-retriable (that is the operationally relevant answer -- "can
+    # I safely retry this whole group" is only true when EVERY row is).
+    retriable: bool | None
+    purge_at: datetime | None
+    # First 25 DISTINCT non-null trace keys, in first-seen order -- a cap, not
+    # a promise every trace key in the group is listed (`count` is the true
+    # total; this is enough to spot-check a handful of Celigo job runs).
+    trace_keys: list[str]
+    errors: list[CeligoErrorOut]
+
+
+class CeligoFlowErrorsOut(BaseModel):
+    flow_id: str
+    status: Literal["open", "resolved"]
+    total: int
+    groups: list[CeligoFlowErrorGroupOut]
 
 
 class CeligoSyncStatusOut(BaseModel):
@@ -651,6 +695,37 @@ async def get_flow_detail(
         )
         facts = script_family_facts(family_rows)
 
+    # Task 4 -- open (`celigo_error_is_open()`) error counts, per step and for
+    # the flow as a whole. Per-step: ONE GROUP BY query for every step at
+    # once, never N+1. `signature_count` is NOT `sum` of a per-step distinct
+    # count (that would over-count a signature spanning multiple steps) --
+    # it's DISTINCT across the whole flow, hence the second, non-grouped
+    # query below with the identical predicate.
+    step_counts_result = await db.execute(
+        select(
+            CeligoFlowError.flow_step_id,
+            func.count().label("error_count"),
+        )
+        .where(
+            CeligoFlowError.tenant_id == user.tenant_id,
+            CeligoFlowError.flow_id == flow.id,
+            celigo_error_is_open(),
+        )
+        .group_by(CeligoFlowError.flow_step_id)
+    )
+    step_error_counts: dict[uuid.UUID | None, int] = {
+        row.flow_step_id: row.error_count for row in step_counts_result.all()
+    }
+    flow_signature_count = (
+        await db.execute(
+            select(func.count(distinct(CeligoFlowError.signature_id))).where(
+                CeligoFlowError.tenant_id == user.tenant_id,
+                CeligoFlowError.flow_id == flow.id,
+                celigo_error_is_open(),
+            )
+        )
+    ).scalar_one()
+
     attachments_by_step: dict[uuid.UUID, list[CeligoAttachmentOut]] = defaultdict(list)
     unassigned: list[CeligoAttachmentOut] = []
     for a in attachments:
@@ -697,6 +772,7 @@ async def get_flow_detail(
             operation=s.operation,
             search_id=s.search_id,
             attachments=attachments_by_step.get(s.id, []),
+            error_count=step_error_counts.get(s.id, 0),
         )
         for s in steps
     ]
@@ -723,6 +799,8 @@ async def get_flow_detail(
         routers=[CeligoRouterOut(**r) for r in project_routers(flow.raw_json)],
         celigo_open_error_count=celigo_open_error_count,
         last_error_at=last_error_at,
+        error_count=sum(step_error_counts.values()),
+        signature_count=flow_signature_count,
     )
 
 
@@ -919,4 +997,174 @@ async def get_errors_for_signature(
             )
             for e in errors
         ],
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /celigo/flows/{id}/errors
+# ---------------------------------------------------------------------------
+
+
+@router.get("/flows/{flow_id}/errors", response_model=CeligoFlowErrorsOut)
+async def list_flow_errors(
+    flow_id: uuid.UUID,
+    user: Annotated[User, Depends(require_permission("connections.view"))],
+    _flag: Annotated[User, Depends(require_feature("celigo"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    status_filter: Literal["open", "resolved"] = Query("open", alias="status"),
+    limit: int = Query(100, ge=1, le=500, description="Max errors returned per group, most recent first"),
+):
+    """A flow's errors (Task 4), grouped by root-cause signature -- the
+    "what's actually breaking" view a per-error list can't give: `/celigo/errors`
+    (above) already returns one signature's errors, but an operator opening a
+    FLOW needs every signature attached to it at once, ranked by how many
+    errors each is causing.
+
+    Loads the flow through the exact same production join as `get_flow_detail`
+    (404 for a flow that doesn't exist, belongs to another tenant, or lives
+    under a sandbox integration) -- a flow a caller can't otherwise see must
+    not leak its errors through this route either.
+
+    `status=open` uses `celigo_error_is_open()` (single-sourced, same as every
+    other open-count in this module); `status=resolved` is `resolved_at IS NOT
+    NULL` -- deliberately NOT "not open", since a row can be neither (purged
+    but never resolved) and that state belongs to neither list, exactly per
+    `celigo_error_is_open()`'s own docstring.
+
+    Grouping happens in PYTHON, not SQL: each group needs both aggregates
+    (first/last seen, retriable tri-state, distinct trace keys) AND a capped
+    slice of the raw rows themselves, which a single GROUP BY can't produce
+    together. Rows are capped at 2000 for grouping (a defensive ceiling, not a
+    page size -- a flow producing more open errors than that needs
+    operational attention no client-side page could show usefully anyway);
+    `limit` instead caps how many raw `errors` come back PER GROUP."""
+    flow = (
+        await db.execute(
+            _join_production_integration(select(CeligoFlow), user.tenant_id).where(
+                CeligoFlow.id == flow_id,
+                CeligoFlow.tenant_id == user.tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if flow is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Flow not found")
+
+    open_predicate = celigo_error_is_open() if status_filter == "open" else CeligoFlowError.resolved_at.isnot(None)
+
+    errors = (
+        (
+            await db.execute(
+                select(CeligoFlowError)
+                .where(
+                    CeligoFlowError.tenant_id == user.tenant_id,
+                    CeligoFlowError.flow_id == flow_id,
+                    open_predicate,
+                )
+                .order_by(CeligoFlowError.occurred_at.desc().nullslast(), CeligoFlowError.id.desc())
+                .limit(2000)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    rows_by_signature: dict[uuid.UUID | None, list[CeligoFlowError]] = defaultdict(list)
+    for e in errors:
+        rows_by_signature[e.signature_id].append(e)
+
+    signature_ids = [sid for sid in rows_by_signature if sid is not None]
+    signatures_by_id: dict[uuid.UUID, CeligoErrorSignature] = {}
+    if signature_ids:
+        sig_rows = (
+            (
+                await db.execute(
+                    select(CeligoErrorSignature).where(
+                        CeligoErrorSignature.tenant_id == user.tenant_id,
+                        CeligoErrorSignature.id.in_(signature_ids),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        signatures_by_id = {s.id: s for s in sig_rows}
+
+    groups: list[CeligoFlowErrorGroupOut] = []
+    for sig_id, rows in rows_by_signature.items():
+        occurred_ats = [r.occurred_at for r in rows if r.occurred_at is not None]
+        purge_ats = [r.purge_at for r in rows if r.purge_at is not None]
+        retriable_values = {r.retriable for r in rows if r.retriable is not None}
+        # Tri-state: False if ANY row can't be retried (that's the operationally
+        # relevant answer), True only if EVERY row can, None when nothing in the
+        # group ever recorded a value either way.
+        if False in retriable_values:
+            group_retriable: bool | None = False
+        elif True in retriable_values:
+            group_retriable = True
+        else:
+            group_retriable = None
+
+        trace_keys: list[str] = []
+        seen_trace_keys: set[str] = set()
+        step_ids: list[str | None] = []
+        seen_step_ids: set[str | None] = set()
+        for r in rows:
+            if r.trace_key is not None and r.trace_key not in seen_trace_keys and len(trace_keys) < 25:
+                seen_trace_keys.add(r.trace_key)
+                trace_keys.append(r.trace_key)
+            step_key = str(r.flow_step_id) if r.flow_step_id is not None else None
+            if step_key not in seen_step_ids:
+                seen_step_ids.add(step_key)
+                step_ids.append(step_key)
+
+        sig = signatures_by_id.get(sig_id) if sig_id is not None else None
+        groups.append(
+            CeligoFlowErrorGroupOut(
+                signature=CeligoErrorSignatureOut(
+                    id=str(sig.id),
+                    fingerprint=sig.fingerprint,
+                    source=sig.source,
+                    code=sig.code,
+                    sample_message=sig.sample_message,
+                    occurrence_count=sig.occurrence_count,
+                    first_seen=sig.first_seen,
+                    last_seen=sig.last_seen,
+                )
+                if sig is not None
+                else None,
+                count=len(rows),
+                step_ids=step_ids,
+                first_seen_at=min(occurred_ats) if occurred_ats else None,
+                last_seen_at=max(occurred_ats) if occurred_ats else None,
+                retriable=group_retriable,
+                purge_at=min(purge_ats) if purge_ats else None,
+                trace_keys=trace_keys,
+                errors=[
+                    CeligoErrorOut(
+                        id=str(e.id),
+                        celigo_id=e.celigo_id,
+                        flow_id=str(e.flow_id) if e.flow_id else None,
+                        flow_step_id=str(e.flow_step_id) if e.flow_step_id else None,
+                        trace_key=e.trace_key,
+                        source=e.source,
+                        code=e.code,
+                        message=e.message,
+                        occurred_at=e.occurred_at,
+                        purge_at=e.purge_at,
+                        resolved_at=e.resolved_at,
+                        purged_at=e.purged_at,
+                        retriable=e.retriable,
+                    )
+                    for e in rows[:limit]
+                ],
+            )
+        )
+
+    groups.sort(key=lambda g: g.count, reverse=True)
+
+    return CeligoFlowErrorsOut(
+        flow_id=str(flow.id),
+        status=status_filter,
+        total=len(errors),
+        groups=groups,
     )
