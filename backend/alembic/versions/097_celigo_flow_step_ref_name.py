@@ -12,6 +12,7 @@ Shortened to `097_celigo_flow_step_ref_name` (29 chars), same meaning.
 """
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "097_celigo_flow_step_ref_name"
