@@ -59,8 +59,7 @@ async function readErrorMessage(res: Response, fallback: string): Promise<string
     if (!errorData?.detail) return fallback;
     if (Array.isArray(errorData.detail)) {
       return errorData.detail
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        .map((err: any) => {
+        .map((err: { loc?: unknown[]; msg?: string }) => {
           const loc = err.loc ? err.loc.join(".") : "";
           return loc ? `${loc}: ${err.msg}` : err.msg;
         })
