@@ -1235,6 +1235,40 @@ class TestFlowErrors:
         assert counts[f"lkp_{sfx}"] == 2 and counts[f"so_add_bIntl_{sfx}"] == 1 and counts[f"src_{sfx}"] == 0
         assert body["error_count"] == 3 and body["signature_count"] == 1
 
+    async def test_flow_error_count_includes_errors_no_step_owns(self, client, admin_user, db):
+        """Final-review finding I9. Celigo can report an error against a FLOW
+        with no `flow_step_id` (a router-level or pre-dispatch failure). The
+        flow's `error_count` counts it -- the flow total is every open error,
+        full stop -- which means the steps can legitimately sum to LESS than
+        the flow. The old docstring claimed the two agreed "by construction";
+        this pins the real contract so the next reader trusts the number
+        rather than the sentence."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        chain = await _seed_router_chain_flow(db, world)
+        await self._seed_two_step_errors(db, world, chain)
+        db.add(
+            CeligoFlowError(
+                tenant_id=world["integration"].tenant_id,
+                celigo_connection_id=world["connection_id"],
+                flow_id=chain["flow"].id,
+                flow_step_id=None,
+                signature_id=world["signature"].id,
+                celigo_id=f"err_unattributed_{world['suffix']}",
+                source="router",
+                code="script_error",
+                message="TypeError: null",
+                occurred_at=datetime(2026, 8, 17, 9, tzinfo=timezone.utc),
+            )
+        )
+        await db.flush()
+
+        body = (await client.get(f"/api/v1/celigo/flows/{chain['flow'].id}", headers=headers)).json()
+        steps_sum = sum(s["error_count"] for s in body["steps"])
+        assert steps_sum == 3, "no step owns the new error"
+        assert body["error_count"] == steps_sum + 1 == 4
+        assert body["signature_count"] == 1, "one root cause, however it is attributed"
+
     async def test_grouped_errors_by_signature_with_step_attribution_and_trace_keys(self, client, admin_user, db):
         user, headers = admin_user
         world = await _seed_world(db, user.tenant_id)

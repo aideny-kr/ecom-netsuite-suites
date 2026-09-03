@@ -363,12 +363,17 @@ class CeligoFlowDetailOut(BaseModel):
     # raw object never carried the field (not yet observed, or omitted).
     celigo_open_error_count: int | None
     last_error_at: datetime | None
-    # This app's OWN open counts (Task 4) -- `error_count` is the sum of every
-    # step's `error_count` above (so it always agrees with what the steps show,
-    # by construction, not by a second independent aggregate); `signature_count`
-    # is DISTINCT root causes across the whole flow, which a per-step sum would
-    # over-count when one signature spans multiple steps (see `get_flow_detail`'s
-    # second, non-grouped query).
+    # This app's OWN open counts (Task 4). `error_count` is EVERY open error on
+    # the flow, including the ones no step owns: Celigo reports router-level and
+    # pre-dispatch failures against the flow with a null `flow_step_id`, and the
+    # flow total would understate reality if it dropped them. So the steps above
+    # can sum to LESS than this number -- the difference is exactly the
+    # unattributed bucket, and a UI that adds the bubbles up will not always
+    # reach the header figure (pinned by
+    # `TestFlowErrors::test_flow_error_count_includes_errors_no_step_owns`).
+    # `signature_count` is DISTINCT root causes across the whole flow, which a
+    # per-step sum would over-count when one signature spans multiple steps
+    # (see `get_flow_detail`'s second, non-grouped query).
     error_count: int
     signature_count: int
 
@@ -488,6 +493,12 @@ class CeligoFlowErrorGroupOut(BaseModel):
 class CeligoFlowErrorsOut(BaseModel):
     flow_id: str
     status: Literal["open", "resolved"]
+    # NOT the flow's whole-population count: it is the number of rows this
+    # request actually grouped, and `list_flow_errors` caps that fetch at 2000.
+    # A flow with more matching errors than the cap reports exactly 2000 here,
+    # so a caller must not render this as "N errors on this flow" without
+    # allowing for "at least". The flow's true open total is
+    # `CeligoFlowDetailOut.error_count` (an uncapped aggregate).
     total: int
     groups: list[CeligoFlowErrorGroupOut]
 
@@ -1276,6 +1287,8 @@ async def get_flow_detail(
         routers=[CeligoRouterOut(**r) for r in project_routers(flow.raw_json)],
         celigo_open_error_count=celigo_open_error_count,
         last_error_at=last_error_at,
+        # Deliberately sums EVERY bucket, the `flow_step_id IS NULL` one
+        # included -- see `CeligoFlowDetailOut.error_count`'s comment.
         error_count=sum(step_error_counts.values()),
         signature_count=flow_signature_count,
     )
@@ -1514,7 +1527,14 @@ async def list_flow_errors(
     together. Rows are capped at 2000 for grouping (a defensive ceiling, not a
     page size -- a flow producing more open errors than that needs
     operational attention no client-side page could show usefully anyway);
-    `limit` instead caps how many raw `errors` come back PER GROUP."""
+    `limit` instead caps how many raw `errors` come back PER GROUP.
+
+    That cap bounds the response's `total` too: it counts the rows fetched, so
+    a flow past 2000 matching errors reports exactly 2000 and every group's
+    `count` is likewise a count of fetched rows. This route answers "what is
+    breaking, and roughly how much of each", never "exactly how many errors
+    does this flow have" -- `GET /celigo/flows/{id}`'s `error_count` is the
+    uncapped aggregate for that."""
     flow = (
         await db.execute(
             _join_production_integration(select(CeligoFlow), user.tenant_id).where(

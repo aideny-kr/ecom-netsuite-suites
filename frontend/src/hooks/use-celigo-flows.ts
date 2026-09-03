@@ -189,9 +189,12 @@ export interface CeligoFlowDetail {
    * `lastErrorAt`) -- distinct from this app's own error tables. */
   celigo_open_error_count: number | null;
   last_error_at: string | null;
-  /** This app's OWN open counts (Task 4). `error_count` is the sum of every
-   * step's `error_count` above; `signature_count` is DISTINCT root causes
-   * across the whole flow (not a per-step sum, which would over-count a
+  /** This app's OWN open counts (Task 4). `error_count` is EVERY open error on
+   * the flow, the ones no step owns included (Celigo reports router-level and
+   * pre-dispatch failures with a null `flow_step_id`) -- so adding up the
+   * steps' own `error_count`s can come to LESS than this, and a UI must not
+   * present the two as the same number. `signature_count` is DISTINCT root
+   * causes across the whole flow (not a per-step sum, which would over-count a
    * signature spanning multiple steps). */
   error_count: number;
   signature_count: number;
@@ -354,6 +357,9 @@ export interface CeligoFlowErrorGroup {
 export interface CeligoFlowErrors {
   flow_id: string;
   status: "open" | "resolved";
+  /** Rows this response actually grouped, capped server-side at 2000 -- NOT
+   * the flow's whole-population count. Read it as "at least"; the uncapped
+   * total is `CeligoFlowDetail.error_count`. Nothing renders it today. */
   total: number;
   groups: CeligoFlowErrorGroup[];
 }
