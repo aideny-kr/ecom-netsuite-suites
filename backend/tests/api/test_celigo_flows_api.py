@@ -554,6 +554,53 @@ class TestListIntegrations:
         assert sched["disabled"] is False and sched["schedule"].startswith("? 5,20,35,50")
         assert sched["last_executed_at"] is not None
 
+    async def test_router_count_counts_routers_per_flow_not_account_wide(self, client, admin_user, db):
+        """Gate fix wave, item 6: Celigo router ids are unique WITHIN a flow, not
+        across an integration -- a cloned flow carries the same router ids as its
+        original. Counting DISTINCT router_id across every flow of an integration
+        therefore collapsed N cloned flows' routers into one, so the card
+        under-reported the topology it claims to summarise."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        clone = await _seed_cron_flow(db, world, name="Cloned Flow")
+
+        for flow in (world["flow"], clone):
+            db.add(
+                CeligoFlowStep(
+                    tenant_id=user.tenant_id,
+                    celigo_connection_id=world["connection_id"],
+                    flow_id=flow.id,
+                    celigo_id=f"imp_{flow.celigo_id}",
+                    role="processor",
+                    sequence=1,
+                    adaptor_type="NetSuiteDistributedImport",
+                    router_id="r1",  # SAME id in both flows -- what a clone looks like
+                    branch_id="b1",
+                    raw_json={},
+                )
+            )
+        await db.flush()
+
+        r = await client.get("/api/v1/celigo/integrations", headers=headers)
+        assert r.status_code == 200, r.text
+        row = next(i for i in r.json() if i["id"] == str(world["integration"].id))
+        assert row["router_count"] == 2, "two flows each with router r1 are two routers, not one"
+
+    async def test_router_count_ignores_steps_with_no_router(self, client, admin_user, db):
+        """The router-less steps (`router_id IS NULL` -- most flow sources) must
+        not each count as a router. A naive row-constructor DISTINCT would count
+        `(flow_id, NULL)` as a real pair, since a ROW with a NULL member is not
+        itself NULL."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)  # its only step has router_id NULL
+        await _seed_cron_flow(db, world, name="Another router-less flow")
+        await db.flush()
+
+        r = await client.get("/api/v1/celigo/integrations", headers=headers)
+        assert r.status_code == 200, r.text
+        row = next(i for i in r.json() if i["id"] == str(world["integration"].id))
+        assert row["router_count"] == 0
+
     async def test_signature_count_dedupes_across_multiple_errors_sharing_one_signature(self, client, admin_user, db):
         """Task 18 (cross-surface consistency): `signature_count` is the
         DISTINCT root-cause count across the whole integration, the same

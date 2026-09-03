@@ -51,7 +51,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, JsonValue
-from sqlalchemy import and_, case, distinct, func, select, text
+from sqlalchemy import and_, case, distinct, func, select, text, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.connector_status import _get_celigo_connection
@@ -660,7 +660,18 @@ async def list_integrations(
             select(
                 CeligoFlow.integration_id,
                 func.count().label("steps"),
-                func.count(distinct(CeligoFlowStep.router_id)).label("routers"),
+                # DISTINCT on the (flow, router) PAIR, not on router_id alone:
+                # Celigo's router ids are unique within a flow, not within an
+                # integration, so a cloned flow carries its original's router
+                # ids verbatim. Counting router_id alone collapsed N cloned
+                # flows' routers into one and under-reported the topology.
+                # The FILTER is load-bearing: a row constructor whose members
+                # are NULL is not itself NULL, so without it every router-less
+                # step (most flow sources) would count `(flow_id, NULL)` as a
+                # router of its own.
+                func.count(distinct(tuple_(CeligoFlowStep.flow_id, CeligoFlowStep.router_id)))
+                .filter(CeligoFlowStep.router_id.isnot(None))
+                .label("routers"),
                 func.count()
                 .filter(and_(CeligoFlowStep.role == "processor", CeligoFlowStep.adaptor_type.ilike("%export")))
                 .label("lookups"),
