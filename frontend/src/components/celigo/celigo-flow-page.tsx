@@ -100,7 +100,6 @@ export function CeligoFlowPage(): JSX.Element {
 
   const navRef = useRef<PanelImperativeHandle>(null);
   const [navCollapsed, setNavCollapsed] = useState(true);
-  const [selectedStepId, setSelectedStepId] = useState<string | null>(null);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("facts");
 
   // The navigator starts collapsed as a rail (mockup: "Navigator rail ·
@@ -130,14 +129,6 @@ export function CeligoFlowPage(): JSX.Element {
     return () => window.removeEventListener("celigo:toggle-nav", onToggleNav);
   }, [toggleNav]);
 
-  // Route's `stepId`/`scriptId` are the persisted selection (so a refresh or
-  // a pasted link reproduces it); `selectedStepId` mirrors `route.stepId`
-  // for the canvas/inspector props below without re-deriving it inline at
-  // every use.
-  useEffect(() => {
-    setSelectedStepId(route.stepId);
-  }, [route.stepId]);
-
   // Esc clears the current selection, topmost layer first: a script drawer
   // open over a selected step closes the drawer on the first Esc and only
   // clears the step on a second one (mockup: "Esc clears the selection; a
@@ -160,9 +151,9 @@ export function CeligoFlowPage(): JSX.Element {
   }, [route.scriptId, route.stepId, route.go]);
 
   const selectedStep: CeligoFlowStep | null = useMemo(() => {
-    if (!detail || !selectedStepId) return null;
-    return detail.steps.find((s) => s.id === selectedStepId) ?? null;
-  }, [detail, selectedStepId]);
+    if (!detail || !route.stepId) return null;
+    return detail.steps.find((s) => s.id === route.stepId) ?? null;
+  }, [detail, route.stepId]);
 
   const clonedFrom: ClonedFromInfo | null = useMemo(() => {
     if (!detail?.source_id || siblingsState === "pending") return null;
@@ -237,7 +228,7 @@ export function CeligoFlowPage(): JSX.Element {
                   {hasSteps ? (
                     <CeligoFlowCanvas
                       detail={d}
-                      selectedStepId={selectedStepId}
+                      selectedStepId={route.stepId}
                       onSelectStep={(stepId, tab) => {
                         route.go.step(stepId);
                         setInspectorTab(tab ?? "facts");
