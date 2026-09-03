@@ -19,7 +19,7 @@ import {
   type CeligoIntegration,
   type CeligoRecordWrite,
 } from "@/hooks/use-celigo-flows";
-import { queryState } from "@/lib/query-state";
+import { queryState, type QueryState } from "@/lib/query-state";
 import { cn } from "@/lib/utils";
 import { stallState } from "./schedule";
 import { ErrorNotice, ErrorPill, Medallions, Pill, formatRelativeTime } from "./shared";
@@ -162,8 +162,26 @@ function AttentionPill({
 /** "synced 21 min ago · 17:51 UTC", amber past 2 h — the toolbar's own
  * freshness fact, restated in the page header so it travels with whichever
  * screenshot or link someone shares (see `stallState`'s docstring: every
- * "last ran" on this page is as of THIS timestamp, never the wall clock). */
-function SyncPill({ lastSyncedAt }: { lastSyncedAt: string | null }): JSX.Element {
+ * "last ran" on this page is as of THIS timestamp, never the wall clock).
+ * Takes the SYNC-STATUS QUERY'S OWN `queryState`, not just `lastSyncedAt` —
+ * a `null` timestamp means two different things ("confirmed never synced"
+ * vs. "don't know yet, the fetch hasn't resolved") and this pill must never
+ * collapse them into the same bare "—" (fix round 1, finding 1). */
+function SyncPill({ state, lastSyncedAt }: { state: QueryState; lastSyncedAt: string | null }): JSX.Element {
+  if (state === "pending") {
+    return (
+      <Pill tone="mute" dot="hollow">
+        <span className="animate-pulse">checking sync status…</span>
+      </Pill>
+    );
+  }
+  if (state === "error") {
+    return (
+      <Pill tone="crit" dot="solid">
+        sync status unavailable
+      </Pill>
+    );
+  }
   if (!lastSyncedAt) {
     return (
       <Pill tone="mute" dot="hollow">
@@ -328,7 +346,17 @@ function IntegrationsTable({
                 <td className="px-2.5 py-1.5">
                   <ErrorPill count={integration.error_count} checkedAt={lastSyncedAt} />
                 </td>
-                <td className="px-2.5 py-1.5 tabular-nums">{formatRelativeTime(integration.last_run_at)}</td>
+                <td className="px-2.5 py-1.5">
+                  {/* Fix round 1, finding 2: the schedule/attention pill —
+                      "the one that would catch" a quietly-stalled flow — was
+                      missing from the list view entirely, even though the
+                      tile view (AttentionPill above) and the mockup's own
+                      list-view table both carry it in this exact cell. */}
+                  <div className="flex flex-wrap items-center gap-1.5 tabular-nums">
+                    <span>{formatRelativeTime(integration.last_run_at)}</span>
+                    <AttentionPill attention={attention} />
+                  </div>
+                </td>
                 <td className="px-2.5 py-1.5 tabular-nums">{integration.script_count}</td>
                 <td className="px-2.5 py-1.5 tabular-nums">{integration.changes_last_24h}</td>
               </tr>
@@ -436,8 +464,15 @@ export function CeligoIntegrationsPage(): JSX.Element {
   const [filter, setFilter] = useState<FilterKey>("all");
 
   const integrationsState = queryState(integrationsQuery);
-  const lastSyncedAt =
-    queryState(syncStatusQuery) === "success" ? syncStatusQuery.data?.last_synced_at ?? null : null;
+  // Fix round 1, finding 1: gated through queryState() with its OWN explicit
+  // pending/error branches (never inferred from `lastSyncedAt` alone) — a
+  // sync-status fetch that hasn't resolved yet must never be read as
+  // "confirmed never synced", under-report every flow's stall state to
+  // "unknown" while presenting it as settled, or leave the SyncPill
+  // indistinguishable from a genuine "never synced" pill. See the body
+  // branch below and `SyncPill` for the two places that matters.
+  const syncStatusState = queryState(syncStatusQuery);
+  const lastSyncedAt = syncStatusState === "success" ? syncStatusQuery.data?.last_synced_at ?? null : null;
   const integrations = integrationsQuery.data ?? NO_INTEGRATIONS;
 
   const sorted = useMemo(
@@ -450,7 +485,11 @@ export function CeligoIntegrationsPage(): JSX.Element {
     return map;
   }, [integrations, lastSyncedAt]);
 
-  const neverSynced = integrationsState === "success" && integrations.length === 0 && lastSyncedAt === null;
+  const neverSynced =
+    integrationsState === "success" &&
+    syncStatusState === "success" &&
+    integrations.length === 0 &&
+    lastSyncedAt === null;
 
   const totals = integrations.reduce(
     (acc, i) => ({
@@ -486,6 +525,24 @@ export function CeligoIntegrationsPage(): JSX.Element {
   } else if (integrationsState === "error") {
     body = (
       <ErrorNotice message="Couldn't load integrations." onRetry={() => integrationsQuery.refetch()} />
+    );
+  } else if (syncStatusState === "pending") {
+    // Integrations resolved, but every fact this page renders past this
+    // point (the "never synced" copy, each tile's stall pill, the filter
+    // counts) needs `lastSyncedAt` to be trustworthy. Rendering the tiles
+    // now would either assert "0 stalled" with no basis (stallState()
+    // returns "unknown" with no sync timestamp, which AttentionPill would
+    // then show as a confident "on time") or claim "never synced" for a
+    // integrationsQuery that resolved empty by coincidence, not by fact.
+    body = (
+      <>
+        <span className="sr-only">Loading sync status…</span>
+        <TileSkeleton />
+      </>
+    );
+  } else if (syncStatusState === "error") {
+    body = (
+      <ErrorNotice message="Couldn't load sync status." onRetry={() => syncStatusQuery.refetch()} />
     );
   } else if (neverSynced) {
     body = (
@@ -538,7 +595,7 @@ export function CeligoIntegrationsPage(): JSX.Element {
             <div className="text-[12px] tabular-nums text-muted-foreground">{headerLine}</div>
           </div>
           <div className="ml-auto">
-            <SyncPill lastSyncedAt={lastSyncedAt} />
+            <SyncPill state={syncStatusState} lastSyncedAt={lastSyncedAt} />
           </div>
         </div>
         {body}

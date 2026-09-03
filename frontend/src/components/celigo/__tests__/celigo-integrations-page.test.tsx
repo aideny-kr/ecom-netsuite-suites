@@ -374,4 +374,75 @@ describe("CeligoIntegrationsPage", () => {
     fireEvent.click(screen.getByText("Solidus + NetSuite"));
     expect(routeMocks.go.integration).toHaveBeenCalledWith("int-click-me");
   });
+
+  // Fix round 1, finding 1: syncStatusQuery's pending/error states were
+  // never distinguished from "resolved with no sync yet" — a race between
+  // the two independent queries (integrations resolves first) must never
+  // collapse into the confident "never synced" copy, an under-reported
+  // stalled count, or a bare "—" SyncPill.
+  it("case 6d: integrations resolved empty + syncStatus still PENDING never renders 'no flows synced yet'", () => {
+    mocks.integrations.mockReturnValue(resolved([]));
+    mocks.syncStatus.mockReturnValue(pending());
+    const { container } = wrap(<CeligoIntegrationsPage />);
+    expect(screen.queryByText(/no flows synced yet/i)).toBeNull();
+    expect(container.querySelectorAll(".animate-pulse").length).toBeGreaterThan(0);
+  });
+
+  it("case 6e: integrations resolved with data + syncStatus still PENDING never renders tiles claiming 'on time' before stall data is known", () => {
+    const maybeStalled = makeIntegration({
+      flow_schedules: [flowSchedule({ last_executed_at: "2026-09-02T14:51:00.000Z" })],
+    });
+    mocks.integrations.mockReturnValue(resolved([maybeStalled]));
+    mocks.syncStatus.mockReturnValue(pending());
+    const { container } = wrap(<CeligoIntegrationsPage />);
+    expect(screen.queryByText("Solidus + NetSuite")).toBeNull();
+    expect(screen.queryByText("on time")).toBeNull();
+    expect(container.querySelectorAll(".animate-pulse").length).toBeGreaterThan(0);
+  });
+
+  it("case 6f: SyncPill shows a loading indicator, not a bare '—', while syncStatus is pending", () => {
+    mocks.integrations.mockReturnValue(resolved([makeIntegration()]));
+    mocks.syncStatus.mockReturnValue(pending());
+    wrap(<CeligoIntegrationsPage />);
+    expect(screen.getByText(/checking sync status/i)).toBeInTheDocument();
+  });
+
+  it("case 6g: an errored syncStatus query shows a sync-status error, never the 'never synced' claim", () => {
+    mocks.integrations.mockReturnValue(resolved([]));
+    mocks.syncStatus.mockReturnValue(errored());
+    wrap(<CeligoIntegrationsPage />);
+    expect(screen.queryByText(/no flows synced yet/i)).toBeNull();
+    expect(screen.getByText(/couldn.?t load sync status/i)).toBeInTheDocument();
+  });
+
+  it("case 6h: an errored syncStatus query's Retry calls its own refetch", () => {
+    const refetch = vi.fn();
+    mocks.integrations.mockReturnValue(resolved([makeIntegration()]));
+    mocks.syncStatus.mockReturnValue(errored(refetch));
+    wrap(<CeligoIntegrationsPage />);
+    fireEvent.click(screen.getByRole("button", { name: /retry/i }));
+    expect(refetch).toHaveBeenCalled();
+  });
+
+  // Fix round 1, finding 2: the list view's Last Run cell rendered only the
+  // relative time, dropping the second (schedule/attention) pill the tile
+  // view and the mockup's own list-view table both carry.
+  it("finding 2: list view's Last Run cell carries the attention pill for every row", () => {
+    routeMocks.view = "list";
+    const stalled = makeIntegration({
+      id: "int-stalled-list",
+      name: "Stalled List Co",
+      flow_schedules: [flowSchedule({ last_executed_at: "2026-09-02T14:51:00.000Z" })],
+    });
+    const onTime = makeIntegration({ id: "int-ontime-list", name: "On Time List Co", flow_schedules: [] });
+    mocks.integrations.mockReturnValue(resolved([stalled, onTime]));
+    wrap(<CeligoIntegrationsPage />);
+
+    const table = screen.getByRole("table");
+    const stalledRow = within(table).getByText("Stalled List Co").closest("tr") as HTMLElement;
+    expect(within(stalledRow).getByText("stalled? 1 flow")).toBeInTheDocument();
+
+    const onTimeRow = within(table).getByText("On Time List Co").closest("tr") as HTMLElement;
+    expect(within(onTimeRow).getByText("on time")).toBeInTheDocument();
+  });
 });
