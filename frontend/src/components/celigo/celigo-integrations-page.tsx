@@ -24,7 +24,7 @@ import { cn } from "@/lib/utils";
 import { stallState } from "./schedule";
 import { ErrorNotice, ErrorPill, Medallions, Pill, formatRelativeTime } from "./shared";
 import { useCeligoRoute } from "./celigo-route";
-import { CeligoBreadcrumb } from "./celigo-surface";
+import { CeligoBreadcrumb } from "./celigo-breadcrumb";
 
 /** A stable reference for "no data yet" — `data ?? []` would allocate a new
  * array every render, which defeats the `useMemo`s below (a changed

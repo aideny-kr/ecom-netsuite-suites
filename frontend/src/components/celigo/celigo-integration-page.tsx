@@ -33,7 +33,7 @@ import { cn } from "@/lib/utils";
 import { parseSchedule, stallState, type ParsedSchedule } from "./schedule";
 import { ErrorNotice, Medallions, Pill, SchedulePill, formatRelativeTime } from "./shared";
 import { useCeligoRoute, type CeligoTab } from "./celigo-route";
-import { CeligoBreadcrumb } from "./celigo-surface";
+import { CeligoBreadcrumb } from "./celigo-breadcrumb";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
