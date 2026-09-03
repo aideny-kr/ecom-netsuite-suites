@@ -306,8 +306,25 @@ function FlowRow({
   return (
     <TableRow
       data-paused={paused ? "true" : undefined}
-      className={cn("cursor-pointer", paused && "opacity-70")}
+      // `link`, not `button`: activating a row navigates to the flow page.
+      // Before this the row was a bare `<TableRow onClick>` -- the whole flows
+      // table was mouse-only (finding I8).
+      role="link"
+      tabIndex={0}
+      className={cn(
+        "cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
+        paused && "opacity-70",
+      )}
       onClick={() => onOpenFlow(flow.id)}
+      onKeyDown={(e) => {
+        // The errors count inside the row is its own <button>; let it handle
+        // its own key press rather than navigating away from the drawer it
+        // is about to open.
+        if (e.target !== e.currentTarget) return;
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault(); // Space would scroll the table
+        onOpenFlow(flow.id);
+      }}
     >
       <TableCell className="whitespace-normal font-medium">{flow.name}</TableCell>
       <TableCell>

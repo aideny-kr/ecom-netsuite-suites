@@ -235,4 +235,34 @@ describe("StepBubble — error badge, selection, paused", () => {
     fireEvent.click(screen.getByTestId("step-bubble-s1"));
     expect(onSelect).toHaveBeenCalledWith("s1", undefined);
   });
+
+  it("is operable from the keyboard: focusable, announced as a button, Enter and Space select", () => {
+    // Final-review finding I8. The bubble was a bare `<div onClick>` -- no
+    // role, no tab stop, no key handling -- so the canvas was mouse-only and
+    // a screen reader was told nothing was there to activate. The chips
+    // inside are real <button>s and were already reachable, which made this
+    // easy to miss: you could tab to a chip but never to the bubble itself.
+    const onSelect = vi.fn();
+    renderBubble(makeStep({ id: "s1" }), { onSelect });
+    const bubble = screen.getByTestId("step-bubble-s1");
+
+    expect(bubble).toHaveAttribute("role", "button");
+    expect(bubble).toHaveAttribute("tabindex", "0");
+    expect(bubble.className).toMatch(/focus-visible:ring-2/);
+
+    fireEvent.keyDown(bubble, { key: "Enter" });
+    expect(onSelect).toHaveBeenCalledWith("s1", undefined);
+
+    onSelect.mockClear();
+    fireEvent.keyDown(bubble, { key: " " });
+    expect(onSelect).toHaveBeenCalledWith("s1", undefined);
+  });
+
+  it("a key press on a chip inside the bubble does not also fire the bubble's own selection", () => {
+    const onSelect = vi.fn();
+    renderBubble(makeStep({ id: "s1" }), { onSelect });
+    const chip = within(screen.getByTestId("step-bubble-s1")).getByText("no hooks");
+    fireEvent.keyDown(chip, { key: "Enter" });
+    expect(onSelect).not.toHaveBeenCalled();
+  });
 });

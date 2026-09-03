@@ -177,10 +177,26 @@ export function StepBubble({
       data-testid={`step-bubble-${step.id}`}
       data-selected={selected ? "true" : undefined}
       data-error={hasError ? "true" : undefined}
+      // Selecting a step is a button, not a link: it opens the inspector on
+      // this page rather than navigating (finding I8 -- this used to be a bare
+      // `<div onClick>`, so the canvas was mouse-only and assistive tech was
+      // told there was nothing here to activate, even though the chips inside
+      // were reachable).
+      role="button"
+      tabIndex={0}
       onClick={() => onSelect(step.id, undefined)}
+      onKeyDown={(e) => {
+        // A chip inside is a real <button> with its own Enter/Space handling;
+        // let the browser activate it and do not ALSO select the bubble.
+        if (e.target !== e.currentTarget) return;
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault(); // Space would scroll the canvas
+        onSelect(step.id, undefined);
+      }}
       style={{ position: "absolute", left: node.x, top: node.y, width: node.w, height: node.h }}
       className={cn(
         "flex cursor-pointer flex-col gap-1 rounded-xl border border-l-[3px] bg-card p-2 text-[11px] shadow-soft",
+        "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
         KIND_BORDER[step.kind],
         selected && "ring-2 ring-orange-500",
         paused && "opacity-60",

@@ -467,6 +467,33 @@ describe("navigation", () => {
     expect(routeMocks.go.flow).toHaveBeenCalledWith("f1");
   });
 
+  it("a flow row is operable from the keyboard: focusable, announced as a link, Enter and Space navigate", () => {
+    // Final-review finding I8. The row was a bare `<TableRow onClick>` -- no
+    // role, no tab stop, no key handling -- so the whole flows table was
+    // mouse-only. `role="link"` rather than "button" because activating it
+    // navigates to the flow page; nothing is submitted or mutated.
+    setup([makeFlow({ id: "f1", name: "Keyboard Flow" })]);
+    const row = screen.getByText("Keyboard Flow").closest("tr")!;
+
+    expect(row).toHaveAttribute("role", "link");
+    expect(row).toHaveAttribute("tabindex", "0");
+    expect(row.className).toMatch(/focus-visible:ring-2/);
+
+    fireEvent.keyDown(row, { key: "Enter" });
+    expect(routeMocks.go.flow).toHaveBeenCalledWith("f1");
+
+    routeMocks.go.flow.mockClear();
+    fireEvent.keyDown(row, { key: " " });
+    expect(routeMocks.go.flow).toHaveBeenCalledWith("f1");
+  });
+
+  it("a key press on the errors button inside a row does not also navigate to the flow", () => {
+    setup([makeFlow({ id: "f1", name: "Keyboard Flow", error_count: 3, signature_count: 1 })]);
+    const row = screen.getByText("Keyboard Flow").closest("tr")!;
+    fireEvent.keyDown(within(row).getByText(/3 open/), { key: "Enter" });
+    expect(routeMocks.go.flow).not.toHaveBeenCalled();
+  });
+
   it("switching tabs writes go.integration(id, tab)", () => {
     setup([]);
     // Radix's Tabs.Trigger activates on `mousedown`, not `click` — see
