@@ -23,7 +23,8 @@ import { stallState, type StallState } from "./schedule";
  * those lives in a file that either predates this one or has no reason to
  * export a helper this small; see `shared.tsx`'s top docstring for the same
  * reasoning applied to `formatRelativeTime`/`ErrorNotice`. */
-function dotToneClass(state: StallState["state"]): string {
+function dotToneClass(state: StallState["state"] | "crit"): string {
+  if (state === "crit") return "bg-red-500";
   if (state === "on_time") return "bg-green-500";
   if (state === "stalled") return "bg-amber-500";
   return "bg-muted-foreground/40";
@@ -36,6 +37,18 @@ function flowStall(flow: CeligoFlowSummary, lastSyncedAt: string | null): StallS
     lastExecutedAt: flow.last_executed_at,
     lastSyncedAt,
   });
+}
+
+/** Open errors outrank schedule health for this dot: a flow running exactly
+ * on schedule while quietly failing every run is not "on time" in any sense
+ * an operator cares about — see the cross-surface consistency test (Task
+ * 18), which pins this against the SAME flow's own error-pill facts
+ * (header, table, bubble) so the rail can never show a calmer story than
+ * the rest of the page. Schedule tone only applies once the flow has zero
+ * open errors. */
+function flowDotState(flow: CeligoFlowSummary, lastSyncedAt: string | null): StallState["state"] | "crit" {
+  if (flow.error_count > 0) return "crit";
+  return flowStall(flow, lastSyncedAt).state;
 }
 
 export function CeligoFlowNavigator({
@@ -70,18 +83,18 @@ export function CeligoFlowNavigator({
         </button>
         <div className="mt-1.5 flex flex-col items-center gap-1.5">
           {flows.map((flow) => {
-            const stall = flowStall(flow, lastSyncedAt);
+            const dotState = flowDotState(flow, lastSyncedAt);
             const current = flow.id === currentFlowId;
             return (
               <span
                 key={flow.id}
-                data-state={stall.state}
+                data-state={dotState}
                 data-current={current ? "true" : undefined}
                 title={flow.name}
                 className={cn(
                   "shrink-0 rounded-full",
                   current ? "h-2 w-2" : "h-1.5 w-1.5",
-                  dotToneClass(stall.state),
+                  dotToneClass(dotState),
                 )}
               />
             );
@@ -102,7 +115,7 @@ export function CeligoFlowNavigator({
       </div>
       <ul className="flex-1 overflow-y-auto py-1">
         {flows.map((flow) => {
-          const stall = flowStall(flow, lastSyncedAt);
+          const dotState = flowDotState(flow, lastSyncedAt);
           const current = flow.id === currentFlowId;
           const paused = flow.disabled === true;
           return (
@@ -118,8 +131,8 @@ export function CeligoFlowNavigator({
                 )}
               >
                 <span
-                  data-state={stall.state}
-                  className={cn("mt-1 h-1.5 w-1.5 shrink-0 rounded-full", dotToneClass(stall.state))}
+                  data-state={dotState}
+                  className={cn("mt-1 h-1.5 w-1.5 shrink-0 rounded-full", dotToneClass(dotState))}
                 />
                 <span className={cn("truncate", paused ? "text-muted-foreground" : "text-foreground")}>
                   {flow.name}

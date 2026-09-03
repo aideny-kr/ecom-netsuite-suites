@@ -164,7 +164,14 @@ class CeligoIntegrationOut(BaseModel):
     is the DISTINCT set of `topology.adaptor_family(adaptor_type)` results
     across every step in the integration, dropping `None`. `script_count` is
     DISTINCT production scripts attached anywhere in the integration.
-    `error_count` is OPEN (`celigo_error_is_open()`); `changes_last_24h` is
+    `error_count` is OPEN (`celigo_error_is_open()`); `signature_count` is the
+    integration-wide twin of `CeligoFlowSummaryOut.signature_count` -- DISTINCT
+    root causes across every flow in the integration (Task 18, cross-surface
+    consistency: the tile's own `ErrorPill` used to default this to `error_count`
+    itself when the field didn't exist, which read "10 open · 10 root causes"
+    on this tile while the SAME 10 errors, one click away on the flows table or
+    the flow page, correctly read "1 root cause" -- the same audit-trail rows,
+    two different claims). `changes_last_24h` is
     `celigo_config_changes` rows in the last rolling 24h -- a coarse "has
     anything drifted recently" signal, not itself a health verdict.
     `flow_schedules` is a second, plain per-flow projection (no aggregation)
@@ -187,6 +194,7 @@ class CeligoIntegrationOut(BaseModel):
     script_count: int
     no_run_count: int
     error_count: int
+    signature_count: int
     changes_last_24h: int
     last_run_at: datetime | None
     writes: list[CeligoRecordWriteOut]
@@ -745,6 +753,31 @@ async def list_integrations(
     ).all()
     errors_by_integration = {row.integration_id: row.errors for row in error_rows}
 
+    # DISTINCT root causes across the whole integration -- same predicate as
+    # `error_rows` above, grouped the same way, just counting distinct
+    # `signature_id` instead of rows (mirrors the per-flow query at
+    # `get_flow_detail`'s `flow_signature_count`). This is what lets the
+    # tile's `ErrorPill` say "10 open · 1 root cause" instead of silently
+    # defaulting to "10 open · 10 root causes" (Task 18).
+    signature_rows = (
+        await db.execute(
+            select(
+                CeligoFlow.integration_id,
+                func.count(distinct(CeligoFlowError.signature_id)).label("signatures"),
+            )
+            .select_from(CeligoFlowError)
+            .join(CeligoFlow, CeligoFlow.id == CeligoFlowError.flow_id)
+            .where(
+                CeligoFlowError.tenant_id == user.tenant_id,
+                CeligoFlow.tenant_id == user.tenant_id,
+                CeligoFlow.integration_id.in_(integration_ids),
+                celigo_error_is_open(),
+            )
+            .group_by(CeligoFlow.integration_id)
+        )
+    ).all()
+    signatures_by_integration = {row.integration_id: row.signatures for row in signature_rows}
+
     # Config changes in the last rolling 24h -- a coarse "something drifted
     # recently" signal, not a health verdict on its own.
     change_rows = (
@@ -786,6 +819,7 @@ async def list_integrations(
                 script_count=scripts_by_integration.get(i.id, 0),
                 no_run_count=bucket.no_run_count if bucket else 0,
                 error_count=errors_by_integration.get(i.id, 0),
+                signature_count=signatures_by_integration.get(i.id, 0),
                 changes_last_24h=changes_by_integration.get(i.id, 0),
                 last_run_at=bucket.last_run_at if bucket else None,
                 writes=writes_by_integration.get(i.id, []),

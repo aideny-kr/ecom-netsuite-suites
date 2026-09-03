@@ -78,6 +78,7 @@ function makeIntegration(overrides: Partial<CeligoIntegration> = {}): CeligoInte
     script_count: 30,
     no_run_count: 0,
     error_count: 0,
+    signature_count: 0,
     changes_last_24h: 0,
     last_run_at: "2026-09-02T18:06:00.000Z",
     writes: [

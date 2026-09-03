@@ -271,7 +271,11 @@ function IntegrationTile({
       )}
     >
       <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
-        <ErrorPill count={integration.error_count} checkedAt={lastSyncedAt} />
+        <ErrorPill
+          count={integration.error_count}
+          signatureCount={integration.signature_count}
+          checkedAt={lastSyncedAt}
+        />
         <AttentionPill attention={attention} />
         <span className="ml-auto">
           <Medallions families={integration.adaptor_families} />
@@ -344,7 +348,11 @@ function IntegrationsTable({
                   <WritesLine writes={integration.writes} />
                 </td>
                 <td className="px-2.5 py-1.5">
-                  <ErrorPill count={integration.error_count} checkedAt={lastSyncedAt} />
+                  <ErrorPill
+          count={integration.error_count}
+          signatureCount={integration.signature_count}
+          checkedAt={lastSyncedAt}
+        />
                 </td>
                 <td className="px-2.5 py-1.5">
                   {/* Fix round 1, finding 2: the schedule/attention pill —

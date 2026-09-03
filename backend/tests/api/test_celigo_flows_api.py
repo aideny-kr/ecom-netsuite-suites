@@ -554,6 +554,47 @@ class TestListIntegrations:
         assert sched["disabled"] is False and sched["schedule"].startswith("? 5,20,35,50")
         assert sched["last_executed_at"] is not None
 
+    async def test_signature_count_dedupes_across_multiple_errors_sharing_one_signature(self, client, admin_user, db):
+        """Task 18 (cross-surface consistency): `signature_count` is the
+        DISTINCT root-cause count across the whole integration, the same
+        predicate as `error_count` (`celigo_error_is_open()`) but counting
+        distinct `signature_id` instead of rows -- mirrors the per-flow
+        query in `get_flow_detail`. Before this field existed, the tile's own
+        `ErrorPill` defaulted the root-cause count to the raw error count
+        (`signatureCount ?? count`), so two errors sharing one root cause
+        read as "2 open · 2 root causes" on the tile while the SAME two rows
+        correctly read "2 open · 1 root cause" one click away on the flows
+        table or the flow page. Seeding a SECOND error against `_seed_world`'s
+        existing signature (not a second signature) is what makes this
+        assertion fail under the naive `error_count`-as-`signature_count`
+        shortcut and pass under real distinct-count aggregation -- a fixture
+        with one error per signature can't tell the two apart."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        db.add(
+            CeligoFlowError(
+                tenant_id=user.tenant_id,
+                celigo_connection_id=world["connection_id"],
+                flow_id=world["flow"].id,
+                flow_step_id=world["step"].id,
+                signature_id=world["signature"].id,
+                celigo_id=f"err2_{world['suffix']}",
+                trace_key=f"trace2_{world['suffix']}",
+                source="import",
+                code="ERR001",
+                message="A second occurrence of the same root cause",
+                occurred_at=datetime.now(timezone.utc),
+                retriable=True,
+            )
+        )
+        await db.flush()
+
+        r = await client.get("/api/v1/celigo/integrations", headers=headers)
+        assert r.status_code == 200, r.text
+        row = next(i for i in r.json() if i["id"] == str(world["integration"].id))
+        assert row["error_count"] == 2, "both errors are open and belong to this integration"
+        assert row["signature_count"] == 1, "both errors share ONE signature -- must not double-count"
+
 
 # ---------------------------------------------------------------------------
 # GET /celigo/integrations/{id}/flows

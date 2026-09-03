@@ -66,6 +66,13 @@ export interface CeligoIntegration {
   script_count: number;
   no_run_count: number;
   error_count: number;
+  /** Task 18 -- the integration-wide twin of `CeligoFlowSummary.signature_count`:
+   * DISTINCT root causes across every flow in the integration, so the tile's
+   * `ErrorPill` reads "10 open · 1 root cause" the same way the flows table and
+   * the flow page already do for the same underlying errors, instead of
+   * defaulting to "10 open · 10 root causes" (one claim per row) when this
+   * field didn't exist. */
+  signature_count: number;
   changes_last_24h: number;
   last_run_at: string | null;
   writes: CeligoRecordWrite[];

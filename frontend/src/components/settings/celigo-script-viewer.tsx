@@ -5,14 +5,16 @@
  * `GET /celigo/scripts/{id}` (`CeligoScriptOut`,
  * backend/app/api/v1/celigo_flows.py).
  *
- * Task 17 — the presentational half (`CeligoScriptViewerBody`) is now
- * extracted so the flow page's script DRAWER (`celigo/celigo-script-drawer.tsx`,
+ * Task 17 — the presentational half (`CeligoScriptViewerBody`) was extracted
+ * so the flow page's script DRAWER (`celigo/celigo-script-drawer.tsx`,
  * mockup screen 4, a right panel over the inspector reached via
- * `&script=<scriptId>`) can reuse the exact same header/pills/table/code/
- * banner instead of re-implementing them. `CeligoScriptViewerDialog` below
- * stays as a thin wrapper around it purely so nothing here breaks before
- * Task 18 deletes this dialog (and `celigo-flow-map.tsx`, its last caller)
- * outright.
+ * `&script=<scriptId>`) could reuse the exact same header/pills/table/code/
+ * banner instead of re-implementing them.
+ *
+ * Task 18 — `CeligoScriptViewerDialog` (the centered-dialog wrapper this
+ * file used to also export) is deleted along with its last caller,
+ * `celigo-flow-map.tsx`: `CeligoScriptViewerBody` below is now this file's
+ * only export, reached exclusively through `CeligoScriptDrawer`.
  *
  * ═══ SECURITY CONTRACT ═══
  * `content` is arbitrary third-party JavaScript, written by whoever
@@ -26,12 +28,10 @@
  * ═══ N2 (standing decision) ═══
  * The banner below is the exact, project-wide string Global Constraints
  * mandates -- verbatim, not paraphrased. `celigo-step-inspector.tsx`'s own
- * Scripts tab carries the identical literal (as `N2_SHIELD_TEXT`) rather
- * than importing this one, for the same reason this file already gives for
- * `formatRelativeTime`/`ErrorNotice` duplicating instead of importing from
- * `celigo-flow-map.tsx`: that Scripts tab predates this extraction and the
- * two files are not on a shared expiry date, so a hand-kept duplicate is
- * safer than a cross-file import that outlives its usefulness.
+ * Scripts tab carries the identical literal (as `N2_SHIELD_TEXT`) rather than
+ * importing this one, since that tab predates this file and the two are not
+ * on a shared expiry date -- a hand-kept duplicate is safer than a
+ * cross-file import that outlives its usefulness.
  *
  * ═══ THE CORRECTION THAT MATTERS MOST (mockup-spec.md's correction section,
  * which overrides the Screen 04 body) ═══
@@ -59,17 +59,10 @@
  * the id is what makes the row identifiable.
  */
 
-import {
-  useCeligoScript,
-  type CeligoScript,
-  type CeligoScriptAttachmentSite,
-} from "@/hooks/use-celigo-flows";
-import { queryState } from "@/lib/query-state";
+import type { CeligoScript, CeligoScriptAttachmentSite } from "@/hooks/use-celigo-flows";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { AlertTriangle, Loader2, ShieldAlert } from "lucide-react";
+import { ShieldAlert } from "lucide-react";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 
@@ -79,11 +72,8 @@ function displayOr(value: string | null | undefined, fallback = "—"): string {
   return value ? value : fallback;
 }
 
-/** Mirrors `stepKindLabel` in celigo-flow-map.tsx (not exported from
- * there, so duplicated here rather than reaching across files for one
- * string). `flow_step_role` is null for a router-level script ref with no
- * owning step -- see `CeligoFlowDetailOut.unassigned_attachments`'s
- * docstring. */
+/** `flow_step_role` is null for a router-level script ref with no owning
+ * step -- see `CeligoFlowDetailOut.unassigned_attachments`'s docstring. */
 function siteLocationLabel(site: CeligoScriptAttachmentSite): string {
   if (!site.flow_step_role) return "Router";
   const kind = site.flow_step_role === "generator" ? "Source" : "Destination";
@@ -125,20 +115,6 @@ function formatContentSize(content: string | null): string | null {
   return `${(content.length / 1024).toFixed(1)} KB`;
 }
 
-function ErrorNotice({ message, onRetry }: { message: string; onRetry?: () => void }) {
-  return (
-    <div className="flex items-center gap-2 rounded-lg border border-destructive/50 bg-destructive/5 px-3 py-2 text-[13px] text-destructive">
-      <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-      <span className="flex-1">{message}</span>
-      {onRetry && (
-        <Button variant="outline" size="sm" className="h-6 px-2 text-[11px]" onClick={onRetry}>
-          Retry
-        </Button>
-      )}
-    </div>
-  );
-}
-
 /** Global Constraints' N2 copy, verbatim -- "shown to you only. Never run
  * here, never sent to the assistant." replaces this file's earlier line,
  * which (wrongly) promised the source would be quoted TO the assistant
@@ -159,9 +135,9 @@ function UntrustedContentBanner() {
  * Task 17 -- the re-homed body: header (hook chip + name), the copies/
  * sites-and-flows pills + size, the "Scripts view" affordance, the used-by
  * table, the code panel, and the N2 banner. Presentational only -- loading
- * and error states are each caller's own job (`CeligoScriptViewerDialog`
- * below and `CeligoScriptDrawer`), since both already gate on their own
- * `useCeligoScript` + `queryState()` before ever reaching this component.
+ * and error states are the caller's own job (`CeligoScriptDrawer`), since it
+ * already gates on its own `useCeligoScript` + `queryState()` before ever
+ * reaching this component.
  *
  * `currentStepId`, when given, is the `flow_step_id` of the step the caller
  * actually opened this script FROM. It picks out that one used_by site so
@@ -295,52 +271,5 @@ export function CeligoScriptViewerBody({
 
       <UntrustedContentBanner />
     </div>
-  );
-}
-
-export function CeligoScriptViewerDialog({
-  scriptId,
-  onOpenChange,
-}: {
-  scriptId: string | null;
-  onOpenChange: (open: boolean) => void;
-}) {
-  const scriptQuery = useCeligoScript(scriptId ?? undefined);
-  const scriptState = queryState(scriptQuery);
-  const script = scriptQuery.data;
-
-  return (
-    <Dialog open={!!scriptId} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[85vh] max-w-3xl overflow-y-auto">
-        <DialogHeader>
-          {/* The visible name/pills now live in `CeligoScriptViewerBody` --
-              this stays sr-only purely so Radix always has an accessible
-              name/description for the dialog, without rendering the name
-              twice. */}
-          <DialogTitle className="sr-only">Script viewer</DialogTitle>
-          <DialogDescription className="sr-only">
-            Attachment sites and source for this script
-          </DialogDescription>
-        </DialogHeader>
-
-        {scriptState === "error" ? (
-          // "error" first -- once a query errors, `script` stays undefined
-          // forever, so the branch below alone would spin with no escape
-          // (the exact ordering Task 9's fix round 1 caught in
-          // FlowDetailDialog). `queryState` is the one mapping every query
-          // in the flow map goes through (see `lib/query-state.ts`).
-          <div className="flex flex-col items-center gap-3 py-8">
-            <ErrorNotice message="Couldn't load this script." onRetry={() => scriptQuery.refetch()} />
-          </div>
-        ) : scriptState !== "success" || !script ? (
-          <div className="flex items-center justify-center gap-2 py-8 text-[13px] text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            Loading script…
-          </div>
-        ) : (
-          <CeligoScriptViewerBody script={script} />
-        )}
-      </DialogContent>
-    </Dialog>
   );
 }
