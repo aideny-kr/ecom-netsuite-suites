@@ -53,6 +53,9 @@ export type LayoutEdge = {
 
 export type LaneLabel = {
   routerId: string;
+  /** `branchKey`, NOT the raw `branch.id` — a branch that declares no id gets
+   * a positional stand-in so the caller can use this as a React key / DOM id
+   * without two unnamed lanes colliding. */
   branchId: string;
   name: string | null;
   ruleCount: number;
@@ -85,8 +88,37 @@ function bySequence(a: CeligoFlowStep, b: CeligoFlowStep): number {
   return a.sequence - b.sequence;
 }
 
-function stepsForBranch(routerSteps: CeligoFlowStep[], routerId: string, branchId: string | null): CeligoFlowStep[] {
-  return routerSteps.filter((s) => s.router_id === routerId && s.branch_id === branchId).sort(bySequence);
+/** The stable key for one branch inside every id this module mints — node ids,
+ * edge ids, lane keys. A declared branch has Celigo's own generated `id`,
+ * unique account-wide; a branch that declares none falls back to its position
+ * INSIDE ITS OWN ROUTER, so two unnamed branches — of the same router or of
+ * two different ones — can never collapse onto one key.
+ *
+ * They used to (final-review finding I2): every id was built from the raw
+ * `branch.id`, so a router with two unnamed branches produced two lanes keyed
+ * `r:null`, and — via `stepsForBranch` below — the same step node twice. React
+ * renders duplicate keys as one element, so a whole lane silently vanished. */
+function branchKey(routerId: string, branch: CeligoRouterBranch, index: number): string {
+  return branch.id ?? `${routerId}#${index}`;
+}
+
+/** One branch's steps, by sequence.
+ *
+ * A branch that declares no id would match the router's `branch_id IS NULL`
+ * steps — and so would every OTHER unnamed branch of that router, which is how
+ * one step ended up drawn in every unnamed lane at once. Only the FIRST
+ * unnamed branch claims them now: the sync gives us nothing that says which
+ * unnamed lane an unattributed step belongs to, so putting it in all of them
+ * asserted something Celigo never told us. Later unnamed branches fall through
+ * to the ordinary "no steps" placeholder. */
+function stepsForBranch(
+  routerSteps: CeligoFlowStep[],
+  router: RouterEntry,
+  branch: CeligoRouterBranch,
+  index: number,
+): CeligoFlowStep[] {
+  if (branch.id === null && index !== router.branches.findIndex((b) => b.id === null)) return [];
+  return routerSteps.filter((s) => s.router_id === router.id && s.branch_id === branch.id).sort(bySequence);
 }
 
 /** Declared routers (as given) plus a synthetic entry -- `name: null`,
@@ -141,7 +173,7 @@ function buildRouterList(routers: CeligoRouter[], routerSteps: CeligoFlowStep[],
 type SpineRouterItem =
   | { kind: "router"; router: RouterEntry }
   | { kind: "step"; step: CeligoFlowStep; routerId: string; branchId: string | null }
-  | { kind: "placeholder"; routerId: string; branchId: string | null };
+  | { kind: "placeholder"; routerId: string; branchId: string | null; branchKey: string };
 
 /** Walks the router chain from its declared entry point (the first router in
  * `combined`) while every router visited is *pass-through* -- exactly one
@@ -171,9 +203,14 @@ function walkRouterChain(
       fanOutRouter = current;
       break;
     }
-    const branchSteps = stepsForBranch(routerSteps, current.id, soleBranch.id);
+    const branchSteps = stepsForBranch(routerSteps, current, soleBranch, 0);
     if (branchSteps.length === 0) {
-      spineItems.push({ kind: "placeholder", routerId: current.id, branchId: soleBranch.id });
+      spineItems.push({
+        kind: "placeholder",
+        routerId: current.id,
+        branchId: soleBranch.id,
+        branchKey: branchKey(current.id, soleBranch, 0),
+      });
     } else {
       for (const s of branchSteps) spineItems.push({ kind: "step", step: s, routerId: current.id, branchId: soleBranch.id });
     }
@@ -253,7 +290,7 @@ export function computeLayout(detail: Pick<CeligoFlowDetail, "steps" | "routers"
       spineSeq.push({ id: item.step.id, step: item.step });
       x += BUBBLE_W + GAP_X;
     } else {
-      const id = `placeholder:${item.branchId}`;
+      const id = `placeholder:${item.branchKey}`;
       nodes.push({ id, type: "placeholder", x, y: spineY, w: BUBBLE_W, h: BUBBLE_H, routerId: item.routerId, branchId: item.branchId });
       spineSeq.push({ id });
       x += BUBBLE_W + GAP_X;
@@ -278,8 +315,9 @@ export function computeLayout(detail: Pick<CeligoFlowDetail, "steps" | "routers"
    * the row with its own branches collapsed into a single placeholder --
    * drawn inline, never expanded (rule 3's last clause) -- so a router chain
    * buried inside a lane still terminates in a fixed number of ranks. */
-  function layoutBranchRow(ownerRouterId: string, branch: CeligoRouterBranch, laneIndex: number, startX: number, rowY: number): string {
-    const branchSteps = stepsForBranch(routerSteps, ownerRouterId, branch.id);
+  function layoutBranchRow(owner: RouterEntry, branch: CeligoRouterBranch, laneIndex: number, startX: number, rowY: number): string {
+    const ownerRouterId = owner.id;
+    const branchSteps = stepsForBranch(routerSteps, owner, branch, laneIndex);
     let cx = startX;
     let firstId: string | undefined;
     let prevId: string | undefined;
@@ -294,7 +332,7 @@ export function computeLayout(detail: Pick<CeligoFlowDetail, "steps" | "routers"
     };
 
     if (branchSteps.length === 0) {
-      const id = `placeholder:${branch.id}`;
+      const id = `placeholder:${branchKey(ownerRouterId, branch, laneIndex)}`;
       nodes.push({ id, type: "placeholder", x: cx, y: rowY, w: BUBBLE_W, h: BUBBLE_H, routerId: ownerRouterId, branchId: branch.id, lane: laneIndex });
       advance(id, BUBBLE_W, undefined);
     } else {
@@ -360,14 +398,14 @@ export function computeLayout(detail: Pick<CeligoFlowDetail, "steps" | "routers"
       const laneY = MARGIN + LANE_LABEL_H + i * LANE_PITCH;
       lanes.push({
         routerId: fanOutRouter.id,
-        branchId: branch.id ?? "",
+        branchId: branchKey(fanOutRouter.id, branch, i),
         name: branch.name,
         ruleCount: branch.rule_count,
         order: branch.order,
         x: laneStartX,
         y: laneY - LANE_LABEL_H,
       });
-      const firstId = layoutBranchRow(fanOutRouter.id, branch, i, laneStartX, laneY);
+      const firstId = layoutBranchRow(fanOutRouter, branch, i, laneStartX, laneY);
       pendingEdges.push({ from: fanOutNodeId, to: firstId, curved: true });
       laneBottom = Math.max(laneBottom, laneY + BUBBLE_H);
     });
@@ -392,14 +430,14 @@ export function computeLayout(detail: Pick<CeligoFlowDetail, "steps" | "routers"
       const laneY = extraY + i * LANE_PITCH;
       lanes.push({
         routerId: rem.id,
-        branchId: branch.id ?? "",
+        branchId: branchKey(rem.id, branch, i),
         name: branch.name,
         ruleCount: branch.rule_count,
         order: branch.order,
         x: blockStartX,
         y: laneY - LANE_LABEL_H,
       });
-      const firstId = layoutBranchRow(rem.id, branch, i, blockStartX, laneY);
+      const firstId = layoutBranchRow(rem, branch, i, blockStartX, laneY);
       pendingEdges.push({ from: routerNodeId, to: firstId, curved: true });
     });
     const blockLanes = Math.max(rem.branches.length, 1);

@@ -136,6 +136,41 @@ describe("computeLayout — deterministic layered layout (pure)", () => {
     expect(ph).toMatchObject({ type: "placeholder", w: BUBBLE_W, h: BUBBLE_H, branchId: "b2" });
   });
 
+  it("(e2) two branches that declare no id: unique node/edge/lane keys, unowned step in the FIRST lane only", () => {
+    // Final-review finding I2. `branch.id` is nullable, and the old code keyed
+    // everything off it directly: two unnamed branches both matched the
+    // router's `branch_id IS NULL` steps, so the SAME step was laid into both
+    // lanes -- duplicate node ids ("s1" twice), duplicate edge ids and
+    // duplicate React lane keys, which React silently renders as one node.
+    const layout = computeLayout(
+      mk(
+        [
+          step({ id: "src", celigo_id: "c0", role: "generator", sequence: 0 }),
+          step({ id: "s1", celigo_id: "c1", role: "processor", router_id: "r", branch_id: null, sequence: 0 }),
+        ],
+        [
+          routerDef({
+            id: "r",
+            branches: [branch({ id: null, name: "A", order: 0 }), branch({ id: null, name: "B", order: 1 })],
+          }),
+        ],
+      ),
+    );
+    const nodeIds = layout.nodes.map((n) => n.id);
+    expect(new Set(nodeIds).size, `duplicate node ids: ${JSON.stringify(nodeIds)}`).toBe(nodeIds.length);
+    const edgeIds = layout.edges.map((e) => e.id);
+    expect(new Set(edgeIds).size, `duplicate edge ids: ${JSON.stringify(edgeIds)}`).toBe(edgeIds.length);
+    const laneKeys = layout.lanes.map((l) => `${l.routerId}:${l.branchId}`);
+    expect(new Set(laneKeys).size, `duplicate lane keys: ${JSON.stringify(laneKeys)}`).toBe(laneKeys.length);
+
+    // The step Celigo never attributed to a lane is drawn once, in the first
+    // unnamed lane; the second lane gets the ordinary "no steps" placeholder.
+    expect(layout.nodes.filter((n) => n.id === "s1")).toHaveLength(1);
+    expect(layout.nodes.find((n) => n.id === "s1")!.lane).toBe(0);
+    expect(layout.nodes.filter((n) => n.type === "placeholder" && n.lane === 1)).toHaveLength(1);
+    expect(layout.lanes.map((l) => l.name)).toEqual(["A", "B"]);
+  });
+
   it("(f) the same celigo_id in two branches still produces two distinct step nodes", () => {
     const layout = computeLayout(
       mk(
