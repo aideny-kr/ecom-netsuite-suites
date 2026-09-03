@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { computeLayout, BUBBLE_W, BUBBLE_H, LANE_PITCH } from "../layout";
+import { computeLayout, BUBBLE_W, BUBBLE_H, LANE_PITCH, MARGIN, LANE_LABEL_H } from "../layout";
 import type { CeligoFlowDetail, CeligoFlowStep, CeligoRouter, CeligoRouterBranch } from "@/hooks/use-celigo-flows";
 
 // Fixture-matrix helpers -- deliberately minimal, filling every required
@@ -287,5 +287,44 @@ describe("computeLayout — deterministic layered layout (pure)", () => {
     const edge = layout.edges.find((e) => e.from === "p1" && e.to === "p2")!;
     expect(edge.dashed).toBe(true);
     expect(edge.label).toBe("continues on failure");
+  });
+
+  it("(k) several sources and NO fan-out router: nothing is laid out above the canvas top", () => {
+    // Gate fix wave, item 2. With no fan-out router the spine used to sit at
+    // the canvas top (`lanesTop`, y=44) while the source stack was centred ON
+    // it, so a stack taller than one bubble reached above y=0 -- clipped away
+    // by the canvas's own `overflow: hidden` sizer, with no scroll to recover
+    // it. Two sources put the first bubble at y=-48.
+    const layout = computeLayout(
+      mk([
+        step({ id: "src1", celigo_id: "c1", role: "generator", sequence: 0 }),
+        step({ id: "src2", celigo_id: "c2", role: "generator", sequence: 1 }),
+        step({ id: "dst", celigo_id: "c3", role: "processor", sequence: 0 }),
+      ]),
+    );
+
+    const above = layout.nodes.filter((n) => n.y < MARGIN + LANE_LABEL_H).map((n) => `${n.id}@y=${n.y}`);
+    expect(above).toEqual([]);
+    expect(layout.height).toBeGreaterThanOrEqual(Math.max(...layout.nodes.map((n) => n.y + n.h)));
+  });
+
+  it("(k2) a taller source stack still clears the top, and the spine stays centred on it", () => {
+    const layout = computeLayout(
+      mk([
+        step({ id: "s1", celigo_id: "c1", role: "generator", sequence: 0 }),
+        step({ id: "s2", celigo_id: "c2", role: "generator", sequence: 1 }),
+        step({ id: "s3", celigo_id: "c3", role: "generator", sequence: 2 }),
+        step({ id: "s4", celigo_id: "c4", role: "generator", sequence: 3 }),
+        step({ id: "dst", celigo_id: "c5", role: "processor", sequence: 0 }),
+      ]),
+    );
+
+    const above = layout.nodes.filter((n) => n.y < MARGIN + LANE_LABEL_H).map((n) => `${n.id}@y=${n.y}`);
+    expect(above).toEqual([]);
+    // The destination still sits on the vertical centre of the source stack.
+    const ys = ["s1", "s2", "s3", "s4"].map((id) => layout.nodes.find((n) => n.id === id)!.y);
+    const dst = layout.nodes.find((n) => n.id === "dst")!;
+    expect(dst.y + BUBBLE_H / 2).toBe((Math.min(...ys) + Math.max(...ys) + BUBBLE_H) / 2);
+    expect(layout.height).toBeGreaterThanOrEqual(Math.max(...layout.nodes.map((n) => n.y + n.h)));
   });
 });

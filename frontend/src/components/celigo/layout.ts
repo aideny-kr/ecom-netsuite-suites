@@ -258,7 +258,20 @@ export function computeLayout(detail: Pick<CeligoFlowDetail, "steps" | "routers"
   const numPrimaryLanes = fanOutRouter ? fanOutRouter.branches.length : 0;
   const lanesTop = MARGIN + LANE_LABEL_H;
   const lanesBottom = lanesTop + (numPrimaryLanes - 1) * LANE_PITCH + BUBBLE_H;
-  const spineY = numPrimaryLanes > 0 ? Math.round((lanesTop + lanesBottom) / 2) : lanesTop;
+  const lanesCentreY = numPrimaryLanes > 0 ? Math.round((lanesTop + lanesBottom) / 2) : lanesTop;
+
+  // The spine's y is the LOWER of the two constraints, never just the lanes'
+  // centre: rank 0's sources are stacked CENTRED on the spine (step 1 below),
+  // so a stack taller than one bubble needs the spine pushed down by half the
+  // overflow or the topmost source lands above the canvas -- at y=-48 for two
+  // sources with no fan-out router, clipped away by the canvas's own
+  // `overflow: hidden` sizer with no scroll that could recover it. Deriving
+  // it here (rather than clamping each source's y afterwards) keeps the stack
+  // centred on the spine, which is what makes the source->spine edge read as
+  // a straight line into the middle of the chain.
+  const sourcesH = sources.length > 0 ? sources.length * BUBBLE_H + (sources.length - 1) * GAP_X : 0;
+  const minSpineY = sources.length > 0 ? lanesTop + Math.ceil((sourcesH - BUBBLE_H) / 2) : lanesTop;
+  const spineY = Math.max(lanesCentreY, minSpineY);
 
   const nodes: LayoutNode[] = [];
   const lanes: LaneLabel[] = [];
