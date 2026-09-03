@@ -455,3 +455,127 @@ describe("CeligoIntegrationsPage", () => {
     expect(within(onTimeRow).getByText("on time")).toBeInTheDocument();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Codex fix wave
+// ---------------------------------------------------------------------------
+
+describe("CeligoIntegrationsPage — header stats never state a count they don't have (item 4)", () => {
+  it("renders dashes, not zeros, while the integrations query is pending", () => {
+    mocks.integrations.mockReturnValue(pending());
+    wrap(<CeligoIntegrationsPage />);
+
+    const header = screen.getByText(/integrations ·/);
+    expect(header.textContent).toContain("— integrations");
+    expect(header.textContent).not.toContain("0 integrations");
+    expect(header.textContent).not.toContain("0 flows");
+  });
+
+  it("renders dashes, not zeros, when the integrations query failed", () => {
+    mocks.integrations.mockReturnValue(errored());
+    wrap(<CeligoIntegrationsPage />);
+
+    const header = screen.getByText(/integrations ·/);
+    expect(header.textContent).toContain("— integrations");
+    expect(header.textContent).not.toContain("0 integrations");
+  });
+});
+
+describe("CeligoIntegrationsPage — filter copy keeps the question mark (item 7)", () => {
+  it("labels the filter 'Stalled?', the same hedge the pills use", () => {
+    mocks.integrations.mockReturnValue(resolved([makeIntegration()]));
+    wrap(<CeligoIntegrationsPage />);
+
+    expect(screen.getByRole("button", { name: /^Stalled\? 0$/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Stalled 0$/ })).not.toBeInTheDocument();
+  });
+});
+
+describe("CeligoIntegrationsPage — no_run/unknown flows are not 'on time' (item 8)", () => {
+  const NEVER_RAN = flowSchedule({ id: "fs-never", last_executed_at: null });
+  const UNPARSEABLE = flowSchedule({ id: "fs-cron", schedule: "@hourly", last_executed_at: SYNCED_AT });
+
+  it("integrationAttention counts a scheduled flow with no recorded run as unverified", () => {
+    const i = makeIntegration({ flow_schedules: [NEVER_RAN] });
+    const attention = integrationAttention(i, SYNCED_AT);
+    expect(attention.stalledCount).toBe(0);
+    expect(attention.unverifiedCount).toBe(1);
+  });
+
+  it("integrationAttention counts an unparseable cron as unverified", () => {
+    const i = makeIntegration({ flow_schedules: [UNPARSEABLE] });
+    expect(integrationAttention(i, SYNCED_AT).unverifiedCount).toBe(1);
+  });
+
+  it("a paused or on-demand flow is not unverified — those are known states", () => {
+    const paused = flowSchedule({ id: "fs-paused", disabled: true });
+    const onDemand = flowSchedule({ id: "fs-od", schedule: null });
+    const i = makeIntegration({ flow_schedules: [paused, onDemand] });
+    expect(integrationAttention(i, SYNCED_AT).unverifiedCount).toBe(0);
+  });
+
+  it("the tile pill reads 'N unverified' instead of a confident 'on time'", () => {
+    mocks.integrations.mockReturnValue(
+      resolved([makeIntegration({ name: "Unverified Co", flow_schedules: [NEVER_RAN, UNPARSEABLE] })]),
+    );
+    wrap(<CeligoIntegrationsPage />);
+
+    const tile = screen.getByText("Unverified Co").closest("button") as HTMLElement;
+    expect(within(tile).getByText("2 unverified")).toBeInTheDocument();
+    expect(within(tile).queryByText("on time")).not.toBeInTheDocument();
+  });
+
+  it("the list row exposes the same fact", () => {
+    routeMocks.view = "list";
+    mocks.integrations.mockReturnValue(
+      resolved([makeIntegration({ name: "Unverified List Co", flow_schedules: [NEVER_RAN] })]),
+    );
+    wrap(<CeligoIntegrationsPage />);
+
+    const row = within(screen.getByRole("table")).getByText("Unverified List Co").closest("tr") as HTMLElement;
+    expect(within(row).getByText("1 unverified")).toBeInTheDocument();
+    expect(within(row).queryByText("on time")).not.toBeInTheDocument();
+  });
+
+  it("a genuinely stalled flow still outranks the unverified copy", () => {
+    const stalled = flowSchedule({ id: "fs-stalled", last_executed_at: "2026-09-02T14:51:00.000Z" });
+    mocks.integrations.mockReturnValue(
+      resolved([makeIntegration({ name: "Both Co", flow_schedules: [stalled, NEVER_RAN] })]),
+    );
+    wrap(<CeligoIntegrationsPage />);
+
+    const tile = screen.getByText("Both Co").closest("button") as HTMLElement;
+    expect(within(tile).getByText("stalled? 1 flow")).toBeInTheDocument();
+    expect(within(tile).queryByText(/unverified/)).not.toBeInTheDocument();
+  });
+});
+
+describe("CeligoIntegrationsPage — 'last run' is relative to the sync, not the wall clock (item 9)", () => {
+  // The integration last ran 17:30. The sync ran at 17:51, and the test's
+  // wall clock is 18:12 — so "21 min ago" (vs. the sync) and "42 min ago"
+  // (vs. now) are two different, distinguishable answers.
+  const LAST_RUN = "2026-09-02T17:30:00.000Z";
+
+  it("the tile measures last-run against the sync timestamp", () => {
+    mocks.integrations.mockReturnValue(
+      resolved([makeIntegration({ name: "Clock Co", last_run_at: LAST_RUN })]),
+    );
+    wrap(<CeligoIntegrationsPage />);
+
+    const tile = screen.getByText("Clock Co").closest("button") as HTMLElement;
+    expect(within(tile).getByText("21 min ago")).toBeInTheDocument();
+    expect(within(tile).queryByText("42 min ago")).not.toBeInTheDocument();
+  });
+
+  it("the list row does too", () => {
+    routeMocks.view = "list";
+    mocks.integrations.mockReturnValue(
+      resolved([makeIntegration({ name: "Clock List Co", last_run_at: LAST_RUN })]),
+    );
+    wrap(<CeligoIntegrationsPage />);
+
+    const row = within(screen.getByRole("table")).getByText("Clock List Co").closest("tr") as HTMLElement;
+    expect(within(row).getByText("21 min ago")).toBeInTheDocument();
+    expect(within(row).queryByText("42 min ago")).not.toBeInTheDocument();
+  });
+});

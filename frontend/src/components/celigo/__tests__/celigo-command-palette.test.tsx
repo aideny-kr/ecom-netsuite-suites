@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, fireEvent, within, act } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { CeligoIntegration, CeligoFlowSchedule } from "@/hooks/use-celigo-flows";
-import { resolved } from "./query-fixtures";
+import { resolved, errored } from "./query-fixtures";
 
 // Task 11 — ⌘K command palette over every integration and flow (mockup:
 // "⌘K is a real palette over all 122 flows, each result carrying its health
@@ -284,5 +284,36 @@ describe("CeligoCommandPalette", () => {
     fireEvent.keyDown(input, { key: "Enter" });
 
     expect(routeMocks.go.flow).toHaveBeenCalledWith("fb", "int-b");
+  });
+
+  // Codex fix wave, item 5. A FAILED sync-status query left `lastSyncedAt`
+  // null, which `stallState` answers as "unknown" — so every row rendered a
+  // muted dot and the palette looked like a set of flows in a calm, known
+  // state. The dots were not data; they were the absence of it.
+  it("item 5: a failed sync-status query hides the health dots and says why", () => {
+    mocks.integrations.mockReturnValue(
+      resolved([makeIntegration({ flow_schedules: [flowSchedule({ id: "f1", name: "Sync Orders" })] })]),
+    );
+    mocks.syncStatus.mockReturnValue(errored());
+    wrap(<CeligoCommandPalette />);
+    openPalette();
+
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText("Sync status unavailable; health dots hidden")).toBeInTheDocument();
+    expect(dialog.querySelectorAll("span[data-state]")).toHaveLength(0);
+    // The rows themselves are real data and still list.
+    expect(within(dialog).getByText("Sync Orders")).toBeInTheDocument();
+  });
+
+  it("item 5: a settled sync status still renders the dots", () => {
+    mocks.integrations.mockReturnValue(
+      resolved([makeIntegration({ flow_schedules: [flowSchedule({ id: "f1", name: "Sync Orders" })] })]),
+    );
+    wrap(<CeligoCommandPalette />);
+    openPalette();
+
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).queryByText("Sync status unavailable; health dots hidden")).not.toBeInTheDocument();
+    expect(dialog.querySelectorAll("span[data-state]").length).toBeGreaterThan(0);
   });
 });

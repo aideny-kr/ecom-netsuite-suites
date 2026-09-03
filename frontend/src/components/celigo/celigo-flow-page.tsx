@@ -22,6 +22,7 @@ import {
   Group as PanelGroup,
   Separator as PanelResizeHandle,
   type PanelImperativeHandle,
+  type PanelSize,
 } from "react-resizable-panels";
 import {
   useCeligoFlowDetail,
@@ -43,6 +44,19 @@ import { CeligoScriptDrawer } from "./celigo-script-drawer";
 import { isCeligoPaletteOpen } from "./palette-open-state";
 
 const NO_FLOWS: CeligoFlowSummary[] = [];
+
+/** The navigator panel's three sizes, as ONE set of numbers. They are also
+ * the threshold `onNavResize` compares against — a collapsible panel is
+ * either at least `NAV_MIN_PCT` wide or snapped all the way to
+ * `NAV_COLLAPSED_PCT`, with nothing in between — so keeping the props and the
+ * threshold as separate literals would let a resize of the panel drift out of
+ * agreement with what `navCollapsed` believes. Percentage STRINGS on the
+ * props: `react-resizable-panels` 4.6.4 reads a bare number as PIXELS. */
+const NAV_MIN_PCT = 12;
+const NAV_COLLAPSED_PCT = 4;
+const NAV_DEFAULT_SIZE = "16%";
+const NAV_MIN_SIZE = `${NAV_MIN_PCT}%`;
+const NAV_COLLAPSED_SIZE = `${NAV_COLLAPSED_PCT}%`;
 
 /** `queryState()` only tells us the query settled with an error — it
  * doesn't say which one. The unknown-id state ("This flow is not in the
@@ -128,6 +142,18 @@ export function CeligoFlowPage(): JSX.Element {
       else navRef.current?.expand();
       return next;
     });
+  }, []);
+
+  // The toggle above is not the only way this panel collapses: dragging the
+  // separator past `minSize` collapses it too, and dragging back out expands
+  // it — neither goes through `toggleNav`, so `navCollapsed` used to drift
+  // out of sync with the real panel. The visible result was the whole named
+  // flow list squeezed into a 4%-wide rail (or a rail's worth of dots
+  // stranded in a full-width panel). `onResize` is the panel's own report of
+  // what it actually did (v4 exposes no onCollapse/onExpand pair), so state
+  // follows geometry instead of guessing at it.
+  const onNavResize = useCallback((panelSize: PanelSize) => {
+    setNavCollapsed(panelSize.asPercentage < NAV_MIN_PCT);
   }, []);
 
   useEffect(() => {
@@ -223,9 +249,19 @@ export function CeligoFlowPage(): JSX.Element {
         <CeligoFlowHeader
           detail={d}
           lastSyncedAt={lastSyncedAt}
+          syncStatusState={syncStatusState}
+          onRetrySyncStatus={() => syncStatusQuery.refetch()}
           integrationName={integrationLabel}
           integrationCeligoId={integration?.celigo_id ?? null}
           clonedFrom={clonedFrom}
+          integrationNotice={
+            integrationsState === "error" ? (
+              <ErrorNotice
+                message="Couldn't load this integration."
+                onRetry={() => integrationsQuery.refetch()}
+              />
+            ) : null
+          }
         />
         <div className="flex-1 min-h-0">
           <PanelGroup id="celigo-flow-v1" orientation="horizontal" className="flex h-full w-full">
@@ -238,13 +274,16 @@ export function CeligoFlowPage(): JSX.Element {
             <Panel
               id="celigo-flow-nav"
               panelRef={navRef}
-              defaultSize="16%"
-              minSize="12%"
+              defaultSize={NAV_DEFAULT_SIZE}
+              minSize={NAV_MIN_SIZE}
               collapsible
-              collapsedSize="4%"
+              collapsedSize={NAV_COLLAPSED_SIZE}
+              onResize={onNavResize}
             >
               <CeligoFlowNavigator
                 flows={siblings}
+                state={siblingsState}
+                onRetry={() => siblingsQuery.refetch()}
                 currentFlowId={d.id}
                 lastSyncedAt={lastSyncedAt}
                 collapsed={navCollapsed}
@@ -302,7 +341,18 @@ export function CeligoFlowPage(): JSX.Element {
         items={[
           { label: "My integrations", onClick: () => route.go.integrations() },
           ...(route.integrationId
-            ? [{ label: integrationLabel || route.integrationId, onClick: () => route.go.integration(route.integrationId!) }]
+            ? [
+                {
+                  label: integrationLabel || route.integrationId,
+                  onClick: () => route.go.integration(route.integrationId!),
+                  // While the integrations list is still in flight the only
+                  // stand-in available is the raw id off the URL, and
+                  // printing that reads as the integration's real name. A
+                  // skeleton says "the name is coming" instead of asserting
+                  // a name that is actually a UUID.
+                  skeleton: integrationsState === "pending",
+                },
+              ]
             : []),
           { label: flowLabel },
         ]}

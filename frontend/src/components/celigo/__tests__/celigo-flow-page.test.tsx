@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, fireEvent, within } from "@testing-library/react";
+import { render, screen, fireEvent, within, act } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import type {
   CeligoFlowDetail,
@@ -751,5 +751,128 @@ describe("CeligoFlowPage — panel sizing", () => {
         expect(String(value)).toMatch(/%$/);
       }
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Codex fix wave — a pending query is never rendered as empty, and a failed
+// one is never rendered as either empty or settled.
+// ---------------------------------------------------------------------------
+
+describe("CeligoFlowPage — siblings query state reaches the navigator (item 1)", () => {
+  it("shows a skeleton, not 'Flows 0', while the sibling list is still pending", () => {
+    mocks.integrationFlows.mockReturnValue(pending());
+    wrap(<CeligoFlowPage />);
+
+    // The rail must not claim a count it does not have.
+    expect(screen.getByTestId("celigo-nav-rail").getAttribute("title")).not.toMatch(/\b0 flows\b/);
+
+    fireEvent(window, new CustomEvent("celigo:toggle-nav"));
+    const list = screen.getByTestId("celigo-nav-list");
+    expect(within(list).getByTestId("celigo-nav-skeleton")).toBeInTheDocument();
+    expect(screen.getByTestId("celigo-nav-count")).toHaveTextContent("—");
+    expect(screen.getByTestId("celigo-nav-count")).not.toHaveTextContent("0");
+  });
+
+  it("shows a Retry-able notice, not an empty list, when the sibling list fails", () => {
+    const refetch = vi.fn();
+    mocks.integrationFlows.mockReturnValue(errored(refetch));
+    wrap(<CeligoFlowPage />);
+
+    fireEvent(window, new CustomEvent("celigo:toggle-nav"));
+    const list = screen.getByTestId("celigo-nav-list");
+    expect(within(list).getByText("Couldn't load the other flows in this integration.")).toBeInTheDocument();
+    expect(within(list).queryByTestId("celigo-nav-skeleton")).not.toBeInTheDocument();
+    expect(screen.getByTestId("celigo-nav-count")).toHaveTextContent("—");
+
+    fireEvent.click(within(list).getByRole("button", { name: "Retry" }));
+    expect(refetch).toHaveBeenCalled();
+  });
+});
+
+describe("CeligoFlowPage — sync-status query state reaches the header (item 2)", () => {
+  it("says it is still checking rather than 'checked —' / 'Synced —' while sync status is pending", () => {
+    mocks.syncStatus.mockReturnValue(pending());
+    const { container } = wrap(<CeligoFlowPage />);
+
+    expect(container.textContent).toContain("checking sync status…");
+    expect(container.textContent).not.toContain("checked —");
+    expect(container.textContent).not.toContain("Synced —");
+    expect(container.textContent).not.toContain("0 open errors");
+    // The flow itself still renders — this is a header fact, not a page failure.
+    expect(screen.getByRole("heading", { name: "New Sales Order to NetSuite - Multi-Subsidiary" })).toBeInTheDocument();
+  });
+
+  it("shows a Retry-able 'Couldn't load sync status.' strip and suppresses every timestamped claim on failure", () => {
+    const refetch = vi.fn();
+    mocks.syncStatus.mockReturnValue(errored(refetch));
+    const { container } = wrap(<CeligoFlowPage />);
+
+    const notice = screen.getByText("Couldn't load sync status.");
+    expect(notice).toBeInTheDocument();
+    expect(container.textContent).toContain("sync status unavailable");
+    expect(container.textContent).not.toContain("checked —");
+    expect(container.textContent).not.toContain("Synced —");
+    expect(container.textContent).not.toContain("0 open errors");
+    expect(screen.getByRole("heading", { name: "New Sales Order to NetSuite - Multi-Subsidiary" })).toBeInTheDocument();
+
+    fireEvent.click(within(notice.closest("div")!).getByRole("button", { name: "Retry" }));
+    expect(refetch).toHaveBeenCalled();
+  });
+});
+
+describe("CeligoFlowPage — integrations query state (item 3)", () => {
+  it("renders the breadcrumb name as a skeleton, not the raw URL id, while integrations are pending", () => {
+    mocks.integrations.mockReturnValue(pending());
+    wrap(<CeligoFlowPage />);
+
+    expect(screen.getByTestId("celigo-breadcrumb-skeleton")).toBeInTheDocument();
+    expect(screen.queryByText("int-1")).not.toBeInTheDocument();
+  });
+
+  it("shows a Retry-able notice when integrations fail instead of silently reading as 'integration absent'", () => {
+    const refetch = vi.fn();
+    mocks.integrations.mockReturnValue(errored(refetch));
+    wrap(<CeligoFlowPage />);
+
+    const notice = screen.getByText("Couldn't load this integration.");
+    expect(notice).toBeInTheDocument();
+    // The page is kept: the flow itself loaded fine.
+    expect(screen.getByRole("heading", { name: "New Sales Order to NetSuite - Multi-Subsidiary" })).toBeInTheDocument();
+    expect(screen.getByTestId("celigo-canvas-host")).toBeInTheDocument();
+
+    fireEvent.click(within(notice.closest("div")!).getByRole("button", { name: "Retry" }));
+    expect(refetch).toHaveBeenCalled();
+  });
+});
+
+describe("CeligoFlowPage — the navigator panel's own collapse (item 21)", () => {
+  // `react-resizable-panels` 4.6.4 exposes no onCollapse/onExpand pair — the
+  // panel reports every size change through `onResize`, and a collapsible
+  // panel is either at least its `minSize` (12%) or snapped to its
+  // `collapsedSize` (4%), never in between. That is the signal this pins.
+  type ResizeHandler = (size: { asPercentage: number; inPixels: number }) => void;
+
+  function navResize(pct: number) {
+    const props = panelSpy.props.filter((p) => p.id === "celigo-flow-nav").pop()!;
+    act(() => (props.onResize as ResizeHandler)({ asPercentage: pct, inPixels: pct * 10 }));
+  }
+
+  it("syncs navCollapsed when the panel is collapsed or expanded by a DRAG, not just by the toggle", () => {
+    panelSpy.props.length = 0;
+    wrap(<CeligoFlowPage />);
+
+    expect(typeof panelSpy.props.find((p) => p.id === "celigo-flow-nav")!.onResize).toBe("function");
+
+    // Dragging past minSize expands the panel; the rail must become the list.
+    expect(screen.getByTestId("celigo-nav-rail")).toBeInTheDocument();
+    navResize(16);
+    expect(screen.getByTestId("celigo-nav-list")).toBeInTheDocument();
+    expect(screen.queryByTestId("celigo-nav-rail")).not.toBeInTheDocument();
+
+    // Dragging it back below minSize collapses it to the rail again.
+    navResize(4);
+    expect(screen.getByTestId("celigo-nav-rail")).toBeInTheDocument();
+    expect(screen.queryByTestId("celigo-nav-list")).not.toBeInTheDocument();
   });
 });

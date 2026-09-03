@@ -118,6 +118,12 @@ export function CeligoCommandPalette(): JSX.Element {
   // a settled fact.
   const lastSyncedAt = syncStatusState === "success" ? syncStatusQuery.data?.last_synced_at ?? null : null;
   const integrations = integrationsState === "success" ? integrationsQuery.data ?? NO_INTEGRATIONS : NO_INTEGRATIONS;
+  // Deriving `lastSyncedAt` honestly was only half the fix. With the sync
+  // status FAILED, every `stallState` answers "unknown" and every dot renders
+  // muted — which is indistinguishable from a set of flows in a genuinely
+  // quiet state. A muted dot the reader can't tell apart from a real one is
+  // a claim, so the dots come off entirely and the palette says why.
+  const healthUnavailable = syncStatusState === "error";
 
   const flows = useMemo<FlowResult[]>(() => {
     const out: FlowResult[] = [];
@@ -177,6 +183,11 @@ export function CeligoCommandPalette(): JSX.Element {
                 <Command.Empty className="px-3 py-6 text-center text-[13px] text-muted-foreground">
                   No matches.
                 </Command.Empty>
+                {healthUnavailable && (
+                  <div className="px-2 py-1.5 text-[11px] text-muted-foreground">
+                    Sync status unavailable; health dots hidden
+                  </div>
+                )}
                 {/* Each item's `value` must be unique -- cmdk keys ALL of its
                     selection state (aria-selected, and what Enter activates)
                     off a single global string compared per-item via strict
@@ -217,7 +228,7 @@ export function CeligoCommandPalette(): JSX.Element {
                       className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[13px] aria-selected:bg-muted"
                     >
                       <ResultRow>
-                        <HealthDot stall={flow.stall} />
+                        {!healthUnavailable && <HealthDot stall={flow.stall} />}
                         <span className="min-w-0 flex-1 truncate">{flow.name}</span>
                         <span className="shrink-0 truncate text-[11px] text-muted-foreground">
                           {flow.integrationName}

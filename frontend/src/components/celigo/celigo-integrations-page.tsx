@@ -46,22 +46,35 @@ const NO_INTEGRATIONS: CeligoIntegration[] = [];
 export function integrationAttention(
   integration: CeligoIntegration,
   lastSyncedAt: string | null,
-): { stalledCount: number; allPaused: boolean; onDemandOnly: boolean } {
-  const stalledCount = integration.flow_schedules.filter(
+): { stalledCount: number; unverifiedCount: number; allPaused: boolean; onDemandOnly: boolean } {
+  const states = integration.flow_schedules.map(
     (fs) =>
       stallState({
         schedule: fs.schedule,
         disabled: fs.disabled,
         lastExecutedAt: fs.last_executed_at,
         lastSyncedAt,
-      }).state === "stalled",
-  ).length;
+      }).state,
+  );
   return {
-    stalledCount,
+    stalledCount: states.filter((s) => s === "stalled").length,
+    // `no_run` (a scheduled flow Celigo has never recorded a run for) and
+    // `unknown` (a cron shape this client does not parse) are exactly the
+    // states where the stall check CANNOT answer. They used to be discarded
+    // here, so an integration whose scheduled flows had all quietly never
+    // run still showed a confident green "on time" — absence read as
+    // success, which is the failure mode this whole surface exists to
+    // prevent. Counted, so the pill can hedge instead.
+    unverifiedCount: states.filter((s) => s === "no_run" || s === "unknown").length,
     allPaused: integration.flow_count > 0 && integration.flow_count === integration.paused_count,
     onDemandOnly: integration.scheduled_count === 0 && integration.on_demand_count > 0,
   };
 }
+
+/** What `integrationAttention` answers — named once so the tile, the table
+ * row and the pill all state the same shape rather than three hand-kept
+ * copies that drift as facts are added. */
+export type IntegrationAttention = ReturnType<typeof integrationAttention>;
 
 /** Attention-first: `error_count desc, stalledCount desc, flow_count desc,
  * name` — a smaller integration with something wrong outranks a bigger
@@ -126,11 +139,7 @@ function passesFilter(
 // Small presentational pieces
 // ---------------------------------------------------------------------------
 
-function AttentionPill({
-  attention,
-}: {
-  attention: { stalledCount: number; allPaused: boolean; onDemandOnly: boolean };
-}): JSX.Element {
+function AttentionPill({ attention }: { attention: IntegrationAttention }): JSX.Element {
   if (attention.allPaused) {
     return (
       <Pill tone="mute" dot="hollow">
@@ -142,6 +151,21 @@ function AttentionPill({
     return (
       <Pill tone="warn" dot="solid">
         stalled? {attention.stalledCount} flow{attention.stalledCount === 1 ? "" : "s"}
+      </Pill>
+    );
+  }
+  // Nothing is provably late, but some flows could not be checked at all —
+  // that is not the same as "on time", and saying so is what keeps a
+  // scheduled flow that has never run from hiding behind a green pill. Muted
+  // and hollow: this is an absence of evidence, not an alarm.
+  if (attention.unverifiedCount > 0) {
+    return (
+      <Pill
+        tone="mute"
+        dot="hollow"
+        title="These flows are scheduled, but have no recorded run or a schedule this view cannot parse — their pace cannot be checked."
+      >
+        {attention.unverifiedCount} unverified
       </Pill>
     );
   }
@@ -256,10 +280,16 @@ function IntegrationTile({
   onClick,
 }: {
   integration: CeligoIntegration;
-  attention: { stalledCount: number; allPaused: boolean; onDemandOnly: boolean };
+  attention: IntegrationAttention;
   lastSyncedAt: string | null;
   onClick: () => void;
 }): JSX.Element {
+  // Every "how long ago" on this surface is measured from the SYNC, never the
+  // viewer's clock (see `stallState`'s docstring): the data is a snapshot, and
+  // a tile that ages its own numbers against wall-clock time drifts further
+  // from the truth the longer the tab stays open. This one cell was still
+  // reading `Date.now()`.
+  const syncClock = lastSyncedAt ? new Date(lastSyncedAt) : undefined;
   return (
     <button
       type="button"
@@ -286,7 +316,8 @@ function IntegrationTile({
       <WritesLine writes={integration.writes} />
       <div className="mt-0.5 flex flex-wrap gap-2.5 border-t pt-1.5 text-[11px] tabular-nums text-muted-foreground">
         <span>
-          last run <b className="font-medium text-foreground">{formatRelativeTime(integration.last_run_at)}</b>
+          last run{" "}
+          <b className="font-medium text-foreground">{formatRelativeTime(integration.last_run_at, syncClock)}</b>
         </span>
         <span>
           <b className="font-medium text-foreground">{integration.script_count}</b> script
@@ -307,10 +338,13 @@ function IntegrationsTable({
   onOpen,
 }: {
   integrations: CeligoIntegration[];
-  attentionById: Map<string, { stalledCount: number; allPaused: boolean; onDemandOnly: boolean }>;
+  attentionById: Map<string, IntegrationAttention>;
   lastSyncedAt: string | null;
   onOpen: (id: string) => void;
 }): JSX.Element {
+  // Same reasoning as the tile's: every relative time on this surface is
+  // measured from the sync, not the viewer's clock.
+  const syncClock = lastSyncedAt ? new Date(lastSyncedAt) : undefined;
   return (
     <div className="overflow-x-auto rounded-lg border">
       <table className="w-full border-collapse text-[12px]">
@@ -361,7 +395,7 @@ function IntegrationsTable({
                       tile view (AttentionPill above) and the mockup's own
                       list-view table both carry it in this exact cell. */}
                   <div className="flex flex-wrap items-center gap-1.5 tabular-nums">
-                    <span>{formatRelativeTime(integration.last_run_at)}</span>
+                    <span>{formatRelativeTime(integration.last_run_at, syncClock)}</span>
                     <AttentionPill attention={attention} />
                   </div>
                 </td>
@@ -422,8 +456,11 @@ function FiltersRow({
         <FilterButton active={filter === "errors"} onClick={() => onFilter("errors")}>
           Open errors {counts.errors}
         </FilterButton>
+        {/* "Stalled?", with the question mark every stall claim on this
+            surface carries: the check compares a last run against a schedule
+            and can only ever suspect, never confirm, that a flow stopped. */}
         <FilterButton active={filter === "stalled"} onClick={() => onFilter("stalled")}>
-          Stalled {counts.stalled}
+          Stalled? {counts.stalled}
         </FilterButton>
         <FilterButton active={filter === "paused"} onClick={() => onFilter("paused")}>
           All paused {counts.paused}
@@ -507,9 +544,15 @@ export function CeligoIntegrationsPage(): JSX.Element {
     }),
     { flows: 0, steps: 0, scripts: 0 },
   );
-  const headerLine = neverSynced
-    ? "— integrations · — flows · — steps · — scripts · production only"
-    : `${integrations.length} integration${integrations.length === 1 ? "" : "s"} · ${totals.flows} flow${
+  // The counts are a claim only a SETTLED integrations query can make. While
+  // it is pending (or after it failed) `integrations` is the empty
+  // stable-reference array, and this line used to render that as a confident
+  // "0 integrations · 0 flows · 0 steps · 0 scripts" — the same shape as a
+  // real, empty account. Dashes say "not known yet" instead.
+  const headerLine =
+    integrationsState !== "success" || neverSynced
+      ? "— integrations · — flows · — steps · — scripts · production only"
+      : `${integrations.length} integration${integrations.length === 1 ? "" : "s"} · ${totals.flows} flow${
         totals.flows === 1 ? "" : "s"
       } · ${totals.steps} step${totals.steps === 1 ? "" : "s"} · ${totals.scripts} script${
         totals.scripts === 1 ? "" : "s"

@@ -25,8 +25,9 @@
  */
 
 import type { CeligoAttachment, CeligoFlowDetail, CeligoFlowStep, CeligoRecordWrite } from "@/hooks/use-celigo-flows";
+import type { QueryState } from "@/lib/query-state";
 import { parseSchedule, stallState } from "./schedule";
-import { ErrorPill, Pill, SchedulePill, formatRelativeTime, deriveFlowSummary } from "./shared";
+import { ErrorNotice, ErrorPill, Pill, SchedulePill, formatRelativeTime, deriveFlowSummary } from "./shared";
 
 /** Resolution of `detail.source_id` against the flow's siblings (the page
  * computes this — it alone holds the sibling list — and hands the header
@@ -148,19 +149,56 @@ export function computeScriptStats(detail: Pick<CeligoFlowDetail, "steps" | "una
   };
 }
 
+/** Both header pills state a fact AS OF THE SYNC — the error pill's zero form
+ * carries "checked {relative}", and the schedule pill's whole verdict is a
+ * comparison against the sync timestamp. With the sync-status query pending or
+ * failed there is no such timestamp, and the pills used to render anyway:
+ * "0 open errors · checked —" beside a bare "—" schedule pill, which reads as
+ * a settled all-clear (finding: codex flow-canvas #2). This pill replaces both
+ * in that case and says which of the two it is, in the same words
+ * `celigo-integrations-page.tsx`'s own `SyncPill` uses. */
+function SyncStatusPill({ state }: { state: Exclude<QueryState, "success"> }): JSX.Element {
+  if (state === "pending") {
+    return (
+      <Pill tone="mute" dot="hollow">
+        <span className="animate-pulse">checking sync status…</span>
+      </Pill>
+    );
+  }
+  return (
+    <Pill tone="crit" dot="solid">
+      sync status unavailable
+    </Pill>
+  );
+}
+
 export function CeligoFlowHeader({
   detail,
   lastSyncedAt,
+  syncStatusState,
+  onRetrySyncStatus,
   integrationName,
   integrationCeligoId,
   clonedFrom,
+  integrationNotice,
 }: {
   detail: CeligoFlowDetail;
   lastSyncedAt: string | null;
+  /** `queryState()` of the sync-status query. `lastSyncedAt` alone cannot
+   * carry this: `null` means "confirmed never synced", "still fetching" and
+   * "the fetch failed" all at once, and the three must not render alike. */
+  syncStatusState: QueryState;
+  onRetrySyncStatus: () => void;
   integrationName: string;
   integrationCeligoId: string | null;
   clonedFrom: ClonedFromInfo | null;
+  /** Rendered under the pill row when the INTEGRATIONS query failed — the
+   * page keeps rendering (the flow itself loaded), but the missing
+   * integration name and Open-in-Celigo link need an explanation that is not
+   * "this flow has no integration". */
+  integrationNotice?: JSX.Element | null;
 }): JSX.Element {
+  const syncSettled = syncStatusState === "success";
   const paused = detail.disabled === true;
   const parsed = parseSchedule(detail.schedule);
   const stall = stallState({
@@ -194,8 +232,14 @@ export function CeligoFlowHeader({
   return (
     <div className="flex flex-col gap-2 border-b bg-card px-4 py-2.5">
       <div className="flex flex-wrap items-center gap-2.5">
-        <ErrorPill count={detail.error_count} signatureCount={detail.signature_count} checkedAt={lastSyncedAt} />
-        <SchedulePill stall={stall} parsed={parsed} />
+        {syncSettled ? (
+          <>
+            <ErrorPill count={detail.error_count} signatureCount={detail.signature_count} checkedAt={lastSyncedAt} />
+            <SchedulePill stall={stall} parsed={parsed} />
+          </>
+        ) : (
+          <SyncStatusPill state={syncStatusState} />
+        )}
         <h3
           className="text-[18px] font-semibold tracking-tight"
           title={integrationName ? `${detail.name} — ${integrationName}` : detail.name}
@@ -222,6 +266,11 @@ export function CeligoFlowHeader({
           )}
         </div>
       </div>
+
+      {syncStatusState === "error" && (
+        <ErrorNotice message="Couldn't load sync status." onRetry={onRetrySyncStatus} />
+      )}
+      {integrationNotice}
 
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11.5px] tabular-nums text-muted-foreground">
         <span>
@@ -269,7 +318,15 @@ export function CeligoFlowHeader({
             <q className="text-muted-foreground">{aiText}</q>
           </div>
         )}
-        <p className="text-[11px] text-muted-foreground">{`Synced ${formatRelativeTime(lastSyncedAt)}.`}</p>
+        {/* "Synced —." was the same collapse the pills made: a dash standing
+            in for three different truths. Each state says which one it is. */}
+        <p className="text-[11px] text-muted-foreground">
+          {syncSettled
+            ? `Synced ${formatRelativeTime(lastSyncedAt)}.`
+            : syncStatusState === "pending"
+              ? "Checking sync status…"
+              : "Sync status unavailable — every fact below is as of an unknown sync."}
+        </p>
       </div>
     </div>
   );
