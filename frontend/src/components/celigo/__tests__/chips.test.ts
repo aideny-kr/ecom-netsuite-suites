@@ -43,4 +43,21 @@ describe("countRules — 'and'/'or' count their members, anything else non-empty
     expect(countRules({ rules: ["and", ["equals", "a", "b"], ["equals", "c", "d"]] })).toBe(2);
     expect(countRules({ rules: [] })).toBe(0);
   });
+
+  // Parity with the backend's `count_rules` (services/celigo/topology.py), the
+  // other half of this same rule. Two implementations of one rule is the drift
+  // this repo has already paid for, so the two places where they used to
+  // disagree are pinned here.
+  it("the combinator is matched case-insensitively, as the backend matches it", () => {
+    expect(countRules(["AND", ["equals", "a", "b"], ["equals", "c", "d"]]).valueOf()).toBe(2);
+    expect(countRules(["Or", ["equals", "a", "b"], ["equals", "c", "d"]])).toBe(2);
+  });
+
+  it("counts only the list members of a combinator, never scalar noise beside them", () => {
+    // The backend counts `isinstance(r, list)` members only. A combinator
+    // carrying a stray label or flag alongside its expressions must not have
+    // that counted as a rule.
+    expect(countRules(["and", ["equals", "a", "b"], "somelabel", ["equals", "c", "d"]])).toBe(2);
+    expect(countRules(["or", "onlynoise"])).toBe(0);
+  });
 });

@@ -19,20 +19,33 @@ export type Chip = {
 };
 
 /** Counts a Celigo filter/expression tree as a rule count for a chip label.
- * `["and"|"or", ...]` counts its members (a compound expression IS that many
- * rules); any other non-empty expression (e.g. a single `["notequals", ...]`)
- * is one rule; `null`/`[]` is zero. A `{rules: [...]}` wrapper (the shape
- * `inputFilter`/`filter` sometimes carries) unwraps one level first -- same
- * counting rule as the backend's `count_rules` (topology.py), reproduced
+ * `["and"|"or", ...]` counts its list members (a compound expression IS that
+ * many rules); any other non-empty expression (e.g. a single
+ * `["notequals", ...]`) is one rule; `null`/`[]` is zero. A `{rules: [...]}`
+ * wrapper (the shape `inputFilter`/`filter` sometimes carries) unwraps one
+ * level first.
+ *
+ * Same counting rule as the backend's `count_rules` (topology.py), reproduced
  * here because the client renders straight off `filter_json`/`mapping_json`
- * without a round trip. */
+ * without a round trip -- the ONE deliberate difference is the `{rules}`
+ * unwrap, which the backend never sees because its callers hand it the inner
+ * list already. The two used to differ by accident as well (this side matched
+ * the combinator case-sensitively and counted non-list members); both are
+ * pinned by `chips.test.ts`. */
 export function countRules(value: CeligoJson): number {
   if (value && typeof value === "object" && !Array.isArray(value) && "rules" in (value as Record<string, unknown>)) {
     return countRules((value as { rules: CeligoJson }).rules);
   }
   if (!Array.isArray(value) || value.length === 0) return 0;
   const [head, ...rest] = value;
-  if (head === "and" || head === "or") return rest.length;
+  // Matched exactly as `count_rules` matches it: case-insensitively, and
+  // counting only the LIST members (each of those is an expression; a bare
+  // string beside them is a label or flag, not a rule). These two details are
+  // the only places the two implementations of this one rule used to
+  // disagree.
+  if (typeof head === "string" && (head.toLowerCase() === "and" || head.toLowerCase() === "or")) {
+    return rest.filter((r) => Array.isArray(r)).length;
+  }
   return 1;
 }
 

@@ -297,8 +297,13 @@ export function SchedulePill({ stall, parsed }: { stall: StallState; parsed: Par
       );
     case "paused":
       return (
+        // "paused", not "all paused": every caller of this pill is a SINGLE
+        // flow (the flow header, and one row of the flows table), where "all"
+        // reads as a claim about a set that isn't there. The integrations
+        // dashboard has its own `AttentionPill`, which says "all paused" and
+        // means it -- every flow in the integration.
         <Pill tone="mute" dot="hollow">
-          all paused
+          paused
         </Pill>
       );
     case "on_demand":
