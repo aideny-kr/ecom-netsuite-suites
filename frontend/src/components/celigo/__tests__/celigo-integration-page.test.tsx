@@ -1,0 +1,554 @@
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render, screen, fireEvent, within } from "@testing-library/react";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import type { CeligoIntegration, CeligoFlowSummary } from "@/hooks/use-celigo-flows";
+import { resolved, pending, errored } from "./query-fixtures";
+
+// Task 12 — the integration page (mockup screen 2): header, tabs, grouped
+// flows table with the topology glyph and schedule/stall pills, and the
+// per-step errors drawer. Mocks the hooks module (Task 10's established
+// pattern) and the route module (Task 10's `routeMocks` pattern, one level
+// up: the route hook itself is stubbed, not next/navigation).
+
+const mocks = vi.hoisted(() => ({
+  integrations: vi.fn(),
+  flows: vi.fn(),
+  syncStatus: vi.fn(),
+  changes: vi.fn(),
+  flowErrors: vi.fn(),
+}));
+
+vi.mock("@/hooks/use-celigo-flows", () => ({
+  useCeligoIntegrations: () => mocks.integrations(),
+  useCeligoIntegrationFlows: () => mocks.flows(),
+  useCeligoSyncStatus: () => mocks.syncStatus(),
+  useCeligoIntegrationChanges: () => mocks.changes(),
+  useCeligoFlowErrors: () => mocks.flowErrors(),
+}));
+
+const routeMocks = vi.hoisted(() => ({
+  integrationId: "int-1" as string | null,
+  tab: "flows" as "flows" | "scripts" | "errors" | "changes",
+  go: {
+    files: vi.fn(),
+    integrations: vi.fn(),
+    integration: vi.fn(),
+    flow: vi.fn(),
+    step: vi.fn(),
+    script: vi.fn(),
+  },
+}));
+
+vi.mock("../celigo-route", () => ({
+  useCeligoRoute: () => ({
+    surface: "celigo" as const,
+    view: "tiles" as const,
+    integrationId: routeMocks.integrationId,
+    tab: routeMocks.tab,
+    flowId: null,
+    stepId: null,
+    scriptId: null,
+    go: routeMocks.go,
+  }),
+}));
+
+import { CeligoIntegrationPage, groupFlows, topologyGlyph } from "../celigo-integration-page";
+
+function wrap(ui: React.ReactElement) {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(<QueryClientProvider client={qc}>{ui}</QueryClientProvider>);
+}
+
+// Real wall clock during the test — deliberately 2h after the sync so that
+// any cell wrongly computed against Date.now() instead of the SYNC
+// timestamp reads "2 h ago", not "21 min ago" (see `formatSchedule`'s and
+// `stallState`'s own "never the wall clock" doctrine).
+const NOW = new Date("2026-09-02T20:12:00.000Z");
+// `last_synced_at` — the sync completed at 18:12 UTC.
+const SYNCED_AT = "2026-09-02T18:12:00.000Z";
+// A flow's own last run, 21 min before the sync — matches the mockup's own
+// "New Sales Order to NetSuite - Multi-Subsidiary" numbers exactly.
+const FLOW_LAST_RUN = "2026-09-02T17:51:00.000Z";
+
+function makeIntegration(overrides: Partial<CeligoIntegration> = {}): CeligoIntegration {
+  return {
+    id: "int-1",
+    celigo_id: "c-int-1",
+    name: "Solidus + NetSuite",
+    sandbox: false,
+    mode: "settings",
+    description: null,
+    celigo_last_modified: null,
+    flow_count: 20,
+    scheduled_count: 9,
+    on_demand_count: 6,
+    paused_count: 5,
+    step_count: 94,
+    router_count: 11,
+    lookup_count: 24,
+    script_count: 30,
+    no_run_count: 0,
+    error_count: 0,
+    changes_last_24h: 0,
+    last_run_at: "2026-09-02T18:06:00.000Z",
+    writes: [
+      { record_type: "salesorder", count: 19 },
+      { record_type: "customer", count: 9 },
+      { record_type: "itemfulfillment", count: 2 },
+      { record_type: "customerdeposit", count: 2 },
+      { record_type: "customrecord_a", count: 1 },
+      { record_type: "customrecord_b", count: 1 },
+    ],
+    adaptor_families: ["HTTP", "NetSuite", "RDBMS"],
+    flow_schedules: [],
+    ...overrides,
+  };
+}
+
+function makeFlow(overrides: Partial<CeligoFlowSummary> = {}): CeligoFlowSummary {
+  return {
+    id: "flow-1",
+    celigo_id: "cel-flow-1",
+    name: "Some Flow",
+    disabled: false,
+    schedule: "? 5,20,35,50 0-23 ? * *", // every 15 min, all hours
+    timezone: "America/Los_Angeles",
+    last_executed_at: FLOW_LAST_RUN,
+    error_count: 0,
+    signature_count: 0,
+    step_count: 3,
+    router_count: 0,
+    branch_count: 0,
+    lookup_count: 0,
+    script_count: 0,
+    diverged_family_count: 0,
+    writes: [],
+    celigo_last_modified: "2026-09-01T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+beforeEach(() => {
+  vi.useFakeTimers();
+  vi.setSystemTime(NOW);
+  mocks.integrations.mockReset().mockReturnValue(resolved([makeIntegration()]));
+  mocks.flows.mockReset().mockReturnValue(resolved([]));
+  mocks.syncStatus.mockReset().mockReturnValue(resolved({ last_synced_at: SYNCED_AT }));
+  mocks.changes.mockReset().mockReturnValue(resolved([]));
+  mocks.flowErrors.mockReset().mockReturnValue(pending());
+  routeMocks.integrationId = "int-1";
+  routeMocks.tab = "flows";
+  routeMocks.go.files.mockReset();
+  routeMocks.go.integrations.mockReset();
+  routeMocks.go.integration.mockReset();
+  routeMocks.go.flow.mockReset();
+  routeMocks.go.step.mockReset();
+  routeMocks.go.script.mockReset();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+});
+
+function setup(flows: CeligoFlowSummary[] = []) {
+  mocks.flows.mockReturnValue(resolved(flows));
+  return wrap(<CeligoIntegrationPage />);
+}
+
+// ---------------------------------------------------------------------------
+// Pure helpers
+// ---------------------------------------------------------------------------
+
+describe("topologyGlyph", () => {
+  it("carries router_count/step_count straight off the flow summary", () => {
+    expect(topologyGlyph({ router_count: 2, step_count: 10 })).toEqual({ routers: 2, steps: 10 });
+    expect(topologyGlyph({ router_count: 0, step_count: 3 })).toEqual({ routers: 0, steps: 3 });
+  });
+});
+
+describe("groupFlows", () => {
+  it("groups scheduled, on-demand, then paused flows, in that order, skipping empty groups", () => {
+    const scheduled = makeFlow({ id: "f-sched", disabled: false, schedule: "? 0,15,30,45 * ? * *" });
+    const onDemand = makeFlow({ id: "f-ondemand", disabled: false, schedule: null });
+    const paused = makeFlow({ id: "f-paused", disabled: true, schedule: "? 0 6 ? * *" });
+    // Passed out of order — groupFlows imposes the fixed order, not input order.
+    const groups = groupFlows([onDemand, paused, scheduled]);
+    expect(groups.map((g) => g.key)).toEqual(["scheduled", "on_demand", "paused"]);
+    expect(groups[0].label).toBe("On · scheduled · 1");
+    expect(groups[0].flows).toEqual([scheduled]);
+    expect(groups[1].label).toBe("On · on demand · 1");
+    expect(groups[1].flows).toEqual([onDemand]);
+    expect(groups[2].label).toBe("Paused in Celigo · 1");
+    expect(groups[2].flows).toEqual([paused]);
+  });
+
+  it("omits a group entirely when it has no flows", () => {
+    const scheduled = makeFlow({ id: "f-sched", disabled: false, schedule: "? 0,15,30,45 * ? * *" });
+    expect(groupFlows([scheduled]).map((g) => g.key)).toEqual(["scheduled"]);
+  });
+
+  it("treats a disabled flow as paused regardless of its own schedule shape", () => {
+    const paused = makeFlow({ disabled: true, schedule: null });
+    expect(groupFlows([paused])[0].key).toBe("paused");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Header
+// ---------------------------------------------------------------------------
+
+describe("CeligoIntegrationPage — header", () => {
+  it("shows the name, Production, medallions, the counts line, and the writes line", () => {
+    setup([]);
+    expect(screen.getByRole("heading", { name: "Solidus + NetSuite" })).toBeInTheDocument();
+    expect(screen.getByText("Production")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "20 flows · 9 scheduled · 6 on demand · 5 paused · 94 steps · 11 routers · 24 lookups · 30 scripts",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "writes salesorder ×19 · customer ×9 · itemfulfillment ×2 · customerdeposit ×2 · +2 custom records",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("shows Flows/Scripts/Errors/Changes tab counts", () => {
+    mocks.changes.mockReturnValue(resolved([
+      {
+        id: "c1",
+        object_kind: "flow",
+        object_id: "flow-2",
+        celigo_id: "cel-c1",
+        field: "schedule",
+        old_value: "? 0 6 ? * *",
+        new_value: null,
+        flow_id: "flow-2",
+        created_at: SYNCED_AT,
+      },
+    ]));
+    setup([
+      makeFlow({ id: "flow-1", script_count: 2 }),
+      makeFlow({ id: "flow-2", script_count: 3, error_count: 5, signature_count: 1 }),
+    ]);
+    expect(screen.getByRole("tab", { name: /Flows/ })).toHaveTextContent("Flows 2");
+    expect(screen.getByRole("tab", { name: /Scripts/ })).toHaveTextContent("Scripts 5");
+    expect(screen.getByRole("tab", { name: /Errors/ })).toHaveTextContent("Errors 1");
+    expect(screen.getByRole("tab", { name: /Changes/ })).toHaveTextContent("Changes 1");
+  });
+
+  it("breadcrumb reads My integrations › Solidus + NetSuite, and clicking My integrations navigates there", () => {
+    setup([]);
+    expect(screen.getByRole("button", { name: "My integrations" })).toBeInTheDocument();
+    expect(screen.getByText("Solidus + NetSuite", { selector: "b" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "My integrations" }));
+    expect(routeMocks.go.integrations).toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Flows table — grouping, schedule cells, paused rows
+// ---------------------------------------------------------------------------
+
+describe("flows table — grouping and schedule cells", () => {
+  it("groups rows under On · scheduled, On · on demand, then Paused in Celigo", () => {
+    setup([
+      makeFlow({ id: "f-sched", name: "Scheduled Flow", disabled: false, schedule: "? 5,20,35,50 0-23 ? * *" }),
+      makeFlow({ id: "f-ondemand", name: "On Demand Flow", disabled: false, schedule: null }),
+      makeFlow({ id: "f-paused", name: "Paused Flow", disabled: true, schedule: "? 5 6 ? * *" }),
+    ]);
+    expect(screen.getByText("On · scheduled · 1")).toBeInTheDocument();
+    expect(screen.getByText("On · on demand · 1")).toBeInTheDocument();
+    expect(screen.getByText("Paused in Celigo · 1")).toBeInTheDocument();
+  });
+
+  it("marks a paused row with data-paused and a Paused state pill", () => {
+    setup([makeFlow({ id: "f-paused", name: "Paused Flow", disabled: true, schedule: null })]);
+    const row = screen.getByText("Paused Flow").closest("tr")!;
+    expect(row.getAttribute("data-paused")).toBe("true");
+    expect(within(row).getByText("Paused")).toBeInTheDocument();
+  });
+
+  it("shows a humanised cron label plus the verbatim elided display string", () => {
+    setup([makeFlow({ id: "f1", name: "Cron Flow", disabled: false, schedule: "? 5,20,35,50 0-23 ? * *" })]);
+    const row = screen.getByText("Cron Flow").closest("tr")!;
+    expect(within(row).getByText("every 15 min")).toBeInTheDocument();
+    expect(within(row).getByText("? 5,20,35,50 0…23 ? * *")).toBeInTheDocument();
+  });
+
+  it("shows the raw schedule string, and nothing else, for an unrecognised shape", () => {
+    setup([makeFlow({ id: "f1", name: "Weird Flow", disabled: false, schedule: "0 0 1 1 *" })]);
+    const row = screen.getByText("Weird Flow").closest("tr")!;
+    expect(within(row).getByText("0 0 1 1 *")).toBeInTheDocument();
+    expect(within(row).queryByText(/every|hourly|daily|×\/day/)).not.toBeInTheDocument();
+  });
+
+  it("shows 'on demand' for a null schedule", () => {
+    setup([makeFlow({ id: "f1", name: "OnDemand Flow", disabled: false, schedule: null })]);
+    const row = screen.getByText("OnDemand Flow").closest("tr")!;
+    expect(within(row).getByText("on demand")).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Steps glyph
+// ---------------------------------------------------------------------------
+
+describe("flows table — steps glyph", () => {
+  it("renders ◉→◇◇→10 for a flow with 2 routers and 10 steps", () => {
+    setup([makeFlow({ id: "f1", name: "Multi-Router Flow", router_count: 2, step_count: 10 })]);
+    const row = screen.getByText("Multi-Router Flow").closest("tr")!;
+    expect(within(row).getByText("◉→◇◇→10")).toBeInTheDocument();
+  });
+
+  it("renders ◉→3 for a flow with no routers", () => {
+    setup([makeFlow({ id: "f1", name: "Plain Flow", router_count: 0, step_count: 3 })]);
+    const row = screen.getByText("Plain Flow").closest("tr")!;
+    expect(within(row).getByText("◉→3")).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Last run — relative to the SYNC timestamp, never the wall clock
+// ---------------------------------------------------------------------------
+
+describe("flows table — last run", () => {
+  it("shows '21 min ago' and the on-time pill for a flow that ran on schedule", () => {
+    setup([
+      makeFlow({
+        id: "f1",
+        name: "OnTime Flow",
+        schedule: "? 5,20,35,50 0-23 ? * *",
+        last_executed_at: FLOW_LAST_RUN,
+      }),
+    ]);
+    const row = screen.getByText("OnTime Flow").closest("tr")!;
+    // Proves the sync timestamp is the reference clock, not Date.now() (real
+    // now is 2h later — a wall-clock bug would read "2 h ago" here instead).
+    expect(within(row).getByText("21 min ago")).toBeInTheDocument();
+    expect(within(row).getByText("on time")).toBeInTheDocument();
+  });
+
+  it("shows a stalled pill with a missed-run count for a flow long overdue", () => {
+    setup([
+      makeFlow({
+        id: "f1",
+        name: "Stalled Flow",
+        schedule: "? 0 6 ? * *", // daily 06:00
+        last_executed_at: "2026-08-15T06:00:00.000Z",
+      }),
+    ]);
+    const row = screen.getByText("Stalled Flow").closest("tr")!;
+    expect(within(row).getByText(/stalled\? \d+ runs? missed/)).toBeInTheDocument();
+  });
+
+  it("shows 'no run recorded' when last_executed_at is null", () => {
+    setup([
+      makeFlow({
+        id: "f1",
+        name: "Never Ran Flow",
+        schedule: "? 0 6 ? * *",
+        last_executed_at: null,
+      }),
+    ]);
+    const row = screen.getByText("Never Ran Flow").closest("tr")!;
+    expect(within(row).getByText("no run recorded")).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Scripts + Errors cells, and the per-step errors drawer
+// ---------------------------------------------------------------------------
+
+describe("flows table — scripts and errors cells", () => {
+  it("shows the script count plus a diverged pill when any family diverged", () => {
+    setup([makeFlow({ id: "f1", name: "Script Flow", script_count: 2, diverged_family_count: 1 })]);
+    const row = screen.getByText("Script Flow").closest("tr")!;
+    expect(within(row).getByText("2 · 1 diverged")).toBeInTheDocument();
+  });
+
+  it("shows a bare '0' for a flow with no scripts", () => {
+    setup([makeFlow({ id: "f1", name: "No Script Flow", script_count: 0, diverged_family_count: 0 })]);
+    const row = screen.getByText("No Script Flow").closest("tr")!;
+    const cells = within(row).getAllByRole("cell");
+    // Columns: Flow · Steps · Writes · Schedule · Last run · Last updated · Errors · Scripts · State
+    expect(cells[7]).toHaveTextContent("0");
+  });
+
+  it("leads with signature_count for a flow with open errors, else shows '0'", () => {
+    setup([
+      makeFlow({ id: "f1", name: "Errored Flow", error_count: 10, signature_count: 1 }),
+      makeFlow({ id: "f2", name: "Clean Flow", error_count: 0 }),
+    ]);
+    const erroredRow = screen.getByText("Errored Flow").closest("tr")!;
+    const cleanRow = screen.getByText("Clean Flow").closest("tr")!;
+    expect(within(erroredRow).getAllByRole("cell")[6]).toHaveTextContent("1 root cause · 10");
+    expect(within(cleanRow).getAllByRole("cell")[6]).toHaveTextContent("0");
+  });
+
+  it("opens a 'Flow: name' drawer listing step_ids with counts when a non-zero errors count is clicked", () => {
+    mocks.flowErrors.mockReturnValue(
+      resolved({
+        flow_id: "f1",
+        status: "open" as const,
+        total: 10,
+        groups: [
+          {
+            signature: null,
+            count: 10,
+            step_ids: ["step-abc"],
+            first_seen_at: null,
+            last_seen_at: null,
+            retriable: null,
+            purge_at: null,
+            trace_keys: [],
+            errors: [],
+          },
+        ],
+      }),
+    );
+    setup([makeFlow({ id: "f1", name: "Errored Flow", error_count: 10, signature_count: 1 })]);
+    fireEvent.click(screen.getByText("1 root cause · 10"));
+    const dialog = screen.getByRole("dialog", { name: "Flow: Errored Flow" });
+    expect(within(dialog).getByText(/step-abc/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/10 errors/)).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Navigation — row click, tab switch
+// ---------------------------------------------------------------------------
+
+describe("navigation", () => {
+  it("clicking a flow row calls go.flow(id)", () => {
+    setup([makeFlow({ id: "f1", name: "Clickable Flow" })]);
+    fireEvent.click(screen.getByText("Clickable Flow").closest("tr")!);
+    expect(routeMocks.go.flow).toHaveBeenCalledWith("f1");
+  });
+
+  it("switching tabs writes go.integration(id, tab)", () => {
+    setup([]);
+    // Radix's Tabs.Trigger activates on `mousedown`, not `click` — see
+    // @radix-ui/react-tabs's own TabsTrigger.
+    fireEvent.mouseDown(screen.getByRole("tab", { name: /Changes/ }));
+    expect(routeMocks.go.integration).toHaveBeenCalledWith("int-1", "changes");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Changes tab
+// ---------------------------------------------------------------------------
+
+describe("Changes tab", () => {
+  beforeEach(() => {
+    routeMocks.tab = "changes";
+  });
+
+  it("lists change rows as field · old → new · relative time", () => {
+    mocks.changes.mockReturnValue(
+      resolved([
+        {
+          id: "c1",
+          object_kind: "flow",
+          object_id: "f1",
+          celigo_id: "cel-1",
+          field: "schedule",
+          old_value: "? 0 6 ? * *",
+          new_value: null,
+          flow_id: "f1",
+          created_at: FLOW_LAST_RUN,
+        },
+      ]),
+    );
+    setup([]);
+    // FLOW_LAST_RUN is 2h21m before NOW → "2 h ago".
+    expect(screen.getByText("schedule · ? 0 6 ? * * → — · 2 h ago")).toBeInTheDocument();
+  });
+
+  it("shows the empty state when there are no changes", () => {
+    mocks.changes.mockReturnValue(resolved([]));
+    setup([]);
+    expect(
+      screen.getByText("No configuration changes recorded since syncing began."),
+    ).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Scripts tab
+// ---------------------------------------------------------------------------
+
+describe("Scripts tab", () => {
+  beforeEach(() => {
+    routeMocks.tab = "scripts";
+  });
+
+  it("renders the summary sentence, plus only the flows with script_count > 0", () => {
+    setup([
+      makeFlow({ id: "f1", name: "Has Scripts", script_count: 2 }),
+      makeFlow({ id: "f2", name: "No Scripts", script_count: 0 }),
+    ]);
+    expect(
+      screen.getByText("2 scripts across 2 flows · the Scripts view ships separately"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Has Scripts")).toBeInTheDocument();
+    expect(screen.queryByText("No Scripts")).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Errors tab
+// ---------------------------------------------------------------------------
+
+describe("Errors tab", () => {
+  beforeEach(() => {
+    routeMocks.tab = "errors";
+  });
+
+  it("lists only the flows with open errors", () => {
+    setup([
+      makeFlow({ id: "f1", name: "Errored Flow", error_count: 5, signature_count: 1 }),
+      makeFlow({ id: "f2", name: "Clean Flow", error_count: 0 }),
+    ]);
+    expect(screen.getByText("Errored Flow")).toBeInTheDocument();
+    expect(screen.queryByText("Clean Flow")).not.toBeInTheDocument();
+  });
+
+  it("shows the quiet-errors sentence with the sync's relative time when nothing is open", () => {
+    setup([makeFlow({ id: "f1", name: "Clean Flow", error_count: 0 })]);
+    // SYNCED_AT is 2h before NOW.
+    expect(
+      screen.getByText("No open errors. Celigo reported 0 on the last sync, 2 h ago."),
+    ).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Query states
+// ---------------------------------------------------------------------------
+
+describe("query states", () => {
+  it("shows a not-in-last-sync message with a link back for an unknown integration id", () => {
+    routeMocks.integrationId = "int-ghost";
+    setup([]);
+    expect(screen.getByText("This integration is not in the last sync.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Back to My integrations" }));
+    expect(routeMocks.go.integrations).toHaveBeenCalled();
+  });
+
+  it("shows an error notice, not a spinner, when the flows query fails", () => {
+    mocks.flows.mockReturnValue(errored());
+    wrap(<CeligoIntegrationPage />);
+    expect(screen.getByText(/couldn.t load flows/i)).toBeInTheDocument();
+  });
+
+  it("shows skeleton rows while flows are pending, never an empty table", () => {
+    mocks.flows.mockReturnValue(pending());
+    wrap(<CeligoIntegrationPage />);
+    expect(screen.getByText("Loading flows…")).toBeInTheDocument();
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+    expect(screen.queryByText(/^On · scheduled/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Paused in Celigo/)).not.toBeInTheDocument();
+  });
+});
