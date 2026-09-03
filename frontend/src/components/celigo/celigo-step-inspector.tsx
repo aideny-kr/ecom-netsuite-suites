@@ -296,11 +296,18 @@ function ErrorsTab({
   groups,
   onRetry,
   lastSyncedAt,
+  flowErrorCount,
 }: {
   errorsState: "pending" | "error" | "success";
   groups: CeligoFlowErrorGroup[];
   onRetry: () => void;
   lastSyncedAt: string | null;
+  /** `detail.error_count` -- every open error on THIS FLOW, not just this
+   * step's. The empty state below says two different things depending on it,
+   * and neither may be guessed from `groups` alone: `groups` is already
+   * filtered to the signatures touching this step, so it is empty in both
+   * cases. */
+  flowErrorCount: number;
 }) {
   if (errorsState === "pending") {
     return (
@@ -314,9 +321,16 @@ function ErrorsTab({
     return <ErrorNotice message="Couldn't load errors for this step." onRetry={onRetry} />;
   }
   if (groups.length === 0) {
+    // A step with no signatures of its own is not evidence that the FLOW is
+    // clean. This used to print "Celigo reported 0 for the whole flow" in
+    // both cases -- a flow-wide claim, stated on a flow with open errors
+    // sitting in other steps. The quiet sentence is only honest when the
+    // flow's own count is zero; otherwise it says where the errors are.
     return (
       <p className="text-[12px] text-muted-foreground">
-        {`No open errors on this step. Celigo reported 0 for the whole flow on the last sync, ${formatRelativeTime(lastSyncedAt)}.`}
+        {flowErrorCount === 0
+          ? `No open errors. Celigo reported 0 on the last sync, ${formatRelativeTime(lastSyncedAt)}.`
+          : `No open errors on this step. ${flowErrorCount} open elsewhere in this flow as of the last sync, ${formatRelativeTime(lastSyncedAt)}.`}
       </p>
     );
   }
@@ -437,6 +451,7 @@ export function CeligoStepInspector({
               groups={matchingGroups}
               onRetry={() => errorsQuery.refetch()}
               lastSyncedAt={lastSyncedAt}
+              flowErrorCount={detail.error_count}
             />
           </TabsContent>
         </div>

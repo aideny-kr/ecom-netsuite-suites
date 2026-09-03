@@ -384,16 +384,24 @@ describe("Scripts tab", () => {
 // ---------------------------------------------------------------------------
 
 describe("Errors tab", () => {
-  it("renders the quiet sentence with the sync time when no group touches this step", () => {
+  it("renders the quiet sentence with the sync time when the whole flow is clean", () => {
     mocks.flowErrors.mockReturnValue(resolved({ flow_id: "flow-1", status: "open", total: 0, groups: [] }));
     const step = makeStep({ id: "step-1" });
-    renderInspector({ detail: makeDetail({ steps: [step] }), step, tab: "errors", lastSyncedAt: "2026-09-02T18:12:00.000Z" });
+    renderInspector({
+      detail: makeDetail({ steps: [step], error_count: 0 }),
+      step,
+      tab: "errors",
+      lastSyncedAt: "2026-09-02T18:12:00.000Z",
+    });
     expect(
-      screen.getByText("No open errors on this step. Celigo reported 0 for the whole flow on the last sync, 4 min ago."),
+      screen.getByText("No open errors. Celigo reported 0 on the last sync, 4 min ago."),
     ).toBeInTheDocument();
   });
 
-  it("shows the quiet sentence, not a signature card, when a group exists but doesn't touch this step", () => {
+  it("says where the flow's OTHER open errors are instead of claiming the flow reported zero", () => {
+    // Gate fix wave, item 4. This pane used to say "Celigo reported 0 for the
+    // whole flow" whenever no signature touched THIS step -- a flow-wide
+    // claim, printed verbatim on a flow with open errors in other steps.
     mocks.flowErrors.mockReturnValue(
       resolved({
         flow_id: "flow-1",
@@ -403,9 +411,17 @@ describe("Errors tab", () => {
       }),
     );
     const step = makeStep({ id: "step-1" });
-    renderInspector({ detail: makeDetail({ steps: [step] }), step, tab: "errors" });
+    renderInspector({
+      detail: makeDetail({ steps: [step], error_count: 3 }),
+      step,
+      tab: "errors",
+      lastSyncedAt: "2026-09-02T18:12:00.000Z",
+    });
     expect(screen.queryByText("script_error")).not.toBeInTheDocument();
-    expect(screen.getByText(/No open errors on this step/)).toBeInTheDocument();
+    expect(
+      screen.getByText("No open errors on this step. 3 open elsewhere in this flow as of the last sync, 4 min ago."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/reported 0/)).not.toBeInTheDocument();
   });
 
   it("renders a loading state, never an empty one, while the errors query is pending", () => {
