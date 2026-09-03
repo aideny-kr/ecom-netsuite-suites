@@ -112,11 +112,18 @@ describe("CeligoScriptViewerDialog — loading and error states", () => {
 });
 
 describe("CeligoScriptViewerDialog — card head", () => {
-  it("shows the script name and the copies/integrations pill", () => {
+  // Task 17 -- the pill format changed from "N copies · M integrations" to
+  // "N copies[ · diverged]" + a separate "N sites · M flows" pill (used_by-
+  // derived), matching the extracted `CeligoScriptViewerBody` the script
+  // drawer now shares. `baseScript` has both sites on the SAME flow_id
+  // ("flow-1"), so the sites/flows pill reads "2 sites · 1 flows".
+  it("shows the script name, the hook chip, and the copies/sites pills", () => {
     mocks.script.mockReturnValue({ data: baseScript, isPending: false, isLoading: false, isError: false, refetch: vi.fn() });
     wrap(<CeligoScriptViewerDialog scriptId="scr-local-1" onOpenChange={vi.fn()} />);
     expect(screen.getByText("BigQuery Data Warehouse Script[v1.1.0]")).toBeInTheDocument();
-    expect(screen.getByText("1 copies · 1 integrations")).toBeInTheDocument();
+    expect(screen.getByText("HK transform")).toBeInTheDocument();
+    expect(screen.getByText("1 copies")).toBeInTheDocument();
+    expect(screen.getByText("2 sites · 1 flows")).toBeInTheDocument();
   });
 });
 
@@ -188,7 +195,12 @@ describe("CeligoScriptViewerDialog — untrusted content", () => {
     // single-node text match won't find it -- assert against the full
     // rendered body text instead.
     expect(document.body.textContent).toContain("function transform(record) { return record; }");
-    expect(screen.getByText(/never followed as instructions, never run/i)).toBeInTheDocument();
+    // Task 17 -- N2's exact, project-wide banner copy replaces the old
+    // "quoted to the assistant inside a sealed block" line (which wrongly
+    // implied script content ever reaches a chat/tool path).
+    expect(
+      screen.getByText("Customer-authored JavaScript, shown to you only. Never run here, never sent to the assistant."),
+    ).toBeInTheDocument();
   });
 
   // Fix round 1 -- `??` does not catch `""`. This file defines `displayOr`

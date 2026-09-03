@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => ({
   integrations: vi.fn(),
   syncStatus: vi.fn(),
   flowErrors: vi.fn(),
+  script: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-celigo-flows", () => ({
@@ -36,6 +37,12 @@ vi.mock("@/hooks/use-celigo-flows", () => ({
   // file's mock must cover it too even though none of Task 14's own
   // assertions touch flow errors.
   useCeligoFlowErrors: () => mocks.flowErrors(),
+  // Task 17 -- the script drawer (`CeligoScriptDrawer`) is now always
+  // mounted (its own `open={!!scriptId}` controls visibility), so it calls
+  // `useCeligoScript` on every render of this page, not only when a test
+  // sets `scriptId`. Without this the "Escape" test below (which DOES set
+  // `routeMocks.scriptId`) would throw calling an undefined mock export.
+  useCeligoScript: (scriptId: string | undefined) => mocks.script(scriptId),
 }));
 
 const routeMocks = vi.hoisted(() => ({
@@ -356,6 +363,26 @@ beforeEach(() => {
   mocks.integrations.mockReset().mockReturnValue(resolved([makeIntegration()]));
   mocks.syncStatus.mockReset().mockReturnValue(resolved({ last_synced_at: SYNCED_AT }));
   mocks.flowErrors.mockReset().mockReturnValue(resolved({ flow_id: "flow-1", status: "open" as const, total: 0, groups: [] }));
+  // Task 17 -- a real script fixture (WITH content), even though most of
+  // this file's own tests never open the drawer (`routeMocks.scriptId`
+  // defaults to null below, so `CeligoScriptDrawer` stays closed and never
+  // renders this data at all). Its own `content` is a marker distinctive
+  // enough that if it ever leaked while closed, the regression test below
+  // would catch it.
+  mocks.script.mockReset().mockReturnValue(
+    resolved({
+      id: "script-x",
+      dedup_key: "dk-x",
+      name: "ns_sales_order_premap",
+      content: "// UNIQUE_SCRIPT_MARKER_FOR_LEAK_TEST\nfunction preMap() {}",
+      content_hash: "hash-x",
+      copies_count: 1,
+      attachment_count: 1,
+      integration_count: 1,
+      content_diverged: false,
+      used_by: [],
+    }),
+  );
   routeMocks.integrationId = "int-1";
   routeMocks.flowId = "flow-1";
   routeMocks.stepId = null;
@@ -552,6 +579,27 @@ describe("CeligoFlowPage — keyboard", () => {
     expect(routeMocks.go.script.mock.invocationCallOrder[0]).toBeLessThan(
       routeMocks.go.step.mock.invocationCallOrder[0],
     );
+  });
+});
+
+describe("CeligoFlowPage — script drawer", () => {
+  // Task 17 -- the drawer is now always mounted (`CeligoScriptDrawer`'s own
+  // `open={!!scriptId}` controls visibility). Regression: `useCeligoScript`
+  // above is mocked to return a script WITH real content on every render of
+  // this file's tests, precisely so a leak while `scriptId` is null (the
+  // default here) would show up as this marker appearing in the document,
+  // not merely as an absent dialog role.
+  it("does not mount the drawer, and never leaks script content, when no scriptId is selected", () => {
+    wrap(<CeligoFlowPage />);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("UNIQUE_SCRIPT_MARKER_FOR_LEAK_TEST");
+  });
+
+  it("mounts the drawer as a dialog when route.scriptId is set", () => {
+    routeMocks.scriptId = "script-x";
+    wrap(<CeligoFlowPage />);
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(document.body.textContent).toContain("UNIQUE_SCRIPT_MARKER_FOR_LEAK_TEST");
   });
 });
 

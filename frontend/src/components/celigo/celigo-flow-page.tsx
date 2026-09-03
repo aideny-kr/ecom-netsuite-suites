@@ -39,6 +39,7 @@ import { CeligoFlowHeader, type ClonedFromInfo } from "./celigo-flow-header";
 import { CeligoFlowNavigator } from "./celigo-flow-navigator";
 import { CeligoFlowCanvas } from "./celigo-flow-canvas";
 import { CeligoStepInspector, type InspectorTab } from "./celigo-step-inspector";
+import { CeligoScriptDrawer } from "./celigo-script-drawer";
 
 const NO_FLOWS: CeligoFlowSummary[] = [];
 
@@ -281,6 +282,15 @@ export function CeligoFlowPage(): JSX.Element {
         ]}
       />
       {body}
+      {/* Task 17 -- the script drawer (mockup screen 4), reached via
+          `&script=<scriptId>`. Always mounted (`open={!!scriptId}` inside
+          the drawer itself controls visibility via Radix's own Presence)
+          rather than conditionally rendered here, so its own Escape/focus-
+          restore lifecycle behaves exactly like `CeligoScriptViewerDialog`'s
+          already does. Escape ORDERING ("drawer first, a second Escape then
+          clears the step") is owned entirely by this file's own `keydown`
+          listener above -- this file does not duplicate it. */}
+      <CeligoScriptDrawer scriptId={route.scriptId} onClose={() => route.go.script(null)} />
     </div>
   );
 }
