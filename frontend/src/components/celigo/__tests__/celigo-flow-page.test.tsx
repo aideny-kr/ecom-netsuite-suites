@@ -412,6 +412,20 @@ describe("CeligoFlowPage — header", () => {
     const { container } = wrap(<CeligoFlowPage />);
     expect(container.textContent).toContain("cloned from NS > Solidus - Shipping Confirmations v2");
   });
+
+  it("withholds the cloned-from fact when the siblings fetch fails, instead of asserting the sibling is gone", () => {
+    // Regression: the guard only withheld the fact while the siblings query
+    // was PENDING. An errored siblings fetch collapsed to the same empty
+    // array used for "no data yet", which then reads as a confirmed
+    // negative — "cloned from a flow no longer in the account" — even
+    // though the real sibling that resolves the name may exist and simply
+    // failed to load. A failed request must render differently from both
+    // "still loading" and "confirmed absent".
+    mocks.detail.mockReturnValue(resolved(makeDetail({ source_id: "cel-flow-2" })));
+    mocks.integrationFlows.mockReturnValue(errored());
+    const { container } = wrap(<CeligoFlowPage />);
+    expect(container.textContent).not.toContain("cloned from");
+  });
 });
 
 describe("CeligoFlowPage — navigator", () => {

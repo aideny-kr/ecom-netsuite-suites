@@ -156,7 +156,16 @@ export function CeligoFlowPage(): JSX.Element {
   }, [detail, route.stepId]);
 
   const clonedFrom: ClonedFromInfo | null = useMemo(() => {
-    if (!detail?.source_id || siblingsState === "pending") return null;
+    // Review-fix (Task 14, finding #2): also withhold the fact while the
+    // siblings query has ERRORED, not just while it's pending. An errored
+    // `useCeligoIntegrationFlows` collapses to the same empty `siblings`
+    // array used for "no data yet" (see `NO_FLOWS` above) — without this
+    // guard that reads as a confirmed negative ("cloned from a flow no
+    // longer in the account") even though the real sibling that would
+    // resolve the name may exist and simply failed to load. A failed
+    // request must render differently from both loading and a genuine
+    // absence.
+    if (!detail?.source_id || siblingsState === "pending" || siblingsState === "error") return null;
     return { resolvedName: siblings.find((f) => f.celigo_id === detail.source_id)?.name ?? null };
   }, [detail, siblings, siblingsState]);
 
