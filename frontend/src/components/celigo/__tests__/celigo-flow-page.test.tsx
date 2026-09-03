@@ -504,7 +504,10 @@ describe("CeligoFlowPage — navigator", () => {
     expect(screen.queryByTestId("celigo-nav-rail")).not.toBeInTheDocument();
     const list = screen.getByTestId("celigo-nav-list");
     fireEvent.click(within(list).getByText("NS > Solidus - Shipping Confirmations v2"));
-    expect(routeMocks.go.flow).toHaveBeenCalledWith("flow-2");
+    // The sibling belongs to the flow's OWN integration (`detail.integration_id`),
+    // which is what the navigator hands `go.flow` -- not whatever `?integration=`
+    // the URL happens to carry (gate fix wave, item 5).
+    expect(routeMocks.go.flow).toHaveBeenCalledWith("flow-2", "int-1");
   });
 });
 

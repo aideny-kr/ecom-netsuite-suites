@@ -675,7 +675,7 @@ export function CeligoIntegrationPage(): JSX.Element {
                 flows={flows}
                 lastSyncedAt={lastSyncedAt}
                 onOpenErrors={(flowId2, flowName) => setErrorsDrawer({ flowId: flowId2, flowName })}
-                onOpenFlow={route.go.flow}
+                onOpenFlow={(flowId2) => route.go.flow(flowId2, integration.id)}
               />
             )}
           </TabsContent>

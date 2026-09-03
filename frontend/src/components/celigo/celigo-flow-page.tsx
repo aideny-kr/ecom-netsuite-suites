@@ -242,7 +242,7 @@ export function CeligoFlowPage(): JSX.Element {
                 lastSyncedAt={lastSyncedAt}
                 collapsed={navCollapsed}
                 onToggle={toggleNav}
-                onSelect={(id) => route.go.flow(id)}
+                onSelect={(id) => route.go.flow(id, d.integration_id)}
               />
             </Panel>
             <PanelResizeHandle className="w-px bg-border" />

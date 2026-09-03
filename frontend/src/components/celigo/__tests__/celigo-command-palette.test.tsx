@@ -165,7 +165,7 @@ describe("CeligoCommandPalette", () => {
     expect(dot).toHaveAttribute("data-state", "on_time");
 
     fireEvent.keyDown(screen.getByPlaceholderText("Search integrations & flows"), { key: "Enter" });
-    expect(routeMocks.go.flow).toHaveBeenCalledWith("f1");
+    expect(routeMocks.go.flow).toHaveBeenCalledWith("f1", "int-1");
   });
 
   it("case 3: an integration result calls go.integration(id)", () => {
@@ -255,7 +255,34 @@ describe("CeligoCommandPalette", () => {
     fireEvent.keyDown(input, { key: "Enter" });
 
     // Navigation must follow the row the user actually arrowed to.
-    expect(routeMocks.go.flow).toHaveBeenCalledWith("dup-2");
-    expect(routeMocks.go.flow).not.toHaveBeenCalledWith("dup-1");
+    expect(routeMocks.go.flow).toHaveBeenCalledWith("dup-2", "int-b");
+    expect(routeMocks.go.flow).not.toHaveBeenCalledWith("dup-1", "int-a");
+  });
+
+  it("case 6: a flow from another integration opens under ITS OWN integration", () => {
+    // Gate fix wave, item 5. The palette searches across every integration,
+    // but `go.flow(id)` attached whatever `?integration=` the CURRENT page
+    // carried -- so a result from integration B opened under integration A,
+    // giving the flow page a breadcrumb and a sibling list from an
+    // integration that does not contain it. The row already knows its own.
+    const alpha = makeIntegration({
+      id: "int-a",
+      name: "Alpha",
+      flow_schedules: [flowSchedule({ id: "fa", name: "Alpha Orders" })],
+    });
+    const beta = makeIntegration({
+      id: "int-b",
+      name: "Beta",
+      flow_schedules: [flowSchedule({ id: "fb", name: "Beta Refunds" })],
+    });
+    mocks.integrations.mockReturnValue(resolved([alpha, beta]));
+    wrap(<CeligoCommandPalette />);
+    openPalette();
+
+    const input = screen.getByPlaceholderText("Search integrations & flows");
+    fireEvent.change(input, { target: { value: "Beta Refunds" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(routeMocks.go.flow).toHaveBeenCalledWith("fb", "int-b");
   });
 });

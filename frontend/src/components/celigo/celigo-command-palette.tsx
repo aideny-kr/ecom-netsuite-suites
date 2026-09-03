@@ -145,9 +145,12 @@ export function CeligoCommandPalette(): JSX.Element {
     route.go.integration(id);
   }
 
-  function selectFlow(id: string) {
+  // The row's OWN integration, not the current page's: this palette lists
+  // every integration's flows, so the flow being opened frequently belongs to
+  // a different one than the page behind the dialog.
+  function selectFlow(id: string, integrationId: string) {
     setOpen(false);
-    route.go.flow(id);
+    route.go.flow(id, integrationId);
   }
 
   return (
@@ -210,7 +213,7 @@ export function CeligoCommandPalette(): JSX.Element {
                       key={flow.id}
                       value={`flow:${flow.id}`}
                       keywords={[flow.name, flow.integrationName]}
-                      onSelect={() => selectFlow(flow.id)}
+                      onSelect={() => selectFlow(flow.id, flow.integrationId)}
                       className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[13px] aria-selected:bg-muted"
                     >
                       <ResultRow>

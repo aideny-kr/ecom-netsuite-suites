@@ -38,4 +38,19 @@ describe("useCeligoRoute is the only writer", () => {
     act(() => result.current.go.flow("f2"));
     expect(nav.push).toHaveBeenLastCalledWith("/workspace?surface=celigo&flow=f2");
   });
+
+  it("go.flow uses the caller's own integration when given, the current one otherwise", () => {
+    // Gate fix wave, item 5. `go.flow` attached whatever `?integration=` the
+    // CURRENT page carried, so a ⌘K result from another integration opened
+    // under the wrong one -- a breadcrumb and a sibling list belonging to an
+    // integration that does not contain the flow on screen.
+    nav.params = new URLSearchParams("surface=celigo&integration=iA");
+    const { result } = renderHook(() => useCeligoRoute());
+
+    act(() => result.current.go.flow("f1"));
+    expect(nav.push).toHaveBeenLastCalledWith("/workspace?surface=celigo&integration=iA&flow=f1");
+
+    act(() => result.current.go.flow("f2", "iB"));
+    expect(nav.push).toHaveBeenLastCalledWith("/workspace?surface=celigo&integration=iB&flow=f2");
+  });
 });

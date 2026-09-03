@@ -461,10 +461,12 @@ describe("flows table — scripts and errors cells", () => {
 // ---------------------------------------------------------------------------
 
 describe("navigation", () => {
-  it("clicking a flow row calls go.flow(id)", () => {
+  it("clicking a flow row opens the flow under THIS integration", () => {
+    // Gate fix wave, item 5: every caller that knows which integration owns
+    // the flow now says so, rather than letting `go.flow` guess from the URL.
     setup([makeFlow({ id: "f1", name: "Clickable Flow" })]);
     fireEvent.click(screen.getByText("Clickable Flow").closest("tr")!);
-    expect(routeMocks.go.flow).toHaveBeenCalledWith("f1");
+    expect(routeMocks.go.flow).toHaveBeenCalledWith("f1", "int-1");
   });
 
   it("a flow row is operable from the keyboard: focusable, announced as a link, Enter and Space navigate", () => {
@@ -480,11 +482,11 @@ describe("navigation", () => {
     expect(row.className).toMatch(/focus-visible:ring-2/);
 
     fireEvent.keyDown(row, { key: "Enter" });
-    expect(routeMocks.go.flow).toHaveBeenCalledWith("f1");
+    expect(routeMocks.go.flow).toHaveBeenCalledWith("f1", "int-1");
 
     routeMocks.go.flow.mockClear();
     fireEvent.keyDown(row, { key: " " });
-    expect(routeMocks.go.flow).toHaveBeenCalledWith("f1");
+    expect(routeMocks.go.flow).toHaveBeenCalledWith("f1", "int-1");
   });
 
   it("a key press on the errors button inside a row does not also navigate to the flow", () => {
