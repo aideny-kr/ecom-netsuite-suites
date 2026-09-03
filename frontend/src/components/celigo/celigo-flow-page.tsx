@@ -45,21 +45,21 @@ const NO_FLOWS: CeligoFlowSummary[] = [];
 /** `queryState()` only tells us the query settled with an error — it
  * doesn't say which one. The unknown-id state ("This flow is not in the
  * last sync.") needs to tell a 404 (the id genuinely isn't in the last
- * sync) apart from every other failure (network, 500, auth) apart, which
- * needs the STATUS code, not just "errored".
+ * sync) apart from every other failure (network, 500, auth), which needs
+ * the STATUS code, not just "errored".
  *
- * `apiClient`'s `request()` (`lib/api-client.ts`) throws a bare `new
- * Error(...)` today with no `.status` field at all — inspected directly for
- * this task, and it doesn't carry one. Rather than block this state on an
- * `api-client.ts` change (out of this task's file list), this checks BOTH a
- * duck-typed `.status` (what a future `ApiError` class, or a test fixture,
- * would carry) AND the message shape the CURRENT client actually throws
- * (`` `Request failed: ${res.status}` ``) — so this works against today's
- * real errors too, not only a mocked shape. */
+ * Review-fix (Task 14, finding #1): this used to ALSO fall back to a
+ * `/\b404\b/` regex over `error.message`, on the belief that `apiClient`'s
+ * `request()` threw a bare `Error` with no status at all. That fallback was
+ * worse than useless: the backend always overwrites the thrown message with
+ * its own `detail` text (e.g. `{"detail": "Flow not found"}`, never
+ * containing the literal "404"), so the regex could never match a REAL
+ * 404 — and it could false-POSITIVE on an unrelated failure whose message
+ * happened to contain that number. `request()` now throws `ApiError`
+ * (`lib/api-client.ts`), which carries the real HTTP status on `.status` —
+ * so status is the only thing this checks. */
 function is404(error: unknown): boolean {
-  if (error && typeof error === "object" && (error as { status?: unknown }).status === 404) return true;
-  if (error instanceof Error && /\b404\b/.test(error.message)) return true;
-  return false;
+  return !!(error && typeof error === "object" && (error as { status?: unknown }).status === 404);
 }
 
 function PageSkeleton(): JSX.Element {

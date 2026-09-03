@@ -1,5 +1,23 @@
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+/**
+ * Thrown by `request()` on any non-OK response. Carries the real HTTP
+ * `status` code alongside `.message` (which `request()` overwrites with the
+ * backend's own `detail` text when present — see below) so a caller can
+ * tell "this resource genuinely doesn't exist" (404) apart from every other
+ * failure by checking `.status`, without pattern-matching text the backend
+ * controls and which routinely contains no digits at all (e.g. `{"detail":
+ * "Flow not found"}` never contains the literal string "404").
+ */
+export class ApiError extends Error {
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+  }
+}
+
 // ── Silent token refresh on 401 ────────────────────────────────
 let isRefreshing = false;
 let refreshPromise: Promise<boolean> | null = null;
@@ -107,7 +125,7 @@ async function request<T>(
       // Use status text if JSON parsing fails
       errorMessage = res.statusText || errorMessage;
     }
-    throw new Error(errorMessage);
+    throw new ApiError(errorMessage, res.status);
   }
 
   if (res.status === 204) {

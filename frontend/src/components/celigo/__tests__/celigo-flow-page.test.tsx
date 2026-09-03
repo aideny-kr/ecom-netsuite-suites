@@ -469,7 +469,16 @@ describe("CeligoFlowPage — failed / unknown-id detail", () => {
   });
 
   it("shows the unknown-id sentence and a link back to the integration on a 404", () => {
-    mocks.detail.mockReturnValue({ ...errored(), error: { status: 404 } });
+    // The real api-client throws an Error whose message is the BACKEND's own
+    // `detail` text (e.g. "Flow not found" — never containing the literal
+    // "404"), with `.status` attached (`ApiError`, see api-client.test.ts).
+    // Shaped that way here, not as a bare `{ status: 404 }` object, so this
+    // test proves the page reads the real thrown-error shape, not a fixture
+    // convenient to only itself.
+    mocks.detail.mockReturnValue({
+      ...errored(),
+      error: Object.assign(new Error("Flow not found"), { status: 404 }),
+    });
     wrap(<CeligoFlowPage />);
 
     expect(screen.getByText("My integrations")).toBeInTheDocument();
@@ -477,6 +486,24 @@ describe("CeligoFlowPage — failed / unknown-id detail", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Back to the integration" }));
     expect(routeMocks.go.integration).toHaveBeenCalledWith("int-1");
+  });
+
+  it("does not mistake a non-404 error for an unknown flow id just because its message contains '404'", () => {
+    // Regression: is404() used to fall back to a `/\b404\b/` regex over the
+    // error MESSAGE. A real failure whose status is NOT 404 but whose text
+    // happens to contain that number (a gateway/proxy error, a port number,
+    // anything) would incorrectly render the confident "not in the last
+    // sync" claim instead of the generic failed-to-load state. Status alone
+    // must decide this, never the message.
+    mocks.detail.mockReturnValue({
+      ...errored(),
+      error: Object.assign(new Error("Gateway error 404: upstream timed out"), { status: 502 }),
+    });
+    wrap(<CeligoFlowPage />);
+
+    expect(screen.queryByText("This flow is not in the last sync.")).not.toBeInTheDocument();
+    expect(screen.getByText("Couldn't load this flow.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
   });
 });
 
