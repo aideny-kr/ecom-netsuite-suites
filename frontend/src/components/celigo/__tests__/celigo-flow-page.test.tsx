@@ -846,6 +846,35 @@ describe("CeligoFlowPage — integrations query state (item 3)", () => {
   });
 });
 
+describe("CeligoFlowPage — the header counts routers the STEPS name too (item 14)", () => {
+  it("counts an undeclared router, and its branch, in the facts strip", () => {
+    // `detail.routers` is what Celigo DECLARED. A step can name a router the
+    // declaration never listed — the canvas already draws a node for it
+    // (finding I4) — so a header reading `detail.routers.length` under-reports
+    // the flow's own shape against the picture right below it.
+    const ghostStep = makeStep({
+      id: "ghost-step",
+      sequence: 10,
+      kind: "destination",
+      adaptor_type: "NetSuiteDistributedImport",
+      router_id: "r-ghost",
+      branch_id: "gb1",
+      record_type: "salesorder",
+      operation: "add",
+    });
+    mocks.detail.mockReturnValue(resolved(makeDetail({ steps: [...STEPS, ghostStep] })));
+    const { container } = wrap(<CeligoFlowPage />);
+
+    expect(container.textContent).toContain("11 steps · 3 routers · 4 branches");
+    expect(container.textContent).not.toContain("2 routers");
+  });
+
+  it("still reports the declared shape when every router is declared", () => {
+    const { container } = wrap(<CeligoFlowPage />);
+    expect(container.textContent).toContain("10 steps · 2 routers · 3 branches · 3 lookups");
+  });
+});
+
 describe("CeligoFlowPage — the navigator panel's own collapse (item 21)", () => {
   // `react-resizable-panels` 4.6.4 exposes no onCollapse/onExpand pair — the
   // panel reports every size change through `onResize`, and a collapsible

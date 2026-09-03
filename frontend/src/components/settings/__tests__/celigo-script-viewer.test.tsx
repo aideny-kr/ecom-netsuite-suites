@@ -110,6 +110,41 @@ describe("CeligoScriptViewerBody — attachment table", () => {
     render(<CeligoScriptViewerBody script={{ ...baseScript, used_by: [] }} />);
     expect(screen.getByText(/no attachment sites recorded/i)).toBeInTheDocument();
   });
+
+  // Codex fix wave, item 15. `flow_step_role` only distinguishes the flow's
+  // GENERATOR (its source) from every processor — and a processor is either a
+  // lookup or a destination. The label assumed the latter, so every lookup
+  // step was announced as a "Destination": the wrong direction of data for
+  // the site a reader is trying to place. The adaptor type is what tells them
+  // apart, exactly as it does on the canvas bubble.
+  it("item 15: a processor on an Export adaptor is a Lookup, not a Destination", () => {
+    render(
+      <CeligoScriptViewerBody
+        script={{
+          ...baseScript,
+          used_by: [{ ...siteA, flow_step_adaptor_type: "NetSuiteDistributedExport" }],
+        }}
+      />,
+    );
+    expect(screen.getByText("Lookup · NetSuiteDistributedExport")).toBeInTheDocument();
+    expect(screen.queryByText(/^Destination · /)).not.toBeInTheDocument();
+  });
+
+  it("item 15: a processor on an Import adaptor is still a Destination, and a generator still a Source", () => {
+    render(
+      <CeligoScriptViewerBody
+        script={{
+          ...baseScript,
+          used_by: [
+            siteA,
+            { ...siteB, flow_step_role: "generator", flow_step_adaptor_type: "HTTPExport", script_celigo_id: "scr-1" },
+          ],
+        }}
+      />,
+    );
+    expect(screen.getByText("Destination · NetSuiteDistributedImport")).toBeInTheDocument();
+    expect(screen.getByText("Source · HTTPExport")).toBeInTheDocument();
+  });
 });
 
 describe("CeligoScriptViewerBody — content_diverged correction", () => {

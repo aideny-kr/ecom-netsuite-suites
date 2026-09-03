@@ -16,6 +16,24 @@ describe("parseSchedule — only the shapes seen live are humanised", () => {
     expect(parseSchedule("? 5 6 ? * *")).toMatchObject({ intervalMinutes: 1440, label: "daily 06:05" });
     expect(parseSchedule("? 0 */6 * * *")).toMatchObject({ intervalMinutes: 360, label: "every 6 h" });
   });
+  // Codex fix wave, item 12. On an hour SUBSET the interval was computed from
+  // the HOUR gap alone, so every minute in the list was ignored: "? 0,30 0,12"
+  // (four runs a day, at 00:00, 00:30, 12:00, 12:30) reported a 12-hour
+  // interval when the real longest gap between runs is 11.5 hours — and
+  // `stallState` multiplies that interval by two to decide "stalled?", so the
+  // error propagated straight into the health pill.
+  it("item 12: minutes count on an hour subset — the interval is the longest real gap", () => {
+    // minute-of-day set {0, 30, 720, 750}; gaps 30 · 690 · 30 · 690 → 690.
+    expect(parseSchedule("? 0,30 0,12 ? * *")).toMatchObject({ intervalMinutes: 690, label: "4×/day" });
+  });
+
+  it("item 12: an evenly-spaced hourly set still reads 'every N h'", () => {
+    expect(parseSchedule("? 0 0,6,12,18 ? * *")).toMatchObject({ intervalMinutes: 360, label: "every 6 h" });
+    // Two minutes an hour on a 6-hourly set is no longer "every 6 h": the
+    // runs are 30 minutes apart, then 5.5 hours apart.
+    expect(parseSchedule("? 0,30 0,6,12,18 ? * *")).toMatchObject({ intervalMinutes: 330, label: "8×/day" });
+  });
+
   it("null, empty string and JSON null are on demand", () => {
     expect(parseSchedule(null)).toEqual({ kind: "on_demand" });
     expect(parseSchedule("")).toEqual({ kind: "on_demand" });

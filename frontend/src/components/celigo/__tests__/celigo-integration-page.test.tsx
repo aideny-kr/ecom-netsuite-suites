@@ -294,6 +294,31 @@ describe("flows table — grouping and schedule cells", () => {
     const row = screen.getByText("OnDemand Flow").closest("tr")!;
     expect(within(row).getByText("on demand")).toBeInTheDocument();
   });
+
+  // Codex fix wave, item 10. A zero is a claim, and on this surface every
+  // claim carries the moment it was checked (`shared.tsx`'s ErrorPill says
+  // "0 open errors · checked 4 min ago" for exactly this reason). The table's
+  // own zero pill said a bare "0" — read as "this flow is clean, now" rather
+  // than "Celigo reported none as of the last sync".
+  it("item 10: the Errors column names the sync, and the zero pill carries its time", () => {
+    setup([makeFlow({ id: "f1", name: "Clean Flow", disabled: false, error_count: 0 })]);
+
+    expect(screen.getByRole("columnheader", { name: "Errors · as of sync" })).toBeInTheDocument();
+    const row = screen.getByText("Clean Flow").closest("tr")!;
+    // Queried by TITLE, not by the text "0": the Scripts cell in the same row
+    // is also a bare "0". SYNCED_AT is 2 h before the test's frozen clock.
+    expect(within(row).getByTitle("0 open errors as of the sync 2 h ago")).toHaveTextContent("0");
+  });
+
+  it("item 10: the zero pill says the sync time is unknown rather than inventing one", () => {
+    mocks.syncStatus.mockReturnValue(resolved({ last_synced_at: null }));
+    setup([makeFlow({ id: "f1", name: "Clean Flow", disabled: false, error_count: 0 })]);
+
+    const row = screen.getByText("Clean Flow").closest("tr")!;
+    expect(
+      within(row).getByTitle("0 open errors as of the sync — sync time unavailable"),
+    ).toHaveTextContent("0");
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -96,7 +96,14 @@ export function CeligoFlowCanvas({
   }, [layout.width]);
 
   const scale = mode === "100" ? 1 : fitScale;
-  const zoomLabel = mode === "100" ? "100%" : `fit · ${Math.round(fitScale * 100)}%`;
+  // At the floor the diagram does NOT fit the viewport — the wrap scrolls —
+  // so calling it "fit" tells a reader the whole flow is on screen when part
+  // of it is off to the right, and they stop scrolling. The floor itself
+  // stays: below 60% the bubbles are unreadable, and a scroll is the better
+  // trade (ruling R19b). Only the label changes.
+  const fitClamped = mode === "fit" && fitScale <= FIT_FLOOR;
+  const zoomLabel =
+    mode === "100" ? "100%" : `${fitClamped ? "min" : "fit"} · ${Math.round(fitScale * 100)}%`;
 
   return (
     <div data-testid="celigo-flow-canvas" className="flex h-full flex-col">

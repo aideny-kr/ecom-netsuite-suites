@@ -77,10 +77,22 @@ function displayOr(value: string | null | undefined, fallback = "—"): string {
 }
 
 /** `flow_step_role` is null for a router-level script ref with no owning
- * step -- see `CeligoFlowDetailOut.unassigned_attachments`'s docstring. */
+ * step -- see `CeligoFlowDetailOut.unassigned_attachments`'s docstring.
+ *
+ * `role` only separates the flow's one GENERATOR (its source) from every
+ * processor, and a processor is either a lookup or a destination — so
+ * calling every processor a "Destination" announced the wrong direction of
+ * data for every lookup site. An `*Export` adaptor on a processor is Celigo's
+ * own marker for a lookup (`NetSuiteDistributedExport`, `HTTPExport`), the
+ * same signal `celigo-step-inspector.tsx` and the canvas bubble read. */
 function siteLocationLabel(site: CeligoScriptAttachmentSite): string {
   if (!site.flow_step_role) return "Router";
-  const kind = site.flow_step_role === "generator" ? "Source" : "Destination";
+  const kind =
+    site.flow_step_role === "generator"
+      ? "Source"
+      : site.flow_step_adaptor_type?.endsWith("Export")
+        ? "Lookup"
+        : "Destination";
   return `${kind} · ${displayOr(site.flow_step_adaptor_type, "Unknown adaptor")}`;
 }
 

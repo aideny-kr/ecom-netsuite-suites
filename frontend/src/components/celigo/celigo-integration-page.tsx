@@ -252,16 +252,29 @@ function ScriptsCell({ flow }: { flow: Pick<CeligoFlowSummary, "script_count" | 
 function ErrorsCell({
   flow,
   paused,
+  lastSyncedAt,
   onOpen,
 }: {
   flow: Pick<CeligoFlowSummary, "error_count" | "signature_count">;
   paused: boolean;
+  /** The zero pill's timestamp. A zero is a CLAIM — "Celigo reported none as
+   * of this sync" — and without the moment attached it reads as "this flow is
+   * clean, now", which is a stronger statement than the data supports. Every
+   * other zero on this surface carries its check time (see `ErrorPill`); this
+   * cell's did not. */
+  lastSyncedAt: string | null;
   onOpen: () => void;
 }): JSX.Element {
   if (flow.error_count === 0) {
     if (paused) return <span className="text-muted-foreground">—</span>;
     return (
-      <Pill tone="ok" dot="solid">
+      <Pill
+        tone="ok"
+        dot="solid"
+        title={`0 open errors as of the sync ${
+          lastSyncedAt ? formatRelativeTime(lastSyncedAt) : "— sync time unavailable"
+        }`}
+      >
         0
       </Pill>
     );
@@ -346,7 +359,12 @@ function FlowRow({
         {formatShortDate(flow.celigo_last_modified)}
       </TableCell>
       <TableCell>
-        <ErrorsCell flow={flow} paused={paused} onOpen={() => onOpenErrors(flow.id, flow.name)} />
+        <ErrorsCell
+          flow={flow}
+          paused={paused}
+          lastSyncedAt={lastSyncedAt}
+          onOpen={() => onOpenErrors(flow.id, flow.name)}
+        />
       </TableCell>
       <TableCell>
         <ScriptsCell flow={flow} />
@@ -402,7 +420,9 @@ function FlowsTable({
             <TableHead className="text-[10.5px]">Schedule</TableHead>
             <TableHead className="text-[10.5px]">Last run</TableHead>
             <TableHead className="text-[10.5px]">Last updated</TableHead>
-            <TableHead className="text-[10.5px]">Errors</TableHead>
+            {/* Named for what the column actually reports: Celigo's own open
+                count AS OF THE LAST SYNC, not a live figure. */}
+            <TableHead className="text-[10.5px]">Errors · as of sync</TableHead>
             <TableHead className="text-[10.5px]">Scripts</TableHead>
             <TableHead className="text-[10.5px]">State</TableHead>
           </TableRow>

@@ -39,11 +39,17 @@ function expand(field: string, max: number): number[] | null {
   return list.length ? Array.from(new Set(list)).sort((a, b) => a - b) : null;
 }
 
-function maxGap(values: number[], period: number): number {
-  if (values.length === 1) return period;
+/** Every circular gap between consecutive values, wrapping the last back to
+ * the first. A single value has exactly one gap: the whole period. */
+function circularGaps(values: number[], period: number): number[] {
+  if (values.length === 1) return [period];
   const gaps = values.slice(1).map((v, i) => v - values[i]);
   gaps.push(period - values[values.length - 1] + values[0]);
-  return Math.max(...gaps);
+  return gaps;
+}
+
+function maxGap(values: number[], period: number): number {
+  return Math.max(...circularGaps(values, period));
 }
 
 /** The trailing three Quartz-style fields (day-of-month, month, day-of-week)
@@ -75,10 +81,24 @@ export function parseSchedule(schedule: CeligoSchedule): ParsedSchedule {
     intervalMinutes = 1440;
     label = `daily ${String(hours[0]).padStart(2, "0")}:${String(minutes[0]).padStart(2, "0")}`;
   } else {
-    const gapH = maxGap(hours, 24);
-    intervalMinutes = gapH * 60;
-    const even = hours.every((h, i) => i === 0 || h - hours[i - 1] === hours[1] - hours[0]);
-    label = even && 24 % gapH === 0 && gapH < 8 ? `every ${gapH} h` : `${hours.length}×/day`;
+    // The interval is the longest gap between two ACTUAL runs, so it has to
+    // be measured over the full minute-of-day set (every hour × every
+    // minute), not over the hours alone. Measuring the hour gap ignored the
+    // minute list entirely: "? 0,30 0,12" runs at 00:00, 00:30, 12:00 and
+    // 12:30, whose longest gap is 11.5 h — it reported 12 h. `stallState`
+    // doubles this number to decide "stalled?", so the error went straight
+    // into the health pill.
+    const minutesOfDay: number[] = [];
+    for (const h of hours) for (const m of minutes) minutesOfDay.push(h * 60 + m);
+    minutesOfDay.sort((a, b) => a - b);
+    const gaps = circularGaps(minutesOfDay, 1440);
+    intervalMinutes = Math.max(...gaps);
+    // "every N h" is a claim of EVEN spacing on the hour, so it survives only
+    // when every gap is the same whole number of hours that divides the day.
+    // Anything else is just a count of runs.
+    const evenlySpaced = gaps.every((g) => g === gaps[0]);
+    const wholeHours = intervalMinutes % 60 === 0 && 1440 % intervalMinutes === 0 && intervalMinutes < 8 * 60;
+    label = evenlySpaced && wholeHours ? `every ${intervalMinutes / 60} h` : `${minutesOfDay.length}×/day`;
   }
   const display = `? ${parts[1]} ${allHours ? "0…23" : parts[2]} ? * *`;
   return { kind: "cron", cron: schedule, intervalMinutes, label, display };

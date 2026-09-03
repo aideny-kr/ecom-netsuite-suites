@@ -172,6 +172,41 @@ function SyncStatusPill({ state }: { state: Exclude<QueryState, "success"> }): J
   );
 }
 
+/** How many routers and branches this flow really has — the DECLARED ones in
+ * `detail.routers` plus any router a step names that the declaration never
+ * listed. Those exist (the canvas already draws a node for each, finding
+ * I4), so counting only the declared list made the header under-report the
+ * shape of the very picture below it. Exported for the same reason
+ * `computeFlowWrites` is: the count is a rule worth testing without mounting
+ * a header.
+ *
+ * A branch is keyed by `(router id, branch id)`; an id-less branch falls back
+ * to its declared `order` so two unnamed branches of one router never
+ * collapse into one — the same rule `layout.ts`'s `branchKey` applies. Steps
+ * of an undeclared router contribute their own branch ids, with a single
+ * "unassigned" bucket for those that name no branch. */
+export function computeTopologyCounts(
+  detail: Pick<CeligoFlowDetail, "steps" | "routers">,
+): { routerCount: number; branchCount: number } {
+  const declaredIds = new Set(
+    detail.routers.map((r) => r.id).filter((id): id is string => typeof id === "string"),
+  );
+  const routerIds = new Set(declaredIds);
+  for (const step of detail.steps) if (step.router_id) routerIds.add(step.router_id);
+
+  const branchKeys = new Set<string>();
+  for (const router of detail.routers) {
+    if (!router.id) continue;
+    for (const branch of router.branches) branchKeys.add(`${router.id}#${branch.id ?? `order:${branch.order}`}`);
+  }
+  for (const step of detail.steps) {
+    if (!step.router_id || declaredIds.has(step.router_id)) continue;
+    branchKeys.add(`${step.router_id}#${step.branch_id ?? "unassigned"}`);
+  }
+
+  return { routerCount: routerIds.size, branchCount: branchKeys.size };
+}
+
 export function CeligoFlowHeader({
   detail,
   lastSyncedAt,
@@ -208,8 +243,7 @@ export function CeligoFlowHeader({
     lastSyncedAt,
   });
 
-  const routerCount = detail.routers.length;
-  const branchCount = detail.routers.reduce((sum, r) => sum + r.branches.length, 0);
+  const { routerCount, branchCount } = computeTopologyCounts(detail);
   const lookupCount = detail.steps.filter((s) => s.kind === "lookup").length;
   const writes = computeFlowWrites(detail.steps);
   const scriptStats = computeScriptStats(detail);

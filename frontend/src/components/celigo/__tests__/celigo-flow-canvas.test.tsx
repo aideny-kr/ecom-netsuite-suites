@@ -306,4 +306,26 @@ describe("CeligoFlowCanvas — fit/zoom", () => {
     fireEvent.click(screen.getByRole("button", { name: "Fit to width" }));
     expect(screen.getByText(`fit · ${expectedPct}%`)).toBeInTheDocument();
   });
+
+  // Codex fix wave, item 22 (ruling R19b). The 0.6 floor stays — below it the
+  // bubbles are unreadable and the canvas scrolls instead — but the label
+  // must stop calling the result "fit": at the floor the diagram does NOT fit
+  // the viewport, and a reader who trusts the word stops scrolling and
+  // misses steps.
+  it("item 22: says 'min · 60%', not 'fit', when the fit scale is clamped at the floor", () => {
+    // A twelve-step top-level chain is ~2.9k px wide against a 1200px wrap —
+    // an unclamped fit would be ~42%.
+    const long = makeDetail({
+      steps: Array.from({ length: 12 }, (_, i) =>
+        makeStep({ id: `chain-${i}`, sequence: i, kind: i === 0 ? "source" : "destination" }),
+      ),
+      routers: [],
+    });
+    const layout = computeLayout(long);
+    expect(WRAP_WIDTH / layout.width).toBeLessThan(0.6);
+
+    renderCanvas(long);
+    expect(screen.getByText("min · 60%")).toBeInTheDocument();
+    expect(screen.queryByText(/^fit · /)).not.toBeInTheDocument();
+  });
 });
