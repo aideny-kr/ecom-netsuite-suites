@@ -98,6 +98,32 @@ describe("fallbackStepTitle — the honest fallback, never an invented name", ()
       unsynced: true,
     });
   });
+
+  // Codex fix wave, item 6. `${family ?? "HTTP"}` picked a real, specific
+  // app family out of thin air whenever the adaptor was not synced — the one
+  // thing this whole function exists to avoid. HTTP is a plausible guess for
+  // a Celigo flow, which is exactly what makes it dangerous: it reads as a
+  // synced fact.
+  it("an unsynced adaptor names the KIND, never a family nobody supplied", () => {
+    expect(fallbackStepTitle({ ...stepBase, kind: "destination", adaptor_type: null })).toEqual({
+      text: "Destination · adaptor not synced",
+      unsynced: true,
+    });
+    expect(fallbackStepTitle({ ...stepBase, kind: "source", adaptor_type: null })).toEqual({
+      text: "Source · adaptor not synced",
+      unsynced: true,
+    });
+    expect(fallbackStepTitle({ ...stepBase, kind: "lookup", adaptor_type: "" })).toEqual({
+      text: "Lookup · adaptor not synced",
+      unsynced: true,
+    });
+  });
+
+  it("an unrecognised adaptor string is still not HTTP", () => {
+    const result = fallbackStepTitle({ ...stepBase, kind: "destination", adaptor_type: "WombatImport" });
+    expect(result.text).toBe("Destination · adaptor not synced");
+    expect(result.text).not.toContain("HTTP");
+  });
 });
 
 describe("deriveFlowSummary — computed off the flow's own steps/routers, never a hardcoded name", () => {
@@ -210,6 +236,120 @@ describe("deriveFlowSummary — computed off the flow's own steps/routers, never
       steps: [],
     };
     expect(deriveFlowSummary(detail)).toBe("0 steps · 0 routers");
+  });
+
+  // Codex fix wave, item 11.
+  function bareDetail(over: Partial<CeligoFlowDetail>): CeligoFlowDetail {
+    return {
+      id: "f",
+      integration_id: "i1",
+      celigo_id: "flow",
+      name: "Flow",
+      disabled: false,
+      schedule: null,
+      timezone: null,
+      last_executed_at: null,
+      source_id: null,
+      ai_description_summary: null,
+      ai_description_detailed: null,
+      celigo_last_modified: null,
+      unassigned_attachments: [],
+      celigo_open_error_count: null,
+      last_error_at: null,
+      error_count: 0,
+      signature_count: 0,
+      routers: [],
+      steps: [],
+      ...over,
+    };
+  }
+
+  it("(a) names EVERY source, not just the first one it happened to find", () => {
+    const detail = bareDetail({
+      steps: [
+        { ...stepBase, id: "s1", kind: "source", adaptor_type: "NetSuiteExport", sequence: 0 },
+        { ...stepBase, id: "s2", kind: "source", adaptor_type: "FTPExport", sequence: 1 },
+      ],
+    });
+    expect(deriveFlowSummary(detail)).toContain("from NetSuite and FTP");
+  });
+
+  it("(a) an unsynced adaptor on a source is said out loud, not silently dropped", () => {
+    const detail = bareDetail({
+      steps: [
+        { ...stepBase, id: "s1", kind: "source", adaptor_type: "NetSuiteExport", sequence: 0 },
+        { ...stepBase, id: "s2", kind: "source", adaptor_type: null, sequence: 1 },
+      ],
+    });
+    expect(deriveFlowSummary(detail)).toContain("from NetSuite and an unsynced adaptor");
+  });
+
+  it("(b) makes no per-branch claim when the router's branches carry no ids", () => {
+    const detail = bareDetail({
+      routers: [
+        {
+          id: "r1",
+          name: null,
+          route_records_to: "branches",
+          route_records_using: "filters",
+          has_script_slot: false,
+          branches: [
+            { id: null, name: null, rule_count: 0, next_router_id: null, order: 0, declared_step_count: 1 },
+            { id: null, name: null, rule_count: 0, next_router_id: null, order: 1, declared_step_count: 1 },
+          ],
+        },
+      ],
+      steps: [
+        { ...stepBase, id: "src", kind: "source", adaptor_type: "HTTPExport", sequence: 0 },
+        {
+          ...stepBase,
+          id: "d1",
+          kind: "destination",
+          adaptor_type: "NetSuiteDistributedImport",
+          router_id: "r1",
+          branch_id: null,
+          record_type: "salesorder",
+          operation: "add",
+          sequence: 1,
+        },
+      ],
+    });
+    const summary = deriveFlowSummary(detail);
+    expect(summary).toContain("routes to 2 branches (branch ids not synced)");
+    expect(summary).not.toContain("per branch:");
+  });
+
+  it("(b) still describes the branch when the ids ARE there", () => {
+    const detail = bareDetail({
+      routers: [
+        {
+          id: "r1",
+          name: null,
+          route_records_to: "branches",
+          route_records_using: "filters",
+          has_script_slot: false,
+          branches: [
+            { id: "b1", name: "One", rule_count: 1, next_router_id: null, order: 0, declared_step_count: 1 },
+            { id: "b2", name: "Two", rule_count: 1, next_router_id: null, order: 1, declared_step_count: 1 },
+          ],
+        },
+      ],
+      steps: [
+        { ...stepBase, id: "src", kind: "source", adaptor_type: "HTTPExport", sequence: 0 },
+        {
+          ...stepBase,
+          id: "d1",
+          kind: "destination",
+          adaptor_type: "NetSuiteDistributedImport",
+          router_id: "r1",
+          branch_id: "b1",
+          record_type: "salesorder",
+          operation: "add",
+          sequence: 1,
+        },
+      ],
+    });
+    expect(deriveFlowSummary(detail)).toContain("per branch: adds the sales order");
   });
 });
 

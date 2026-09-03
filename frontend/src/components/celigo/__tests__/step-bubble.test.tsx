@@ -266,3 +266,59 @@ describe("StepBubble — error badge, selection, paused", () => {
     expect(onSelect).not.toHaveBeenCalled();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Codex fix wave
+// ---------------------------------------------------------------------------
+
+describe("StepBubble — an unsynced adaptor is never called HTTP (item 6)", () => {
+  it("titles by kind and says the adaptor is not synced, in both the title and the fact line", () => {
+    renderBubble(makeStep({ id: "s1", kind: "destination", role: "processor", adaptor_type: null, connection_celigo_id: null }));
+    const bubble = screen.getByTestId("step-bubble-s1");
+
+    expect(within(bubble).getByText("Destination · adaptor not synced")).toHaveAttribute("data-unsynced", "true");
+    expect(within(bubble).getByText("adaptor not synced")).toBeInTheDocument();
+    expect(bubble.textContent).not.toContain("HTTP");
+    expect(bubble.textContent).not.toContain("http");
+  });
+
+  it("keeps the connection id, which IS a synced fact, alongside the unsynced adaptor", () => {
+    renderBubble(makeStep({ id: "s1", kind: "lookup", role: "processor", adaptor_type: null, connection_celigo_id: "648bd44c1234567" }));
+    const bubble = screen.getByTestId("step-bubble-s1");
+    expect(within(bubble).getByText("adaptor not synced · conn 648bd44c…")).toBeInTheDocument();
+  });
+});
+
+describe("StepBubble — the fact line reads the step's KIND, not the adaptor string (item 13)", () => {
+  it("an AS2 destination is an import, even though 'AS2' contains no 'Import'", () => {
+    renderBubble(makeStep({ id: "s1", kind: "destination", role: "processor", adaptor_type: "AS2", connection_celigo_id: null }));
+    const bubble = screen.getByTestId("step-bubble-s1");
+    expect(within(bubble).getByText("as2 import")).toBeInTheDocument();
+    expect(bubble.textContent).not.toContain("as2 export");
+  });
+
+  it("an FTP source is an export", () => {
+    renderBubble(makeStep({ id: "s1", kind: "source", role: "generator", adaptor_type: "FTPImport", connection_celigo_id: null }));
+    expect(within(screen.getByTestId("step-bubble-s1")).getByText("ftp export")).toBeInTheDocument();
+  });
+
+  it("an HTTP lookup says so outright rather than borrowing the source's word", () => {
+    renderBubble(makeStep({ id: "s1", kind: "lookup", role: "processor", adaptor_type: "HTTPExport", connection_celigo_id: null }));
+    expect(within(screen.getByTestId("step-bubble-s1")).getByText("http export · lookup")).toBeInTheDocument();
+  });
+});
+
+describe("StepBubble — a long title is clamped, not spilled out of the bubble (item 26)", () => {
+  it("clamps to two lines and keeps the full name in the title attribute", () => {
+    const name =
+      "NS > Solidus — Shipping Confirmations and Fulfilment Status Sync for the Multi-Subsidiary Backfill v2";
+    renderBubble(makeStep({ id: "s1", reference_name: name }));
+    const title = within(screen.getByTestId("step-bubble-s1")).getByText(name);
+
+    // `line-clamp-2` is Tailwind core and carries `overflow: hidden` with it;
+    // a separate `overflow-hidden` beside it is stripped by tailwind-merge as
+    // a conflicting rule, so this pins the class that actually survives.
+    expect(title.className).toMatch(/line-clamp-2/);
+    expect(title).toHaveAttribute("title", name);
+  });
+});

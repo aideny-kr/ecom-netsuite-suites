@@ -20,7 +20,7 @@ import type { CeligoFlowStep } from "@/hooks/use-celigo-flows";
 import type { LayoutNode } from "./layout";
 import type { InspectorTab } from "./celigo-step-inspector";
 import { affordanceChips, type Chip } from "./chips";
-import { adaptorFamily, fallbackStepTitle } from "./shared";
+import { ADAPTOR_NOT_SYNCED, adaptorFamily, fallbackStepTitle } from "./shared";
 import { cn } from "@/lib/utils";
 
 const APP_GLYPH: Record<string, string> = {
@@ -48,10 +48,19 @@ const KIND_BORDER: Record<CeligoFlowStep["kind"], string> = {
  * NetSuite destination, the saved-search id for a NetSuite lookup, or a
  * generic `{family} {export|import} · conn {first 8 chars}…` for everything
  * else (HTTP, AS2, FTP, RDBMS, REST — none of these carry enough synced
- * structure to say more). `Import`/`Export` reads off the adaptor type
- * string itself, which is why an HTTP LOOKUP still says "http export" —
- * Celigo's own HTTPExport adaptor backs both a flow's source and its
- * lookups; the word describes the adaptor, not the step's role. */
+ * structure to say more).
+ *
+ * `import`/`export` comes from the step's own `kind`, which is the fact
+ * being stated. It used to be sniffed out of the ADAPTOR TYPE STRING
+ * (`includes("Import")`) — so `AS2`, `FTP`, `RDBMS` and `REST` destinations,
+ * whose adaptor names carry no such substring, were all labelled "export":
+ * the exact opposite of what they do. A lookup is spelled out as
+ * "export · lookup" rather than left to share the source's bare word, since
+ * both are reads but only one is the flow's input.
+ *
+ * With no recognised adaptor at all there is no family word to lowercase,
+ * so the line states the gap (`"adaptor not synced"`) and keeps the
+ * connection id, which IS synced. */
 function factLine(step: CeligoFlowStep): string {
   const family = adaptorFamily(step.adaptor_type);
   if (family === "NetSuite") {
@@ -62,9 +71,10 @@ function factLine(step: CeligoFlowStep): string {
       return `import · ${step.operation} · ${step.record_type}`;
     }
   }
-  const word = step.adaptor_type?.includes("Import") ? "import" : "export";
+  const word = step.kind === "source" ? "export" : step.kind === "lookup" ? "export · lookup" : "import";
   const conn = step.connection_celigo_id ? ` · conn ${step.connection_celigo_id.slice(0, 8)}…` : "";
-  return `${(family ?? "HTTP").toLowerCase()} ${word}${conn}`;
+  if (!family) return `${ADAPTOR_NOT_SYNCED}${conn}`;
+  return `${family.toLowerCase()} ${word}${conn}`;
 }
 
 /** Where a chip click sends the inspector — the tab that chip's OWN data
@@ -212,9 +222,22 @@ export function StepBubble({
           <span className="ml-auto text-[10px] normal-case tracking-normal text-red-600 dark:text-red-400">{`${step.error_count} open`}</span>
         )}
       </div>
+      {/* The bubble is a FIXED height (`node.h`), so a long synced
+          `reference_name` used to push the fact line, chips and footer out
+          through the bottom of the card and over its neighbour. Clamped to
+          two lines with the full name on `title`, so nothing is lost — it
+          just needs a hover (or the inspector, which shows it in full). */}
       <div
         data-unsynced={unsynced ? "true" : undefined}
-        className={cn("min-h-[31px] text-[12.5px] font-semibold leading-snug", unsynced && "font-medium text-muted-foreground")}
+        title={title}
+        className={cn(
+          // `line-clamp-2` is Tailwind 3.3+ core and already sets
+          // `overflow: hidden` + the -webkit-box display; adding
+          // `overflow-hidden` alongside it is what `cn` (tailwind-merge)
+          // strips back out as a conflicting rule.
+          "min-h-[31px] text-[12.5px] font-semibold leading-snug line-clamp-2",
+          unsynced && "font-medium text-muted-foreground",
+        )}
       >
         {title}
       </div>

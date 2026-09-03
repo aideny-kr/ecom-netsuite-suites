@@ -97,7 +97,14 @@ export function adaptorFamily(adaptorType: string | null): "NetSuite" | "HTTP" |
  * depends on a search id, not a description of what it returns, so it
  * still reads as "cannot say more" -- matching the mockup's `.unsynced`
  * styling on both), `false` only for the NetSuite destination case, which
- * states a real fact outright. */
+ * states a real fact outright.
+ *
+ * When the ADAPTOR itself isn't synced (or is a string this client doesn't
+ * recognise), there is no family word to use and the title says so:
+ * `"Destination · adaptor not synced"`. It used to substitute a literal
+ * `"HTTP"` there — inventing a specific, plausible app family out of an
+ * absence, which is precisely what every other line of this function exists
+ * to avoid. A guess that reads like a fact is worse than a stated gap. */
 export function fallbackStepTitle(
   step: Pick<CeligoFlowStep, "kind" | "adaptor_type" | "record_type" | "operation" | "search_id">,
 ): { text: string; unsynced: boolean } {
@@ -110,9 +117,26 @@ export function fallbackStepTitle(
       return { text: `lookup ${step.record_type ?? "record"} · search ${step.search_id}`, unsynced: true };
     }
   }
+  if (!family) {
+    return { text: `${KIND_WORD[step.kind]} · ${ADAPTOR_NOT_SYNCED}`, unsynced: true };
+  }
   const kindWord = step.kind === "source" ? "export" : step.kind === "lookup" ? "lookup" : "destination";
-  return { text: `${family ?? "HTTP"} ${kindWord} · name not synced`, unsynced: true };
+  return { text: `${family} ${kindWord} · name not synced`, unsynced: true };
 }
+
+/** The one phrase for "Celigo gave us no adaptor for this step" — used by the
+ * fallback title above and by `step-bubble.tsx`'s fact line, which state the
+ * same absence in two places on the same bubble. */
+export const ADAPTOR_NOT_SYNCED = "adaptor not synced";
+
+/** Celigo's own kind vocabulary, capitalised — the same three words
+ * `step-bubble.tsx` and `celigo-step-inspector.tsx` already print as their
+ * eyebrow/header label. */
+const KIND_WORD: Record<CeligoFlowStep["kind"], string> = {
+  source: "Source",
+  lookup: "Lookup",
+  destination: "Destination",
+};
 
 // ---------------------------------------------------------------------------
 // deriveFlowSummary
@@ -165,15 +189,30 @@ function branchVerbPhrase(steps: CeligoFlowStep[]): string {
  * source step to anchor on (an empty flow, or one whose steps haven't
  * synced kinds yet) rather than guessing at a sentence with nothing to
  * hang it on. */
+/** "NetSuite", "NetSuite and FTP", "NetSuite, FTP and HTTP" — an ordinary
+ * English list, deduped, in the order the sources appear. A source whose
+ * adaptor didn't sync contributes "an unsynced adaptor" rather than being
+ * dropped: silently omitting it would under-report how many places this flow
+ * pulls from, which is the same class of error as inventing one. */
+function joinSourceNames(names: string[]): string {
+  const unique = Array.from(new Set(names));
+  if (unique.length === 1) return unique[0];
+  return `${unique.slice(0, -1).join(", ")} and ${unique[unique.length - 1]}`;
+}
+
 export function deriveFlowSummary(detail: CeligoFlowDetail): string {
-  const source = detail.steps.find((s) => s.kind === "source");
+  const sources = detail.steps.filter((s) => s.kind === "source");
+  const source = sources[0];
   if (!source) {
     return `${detail.steps.length} step${detail.steps.length === 1 ? "" : "s"} · ${detail.routers.length} router${detail.routers.length === 1 ? "" : "s"}`;
   }
 
-  const family = adaptorFamily(source.adaptor_type);
+  // Every source, not just the first one found. A flow pulling from both
+  // NetSuite and an FTP drop used to read as if it had a single NetSuite
+  // source — a summary that quietly halved the flow's own inputs.
+  const sourceNames = joinSourceNames(sources.map((s) => adaptorFamily(s.adaptor_type) ?? "an unsynced adaptor"));
   const sourcePhrase = source.record_type ? recordTypeDisplay(source.record_type) : "records";
-  let sentence = `Gets ${sourcePhrase} from ${family ?? "the source"}`;
+  let sentence = `Gets ${sourcePhrase} from ${sourceNames}`;
 
   const preRouteLookups = detail.steps.filter((s) => s.kind === "lookup" && !s.branch_id);
   if (preRouteLookups.length > 0) sentence += " → looks each one up again";
@@ -181,6 +220,14 @@ export function deriveFlowSummary(detail: CeligoFlowDetail): string {
   const routingRouter = detail.routers.find((r) => r.branches.length > 1);
   let branchSteps: CeligoFlowStep[];
   if (routingRouter) {
+    // A branch with no id cannot be told apart from the router's OTHER
+    // id-less branches, so "the first branch's steps" was really "every
+    // unattributed step of this router" — described as if it were one
+    // branch's pipeline. With ids missing, the honest answer is the count
+    // and nothing more.
+    if (routingRouter.branches.some((b) => b.id === null)) {
+      return `${sentence} → routes to ${routingRouter.branches.length} branches (branch ids not synced).`;
+    }
     sentence += ` → routes on ${routingRouter.branches.length} branches`;
     const firstBranch = routingRouter.branches[0];
     branchSteps = detail.steps
