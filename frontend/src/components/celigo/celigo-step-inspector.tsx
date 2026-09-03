@@ -282,9 +282,11 @@ function ErrorSignatureCard({ group }: { group: CeligoFlowErrorGroup }) {
           ))}
         </div>
       )}
-      <a href="/reconciliation" className="mt-1.5 inline-block text-[12px] font-medium text-foreground underline">
-        {`Open the ${group.count} in recon →`}
-      </a>
+      {/* No "open these in recon" link (finding I7): these are Celigo
+          integration errors, and the reconciliation surface neither knows
+          about them nor lists them -- the link went to a page that could not
+          answer for the number it named. The trace-key chips above are the
+          real handle: an operator carries one into Celigo's own error view. */}
     </div>
   );
 }
@@ -357,9 +359,14 @@ export function CeligoStepInspector({
     );
   }
 
+  // The groups whose root cause TOUCHES this step -- the detail the Errors tab
+  // body renders. Note a group's own `count` is flow-wide: one signature can
+  // span several steps, which is exactly why the tab BADGE below reads
+  // `step.error_count` (the backend's per-step attribution) instead of summing
+  // these. Summing them showed a shared signature's whole total on every step
+  // it touched (finding I3).
   const matchingGroups =
     errorsState === "success" ? (errorsQuery.data?.groups ?? []).filter((g) => g.step_ids.includes(step.id)) : [];
-  const matchingErrorCount = matchingGroups.reduce((sum, g) => sum + g.count, 0);
   const filterRuleCount = step.filter_json ? countRules(step.filter_json) : null;
   const mappingFieldCount =
     step.mapping_json &&
@@ -397,7 +404,10 @@ export function CeligoStepInspector({
             {`Scripts ${step.attachments.length}`}
           </TabsTrigger>
           <TabsTrigger value="errors" className="text-[12px]">
-            {`Errors ${errorsState === "success" ? matchingErrorCount : "…"}`}
+            {/* `step.error_count` came with `detail`, so this badge is a settled
+                number the moment the step is selected -- it no longer waits on
+                (or degrades to "…" with) the separate errors query. */}
+            {`Errors ${step.error_count}`}
           </TabsTrigger>
         </TabsList>
         <div className="flex-1 min-h-0 overflow-auto p-3">

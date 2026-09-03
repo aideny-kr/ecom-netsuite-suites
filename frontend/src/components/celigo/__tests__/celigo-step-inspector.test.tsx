@@ -446,8 +446,41 @@ describe("Errors tab", () => {
     expect(screen.getByText("purges 16 Sep")).toBeInTheDocument();
     expect(screen.getByText("15822111")).toBeInTheDocument();
     expect(screen.getByText("15241110")).toBeInTheDocument();
-    const link = screen.getByRole("link", { name: "Open the 10 in recon →" });
-    expect(link).toHaveAttribute("href", "/reconciliation");
+    // Final-review finding I7: the card used to end in "Open the 10 in recon →"
+    // pointing at /reconciliation. These are Celigo integration errors; the
+    // reconciliation surface knows nothing about them and shows no such list,
+    // so the link led nowhere useful. The trace-key chips stay -- they ARE the
+    // handle an operator carries into Celigo.
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+  });
+
+  it("the Errors tab badge counts THIS step's errors, not a shared signature's flow-wide total", () => {
+    // Final-review finding I3. The badge summed `group.count` for every group
+    // whose `step_ids` include the step, so one 10-error signature spanning two
+    // steps read "Errors 10" on BOTH of them. `step.error_count` is the count
+    // the backend attributed to this step; the signature card keeps the
+    // flow-wide ×10 as the detail.
+    mocks.flowErrors.mockReturnValue(
+      resolved({
+        flow_id: "flow-1",
+        status: "open",
+        total: 10,
+        groups: [makeErrorGroup({ count: 10, step_ids: ["step-1", "step-2"] })],
+      }),
+    );
+    const step = makeStep({ id: "step-1", error_count: 4 });
+    const other = makeStep({ id: "step-2", error_count: 6 });
+    renderInspector({ detail: makeDetail({ steps: [step, other] }), step, tab: "errors" });
+
+    expect(screen.getByRole("tab", { name: /Errors/ })).toHaveTextContent("Errors 4");
+    expect(screen.getByText("×10")).toBeInTheDocument();
+  });
+
+  it("the Errors badge reads the step's own count even while the errors query is pending", () => {
+    mocks.flowErrors.mockReturnValue(pending());
+    const step = makeStep({ id: "step-1", error_count: 4 });
+    renderInspector({ detail: makeDetail({ steps: [step] }), step, tab: "errors" });
+    expect(screen.getByRole("tab", { name: /Errors/ })).toHaveTextContent("Errors 4");
   });
 
   it("a tab prop of 'errors' selects the Errors tab directly", () => {
