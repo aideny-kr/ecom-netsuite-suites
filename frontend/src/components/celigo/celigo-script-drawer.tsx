@@ -53,6 +53,7 @@ export function CeligoScriptDrawer({
   onClose,
   returnFocusTo,
   currentStepId,
+  currentJsonPath,
 }: {
   scriptId: string | null;
   onClose: () => void;
@@ -61,6 +62,10 @@ export function CeligoScriptDrawer({
    * several sites; without this the body announces `used_by[0]`'s hook
    * whichever step the reader actually came from. */
   currentStepId?: string | null;
+  /** The SITE within that step — the clicked attachment's `json_path`. A step
+   * can hold two sites of the same script (preMap and postMap, or two clones
+   * of one family), which `currentStepId` alone cannot separate. */
+  currentJsonPath?: string | null;
 }): JSX.Element {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
 
@@ -129,7 +134,11 @@ export function CeligoScriptDrawer({
                   out that step's own `used_by` site so the header names the
                   hook the reader actually opened, and still falls back to
                   `used_by[0]` when nothing is selected. */}
-              <CeligoScriptViewerBody script={script} currentStepId={currentStepId} />
+              <CeligoScriptViewerBody
+                script={script}
+                currentStepId={currentStepId}
+                currentJsonPath={currentJsonPath}
+              />
             </div>
           )}
         </DialogPrimitive.Content>

@@ -224,6 +224,34 @@ describe("CeligoScriptDrawer — Escape", () => {
   });
 });
 
+describe("CeligoScriptDrawer — currentJsonPath (item 25)", () => {
+  // Two sites of the SAME script on the SAME step — the shape `flow_step_id`
+  // cannot resolve. Only the json_path says which one the reader clicked.
+  const preMapSite = { ...siteA, flow_step_id: "step-5", json_path: "66738c3d….hooks.preMap", function_name: "preMap" };
+  const postMapSite = { ...siteA, flow_step_id: "step-5", json_path: "66738c3d….hooks.postMap", function_name: "postMap" };
+
+  it("names the site the reader actually opened, not whichever came back first", () => {
+    mocks.script.mockReturnValue(resolved({ ...SCRIPT, used_by: [preMapSite, postMapSite] }));
+    wrap(
+      <CeligoScriptDrawer
+        scriptId="scr-1"
+        currentStepId="step-5"
+        currentJsonPath="66738c3d….hooks.postMap"
+        onClose={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("HK postMap")).toBeInTheDocument();
+    expect(screen.queryByText("HK preMap")).not.toBeInTheDocument();
+  });
+
+  it("falls back to the step, then to the first site, when no json_path is given", () => {
+    mocks.script.mockReturnValue(resolved({ ...SCRIPT, used_by: [preMapSite, postMapSite] }));
+    wrap(<CeligoScriptDrawer scriptId="scr-1" currentStepId="step-5" onClose={vi.fn()} />);
+    expect(screen.getByText("HK preMap")).toBeInTheDocument();
+  });
+});
+
 describe("CeligoScriptDrawer — focus management", () => {
   it("focuses the close button on open, and returns focus to returnFocusTo when it closes", async () => {
     mocks.script.mockReturnValue(resolved(SCRIPT));

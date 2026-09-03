@@ -83,4 +83,43 @@ describe("useCeligoRoute is the only writer", () => {
     act(() => result.current.go.flow("f2", "iB"));
     expect(nav.push).toHaveBeenLastCalledWith("/workspace?surface=celigo&integration=iB&flow=f2");
   });
+
+  // Codex fix wave, item 25. One script is routinely attached at several
+  // SITES on the same step (a preMap and a postMap, or two clones of one
+  // family), and `flow_step_id` cannot tell them apart — so the drawer named
+  // whichever site the backend returned first. The site the reader actually
+  // clicked travels on the URL, which also means a pasted link reopens the
+  // same one.
+  it("item 25: go.script carries the attachment site, and reading it back gives the json_path", () => {
+    nav.params = new URLSearchParams("surface=celigo&flow=f1&step=s1");
+    const { result } = renderHook(() => useCeligoRoute());
+
+    act(() => result.current.go.script("x1", { jsonPath: "66738c3d….hooks.preMap" }));
+    expect(nav.replace).toHaveBeenLastCalledWith(
+      "/workspace?surface=celigo&flow=f1&step=s1&script=x1&site=66738c3d%E2%80%A6.hooks.preMap",
+    );
+
+    expect(
+      readCeligoRoute(new URLSearchParams("surface=celigo&script=x1&site=a.hooks.preMap")).scriptSite,
+    ).toBe("a.hooks.preMap");
+    expect(readCeligoRoute(new URLSearchParams("surface=celigo&script=x1")).scriptSite).toBeNull();
+  });
+
+  it("item 25: closing the drawer drops the site along with the script", () => {
+    nav.params = new URLSearchParams("surface=celigo&flow=f1&step=s1&script=x1&site=a.hooks.preMap");
+    const { result } = renderHook(() => useCeligoRoute());
+
+    act(() => result.current.go.script(null));
+    expect(nav.replace).toHaveBeenLastCalledWith("/workspace?surface=celigo&flow=f1&step=s1");
+  });
+
+  it("item 25: a same-page tab change keeps the open script AND its site", () => {
+    nav.params = new URLSearchParams("surface=celigo&integration=i1&flow=f1&step=s1&script=x1&site=a.hooks.preMap");
+    const { result } = renderHook(() => useCeligoRoute());
+
+    act(() => result.current.go.tab("errors"));
+    expect(nav.replace).toHaveBeenLastCalledWith(
+      "/workspace?surface=celigo&integration=i1&tab=errors&flow=f1&step=s1&script=x1&site=a.hooks.preMap",
+    );
+  });
 });

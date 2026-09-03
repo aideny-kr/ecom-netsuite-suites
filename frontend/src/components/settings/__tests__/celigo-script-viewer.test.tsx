@@ -81,6 +81,31 @@ describe("CeligoScriptViewerBody — card head", () => {
     render(<CeligoScriptViewerBody script={{ ...baseScript, used_by: [siteA] }} />);
     expect(screen.getByText("1 site · 1 flow")).toBeInTheDocument();
   });
+
+  // Codex fix wave, item 25. `currentStepId` alone cannot resolve two sites of
+  // the same script on the same step — a transform and a hook, say — so the
+  // header named whichever the backend returned first. The json_path is the
+  // only thing that identifies the site the reader actually clicked.
+  it("item 25: json_path picks the site, ahead of the step id", () => {
+    const transformSite = { ...siteA, function_name: "transform", json_path: "pageProcessors[0].transform.script" };
+    const hookSite = { ...siteA, function_name: "preSave", json_path: "hooks.preSavePage" };
+    render(
+      <CeligoScriptViewerBody
+        script={{ ...baseScript, used_by: [transformSite, hookSite] }}
+        currentStepId="step-1"
+        currentJsonPath="hooks.preSavePage"
+      />,
+    );
+    expect(screen.getByText("HK preSave")).toBeInTheDocument();
+    expect(screen.queryByText("HK transform")).not.toBeInTheDocument();
+  });
+
+  it("item 25: an unknown json_path falls back to the step, then the first site", () => {
+    render(
+      <CeligoScriptViewerBody script={baseScript} currentStepId="step-1" currentJsonPath="not.a.real.path" />,
+    );
+    expect(screen.getByText("HK transform")).toBeInTheDocument();
+  });
 });
 
 describe("CeligoScriptViewerBody — attachment table", () => {

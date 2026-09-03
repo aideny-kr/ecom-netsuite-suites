@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, fireEvent, within, act } from "@testing-library/react";
+import { render, screen, fireEvent, within, act, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import type {
   CeligoFlowDetail,
@@ -134,7 +134,13 @@ function makeStep(overrides: Partial<CeligoFlowStep> = {}): CeligoFlowStep {
   return {
     id: "step",
     celigo_id: "cel-step",
-    role: "generator",
+    // `role` follows `kind`, as it does in real data: Celigo's generator is
+    // the flow's source, everything else is a processor. It used to default
+    // to "generator" for every step and no fixture overrode it, so all ten
+    // steps of this pipeline claimed to be the flow's source — the layout
+    // then drew each of them twice (once stacked as a source, once in its
+    // lane) and the canvas showed nineteen bubbles for ten steps.
+    role: overrides.kind && overrides.kind !== "source" ? "processor" : "generator",
     router_id: null,
     branch_id: null,
     branch_key: "",
@@ -846,6 +852,55 @@ describe("CeligoFlowPage — integrations query state (item 3)", () => {
   });
 });
 
+describe("CeligoFlowPage — opening a script carries the opener and the site (items 24, 25)", () => {
+  function openScriptsTabFor(stepId: string) {
+    routeMocks.stepId = stepId;
+    const view = wrap(<CeligoFlowPage />);
+    fireEvent.mouseDown(screen.getByRole("tab", { name: /Scripts/ }));
+    return view;
+  }
+
+  it("item 25: go.script carries the clicked attachment's json_path", () => {
+    openScriptsTabFor("s1");
+    fireEvent.click(screen.getByText("Open source →"));
+    expect(routeMocks.go.script).toHaveBeenCalledWith("s-presave", { jsonPath: "path" });
+  });
+
+  it("item 24: closing the drawer returns focus to the button that opened it", async () => {
+    // `returnFocusTo` was never supplied by the page, so Radix had nothing to
+    // restore to and focus fell to <body> — a keyboard reader who opened a
+    // script from deep in the inspector restarted at the top of the page.
+    //
+    // Real timers for this one test: Radix moves focus from its own async
+    // open/close lifecycle, and `waitFor` under this file's frozen clock
+    // would sit on a timer nothing advances. No assertion here reads a
+    // relative time, so the wall clock is free to run.
+    vi.useRealTimers();
+    const { rerender } = openScriptsTabFor("s1");
+    const opener = screen.getByText("Open source →");
+    fireEvent.click(opener);
+
+    // The URL now carries the script; re-render the SAME page instance so the
+    // opener it recorded on the click survives.
+    routeMocks.scriptId = "s-presave";
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    rerender(
+      <QueryClientProvider client={qc}>
+        <CeligoFlowPage />
+      </QueryClientProvider>,
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: /close/i })).toHaveFocus());
+
+    routeMocks.scriptId = null;
+    rerender(
+      <QueryClientProvider client={qc}>
+        <CeligoFlowPage />
+      </QueryClientProvider>,
+    );
+    await waitFor(() => expect(opener).toHaveFocus());
+  });
+});
+
 describe("CeligoFlowPage — the header counts routers the STEPS name too (item 14)", () => {
   it("counts an undeclared router, and its branch, in the facts strip", () => {
     // `detail.routers` is what Celigo DECLARED. A step can name a router the
@@ -872,6 +927,18 @@ describe("CeligoFlowPage — the header counts routers the STEPS name too (item 
   it("still reports the declared shape when every router is declared", () => {
     const { container } = wrap(<CeligoFlowPage />);
     expect(container.textContent).toContain("10 steps · 2 routers · 3 branches · 3 lookups");
+  });
+
+  it("draws exactly one bubble per step — the header count and the picture agree", () => {
+    // The header states a step count and the canvas draws the steps; a
+    // duplicated node would make the two disagree while both looked right in
+    // isolation. React also renders two children sharing a key as ONE, so a
+    // duplicate hides itself in the DOM — this counts by step id instead.
+    const { container } = wrap(<CeligoFlowPage />);
+    const bubbles = Array.from(container.querySelectorAll('[data-testid^="step-bubble-"]'));
+    const ids = bubbles.map((b) => b.getAttribute("data-testid"));
+    expect(new Set(ids).size, `duplicate bubbles: ${JSON.stringify(ids)}`).toBe(ids.length);
+    expect(bubbles).toHaveLength(STEPS.length);
   });
 });
 

@@ -28,6 +28,14 @@ export type CeligoRoute = {
   flowId: string | null;
   stepId: string | null;
   scriptId: string | null;
+  /** WHICH attachment site of `scriptId` is open, as the attachment's own
+   * `json_path`. One script is routinely wired in at several sites on the
+   * same step (a preMap and a postMap, or two clones of one family), and the
+   * step id alone cannot tell them apart — so the drawer named whichever site
+   * the backend returned first. On the URL, so a pasted link reopens the same
+   * one. `null` when no site was named (an older link, or a caller that has
+   * only the script). */
+  scriptSite: string | null;
 };
 
 const VALID_VIEWS: readonly CeligoView[] = ["tiles", "list"];
@@ -52,13 +60,14 @@ export function readCeligoRoute(params: URLSearchParams): CeligoRoute {
     flowId: params.get("flow"),
     stepId: params.get("step"),
     scriptId: params.get("script"),
+    scriptSite: params.get("site"),
   };
 }
 
 // Fixed serialization order, independent of the order params happened to
 // arrive in — so two calls that set the same fields always produce byte-
 // identical URLs (stable history entries, stable test assertions).
-const CELIGO_KEYS = ["surface", "view", "integration", "tab", "flow", "step", "script"] as const;
+const CELIGO_KEYS = ["surface", "view", "integration", "tab", "flow", "step", "script", "site"] as const;
 type CeligoKey = (typeof CELIGO_KEYS)[number];
 const CELIGO_KEY_SET: ReadonlySet<string> = new Set(CELIGO_KEYS);
 
@@ -118,7 +127,12 @@ export function useCeligoRoute(): CeligoRoute & {
      * the flow is known to belong to the page already on screen. */
     flow(id: string, integrationId?: string | null): void;
     step(stepId: string | null): void;
-    script(scriptId: string | null): void;
+    /** `site` is the clicked attachment's own `json_path` — WHICH of a
+     * script's several attachment sites is open (see `CeligoRoute.scriptSite`).
+     * `stepId` overrides the step already on the URL for the rare caller that
+     * knows better; every caller today omits it. Both are dropped when
+     * `scriptId` is null: closing the drawer clears the whole selection. */
+    script(scriptId: string | null, site?: { stepId?: string | null; jsonPath?: string | null }): void;
   };
 } {
   const router = useRouter();
@@ -176,10 +190,22 @@ export function useCeligoRoute(): CeligoRoute & {
           ...(route.flowId ? { flow: route.flowId } : {}),
           ...(route.stepId ? { step: route.stepId } : {}),
           ...(route.scriptId ? { script: route.scriptId } : {}),
+          ...(route.scriptId && route.scriptSite ? { site: route.scriptSite } : {}),
         }),
       );
     },
-    [searchParams, pathname, router, route.view, route.tab, route.integrationId, route.flowId, route.stepId, route.scriptId],
+    [
+      searchParams,
+      pathname,
+      router,
+      route.view,
+      route.tab,
+      route.integrationId,
+      route.flowId,
+      route.stepId,
+      route.scriptId,
+      route.scriptSite,
+    ],
   );
 
   const tab = useCallback((next: CeligoTab) => replaceSelection({ tab: next }), [replaceSelection]);
@@ -221,15 +247,20 @@ export function useCeligoRoute(): CeligoRoute & {
   );
 
   const script = useCallback(
-    (scriptId: string | null) => {
+    (scriptId: string | null, site?: { stepId?: string | null; jsonPath?: string | null }) => {
       const other = otherParams(searchParams, []);
+      const stepId = site?.stepId !== undefined ? site.stepId : route.stepId;
       router.replace(
         buildUrl(pathname, other, {
           surface: "celigo",
           ...(route.integrationId ? { integration: route.integrationId } : {}),
           ...(route.flowId ? { flow: route.flowId } : {}),
-          ...(route.stepId ? { step: route.stepId } : {}),
+          ...(stepId ? { step: stepId } : {}),
           ...(scriptId ? { script: scriptId } : {}),
+          // The site only means anything alongside a script, so closing the
+          // drawer (`scriptId: null`) drops it rather than stranding a `site`
+          // that names nothing.
+          ...(scriptId && site?.jsonPath ? { site: site.jsonPath } : {}),
         }),
       );
     },

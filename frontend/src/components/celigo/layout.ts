@@ -310,9 +310,17 @@ export function computeLayout(detail: Pick<CeligoFlowDetail, "steps" | "routers"
     orderWarnedRouterIds.add(routerId);
     warnings.push(WARN_ROUTER_ORDER_UNVERIFIED);
   };
-  const sources = detail.steps.filter((s) => s.role === "generator").sort(bySequence);
-  const topChain = detail.steps.filter((s) => s.role === "processor" && s.router_id === null).sort(bySequence);
+  // The three buckets must PARTITION the steps: every step in exactly one,
+  // or a step lands in two and gets two nodes with the same id. `sources`
+  // used to select on `role` alone while `routerSteps` selected on
+  // `router_id`, so a generator that also named a router was drawn twice —
+  // and React renders two children sharing a key as one, which hides the
+  // duplicate in the DOM while the canvas draws a bubble in a lane it does
+  // not belong to. Router placement is the more specific fact, so it wins.
   const routerSteps = detail.steps.filter((s) => s.router_id !== null);
+  const topLevel = detail.steps.filter((s) => s.router_id === null);
+  const sources = topLevel.filter((s) => s.role === "generator").sort(bySequence);
+  const topChain = topLevel.filter((s) => s.role !== "generator").sort(bySequence);
 
   const combined = buildRouterList(detail.routers, routerSteps, warnings, warnRouterOrder);
   const visitedIds = new Set<string>();

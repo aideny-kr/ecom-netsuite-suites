@@ -166,12 +166,21 @@ function UntrustedContentBanner() {
 export function CeligoScriptViewerBody({
   script,
   currentStepId,
+  currentJsonPath,
 }: {
   script: CeligoScript;
   currentStepId?: string | null;
+  /** The `json_path` of the attachment site the reader actually clicked.
+   * `currentStepId` cannot resolve two sites of the same script on the SAME
+   * step — a transform and a hook, or two clones of one family — so the
+   * header named whichever site came back first. This wins over the step id
+   * when both are given; an unrecognised path (an old link, a site that has
+   * since moved) falls through to the step, then to the first site. */
+  currentJsonPath?: string | null;
 }): JSX.Element {
   const copyGroups = groupSitesByCopy(script.used_by);
   const currentSite =
+    (currentJsonPath ? script.used_by.find((s) => s.json_path === currentJsonPath) : undefined) ??
     (currentStepId ? script.used_by.find((s) => s.flow_step_id === currentStepId) : undefined) ??
     script.used_by[0];
   const shownSites =

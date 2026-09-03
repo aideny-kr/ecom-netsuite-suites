@@ -125,6 +125,14 @@ export function CeligoFlowPage(): JSX.Element {
   const [navCollapsed, setNavCollapsed] = useState(true);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("facts");
 
+  // The element that opened the script drawer, so Radix can hand focus back
+  // when it closes. Nothing else can supply it: the drawer is mounted here,
+  // the button lives inside the inspector, and only the CLICK knows which of
+  // several "Open source →" buttons it was. Without it Radix restored to
+  // nothing and focus fell to <body> — a keyboard reader who opened a script
+  // from deep in the inspector restarted at the top of the page.
+  const scriptOpenerRef = useRef<HTMLElement | null>(null);
+
   // The navigator starts collapsed as a rail (mockup: "Navigator rail ·
   // ⌘B expands"). `navCollapsed` is the source of truth for what
   // `CeligoFlowNavigator` renders; the imperative calls below additionally
@@ -326,7 +334,14 @@ export function CeligoFlowPage(): JSX.Element {
                 tab={inspectorTab}
                 onTabChange={setInspectorTab}
                 lastSyncedAt={lastSyncedAt}
-                onOpenScript={(scriptId) => route.go.script(scriptId)}
+                onOpenScript={(scriptId, opener, jsonPath) => {
+                  scriptOpenerRef.current = opener;
+                  // The clicked SITE travels on the URL, so the drawer names
+                  // the attachment the reader opened rather than whichever
+                  // one the backend returned first — and a pasted link
+                  // reopens that same site.
+                  route.go.script(scriptId, { jsonPath });
+                }}
               />
             </Panel>
           </PanelGroup>
@@ -369,6 +384,8 @@ export function CeligoFlowPage(): JSX.Element {
       <CeligoScriptDrawer
         scriptId={route.scriptId}
         currentStepId={route.stepId}
+        currentJsonPath={route.scriptSite}
+        returnFocusTo={scriptOpenerRef}
         onClose={() => route.go.script(null)}
       />
     </div>

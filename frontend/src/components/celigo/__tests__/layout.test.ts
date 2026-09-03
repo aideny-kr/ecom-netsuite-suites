@@ -104,6 +104,31 @@ describe("computeLayout — deterministic layered layout (pure)", () => {
     expect(layout.edges.filter((e) => e.to === "router:r").map((e) => e.from).sort()).toEqual(["src1", "src2"]);
   });
 
+  it("(b4) a step is laid out exactly ONCE, even if it is a generator that also names a router", () => {
+    // The three buckets — sources, top-level chain, router steps — were not
+    // disjoint: `sources` selected on `role` alone while `routerSteps`
+    // selected on `router_id`, so a step that is both landed in each and got
+    // TWO nodes with the same id. React renders two children sharing a key as
+    // one, so the duplicate hid itself in the DOM while the canvas drew a
+    // bubble in a lane it does not belong to and the edges from it went
+    // nowhere sensible. Real syncs put generators outside routers, but a
+    // layout that depends on that is one bad row away from a silent mess.
+    const layout = computeLayout(
+      mk(
+        [
+          step({ id: "src", celigo_id: "c0", role: "generator", sequence: 0 }),
+          step({ id: "odd", celigo_id: "c1", role: "generator", router_id: "r", branch_id: "b1", sequence: 1 }),
+        ],
+        [routerDef({ id: "r", branches: [branch({ id: "b1", order: 0 })] })],
+      ),
+    );
+    const ids = layout.nodes.map((n) => n.id);
+    expect(new Set(ids).size, `duplicate node ids: ${JSON.stringify(ids)}`).toBe(ids.length);
+    expect(layout.nodes.filter((n) => n.id === "odd")).toHaveLength(1);
+    // Its router placement wins: that is the more specific fact Celigo gave.
+    expect(layout.nodes.find((n) => n.id === "odd")).toMatchObject({ routerId: "r", branchId: "b1" });
+  });
+
   it("(c) a top-level chain of 3 processor steps: x strictly increasing, 2 edges", () => {
     const layout = computeLayout(
       mk([
