@@ -68,9 +68,10 @@ import { ChangesetPanel } from "@/components/workspace/changeset-panel";
 import { RunsPanel } from "@/components/workspace/runs-panel";
 import { ImportDialog } from "@/components/workspace/import-dialog";
 import { WorkspaceChatPanel } from "@/components/workspace/workspace-chat-panel";
-import { CeligoFlowMap } from "@/components/settings/celigo-flow-map";
 import { useFeature } from "@/hooks/use-features";
-import { CeligoSurfaceToggle, type WorkspaceSurface } from "./surface-toggle";
+import { CeligoSurfaceToggle } from "./surface-toggle";
+import { useCeligoRoute } from "@/components/celigo/celigo-route";
+import { CeligoSurface } from "@/components/celigo/celigo-surface";
 import {
   useWorkspaces,
   useCreateWorkspace,
@@ -319,8 +320,14 @@ export default function WorkspacePage() {
   // integrators and can never be edited or deployed from here. Rendering the
   // Celigo surface INSTEAD OF the panel group -- not alongside it -- means those
   // affordances are not merely hidden, they are never mounted.
-  const [surface, setSurface] = useState<WorkspaceSurface>("files");
   const showCeligo = useFeature("celigo");
+  const route = useCeligoRoute();
+  // The flag gates the surface twice on purpose: `CeligoSurfaceToggle` (below)
+  // already returns null when disabled, but a stale `?surface=celigo` link
+  // bookmarked before the flag was off must not resurrect the surface either
+  // -- so `surface` itself falls back to "files" whenever the flag is off,
+  // independent of what the URL says.
+  const surface = showCeligo ? route.surface : "files";
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null);
   const [selectedFilePath, setSelectedFilePath] = useState<string>("");
   const [searchQuery, setSearchQuery] = useState("");
@@ -418,6 +425,12 @@ export default function WorkspacePage() {
 
   // Deep-link support
   useEffect(() => {
+    // The Celigo surface has its own URL params and its own deep-link
+    // handling (`useCeligoRoute`) -- this effect is Files-only, so it must
+    // not read `file`/`workspace` while Celigo params are the ones on the
+    // URL (they are never both present at once; see `page.tsx`'s `surface`
+    // exclusivity comment).
+    if (route.surface === "celigo") return;
     const fileParam = searchParams.get("file");
     const workspaceParam = searchParams.get("workspace");
     if (!fileParam) return;
@@ -438,7 +451,7 @@ export default function WorkspacePage() {
         setViewingDiffId(null);
       }
     }
-  }, [searchParams, fileTree, workspaces, selectedWorkspaceId, findFileInTree]);
+  }, [route.surface, searchParams, fileTree, workspaces, selectedWorkspaceId, findFileInTree]);
 
   useEffect(() => {
     setIsMounted(true);
@@ -511,6 +524,22 @@ export default function WorkspacePage() {
     function handleKeyDown(e: KeyboardEvent) {
       const isMod = e.metaKey || e.ctrlKey;
 
+      // On the Celigo surface, ⌘K/⌘B belong to that surface's own palette
+      // and nav rail (Tasks 11/14) -- they must never reach for
+      // `searchInputRef`/`fileTreeRef`, which the Celigo surface doesn't
+      // mount at all.
+      if (surface === "celigo") {
+        if (isMod && e.key === "k") {
+          e.preventDefault();
+          window.dispatchEvent(new CustomEvent("celigo:command-k"));
+        }
+        if (isMod && e.key === "b") {
+          e.preventDefault();
+          window.dispatchEvent(new CustomEvent("celigo:toggle-nav"));
+        }
+        return;
+      }
+
       // Cmd+K — Focus search
       if (isMod && e.key === "k") {
         e.preventDefault();
@@ -545,7 +574,7 @@ export default function WorkspacePage() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [fileTreeCollapsed, searchFocused, activeTabId, closeTab]);
+  }, [surface, fileTreeCollapsed, searchFocused, activeTabId, closeTab]);
 
   const handleMentionClick = useCallback(
     (filePath: string) => {
@@ -576,7 +605,11 @@ export default function WorkspacePage() {
             onSelect={handleWorkspaceSwitch}
           />
 
-          <CeligoSurfaceToggle surface={surface} onChange={setSurface} enabled={showCeligo} />
+          <CeligoSurfaceToggle
+            surface={surface}
+            onChange={(next) => (next === "celigo" ? route.go.integrations() : route.go.files())}
+            enabled={showCeligo}
+          />
 
           <Dialog open={createOpen} onOpenChange={setCreateOpen}>
             <DialogTrigger asChild>
@@ -772,8 +805,8 @@ export default function WorkspacePage() {
              tree, changesets, diff viewer and Deploy button -- is not rendered
              at all in this branch, so no Celigo content can reach an
              edit-or-deploy affordance by any path. */
-          <div className="flex-1 overflow-auto p-4">
-            <CeligoFlowMap />
+          <div className="flex-1 min-h-0 flex flex-col" data-testid="celigo-surface-host">
+            <CeligoSurface />
           </div>
         ) : isMounted ? (
           <PanelGroup id="layout-final-v19" orientation="horizontal" className="flex w-full h-full overflow-hidden">

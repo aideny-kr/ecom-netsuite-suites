@@ -11,32 +11,92 @@
  * tree -- hidden by a class, reachable by a keyboard user, and one refactor away
  * from being visible. Asserting "not visible" would not catch that. These tests
  * assert the deploy affordances are NOT MOUNTED AT ALL.
+ *
+ * Task 9 adds: the surface itself is now URL-driven (`?surface=celigo`) rather
+ * than component `useState`, so a second pair of tests below renders the whole
+ * `WorkspacePage` and checks the real switch — flag-on + the URL param mounts
+ * `CeligoSurface`; flag-off ignores the URL param and stays on Files.
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
-const mockUseFeature = vi.fn();
-vi.mock("@/hooks/use-features", () => ({
-  useFeature: (name: string) => mockUseFeature(name),
-}));
-
-// The flow map has its own dedicated suite; here it only needs to be locatable.
-vi.mock("@/components/settings/celigo-flow-map", () => ({
-  CeligoFlowMap: () => <div data-testid="celigo-flow-map">flow map</div>,
-}));
-
+const nav = vi.hoisted(() => ({ push: vi.fn(), replace: vi.fn(), params: new URLSearchParams() }));
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
-  useSearchParams: () => new URLSearchParams(),
+  useRouter: () => ({ push: nav.push, replace: nav.replace }),
+  useSearchParams: () => nav.params,
+  usePathname: () => "/workspace",
 }));
+
+const features = vi.hoisted(() => vi.fn());
+vi.mock("@/hooks/use-features", () => ({
+  useFeature: () => features(),
+}));
+
+// The Celigo surface has its own dedicated test suite (Tasks 10/12/14 as they
+// land); here it only needs to be locatable, so the page tests below don't
+// also depend on whatever it renders internally.
+vi.mock("@/components/celigo/celigo-surface", () => ({
+  CeligoSurface: () => <div data-testid="celigo-surface" />,
+}));
+
+// Every hook `page.tsx` calls at module scope, mocked to the minimal shape
+// the page destructures — none of these tests select a workspace, so no
+// hook's data ever needs to be more than empty/undefined.
+vi.mock("@/hooks/use-workspace", () => ({
+  useWorkspaces: () => ({ data: [] }),
+  useCreateWorkspace: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useWorkspaceFiles: () => ({ data: [] }),
+  useFileContent: () => ({ data: undefined }),
+  useSearchFiles: () => ({ data: undefined }),
+}));
+vi.mock("@/hooks/use-changesets", () => ({
+  useChangesets: () => ({ data: [] }),
+  useChangesetDiff: () => ({ data: undefined }),
+}));
+vi.mock("@/hooks/use-runs", () => ({
+  useRuns: () => ({ data: [] }),
+}));
+vi.mock("@/hooks/use-ai-settings", () => ({
+  useAiSettings: () => ({ data: undefined }),
+}));
+vi.mock("@/hooks/use-connections", () => ({
+  useConnections: () => ({ data: [] }),
+}));
+vi.mock("@/hooks/use-mcp-connectors", () => ({
+  useMcpConnectors: () => ({ data: [] }),
+}));
+vi.mock("@/hooks/use-suitescript-sync", () => ({
+  useSuiteScriptSyncStatus: () => ({ data: undefined }),
+  useTriggerSuiteScriptSync: () => ({ mutate: vi.fn(), isPending: false }),
+}));
+vi.mock("@/hooks/use-netsuite-api-logs", () => ({
+  useNetSuiteApiLogs: () => ({ data: [] }),
+}));
+vi.mock("@/hooks/use-netsuite-file-ops", () => ({
+  usePullFile: () => ({ mutate: vi.fn(), isPending: false }),
+  usePushFile: () => ({ mutate: vi.fn(), isPending: false }),
+}));
+vi.mock("@/hooks/use-mock-data", () => ({
+  useMockData: () => ({ mutateAsync: vi.fn(), isPending: false, data: undefined, error: null }),
+}));
+
+import WorkspacePage from "../page";
+
+function wrap(ui: React.ReactElement) {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return <QueryClientProvider client={qc}>{ui}</QueryClientProvider>;
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  nav.push.mockReset();
+  nav.replace.mockReset();
+  nav.params = new URLSearchParams();
+});
 
 describe("workspace surfaces", () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    mockUseFeature.mockImplementation((name: string) => name === "celigo");
-  });
-
   it("exposes a Celigo flows surface only when the feature flag is on", async () => {
     const { CeligoSurfaceToggle } = await import("../surface-toggle");
     const { rerender } = render(
@@ -69,5 +129,21 @@ describe("workspace surfaces", () => {
     expect(screen.getByRole("button", { name: /^files$/i }).getAttribute("aria-pressed")).toBe(
       "false",
     );
+  });
+
+  it("with the flag on and ?surface=celigo the Celigo surface is mounted and no deploy affordance is in the tree", async () => {
+    nav.params = new URLSearchParams("surface=celigo");
+    features.mockReturnValue(true);
+    render(wrap(<WorkspacePage />));
+    expect(await screen.findByTestId("celigo-surface")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /deploy/i })).toBeNull();
+    expect(screen.queryByText(/changeset/i)).toBeNull();
+  });
+
+  it("with the flag off ?surface=celigo renders Files", () => {
+    nav.params = new URLSearchParams("surface=celigo");
+    features.mockReturnValue(false);
+    render(wrap(<WorkspacePage />));
+    expect(screen.queryByTestId("celigo-surface")).toBeNull();
   });
 });
