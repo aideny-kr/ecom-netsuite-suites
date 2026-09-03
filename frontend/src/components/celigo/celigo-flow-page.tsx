@@ -222,7 +222,20 @@ export function CeligoFlowPage(): JSX.Element {
         />
         <div className="flex-1 min-h-0">
           <PanelGroup id="celigo-flow-v1" orientation="horizontal" className="flex h-full w-full">
-            <Panel id="celigo-flow-nav" panelRef={navRef} defaultSize={16} minSize={12} collapsible collapsedSize={4}>
+            {/* Sizes are PERCENTAGE STRINGS, never bare numbers:
+                `react-resizable-panels` 4.6.4 parses a number as PIXELS
+                (its size parser is `case "number": return [e, "px"]`) and
+                only a "%"-suffixed string as a fraction of the group. As
+                numbers these read as a 16px navigator and a 24px inspector
+                — invisible slivers — instead of the 16%/24% intended. */}
+            <Panel
+              id="celigo-flow-nav"
+              panelRef={navRef}
+              defaultSize="16%"
+              minSize="12%"
+              collapsible
+              collapsedSize="4%"
+            >
               <CeligoFlowNavigator
                 flows={siblings}
                 currentFlowId={d.id}
@@ -260,7 +273,7 @@ export function CeligoFlowPage(): JSX.Element {
               </div>
             </Panel>
             <PanelResizeHandle className="w-px bg-border" />
-            <Panel id="celigo-flow-inspector" defaultSize={24} minSize={20}>
+            <Panel id="celigo-flow-inspector" defaultSize="24%" minSize="20%">
               <CeligoStepInspector
                 detail={d}
                 step={selectedStep}

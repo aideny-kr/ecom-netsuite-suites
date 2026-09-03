@@ -73,6 +73,26 @@ vi.mock("../celigo-route", () => ({
   }),
 }));
 
+// Panel sizing (gate fix wave, item 1): `react-resizable-panels` 4.6.4 reads
+// a bare NUMBER as PIXELS and only a "%"-suffixed STRING as a percentage --
+// its own size parser is `case "number": return [e, "px"]`
+// (`dist/react-resizable-panels.js`). This spy records the props the REAL
+// `Panel` is called with and then renders that real component, so every other
+// test in this file still exercises the library itself rather than a stub.
+const panelSpy = vi.hoisted(() => ({ props: [] as Record<string, unknown>[] }));
+
+vi.mock("react-resizable-panels", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("react-resizable-panels")>();
+  const Actual = actual.Panel;
+  return {
+    ...actual,
+    Panel: (props: Parameters<typeof Actual>[0]) => {
+      panelSpy.props.push(props as unknown as Record<string, unknown>);
+      return <Actual {...props} />;
+    },
+  };
+});
+
 import { CeligoFlowPage } from "../celigo-flow-page";
 import { setCeligoPaletteOpen } from "../palette-open-state";
 
@@ -640,5 +660,34 @@ describe("CeligoFlowPage — inspector resting state", () => {
 
     const inspector = screen.getByTestId("celigo-step-inspector-stub");
     expect(inspector).toHaveTextContent("no step selected");
+  });
+});
+
+describe("CeligoFlowPage — panel sizing", () => {
+  // Gate fix wave, item 1. `defaultSize={16}` asked the library for a
+  // 16-PIXEL navigator and `defaultSize={24}` for a 24-PIXEL inspector --
+  // invisible slivers -- rather than the 16%/24% of the group the layout
+  // intends. Only a "%"-suffixed string means a percentage; see the
+  // `vi.mock` at the top of this file for the parser this pins.
+  it("sizes every panel as a percentage string; a bare number would mean PIXELS", () => {
+    panelSpy.props.length = 0;
+    wrap(<CeligoFlowPage />);
+
+    const sizeKeys = ["defaultSize", "minSize", "maxSize", "collapsedSize"] as const;
+    const sized = panelSpy.props.filter((p) => sizeKeys.some((k) => p[k] !== undefined));
+    expect(sized.length).toBeGreaterThan(0);
+
+    for (const props of sized) {
+      for (const key of sizeKeys) {
+        const value = props[key];
+        if (value === undefined) continue;
+        // Compared as a string so a failure names the panel, the prop and
+        // the offending value rather than just "expected string, got number".
+        expect(`${String(props.id)}.${key}=${String(value)} is ${typeof value}`).toBe(
+          `${String(props.id)}.${key}=${String(value)} is string`,
+        );
+        expect(String(value)).toMatch(/%$/);
+      }
+    }
   });
 });
