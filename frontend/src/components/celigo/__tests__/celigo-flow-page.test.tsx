@@ -651,6 +651,44 @@ describe("CeligoFlowPage — script drawer", () => {
     expect(screen.getByRole("dialog")).toBeInTheDocument();
     expect(document.body.textContent).toContain("UNIQUE_SCRIPT_MARKER_FOR_LEAK_TEST");
   });
+
+  it("hands the drawer the selected step, so the header names the site you opened it from", () => {
+    // Gate fix wave, item 10: the drawer's `currentStepId` had no caller, so
+    // a script attached at several sites always announced the first one's
+    // hook regardless of which step the reader opened it from.
+    const site = {
+      flow_id: "flow-1",
+      flow_name: "Flow One",
+      integration_id: "int-1",
+      flow_step_id: "step-1",
+      flow_step_role: "processor",
+      flow_step_adaptor_type: "NetSuiteDistributedImport",
+      script_celigo_id: "scr-current",
+      json_path: "a….hooks.preSavePage",
+      function_name: "preSavePage",
+      site_type: "hook",
+    };
+    mocks.script.mockReturnValue(
+      resolved({
+        id: "script-x",
+        dedup_key: "dk-x",
+        name: "ns_sales_order_premap",
+        content: "// UNIQUE_SCRIPT_MARKER_FOR_LEAK_TEST",
+        content_hash: "hash-x",
+        copies_count: 1,
+        attachment_count: 2,
+        integration_count: 1,
+        content_diverged: false,
+        used_by: [site, { ...site, flow_step_id: "step-2", function_name: "preMap" }],
+      }),
+    );
+    routeMocks.scriptId = "script-x";
+    routeMocks.stepId = "step-2";
+    wrap(<CeligoFlowPage />);
+
+    expect(screen.getByText("HK preMap")).toBeInTheDocument();
+    expect(screen.queryByText("HK preSavePage")).not.toBeInTheDocument();
+  });
 });
 
 describe("CeligoFlowPage — inspector resting state", () => {

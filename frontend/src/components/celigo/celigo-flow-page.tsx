@@ -309,7 +309,11 @@ export function CeligoFlowPage(): JSX.Element {
           already does. Escape ORDERING ("drawer first, a second Escape then
           clears the step") is owned entirely by this file's own `keydown`
           listener above -- this file does not duplicate it. */}
-      <CeligoScriptDrawer scriptId={route.scriptId} onClose={() => route.go.script(null)} />
+      <CeligoScriptDrawer
+        scriptId={route.scriptId}
+        currentStepId={route.stepId}
+        onClose={() => route.go.script(null)}
+      />
     </div>
   );
 }

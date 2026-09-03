@@ -186,6 +186,33 @@ describe("CeligoScriptDrawer — loaded, as a right-panel drawer over the inspec
   });
 });
 
+describe("CeligoScriptDrawer — currentStepId", () => {
+  it("names the site of the step the drawer was opened FROM, not used_by[0]", () => {
+    // Gate fix wave, item 10. `CeligoScriptViewerBody` has always accepted
+    // `currentStepId` and falls back to `used_by[0]` without it -- but no
+    // caller ever passed one, so a script attached at several sites always
+    // announced the FIRST site's hook, whichever step you actually came from.
+    const first = { ...siteA, flow_step_id: "step-1", function_name: "preSavePage" };
+    const current = { ...siteA, flow_step_id: "step-42", function_name: "preMap" };
+    mocks.script.mockReturnValue(resolved({ ...SCRIPT, used_by: [first, current] }));
+
+    wrap(<CeligoScriptDrawer scriptId="scr-1" currentStepId="step-42" onClose={vi.fn()} />);
+
+    expect(screen.getByText("HK preMap")).toBeInTheDocument();
+    expect(screen.queryByText("HK preSavePage")).not.toBeInTheDocument();
+  });
+
+  it("still falls back to the first site when no step is selected", () => {
+    const first = { ...siteA, flow_step_id: "step-1", function_name: "preSavePage" };
+    const other = { ...siteA, flow_step_id: "step-42", function_name: "preMap" };
+    mocks.script.mockReturnValue(resolved({ ...SCRIPT, used_by: [first, other] }));
+
+    wrap(<CeligoScriptDrawer scriptId="scr-1" currentStepId={null} onClose={vi.fn()} />);
+
+    expect(screen.getByText("HK preSavePage")).toBeInTheDocument();
+  });
+});
+
 describe("CeligoScriptDrawer — Escape", () => {
   it("calls onClose on Escape (Radix Dialog's own default dismissal — no drawer-local keydown listener)", () => {
     mocks.script.mockReturnValue(resolved(SCRIPT));

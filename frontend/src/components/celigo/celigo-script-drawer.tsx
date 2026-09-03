@@ -52,10 +52,15 @@ export function CeligoScriptDrawer({
   scriptId,
   onClose,
   returnFocusTo,
+  currentStepId,
 }: {
   scriptId: string | null;
   onClose: () => void;
   returnFocusTo?: React.RefObject<HTMLElement>;
+  /** The step this drawer was opened FROM. One script can be attached at
+   * several sites; without this the body announces `used_by[0]`'s hook
+   * whichever step the reader actually came from. */
+  currentStepId?: string | null;
 }): JSX.Element {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
 
@@ -120,13 +125,11 @@ export function CeligoScriptDrawer({
             <DrawerSkeleton />
           ) : (
             <div className="pt-6">
-              {/* No `currentStepId` -- that prop is not part of this
-                  component's own interface (see the task brief's Produces
-                  list: `CeligoScriptDrawer({ scriptId, onClose,
-                  returnFocusTo? })`, no step id). `CeligoScriptViewerBody`
-                  falls back to the first `used_by` entry, exactly its
-                  pre-Task-17 default. */}
-              <CeligoScriptViewerBody script={script} />
+              {/* The selected step, passed straight through: the body picks
+                  out that step's own `used_by` site so the header names the
+                  hook the reader actually opened, and still falls back to
+                  `used_by[0]` when nothing is selected. */}
+              <CeligoScriptViewerBody script={script} currentStepId={currentStepId} />
             </div>
           )}
         </DialogPrimitive.Content>
