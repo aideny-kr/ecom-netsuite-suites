@@ -40,6 +40,7 @@ import { CeligoFlowNavigator } from "./celigo-flow-navigator";
 import { CeligoFlowCanvas } from "./celigo-flow-canvas";
 import { CeligoStepInspector, type InspectorTab } from "./celigo-step-inspector";
 import { CeligoScriptDrawer } from "./celigo-script-drawer";
+import { isCeligoPaletteOpen } from "./palette-open-state";
 
 const NO_FLOWS: CeligoFlowSummary[] = [];
 
@@ -139,6 +140,11 @@ export function CeligoFlowPage(): JSX.Element {
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (e.key !== "Escape") return;
+      // The ⌘K palette is dismissed by Radix from a document-level CAPTURE
+      // listener that does not stop the event, so this window listener runs on
+      // the same keypress. Without this guard, dismissing the palette also
+      // cleared the step selected on the page behind it (finding I5).
+      if (isCeligoPaletteOpen()) return;
       if (route.scriptId) {
         route.go.script(null);
         return;

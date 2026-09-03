@@ -33,6 +33,7 @@ import {
 import { queryState } from "@/lib/query-state";
 import { stallState, type StallState } from "./schedule";
 import { useCeligoRoute } from "./celigo-route";
+import { setCeligoPaletteOpen } from "./palette-open-state";
 import { cn } from "@/lib/utils";
 
 /** Every dot the palette can show groups into one of three tones — the same
@@ -98,6 +99,16 @@ export function CeligoCommandPalette(): JSX.Element {
     window.addEventListener("celigo:command-k", onCommandK);
     return () => window.removeEventListener("celigo:command-k", onCommandK);
   }, []);
+
+  // Publish "the palette is up" for the flow page's own Escape handler, which
+  // would otherwise clear the selected step behind this dialog on the very
+  // keypress that dismisses it (finding I5 -- see `palette-open-state.ts`).
+  // The cleanup also covers an unmount while open, so the flag can never be
+  // stranded set with no dialog on screen.
+  useEffect(() => {
+    setCeligoPaletteOpen(open);
+    return () => setCeligoPaletteOpen(false);
+  }, [open]);
 
   const integrationsState = queryState(integrationsQuery);
   const syncStatusState = queryState(syncStatusQuery);

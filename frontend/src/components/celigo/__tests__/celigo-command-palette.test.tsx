@@ -54,6 +54,7 @@ vi.mock("../celigo-route", () => ({
 }));
 
 import { CeligoCommandPalette } from "../celigo-command-palette";
+import { isCeligoPaletteOpen } from "../palette-open-state";
 
 function wrap(ui: React.ReactElement) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -199,6 +200,31 @@ describe("CeligoCommandPalette", () => {
 
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("publishes its open state so the flow page's own Escape handler can stand down", () => {
+    // Final-review finding I5. Radix closes this dialog from a document-level
+    // CAPTURE listener and does not stop the event, so the flow page's window
+    // listener saw the same Escape and cleared the selected step behind the
+    // palette. The page reads this flag; the palette is its only writer.
+    mocks.integrations.mockReturnValue(resolved([makeIntegration()]));
+    const { unmount } = wrap(<CeligoCommandPalette />);
+    expect(isCeligoPaletteOpen()).toBe(false);
+
+    openPalette();
+    expect(isCeligoPaletteOpen()).toBe(true);
+
+    act(() => {
+      fireEvent.keyDown(document, { key: "Escape" });
+    });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(isCeligoPaletteOpen()).toBe(false);
+
+    // ...and an unmount while open never strands the flag set.
+    openPalette();
+    expect(isCeligoPaletteOpen()).toBe(true);
+    unmount();
+    expect(isCeligoPaletteOpen()).toBe(false);
   });
 
   it("case 5: duplicate flow names across different integrations navigate to the arrowed-to row, not whichever duplicate is first in the DOM", () => {

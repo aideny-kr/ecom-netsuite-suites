@@ -74,6 +74,7 @@ vi.mock("../celigo-route", () => ({
 }));
 
 import { CeligoFlowPage } from "../celigo-flow-page";
+import { setCeligoPaletteOpen } from "../palette-open-state";
 
 function wrap(ui: React.ReactElement) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -580,6 +581,31 @@ describe("CeligoFlowPage — keyboard", () => {
     expect(routeMocks.go.script.mock.invocationCallOrder[0]).toBeLessThan(
       routeMocks.go.step.mock.invocationCallOrder[0],
     );
+  });
+
+  it("Escape while the command palette is open clears nothing on the page behind it", () => {
+    // Final-review finding I5. Radix dismisses the ⌘K palette from a
+    // document-level CAPTURE listener without stopping the event, so this
+    // page's own window listener fired on the SAME keypress and cleared the
+    // selected step behind the dialog -- one Escape, two dismissals. The
+    // palette publishes its open state (`palette-open-state.ts`) and this
+    // handler stands down while it is up.
+    routeMocks.stepId = "s5";
+    routeMocks.scriptId = "script-x";
+    wrap(<CeligoFlowPage />);
+
+    setCeligoPaletteOpen(true);
+    try {
+      fireEvent.keyDown(window, { key: "Escape" });
+      expect(routeMocks.go.script).not.toHaveBeenCalled();
+      expect(routeMocks.go.step).not.toHaveBeenCalled();
+    } finally {
+      setCeligoPaletteOpen(false);
+    }
+
+    // With the palette gone, the same keypress works as before.
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(routeMocks.go.script).toHaveBeenCalledWith(null);
   });
 });
 
