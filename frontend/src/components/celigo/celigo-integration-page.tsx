@@ -140,6 +140,28 @@ function headerWritesLine(writes: CeligoRecordWrite[]): string {
   return `writes ${parts.join(" · ")}`;
 }
 
+/** "26 Feb" / "2 Sep" — a short absolute date, no year, matching the
+ * mockup's "Last updated" column exactly. Deliberately NOT
+ * `formatRelativeTime`: that function needs a `now` to measure against, and
+ * this column had been calling it with no second argument at all — which
+ * both defaulted silently to the real wall clock (breaking this page's own
+ * "every timestamp is relative to the sync, never `Date.now()`" invariant)
+ * and rendered as a long string ("17 months ago") where the mockup shows a
+ * short absolute date. An absolute date has no "now" to get wrong in the
+ * first place, so this column can never drift onto either clock. `null` (no
+ * modification recorded) is "—", matching every other empty-timestamp cell
+ * on this page. Reads UTC fields (`getUTCDate`/`getUTCMonth`) so the date
+ * shown doesn't depend on the viewer's — or the test runner's — local
+ * timezone. */
+function formatShortDate(iso: string | null): string {
+  if (!iso) return "—";
+  const ms = Date.parse(iso);
+  if (Number.isNaN(ms)) return "—";
+  const d = new Date(ms);
+  const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`;
+}
+
 /** `old_value`/`new_value` are opaque JSON (`CeligoJson`) — a config change
  * can touch a string field, a boolean, or a whole object. Rendered as
  * literal text: primitives as themselves, `null` as "—" (a value that was
@@ -220,10 +242,13 @@ function ScriptsCell({ flow }: { flow: Pick<CeligoFlowSummary, "script_count" | 
 
 /** Errors column — "0" (a green pill when the flow is live, a bare dash
  * when it's paused: nothing is being checked for a flow Celigo isn't
- * running) or a clickable "{signature_count} root cause{s} ·
- * {error_count}" that opens the per-step drawer. `signature_count` leads —
- * the actionable number — with the raw count trailing it, same "root cause
- * leads" doctrine as the flow page's own error state (mockup screen 5). */
+ * running) or a clickable "{error_count} open · {signature_count} root
+ * cause{s}" that opens the per-step drawer. `error_count` leads, matching
+ * both the approved mockup's own copy ("10 open · 1 root cause", mockup
+ * lines 800/816) and `shared.tsx`'s already-shipped `ErrorPill` convention
+ * used elsewhere on this surface — this file previously reversed the
+ * order (root cause leading), which read as a cross-page inconsistency;
+ * fixed to match. */
 function ErrorsCell({
   flow,
   paused,
@@ -251,7 +276,7 @@ function ErrorsCell({
       className="inline-flex"
     >
       <Pill tone="crit" dot="solid">
-        {flow.signature_count} root cause{flow.signature_count === 1 ? "" : "s"} · {flow.error_count}
+        {flow.error_count} open · {flow.signature_count} root cause{flow.signature_count === 1 ? "" : "s"}
       </Pill>
     </button>
   );
@@ -301,7 +326,7 @@ function FlowRow({
         </div>
       </TableCell>
       <TableCell className="tabular-nums text-muted-foreground">
-        {formatRelativeTime(flow.celigo_last_modified)}
+        {formatShortDate(flow.celigo_last_modified)}
       </TableCell>
       <TableCell>
         <ErrorsCell flow={flow} paused={paused} onOpen={() => onOpenErrors(flow.id, flow.name)} />
@@ -428,7 +453,7 @@ function ErrorsTab({ flows, lastSyncedAt }: { flows: CeligoFlowSummary[]; lastSy
         <li key={f.id} className="flex items-center justify-between rounded-lg border px-2.5 py-1.5">
           <span>{f.name}</span>
           <Pill tone="crit" dot="solid">
-            {f.signature_count} root cause{f.signature_count === 1 ? "" : "s"} · {f.error_count}
+            {f.error_count} open · {f.signature_count} root cause{f.signature_count === 1 ? "" : "s"}
           </Pill>
         </li>
       ))}

@@ -358,6 +358,45 @@ describe("flows table — last run", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Last updated — a short absolute date (mockup: "26 Feb" / "2 Sep"), never
+// a long relative string, and never computed off the wall clock (there is
+// no "now" in an absolute date at all).
+// ---------------------------------------------------------------------------
+
+describe("flows table — last updated", () => {
+  it("shows a short absolute date ('D MMM'), not a relative string", () => {
+    setup([
+      makeFlow({ id: "f1", name: "Modified Flow", celigo_last_modified: "2026-09-01T00:00:00.000Z" }),
+    ]);
+    const row = screen.getByText("Modified Flow").closest("tr")!;
+    // Columns: Flow · Steps · Writes · Schedule · Last run · Last updated · Errors · Scripts · State
+    const lastUpdatedCell = within(row).getAllByRole("cell")[5];
+    // Real now is 2026-09-02T20:12Z and the sync completed 2026-09-02T18:12Z
+    // — a wall-clock OR sync-clock relative bug would both render some
+    // "N day(s) ago" string here; the fix renders an absolute date instead,
+    // so neither clock can leak in.
+    expect(lastUpdatedCell).toHaveTextContent("1 Sep");
+    expect(lastUpdatedCell).not.toHaveTextContent(/ago/);
+  });
+
+  it("matches the mockup's own example exactly: a modification over a year old still reads '26 Feb', no year", () => {
+    setup([
+      makeFlow({ id: "f1", name: "Old Flow", celigo_last_modified: "2025-02-26T10:00:00.000Z" }),
+    ]);
+    const row = screen.getByText("Old Flow").closest("tr")!;
+    expect(within(row).getByText("26 Feb")).toBeInTheDocument();
+  });
+
+  it("shows '—' when celigo_last_modified is null", () => {
+    setup([makeFlow({ id: "f1", name: "Never Modified Flow", celigo_last_modified: null })]);
+    const row = screen.getByText("Never Modified Flow").closest("tr")!;
+    const cells = within(row).getAllByRole("cell");
+    // Columns: Flow · Steps · Writes · Schedule · Last run · Last updated · Errors · Scripts · State
+    expect(cells[5]).toHaveTextContent("—");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Scripts + Errors cells, and the per-step errors drawer
 // ---------------------------------------------------------------------------
 
@@ -376,14 +415,14 @@ describe("flows table — scripts and errors cells", () => {
     expect(cells[7]).toHaveTextContent("0");
   });
 
-  it("leads with signature_count for a flow with open errors, else shows '0'", () => {
+  it("shows 'N open · M root cause(s)' for a flow with open errors, else shows '0' — error_count leads, matching the mockup and shared.tsx's ErrorPill convention", () => {
     setup([
       makeFlow({ id: "f1", name: "Errored Flow", error_count: 10, signature_count: 1 }),
       makeFlow({ id: "f2", name: "Clean Flow", error_count: 0 }),
     ]);
     const erroredRow = screen.getByText("Errored Flow").closest("tr")!;
     const cleanRow = screen.getByText("Clean Flow").closest("tr")!;
-    expect(within(erroredRow).getAllByRole("cell")[6]).toHaveTextContent("1 root cause · 10");
+    expect(within(erroredRow).getAllByRole("cell")[6]).toHaveTextContent("10 open · 1 root cause");
     expect(within(cleanRow).getAllByRole("cell")[6]).toHaveTextContent("0");
   });
 
@@ -409,7 +448,7 @@ describe("flows table — scripts and errors cells", () => {
       }),
     );
     setup([makeFlow({ id: "f1", name: "Errored Flow", error_count: 10, signature_count: 1 })]);
-    fireEvent.click(screen.getByText("1 root cause · 10"));
+    fireEvent.click(screen.getByText("10 open · 1 root cause"));
     const dialog = screen.getByRole("dialog", { name: "Flow: Errored Flow" });
     expect(within(dialog).getByText(/step-abc/)).toBeInTheDocument();
     expect(within(dialog).getByText(/10 errors/)).toBeInTheDocument();
@@ -506,12 +545,13 @@ describe("Errors tab", () => {
     routeMocks.tab = "errors";
   });
 
-  it("lists only the flows with open errors", () => {
+  it("lists only the flows with open errors, pill reading 'N open · M root cause(s)'", () => {
     setup([
       makeFlow({ id: "f1", name: "Errored Flow", error_count: 5, signature_count: 1 }),
       makeFlow({ id: "f2", name: "Clean Flow", error_count: 0 }),
     ]);
     expect(screen.getByText("Errored Flow")).toBeInTheDocument();
+    expect(screen.getByText("5 open · 1 root cause")).toBeInTheDocument();
     expect(screen.queryByText("Clean Flow")).not.toBeInTheDocument();
   });
 
