@@ -278,6 +278,39 @@ describe("CeligoFlowCanvas — bubbles, routers, lanes, edges", () => {
     expect(within(ghost).getByTestId("router-value")).toHaveTextContent("undeclared · 1 branch");
   });
 
+  // Codex fix wave, item 19 (ruling R19a). The layout collapses several
+  // id-less branches into ONE lane; the caption has to say so rather than
+  // print "Branch 1 · Unnamed · 0 rules", which reads as one specific branch
+  // that happens to have no name.
+  it("item 19: a merged id-less lane says how many branches it stands for", () => {
+    const detail = makeDetail({
+      steps: [
+        makeStep({ id: "src", sequence: 0, kind: "source" }),
+        makeStep({ id: "s1", sequence: 1, kind: "destination", router_id: "r", branch_id: null }),
+      ],
+      routers: [
+        {
+          id: "r",
+          name: null,
+          route_records_to: "branches",
+          route_records_using: "filters",
+          has_script_slot: false,
+          branches: [
+            { id: null, name: "A", rule_count: 1, next_router_id: null, order: 0, declared_step_count: 1 },
+            { id: null, name: "B", rule_count: 1, next_router_id: null, order: 1, declared_step_count: 1 },
+          ],
+        },
+      ],
+    });
+    renderCanvas(detail);
+
+    expect(
+      screen.getByText("2 branches · steps not attributable (branch ids missing)"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/^Branch 1 · A/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Branch 2 · B/)).not.toBeInTheDocument();
+  });
+
   it("renders the legend row with the three chip states", () => {
     renderCanvas();
     const legend = screen.getByTestId("canvas-legend");

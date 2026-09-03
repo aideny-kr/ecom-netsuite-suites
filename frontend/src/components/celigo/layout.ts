@@ -62,6 +62,12 @@ export type LaneLabel = {
   order: number;
   x: number;
   y: number;
+  /** Set only on the ONE lane that stands in for several id-less branches of
+   * the same router (ruling R19a): how many branches it merges. The renderer
+   * says so instead of printing a branch name and an ordinal, because with no
+   * ids there is nothing that attributes a step to one of them. `undefined`
+   * on every ordinary lane. */
+  mergedBranchCount?: number;
 };
 
 export type Layout = {
@@ -82,7 +88,7 @@ export type Layout = {
 };
 
 const WARN_ROUTER_ORDER_UNVERIFIED = "router order unverified";
-const WARN_NESTED_ROUTER_INLINE = "nested router chain drawn inline";
+const WARN_NESTED_ROUTER_EXPANDED = "nested router chain expanded below";
 
 /** A router entry in the working chain: every declared router from
  * `detail.routers`, verbatim, plus a synthetic one per undeclared router_id
@@ -117,23 +123,52 @@ function branchKey(routerId: string, branch: CeligoRouterBranch, index: number):
   return branch.id ?? `${routerId}#${index}`;
 }
 
-/** One branch's steps, by sequence.
+/** One RENDER branch's steps, by sequence.
  *
- * A branch that declares no id would match the router's `branch_id IS NULL`
- * steps — and so would every OTHER unnamed branch of that router, which is how
- * one step ended up drawn in every unnamed lane at once. Only the FIRST
- * unnamed branch claims them now: the sync gives us nothing that says which
- * unnamed lane an unattributed step belongs to, so putting it in all of them
- * asserted something Celigo never told us. Later unnamed branches fall through
- * to the ordinary "no steps" placeholder. */
+ * "Render branch" matters: `renderBranches` below guarantees a router is
+ * never laid out with more than one id-less branch, so a `branch_id IS NULL`
+ * match here can only ever belong to one lane. Without that guarantee this
+ * filter matched every unnamed branch of the router at once, and the same
+ * step was drawn into each of them (duplicate node/edge/lane ids — React
+ * renders those as one element, so a whole lane silently vanished). */
 function stepsForBranch(
   routerSteps: CeligoFlowStep[],
   router: RouterEntry,
   branch: CeligoRouterBranch,
-  index: number,
 ): CeligoFlowStep[] {
-  if (branch.id === null && index !== router.branches.findIndex((b) => b.id === null)) return [];
   return routerSteps.filter((s) => s.router_id === router.id && s.branch_id === branch.id).sort(bySequence);
+}
+
+/** The branches a router is actually DRAWN with. Identical to its declared
+ * list, except that several id-less branches collapse into one (ruling R19a).
+ *
+ * Celigo can hand us a router whose branches carry names but no ids. Nothing
+ * then attributes a step to one branch rather than another — `branch_id` is
+ * null on every one of them — so drawing a lane per declared branch invents a
+ * topology: "A holds these two steps, B holds none" is a claim, and the real
+ * branch names make it read as a confident one. One lane, labelled as a merge
+ * (see `LaneLabel.mergedBranchCount`), states what is actually known: these
+ * steps belong to one of N branches and the sync did not say which.
+ *
+ * The merged entry keeps the FIRST id-less branch's `order` so lane ordering
+ * stays a function of the declared order alone, and drops the name and rule
+ * count, which describe one specific branch and cannot describe the merge. */
+function renderBranches(router: RouterEntry): { branch: CeligoRouterBranch; mergedCount?: number }[] {
+  const idlessCount = router.branches.filter((b) => b.id === null).length;
+  if (idlessCount <= 1) return router.branches.map((branch) => ({ branch }));
+
+  const out: { branch: CeligoRouterBranch; mergedCount?: number }[] = [];
+  let merged = false;
+  for (const branch of router.branches) {
+    if (branch.id !== null) {
+      out.push({ branch });
+      continue;
+    }
+    if (merged) continue;
+    merged = true;
+    out.push({ branch: { ...branch, name: null, rule_count: 0 }, mergedCount: idlessCount });
+  }
+  return out;
 }
 
 /** Declared routers (as given) plus a synthetic entry -- `name: null`,
@@ -239,7 +274,7 @@ function walkRouterChain(
       fanOutRouter = current;
       break;
     }
-    const branchSteps = stepsForBranch(routerSteps, current, soleBranch, 0);
+    const branchSteps = stepsForBranch(routerSteps, current, soleBranch);
     if (branchSteps.length === 0) {
       spineItems.push({
         kind: "placeholder",
@@ -283,7 +318,10 @@ export function computeLayout(detail: Pick<CeligoFlowDetail, "steps" | "routers"
   const visitedIds = new Set<string>();
   const { spineItems, fanOutRouter } = walkRouterChain(combined, routerSteps, visitedIds);
 
-  const numPrimaryLanes = fanOutRouter ? fanOutRouter.branches.length : 0;
+  // Counted off the RENDER branches: several id-less branches collapse into
+  // one lane (ruling R19a), and the vertical centring below has to agree with
+  // how many lanes are actually drawn.
+  const numPrimaryLanes = fanOutRouter ? renderBranches(fanOutRouter).length : 0;
   const lanesTop = MARGIN + LANE_LABEL_H;
   const lanesBottom = lanesTop + (numPrimaryLanes - 1) * LANE_PITCH + BUBBLE_H;
   const lanesCentreY = numPrimaryLanes > 0 ? Math.round((lanesTop + lanesBottom) / 2) : lanesTop;
@@ -358,25 +396,46 @@ export function computeLayout(detail: Pick<CeligoFlowDetail, "steps" | "routers"
   for (let i = 1; i < spineSeq.length; i++) {
     pendingEdges.push({ from: spineSeq[i - 1].id, to: spineSeq[i].id, curved: false, fromStep: spineSeq[i - 1].step });
   }
-  if (sources.length > 0 && spineSeq.length > 0) {
-    pendingEdges.push({
-      from: sourceNodeIds[sourceNodeIds.length - 1],
-      to: spineSeq[0].id,
-      curved: false,
-      fromStep: sources[sources.length - 1],
+  // EVERY source feeds the chain, not just the last one by sequence. A flow
+  // with two inputs used to draw one of them with nothing leaving it — a
+  // picture that says that source feeds nothing, on a surface whose whole job
+  // is showing where data goes. Each edge carries its OWN source step, so a
+  // "continues on failure" source dashes its own line and not a sibling's.
+  if (spineSeq.length > 0) {
+    sources.forEach((source, i) => {
+      pendingEdges.push({ from: sourceNodeIds[i], to: spineSeq[0].id, curved: false, fromStep: source });
     });
+  }
+
+  // Lanes for a router reached from INSIDE another lane are appended below
+  // everything drawn so far, so a nested block can never land on top of the
+  // primary lanes or an extra router block. Reading the current bottom off
+  // the placed nodes (rather than a counter) keeps that true no matter which
+  // section triggers the expansion.
+  let laneBottom = spineY + BUBBLE_H;
+  function allocateAppendedLaneY(): number {
+    const bottom = nodes.length > 0 ? Math.max(...nodes.map((n) => n.y + n.h)) : lanesTop;
+    const y = bottom + GAP_X + LANE_LABEL_H;
+    laneBottom = Math.max(laneBottom, y + BUBBLE_H);
+    return y;
   }
 
   /** Lays out one branch's row (a lane, or a remaining router's own branch
    * row): its steps as consecutive ranks from `startX`, or one placeholder
    * when the branch declares no steps at all (rule 6). When the branch's own
-   * `next_router_id` is set, that nested router is appended at the end of
-   * the row with its own branches collapsed into a single placeholder --
-   * drawn inline, never expanded (rule 3's last clause) -- so a router chain
-   * buried inside a lane still terminates in a fixed number of ranks. */
+   * `next_router_id` is set, that nested router is appended at the end of the
+   * row and its own branches become extra lanes below the current block.
+   *
+   * Those branches used to collapse into a single "no steps declared"
+   * placeholder instead, on the reasoning that a chain buried inside a lane
+   * should terminate in a fixed number of ranks. The cost was too high: the
+   * nested router's REAL steps got no node at all — unreachable,
+   * uninspectable, and still counted in the header — so the canvas showed
+   * fewer steps than the flow has. `visitedIds` is what bounds the expansion;
+   * two routers that name each other are drawn once each. */
   function layoutBranchRow(owner: RouterEntry, branch: CeligoRouterBranch, laneIndex: number, startX: number, rowY: number): string {
     const ownerRouterId = owner.id;
-    const branchSteps = stepsForBranch(routerSteps, owner, branch, laneIndex);
+    const branchSteps = stepsForBranch(routerSteps, owner, branch);
     let cx = startX;
     let firstId: string | undefined;
     let prevId: string | undefined;
@@ -416,7 +475,7 @@ export function computeLayout(detail: Pick<CeligoFlowDetail, "steps" | "routers"
       const nested = combined.find((r) => r.id === branch.next_router_id);
       if (nested && !visitedIds.has(nested.id)) {
         visitedIds.add(nested.id);
-        warnings.push(WARN_NESTED_ROUTER_INLINE);
+        warnings.push(WARN_NESTED_ROUTER_EXPANDED);
         const routerNodeId = `router:${nested.id}`;
         nodes.push({
           id: routerNodeId,
@@ -428,32 +487,42 @@ export function computeLayout(detail: Pick<CeligoFlowDetail, "steps" | "routers"
           routerId: nested.id,
           lane: laneIndex,
         });
+        // `advance` draws the edge from this branch's LAST step into the
+        // nested router before moving the cursor past it.
         advance(routerNodeId, ROUTER_W, undefined);
-        const collapseId = `placeholder:${nested.id}:branches`;
-        nodes.push({
-          id: collapseId,
-          type: "placeholder",
-          x: cx,
-          y: rowY,
-          w: BUBBLE_W,
-          h: BUBBLE_H,
-          routerId: nested.id,
-          branchId: null,
-          lane: laneIndex,
+        const nestedStartX = cx;
+        renderBranches(nested).forEach(({ branch: nestedBranch, mergedCount }, i) => {
+          const nestedLaneY = allocateAppendedLaneY();
+          lanes.push({
+            routerId: nested.id,
+            branchId: branchKey(nested.id, nestedBranch, i),
+            name: nestedBranch.name,
+            ruleCount: nestedBranch.rule_count,
+            order: nestedBranch.order,
+            x: nestedStartX,
+            y: nestedLaneY - LANE_LABEL_H,
+            ...(mergedCount ? { mergedBranchCount: mergedCount } : {}),
+          });
+          const nestedFirstId = layoutBranchRow(nested, nestedBranch, i, nestedStartX, nestedLaneY);
+          pendingEdges.push({ from: routerNodeId, to: nestedFirstId, curved: true });
         });
-        advance(collapseId, BUBBLE_W, undefined);
       }
     }
 
     return firstId!;
   }
 
+  /** One id-less-branch warning per router, stated once with its count. */
+  function warnMergedBranches(count: number) {
+    warnings.push(`${count} branches have no id — steps not attributable`);
+  }
+
   // 4. Primary fan-out lanes -- rows, in declared order, LANE_PITCH apart.
-  let laneBottom = spineY + BUBBLE_H;
   if (fanOutRouter) {
     const laneStartX = x;
     const fanOutNodeId = `router:${fanOutRouter.id}`;
-    fanOutRouter.branches.forEach((branch, i) => {
+    renderBranches(fanOutRouter).forEach(({ branch, mergedCount }, i) => {
+      if (mergedCount) warnMergedBranches(mergedCount);
       const laneY = MARGIN + LANE_LABEL_H + i * LANE_PITCH;
       lanes.push({
         routerId: fanOutRouter.id,
@@ -463,6 +532,7 @@ export function computeLayout(detail: Pick<CeligoFlowDetail, "steps" | "routers"
         order: branch.order,
         x: laneStartX,
         y: laneY - LANE_LABEL_H,
+        ...(mergedCount ? { mergedBranchCount: mergedCount } : {}),
       });
       const firstId = layoutBranchRow(fanOutRouter, branch, i, laneStartX, laneY);
       pendingEdges.push({ from: fanOutNodeId, to: firstId, curved: true });
@@ -485,7 +555,9 @@ export function computeLayout(detail: Pick<CeligoFlowDetail, "steps" | "routers"
     const routerNodeId = `router:${rem.id}`;
     nodes.push({ id: routerNodeId, type: "router", x: MARGIN, y: extraY + (BUBBLE_H - ROUTER_H) / 2, w: ROUTER_W, h: ROUTER_H, routerId: rem.id });
     const blockStartX = MARGIN + ROUTER_W + GAP_X;
-    rem.branches.forEach((branch, i) => {
+    const remBranches = renderBranches(rem);
+    remBranches.forEach(({ branch, mergedCount }, i) => {
+      if (mergedCount) warnMergedBranches(mergedCount);
       const laneY = extraY + i * LANE_PITCH;
       lanes.push({
         routerId: rem.id,
@@ -495,11 +567,12 @@ export function computeLayout(detail: Pick<CeligoFlowDetail, "steps" | "routers"
         order: branch.order,
         x: blockStartX,
         y: laneY - LANE_LABEL_H,
+        ...(mergedCount ? { mergedBranchCount: mergedCount } : {}),
       });
       const firstId = layoutBranchRow(rem, branch, i, blockStartX, laneY);
       pendingEdges.push({ from: routerNodeId, to: firstId, curved: true });
     });
-    const blockLanes = Math.max(rem.branches.length, 1);
+    const blockLanes = Math.max(remBranches.length, 1);
     extraY += (blockLanes - 1) * LANE_PITCH + BUBBLE_H + GAP_X;
   }
 

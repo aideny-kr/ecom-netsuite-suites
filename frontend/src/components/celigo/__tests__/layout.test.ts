@@ -56,7 +56,11 @@ describe("computeLayout — deterministic layered layout (pure)", () => {
     expect(layout.edges[0]).toMatchObject({ from: "src", to: "dst" });
   });
 
-  it("(b) two sources stack vertically at equal x; the chain edge leaves the LAST source (by sequence)", () => {
+  it("(b) two sources stack vertically at equal x, and EVERY source feeds the chain (item 18)", () => {
+    // Codex fix wave, item 18. Only the LAST source (by sequence) got an edge
+    // into the spine, so a flow with two inputs drew one of them floating
+    // with nothing leaving it — a picture that says that source feeds
+    // nothing. Every source reaches the first spine node.
     const layout = computeLayout(
       mk([
         step({ id: "src1", celigo_id: "c1", role: "generator", sequence: 0 }),
@@ -68,8 +72,36 @@ describe("computeLayout — deterministic layered layout (pure)", () => {
     const src2 = layout.nodes.find((n) => n.id === "src2")!;
     expect(src1.x).toBe(src2.x);
     expect(src1.y).not.toBe(src2.y);
-    const edge = layout.edges.find((e) => e.to === "dst")!;
-    expect(edge.from).toBe("src2");
+
+    const intoDst = layout.edges.filter((e) => e.to === "dst");
+    expect(intoDst.map((e) => e.from).sort()).toEqual(["src1", "src2"]);
+    expect(new Set(intoDst.map((e) => e.id)).size).toBe(2);
+  });
+
+  it("(b2) each source's own edge carries that source's proceed_on_failure (item 18)", () => {
+    const layout = computeLayout(
+      mk([
+        step({ id: "src1", celigo_id: "c1", role: "generator", sequence: 0, proceed_on_failure: true }),
+        step({ id: "src2", celigo_id: "c2", role: "generator", sequence: 1 }),
+        step({ id: "dst", celigo_id: "c3", role: "processor", sequence: 0 }),
+      ]),
+    );
+    expect(layout.edges.find((e) => e.from === "src1")!.dashed).toBe(true);
+    expect(layout.edges.find((e) => e.from === "src2")!.dashed).toBe(false);
+  });
+
+  it("(b3) every source reaches the fan-out router when that is the first spine node (item 18)", () => {
+    const layout = computeLayout(
+      mk(
+        [
+          step({ id: "src1", celigo_id: "c1", role: "generator", sequence: 0 }),
+          step({ id: "src2", celigo_id: "c2", role: "generator", sequence: 1 }),
+          step({ id: "b1s", celigo_id: "c3", role: "processor", router_id: "r", branch_id: "b1", sequence: 0 }),
+        ],
+        [routerDef({ id: "r", branches: [branch({ id: "b1", order: 0 })] })],
+      ),
+    );
+    expect(layout.edges.filter((e) => e.to === "router:r").map((e) => e.from).sort()).toEqual(["src1", "src2"]);
   });
 
   it("(c) a top-level chain of 3 processor steps: x strictly increasing, 2 edges", () => {
@@ -136,17 +168,21 @@ describe("computeLayout — deterministic layered layout (pure)", () => {
     expect(ph).toMatchObject({ type: "placeholder", w: BUBBLE_W, h: BUBBLE_H, branchId: "b2" });
   });
 
-  it("(e2) two branches that declare no id: unique node/edge/lane keys, unowned step in the FIRST lane only", () => {
-    // Final-review finding I2. `branch.id` is nullable, and the old code keyed
-    // everything off it directly: two unnamed branches both matched the
-    // router's `branch_id IS NULL` steps, so the SAME step was laid into both
-    // lanes -- duplicate node ids ("s1" twice), duplicate edge ids and
-    // duplicate React lane keys, which React silently renders as one node.
+  it("(e2) two branches that declare no id collapse into ONE lane, not two invented ones (item 19 / R19a)", () => {
+    // Final-review finding I2 first stopped the SAME step being drawn into
+    // every unnamed lane (duplicate node/edge/lane ids, which React silently
+    // renders as one). Codex fix wave, item 19 (ruling R19a) goes further:
+    // drawing two unnamed lanes at all invents a topology the sync never
+    // supplied — "A got this step, B got none" is a claim, and the branch
+    // NAMES Celigo did give ("A", "B") make it read as a confident one. With
+    // ids missing, the honest picture is one lane holding every unattributed
+    // step, labelled as exactly that.
     const layout = computeLayout(
       mk(
         [
           step({ id: "src", celigo_id: "c0", role: "generator", sequence: 0 }),
           step({ id: "s1", celigo_id: "c1", role: "processor", router_id: "r", branch_id: null, sequence: 0 }),
+          step({ id: "s2", celigo_id: "c2", role: "processor", router_id: "r", branch_id: null, sequence: 1 }),
         ],
         [
           routerDef({
@@ -160,15 +196,43 @@ describe("computeLayout — deterministic layered layout (pure)", () => {
     expect(new Set(nodeIds).size, `duplicate node ids: ${JSON.stringify(nodeIds)}`).toBe(nodeIds.length);
     const edgeIds = layout.edges.map((e) => e.id);
     expect(new Set(edgeIds).size, `duplicate edge ids: ${JSON.stringify(edgeIds)}`).toBe(edgeIds.length);
-    const laneKeys = layout.lanes.map((l) => `${l.routerId}:${l.branchId}`);
-    expect(new Set(laneKeys).size, `duplicate lane keys: ${JSON.stringify(laneKeys)}`).toBe(laneKeys.length);
 
-    // The step Celigo never attributed to a lane is drawn once, in the first
-    // unnamed lane; the second lane gets the ordinary "no steps" placeholder.
+    // ONE lane, flagged as a merge of both id-less branches — and no lane
+    // carries either invented name.
+    expect(layout.lanes).toHaveLength(1);
+    expect(layout.lanes[0].mergedBranchCount).toBe(2);
+    expect(layout.lanes.map((l) => l.name)).toEqual([null]);
+    expect(layout.warnings).toContain("2 branches have no id — steps not attributable");
+
+    // Both unattributed steps live in that single lane; nothing is duplicated
+    // and no empty placeholder lane is invented for the second branch.
     expect(layout.nodes.filter((n) => n.id === "s1")).toHaveLength(1);
+    expect(layout.nodes.filter((n) => n.id === "s2")).toHaveLength(1);
     expect(layout.nodes.find((n) => n.id === "s1")!.lane).toBe(0);
-    expect(layout.nodes.filter((n) => n.type === "placeholder" && n.lane === 1)).toHaveLength(1);
+    expect(layout.nodes.find((n) => n.id === "s2")!.lane).toBe(0);
+    expect(layout.nodes.filter((n) => n.type === "placeholder")).toHaveLength(0);
+  });
+
+  it("(e3) a SINGLE id-less branch is left alone — there is nothing to merge (item 19)", () => {
+    const layout = computeLayout(
+      mk(
+        [
+          step({ id: "src", celigo_id: "c0", role: "generator", sequence: 0 }),
+          step({ id: "s1", celigo_id: "c1", role: "processor", router_id: "r", branch_id: null, sequence: 0 }),
+          step({ id: "s2", celigo_id: "c2", role: "processor", router_id: "r", branch_id: "b2", sequence: 0 }),
+        ],
+        [
+          routerDef({
+            id: "r",
+            branches: [branch({ id: null, name: "A", order: 0 }), branch({ id: "b2", name: "B", order: 1 })],
+          }),
+        ],
+      ),
+    );
+    expect(layout.lanes).toHaveLength(2);
     expect(layout.lanes.map((l) => l.name)).toEqual(["A", "B"]);
+    expect(layout.lanes.every((l) => l.mergedBranchCount === undefined)).toBe(true);
+    expect(layout.warnings.some((w) => w.includes("no id"))).toBe(false);
   });
 
   it("(f) the same celigo_id in two branches still produces two distinct step nodes", () => {
@@ -320,10 +384,55 @@ describe("computeLayout — deterministic layered layout (pure)", () => {
       ),
     );
     expect(layout.nodes.filter((n) => n.id === "router:r3")).toHaveLength(1);
-    expect(layout.nodes.filter((n) => n.id === "placeholder:r3:branches")).toHaveLength(1);
-    // r3's own branch is collapsed, not expanded (rule 3's last clause) --
-    // its real step never renders as a node, nested or otherwise.
-    expect(layout.nodes.filter((n) => n.id === "c1")).toHaveLength(0);
+
+    // Codex fix wave, item 20. r3's branch used to collapse into a single
+    // "no steps declared" placeholder, so `c1` — a real, synced step with its
+    // own errors and scripts — had no node at all: unreachable, uninspectable,
+    // and counted by the header while missing from the picture. Its branches
+    // are expanded as their own lanes below the primary block instead.
+    expect(layout.nodes.filter((n) => n.id === "placeholder:r3:branches")).toHaveLength(0);
+    const c1 = layout.nodes.find((n) => n.id === "c1");
+    expect(c1, "the nested router's own step must have a node").toBeTruthy();
+    expect(c1).toMatchObject({ type: "step", stepId: "c1", routerId: "r3", branchId: "bC" });
+
+    // A lane of its own, below every primary lane, with a curved edge from
+    // the nested router into it — and the branch's own last step still feeds
+    // that router.
+    const nestedLane = layout.lanes.find((l) => l.routerId === "r3")!;
+    expect(nestedLane).toBeTruthy();
+    expect(nestedLane.y).toBeGreaterThan(Math.max(...layout.lanes.filter((l) => l.routerId === "r_fanout").map((l) => l.y)));
+    expect(layout.edges.some((e) => e.from === "router:r3" && e.to === "c1" && e.curved)).toBe(true);
+    expect(layout.edges.some((e) => e.from === "b1" && e.to === "router:r3")).toBe(true);
+
+    // Nothing overlaps: every node's box is inside the reported canvas.
+    expect(layout.height).toBeGreaterThanOrEqual(Math.max(...layout.nodes.map((n) => n.y + n.h)));
+  });
+
+  it("item 20: a nested router chain terminates instead of looping forever", () => {
+    // Two routers that name each other. The visited set is what stops the
+    // expansion; without it this recurses until the stack goes.
+    const layout = computeLayout(
+      mk(
+        [
+          step({ id: "src", celigo_id: "c0", role: "generator", sequence: 0 }),
+          step({ id: "a1", celigo_id: "ca1", role: "processor", router_id: "rA", branch_id: "bA", sequence: 0 }),
+          step({ id: "b1", celigo_id: "cb1", role: "processor", router_id: "rA", branch_id: "bLoop", sequence: 0 }),
+          step({ id: "c1", celigo_id: "cc1", role: "processor", router_id: "rB", branch_id: "bBack", sequence: 0 }),
+        ],
+        [
+          routerDef({
+            id: "rA",
+            branches: [branch({ id: "bA", order: 0 }), branch({ id: "bLoop", order: 1, next_router_id: "rB" })],
+          }),
+          routerDef({ id: "rB", branches: [branch({ id: "bBack", order: 0, next_router_id: "rA" })] }),
+        ],
+      ),
+    );
+    expect(layout.nodes.filter((n) => n.id === "router:rA")).toHaveLength(1);
+    expect(layout.nodes.filter((n) => n.id === "router:rB")).toHaveLength(1);
+    expect(layout.nodes.filter((n) => n.id === "c1")).toHaveLength(1);
+    const nodeIds = layout.nodes.map((n) => n.id);
+    expect(new Set(nodeIds).size).toBe(nodeIds.length);
   });
 
   it("(j) proceed_on_failure on the FROM step makes its outgoing edge dashed with a label", () => {

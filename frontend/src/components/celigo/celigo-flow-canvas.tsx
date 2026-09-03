@@ -147,8 +147,21 @@ export function CeligoFlowCanvas({
                 style={{ position: "absolute", left: lane.x, top: lane.y }}
                 className="whitespace-nowrap text-[10.5px] text-muted-foreground"
               >
-                <b className="font-medium text-foreground">{`Branch ${lane.order + 1} · ${lane.name ?? "Unnamed"}`}</b>
-                {` · ${lane.ruleCount} rule${lane.ruleCount === 1 ? "" : "s"}`}
+                {/* A lane standing in for several id-less branches (ruling
+                    R19a) has no branch of its own to name: printing "Branch 1
+                    · Unnamed · 0 rules" would read as one specific branch that
+                    happens to lack a name, when the truth is that nothing
+                    attributes these steps to any of the N. */}
+                {lane.mergedBranchCount ? (
+                  <b className="font-medium text-foreground">
+                    {`${lane.mergedBranchCount} branches · steps not attributable (branch ids missing)`}
+                  </b>
+                ) : (
+                  <>
+                    <b className="font-medium text-foreground">{`Branch ${lane.order + 1} · ${lane.name ?? "Unnamed"}`}</b>
+                    {` · ${lane.ruleCount} rule${lane.ruleCount === 1 ? "" : "s"}`}
+                  </>
+                )}
               </div>
             ))}
 
