@@ -7,12 +7,15 @@
  * `CeligoSurface` reads the URL (via `useCeligoRoute`) and renders exactly
  * one of three pages: a flow (a flow is selected), an integration (an
  * integration is selected but no flow yet), or the integrations index
- * (neither). The three page components below are placeholders — Tasks
- * 10/12/14 replace each with its real implementation (in its own file,
- * imported here in place of the stub) without touching this switch.
+ * (neither). `CeligoIntegrationPage`/`CeligoFlowPage` below are still
+ * placeholders — Tasks 12/14 replace each with its real implementation (in
+ * its own file, imported here in place of the stub) without touching this
+ * switch; Task 10 already did that for `CeligoIntegrationsPage`, which is
+ * why it's imported rather than defined here.
  */
 
 import { useCeligoRoute } from "./celigo-route";
+import { CeligoIntegrationsPage } from "./celigo-integrations-page";
 
 export function CeligoBreadcrumb({
   items,
@@ -41,16 +44,7 @@ export function CeligoBreadcrumb({
   );
 }
 
-// ─── Placeholders — replaced in place by Tasks 10, 12, 14 ───────────────────
-
-function CeligoIntegrationsPage(): JSX.Element {
-  return (
-    <div className="flex flex-1 min-h-0 flex-col">
-      <CeligoBreadcrumb items={[{ label: "My integrations" }]} />
-      <p className="p-4 text-[13px] text-muted-foreground">Loading…</p>
-    </div>
-  );
-}
+// ─── Placeholders — replaced in place by Tasks 12, 14 ────────────────────────
 
 function CeligoIntegrationPage(): JSX.Element {
   const route = useCeligoRoute();
