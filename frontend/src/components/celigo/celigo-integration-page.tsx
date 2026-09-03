@@ -657,7 +657,7 @@ export function CeligoIntegrationPage(): JSX.Element {
 
         <Tabs
           value={route.tab}
-          onValueChange={(v) => route.go.integration(integration.id, v as CeligoTab)}
+          onValueChange={(v) => route.go.tab(v as CeligoTab)}
         >
           <TabsList>
             <TabsTrigger value="flows">Flows {flowsState === "success" ? flows.length : "…"}</TabsTrigger>

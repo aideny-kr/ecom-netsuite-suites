@@ -27,6 +27,8 @@ const routeMocks = vi.hoisted(() => ({
     files: vi.fn(),
     integrations: vi.fn(),
     integration: vi.fn(),
+    tab: vi.fn(),
+    view: vi.fn(),
     flow: vi.fn(),
     step: vi.fn(),
     script: vi.fn(),
@@ -114,6 +116,8 @@ beforeEach(() => {
   routeMocks.go.files.mockReset();
   routeMocks.go.integrations.mockReset();
   routeMocks.go.integration.mockReset();
+  routeMocks.go.tab.mockReset();
+  routeMocks.go.view.mockReset();
   routeMocks.go.flow.mockReset();
   routeMocks.go.step.mockReset();
   routeMocks.go.script.mockReset();
@@ -326,11 +330,15 @@ describe("CeligoIntegrationsPage", () => {
     expect(screen.queryByText("Plain Co")).toBeNull();
   });
 
-  it("case 5: the list toggle navigates to list view, and list view renders the same counts", () => {
+  it("case 5: the list toggle switches view in place, and list view renders the same counts", () => {
+    // Gate fix wave, item 7: flipping tiles/list is a selection change on the
+    // page already on screen, so it replaces rather than pushing a history
+    // entry a reader would then have to Back out of one toggle at a time.
     mocks.integrations.mockReturnValue(resolved([makeIntegration()]));
     wrap(<CeligoIntegrationsPage />);
     fireEvent.click(screen.getByRole("button", { name: /list view/i }));
-    expect(routeMocks.go.integrations).toHaveBeenCalledWith("list");
+    expect(routeMocks.go.view).toHaveBeenCalledWith("list");
+    expect(routeMocks.go.integrations).not.toHaveBeenCalled();
   });
 
   it("case 5b: with view=list the table renders rows with the same counts", () => {

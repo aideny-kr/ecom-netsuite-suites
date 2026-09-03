@@ -102,6 +102,14 @@ export function useCeligoRoute(): CeligoRoute & {
     files(): void;
     integrations(view?: CeligoView): void;
     integration(id: string, tab?: CeligoTab): void;
+    /** Switch the integration page's tab, or the integrations page's
+     * tiles/list view, WITHOUT leaving the page. Both replace (like
+     * `step`/`script`) rather than push: a tab and a view toggle are
+     * selections inside the page already on screen, and pushing made Back
+     * walk one entry per tab a reader had glanced at instead of returning
+     * them to where they came from. Everything else on the URL is kept. */
+    tab(tab: CeligoTab): void;
+    view(view: CeligoView): void;
     /** `integrationId` is the integration THIS flow belongs to, and wins over
      * whatever the current page carries. Every caller that knows it must pass
      * it: the ⌘K palette searches across all integrations, so defaulting to
@@ -149,6 +157,33 @@ export function useCeligoRoute(): CeligoRoute & {
     },
     [searchParams, pathname, router],
   );
+
+  // `go.tab` / `go.view` — same-page selection changes, so they `replace` and
+  // carry every other Celigo param through untouched. Both are written as one
+  // shared builder so "which params survive a selection change" stays a
+  // single decision rather than two that can drift.
+  const replaceSelection = useCallback(
+    (next: { view?: CeligoView; tab?: CeligoTab }) => {
+      const view = next.view ?? route.view;
+      const tab = next.tab ?? route.tab;
+      const other = otherParams(searchParams, []);
+      router.replace(
+        buildUrl(pathname, other, {
+          surface: "celigo",
+          ...(view === "list" ? { view: "list" as const } : {}),
+          ...(route.integrationId ? { integration: route.integrationId } : {}),
+          ...(tab !== "flows" ? { tab } : {}),
+          ...(route.flowId ? { flow: route.flowId } : {}),
+          ...(route.stepId ? { step: route.stepId } : {}),
+          ...(route.scriptId ? { script: route.scriptId } : {}),
+        }),
+      );
+    },
+    [searchParams, pathname, router, route.view, route.tab, route.integrationId, route.flowId, route.stepId, route.scriptId],
+  );
+
+  const tab = useCallback((next: CeligoTab) => replaceSelection({ tab: next }), [replaceSelection]);
+  const view = useCallback((next: CeligoView) => replaceSelection({ view: next }), [replaceSelection]);
 
   const flow = useCallback(
     (id: string, integrationId?: string | null) => {
@@ -201,5 +236,5 @@ export function useCeligoRoute(): CeligoRoute & {
     [searchParams, pathname, router, route.integrationId, route.flowId, route.stepId],
   );
 
-  return { ...route, go: { files, integrations, integration, flow, step, script } };
+  return { ...route, go: { files, integrations, integration, tab, view, flow, step, script } };
 }

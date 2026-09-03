@@ -33,6 +33,8 @@ const routeMocks = vi.hoisted(() => ({
     files: vi.fn(),
     integrations: vi.fn(),
     integration: vi.fn(),
+    tab: vi.fn(),
+    view: vi.fn(),
     flow: vi.fn(),
     step: vi.fn(),
     script: vi.fn(),
@@ -142,6 +144,8 @@ beforeEach(() => {
   routeMocks.go.files.mockReset();
   routeMocks.go.integrations.mockReset();
   routeMocks.go.integration.mockReset();
+  routeMocks.go.tab.mockReset();
+  routeMocks.go.view.mockReset();
   routeMocks.go.flow.mockReset();
   routeMocks.go.step.mockReset();
   routeMocks.go.script.mockReset();
@@ -496,12 +500,15 @@ describe("navigation", () => {
     expect(routeMocks.go.flow).not.toHaveBeenCalled();
   });
 
-  it("switching tabs writes go.integration(id, tab)", () => {
+  it("switching tabs replaces the tab param instead of pushing a page", () => {
+    // Gate fix wave, item 7: a tab is a selection inside the page already on
+    // screen, so it must not cost a Back press each.
     setup([]);
     // Radix's Tabs.Trigger activates on `mousedown`, not `click` — see
     // @radix-ui/react-tabs's own TabsTrigger.
     fireEvent.mouseDown(screen.getByRole("tab", { name: /Changes/ }));
-    expect(routeMocks.go.integration).toHaveBeenCalledWith("int-1", "changes");
+    expect(routeMocks.go.tab).toHaveBeenCalledWith("changes");
+    expect(routeMocks.go.integration).not.toHaveBeenCalled();
   });
 });
 

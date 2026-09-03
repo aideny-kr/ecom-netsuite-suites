@@ -39,6 +39,36 @@ describe("useCeligoRoute is the only writer", () => {
     expect(nav.push).toHaveBeenLastCalledWith("/workspace?surface=celigo&flow=f2");
   });
 
+  it("go.tab and go.view replace instead of pushing, keeping the rest of the URL", () => {
+    // Gate fix wave, item 7. Switching a tab or flipping tiles/list is a
+    // selection change WITHIN the page already on screen -- the same category
+    // as go.step/go.script -- but both went through a pushing `go.*`, so Back
+    // walked one entry per tab a reader had glanced at instead of leaving the
+    // page they came from.
+    nav.params = new URLSearchParams("surface=celigo&integration=i1&tab=scripts");
+    const { result } = renderHook(() => useCeligoRoute());
+    act(() => result.current.go.tab("changes"));
+    expect(nav.replace).toHaveBeenLastCalledWith("/workspace?surface=celigo&integration=i1&tab=changes");
+    expect(nav.push).not.toHaveBeenCalled();
+
+    nav.params = new URLSearchParams("surface=celigo&view=list");
+    const r2 = renderHook(() => useCeligoRoute());
+    act(() => r2.result.current.go.view("tiles"));
+    expect(nav.replace).toHaveBeenLastCalledWith("/workspace?surface=celigo");
+    act(() => r2.result.current.go.view("list"));
+    expect(nav.replace).toHaveBeenLastCalledWith("/workspace?surface=celigo&view=list");
+    expect(nav.push).not.toHaveBeenCalled();
+  });
+
+  it("go.tab keeps a drilled-in flow/step/script and the current view", () => {
+    nav.params = new URLSearchParams("surface=celigo&view=list&integration=i1&flow=f1&step=s1&script=x1");
+    const { result } = renderHook(() => useCeligoRoute());
+    act(() => result.current.go.tab("errors"));
+    expect(nav.replace).toHaveBeenLastCalledWith(
+      "/workspace?surface=celigo&view=list&integration=i1&tab=errors&flow=f1&step=s1&script=x1",
+    );
+  });
+
   it("go.flow uses the caller's own integration when given, the current one otherwise", () => {
     // Gate fix wave, item 5. `go.flow` attached whatever `?integration=` the
     // CURRENT page carried, so a ⌘K result from another integration opened

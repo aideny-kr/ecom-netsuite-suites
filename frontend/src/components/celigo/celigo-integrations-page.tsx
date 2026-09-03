@@ -567,7 +567,7 @@ export function CeligoIntegrationsPage(): JSX.Element {
           onFilter={setFilter}
           counts={filterCounts}
           view={route.view}
-          onView={(v) => route.go.integrations(v)}
+          onView={(v) => route.go.view(v)}
         />
         {route.view === "list" ? (
           <IntegrationsTable
