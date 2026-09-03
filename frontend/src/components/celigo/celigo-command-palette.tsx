@@ -163,6 +163,15 @@ export function CeligoCommandPalette(): JSX.Element {
                 <Command.Empty className="px-3 py-6 text-center text-[13px] text-muted-foreground">
                   No matches.
                 </Command.Empty>
+                {/* Each item's `value` must be unique -- cmdk keys ALL of its
+                    selection state (aria-selected, and what Enter activates)
+                    off a single global string compared per-item via strict
+                    equality, not off DOM identity. A display name is not
+                    unique (a sandbox/production integration pair can share a
+                    name; two flows in different integrations can too), so
+                    `value` is the row's own id and the name moves to
+                    `keywords` — cmdk's fuzzy filter matches value+keywords
+                    together, so search-by-name still works. */}
                 <Command.Group
                   heading="Integrations"
                   className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-[11px] [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wide [&_[cmdk-group-heading]]:text-muted-foreground"
@@ -170,7 +179,8 @@ export function CeligoCommandPalette(): JSX.Element {
                   {integrations.map((integration) => (
                     <Command.Item
                       key={integration.id}
-                      value={`integration:${integration.name}`}
+                      value={`integration:${integration.id}`}
+                      keywords={[integration.name]}
                       onSelect={() => selectIntegration(integration.id)}
                       className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[13px] aria-selected:bg-muted"
                     >
@@ -187,7 +197,8 @@ export function CeligoCommandPalette(): JSX.Element {
                   {flows.map((flow) => (
                     <Command.Item
                       key={flow.id}
-                      value={`flow:${flow.name}`}
+                      value={`flow:${flow.id}`}
+                      keywords={[flow.name, flow.integrationName]}
                       onSelect={() => selectFlow(flow.id)}
                       className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[13px] aria-selected:bg-muted"
                     >
