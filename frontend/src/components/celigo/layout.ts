@@ -143,7 +143,12 @@ function stepsForBranch(
  * never declared. Pushes the "router order unverified" warning once per
  * synthetic entry: an undeclared router's position in the drawing is a
  * guess, and every caller of this list needs to know that up front. */
-function buildRouterList(routers: CeligoRouter[], routerSteps: CeligoFlowStep[], warnings: string[]): RouterEntry[] {
+function buildRouterList(
+  routers: CeligoRouter[],
+  routerSteps: CeligoFlowStep[],
+  warnings: string[],
+  warnRouterOrder: (routerId: string) => void,
+): RouterEntry[] {
   const declared: RouterEntry[] = routers
     .filter((r): r is CeligoRouter & { id: string } => typeof r.id === "string")
     .map((r) => ({ ...r, declared: true }));
@@ -159,7 +164,7 @@ function buildRouterList(routers: CeligoRouter[], routerSteps: CeligoFlowStep[],
   }
 
   const synthetic: RouterEntry[] = undeclaredIds.map((routerId) => {
-    warnings.push(WARN_ROUTER_ORDER_UNVERIFIED);
+    warnRouterOrder(routerId);
     const ownSteps = routerSteps.filter((s) => s.router_id === routerId);
     const branchIds: (string | null)[] = Array.from(
       new Set(ownSteps.filter((s) => s.branch_id !== null).map((s) => s.branch_id as string)),
@@ -260,11 +265,21 @@ export function computeLayout(detail: Pick<CeligoFlowDetail, "steps" | "routers"
   }
 
   const warnings: string[] = [];
+  // "router order unverified" is a fact about ONE router, and a router can be
+  // passed over twice (invented as synthetic, then drawn again as a remaining
+  // block). The canvas joins these with " · ", so pushing per pass made the
+  // strip repeat itself; this keys the warning on the router instead.
+  const orderWarnedRouterIds = new Set<string>();
+  const warnRouterOrder = (routerId: string) => {
+    if (orderWarnedRouterIds.has(routerId)) return;
+    orderWarnedRouterIds.add(routerId);
+    warnings.push(WARN_ROUTER_ORDER_UNVERIFIED);
+  };
   const sources = detail.steps.filter((s) => s.role === "generator").sort(bySequence);
   const topChain = detail.steps.filter((s) => s.role === "processor" && s.router_id === null).sort(bySequence);
   const routerSteps = detail.steps.filter((s) => s.router_id !== null);
 
-  const combined = buildRouterList(detail.routers, routerSteps, warnings);
+  const combined = buildRouterList(detail.routers, routerSteps, warnings, warnRouterOrder);
   const visitedIds = new Set<string>();
   const { spineItems, fanOutRouter } = walkRouterChain(combined, routerSteps, visitedIds);
 
@@ -466,7 +481,7 @@ export function computeLayout(detail: Pick<CeligoFlowDetail, "steps" | "routers"
   for (const rem of combined.filter((r) => !visitedIds.has(r.id))) {
     if (visitedIds.has(rem.id)) continue;
     visitedIds.add(rem.id);
-    warnings.push(WARN_ROUTER_ORDER_UNVERIFIED);
+    warnRouterOrder(rem.id);
     const routerNodeId = `router:${rem.id}`;
     nodes.push({ id: routerNodeId, type: "router", x: MARGIN, y: extraY + (BUBBLE_H - ROUTER_H) / 2, w: ROUTER_W, h: ROUTER_H, routerId: rem.id });
     const blockStartX = MARGIN + ROUTER_W + GAP_X;

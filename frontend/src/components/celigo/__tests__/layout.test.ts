@@ -241,6 +241,20 @@ describe("computeLayout — deterministic layered layout (pure)", () => {
     expect(layout.warnings).toContain("router order unverified");
   });
 
+  it("(i4) the router-order warning is pushed once per router, not once per pass over it", () => {
+    // An unchained synthetic router was warned about twice -- once when it
+    // was invented, once again when it was drawn as a "remaining" block --
+    // and the canvas joins warnings with " · ", so the strip repeated itself.
+    const layout = computeLayout(
+      mk([
+        step({ id: "src", celigo_id: "c0", role: "generator", sequence: 0 }),
+        step({ id: "r1s", celigo_id: "c1", role: "processor", router_id: "r1", branch_id: "b1", sequence: 0 }),
+        step({ id: "r2s", celigo_id: "c2", role: "processor", router_id: "r2", branch_id: "b1", sequence: 0 }),
+      ]),
+    );
+    expect(layout.warnings.filter((w) => w === "router order unverified")).toHaveLength(2);
+  });
+
   it("(i2) an undeclared router's steps with NO branch_id still get a node, and the gap is named", () => {
     // Gate fix wave, item 3. A synthetic router's branches were built only
     // from the non-null `branch_id`s its steps carried, so a step that named
