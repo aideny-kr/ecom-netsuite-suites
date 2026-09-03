@@ -28,20 +28,13 @@ import {
 } from "@/hooks/use-celigo-flows";
 import { queryState } from "@/lib/query-state";
 import { countRules } from "./chips";
-import { ErrorNotice, fallbackStepTitle, formatRelativeTime } from "./shared";
+import { ErrorNotice, N2_SHIELD_TEXT, fallbackStepTitle, formatRelativeTime } from "./shared";
 import { FilterPanel, FieldMappingPanel } from "./inspector-panels";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { Loader2, ShieldAlert } from "lucide-react";
 
 export type InspectorTab = "facts" | "filter" | "mapping" | "scripts" | "errors";
-
-/** Global Constraints' exact N2 banner copy -- verbatim, not the shorter
- * "Source opens in a drawer…" line the mockup sketched for this specific
- * pane. The binding rule names one canonical string project-wide; where the
- * two disagree, the rule wins over the sketch. */
-const N2_SHIELD_TEXT =
-  "Customer-authored JavaScript, shown to you only. Never run here, never sent to the assistant.";
 
 const KIND_LABEL: Record<CeligoFlowStep["kind"], string> = {
   source: "Source",

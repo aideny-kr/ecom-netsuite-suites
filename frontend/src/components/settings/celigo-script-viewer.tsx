@@ -27,11 +27,14 @@
  *
  * ═══ N2 (standing decision) ═══
  * The banner below is the exact, project-wide string Global Constraints
- * mandates -- verbatim, not paraphrased. `celigo-step-inspector.tsx`'s own
- * Scripts tab carries the identical literal (as `N2_SHIELD_TEXT`) rather than
- * importing this one, since that tab predates this file and the two are not
- * on a shared expiry date -- a hand-kept duplicate is safer than a
- * cross-file import that outlives its usefulness.
+ * mandates -- verbatim, not paraphrased. It is now IMPORTED from
+ * `components/celigo/shared.tsx` (`N2_SHIELD_TEXT`), the single definition
+ * this file and `celigo-step-inspector.tsx`'s Scripts tab both render. The
+ * two used to hold hand-kept copies of the literal, on the reasoning that a
+ * duplicate is safer than an import that outlives its usefulness -- but two
+ * copies of a mandated string is the shape that drifts, and an edit to one
+ * would leave the other promising something different about the same
+ * content, with nothing to catch it.
  *
  * ═══ THE CORRECTION THAT MATTERS MOST (mockup-spec.md's correction section,
  * which overrides the Screen 04 body) ═══
@@ -60,6 +63,7 @@
  */
 
 import type { CeligoScript, CeligoScriptAttachmentSite } from "@/hooks/use-celigo-flows";
+import { N2_SHIELD_TEXT } from "@/components/celigo/shared";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ShieldAlert } from "lucide-react";
@@ -124,9 +128,7 @@ function UntrustedContentBanner() {
   return (
     <div className="flex items-start gap-2.5 rounded-xl border border-amber-500/30 bg-amber-500/5 p-3">
       <ShieldAlert className="h-4 w-4 text-amber-600 mt-0.5 shrink-0" aria-hidden />
-      <p className="text-[12px] text-muted-foreground">
-        Customer-authored JavaScript, shown to you only. Never run here, never sent to the assistant.
-      </p>
+      <p className="text-[12px] text-muted-foreground">{N2_SHIELD_TEXT}</p>
     </div>
   );
 }

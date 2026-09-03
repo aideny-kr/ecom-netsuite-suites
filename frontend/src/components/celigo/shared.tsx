@@ -17,6 +17,23 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
+// N2_SHIELD_TEXT — the one N2 banner string, defined once.
+// ---------------------------------------------------------------------------
+
+/** Global Constraints' exact N2 banner copy, verbatim -- not the shorter
+ * "Source opens in a drawer…" line the mockup sketched for the inspector's
+ * Scripts pane. The binding rule names one canonical string project-wide, so
+ * it is DEFINED once here and imported by every surface that shows customer
+ * JavaScript (`celigo-step-inspector.tsx`'s Scripts tab and
+ * `settings/celigo-script-viewer.tsx`'s banner). It used to be a hand-kept
+ * duplicate in both files, on the reasoning that a copy is safer than an
+ * import that outlives its usefulness -- but two copies of a mandated string
+ * is exactly the shape that drifts: an edit to one leaves the other stating
+ * a different promise about the same content, with nothing to catch it. */
+export const N2_SHIELD_TEXT =
+  "Customer-authored JavaScript, shown to you only. Never run here, never sent to the assistant.";
+
+// ---------------------------------------------------------------------------
 // formatRelativeTime
 // ---------------------------------------------------------------------------
 

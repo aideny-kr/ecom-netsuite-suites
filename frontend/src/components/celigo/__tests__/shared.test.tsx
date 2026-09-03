@@ -9,6 +9,7 @@ import {
   Pill,
   SchedulePill,
   Medallions,
+  N2_SHIELD_TEXT,
 } from "../shared";
 import type { CeligoFlowDetail, CeligoFlowStep } from "@/hooks/use-celigo-flows";
 
@@ -257,5 +258,17 @@ describe("Pill / SchedulePill / Medallions — small presentational pieces", () 
     expect(screen.getByText("HTTP")).toBeInTheDocument();
     expect(screen.getByText("NS")).toBeInTheDocument();
     expect(screen.getByText("DB")).toBeInTheDocument();
+  });
+});
+
+describe("N2_SHIELD_TEXT — the one definition of the mandated banner string", () => {
+  // Gate fix wave, item 12. This string is mandated verbatim by Global
+  // Constraints and was previously hand-copied into both surfaces that show
+  // customer JavaScript. It now lives here alone; both import it, so the
+  // wording is pinned in exactly one place -- this assertion.
+  it("is the exact mandated wording", () => {
+    expect(N2_SHIELD_TEXT).toBe(
+      "Customer-authored JavaScript, shown to you only. Never run here, never sent to the assistant.",
+    );
   });
 });
