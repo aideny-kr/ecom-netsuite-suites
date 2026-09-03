@@ -28,7 +28,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("@/hooks/use-celigo-flows", () => ({
   useCeligoFlowDetail: () => mocks.detail(),
-  useCeligoIntegrationFlows: () => mocks.integrationFlows(),
+  useCeligoIntegrationFlows: (integrationId: string | undefined) => mocks.integrationFlows(integrationId),
   useCeligoIntegrations: () => mocks.integrations(),
   useCeligoSyncStatus: () => mocks.syncStatus(),
   // Task 16 -- the real `CeligoStepInspector` (no longer the Task 14 stub)
@@ -701,6 +701,27 @@ describe("CeligoFlowPage — inspector resting state", () => {
 
     const inspector = screen.getByTestId("celigo-step-inspector-stub");
     expect(inspector).toHaveTextContent("no step selected");
+  });
+});
+
+describe("CeligoFlowPage — sibling flows query", () => {
+  it("starts on the URL's integration while the detail is still loading", () => {
+    // Gate fix wave, minor. The sibling list was gated purely on
+    // `detail.integration_id`, so it could not begin until the detail
+    // request had already come back -- two round trips in series for a fact
+    // the URL usually already carries.
+    mocks.detail.mockReturnValue(pending());
+    wrap(<CeligoFlowPage />);
+    expect(mocks.integrationFlows).toHaveBeenCalledWith("int-1");
+  });
+
+  it("prefers the flow's OWN integration over a stale one on the URL", () => {
+    // Order matters: a hand-edited or stale `?integration=` must not decide
+    // which flows the navigator lists.
+    routeMocks.integrationId = "int-stale";
+    mocks.detail.mockReturnValue(resolved(makeDetail({ integration_id: "int-real" })));
+    wrap(<CeligoFlowPage />);
+    expect(mocks.integrationFlows).toHaveBeenLastCalledWith("int-real");
   });
 });
 

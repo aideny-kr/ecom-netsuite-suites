@@ -383,6 +383,27 @@ describe("Scripts tab", () => {
 // Errors tab
 // ---------------------------------------------------------------------------
 
+describe("empty strings are absences, not values", () => {
+  it("renders an empty adaptor_type as '—' and omits it from the header, exactly like null", () => {
+    // Gate fix wave, minor. The header already treated "" as absent
+    // (`step.adaptor_type ? …`) while the Facts row used `?? "—"`, which
+    // keeps "" and prints a blank value where the dash belongs.
+    const step = makeStep({ id: "step-1", adaptor_type: "", kind: "destination" });
+    renderInspector({ detail: makeDetail({ steps: [step] }), step, tab: "facts" });
+    expect(screen.getByText("—")).toBeInTheDocument();
+    expect(screen.getByText("Destination")).toBeInTheDocument();
+  });
+
+  it("falls back to 'hook' for an empty function_name on a script site", () => {
+    const step = makeStep({
+      id: "step-1",
+      attachments: [makeAttachment({ function_name: "" })],
+    });
+    renderInspector({ detail: makeDetail({ steps: [step] }), step, tab: "scripts" });
+    expect(screen.getByText("HK hook")).toBeInTheDocument();
+  });
+});
+
 describe("Errors tab", () => {
   it("renders the quiet sentence with the sync time when the whole flow is clean", () => {
     mocks.flowErrors.mockReturnValue(resolved({ flow_id: "flow-1", status: "open", total: 0, groups: [] }));

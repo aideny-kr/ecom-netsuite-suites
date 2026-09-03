@@ -148,7 +148,10 @@ function FactRow({ label, value, mono }: { label: string; value: string; mono?: 
 function FactsTab({ detail, step }: { detail: CeligoFlowDetail; step: CeligoFlowStep }) {
   return (
     <div className="flex flex-col">
-      <FactRow label="adaptor" value={step.adaptor_type ?? "—"} mono />
+      {/* `|| "—"`, not `?? "—"`: an empty adaptor_type is an absence, and the
+          header above already reads it that way (`step.adaptor_type ? …`).
+          With `??` this row printed a blank where the dash belongs. */}
+      <FactRow label="adaptor" value={step.adaptor_type || "—"} mono />
       <FactRow
         label="connection"
         value={step.connection_celigo_id ? `${truncateId(step.connection_celigo_id)} · name not synced` : "—"}
@@ -197,7 +200,9 @@ function ScriptSiteCard({
     <div className="rounded-lg border p-2.5 text-[12px]">
       <div className="flex flex-wrap items-center gap-1.5">
         <Badge variant="outline" className="border-blue-500/50 bg-blue-500/10 text-[10px] text-blue-700 dark:text-blue-400">
-          {`HK ${attachment.function_name ?? "hook"}`}
+          {/* `||`, not `??`: an empty function_name is "not recorded", the
+              same as null -- "HK " with nothing after it names nothing. */}
+          {`HK ${attachment.function_name || "hook"}`}
         </Badge>
         <span className="font-mono text-[12px]">{attachment.script_name ?? "name not synced"}</span>
       </div>

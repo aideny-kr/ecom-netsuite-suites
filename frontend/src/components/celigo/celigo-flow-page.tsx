@@ -85,7 +85,14 @@ export function CeligoFlowPage(): JSX.Element {
   const detailState = queryState(detailQuery);
   const detail = detailState === "success" ? detailQuery.data! : undefined;
 
-  const siblingsQuery = useCeligoIntegrationFlows(detail?.integration_id);
+  // The flow's OWN integration wins once the detail lands; the URL's
+  // `?integration=` is only a head start, so the sibling list can begin
+  // loading in parallel with the detail instead of strictly after it. The
+  // order matters: a stale or hand-edited `?integration=` must not decide
+  // which flows the navigator lists, so `detail` overrides it the moment it
+  // arrives (React Query simply refetches under the corrected key).
+  const siblingsIntegrationId = detail?.integration_id ?? route.integrationId ?? undefined;
+  const siblingsQuery = useCeligoIntegrationFlows(siblingsIntegrationId);
   const siblingsState = queryState(siblingsQuery);
   const siblings = siblingsState === "success" ? siblingsQuery.data! : NO_FLOWS;
 
