@@ -16,6 +16,7 @@
 
 import { useCeligoRoute } from "./celigo-route";
 import { CeligoIntegrationsPage } from "./celigo-integrations-page";
+import { CeligoCommandPalette } from "./celigo-command-palette";
 
 export function CeligoBreadcrumb({
   items,
@@ -96,6 +97,11 @@ export function CeligoSurface(): JSX.Element {
   return (
     <div data-testid="celigo-surface" className="flex flex-1 min-h-0 flex-col">
       {content}
+      {/* Task 11 — mounted once here (not per sub-page) so ⌘K reaches every
+          integration and flow regardless of which of the three pages above
+          is on screen; it owns its own open state, listening for the
+          `celigo:command-k` window event the workspace page dispatches. */}
+      <CeligoCommandPalette />
     </div>
   );
 }
