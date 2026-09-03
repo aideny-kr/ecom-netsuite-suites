@@ -156,9 +156,9 @@ type SpineRouterItem =
 function walkRouterChain(
   combined: RouterEntry[],
   routerSteps: CeligoFlowStep[],
-): { spineItems: SpineRouterItem[]; fanOutRouter: RouterEntry | undefined; remaining: RouterEntry[] } {
+  visited: Set<string>,
+): { spineItems: SpineRouterItem[]; fanOutRouter: RouterEntry | undefined } {
   const spineItems: SpineRouterItem[] = [];
-  const visited = new Set<string>();
   let fanOutRouter: RouterEntry | undefined;
   let current: RouterEntry | undefined = combined[0];
 
@@ -181,8 +181,7 @@ function walkRouterChain(
     current = next && !visited.has(next.id) ? next : undefined;
   }
 
-  const remaining = combined.filter((r) => !visited.has(r.id));
-  return { spineItems, fanOutRouter, remaining };
+  return { spineItems, fanOutRouter };
 }
 
 type PendingEdge = { from: string; to: string; curved: boolean; fromStep?: CeligoFlowStep };
@@ -198,10 +197,8 @@ export function computeLayout(detail: Pick<CeligoFlowDetail, "steps" | "routers"
   const routerSteps = detail.steps.filter((s) => s.router_id !== null);
 
   const combined = buildRouterList(detail.routers, routerSteps, warnings);
-  const { spineItems, fanOutRouter, remaining } = walkRouterChain(combined, routerSteps);
-  const visitedIds = new Set(
-    combined.filter((r) => !remaining.some((rem) => rem.id === r.id)).map((r) => r.id),
-  );
+  const visitedIds = new Set<string>();
+  const { spineItems, fanOutRouter } = walkRouterChain(combined, routerSteps, visitedIds);
 
   const numPrimaryLanes = fanOutRouter ? fanOutRouter.branches.length : 0;
   const lanesTop = MARGIN + LANE_LABEL_H;
@@ -378,8 +375,15 @@ export function computeLayout(detail: Pick<CeligoFlowDetail, "steps" | "routers"
 
   // 5. Remaining undeclared/unchained routers -- stacked below the last
   // lane as their own extra fan-out blocks (point 4 of the algorithm).
+  // Computed AFTER the primary lanes render (not from walkRouterChain's
+  // earlier snapshot): a lane's own `next_router_id` nesting (rule 3's last
+  // clause) can consume one of these routers inline first, and the guard
+  // inside the loop covers a later entry doing the same to an earlier one --
+  // either way a router already drawn inline must never be drawn again here.
   let extraY = laneBottom + GAP_X;
-  for (const rem of remaining) {
+  for (const rem of combined.filter((r) => !visitedIds.has(r.id))) {
+    if (visitedIds.has(rem.id)) continue;
+    visitedIds.add(rem.id);
     warnings.push(WARN_ROUTER_ORDER_UNVERIFIED);
     const routerNodeId = `router:${rem.id}`;
     nodes.push({ id: routerNodeId, type: "router", x: MARGIN, y: extraY + (BUBBLE_H - ROUTER_H) / 2, w: ROUTER_W, h: ROUTER_H, routerId: rem.id });

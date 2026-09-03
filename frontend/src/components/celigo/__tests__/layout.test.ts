@@ -206,6 +206,42 @@ describe("computeLayout — deterministic layered layout (pure)", () => {
     expect(layout.warnings).toContain("router order unverified");
   });
 
+  it("self-review: a declared router chained-to from INSIDE a fan-out lane is drawn once, not duplicated as an extra 'remaining' block", () => {
+    // r_fanout is the chain's entry point and is itself the fan-out router
+    // (2 branches). Branch bB's next_router_id nests router r3 inline at the
+    // end of that lane (rule 3's last clause). r3 is never touched by the
+    // top-level spine walk (it only has one branch and no steps of its own
+    // outside the nested reference), so before rendering the lanes it would
+    // still look "unchained" -- the bug this test guards against is treating
+    // that stale snapshot as authoritative and drawing r3 a second time as
+    // its own extra fan-out block below the primary lanes.
+    const layout = computeLayout(
+      mk(
+        [
+          step({ id: "src", celigo_id: "c0", role: "generator", sequence: 0 }),
+          step({ id: "a1", celigo_id: "ca1", role: "processor", router_id: "r_fanout", branch_id: "bA", sequence: 0 }),
+          step({ id: "b1", celigo_id: "cb1", role: "processor", router_id: "r_fanout", branch_id: "bB", sequence: 0 }),
+          step({ id: "c1", celigo_id: "cc1", role: "processor", router_id: "r3", branch_id: "bC", sequence: 0 }),
+        ],
+        [
+          routerDef({
+            id: "r_fanout",
+            branches: [
+              branch({ id: "bA", order: 0 }),
+              branch({ id: "bB", order: 1, next_router_id: "r3" }),
+            ],
+          }),
+          routerDef({ id: "r3", branches: [branch({ id: "bC", order: 0 })] }),
+        ],
+      ),
+    );
+    expect(layout.nodes.filter((n) => n.id === "router:r3")).toHaveLength(1);
+    expect(layout.nodes.filter((n) => n.id === "placeholder:r3:branches")).toHaveLength(1);
+    // r3's own branch is collapsed, not expanded (rule 3's last clause) --
+    // its real step never renders as a node, nested or otherwise.
+    expect(layout.nodes.filter((n) => n.id === "c1")).toHaveLength(0);
+  });
+
   it("(j) proceed_on_failure on the FROM step makes its outgoing edge dashed with a label", () => {
     const layout = computeLayout(
       mk([
