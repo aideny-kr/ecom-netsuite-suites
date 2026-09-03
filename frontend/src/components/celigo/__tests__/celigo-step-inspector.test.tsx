@@ -408,6 +408,25 @@ describe("Errors tab", () => {
     expect(screen.getByText(/No open errors on this step/)).toBeInTheDocument();
   });
 
+  it("renders a loading state, never an empty one, while the errors query is pending", () => {
+    mocks.flowErrors.mockReturnValue(pending());
+    const step = makeStep({ id: "step-1" });
+    renderInspector({ detail: makeDetail({ steps: [step] }), step, tab: "errors" });
+    expect(screen.getByText("Loading errors…")).toBeInTheDocument();
+    expect(screen.queryByText(/No open errors/)).not.toBeInTheDocument();
+  });
+
+  it("renders a visibly distinct error notice, never an empty one, when the errors query fails", () => {
+    const refetch = vi.fn();
+    mocks.flowErrors.mockReturnValue(errored(refetch));
+    const step = makeStep({ id: "step-1" });
+    renderInspector({ detail: makeDetail({ steps: [step] }), step, tab: "errors" });
+    expect(screen.getByText("Couldn't load errors for this step.")).toBeInTheDocument();
+    expect(screen.queryByText(/No open errors/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText("Retry"));
+    expect(refetch).toHaveBeenCalled();
+  });
+
   it("renders a signature card for a group whose step_ids include this step", () => {
     mocks.flowErrors.mockReturnValue(
       resolved({

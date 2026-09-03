@@ -129,7 +129,12 @@ function stepPositionLine(detail: CeligoFlowDetail, step: CeligoFlowStep): strin
  * needs to know a step recurring in both isn't a coincidence of two
  * similarly-configured steps but the literal same one. Only ever answers
  * for THIS flow (the data this component already has); a step reused across
- * OTHER flows entirely is outside what `detail` can say. */
+ * OTHER flows entirely is outside what `detail` can say. Names only the
+ * FIRST other occurrence found -- the two-branch case the mockup and every
+ * live flow that reuses a step actually shows. A step attached in three or
+ * more branches would still read as "also in Branch N" for one of them,
+ * naming a real branch rather than every one; the plan does not ask for an
+ * exhaustive list here, and no live flow does this today. */
 function usedElsewhereLine(detail: CeligoFlowDetail, step: CeligoFlowStep): string {
   const other = detail.steps.find((s) => s.id !== step.id && s.celigo_id === step.celigo_id);
   if (!other) return "only in this flow";
@@ -163,6 +168,12 @@ function FactsTab({ detail, step }: { detail: CeligoFlowDetail; step: CeligoFlow
   );
 }
 
+type CeligoAttachmentLike = {
+  script_copies_count: number | null;
+  script_versions_count: number | null;
+  script_version_letter: string | null;
+};
+
 /** `1 copy · 1 version` when this attachment's script isn't part of a
  * meaningful clone family (`script_copies_count <= 1`); `copy C of 3
  * versions · 7 copies` when it is -- the family form always names THIS
@@ -179,12 +190,6 @@ function scriptFamilyLine(att: CeligoAttachmentLike): string | null {
   const letter = att.script_version_letter ?? "?";
   return `copy ${letter} of ${att.script_versions_count} ${versionsWord} · ${att.script_copies_count} copies`;
 }
-
-type CeligoAttachmentLike = {
-  script_copies_count: number | null;
-  script_versions_count: number | null;
-  script_version_letter: string | null;
-};
 
 function ScriptSiteCard({
   attachment,
@@ -285,19 +290,16 @@ function ErrorSignatureCard({ group }: { group: CeligoFlowErrorGroup }) {
 }
 
 function ErrorsTab({
-  step,
   errorsState,
   groups,
   onRetry,
   lastSyncedAt,
 }: {
-  step: CeligoFlowStep;
   errorsState: "pending" | "error" | "success";
   groups: CeligoFlowErrorGroup[];
   onRetry: () => void;
   lastSyncedAt: string | null;
 }) {
-  void step;
   if (errorsState === "pending") {
     return (
       <div className="flex items-center gap-1.5 text-[12px] text-muted-foreground">
@@ -421,7 +423,6 @@ export function CeligoStepInspector({
           </TabsContent>
           <TabsContent value="errors" className="mt-0">
             <ErrorsTab
-              step={step}
               errorsState={errorsState}
               groups={matchingGroups}
               onRetry={() => errorsQuery.refetch()}
