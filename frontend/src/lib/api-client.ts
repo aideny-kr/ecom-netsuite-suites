@@ -47,6 +47,50 @@ async function tryRefreshToken(): Promise<boolean> {
   return refreshPromise;
 }
 
+/** The backend's own `detail` text for a non-OK response, falling back to
+ * `fallback` when the body isn't JSON or carries no detail. Pydantic
+ * validation errors arrive as a LIST of `{loc, msg}` objects and render as
+ * one `loc: msg` line each. Extracted so the two places that build an error
+ * from a response — the ordinary non-OK path and `retryFailure` below —
+ * cannot drift into reporting the same failure two different ways. */
+async function readErrorMessage(res: Response, fallback: string): Promise<string> {
+  try {
+    const errorData = await res.json();
+    if (!errorData?.detail) return fallback;
+    if (Array.isArray(errorData.detail)) {
+      return errorData.detail
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .map((err: any) => {
+          const loc = err.loc ? err.loc.join(".") : "";
+          return loc ? `${loc}: ${err.msg}` : err.msg;
+        })
+        .join("\n");
+    }
+    if (typeof errorData.detail === "object") return JSON.stringify(errorData.detail);
+    return String(errorData.detail);
+  } catch {
+    return res.statusText || fallback;
+  }
+}
+
+/** A non-OK RETRY after a token refresh that SUCCEEDED. Only a 401 here means
+ * the session is genuinely dead and the logout path is the right answer;
+ * every other status is an ordinary request failure and must surface as one.
+ *
+ * It used to surface as a logout: the retry's `if (retry.ok)` simply fell
+ * through, so a 404 (a flow id that genuinely isn't in the last sync) wiped
+ * the access token and bounced the reader to `/login` — losing their session
+ * over a missing record, and hiding the real status from the page that knew
+ * how to render it (`celigo-flow-page.tsx`'s `is404`).
+ *
+ * Returns the error to throw, or `null` when the caller SHOULD fall through
+ * to logging out. Shared by all four request shapes so the rule is one
+ * decision rather than four copies that can drift. */
+async function retryFailure(res: Response, fallback: string): Promise<ApiError | null> {
+  if (res.status === 401) return null;
+  return new ApiError(await readErrorMessage(res, fallback), res.status);
+}
+
 async function request<T>(
   method: string,
   path: string,
@@ -95,6 +139,8 @@ async function request<T>(
         if (retry.status === 204) return undefined as T;
         return retry.json();
       }
+      const failure = await retryFailure(retry, `Request failed: ${retry.status}`);
+      if (failure) throw failure;
     }
     localStorage.removeItem("access_token");
     localStorage.removeItem("refresh_token");
@@ -103,29 +149,7 @@ async function request<T>(
   }
 
   if (!res.ok) {
-    let errorMessage = `Request failed: ${res.status}`;
-    try {
-      const errorData = await res.json();
-      if (errorData.detail) {
-        if (Array.isArray(errorData.detail)) {
-          // Handle Pydantic validation errors (list of objects)
-          errorMessage = errorData.detail
-            .map((err: any) => {
-              const loc = err.loc ? err.loc.join(".") : "";
-              return loc ? `${loc}: ${err.msg}` : err.msg;
-            })
-            .join("\n");
-        } else if (typeof errorData.detail === "object") {
-          errorMessage = JSON.stringify(errorData.detail);
-        } else {
-          errorMessage = String(errorData.detail);
-        }
-      }
-    } catch (e) {
-      // Use status text if JSON parsing fails
-      errorMessage = res.statusText || errorMessage;
-    }
-    throw new ApiError(errorMessage, res.status);
+    throw new ApiError(await readErrorMessage(res, `Request failed: ${res.status}`), res.status);
   }
 
   if (res.status === 204) {
@@ -167,6 +191,9 @@ async function requestText(path: string): Promise<string> {
         credentials: "include",
       });
       if (retry.ok) return retry.text();
+      // Same rule as `request()`: only a 401 on the retry is a dead session.
+      const failure = await retryFailure(retry, `Request failed: ${retry.status}`);
+      if (failure) throw failure;
     }
     localStorage.removeItem("access_token");
     localStorage.removeItem("refresh_token");
@@ -223,6 +250,9 @@ async function streamRequest(path: string, body?: unknown): Promise<Response> {
         body: body ? JSON.stringify(body) : undefined,
       });
       if (retry.ok) return retry;
+      // Same rule as `request()`: only a 401 on the retry is a dead session.
+      const failure = await retryFailure(retry, `Request failed: ${retry.status}`);
+      if (failure) throw failure;
     }
     localStorage.removeItem("access_token");
     localStorage.removeItem("refresh_token");
@@ -283,6 +313,9 @@ async function downloadRequest(path: string, body?: unknown): Promise<Response> 
         body: body ? JSON.stringify(body) : undefined,
       });
       if (retry.ok) return retry;
+      // Same rule as `request()`: only a 401 on the retry is a dead session.
+      const failure = await retryFailure(retry, `Export failed: ${retry.status}`);
+      if (failure) throw failure;
     }
     localStorage.removeItem("access_token");
     localStorage.removeItem("refresh_token");
