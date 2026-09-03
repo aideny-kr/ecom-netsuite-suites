@@ -430,7 +430,12 @@ export default function WorkspacePage() {
     // not read `file`/`workspace` while Celigo params are the ones on the
     // URL (they are never both present at once; see `page.tsx`'s `surface`
     // exclusivity comment).
-    if (route.surface === "celigo") return;
+    //
+    // Gated on `surface`, NOT the raw `route.surface`: with the flag off, a
+    // stale `?surface=celigo&file=…` bookmark renders FILES, and standing
+    // aside for a Celigo surface that is not mounted just dropped the file
+    // deep link and left an empty editor (finding I6).
+    if (surface === "celigo") return;
     const fileParam = searchParams.get("file");
     const workspaceParam = searchParams.get("workspace");
     if (!fileParam) return;
@@ -451,7 +456,7 @@ export default function WorkspacePage() {
         setViewingDiffId(null);
       }
     }
-  }, [route.surface, searchParams, fileTree, workspaces, selectedWorkspaceId, findFileInTree]);
+  }, [surface, searchParams, fileTree, workspaces, selectedWorkspaceId, findFileInTree]);
 
   useEffect(() => {
     setIsMounted(true);
