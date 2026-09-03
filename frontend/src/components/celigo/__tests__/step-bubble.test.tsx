@@ -109,6 +109,15 @@ describe("StepBubble — eyebrow, title, fact line", () => {
 });
 
 describe("StepBubble — affordance chips", () => {
+  it("a source's transform chip also selects the step at the scripts tab, same as a hooks chip", () => {
+    const onSelect = vi.fn();
+    renderBubble(makeStep({ id: "s1", kind: "source", role: "generator", adaptor_type: "HTTPExport" }), { onSelect });
+    const bubble = screen.getByTestId("step-bubble-s1");
+    // source order: transform (scripts) · hooks (scripts) · output_filter (filter)
+    fireEvent.click(within(bubble).getByText("no transform"));
+    expect(onSelect).toHaveBeenCalledWith("s1", "scripts");
+  });
+
   it("renders every chip affordanceChips returns, in order, and each click selects the step at the matching tab", () => {
     const onSelect = vi.fn();
     renderBubble(makeStep({ id: "s1", kind: "destination", role: "processor", adaptor_type: "NetSuiteDistributedImport" }), { onSelect });
