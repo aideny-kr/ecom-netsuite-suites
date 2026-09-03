@@ -1201,6 +1201,21 @@ class TestGetFlowDetail:
             34145,
         )
 
+    async def test_boolean_num_open_error_is_not_a_count(self, client, admin_user, db):
+        """Gate fix wave, item 8: `isinstance(x, int)` is True for a bool in
+        Python, so a `numOpenError` of `true` would have been relayed as the
+        count 1 -- a fabricated error total from a field that said nothing of
+        the kind. It is a shape nobody has seen, which is exactly why it must
+        fail closed to None rather than to a number a UI will then print."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        world["flow"].raw_json = {**world["flow"].raw_json, "numOpenError": True}
+        await db.flush()
+
+        r = await client.get(f"/api/v1/celigo/flows/{world['flow'].id}", headers=headers)
+        assert r.status_code == 200, r.text
+        assert r.json()["celigo_open_error_count"] is None
+
     async def test_404_for_unknown_flow(self, client, admin_user):
         _, headers = admin_user
         r = await client.get(f"/api/v1/celigo/flows/{uuid.uuid4()}", headers=headers)

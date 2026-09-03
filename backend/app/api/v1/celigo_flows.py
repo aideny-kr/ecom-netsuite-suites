@@ -1277,7 +1277,16 @@ async def get_flow_detail(
     ]
 
     raw_open_error_count = flow.raw_json.get("numOpenError") if isinstance(flow.raw_json, dict) else None
-    celigo_open_error_count = raw_open_error_count if isinstance(raw_open_error_count, int) else None
+    # `not isinstance(..., bool)` is load-bearing: in Python `True` IS an int,
+    # so a `numOpenError` of `true` would have been relayed as the count 1 --
+    # an error total fabricated out of a field that said no such thing. This
+    # is a shape nobody has seen, which is precisely why it must fail closed
+    # to None rather than to a number a UI will then print as fact.
+    celigo_open_error_count = (
+        raw_open_error_count
+        if isinstance(raw_open_error_count, int) and not isinstance(raw_open_error_count, bool)
+        else None
+    )
     last_error_at = _parse_iso(flow.raw_json.get("lastErrorAt") if isinstance(flow.raw_json, dict) else None)
 
     return CeligoFlowDetailOut(
