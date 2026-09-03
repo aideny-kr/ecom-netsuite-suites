@@ -241,6 +241,41 @@ describe("computeLayout — deterministic layered layout (pure)", () => {
     expect(layout.warnings).toContain("router order unverified");
   });
 
+  it("(i2) an undeclared router's steps with NO branch_id still get a node, and the gap is named", () => {
+    // Gate fix wave, item 3. A synthetic router's branches were built only
+    // from the non-null `branch_id`s its steps carried, so a step that named
+    // the router but no branch belonged to no lane at all -- it vanished
+    // with no node, no placeholder and no warning, while the router it
+    // pointed at was drawn as if complete.
+    const layout = computeLayout(
+      mk([
+        step({ id: "src", celigo_id: "c0", role: "generator", sequence: 0 }),
+        step({ id: "unbranched", celigo_id: "c1", role: "processor", router_id: "rX", branch_id: null, sequence: 0 }),
+        step({ id: "branched", celigo_id: "c2", role: "processor", router_id: "rX", branch_id: "b1", sequence: 1 }),
+      ]),
+    );
+
+    expect(layout.nodes.find((n) => n.id === "unbranched")).toBeTruthy();
+    expect(layout.nodes.find((n) => n.id === "branched")).toBeTruthy();
+    expect(layout.warnings).toContain("undeclared router: 1 step(s) without a branch");
+  });
+
+  it("(i3) an undeclared router whose steps ALL lack a branch_id still draws them", () => {
+    const layout = computeLayout(
+      mk([
+        step({ id: "src", celigo_id: "c0", role: "generator", sequence: 0 }),
+        step({ id: "u1", celigo_id: "c1", role: "processor", router_id: "rY", branch_id: null, sequence: 0 }),
+        step({ id: "u2", celigo_id: "c2", role: "processor", router_id: "rY", branch_id: null, sequence: 1 }),
+      ]),
+    );
+
+    expect(layout.nodes.filter((n) => n.type === "step" && n.routerId === "rY").map((n) => n.id).sort()).toEqual([
+      "u1",
+      "u2",
+    ]);
+    expect(layout.warnings).toContain("undeclared router: 2 step(s) without a branch");
+  });
+
   it("self-review: a declared router chained-to from INSIDE a fan-out lane is drawn once, not duplicated as an extra 'remaining' block", () => {
     // r_fanout is the chain's entry point and is itself the fan-out router
     // (2 branches). Branch bB's next_router_id nests router r3 inline at the

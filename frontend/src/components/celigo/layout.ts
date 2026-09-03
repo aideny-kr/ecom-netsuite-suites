@@ -160,9 +160,22 @@ function buildRouterList(routers: CeligoRouter[], routerSteps: CeligoFlowStep[],
 
   const synthetic: RouterEntry[] = undeclaredIds.map((routerId) => {
     warnings.push(WARN_ROUTER_ORDER_UNVERIFIED);
-    const branchIds = Array.from(
-      new Set(routerSteps.filter((s) => s.router_id === routerId && s.branch_id !== null).map((s) => s.branch_id as string)),
+    const ownSteps = routerSteps.filter((s) => s.router_id === routerId);
+    const branchIds: (string | null)[] = Array.from(
+      new Set(ownSteps.filter((s) => s.branch_id !== null).map((s) => s.branch_id as string)),
     ).sort();
+    // Steps that name this router but NO branch used to belong to no lane at
+    // all: the branch list was built only from the non-null `branch_id`s, so
+    // those steps vanished -- no node, no placeholder, no warning -- while
+    // the router they pointed at was drawn as if it were complete. They get
+    // a leading id-less branch instead (`stepsForBranch`'s first-null-branch
+    // rule then claims exactly them), and the flow gets told what the sync
+    // could not say: which lane they really belong to is unknown.
+    const unbranchedCount = ownSteps.filter((s) => s.branch_id === null).length;
+    if (unbranchedCount > 0) {
+      branchIds.unshift(null);
+      warnings.push(`undeclared router: ${unbranchedCount} step(s) without a branch`);
+    }
     const branches: CeligoRouterBranch[] = branchIds.map((id, order) => ({
       id,
       name: null,
