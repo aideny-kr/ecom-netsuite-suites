@@ -134,7 +134,7 @@ def _set_clause(values: dict, *, exclude: set[str]) -> dict:
     return out
 
 
-def _parse_celigo_timestamp(value: object) -> datetime | None:
+def parse_celigo_timestamp(value: object) -> datetime | None:
     """Best-effort parse of a Celigo timestamp field into an aware datetime.
 
     Defensive by design: `celigo_last_modified`/`last_executed_at` etc. are
@@ -145,8 +145,20 @@ def _parse_celigo_timestamp(value: object) -> datetime | None:
     present key but doesn't record its wire format); handles the two shapes
     most REST APIs of this kind use -- ISO-8601 strings and epoch
     milliseconds -- and returns None for anything else.
+
+    Public (no leading underscore) because the read API parses the same
+    Celigo timestamps out of the same stored `raw_json`: `celigo_flows.py`
+    used to carry a private re-implementation of only the string half, so an
+    epoch-ms `lastErrorAt` silently became NULL there while the sync's own
+    columns parsed it fine. `_parse_celigo_timestamp` remains as an alias for
+    this module's existing callers.
     """
     if value is None:
+        return None
+    # A bool IS an int in Python. Without this guard `True` would divide to
+    # 0.001 and come back as a real-looking 1970-01-01T00:00:00.001Z -- a
+    # timestamp invented out of a flag.
+    if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
         try:
@@ -159,6 +171,10 @@ def _parse_celigo_timestamp(value: object) -> datetime | None:
         except ValueError:
             return None
     return None
+
+
+#: Back-compat alias -- this module's own call sites predate the public name.
+_parse_celigo_timestamp = parse_celigo_timestamp
 
 
 def _content_hash(content: str | None) -> str | None:

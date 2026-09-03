@@ -1216,6 +1216,44 @@ class TestGetFlowDetail:
         assert r.status_code == 200, r.text
         assert r.json()["celigo_open_error_count"] is None
 
+    async def test_last_error_at_accepts_epoch_millis(self, client, admin_user, db):
+        """Gate fix wave, item 9: `lastErrorAt` is parsed by the package's own
+        `parse_celigo_timestamp`, which handles BOTH shapes Celigo's REST API
+        uses -- an ISO-8601 string and epoch milliseconds. The API used to
+        carry a private re-implementation of only the string half, so an
+        epoch-ms value silently became `null`."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        world["flow"].raw_json = {**world["flow"].raw_json, "lastErrorAt": 1788336000000}  # 2026-09-02T08:00Z
+        await db.flush()
+
+        r = await client.get(f"/api/v1/celigo/flows/{world['flow'].id}", headers=headers)
+        assert r.status_code == 200, r.text
+        assert r.json()["last_error_at"] == "2026-09-02T08:00:00Z"
+
+    async def test_last_error_at_still_accepts_an_iso_string(self, client, admin_user, db):
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        world["flow"].raw_json = {**world["flow"].raw_json, "lastErrorAt": "2026-09-02T08:00:00Z"}
+        await db.flush()
+
+        r = await client.get(f"/api/v1/celigo/flows/{world['flow'].id}", headers=headers)
+        assert r.status_code == 200, r.text
+        assert r.json()["last_error_at"] == "2026-09-02T08:00:00Z"
+
+    async def test_boolean_last_error_at_is_not_a_timestamp(self, client, admin_user, db):
+        """A bool is an int in Python, so an unguarded epoch-ms branch would
+        turn `true` into 1970-01-01T00:00:00.001Z -- a real-looking timestamp
+        invented out of a flag."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        world["flow"].raw_json = {**world["flow"].raw_json, "lastErrorAt": True}
+        await db.flush()
+
+        r = await client.get(f"/api/v1/celigo/flows/{world['flow'].id}", headers=headers)
+        assert r.status_code == 200, r.text
+        assert r.json()["last_error_at"] is None
+
     async def test_404_for_unknown_flow(self, client, admin_user):
         _, headers = admin_user
         r = await client.get(f"/api/v1/celigo/flows/{uuid.uuid4()}", headers=headers)

@@ -73,7 +73,7 @@ from app.models.celigo import (
 )
 from app.models.pipeline import CursorState
 from app.models.user import User
-from app.services.celigo.repository import list_logical_scripts
+from app.services.celigo.repository import list_logical_scripts, parse_celigo_timestamp
 from app.services.celigo.topology import (
     ScriptFamilyFact,
     adaptor_family,
@@ -114,18 +114,6 @@ def _join_production_integration(stmt, tenant_id):
 # whatever Celigo sends; the API's job is to relay it, not to vouch for its
 # shape -- the frontend decides how to render what it gets.
 CeligoSchedule = JsonValue
-
-
-def _parse_iso(value: object) -> datetime | None:
-    """`raw_json["lastErrorAt"]` is Celigo's own ISO-8601 string (or absent) --
-    never a `datetime` (raw_json is a JSONB blob). Fails closed to `None`
-    rather than 500ing the flow on a shape nobody has seen yet."""
-    if not isinstance(value, str):
-        return None
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
 
 
 class CeligoFlowScheduleOut(BaseModel):
@@ -1287,7 +1275,15 @@ async def get_flow_detail(
         if isinstance(raw_open_error_count, int) and not isinstance(raw_open_error_count, bool)
         else None
     )
-    last_error_at = _parse_iso(flow.raw_json.get("lastErrorAt") if isinstance(flow.raw_json, dict) else None)
+    # The SYNC's own parser, not a second one: `raw_json["lastErrorAt"]` is
+    # the same Celigo wire value the repository already reads for
+    # `lastModified`/`lastExecutedAt`, and it comes in both shapes that API
+    # uses. This endpoint used to reimplement only the string half, so an
+    # epoch-ms value silently became NULL here while the sync's own columns
+    # parsed it correctly.
+    last_error_at = parse_celigo_timestamp(
+        flow.raw_json.get("lastErrorAt") if isinstance(flow.raw_json, dict) else None
+    )
 
     return CeligoFlowDetailOut(
         id=str(flow.id),
