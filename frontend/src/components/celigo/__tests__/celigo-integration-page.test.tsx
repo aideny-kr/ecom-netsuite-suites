@@ -543,6 +543,14 @@ describe("query states", () => {
     expect(screen.getByText(/couldn.t load flows/i)).toBeInTheDocument();
   });
 
+  it("shows an error notice on the Flows tab when sync status fails, never lastSyncedAt: null pills", () => {
+    mocks.flows.mockReturnValue(resolved([makeFlow({ id: "f1", name: "Some Flow" })]));
+    mocks.syncStatus.mockReturnValue(errored());
+    wrap(<CeligoIntegrationPage />);
+    expect(screen.getByText(/couldn.t load flows/i)).toBeInTheDocument();
+    expect(screen.queryByText("Some Flow")).not.toBeInTheDocument();
+  });
+
   it("shows skeleton rows while flows are pending, never an empty table", () => {
     mocks.flows.mockReturnValue(pending());
     wrap(<CeligoIntegrationPage />);

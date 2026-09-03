@@ -493,7 +493,10 @@ function CeligoFlowErrorsDrawer({
       <DialogContent
         className={cn(
           "inset-y-0 right-0 left-auto top-0 w-[520px] max-w-none translate-x-0 translate-y-0",
-          "flex flex-col gap-3 overflow-y-auto rounded-none border-l",
+          // `sm:rounded-lg` on the shared default is a responsive variant —
+          // twMerge only drops a class sharing the exact same modifier, so a
+          // bare `rounded-none` alone leaves the sm: one to win above 640px.
+          "flex flex-col gap-3 overflow-y-auto rounded-none sm:rounded-none border-l",
         )}
       >
         <DialogHeader>
@@ -586,6 +589,16 @@ export function CeligoIntegrationPage(): JSX.Element {
     );
   } else {
     const flowsLoading = flowsState === "pending" || syncStatusState === "pending";
+    // Last-run/stall pills and the quiet-errors sentence both need
+    // `lastSyncedAt` to be trustworthy — an errored sync-status fetch must
+    // not be read as "resolved, so render with lastSyncedAt: null" (that
+    // would silently show every stall pill as "unknown" and the quiet
+    // sentence as "...last sync, —." instead of surfacing the real failure).
+    const flowsBlocked = flowsState === "error" || syncStatusState === "error";
+    const retryFlowsAndSync = () => {
+      if (flowsState === "error") flowsQuery.refetch();
+      if (syncStatusState === "error") syncStatusQuery.refetch();
+    };
     body = (
       <>
         <div className="flex flex-wrap items-start gap-3.5">
@@ -613,8 +626,8 @@ export function CeligoIntegrationPage(): JSX.Element {
           <TabsContent value="flows">
             {flowsLoading ? (
               <FlowsTableSkeleton />
-            ) : flowsState === "error" ? (
-              <ErrorNotice message="Couldn't load flows." onRetry={() => flowsQuery.refetch()} />
+            ) : flowsBlocked ? (
+              <ErrorNotice message="Couldn't load flows." onRetry={retryFlowsAndSync} />
             ) : (
               <FlowsTable
                 flows={flows}
@@ -636,8 +649,8 @@ export function CeligoIntegrationPage(): JSX.Element {
           <TabsContent value="errors">
             {flowsLoading ? (
               <FlowsTableSkeleton />
-            ) : flowsState === "error" ? (
-              <ErrorNotice message="Couldn't load flows." onRetry={() => flowsQuery.refetch()} />
+            ) : flowsBlocked ? (
+              <ErrorNotice message="Couldn't load flows." onRetry={retryFlowsAndSync} />
             ) : (
               <ErrorsTab flows={errorFlows} lastSyncedAt={lastSyncedAt} />
             )}
