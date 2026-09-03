@@ -18,9 +18,9 @@
  */
 
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
-import type { CeligoFlowDetail, CeligoRouter } from "@/hooks/use-celigo-flows";
+import type { CeligoFlowDetail } from "@/hooks/use-celigo-flows";
 import type { InspectorTab } from "./celigo-step-inspector";
-import { computeLayout, type LayoutEdge } from "./layout";
+import { computeLayout, type LayoutEdge, type LayoutRouter } from "./layout";
 import { StepBubble } from "./step-bubble";
 import { RouterNode } from "./router-node";
 import { cn } from "@/lib/utils";
@@ -54,11 +54,16 @@ export function CeligoFlowCanvas({
 }): JSX.Element {
   const layout = useMemo(() => computeLayout(detail), [detail]);
   const stepsById = useMemo(() => new Map(detail.steps.map((s) => [s.id, s])), [detail.steps]);
+  // Resolved against `layout.routers`, NOT `detail.routers`: the layout also
+  // draws a node for any router the flow's steps point at that `detail.routers`
+  // never declared. Looking those up in the declared list missed, `RouterNode`
+  // returned null, and the rank the layout had already reserved rendered as
+  // blank space with an edge arriving in it (finding I4).
   const routersById = useMemo(() => {
-    const m = new Map<string, CeligoRouter>();
-    for (const r of detail.routers) if (r.id) m.set(r.id, r);
+    const m = new Map<string, LayoutRouter>();
+    for (const r of layout.routers) m.set(r.id, r);
     return m;
-  }, [detail.routers]);
+  }, [layout.routers]);
 
   // Router display numbers ("Router 1", "Router 2", …) follow the order
   // `computeLayout` actually placed the router NODES in — the chain's

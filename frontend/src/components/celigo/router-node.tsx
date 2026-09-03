@@ -17,8 +17,7 @@
  * router, never the full list.
  */
 
-import type { CeligoRouter } from "@/hooks/use-celigo-flows";
-import type { LayoutNode } from "./layout";
+import type { LayoutNode, LayoutRouter } from "./layout";
 
 const ROUTE_TO_LABEL: Record<string, string> = {
   first_matching_branch: "first matching branch",
@@ -30,7 +29,17 @@ const ROUTE_USING_LABEL: Record<string, string> = {
   script: "by script",
 };
 
-export function routerSummary(router: CeligoRouter, routerIndexById: Map<string, number>): string {
+export function routerSummary(router: LayoutRouter, routerIndexById: Map<string, number>): string {
+  const branchCount = `${router.branches.length} branch${router.branches.length === 1 ? "" : "es"}`;
+  if (!router.declared) {
+    // A router `detail.routers` never declared — `computeLayout` synthesised
+    // it from the `router_id` its steps point at (finding I4). The sync
+    // carried no name, no routing mode and no true branch order for it, so
+    // this says exactly that instead of printing a default routing rule the
+    // account may not use. The branch count is real: it counts the distinct
+    // branches the steps themselves reference.
+    return `undeclared · ${branchCount}`;
+  }
   const soleBranch = router.branches.length === 1 ? router.branches[0] : undefined;
   if (soleBranch?.next_router_id) {
     const targetIndex = routerIndexById.get(soleBranch.next_router_id);
@@ -39,7 +48,7 @@ export function routerSummary(router: CeligoRouter, routerIndexById: Map<string,
   }
   const toLabel = (router.route_records_to && ROUTE_TO_LABEL[router.route_records_to]) || "routes on branches";
   const usingLabel = router.route_records_using ? ROUTE_USING_LABEL[router.route_records_using] : null;
-  const parts = [toLabel, usingLabel, String(router.branches.length)].filter((p): p is string => !!p);
+  const parts = [toLabel, usingLabel, branchCount].filter((p): p is string => !!p);
   return parts.join(" · ");
 }
 
@@ -49,7 +58,7 @@ export function RouterNode({
   index,
   routerIndexById,
 }: {
-  router: CeligoRouter;
+  router: LayoutRouter;
   node: Pick<LayoutNode, "x" | "y" | "w">;
   index: number;
   routerIndexById: Map<string, number>;

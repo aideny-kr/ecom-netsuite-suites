@@ -68,6 +68,13 @@ export type Layout = {
   nodes: LayoutNode[];
   edges: LayoutEdge[];
   lanes: LaneLabel[];
+  /** Every router this layout drew a node for, keyed by the `routerId` those
+   * nodes carry — the flow's declared routers PLUS the synthetic entries this
+   * module invents for a `router_id` steps reference but `detail.routers`
+   * never declared. A renderer must resolve router nodes against THIS list,
+   * not `detail.routers`: a lookup that misses on a synthetic router leaves a
+   * reserved rank blank with an edge pointing into it (finding I4). */
+  routers: LayoutRouter[];
   captions: { x: number; y: number; text: string }[];
   width: number;
   height: number;
@@ -81,8 +88,16 @@ const WARN_NESTED_ROUTER_INLINE = "nested router chain drawn inline";
  * `detail.routers`, verbatim, plus a synthetic one per undeclared router_id
  * actually referenced by a step -- same shape either way so the rest of the
  * algorithm never has to branch on "declared vs synthetic" again once this
- * list exists. */
-type RouterEntry = CeligoRouter & { id: string };
+ * list exists.
+ *
+ * `declared` is the one thing a RENDERER still has to tell apart: a synthetic
+ * router carries no name, no routing mode and no true branch order, so
+ * printing the usual "first matching branch · by input filters · N" over it
+ * would state facts the sync never supplied. It is exported on `Layout.routers`
+ * for exactly that. */
+export type LayoutRouter = CeligoRouter & { id: string; declared: boolean };
+
+type RouterEntry = LayoutRouter;
 
 function bySequence(a: CeligoFlowStep, b: CeligoFlowStep): number {
   return a.sequence - b.sequence;
@@ -129,7 +144,9 @@ function stepsForBranch(
  * synthetic entry: an undeclared router's position in the drawing is a
  * guess, and every caller of this list needs to know that up front. */
 function buildRouterList(routers: CeligoRouter[], routerSteps: CeligoFlowStep[], warnings: string[]): RouterEntry[] {
-  const declared: RouterEntry[] = routers.filter((r): r is RouterEntry => typeof r.id === "string");
+  const declared: RouterEntry[] = routers
+    .filter((r): r is CeligoRouter & { id: string } => typeof r.id === "string")
+    .map((r) => ({ ...r, declared: true }));
   const declaredIds = new Set(declared.map((r) => r.id));
 
   const undeclaredIds: string[] = [];
@@ -161,6 +178,7 @@ function buildRouterList(routers: CeligoRouter[], routerSteps: CeligoFlowStep[],
       route_records_using: null,
       has_script_slot: false,
       branches,
+      declared: false,
     };
   });
 
@@ -225,7 +243,7 @@ type PendingEdge = { from: string; to: string; curved: boolean; fromStep?: Celig
 
 export function computeLayout(detail: Pick<CeligoFlowDetail, "steps" | "routers">): Layout {
   if (detail.steps.length === 0) {
-    return { nodes: [], edges: [], lanes: [], captions: [], width: 0, height: 0, warnings: ["no steps recorded"] };
+    return { nodes: [], edges: [], lanes: [], routers: [], captions: [], width: 0, height: 0, warnings: ["no steps recorded"] };
   }
 
   const warnings: string[] = [];
@@ -467,5 +485,5 @@ export function computeLayout(detail: Pick<CeligoFlowDetail, "steps" | "routers"
   const maxX = Math.max(...nodes.map((n) => n.x + n.w));
   const maxY = Math.max(...nodes.map((n) => n.y + n.h));
 
-  return { nodes, edges, lanes, captions: [], width: maxX + MARGIN, height: maxY + MARGIN, warnings };
+  return { nodes, edges, lanes, routers: combined, captions: [], width: maxX + MARGIN, height: maxY + MARGIN, warnings };
 }

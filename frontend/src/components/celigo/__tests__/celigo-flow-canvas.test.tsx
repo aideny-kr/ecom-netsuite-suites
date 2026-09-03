@@ -195,7 +195,7 @@ describe("CeligoFlowCanvas — bubbles, routers, lanes, edges", () => {
 
     const r2 = screen.getByTestId("router-node-r2");
     expect(within(r2).getByTestId("router-label")).toHaveTextContent("Router 2");
-    expect(within(r2).getByTestId("router-value")).toHaveTextContent("first matching branch · by input filters · 2");
+    expect(within(r2).getByTestId("router-value")).toHaveTextContent("first matching branch · by input filters · 2 branches");
   });
 
   it("renders lane labels as 'Branch {n} · {name} · {ruleCount} rule(s)'", () => {
@@ -257,6 +257,25 @@ describe("CeligoFlowCanvas — bubbles, routers, lanes, edges", () => {
     const caption = screen.getByTestId("canvas-warnings");
     expect(caption).toHaveTextContent("router order unverified");
     expect(caption.className).toMatch(/amber/);
+  });
+
+  it("draws a neutral node for a router the flow never declared, instead of an arrow into a gap", () => {
+    // Final-review finding I4. `computeLayout` synthesises a router for any
+    // `router_id` a step references that `detail.routers` never declared, and
+    // reserves canvas space for it — but the canvas looked routers up in a map
+    // built from `detail.routers` alone, so `RouterNode` returned null and the
+    // reserved rank rendered as blank space with an edge pointing into it.
+    const detail = makeDetail({
+      steps: [
+        makeStep({ id: "src2", sequence: 0, kind: "source" }),
+        makeStep({ id: "undeclared", sequence: 1, kind: "destination", router_id: "ghost", branch_id: "b1" }),
+      ],
+      routers: [],
+    });
+    renderCanvas(detail);
+    const ghost = screen.getByTestId("router-node-ghost");
+    expect(within(ghost).getByTestId("router-label")).toHaveTextContent("Router 1");
+    expect(within(ghost).getByTestId("router-value")).toHaveTextContent("undeclared · 1 branch");
   });
 
   it("renders the legend row with the three chip states", () => {
