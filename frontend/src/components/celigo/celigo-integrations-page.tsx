@@ -185,16 +185,22 @@ function SyncPill({ lastSyncedAt }: { lastSyncedAt: string | null }): JSX.Elemen
 
 /** "writes SALESORDER ×19 customer ×9 …" — the top four write types (the
  * API already orders `writes` count desc, then record_type — see
- * `CeligoRecordWrite`'s docstring), collapsing the rest into a single
- * "+N custom records" chip rather than letting a long tail crowd the tile.
- * Empty says so outright: a flow that only reads NetSuite and pushes
- * elsewhere is not a gap in the sync, it's a fact about the integration. */
+ * `CeligoRecordWrite`'s docstring), collapsing the rest into one chip rather
+ * than letting a long tail crowd the tile. That chip says "custom records"
+ * ONLY when every collapsed type is actually `customrecord_*` — otherwise
+ * "custom" would be a claim this data doesn't back (a 5th STANDARD type,
+ * e.g. `invoice`, collapsed under "custom records" would be a fabricated
+ * label of the same shape every other honest-fallback in this surface goes
+ * out of its way to avoid — see `fallbackStepTitle`'s docstring). Empty says
+ * so outright: a flow that only reads NetSuite and pushes elsewhere is not a
+ * gap in the sync, it's a fact about the integration. */
 function WritesLine({ writes }: { writes: CeligoRecordWrite[] }): JSX.Element {
   if (writes.length === 0) {
     return <div className="text-[11px] text-muted-foreground">no NetSuite writes</div>;
   }
   const visible = writes.slice(0, 4);
-  const extra = writes.length - visible.length;
+  const overflow = writes.slice(4);
+  const allCustom = overflow.length > 0 && overflow.every((w) => w.record_type.startsWith("customrecord_"));
   return (
     <div className="flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5 text-[11px]">
       <span className="text-[10px] uppercase tracking-wide text-muted-foreground">writes</span>
@@ -203,9 +209,9 @@ function WritesLine({ writes }: { writes: CeligoRecordWrite[] }): JSX.Element {
           {w.record_type} ×{w.count}
         </span>
       ))}
-      {extra > 0 && (
+      {overflow.length > 0 && (
         <span className="font-mono text-muted-foreground">
-          +{extra} custom record{extra === 1 ? "" : "s"}
+          +{overflow.length} {allCustom ? `custom record${overflow.length === 1 ? "" : "s"}` : "more"}
         </span>
       )}
     </div>

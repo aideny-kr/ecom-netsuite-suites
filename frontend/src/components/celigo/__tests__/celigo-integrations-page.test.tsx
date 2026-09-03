@@ -265,6 +265,42 @@ describe("CeligoIntegrationsPage", () => {
     expect(within(onDemandTile as HTMLElement).getByText("on demand only")).toBeInTheDocument();
   });
 
+  it("writes overflow only claims 'custom records' when every hidden type actually is one", () => {
+    const genuinelyCustom = makeIntegration({
+      id: "int-custom",
+      name: "Custom Overflow Co",
+      writes: [
+        { record_type: "salesorder", count: 5 },
+        { record_type: "customer", count: 4 },
+        { record_type: "itemfulfillment", count: 3 },
+        { record_type: "purchaseorder", count: 2 },
+        { record_type: "customrecord_po_ack", count: 1 },
+        { record_type: "customrecord_x", count: 1 },
+      ],
+    });
+    const notActuallyCustom = makeIntegration({
+      id: "int-standard",
+      name: "Standard Overflow Co",
+      writes: [
+        { record_type: "salesorder", count: 5 },
+        { record_type: "customer", count: 4 },
+        { record_type: "itemfulfillment", count: 3 },
+        { record_type: "purchaseorder", count: 2 },
+        { record_type: "invoice", count: 1 }, // a 5th STANDARD type, not customrecord_*
+      ],
+    });
+    mocks.integrations.mockReturnValue(resolved([genuinelyCustom, notActuallyCustom]));
+
+    wrap(<CeligoIntegrationsPage />);
+
+    const customTile = screen.getByText("Custom Overflow Co").closest("button") as HTMLElement;
+    expect(within(customTile).getByText("+2 custom records")).toBeInTheDocument();
+
+    const standardTile = screen.getByText("Standard Overflow Co").closest("button") as HTMLElement;
+    expect(within(standardTile).queryByText(/custom record/)).toBeNull();
+    expect(within(standardTile).getByText("+1 more")).toBeInTheDocument();
+  });
+
   it("case 4: Stalled and Open errors filters each isolate their tile", () => {
     const stalledOnly = makeIntegration({
       id: "int-s",
