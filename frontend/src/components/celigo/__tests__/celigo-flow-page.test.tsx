@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => ({
   integrationFlows: vi.fn(),
   integrations: vi.fn(),
   syncStatus: vi.fn(),
+  flowErrors: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-celigo-flows", () => ({
@@ -29,6 +30,12 @@ vi.mock("@/hooks/use-celigo-flows", () => ({
   useCeligoIntegrationFlows: () => mocks.integrationFlows(),
   useCeligoIntegrations: () => mocks.integrations(),
   useCeligoSyncStatus: () => mocks.syncStatus(),
+  // Task 16 -- the real `CeligoStepInspector` (no longer the Task 14 stub)
+  // calls `useCeligoFlowErrors(detail.id)` unconditionally (even in the
+  // resting state, since hooks can't be called conditionally), so this
+  // file's mock must cover it too even though none of Task 14's own
+  // assertions touch flow errors.
+  useCeligoFlowErrors: () => mocks.flowErrors(),
 }));
 
 const routeMocks = vi.hoisted(() => ({
@@ -348,6 +355,7 @@ beforeEach(() => {
   mocks.integrationFlows.mockReset().mockReturnValue(resolved(SIBLINGS));
   mocks.integrations.mockReset().mockReturnValue(resolved([makeIntegration()]));
   mocks.syncStatus.mockReset().mockReturnValue(resolved({ last_synced_at: SYNCED_AT }));
+  mocks.flowErrors.mockReset().mockReturnValue(resolved({ flow_id: "flow-1", status: "open" as const, total: 0, groups: [] }));
   routeMocks.integrationId = "int-1";
   routeMocks.flowId = "flow-1";
   routeMocks.stepId = null;
