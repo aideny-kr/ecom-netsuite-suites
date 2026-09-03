@@ -188,7 +188,9 @@ export function CeligoScriptViewerBody({
             {`${script.copies_count} copies${script.content_diverged ? " · diverged" : ""}`}
           </Badge>
           <Badge variant="outline" className="border-border bg-muted text-[11px] text-muted-foreground">
-            {`${shownSites.length} sites · ${flowCount} flows`}
+            {/* Each half pluralises on its OWN count: a single-site script
+                read "1 sites · 1 flows". */}
+            {`${shownSites.length} site${shownSites.length === 1 ? "" : "s"} · ${flowCount} flow${flowCount === 1 ? "" : "s"}`}
           </Badge>
           {sizeLabel && <span className="text-[11px] tabular-nums text-muted-foreground">{sizeLabel}</span>}
         </div>

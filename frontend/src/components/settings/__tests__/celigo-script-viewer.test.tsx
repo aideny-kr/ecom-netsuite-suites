@@ -67,13 +67,19 @@ describe("CeligoScriptViewerBody — card head", () => {
   // The pill format is "N copies[ · diverged]" (family) plus a separate
   // "N sites · M flows" pill (used_by-derived). `baseScript` has both sites
   // on the SAME flow_id ("flow-1"), so the sites/flows pill reads
-  // "2 sites · 1 flows".
+  // "2 sites · 1 flow" -- each half is pluralised on its OWN count.
   it("shows the script name, the hook chip, and the copies/sites pills", () => {
     render(<CeligoScriptViewerBody script={baseScript} />);
     expect(screen.getByText("BigQuery Data Warehouse Script[v1.1.0]")).toBeInTheDocument();
     expect(screen.getByText("HK transform")).toBeInTheDocument();
     expect(screen.getByText("1 copies")).toBeInTheDocument();
-    expect(screen.getByText("2 sites · 1 flows")).toBeInTheDocument();
+    expect(screen.getByText("2 sites · 1 flow")).toBeInTheDocument();
+  });
+
+  it("pluralises each half of the sites/flows pill on its own count", () => {
+    // Gate fix wave, item 11: a single-site script read "1 sites · 1 flows".
+    render(<CeligoScriptViewerBody script={{ ...baseScript, used_by: [siteA] }} />);
+    expect(screen.getByText("1 site · 1 flow")).toBeInTheDocument();
   });
 });
 
