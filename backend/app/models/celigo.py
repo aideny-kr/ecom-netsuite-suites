@@ -50,6 +50,8 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     and_,
+    func,
+    or_,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -194,6 +196,12 @@ class CeligoFlowStep(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     record_type: Mapped[str | None] = mapped_column(Text, nullable=True)
     operation: Mapped[str | None] = mapped_column(Text, nullable=True)
     search_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reference_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    """The export/import's own `name` as typed in Celigo ("Get New Sales Orders",
+    "Update Currency"). Lives on the REFERENCED object, so sync Phase D backfills
+    it onto every step row that references that celigo_id (migration 097). NULL
+    until the first post-097 sync; the UI then shows an honest fallback, never an
+    invented name."""
     # filter/responseMapping ARE present directly on the pageProcessor entry
     # (sanitizer.py's _PAGE_PROCESSOR) -- no extra fetch needed for these two.
     filter_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
@@ -435,6 +443,26 @@ def celigo_error_is_open() -> ColumnElement[bool]:
     snapshot's WHERE clause now uses it); it is only wrong when it is used to
     mean OPEN."""
     return and_(CeligoFlowError.resolved_at.is_(None), CeligoFlowError.purged_at.is_(None))
+
+
+def celigo_flow_is_on_demand() -> ColumnElement[bool]:
+    """A flow with no schedule runs on demand. Celigo sends the schedule as a
+    cron STRING, JSON null, or "" -- all three mean on demand; SQL NULL too.
+
+    `CeligoFlow.schedule[()].astext` -- not the bare `.astext` the task brief's
+    prose sketched -- compiles to `schedule #>> '{}'` (whole-value-as-text).
+    SQLAlchemy 2.0's JSON/JSONB comparator only defines `.astext` on the
+    result of an INDEX operation (`col[key].astext`, `->>`); calling it on the
+    column itself raises `AttributeError` (verified directly against this
+    version, both in bare SQLAlchemy Core and against this table). Indexing
+    with an empty path tuple is the documented way to reach the root-value
+    form of the same operator."""
+    typeof = func.jsonb_typeof(CeligoFlow.schedule)
+    return or_(
+        CeligoFlow.schedule.is_(None),
+        typeof == "null",
+        and_(typeof == "string", CeligoFlow.schedule[()].astext == ""),
+    )
 
 
 def celigo_integration_is_production() -> ColumnElement[bool]:

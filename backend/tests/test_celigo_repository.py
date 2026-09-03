@@ -28,13 +28,21 @@ import uuid
 
 import pytest
 import sqlalchemy.exc
-from sqlalchemy import select, text
+from sqlalchemy import JSON, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.celigo import CeligoFlowError, CeligoScriptAttachment
+from app.models.celigo import (
+    CeligoFlow,
+    CeligoFlowError,
+    CeligoFlowStep,
+    CeligoIntegration,
+    CeligoScriptAttachment,
+    celigo_flow_is_on_demand,
+)
 from app.services.celigo.graph import walk_script_refs
 from app.services.celigo.repository import (
     FlowStepRoleCollisionError,
+    backfill_flow_step_reference_info,
     extract_flow_steps,
     list_logical_scripts,
     mark_flow_errors_purged,
@@ -850,3 +858,108 @@ class TestFlowStepInsertNeverSwallowsUnrelatedIntegrityErrors:
 
         with pytest.raises(sqlalchemy.exc.IntegrityError):
             await sync_flow_steps(db, tenant_id=tenant.id, connection_id=conn_id, flow_id=bogus_flow_id, steps=steps)
+
+
+async def test_backfill_writes_reference_name_and_none_never_clobbers(db):
+    tenant = await create_test_tenant(db)
+    conn_id = await _make_connection(db, tenant.id)
+    integration = CeligoIntegration(
+        tenant_id=tenant.id, celigo_connection_id=conn_id, celigo_id="int_names", name="Names", raw_json={}
+    )
+    db.add(integration)
+    await db.flush()
+    flow = CeligoFlow(
+        tenant_id=tenant.id,
+        celigo_connection_id=conn_id,
+        integration_id=integration.id,
+        celigo_id="flow_names",
+        name="Names flow",
+        raw_json={},
+    )
+    db.add(flow)
+    await db.flush()
+    step = CeligoFlowStep(
+        tenant_id=tenant.id,
+        celigo_connection_id=conn_id,
+        flow_id=flow.id,
+        celigo_id="exp_names",
+        role="generator",
+        sequence=0,
+        raw_json={},
+    )
+    db.add(step)
+    await db.flush()
+
+    n = await backfill_flow_step_reference_info(
+        db,
+        tenant_id=tenant.id,
+        connection_id=conn_id,
+        celigo_id="exp_names",
+        adaptor_type="HTTPExport",
+        connection_celigo_id=None,
+        reference_name="Get New Sales Orders",
+    )
+    assert n == 1
+    await db.refresh(step)
+    assert step.reference_name == "Get New Sales Orders"
+
+    # A later backfill with no name (Celigo omitted it) must not blank the stored one.
+    await backfill_flow_step_reference_info(
+        db,
+        tenant_id=tenant.id,
+        connection_id=conn_id,
+        celigo_id="exp_names",
+        adaptor_type="HTTPExport",
+        connection_celigo_id=None,
+        reference_name=None,
+    )
+    await db.refresh(step)
+    assert step.reference_name == "Get New Sales Orders"
+
+
+def sa_null_json():
+    """SQLAlchemy's JSON null sentinel -- writes the JSON `null` value into a
+    JSONB column, not SQL NULL. `schedule.is_(None)` and `jsonb_typeof(...) ==
+    'null'` are two different rows on disk; a test fixture that only ever
+    wrote SQL NULL would never exercise the second branch of
+    `celigo_flow_is_on_demand()`."""
+    return JSON.NULL
+
+
+async def test_celigo_flow_is_on_demand_treats_json_null_and_empty_string_as_on_demand(db):
+    tenant = await create_test_tenant(db)
+    conn_id = await _make_connection(db, tenant.id)
+    integration = CeligoIntegration(
+        tenant_id=tenant.id, celigo_connection_id=conn_id, celigo_id="int_od", name="OD", raw_json={}
+    )
+    db.add(integration)
+    await db.flush()
+
+    def flow(cid, schedule):
+        return CeligoFlow(
+            tenant_id=tenant.id,
+            celigo_connection_id=conn_id,
+            integration_id=integration.id,
+            celigo_id=cid,
+            name=cid,
+            schedule=schedule,
+            raw_json={},
+        )
+
+    db.add_all(
+        [
+            flow("od_sqlnull", None),
+            flow("od_jsonnull", sa_null_json()),
+            flow("od_empty", ""),
+            flow("cron", "? 5 * ? * *"),
+        ]
+    )
+    await db.flush()
+    ids = set(
+        (
+            await db.execute(
+                select(CeligoFlow.celigo_id).where(CeligoFlow.tenant_id == tenant.id, celigo_flow_is_on_demand())
+            )
+        ).scalars()
+    )
+    assert ids == {"od_sqlnull", "od_jsonnull", "od_empty"}

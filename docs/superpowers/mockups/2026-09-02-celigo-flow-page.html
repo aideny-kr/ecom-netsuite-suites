@@ -1,0 +1,991 @@
+<title>Celigo Flow Pages</title>
+<style>
+  :root {
+    --ground: #FAFAFA; --card: #FFFFFF; --card-2: #F4F4F6; --canvas: #F7F7F9;
+    --ink: #0A0A0B; --ink-muted: #71717A; --ink-faint: #A1A1AA;
+    --line: #E4E4E7; --line-soft: #EFEFF1; --line-strong: #C9C9CF;
+    --accent: #E0641F; --accent-bg: #E0641F14;
+    --ok: #16A34A; --ok-bg: #16A34A14;
+    --crit: #E11D48; --crit-bg: #E11D4814;
+    --warn: #B45309; --warn-bg: #F59E0B1A;
+    --hook: #2563EB; --hook-bg: #2563EB14;
+    --transform: #7C3AED; --transform-bg: #7C3AED14;
+    --filter: #0D9488; --filter-bg: #0D948814;
+    --map: #52525B; --map-bg: #52525B14;
+    --ns: #1F3B6C; --http: #4B5563;
+    --code-bg: #141419; --code-ink: #E6E6EA; --code-dim: #8A8A94; --code-kw: #C792EA; --code-str: #C3E88D; --code-fn: #82AAFF;
+    --shadow: 0 1px 2px #0a0a0b0d, 0 1px 3px #0a0a0b0a;
+    --shadow-lift: 0 4px 14px #0a0a0b14, 0 1px 3px #0a0a0b0a;
+    --dot: #D9D9DE;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0F0F12; --card: #141419; --card-2: #1A1A20; --canvas: #111116;
+      --ink: #F2F2F4; --ink-muted: #8A8A94; --ink-faint: #62626C;
+      --line: #26262C; --line-soft: #1F1F25; --line-strong: #3A3A42;
+      --accent: #FF8A4C; --accent-bg: #FF8A4C1F;
+      --ok: #4ADE80; --ok-bg: #4ADE801A;
+      --crit: #FF6B81; --crit-bg: #FF6B811A;
+      --warn: #FBBF24; --warn-bg: #FBBF241A;
+      --hook: #60A5FA; --hook-bg: #60A5FA1F;
+      --transform: #A78BFA; --transform-bg: #A78BFA1F;
+      --filter: #2DD4BF; --filter-bg: #2DD4BF1F;
+      --map: #A1A1AA; --map-bg: #A1A1AA1F;
+      --ns: #4C6FB0; --http: #6B7280;
+      --code-bg: #0B0B0E; --code-dim: #6E6E78;
+      --shadow: 0 1px 2px #00000040, 0 1px 3px #00000030;
+      --shadow-lift: 0 4px 14px #00000066, 0 1px 3px #00000040;
+      --dot: #26262C;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #0F0F12; --card: #141419; --card-2: #1A1A20; --canvas: #111116;
+    --ink: #F2F2F4; --ink-muted: #8A8A94; --ink-faint: #62626C;
+    --line: #26262C; --line-soft: #1F1F25; --line-strong: #3A3A42;
+    --accent: #FF8A4C; --accent-bg: #FF8A4C1F;
+    --ok: #4ADE80; --ok-bg: #4ADE801A;
+    --crit: #FF6B81; --crit-bg: #FF6B811A;
+    --warn: #FBBF24; --warn-bg: #FBBF241A;
+    --hook: #60A5FA; --hook-bg: #60A5FA1F;
+    --transform: #A78BFA; --transform-bg: #A78BFA1F;
+    --filter: #2DD4BF; --filter-bg: #2DD4BF1F;
+    --map: #A1A1AA; --map-bg: #A1A1AA1F;
+    --ns: #4C6FB0; --http: #6B7280;
+    --code-bg: #0B0B0E; --code-dim: #6E6E78;
+    --shadow: 0 1px 2px #00000040, 0 1px 3px #00000030;
+    --shadow-lift: 0 4px 14px #00000066, 0 1px 3px #00000040;
+    --dot: #26262C;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--ground); color: var(--ink);
+    font: 14px/1.55 ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif;
+    margin: 0; padding: 32px 20px 72px; -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1240px; margin: 0 auto; display: flex; flex-direction: column; gap: 40px; }
+  .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  .tnum { font-variant-numeric: tabular-nums; }
+  a { color: inherit; }
+
+  header.doc .eyebrow { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-faint); margin: 0 0 8px; }
+  header.doc h1 { font-size: 28px; line-height: 1.15; margin: 0 0 10px; letter-spacing: -.02em; text-wrap: balance; max-width: 30ch; }
+  header.doc p { margin: 0; color: var(--ink-muted); max-width: 72ch; font-size: 14px; }
+  header.doc p + p { margin-top: 8px; }
+  header.doc b { color: var(--ink); font-weight: 600; }
+
+  .stage-label { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; padding: 0 0 10px; }
+  .stage-label h2 { font-size: 15px; margin: 0; letter-spacing: -.01em; }
+  .stage-label span { font-size: 12.5px; color: var(--ink-muted); }
+  .stage-label .url { margin-left: auto; font-size: 11.5px; color: var(--ink-faint); }
+  .stage { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: var(--card); box-shadow: var(--shadow); }
+  .breakout { --w: min(100vw - 40px, 1680px); width: var(--w); margin-left: calc((100% - var(--w)) / 2); }
+  .note { border-left: 2px solid var(--line); padding: 2px 0 2px 12px; font-size: 12.5px; color: var(--ink-muted); margin-top: 12px; }
+  .note b { color: var(--ink); font-weight: 600; }
+  .ex { font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); background: var(--accent-bg); border-radius: 3px; padding: 0 4px; vertical-align: 2px; white-space: nowrap; }
+  .real { font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--ok); background: var(--ok-bg); border-radius: 3px; padding: 0 4px; vertical-align: 2px; white-space: nowrap; }
+
+  /* workspace chrome */
+  .toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 6px 12px; border-bottom: 1px solid var(--line); background: var(--card); font-size: 11.5px; }
+  .ws-pick { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 6px; padding: 3px 9px; color: var(--ink-muted); }
+  .seg { display: inline-flex; gap: 2px; border: 1px solid var(--line); border-radius: 6px; padding: 2px; }
+  .seg button { font: inherit; font-size: 11.5px; border: 0; border-radius: 4px; padding: 2px 10px; background: transparent; color: var(--ink-muted); }
+  .seg button[aria-pressed="true"] { background: var(--card-2); color: var(--ink); }
+  .btn { font: inherit; font-size: 11.5px; border: 1px solid var(--line); border-radius: 6px; padding: 3px 9px; background: var(--card); color: var(--ink); white-space: nowrap; }
+  .btn.ghost { color: var(--ink-muted); }
+  .search { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; color: var(--ink-faint); min-width: 220px; }
+  .search kbd { font: inherit; font-size: 10px; border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; margin-left: auto; }
+  .toolbar .far { margin-left: auto; color: var(--ink-faint); display: inline-flex; gap: 10px; align-items: center; }
+  .crumbs { display: flex; align-items: center; gap: 6px; padding: 8px 16px; font-size: 12px; color: var(--ink-muted); border-bottom: 1px solid var(--line-soft); background: var(--card); flex-wrap: wrap; }
+  .crumbs b { color: var(--ink); font-weight: 500; }
+  .crumbs .sep { color: var(--ink-faint); }
+  .surface { padding: 16px; display: flex; flex-direction: column; gap: 14px; background: var(--ground); }
+
+  /* pills, dots, medallions */
+  .pill { display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; padding: 1px 7px; border-radius: 999px; white-space: nowrap; border: 1px solid transparent; letter-spacing: .01em; line-height: 1.5; }
+  .pill.ok { color: var(--ok); background: var(--ok-bg); }
+  .pill.crit { color: var(--crit); background: var(--crit-bg); }
+  .pill.warn { color: var(--warn); background: var(--warn-bg); }
+  .pill.mute { color: var(--ink-muted); background: var(--card-2); border-color: var(--line); }
+  .pill.accent { color: var(--accent); background: var(--accent-bg); }
+  .pill small { color: inherit; opacity: .75; font-size: 10px; }
+  .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; display: inline-block; flex-shrink: 0; }
+  .dot.hollow { background: transparent; border: 1.5px solid currentColor; }
+  .medals { display: inline-flex; gap: 3px; }
+  .medal { display: inline-flex; align-items: center; justify-content: center; height: 16px; min-width: 16px; padding: 0 3px; border-radius: 4px; font-size: 8.5px; font-weight: 700; letter-spacing: .02em; color: var(--card); background: var(--ink); }
+  .medal.ns { background: var(--ns); } .medal.http { background: var(--http); } .medal.as2 { background: #7C3AED; } .medal.ftp { background: #0D9488; } .medal.db { background: #B45309; } .medal.rest { background: #52525B; }
+
+  /* screen 1 */
+  .page-head { display: flex; align-items: flex-end; gap: 14px; flex-wrap: wrap; }
+  .page-head h3 { font-size: 20px; margin: 0; letter-spacing: -.02em; font-weight: 600; }
+  .page-head .sub { font-size: 12px; color: var(--ink-muted); }
+  .page-head .right { margin-left: auto; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .filters { display: flex; gap: 4px; font-size: 11.5px; }
+  .filters button { font: inherit; border: 1px solid transparent; border-radius: 999px; padding: 2px 10px; background: transparent; color: var(--ink-muted); }
+  .filters button[aria-pressed="true"] { background: var(--card-2); border-color: var(--line); color: var(--ink); }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 12px; }
+  .tile { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px 10px; display: flex; flex-direction: column; gap: 6px; box-shadow: var(--shadow); position: relative; }
+  .tile:hover { box-shadow: var(--shadow-lift); }
+  .tile .r1 { display: flex; align-items: center; gap: 6px; font-size: 11px; flex-wrap: wrap; }
+  .tile .r1 .medals { margin-left: auto; }
+  .tile h4 { margin: 2px 0 0; font-size: 16px; font-weight: 600; letter-spacing: -.01em; line-height: 1.25; }
+  .tile .counts { font-size: 11.5px; color: var(--ink-muted); }
+  .tile .writes { font-size: 11px; color: var(--ink); display: flex; flex-wrap: wrap; gap: 4px 6px; align-items: baseline; }
+  .tile .writes .k { color: var(--ink-faint); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; }
+  .tile .foot { display: flex; gap: 10px; flex-wrap: wrap; border-top: 1px solid var(--line-soft); padding-top: 7px; margin-top: 2px; font-size: 11px; color: var(--ink-muted); }
+  .tile .foot b { color: var(--ink); font-weight: 500; }
+  .tile.dim { opacity: .7; }
+
+  table.flows { width: 100%; border-collapse: collapse; font-size: 12px; background: var(--card); border: 1px solid var(--line); }
+  table.flows th { text-align: left; font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-faint); font-weight: 500; padding: 7px 10px; border-bottom: 1px solid var(--line); background: var(--card-2); white-space: nowrap; }
+  table.flows td { padding: 6px 10px; border-bottom: 1px solid var(--line-soft); vertical-align: middle; white-space: nowrap; }
+  table.flows tr:last-child td { border-bottom: 0; }
+  table.flows td.name { white-space: normal; font-weight: 500; min-width: 220px; }
+  table.flows tr.paused td { color: var(--ink-faint); }
+  table.flows tr.paused td.name { color: var(--ink-muted); }
+  table.flows tr.group td { background: var(--card-2); color: var(--ink-faint); font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase; padding: 4px 10px; }
+  table.flows .cron { color: var(--ink-faint); font-size: 10.5px; }
+  .tablewrap { overflow-x: auto; border-radius: 8px; border: 1px solid var(--line); }
+  .tablewrap table.flows { border: 0; }
+  .glyph { display: inline-flex; align-items: center; gap: 2px; font-size: 10.5px; color: var(--ink-muted); }
+  .glyph i { font-style: normal; }
+  .glyph .src { color: var(--ok); } .glyph .rt { color: var(--ink); } .glyph .n { color: var(--ink); font-weight: 500; }
+
+  /* screen 2 */
+  .ihead { display: flex; align-items: flex-start; gap: 14px; flex-wrap: wrap; }
+  .ihead h3 { font-size: 22px; margin: 0; font-weight: 600; letter-spacing: -.02em; }
+  .ihead .meta { font-size: 12px; color: var(--ink-muted); display: flex; gap: 12px; flex-wrap: wrap; margin-top: 4px; align-items: center; }
+  .tabs { display: flex; gap: 18px; border-bottom: 1px solid var(--line); font-size: 12.5px; padding: 0 2px; }
+  .tabs span { padding: 6px 0 7px; color: var(--ink-muted); border-bottom: 2px solid transparent; }
+  .tabs span[aria-current="true"] { color: var(--ink); border-bottom-color: var(--ink); }
+  .tabs span small { color: var(--ink-faint); margin-left: 4px; }
+  .tabs .grp { margin-left: auto; font-size: 11.5px; color: var(--ink-muted); padding: 6px 0; }
+
+  /* screen 3 */
+  .fhead { padding: 12px 16px 10px; background: var(--card); border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 6px; }
+  .fhead .row1 { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .fhead h3 { font-size: 18px; margin: 0; font-weight: 600; letter-spacing: -.015em; }
+  .fhead .actions { margin-left: auto; display: flex; gap: 6px; }
+  .facts { display: flex; gap: 0; flex-wrap: wrap; font-size: 11.5px; color: var(--ink-muted); align-items: center; }
+  .facts > span { padding-right: 10px; margin-right: 10px; border-right: 1px solid var(--line); line-height: 1.4; }
+  .facts > span:last-child { border-right: 0; }
+  .facts b { color: var(--ink); font-weight: 500; }
+  .summary { font-size: 12.5px; color: var(--ink); display: flex; gap: 8px; align-items: baseline; }
+  .summary .k { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-faint); white-space: nowrap; }
+  .ai { font-size: 12px; color: var(--ink); background: var(--card-2); border: 1px solid var(--line-soft); border-radius: 6px; padding: 6px 10px; display: flex; gap: 8px; align-items: baseline; }
+  .ai .k { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-faint); white-space: nowrap; }
+  .ai q { quotes: "“" "”"; color: var(--ink-muted); }
+
+  .panes { display: grid; grid-template-columns: 36px 1fr 300px; min-height: 520px; background: var(--card); }
+  .panes.wide-nav { grid-template-columns: 220px 1fr 300px; }
+  .pane { min-width: 0; }
+  .rail { border-right: 1px solid var(--line); background: var(--card); display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 8px 0; font-size: 10px; color: var(--ink-faint); }
+  .rail .dots { display: flex; flex-direction: column; gap: 5px; align-items: center; margin-top: 6px; }
+  .rail .dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); display: block; }
+  .rail .dots i.cur { width: 8px; height: 8px; background: var(--accent); }
+  .rail .dots i.paused { background: var(--ink-faint); }
+  .rail .vt { writing-mode: vertical-rl; transform: rotate(180deg); letter-spacing: .08em; text-transform: uppercase; margin-top: 8px; }
+  .nav { border-right: 1px solid var(--line); background: var(--card); font-size: 11.5px; display: flex; flex-direction: column; }
+  .nav .hd { display: flex; align-items: center; gap: 6px; padding: 7px 10px; border-bottom: 1px solid var(--line-soft); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-faint); }
+  .nav .hd .cnt { margin-left: auto; }
+  .nav ul { list-style: none; margin: 0; padding: 4px 0; overflow: auto; }
+  .nav li { padding: 4px 10px 4px 12px; display: grid; grid-template-columns: 8px 1fr; gap: 6px; align-items: start; color: var(--ink-muted); }
+  .nav li .dot { margin-top: 6px; }
+  .nav li .nm { color: var(--ink); line-height: 1.3; }
+  .nav li .m { font-size: 10.5px; color: var(--ink-faint); }
+  .nav li[aria-current="true"] { background: var(--accent-bg); border-right: 2px solid var(--accent); }
+  .nav li.paused .nm { color: var(--ink-muted); }
+  .nav li.paused .dot { background: var(--ink-faint); }
+
+  .canvas-wrap { position: relative; background: var(--canvas); background-image: radial-gradient(var(--dot) 1px, transparent 1px); background-size: 18px 18px; overflow: auto; }
+  .canvas-scale { transform-origin: 0 0; }
+  .canvas { position: relative; width: 1686px; height: 470px; }
+  #sizer { overflow: hidden; }
+  .canvas svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .canvas svg path { fill: none; stroke: var(--line-strong); stroke-width: 1.5; }
+  .canvas svg path.fail { stroke-dasharray: 4 4; stroke: var(--warn); }
+  .canvas-tools { position: absolute; right: 10px; bottom: 10px; display: flex; gap: 4px; z-index: 2; }
+  .canvas-tools button { width: 26px; height: 26px; border: 1px solid var(--line); background: var(--card); border-radius: 6px; display: inline-flex; align-items: center; justify-content: center; font: inherit; font-size: 12px; color: var(--ink-muted); cursor: pointer; padding: 0; }
+  .canvas-tools button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .canvas-tools span { align-self: center; font-size: 10.5px; color: var(--ink-faint); margin-right: 4px; }
+  .lane { position: absolute; font-size: 9.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-faint); white-space: nowrap; }
+  .branchlbl { position: absolute; font-size: 10.5px; color: var(--ink-muted); background: var(--canvas); padding: 0 4px; border-radius: 3px; white-space: nowrap; }
+  .branchlbl b { color: var(--ink); font-weight: 500; }
+  .branchlbl .mono { color: var(--ink-faint); }
+
+  /* bubble */
+  .bubble { position: absolute; width: 212px; height: 162px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; }
+  .bubble.src { border-left: 3px solid var(--ok); }
+  .bubble.lkp { border-left: 3px solid var(--filter); }
+  .bubble.dst { border-left: 3px solid var(--hook); }
+  .bubble.sel { box-shadow: 0 0 0 2px var(--accent), var(--shadow-lift); }
+  .bubble.paused { opacity: .6; }
+  .bubble.err { border-color: color-mix(in srgb, var(--crit) 55%, var(--line)); }
+  .bubble .eb { display: flex; align-items: center; gap: 6px; font-size: 9px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-faint); white-space: nowrap; }
+  .bubble .eb .app { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; border-radius: 4px; font-size: 8.5px; font-weight: 700; letter-spacing: 0; color: var(--card); background: var(--ink); flex-shrink: 0; }
+  .bubble .eb .app.ns { background: var(--ns); } .bubble .eb .app.http { background: var(--http); }
+  .bubble .eb .errn { margin-left: auto; letter-spacing: 0; text-transform: none; font-size: 10px; }
+  .bubble .ttl { font-size: 12.5px; font-weight: 600; line-height: 1.25; letter-spacing: -.005em; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-height: 31px; }
+  .bubble .ttl.unsynced { color: var(--ink-muted); font-weight: 500; }
+  .bubble .ttl .m { font-weight: 400; color: var(--ink-faint); }
+  .bubble .fact { font-size: 10px; color: var(--ink-muted); line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .bubble .fact b { color: var(--ink); font-weight: 500; }
+  .aff { display: flex; gap: 3px; flex-wrap: wrap; margin-top: 1px; }
+  .chip { display: inline-flex; align-items: center; gap: 4px; font-size: 9px; border-radius: 5px; padding: 0 5px; border: 1px solid transparent; line-height: 1.6; cursor: default; white-space: nowrap; }
+  .chip .t { font-family: ui-monospace, Menlo, monospace; }
+  .chip.fl { color: var(--filter); background: var(--filter-bg); }
+  .chip.hk { color: var(--hook); background: var(--hook-bg); }
+  .chip.tr { color: var(--transform); background: var(--transform-bg); }
+  .chip.mp { color: var(--map); background: var(--map-bg); }
+  .chip.none { color: var(--ink-faint); border-color: var(--line-soft); background: transparent; }
+  .chip.unsynced { color: var(--ink-faint); border: 1px dashed var(--line-strong); background: transparent; }
+  .chip .ver { font-size: 8.5px; padding: 0 3px; border-radius: 3px; background: var(--card); border: 1px solid currentColor; }
+  .chip .div { width: 5px; height: 5px; border-radius: 50%; background: var(--warn); }
+  .chip .ed { width: 5px; height: 5px; border-radius: 50%; background: var(--crit); }
+  .bubble .foot { display: flex; gap: 8px; font-size: 9.5px; color: var(--ink-faint); margin-top: auto; flex-wrap: nowrap; white-space: nowrap; overflow: hidden; }
+  .bubble .foot .warn { color: var(--warn); }
+  .bubble .foot .crit { color: var(--crit); }
+  .rnode { position: absolute; width: 110px; background: var(--card); border: 1px solid var(--line-strong); border-radius: 999px; padding: 6px 10px; text-align: center; box-shadow: var(--shadow); }
+  .rnode .k { font-size: 9px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-faint); }
+  .rnode .v { font-size: 10px; color: var(--ink); line-height: 1.3; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--ink-muted); padding: 8px 16px; border-top: 1px solid var(--line); background: var(--card); align-items: center; }
+  .legend .chip { cursor: default; }
+
+  /* inspector */
+  .insp { border-left: 1px solid var(--line); background: var(--card); font-size: 11.5px; display: flex; flex-direction: column; }
+  .insp .hd { padding: 8px 12px 0; }
+  .insp .hd .eb { font-size: 9.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-faint); }
+  .insp .hd .ttl { font-size: 13px; font-weight: 600; margin: 2px 0 6px; }
+  .itabs { display: flex; gap: 12px; padding: 0 12px; border-bottom: 1px solid var(--line); font-size: 11px; }
+  .itabs span { padding: 4px 0 6px; color: var(--ink-muted); border-bottom: 2px solid transparent; white-space: nowrap; }
+  .itabs span[aria-current="true"] { color: var(--ink); border-bottom-color: var(--ink); }
+  .itabs span small { color: var(--ink-faint); margin-left: 3px; }
+  .insp .body { padding: 10px 12px; display: flex; flex-direction: column; gap: 10px; overflow: auto; }
+  .kv { display: grid; grid-template-columns: 92px 1fr; gap: 3px 10px; font-size: 11px; }
+  .kv .k { color: var(--ink-faint); }
+  .kv .v { color: var(--ink); word-break: break-word; }
+  .kv .v.m { color: var(--ink-muted); }
+  .insp h5 { margin: 0; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-faint); }
+  .insp .grp { display: flex; flex-direction: column; gap: 5px; }
+  .site { border: 1px solid var(--line); border-radius: 7px; padding: 6px 8px; display: flex; flex-direction: column; gap: 3px; }
+  .site .r { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .site .path { font-size: 10px; color: var(--ink-faint); word-break: break-all; }
+  .linkish { color: var(--hook); text-decoration: none; font-size: 11px; }
+  .shield { display: flex; gap: 6px; align-items: flex-start; font-size: 10.5px; color: var(--ink-muted); background: var(--warn-bg); border-radius: 6px; padding: 5px 8px; }
+  .shield b { color: var(--warn); }
+  .quiet { font-size: 11px; color: var(--ink-muted); background: var(--card-2); border-radius: 6px; padding: 6px 8px; }
+
+  /* drawer */
+  .drawer-stage { display: grid; grid-template-columns: 1fr 560px; min-height: 480px; }
+  .drawer-stage .shade { background: color-mix(in srgb, var(--ink) 35%, transparent); position: relative; }
+  .drawer-stage .shade .ghost { position: absolute; inset: 0; padding: 20px; color: var(--card); font-size: 11.5px; opacity: .9; }
+  .drawer { background: var(--card); border-left: 1px solid var(--line); display: flex; flex-direction: column; box-shadow: -8px 0 24px #0000001f; }
+  .drawer .hd { padding: 10px 14px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 4px; }
+  .drawer .hd .r { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .drawer .hd .ttl { font-size: 14px; font-weight: 600; }
+  .drawer .hd .m { font-size: 11px; color: var(--ink-muted); }
+  .drawer .hd .x { margin-left: auto; color: var(--ink-faint); }
+  .drawer .bar { display: flex; gap: 6px; padding: 8px 14px; border-bottom: 1px solid var(--line-soft); font-size: 11px; }
+  .code { background: var(--code-bg); color: var(--code-ink); font: 11.5px/1.65 ui-monospace, Menlo, monospace; padding: 12px 14px; overflow: auto; flex: 1; }
+  .code .ln { color: var(--code-dim); display: inline-block; width: 26px; user-select: none; }
+  .code .kw { color: var(--code-kw); } .code .str { color: var(--code-str); } .code .fn { color: var(--code-fn); } .code .cm { color: var(--code-dim); font-style: italic; }
+  .copies { padding: 8px 14px 10px; border-top: 1px solid var(--line); font-size: 11px; display: flex; flex-direction: column; gap: 4px; }
+  .copies h5 { margin: 0 0 2px; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-faint); }
+  .copies .r { display: grid; grid-template-columns: 18px 70px 1fr auto; gap: 8px; align-items: center; }
+  .copies .l { display: inline-flex; width: 16px; height: 16px; border-radius: 4px; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; background: var(--card-2); border: 1px solid var(--line); }
+  .copies .r.cur .l { background: var(--hook-bg); color: var(--hook); border-color: var(--hook); }
+
+  /* error state */
+  .errsig { border: 1px solid color-mix(in srgb, var(--crit) 40%, var(--line)); border-radius: 7px; padding: 8px 10px; display: flex; flex-direction: column; gap: 5px; background: var(--card); }
+  .errsig .r { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 11px; }
+  .errsig .msg { font-size: 11px; color: var(--ink); }
+  .errsig .keys { display: flex; flex-wrap: wrap; gap: 3px; }
+  .errsig .keys span { font-size: 10px; border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; color: var(--ink-muted); }
+  .errsig .eff { font-size: 10.5px; color: var(--ink-muted); border-top: 1px dashed var(--line); padding-top: 5px; }
+  .lanebox { position: absolute; width: 420px; height: 64px; border: 1px dashed var(--line-strong); border-radius: 8px; padding: 8px 12px; font-size: 10.5px; color: var(--ink-muted); background: color-mix(in srgb, var(--card) 60%, transparent); }
+  .lanebox b { color: var(--ink); font-weight: 500; }
+
+  /* states strip */
+  .states { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; }
+  .state { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; font-size: 11.5px; }
+  .state .k { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-faint); }
+  .state .why { color: var(--ink-muted); font-size: 11px; }
+  .banner { font-size: 11px; color: var(--ink-muted); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; background: var(--card-2); }
+
+  /* spec tables + cards */
+  table.spec { width: 100%; border-collapse: collapse; font-size: 12px; }
+  table.spec th { text-align: left; font-size: 10.5px; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-faint); font-weight: 500; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  table.spec td { padding: 6px 8px; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+  table.spec tr:last-child td { border-bottom: 0; }
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+  .card h3 { margin: 0 0 8px; font-size: 14px; }
+  .card ul, .card ol { margin: 0; padding-left: 18px; font-size: 12.5px; color: var(--ink-muted); display: flex; flex-direction: column; gap: 5px; }
+  .card li b { color: var(--ink); font-weight: 500; }
+  footer { font-size: 12px; color: var(--ink-faint); border-top: 1px solid var(--line); padding-top: 14px; max-width: 90ch; }
+  .toggle { display: inline-flex; gap: 2px; border: 1px solid var(--line); border-radius: 6px; padding: 2px; font-size: 11px; }
+  .toggle button { font: inherit; border: 0; border-radius: 4px; padding: 2px 9px; background: transparent; color: var(--ink-muted); cursor: pointer; }
+  .toggle button[aria-pressed="true"] { background: var(--card-2); color: var(--ink); }
+  .toggle button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  body:not(.named) .named-only { display: none !important; }
+  body.named .unnamed-only { display: none !important; }
+  @media (max-width: 900px) { .panes, .panes.wide-nav { grid-template-columns: 1fr; } .nav, .rail, .insp { display: none; } .drawer-stage { grid-template-columns: 1fr; } .drawer-stage .shade { display: none; } .breakout { --w: 100%; margin-left: 0; } }
+  @media (prefers-reduced-motion: no-preference) { .tile { transition: box-shadow .15s ease; } .canvas-scale { transition: transform .15s ease; } }
+</style>
+
+<div class="wrap">
+  <header class="doc">
+    <p class="eyebrow">Dev workspace · Celigo · design for approval · 2026-09-02</p>
+    <h1>Celigo's three levels, rebuilt: your integrations, one integration, and every flow as its own full page</h1>
+    <p>What integrator.io draws — tiles, a flows table, a left-to-right Flow Builder canvas with routers and branch lanes — kept exactly, then made dense: every tile, table row and bubble carries the facts the flow map was missing. <b>Everything on this page is real</b> unless it wears an <span class="ex">example</span> mark: the 17 production integrations and their counts, all 20 Solidus + NetSuite flows, and the centrepiece flow's actual 10 steps, 2 chained routers and branch names, straight from the last sync.</p>
+    <p>One thing is real but not yet synced: the names you gave each step in Celigo (<b>Get New Sales Orders</b>, <b>Lookup Customer</b>, <b>Update Currency</b>…). They were read live from Celigo for this page only. The toggle on the flow page shows the surface with and without them, because whether the names sync ships in the same train is the first decision at the bottom.</p>
+  </header>
+
+  <!-- ═══════════════════════ SCREEN 1 ═══════════════════════ -->
+  <section>
+    <div class="stage-label">
+      <h2>1 · My integrations</h2>
+      <span>Celigo's tile dashboard, with each tile answering "what does it write, is it running, what's failing" before you click.</span>
+      <span class="url mono">/workspace?surface=celigo</span>
+    </div>
+    <div class="stage">
+      <div class="toolbar">
+        <span class="ws-pick">NetSuite Scripts ▾</span>
+        <span class="seg"><button aria-pressed="false">Files</button><button aria-pressed="true">Celigo flows</button></span>
+        <span class="btn ghost">+ New</span>
+        <span class="search">⌕ Search integrations &amp; flows <kbd>⌘K</kbd></span>
+        <span class="far"><span class="pill ok"><i class="dot"></i>synced 4 min ago · 18:12 UTC</span></span>
+      </div>
+      <div class="surface">
+        <div class="page-head">
+          <div>
+            <h3>My integrations</h3>
+            <div class="sub tnum">17 integrations · 122 flows · 359 steps · 129 scripts · production only · sorted attention-first, then by size</div>
+          </div>
+          <div class="right">
+            <span class="filters"><button aria-pressed="true">All 17</button><button>Open errors 0</button><button>Stalled 0</button><button>All paused 1</button></span>
+            <span class="seg"><button aria-pressed="true">▦</button><button>☰</button></span>
+          </div>
+        </div>
+
+        <div class="tiles">
+          <div class="tile">
+            <div class="r1"><span class="pill ok"><i class="dot"></i>0 open errors <small>· checked 4 min ago</small></span><span class="pill ok"><i class="dot"></i>on time</span><span class="medals"><span class="medal http">HTTP</span><span class="medal ns">NS</span><span class="medal db">DB</span></span></div>
+            <h4>Backfills</h4>
+            <div class="counts tnum">23 flows · 2 scheduled · 19 on demand · 2 paused · 81 steps</div>
+            <div class="writes"><span class="k">writes</span><span class="mono">salesorder ×17</span><span class="mono">customer ×15</span><span class="mono">customerdeposit ×4</span><span class="mono">customerrefund ×2</span><span class="mono" style="color:var(--ink-faint)">+2 custom records</span></div>
+            <div class="foot tnum"><span>last run <b>1 h ago</b></span><span><b>15</b> scripts</span><span>changes <b>0</b></span></div>
+          </div>
+          <div class="tile">
+            <div class="r1"><span class="pill ok"><i class="dot"></i>0 open errors <small>· checked 4 min ago</small></span><span class="pill ok"><i class="dot"></i>on time</span><span class="medals"><span class="medal http">HTTP</span><span class="medal ns">NS</span><span class="medal db">DB</span></span></div>
+            <h4>Solidus + NetSuite</h4>
+            <div class="counts tnum">20 flows · 9 scheduled · 6 on demand · 5 paused · 94 steps</div>
+            <div class="writes"><span class="k">writes</span><span class="mono">salesorder ×19</span><span class="mono">customer ×9</span><span class="mono">itemfulfillment ×2</span><span class="mono">customerdeposit ×2</span><span class="mono" style="color:var(--ink-faint)">+2 custom records</span></div>
+            <div class="foot tnum"><span>last run <b>6 min ago</b></span><span><b>30</b> scripts</span><span>changes <b>0</b></span></div>
+          </div>
+          <div class="tile">
+            <div class="r1"><span class="pill ok"><i class="dot"></i>0 open errors <small>· checked 4 min ago</small></span><span class="pill mute"><i class="dot hollow"></i>on demand only</span><span class="medals"><span class="medal ns">NS</span><span class="medal http">HTTP</span><span class="medal db">DB</span></span></div>
+            <h4>Standalone flows</h4>
+            <div class="counts tnum">14 flows · 0 scheduled · 9 on demand · 5 paused · 16 steps</div>
+            <div class="writes"><span class="k">writes</span><span class="mono">itemfulfillment ×3</span><span class="mono">salesorder ×2</span></div>
+            <div class="foot tnum"><span>last run <b>6 months ago</b></span><span><b>2</b> no run recorded</span><span><b>2</b> scripts</span></div>
+          </div>
+          <div class="tile">
+            <div class="r1"><span class="pill ok"><i class="dot"></i>0 open errors <small>· checked 4 min ago</small></span><span class="pill ok"><i class="dot"></i>on time</span><span class="medals"><span class="medal ns">NS</span><span class="medal http">HTTP</span></span></div>
+            <h4>NS Operations</h4>
+            <div class="counts tnum">11 flows · 4 scheduled · 6 on demand · 1 paused · 19 steps</div>
+            <div class="writes"><span class="k">writes</span><span class="mono">returnauthorization ×5</span><span class="mono">itemreceipt ×1</span><span class="mono" style="color:var(--ink-faint)">+1 custom record</span></div>
+            <div class="foot tnum"><span>last run <b>6 min ago</b></span><span><b>1</b> no run recorded</span><span><b>1</b> script</span></div>
+          </div>
+          <div class="tile">
+            <div class="r1"><span class="pill ok"><i class="dot"></i>0 open errors <small>· checked 4 min ago</small></span><span class="pill ok"><i class="dot"></i>on time</span><span class="medals"><span class="medal as2">AS2</span><span class="medal ftp">FTP</span><span class="medal ns">NS</span></span></div>
+            <h4>Dimerco</h4>
+            <div class="counts tnum">9 flows · 3 scheduled · 5 on demand · 1 paused · 21 steps</div>
+            <div class="writes"><span class="k">writes</span><span class="mono">itemfulfillment ×2</span><span class="mono">inventoryadjustment ×2</span><span class="mono">receiveinboundshipment ×1</span><span class="mono" style="color:var(--ink-faint)">+1</span></div>
+            <div class="foot tnum"><span>last run <b>7 min ago</b></span><span><b>11</b> scripts</span><span>changes <b>0</b></span></div>
+          </div>
+          <div class="tile">
+            <div class="r1"><span class="pill ok"><i class="dot"></i>0 open errors <small>· checked 4 min ago</small></span><span class="pill ok"><i class="dot"></i>on time</span><span class="medals"><span class="medal ns">NS</span><span class="medal rest">REST</span><span class="medal http">HTTP</span></span></div>
+            <h4>NetSuite + Shipstation (PanurgyOEM)</h4>
+            <div class="counts tnum">7 flows · 5 scheduled · 2 paused · 19 steps</div>
+            <div class="writes"><span class="k">writes</span><span class="mono">salesorder ×2</span><span class="mono">itemfulfillment ×1</span><span class="mono">transferorder ×1</span></div>
+            <div class="foot tnum"><span>last run <b>6 min ago</b></span><span><b>2</b> scripts</span><span>changes <b>0</b></span></div>
+          </div>
+          <div class="tile">
+            <div class="r1"><span class="pill ok"><i class="dot"></i>0 open errors <small>· checked 4 min ago</small></span><span class="pill ok"><i class="dot"></i>on time</span><span class="medals"><span class="medal as2">AS2</span><span class="medal ns">NS</span></span></div>
+            <h4>NS + Compal</h4>
+            <div class="counts tnum">6 flows · 2 scheduled · 4 on demand · 14 steps</div>
+            <div class="writes"><span class="k">writes</span><span class="mono">purchaseorder ×2</span><span class="mono">customrecord_po_ack ×2</span><span class="mono" style="color:var(--ink-faint)">+1</span></div>
+            <div class="foot tnum"><span>last run <b>6 min ago</b></span><span><b>3</b> scripts</span><span>changes <b>0</b></span></div>
+          </div>
+          <div class="tile">
+            <div class="r1"><span class="pill ok"><i class="dot"></i>0 open errors <small>· checked 4 min ago</small></span><span class="pill ok"><i class="dot"></i>on time</span><span class="medals"><span class="medal ns">NS</span><span class="medal http">HTTP</span></span></div>
+            <h4>Solidus + NetSuite Inventory</h4>
+            <div class="counts tnum">6 flows · 6 scheduled · 30 steps · 6 routers</div>
+            <div class="writes"><span class="k">writes</span><span class="mono" style="color:var(--ink-faint)">no NetSuite writes · reads NetSuite, pushes over HTTP ×18</span></div>
+            <div class="foot tnum"><span>last run <b>54 min ago</b></span><span><b>22</b> scripts</span><span>changes <b>0</b></span></div>
+          </div>
+          <div class="tile">
+            <div class="r1"><span class="pill ok"><i class="dot"></i>0 open errors <small>· checked 4 min ago</small></span><span class="pill ok"><i class="dot"></i>on time</span><span class="medals"><span class="medal ns">NS</span><span class="medal http">HTTP</span></span></div>
+            <h4>NS + Solidus - Preorder Batch Processing</h4>
+            <div class="counts tnum">5 flows · 2 scheduled · 3 paused · 14 steps</div>
+            <div class="writes"><span class="k">writes</span><span class="mono">salesorder ×4</span></div>
+            <div class="foot tnum"><span>last run <b>7 min ago</b></span><span><b>0</b> scripts</span><span>changes <b>0</b></span></div>
+          </div>
+        </div>
+
+        <div class="tablewrap">
+          <table class="flows">
+            <thead><tr><th>Integration <span style="font-weight:400;text-transform:none;letter-spacing:0">· list view ☰ · the 8 not tiled above</span></th><th>Apps</th><th>Flows</th><th>Writes</th><th>Errors</th><th>Last run</th><th>Scripts</th><th>Changes</th></tr></thead>
+            <tbody>
+              <tr><td class="name">NS + EU 3PL</td><td><span class="medals"><span class="medal ns">NS</span><span class="medal http">HTTP</span></span></td><td class="tnum">5 · 5 scheduled</td><td class="mono">itemfulfillment ×2 · +4 types</td><td><span class="pill ok">0</span></td><td class="tnum">5 min ago <span class="pill ok"><i class="dot"></i>on time</span></td><td class="tnum">2</td><td class="tnum">0</td></tr>
+              <tr><td class="name">NS + Repair Centers</td><td><span class="medals"><span class="medal ftp">FTP</span><span class="medal ns">NS</span></span></td><td class="tnum">5 · 3 scheduled · 2 paused</td><td class="mono">itemreceipt ×2 · returnauthorization ×2 · +1</td><td><span class="pill ok">0</span></td><td class="tnum">1 h ago <span class="pill ok"><i class="dot"></i>on time</span></td><td class="tnum">6</td><td class="tnum">0</td></tr>
+              <tr><td class="name">Bigquery</td><td><span class="medals"><span class="medal db">DB</span><span class="medal http">HTTP</span><span class="medal ns">NS</span></span></td><td class="tnum">3 · 3 scheduled</td><td class="mono" style="color:var(--ink-faint)">no NetSuite writes</td><td><span class="pill ok">0</span></td><td class="tnum">5 min ago <span class="pill ok"><i class="dot"></i>on time</span></td><td class="tnum">1</td><td class="tnum">0</td></tr>
+              <tr><td class="name">FW + Klaviyo</td><td><span class="medals"><span class="medal ns">NS</span><span class="medal http">HTTP</span></span></td><td class="tnum">2 · 2 scheduled</td><td class="mono" style="color:var(--ink-faint)">no NetSuite writes</td><td><span class="pill ok">0</span></td><td class="tnum">3 h ago <span class="pill ok"><i class="dot"></i>on time</span></td><td class="tnum">0</td><td class="tnum">0</td></tr>
+              <tr><td class="name">FW Marketplace Operations</td><td><span class="medals"><span class="medal ns">NS</span><span class="medal http">HTTP</span></span></td><td class="tnum">2 · 2 scheduled</td><td class="mono">salesorder ×2</td><td><span class="pill ok">0</span></td><td class="tnum">4 h ago <span class="pill ok"><i class="dot"></i>on time</span></td><td class="tnum">0</td><td class="tnum">0</td></tr>
+              <tr><td class="name">Supply Chain Management</td><td><span style="color:var(--ink-faint)">—</span></td><td class="tnum">2 · 1 on demand · 1 paused</td><td class="mono" style="color:var(--ink-faint)">no steps recorded</td><td><span class="pill ok">0</span></td><td class="tnum">11 days ago</td><td class="tnum">0</td><td class="tnum">0</td></tr>
+              <tr><td class="name">Panurgy + NetSuite</td><td><span class="medals"><span class="medal ftp">FTP</span><span class="medal ns">NS</span></span></td><td class="tnum">1 · 1 scheduled</td><td class="mono" style="color:var(--ink-faint)">no NetSuite writes</td><td><span class="pill ok">0</span></td><td class="tnum">11 h ago <span class="pill ok"><i class="dot"></i>on time</span></td><td class="tnum">1</td><td class="tnum">0</td></tr>
+              <tr class="paused"><td class="name">NS + Database</td><td><span class="medals"><span class="medal ns">NS</span><span class="medal db">DB</span></span></td><td class="tnum">1 · 1 paused</td><td class="mono">—</td><td>—</td><td class="tnum">2 years ago <span class="pill mute">all paused</span></td><td class="tnum">0</td><td class="tnum">0</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <p class="note"><b>Two pills, not one adjective.</b> Celigo's tile says "Success". Here the first pill is the error fact and carries the time it was checked, so a zero is a claim with a timestamp, not a decoration. The second pill is the schedule fact (on time · stalled? · on demand only · all paused); a scheduled flow that quietly stopped shows no errors — absence is not success — so the second pill is the one that would catch it. Today all 122 flows pass the stall check, so "Stalled 0" is the real number. <b>Apps</b> are the adaptor families found in each integration's steps; Celigo's per-app logos need connection identity, which is not synced. <b>Writes</b> is the NetSuite record-type rollup from the 228 steps that carry a record type and operation; integrations that only read NetSuite and push elsewhere say so. No "Sync now": there is no trigger endpoint, and a button that cannot act does not belong on a read-only surface.</p>
+  </section>
+
+  <!-- ═══════════════════════ SCREEN 2 ═══════════════════════ -->
+  <section>
+    <div class="stage-label">
+      <h2>2 · Integration page</h2>
+      <span>Celigo's Flows tab, columns rearranged around the questions that get asked. All 20 flows, real.</span>
+      <span class="url mono">/workspace?surface=celigo&amp;integration=&lt;id&gt;</span>
+    </div>
+    <div class="stage">
+      <div class="crumbs"><span>My integrations</span><span class="sep">›</span><b>Solidus + NetSuite</b></div>
+      <div class="surface">
+        <div class="ihead">
+          <div>
+            <h3>Solidus + NetSuite</h3>
+            <div class="meta tnum"><span class="pill mute">Production</span><span class="medals"><span class="medal http">HTTP</span><span class="medal ns">NS</span><span class="medal db">DB</span></span><span>20 flows · 9 scheduled · 6 on demand · 5 paused · 94 steps · 11 routers · 24 lookups · 30 scripts</span><span class="mono">writes salesorder ×19 · customer ×9 · itemfulfillment ×2 · customerdeposit ×2 · +2 custom records</span></div>
+          </div>
+        </div>
+        <div class="tabs"><span aria-current="true">Flows<small>20</small></span><span>Scripts<small>30</small></span><span>Errors<small>0</small></span><span>Changes<small>0</small></span><span class="grp">Group by: <b>state</b> · record type written · none</span></div>
+        <div class="tablewrap">
+        <table class="flows">
+          <thead><tr><th>Flow</th><th>Steps</th><th>Writes</th><th>Schedule</th><th>Last run</th><th>Last updated</th><th>Errors</th><th>Scripts</th><th>State</th></tr></thead>
+          <tbody>
+            <tr class="group"><td colspan="9">On · scheduled · 9</td></tr>
+            <tr>
+              <td class="name">New Sales Order to NetSuite - Multi-Subsidiary</td>
+              <td><span class="glyph"><i class="src">◉</i><i>→</i><i class="rt">◇◇</i><i>→</i><i class="n">10</i></span></td>
+              <td class="mono">salesorder · customer</td>
+              <td><span class="mono">every 15 min</span> <span class="cron mono">? 5,20,35,50 0…23 ? * *</span></td>
+              <td class="tnum">21 min ago <span class="pill ok"><i class="dot"></i>on time</span></td>
+              <td class="tnum">2 Sep</td>
+              <td><span class="pill ok">0</span></td>
+              <td class="tnum">2 <span class="pill warn" title="one attached script family has diverged copies">1 diverged</span></td>
+              <td><span class="pill ok">On</span></td>
+            </tr>
+            <tr><td class="name">NS &gt; Solidus - Shipping Confirmations v2 (multi-shipments)</td><td><span class="glyph"><i class="src">◉</i><i>→</i><i class="n">4</i></span></td><td class="mono">itemfulfillment</td><td><span class="mono">every 30 min</span> <span class="cron mono">? 5,35 0…23 ? * *</span></td><td class="tnum">6 min ago <span class="pill ok"><i class="dot"></i>on time</span></td><td class="tnum">2 Sep</td><td><span class="pill ok">0</span></td><td class="tnum">1</td><td><span class="pill ok">On</span></td></tr>
+            <tr><td class="name">NS - Create Customer Deposits (Paid Orders)</td><td><span class="glyph"><i class="src">◉</i><i>→</i><i class="n">3</i></span></td><td class="mono">customerdeposit · salesorder</td><td><span class="mono">every 30 min</span> <span class="cron mono">? 10,40 0…23 ? * *</span></td><td class="tnum">32 min ago <span class="pill ok"><i class="dot"></i>on time</span></td><td class="tnum">2 Sep</td><td><span class="pill ok">0</span></td><td class="tnum">0</td><td><span class="pill ok">On</span></td></tr>
+            <tr><td class="name">NS - Create Customer Deposits (Pre-orders)</td><td><span class="glyph"><i class="src">◉</i><i>→</i><i class="n">3</i></span></td><td class="mono">customerdeposit · salesorder</td><td><span class="mono">every 30 min</span> <span class="cron mono">? 10,40 0…23 ? * *</span></td><td class="tnum">32 min ago <span class="pill ok"><i class="dot"></i>on time</span></td><td class="tnum">2 Sep</td><td><span class="pill ok">0</span></td><td class="tnum">0</td><td><span class="pill ok">On</span></td></tr>
+            <tr><td class="name">Update Serial Number by Order Lines - NetSuite &gt; Solidus</td><td><span class="glyph"><i class="src">◉</i><i>→</i><i class="n">3</i></span></td><td class="mono">salesorder</td><td><span class="mono">hourly at :10</span> <span class="cron mono">? 10 0…23 ? * *</span></td><td class="tnum">55 min ago <span class="pill ok"><i class="dot"></i>on time</span></td><td class="tnum">2 Sep</td><td><span class="pill ok">0</span></td><td class="tnum">1</td><td><span class="pill ok">On</span></td></tr>
+            <tr><td class="name">New Solidus RA &gt; NetSuite RA - v2.2</td><td><span class="glyph"><i class="src">◉</i><i>→</i><i class="n">4</i></span></td><td class="mono">customrecord_fw_data_processor</td><td><span class="mono">hourly at :05</span> <span class="cron mono">? 5 0…23 ? * *</span></td><td class="tnum">1 h ago <span class="pill ok"><i class="dot"></i>on time</span></td><td class="tnum">2 Sep</td><td><span class="pill ok">0</span></td><td class="tnum">1</td><td><span class="pill ok">On</span></td></tr>
+            <tr><td class="name">Solidus Customer Returns to NS Return Request</td><td><span class="glyph"><i class="src">◉</i><i>→</i><i class="n">3</i></span></td><td class="mono">customrecord_framework_return_header</td><td><span class="mono">hourly at :05</span></td><td class="tnum">1 h ago <span class="pill ok"><i class="dot"></i>on time</span></td><td class="tnum">2 Sep</td><td><span class="pill ok">0</span></td><td class="tnum">2</td><td><span class="pill ok">On</span></td></tr>
+            <tr><td class="name">Solidus Refunds to NS Refund Requests</td><td><span class="glyph"><i class="src">◉</i><i>→</i><i class="n">2</i></span></td><td class="mono">customrecord_fw_refund_requests</td><td><span class="mono">hourly at :05</span></td><td class="tnum">1 h ago <span class="pill ok"><i class="dot"></i>on time</span></td><td class="tnum">2 Sep</td><td><span class="pill ok">0</span></td><td class="tnum">0</td><td><span class="pill ok">On</span></td></tr>
+            <tr><td class="name">NS &gt; Solidus Inventory Sync - Digital Location</td><td><span class="glyph"><i class="src">◉</i><i>→</i><i class="n">3</i></span></td><td class="mono" style="color:var(--ink-faint)">— (HTTP)</td><td><span class="mono">every 4 h</span> <span class="cron mono">? 5 0,4,8,12,16,20 ? * *</span></td><td class="tnum">3 h ago <span class="pill ok"><i class="dot"></i>on time</span></td><td class="tnum">2 Sep</td><td><span class="pill ok">0</span></td><td class="tnum">2</td><td><span class="pill ok">On</span></td></tr>
+            <tr class="group"><td colspan="9">On · on demand · 6</td></tr>
+            <tr><td class="name">Update Pre-Orders - Solidus &gt; Multi-Subsidiary</td><td><span class="glyph"><i class="src">◉</i><i>→</i><i class="rt">◇◇</i><i>→</i><i class="n">8</i></span></td><td class="mono">salesorder</td><td><span class="mono" style="color:var(--ink-faint)">on demand</span></td><td class="tnum">20 min ago</td><td class="tnum">2 Sep</td><td><span class="pill ok">0</span></td><td class="tnum">2 <span class="pill warn">1 diverged</span></td><td><span class="pill ok">On</span></td></tr>
+            <tr><td class="name">Balance Users to NetSuite</td><td><span class="glyph"><i class="src">◉</i><i>→</i><i class="n">3</i></span></td><td class="mono">customer</td><td><span class="mono" style="color:var(--ink-faint)">on demand</span></td><td class="tnum">20 min ago</td><td class="tnum">2 Sep</td><td><span class="pill ok">0</span></td><td class="tnum">0</td><td><span class="pill ok">On</span></td></tr>
+            <tr><td class="name">MANUAL - Update Serial Number by Order Lines - NetSuite &gt; Solidus</td><td><span class="glyph"><i class="src">◉</i><i>→</i><i class="n">4</i></span></td><td class="mono">salesorder</td><td><span class="mono" style="color:var(--ink-faint)">on demand</span></td><td class="tnum">21 h ago</td><td class="tnum">1 Sep</td><td><span class="pill ok">0</span></td><td class="tnum">1</td><td><span class="pill ok">On</span></td></tr>
+            <tr><td class="name">[Manual] Update Pre-Orders - Solidus &gt; Multi-Subsidiary</td><td><span class="glyph"><i class="src">◉</i><i>→</i><i class="rt">◇◇</i><i>→</i><i class="n">8</i></span></td><td class="mono">salesorder</td><td><span class="mono" style="color:var(--ink-faint)">on demand</span></td><td class="tnum">12 days ago</td><td class="tnum">21 Aug</td><td><span class="pill ok">0</span></td><td class="tnum">2 <span class="pill warn">1 diverged</span></td><td><span class="pill ok">On</span></td></tr>
+            <tr><td class="name">[Manual - 05.07.2026] Sales Order to NetSuite - Multi-Subsidiary</td><td><span class="glyph"><i class="src">◉</i><i>→</i><i class="rt">◇◇</i><i>→</i><i class="n">10</i></span></td><td class="mono">salesorder · customer</td><td><span class="mono" style="color:var(--ink-faint)">on demand</span></td><td class="tnum">28 days ago</td><td class="tnum">27 Aug</td><td><span class="pill ok">0</span></td><td class="tnum">2 <span class="pill warn">1 diverged</span></td><td><span class="pill ok">On</span></td></tr>
+            <tr><td class="name">MANUAL - NS &gt; Solidus - Shipping Confirmations v2</td><td><span class="glyph"><i class="src">◉</i><i>→</i><i class="n">4</i></span></td><td class="mono">itemfulfillment</td><td><span class="mono" style="color:var(--ink-faint)">on demand</span></td><td class="tnum">8 months ago</td><td class="tnum">21 Apr</td><td><span class="pill ok">0</span></td><td class="tnum">1</td><td><span class="pill ok">On</span></td></tr>
+            <tr class="group"><td colspan="9">Paused in Celigo · 5 · kept, dimmed, never called stalled</td></tr>
+            <tr class="paused"><td class="name">NS &gt; Solidus Inventory Sync (Dimerco) v1.1</td><td><span class="glyph"><i class="src">◉</i><i>→</i><i class="rt">◇</i><i>→</i><i class="n">5</i></span></td><td class="mono">— (HTTP)</td><td><span class="mono">kept: every 4 h</span></td><td class="tnum">17 months ago</td><td class="tnum">26 Feb</td><td>—</td><td class="tnum">4 <span class="pill warn">1 diverged</span></td><td><span class="pill mute">Paused</span></td></tr>
+            <tr class="paused"><td class="name">NS &gt; Solidus Inventory Sync (EU Fedex) v1.1</td><td><span class="glyph"><i class="src">◉</i><i>→</i><i class="rt">◇</i><i>→</i><i class="n">5</i></span></td><td class="mono">— (HTTP)</td><td><span class="mono">kept: 3×/day</span> <span class="cron mono">? 5 2,10,18 ? * *</span></td><td class="tnum">17 months ago</td><td class="tnum">26 Feb</td><td>—</td><td class="tnum">4 <span class="pill warn">2 diverged</span></td><td><span class="pill mute">Paused</span></td></tr>
+            <tr class="paused"><td class="name">NS &gt; Solidus Inventory Sync (Panurgy) v1.1</td><td><span class="glyph"><i class="src">◉</i><i>→</i><i class="rt">◇</i><i>→</i><i class="n">5</i></span></td><td class="mono">— (HTTP)</td><td><span class="mono">kept: 4×/day</span> <span class="cron mono">? 5 1,7,13,19 ? * *</span></td><td class="tnum">17 months ago</td><td class="tnum">26 Feb</td><td>—</td><td class="tnum">4 <span class="pill warn">1 diverged</span></td><td><span class="pill mute">Paused</span></td></tr>
+            <tr class="paused"><td class="name">Update Pre-Orders - Solidus &gt; NetSuite - v1.1</td><td><span class="glyph"><i class="src">◉</i><i>→</i><i class="n">4</i></span></td><td class="mono">salesorder</td><td><span class="mono" style="color:var(--ink-faint)">on demand</span></td><td class="tnum">2 years ago</td><td class="tnum">26 Feb</td><td>—</td><td class="tnum">1 <span class="pill warn">1 diverged</span></td><td><span class="pill mute">Paused</span></td></tr>
+            <tr class="paused"><td class="name">Shipped Order Post Purchase Email (Post IRIS)</td><td><span class="glyph"><i class="src">◉</i><i>→</i><i class="n">3</i></span></td><td class="mono">salesorder</td><td><span class="mono">kept: daily 06:05</span> <span class="cron mono">? 5 6 ? * *</span></td><td class="tnum">3 years ago</td><td class="tnum">26 Feb</td><td>—</td><td class="tnum">0</td><td><span class="pill mute">Paused</span></td></tr>
+            <tr>
+              <td class="name">a scheduled flow that quietly stopped <span class="ex">example · none today</span></td>
+              <td><span class="glyph"><i class="src">◉</i><i>→</i><i class="n">3</i></span></td>
+              <td class="mono">salesorder</td>
+              <td><span class="mono">every 15 min</span></td>
+              <td class="tnum">3 h ago <span class="pill warn"><i class="dot"></i>stalled? 12 runs missed</span></td>
+              <td class="tnum">2 Sep</td>
+              <td><span class="pill ok">0</span></td>
+              <td class="tnum">1</td>
+              <td><span class="pill ok">On</span></td>
+            </tr>
+          </tbody>
+        </table>
+        </div>
+      </div>
+    </div>
+    <p class="note"><b>Row click opens the flow page; nothing expands in place.</b> The <b>Steps</b> glyph says how a flow is shaped before you open it: ◉ source, ◇ per router, then the step count — the four Multi-Subsidiary flows all read ◉→◇◇→n because they share a shape. Schedules are humanised only for the one cron shape seen live (a minute list, an hour list); anything else shows Celigo's string verbatim. "Last run" is relative to the sync, not the wall clock. Celigo's Off/On toggle, ▷ Run and the Actions menu are not here — they are writes, and this surface has none. The Scripts tab is the approved Scripts view scoped to this integration; Errors and Changes are the same lists scoped down (both empty today). Clicking an Errors count opens Celigo's per-step "Flow: name" drawer (step · errors · last open error) without leaving the table.</p>
+  </section>
+
+  <!-- ═══════════════════════ SCREEN 3 ═══════════════════════ -->
+  <section>
+    <div class="stage-label">
+      <h2>3 · The flow page</h2>
+      <span>Full page. Navigator rail · canvas · inspector in the workspace's own resizable panel group. This is the real pipeline: 10 steps, 2 routers, 3 branches.</span>
+      <span class="url mono">/workspace?surface=celigo&amp;flow=&lt;id&gt;&amp;step=&lt;stepId&gt;</span>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center;margin:0 0 10px;font-size:12px;color:var(--ink-muted);flex-wrap:wrap">
+      <span class="toggle" role="group" aria-label="Which backend the mock reflects"><button id="t-today" aria-pressed="true" onclick="setNamed(false)">Ships first · names not synced</button><button id="t-named" aria-pressed="false" onclick="setNamed(true)">After the names sync · your own step names</button></span>
+      <span>The names under the second toggle are real — read live from Celigo for this page — but the sync does not store them yet.</span>
+    </div>
+    <div class="stage breakout">
+      <div class="toolbar">
+        <span class="ws-pick">NetSuite Scripts ▾</span>
+        <span class="seg"><button aria-pressed="false">Files</button><button aria-pressed="true">Celigo flows</button></span>
+        <span class="btn ghost">+ New</span>
+        <span class="search">⌕ Search integrations &amp; flows <kbd>⌘K</kbd></span>
+        <span class="far"><span class="pill ok"><i class="dot"></i>synced 4 min ago · 18:12 UTC</span></span>
+      </div>
+      <div class="crumbs"><span>My integrations</span><span class="sep">›</span><span>Solidus + NetSuite</span><span class="sep">›</span><b>New Sales Order to NetSuite - Multi-Subsidiary</b></div>
+
+      <div class="fhead">
+        <div class="row1">
+          <span class="pill ok"><i class="dot"></i>0 open errors <small>· checked 4 min ago</small></span>
+          <span class="pill ok"><i class="dot"></i>on time</span>
+          <h3>New Sales Order to NetSuite - Multi-Subsidiary</h3>
+          <span class="actions"><span class="btn ghost">Copy link</span><span class="btn ghost" title="https://integrator.io/integrations/600a502a…/flowBuilder/66738c3e… — URL shape to verify before shipping">Open in Celigo ↗</span></span>
+        </div>
+        <div class="facts tnum">
+          <span><b>every 15 min</b> <span class="mono">? 5,20,35,50 0…23 ? * *</span> · America/Los_Angeles</span>
+          <span>last ran <b>17:51 UTC</b> · 21 min before the sync</span>
+          <span><b>10</b> steps · 2 routers · 3 branches · 3 lookups</span>
+          <span>writes <b class="mono">salesorder ×2 · customer ×4</b></span>
+          <span><b>2</b> scripts · <span class="pill warn" style="vertical-align:1px">1 diverged family</span></span>
+          <span>cloned from a flow no longer in the account <span class="mono">666fc163…</span></span>
+          <span>modified in Celigo <b>2 Sep 2026</b></span>
+        </div>
+        <div class="summary"><span class="k">What it does · derived</span><span>Gets new orders from Solidus → looks each one up again (34 KB hook) → routes on <span class="mono">≠ / = "Framework Inc"</span> → per subsidiary: looks up the customer in NetSuite, adds it, updates it, then adds the sales order.</span></div>
+        <div class="ai"><span class="k">AI description · Celigo · inherited from the clone source</span><span><q>The "Backfill Sales Order by Order Number - 6/7/22" flow retrieves sales order data from an API endpoint using an HTTP export. The data is then imported into NetSuite using two imports … The flow includes a router that directs the data to the appropriate import based on the value of the "business_entity" field.</q> <span class="pill warn" style="vertical-align:1px">names another flow · 2 imports, this one has 6</span></span></div>
+      </div>
+
+      <div class="panes">
+        <!-- navigator rail (collapsed, ⌘B) -->
+        <div class="pane rail" title="Navigator · 20 flows in Solidus + NetSuite · ⌘B expands">
+          <span>›</span>
+          <div class="dots"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i class="cur"></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i class="paused"></i><i class="paused"></i><i class="paused"></i><i class="paused"></i><i class="paused"></i></div>
+          <span class="vt">20 flows · ⌘B</span>
+        </div>
+
+        <!-- canvas -->
+        <div class="pane canvas-wrap" id="cw">
+          <div id="sizer"><div class="canvas-scale" id="cs">
+          <div class="canvas">
+            <svg viewBox="0 0 1686 470" aria-hidden="true">
+              <defs><marker id="ar" viewBox="0 0 8 8" refX="7" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" style="fill:var(--line-strong);stroke:none"/></marker></defs>
+              <path d="M232,249 L254,249" marker-end="url(#ar)"/>
+              <path d="M364,249 L386,249" marker-end="url(#ar)"/>
+              <path d="M598,249 L620,249" marker-end="url(#ar)"/>
+              <path d="M730,249 C742,249 740,125 752,125" marker-end="url(#ar)"/>
+              <path d="M730,249 C742,249 740,377 752,377" marker-end="url(#ar)"/>
+              <path d="M964,125 L986,125" marker-end="url(#ar)"/><path d="M1198,125 L1220,125" marker-end="url(#ar)"/><path d="M1432,125 L1454,125" marker-end="url(#ar)"/>
+              <path d="M964,377 L986,377" marker-end="url(#ar)"/><path d="M1198,377 L1220,377" marker-end="url(#ar)"/><path d="M1432,377 L1454,377" marker-end="url(#ar)"/>
+            </svg>
+
+            <div class="lane" style="left:20px;top:6px">Sources · 1</div>
+            <div class="lane" style="left:386px;top:6px">Lookups · 3 &nbsp;·&nbsp; Destinations · 6</div>
+            <div class="branchlbl" style="left:752px;top:22px"><b>Branch 1 · Framework Intl</b> · 1 rule · <span class="mono">≠ "Framework Inc"</span></div>
+            <div class="branchlbl" style="left:752px;top:274px"><b>Branch 2 · Framework Inc</b> · 1 rule · <span class="mono">= "Framework Inc"</span></div>
+
+            <!-- SOURCE -->
+            <div class="bubble src" style="left:20px;top:168px">
+              <div class="eb"><span class="app http">H</span>Source · HTTP</div>
+              <div class="ttl unsynced unnamed-only">HTTP export <span class="m">· name not synced</span></div>
+              <div class="ttl named-only">Get New Sales Orders</div>
+              <div class="fact mono">http export · <span class="unnamed-only">conn 648bd44c…</span><span class="named-only">FW Solidus - Admin</span></div>
+              <div class="aff">
+                <span class="chip none">no transform</span>
+                <span class="chip none">no hooks</span>
+                <span class="chip none">no output filter</span>
+              </div>
+              <div class="foot"><span>retries on</span><span>page size —</span></div>
+            </div>
+
+            <!-- ROUTER 1 -->
+            <div class="rnode" style="left:254px;top:221px">
+              <div class="k">Router 1</div>
+              <div class="v">pass-through · 1 branch<br>→ chains to router 2</div>
+            </div>
+
+            <!-- LOOKUP (router 1, branch 170B) -->
+            <div class="bubble lkp sel" style="left:386px;top:168px">
+              <div class="eb"><span class="app http">H</span>Lookup · HTTP</div>
+              <div class="ttl unsynced unnamed-only">HTTP lookup <span class="m">· name not synced</span></div>
+              <div class="ttl named-only">Lookup Sales Orders (Multi-Subsidiary)</div>
+              <div class="fact mono">http export · <span class="unnamed-only">conn 648bd44c…</span><span class="named-only">FW Solidus - Admin</span></div>
+              <div class="aff">
+                <span class="chip none">no input filter</span>
+                <span class="chip mp">⇄ response · 23 fields</span>
+                <span class="chip hk">HK <span class="t">preSavePage</span> <span class="ver">×1</span></span>
+                <span class="chip none">no transform</span>
+              </div>
+              <div class="foot"><span>hook shared by 4 flows · 34 KB</span></div>
+            </div>
+
+            <!-- ROUTER 2 -->
+            <div class="rnode" style="left:620px;top:221px">
+              <div class="k">Router 2</div>
+              <div class="v">first matching branch<br>by input filters · 2</div>
+            </div>
+
+            <!-- BRANCH 1 · Framework Intl -->
+            <div class="bubble lkp" style="left:752px;top:44px">
+              <div class="eb"><span class="app ns">N</span>Lookup · NetSuite</div>
+              <div class="ttl unsynced unnamed-only">lookup customer <span class="m">· search 5090</span></div>
+              <div class="ttl named-only">Lookup Customer</div>
+              <div class="fact mono">export · saved search <b>5090</b> · <b>customer</b></div>
+              <div class="aff"><span class="chip none">no input filter</span><span class="chip mp">⇄ response · 1 field</span><span class="chip none">no hooks</span><span class="chip none">no transform</span></div>
+              <div class="foot"><span class="named-only">NetSuite Production</span><span class="unnamed-only">conn 600a5064… · name not synced</span></div>
+            </div>
+            <div class="bubble dst" style="left:986px;top:44px">
+              <div class="eb"><span class="app ns">N</span>Destination · NetSuite</div>
+              <div class="ttl unnamed-only">add customer</div>
+              <div class="ttl named-only">Import Customer (Solidus &gt; NetSuite) BV</div>
+              <div class="fact mono">import · <b>add</b> · <b>customer</b></div>
+              <div class="aff"><span class="chip none">no input filter</span><span class="chip unsynced">⇄ NS field map · not synced</span><span class="chip none">no resp. map</span><span class="chip none">no hooks</span></div>
+              <div class="foot"><span>stops flow on failure</span></div>
+            </div>
+            <div class="bubble dst" style="left:1220px;top:44px">
+              <div class="eb"><span class="app ns">N</span>Destination · NetSuite</div>
+              <div class="ttl unnamed-only">update customer</div>
+              <div class="ttl named-only">Update Currency</div>
+              <div class="fact mono">import · <b>update</b> · <b>customer</b></div>
+              <div class="aff"><span class="chip none">no input filter</span><span class="chip unsynced">⇄ NS field map · not synced</span><span class="chip none">no resp. map</span><span class="chip none">no hooks</span></div>
+              <div class="foot"><span>stops on failure · default</span></div>
+            </div>
+            <div class="bubble dst" style="left:1454px;top:44px">
+              <div class="eb"><span class="app ns">N</span>Destination · NetSuite</div>
+              <div class="ttl unnamed-only">add salesorder</div>
+              <div class="ttl named-only">Add New Sales Order (Framework BV)</div>
+              <div class="fact mono">import · <b>add</b> · <b>salesorder</b></div>
+              <div class="aff"><span class="chip none">no input filter</span><span class="chip unsynced">⇄ NS field map · not synced</span><span class="chip none">no resp. map</span><span class="chip hk">HK <span class="t">preMap</span> <span class="ver">C/3</span><i class="div" title="copies of this script differ"></i></span></div>
+              <div class="foot"><span>stops on failure · default</span></div>
+            </div>
+
+            <!-- BRANCH 2 · Framework Inc -->
+            <div class="bubble lkp" style="left:752px;top:296px">
+              <div class="eb"><span class="app ns">N</span>Lookup · NetSuite</div>
+              <div class="ttl unsynced unnamed-only">lookup customer <span class="m">· search 5090</span></div>
+              <div class="ttl named-only">Lookup Customer</div>
+              <div class="fact mono">export · saved search <b>5090</b> · <b>customer</b></div>
+              <div class="aff"><span class="chip none">no input filter</span><span class="chip mp">⇄ response · 1 field</span><span class="chip none">no hooks</span><span class="chip none">no transform</span></div>
+              <div class="foot"><span class="named-only">NetSuite Production</span><span class="unnamed-only">conn 600a5064… · name not synced</span></div>
+            </div>
+            <div class="bubble dst" style="left:986px;top:296px">
+              <div class="eb"><span class="app ns">N</span>Destination · NetSuite</div>
+              <div class="ttl unnamed-only">add customer</div>
+              <div class="ttl named-only">Import Customer (Solidus &gt; NetSuite)</div>
+              <div class="fact mono">import · <b>add</b> · <b>customer</b></div>
+              <div class="aff"><span class="chip none">no input filter</span><span class="chip unsynced">⇄ NS field map · not synced</span><span class="chip none">no resp. map</span><span class="chip none">no hooks</span></div>
+              <div class="foot"><span>stops flow on failure</span></div>
+            </div>
+            <div class="bubble dst" style="left:1220px;top:296px">
+              <div class="eb"><span class="app ns">N</span>Destination · NetSuite</div>
+              <div class="ttl unnamed-only">update customer</div>
+              <div class="ttl named-only">Update Currency</div>
+              <div class="fact mono">import · <b>update</b> · <b>customer</b></div>
+              <div class="aff"><span class="chip none">no input filter</span><span class="chip unsynced">⇄ NS field map · not synced</span><span class="chip none">no resp. map</span><span class="chip none">no hooks</span></div>
+              <div class="foot"><span>stops on failure · default</span></div>
+            </div>
+            <div class="bubble dst" style="left:1454px;top:296px">
+              <div class="eb"><span class="app ns">N</span>Destination · NetSuite</div>
+              <div class="ttl unnamed-only">add salesorder</div>
+              <div class="ttl named-only">Add New Sales Order (Framework Inc)</div>
+              <div class="fact mono">import · <b>add</b> · <b>salesorder</b></div>
+              <div class="aff"><span class="chip none">no input filter</span><span class="chip unsynced">⇄ NS field map · not synced</span><span class="chip none">no resp. map</span><span class="chip hk">HK <span class="t">preMap</span> <span class="ver">C/3</span><i class="div" title="copies of this script differ"></i></span></div>
+              <div class="foot"><span>stops on failure · default</span></div>
+            </div>
+          </div>
+          </div></div>
+          <div class="canvas-tools"><span id="zoomlbl">fit</span><button onclick="zoom(1)" aria-label="Zoom to 100%">+</button><button onclick="zoom('fit')" aria-label="Fit to width">⤢</button></div>
+        </div>
+
+        <!-- inspector -->
+        <div class="pane insp">
+          <div class="hd">
+            <div class="eb">Lookup · HTTPExport · router 1 · branch 1 · step 1 of 1</div>
+            <div class="ttl"><span class="unnamed-only">HTTP lookup <span style="color:var(--ink-faint);font-weight:400">· name not synced</span></span><span class="named-only">Lookup Sales Orders (Multi-Subsidiary)</span></div>
+          </div>
+          <div class="itabs"><span>Facts</span><span>Filter<small>—</small></span><span>Mapping<small>23</small></span><span aria-current="true">Scripts<small>1</small></span><span>Errors<small>0</small></span></div>
+          <div class="body">
+            <div class="kv">
+              <span class="k">adaptor</span><span class="v mono">HTTPExport</span>
+              <span class="k">connection</span><span class="v mono unnamed-only" style="color:var(--ink-muted)">648bd44c… · name not synced</span><span class="v mono named-only">FW Solidus - Admin <span style="color:var(--ink-faint)">(http)</span></span>
+              <span class="k">celigo id</span><span class="v mono m">66738c3d…</span>
+              <span class="k">used elsewhere</span><span class="v m">only in this flow</span>
+            </div>
+            <div class="grp">
+              <h5>Scripts · 1 attachment</h5>
+              <div class="site">
+                <div class="r"><span class="chip hk">HK <span class="t">preSavePage</span></span><span class="tnum">sales_order_script_v2</span></div>
+                <div class="r"><span class="pill mute">1 copy · 1 version</span><span class="pill mute">4 sites · 4 flows</span><span style="color:var(--ink-faint)">33.3 KB · modified 25 Aug 2026</span></div>
+                <div class="path mono">66738c3d….hooks.preSavePage</div>
+                <div class="r"><a class="linkish" href="#s4">Open source →</a><a class="linkish" href="#s2">Scripts view ↗</a></div>
+              </div>
+              <div class="shield"><b>⚠</b><span>Source opens in a drawer, shown to you only. Never sent to the assistant (N2).</span></div>
+            </div>
+            <div class="grp">
+              <h5>Errors · this step</h5>
+              <div class="quiet">No open errors on this step. Celigo reported 0 for the whole flow on the last sync, 4 min ago.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="legend">
+        <span>Chip states:</span>
+        <span class="chip hk">configured · named</span>
+        <span class="chip none">looked, none</span>
+        <span class="chip unsynced">cannot say · not synced</span>
+        <span style="margin-left:auto">Canvas shown at fit-to-width; <b style="font-weight:500;color:var(--ink)">+</b> is 100%.</span>
+      </div>
+    </div>
+    <p class="note"><b>The bubble.</b> Eyebrow = Celigo's own type vocabulary (Source · Lookup · Destination) plus the app family. Title = the name you typed in Celigo once it is synced; until then the honest fallback is what the step does — <span class="mono">add salesorder</span>, <span class="mono">lookup customer · search 5090</span> — and "name not synced" for HTTP steps. Never an invented name. Flip the toggle: "update customer" becomes <b>Update Currency</b>, which is the whole argument for the names sync. Fact line = adaptor · operation · record type, or the saved search id. Then the affordances Celigo hangs on the connector line, in Celigo's own per-side order (sources: transform · hooks · output filter; destinations: input filter · NetSuite mapping · response mapping · hooks) so an absent one is visible and comparable across bubbles. Three chip states: configured, looked-and-none (hollow), cannot-say (dashed) — the import's NetSuite field mapping is dashed on every destination because the sync drops it. A hook chip carries the function name and the script's clone state: <span class="mono">×1</span> one copy; <span class="mono">C/3</span> this step runs copy C of a family with three differing versions, and the amber dot says so without a tooltip.</p>
+    <p class="note"><b>Routers and lanes, as Celigo declares them.</b> This flow chains two routers: router 1 has one branch whose <span class="mono">nextRouterId</span> points at router 2, which routes on input filters to the first matching branch. Branch names ("Framework Intl", "Framework Inc"), the rule, the routing mode and the chain are already in the synced flow object; they only need projecting into the API. 8 of the 122 flows chain routers this way and 19 have a router at all, so the chained layout is built and tested, not deferred. Layout is deterministic — ranks left to right: sources · router · lookup · router · branch lanes — so a refetch never reshuffles. When nothing is selected the inspector shows the flow Overview (this header's facts, adaptor mix, the AI description, sync freshness).</p>
+  </section>
+
+  <!-- ═══════════════════════ SCREEN 4 ═══════════════════════ -->
+  <section id="s4">
+    <div class="stage-label">
+      <h2>4 · Opening a script from a bubble</h2>
+      <span>Hook chip → inspector Scripts tab → "Open source" slides a drawer over the inspector. Here: the diverged preMap family on "Add New Sales Order (Framework BV)".</span>
+      <span class="url mono">…&amp;step=&lt;stepId&gt;&amp;script=&lt;scriptId&gt;</span>
+    </div>
+    <div class="stage">
+      <div class="drawer-stage">
+        <div class="shade"><div class="ghost">Flow page, dimmed. Esc or the × closes the drawer and returns focus to the chip that opened it. The URL keeps <span class="mono">&amp;script=</span> so a pasted link opens straight to this source.</div></div>
+        <div class="drawer">
+          <div class="hd">
+            <div class="r"><span class="chip hk">HK <span class="t">preMap</span></span><span class="ttl">ns_sales_order_premap</span><span class="x">×</span></div>
+            <div class="r"><span class="pill warn">copy C · 3 versions</span><span class="pill mute">7 copies</span><span class="pill mute">this copy: 4 sites · 2 flows</span><span class="m tnum">2.4 KB · modified 23 Apr 2026</span></div>
+            <div class="m mono">attached at 66738c3d….hooks.preMap · this flow · Branch 1 and Branch 2 · both salesorder adds</div>
+          </div>
+          <div class="bar"><span class="btn">Copy C ▾</span><span class="btn">Compare with A ⇄</span><span class="btn ghost">Scripts view ↗</span></div>
+          <div class="code" aria-label="Script source, shown as inert text"><span class="ln">1</span><span class="cm">// Illustrative body — the real one is customer-authored and synced. <span class="ex">example</span></span>
+<span class="ln">2</span><span class="kw">function</span> <span class="fn">preMap</span>(options) {
+<span class="ln">3</span>  <span class="kw">return</span> options.data.map(record =&gt; {
+<span class="ln">4</span>    record.subsidiary = SUBSIDIARY_BY_ENTITY[record.business_entity];
+<span class="ln">5</span>    <span class="kw">return</span> { data: record };
+<span class="ln">6</span>  });
+<span class="ln">7</span>}</div>
+          <div class="shield" style="border-radius:0;padding:7px 14px"><b>⚠</b><span>Customer-authored JavaScript, shown to you only. Never run here, never sent to the assistant (standing decision N2). Nothing on this surface can edit or deploy it.</span></div>
+          <div class="copies">
+            <h5>Copies in this family · 7 · 3 versions</h5>
+            <div class="r"><span class="l">A</span><span class="mono">e521de</span><span>1 copy · Sep 2025 · 2.3 KB · 2 sites</span><span class="pill mute">oldest</span></div>
+            <div class="r"><span class="l">B</span><span class="mono">b285a6</span><span>3 copies · Oct 2025 – Mar 2026 · 2.1 KB · 6 sites</span><span class="pill warn">differs from A</span></div>
+            <div class="r cur"><span class="l">C</span><span class="mono">7f2bd1</span><span>3 copies · Apr – Jun 2026 · 2.4 KB · 8 sites · <b>this step</b></span><span class="pill warn">differs from A, B</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p class="note"><b>Why a drawer and not a page jump.</b> The question that opened the script was asked about <i>this</i> bubble; reading 40 lines should not lose the canvas. The full family — every site, every copy, the diff — lives in the approved Scripts view, one click away. The drawer is the existing script viewer re-homed from a dialog to a side panel: same inert rendering, same shield strip, same used-by rows. The family above is real: seven copies of one preMap hook across eight Multi-Subsidiary flows, in three differing versions.</p>
+  </section>
+
+  <!-- ═══════════════════════ SCREEN 5 ═══════════════════════ -->
+  <section>
+    <div class="stage-label">
+      <h2>5 · Error state — this flow on 17 August</h2>
+      <span>The real 17 Aug 2026 payload from the connector spec, placed on the real pipeline. Zero open errors today; this is what the same page showed then.</span>
+    </div>
+    <div class="stage">
+      <div class="fhead">
+        <div class="row1">
+          <span class="pill crit"><i class="dot"></i>10 open · 1 root cause</span>
+          <span class="pill ok"><i class="dot"></i>on time</span>
+          <h3>New Sales Order to NetSuite - Multi-Subsidiary</h3>
+          <span class="actions"><span class="btn ghost">Copy link</span><span class="btn ghost">Open errors in Celigo ↗</span></span>
+        </div>
+        <div class="facts tnum">
+          <span><b>every 15 min</b> · last ran <b>4 min before the sync</b></span>
+          <span>first failure <b>17 Aug 06:20</b> · latest <b>17 Aug 11:05</b></span>
+          <span>Celigo purges these <b>16 Sep</b> · snapshot kept here</span>
+          <span>10 orders never reached NetSuite → <a class="linkish" href="#">10 unmatched charges in recon</a></span>
+        </div>
+      </div>
+      <div class="panes wide-nav" style="min-height:400px">
+        <div class="pane nav">
+          <div class="hd">Solidus + NetSuite <span class="cnt tnum">20 flows</span></div>
+          <ul>
+            <li aria-current="true"><i class="dot" style="color:var(--crit)"></i><div><div class="nm">New Sales Order to NetSuite - Multi-Subsidiary</div><div class="m tnum" style="color:var(--crit)">10 open · 1 root cause</div></div></li>
+            <li><i class="dot" style="color:var(--ok)"></i><div><div class="nm">NS &gt; Solidus - Shipping Confirmations v2 (multi-shipments)</div><div class="m tnum">30 min · 6 min ago</div></div></li>
+            <li><i class="dot" style="color:var(--ok)"></i><div><div class="nm">NS - Create Customer Deposits (Paid Orders)</div><div class="m tnum">30 min · 32 min ago</div></div></li>
+            <li><i class="dot" style="color:var(--ok)"></i><div><div class="nm">Update Pre-Orders - Solidus &gt; Multi-Subsidiary</div><div class="m tnum">on demand · 20 min ago</div></div></li>
+            <li class="paused"><i class="dot"></i><div><div class="nm">NS &gt; Solidus Inventory Sync (Dimerco) v1.1</div><div class="m tnum">paused · 17 months ago</div></div></li>
+            <li style="color:var(--ink-faint);padding-top:8px">+ 15 more · ⌘B hides this pane</li>
+          </ul>
+        </div>
+        <div class="pane canvas-wrap">
+          <div class="canvas" style="width:1200px;height:380px">
+            <svg viewBox="0 0 1200 380" aria-hidden="true">
+              <path d="M232,193 L254,193" marker-end="url(#ar)"/>
+              <path d="M364,193 L386,193" marker-end="url(#ar)"/>
+              <path d="M598,193 L620,193" marker-end="url(#ar)"/>
+              <path d="M730,193 C742,193 740,72 752,72" marker-end="url(#ar)"/>
+              <path d="M730,193 C742,193 740,308 752,308" marker-end="url(#ar)"/>
+            </svg>
+            <div class="lane" style="left:20px;top:6px">Sources · 1</div>
+            <div class="lane" style="left:386px;top:6px">Lookups · 3 &nbsp;·&nbsp; Destinations · 6</div>
+            <div class="bubble src" style="left:20px;top:112px">
+              <div class="eb"><span class="app http">H</span>Source · HTTP</div>
+              <div class="ttl unsynced">HTTP export <span class="m">· name not synced</span></div>
+              <div class="fact mono">http export · conn 648bd44c…</div>
+              <div class="aff"><span class="chip none">no transform</span><span class="chip none">no hooks</span><span class="chip none">no output filter</span></div>
+              <div class="foot"><span>10 records handed on</span></div>
+            </div>
+            <div class="rnode" style="left:254px;top:165px"><div class="k">Router 1</div><div class="v">pass-through · 1 branch<br>→ chains to router 2</div></div>
+            <div class="bubble lkp sel err" style="left:386px;top:112px">
+              <div class="eb"><span class="app http">H</span>Lookup · HTTP <span class="errn pill crit" style="padding:0 6px">10 open</span></div>
+              <div class="ttl unsynced">HTTP lookup <span class="m">· name not synced</span></div>
+              <div class="fact mono">http export · conn 648bd44c…</div>
+              <div class="aff"><span class="chip none">no input filter</span><span class="chip mp">⇄ response · 23 fields</span><span class="chip hk">HK <span class="t">preSavePage</span> <span class="ver">×1</span><i class="ed" title="errors originate in this hook"></i></span><span class="chip none">no transform</span></div>
+              <div class="foot"><span class="crit">errors originate in preSavePage</span></div>
+            </div>
+            <div class="rnode" style="left:620px;top:165px;opacity:.6"><div class="k">Router 2</div><div class="v">first matching branch<br>by input filters · 2</div></div>
+            <div class="lanebox" style="left:752px;top:40px"><b>Branch 1 · Framework Intl</b> · 4 steps · 0 open<br>Lookup Customer → add customer → update customer → add salesorder · <b>the 10 never got here</b></div>
+            <div class="lanebox" style="left:752px;top:276px"><b>Branch 2 · Framework Inc</b> · 4 steps · 0 open<br>Lookup Customer → add customer → update customer → add salesorder · <b>the 10 never got here</b></div>
+          </div>
+        </div>
+        <div class="pane insp">
+          <div class="hd"><div class="eb">Lookup · HTTPExport</div><div class="ttl">HTTP lookup</div></div>
+          <div class="itabs"><span>Facts</span><span>Filter<small>—</small></span><span>Mapping<small>23</small></span><span>Scripts<small>1</small></span><span aria-current="true" style="color:var(--crit);border-bottom-color:var(--crit)">Errors<small>10</small></span></div>
+          <div class="body">
+            <div class="errsig">
+              <div class="r"><span class="pill crit">script_error</span><span class="mono" style="color:var(--ink-muted)">pre_save_page_hook</span><span class="tnum" style="margin-left:auto">×10</span></div>
+              <div class="msg mono">TypeError: Cannot read properties of null (reading 'name')</div>
+              <div class="r" style="font-size:10.5px;color:var(--ink-muted)"><span>first 17 Aug 06:20</span><span>latest 11:05</span><span>not retriable</span><span>purges 16 Sep</span></div>
+              <div class="r"><span class="chip hk">HK <span class="t">preSavePage</span> <span class="ver">×1</span></span><span style="font-size:10.5px;color:var(--ink-muted)">sales_order_script_v2 · the only preSavePage hook in this flow</span></div>
+              <div class="keys"><span>15822111</span><span>15241110</span><span>14847341</span><span>13431048</span><span>13398220</span><span>13387105</span><span>+4</span></div>
+              <div class="eff">These trace keys are Solidus order ids. None reached NetSuite: no customer, no sales order — they appear in recon as unmatched Stripe charges with no explanation. <a class="linkish" href="#">Open the 10 in recon →</a></div>
+            </div>
+            <div class="grp"><h5>Steps downstream</h5><div class="kv"><span class="k">Branch 1</span><span class="v m">4 steps · 0 open — never reached</span><span class="k">Branch 2</span><span class="v m">4 steps · 0 open — never reached</span></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p class="note"><b>Root cause leads, volume follows, effect closes.</b> One signature (source · code · normalised message), ten occurrences, the hook it came from, the order ids Celigo will purge in 30 days, and the recon consequence. Celigo's error source <span class="mono">pre_save_page_hook</span> maps to the one step in this flow that has a preSavePage hook — the lookup, not the source — and an error source that matches no hook attaches to the step, never to a chip. Per-step counts are already stored; they only need to reach the flow-detail response. Because there are no live errors today, this state ships verified against the 17 Aug fixture and a seeded e2e that inserts one signature and asserts the tile pill, table cell, header pill, bubble badge, navigator dot and Errors tab all agree on the count.</p>
+  </section>
+
+  <!-- ═══════════════════════ SCREEN 6 ═══════════════════════ -->
+  <section>
+    <div class="stage-label">
+      <h2>6 · The other states, side by side</h2>
+      <span>Each one is a distinct sentence, never a blank, a spinner with no exit, or a confident zero.</span>
+    </div>
+    <div class="states">
+      <div class="state"><span class="k">Today · everything quiet</span><span><span class="pill ok"><i class="dot"></i>0 open errors · checked 4 min ago</span> <span class="pill ok"><i class="dot"></i>on time</span></span><span class="why">All 122 flows read like this now. The Errors tab shows "No open errors. Celigo reported 0 on the last sync." with the sync time, not an empty box. Until drift or run history is synced, this is a reference surface, not a monitor — the page says so in the Errors tab rather than pretending.</span></div>
+      <div class="state"><span class="k">Stalled schedule <span class="ex">none today</span></span><span><span class="pill ok"><i class="dot"></i>0 open errors</span> <span class="pill warn"><i class="dot"></i>stalled? 12 runs missed</span></span><span class="why">Scheduled, on, and last ran more than 2 intervals before the sync time. Computed from the cron string's minute and hour lists only; any other shape shows the string verbatim and makes no claim. Listener-driven flows (no schedule) get no stall claim either — that hole is named, not hidden.</span></div>
+      <div class="state"><span class="k">Paused · real</span><span><span class="pill mute"><i class="dot"></i>Paused</span> <span style="color:var(--ink-faint)">last ran 17 months ago · kept: every 4 h</span></span><span class="banner">This flow is Off in Celigo — mirrored here, not changeable here.</span><span class="why">NS &gt; Solidus Inventory Sync (Dimerco) v1.1. Stays in the navigator and table, dimmed; bubbles draw at 60% under that banner. Never "stalled" — it was told to stop.</span></div>
+      <div class="state"><span class="k">No run recorded · real</span><span><span class="pill mute"><i class="dot hollow"></i>no run recorded</span></span><span class="why">6 of 122 flows. Not "never ran" — Celigo has no lastExecutedAt for them. The word "recorded" is doing real work.</span></div>
+      <div class="state"><span class="k">No steps recorded · real</span><span><span class="pill mute">0 steps</span> <span style="color:var(--ink-faint)">Supply Chain Management · 2 flows</span></span><span class="why">Celigo returned two flows with no page generators or processors. The table says "no steps recorded" and the flow page draws an empty canvas with that sentence, not a broken pipeline.</span></div>
+      <div class="state"><span class="k">Sync is stale</span><span><span class="pill warn"><i class="dot"></i>synced 5 h ago</span></span><span class="why">Every "last ran" is as of that sync, so the toolbar pill turns amber past 2 h and the flow header says "as of sync 5 h ago". Stall math uses the sync time, never the wall clock.</span></div>
+      <div class="state"><span class="k">Never synced</span><span><span class="pill mute">—</span> <span style="color:var(--ink-faint)">counts read "—", not 0</span></span><span class="why">The 09-01 empty state, unchanged: "No flows synced yet — run a sync from the connector card in Settings."</span></div>
+      <div class="state"><span class="k">Link to a flow not in the last sync</span><span><span class="pill mute">This flow is not in the last sync.</span></span><span class="why">A pasted <span class="mono">&amp;flow=</span> that no longer resolves falls back one level to the integration page with that sentence and a link — never a blank page.</span></div>
+      <div class="state"><span class="k">Request failed</span><span><span class="pill crit">Couldn't load this flow.</span> <span class="btn ghost">Retry</span></span><span class="why">The existing rule: an error is visibly different from loading and from empty. A failed flow-detail fetch leaves the header and navigator up and puts the notice where the canvas would be; a failed flows fetch never renders "0 flows".</span></div>
+      <div class="state"><span class="k">Config changed since last sync</span><span><span class="pill accent">3 changes · 2 h ago</span> <span class="ex">none today</span></span><span class="why">Drift is recorded per sync and empty today. When it lights, the tile foot, the integration Changes tab and the flow header each carry the count; a changed step gets an orange ring on the canvas.</span></div>
+    </div>
+  </section>
+
+  <!-- ═══════════════════════ SPEC ═══════════════════════ -->
+  <section>
+    <div class="stage-label"><h2>What each element needs from the backend</h2><span>On the wire today · in the DB but not on the wire (T1, read-only API) · needs a sync change (T2)</span></div>
+    <div class="card" style="overflow-x:auto">
+      <table class="spec">
+        <thead><tr><th>Element</th><th>Where it comes from</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td>Bubbles, edges, router membership, branch lanes, sequence</td><td><span class="mono">role · router_id · branch_id · sequence</span> on <span class="mono">GET /celigo/flows/{id}</span></td><td><span class="pill ok">on the wire</span></td></tr>
+          <tr><td>Response-mapping counts, proceed-on-failure, skip-retries, hook/transform/filter chips with function names</td><td><span class="mono">filter_json · mapping_json · proceed_on_failure · skip_retries · attachments[]</span></td><td><span class="pill ok">on the wire</span></td></tr>
+          <tr><td>Header schedule, timezone, paused, last run, AI description, cloned-from, Celigo modified</td><td>flow detail</td><td><span class="pill ok">on the wire</span></td></tr>
+          <tr><td>Script drawer: source, hash, copies, diverged, where-used</td><td><span class="mono">GET /celigo/scripts/{id}</span></td><td><span class="pill ok">on the wire</span></td></tr>
+          <tr><td>Bubble fact line: <span class="mono">operation · record_type · search_id</span>; Lookup vs Destination eyebrow</td><td>step columns exist since migration 096; add to the step response</td><td><span class="pill warn">T1</span></td></tr>
+          <tr><td>Router mode, branch names, branch rule, the router chain, declared branch order</td><td>kept verbatim in the synced flow object (<span class="mono">routers[].routeRecordsTo / routeRecordsUsing / branches[].name / inputFilter / nextRouterId</span>); project into the response — 8 chained-router flows, 19 with routers, so this ships in the first build</td><td><span class="pill warn">T1</span></td></tr>
+          <tr><td>Per-bubble open-error badge, per-step Errors tab, "Flow: name" step drawer on the table</td><td>per-step error rows are stored; extend the existing errors route with <span class="mono">flow_id / step_id / status</span> filters and add per-step counts to flow detail</td><td><span class="pill warn">T1</span></td></tr>
+          <tr><td>Tile and header rollups: writes, scheduled / on demand / paused, last run, scripts, stalled, changes; the Steps glyph counts</td><td>new integration summary endpoint; the existing writes helper is keyed by connection, so it gets an integration filter</td><td><span class="pill warn">T1</span></td></tr>
+          <tr><td>Last updated column; Celigo's own open-error count as a cross-check</td><td><span class="mono">celigo_last_modified</span> and the flow object's <span class="mono">numOpenError / lastErrorAt</span> — when Celigo's count and our stored rows disagree after a partial sync, the pill shows ours and a caption says Celigo reports N</td><td><span class="pill warn">T1</span></td></tr>
+          <tr><td>Changes tab, orange ring on changed steps</td><td>config-change rows exist, no route</td><td><span class="pill warn">T1</span></td></tr>
+          <tr><td><b>Bubble title = your export/import name</b></td><td>the name is fetched and sanitised in the step-detail phase, then dropped; one column + one backfill parameter + one migration (~1.5 d)</td><td><span class="pill crit">T2 · sync change</span></td></tr>
+          <tr><td><b>Connection name and per-app logo</b> (bubble foot, inspector, tile Apps)</td><td>connections are not fetched; must be live-probed and allowlisted first because connection objects carry credentials (~2 d)</td><td><span class="pill crit">T2 · sync change</span></td></tr>
+          <tr><td>Import's actual NetSuite field mapping (the dashed chip)</td><td>sanitised then discarded; the Mapping tab shows the <i>response</i> mapping and is labelled so (~1 d)</td><td><span class="pill crit">T2 · sync change</span></td></tr>
+          <tr><td>Run history, records per run (Celigo's bottom Run dashboard drawer)</td><td>nothing beyond last-run time is synced; the slot under the canvas stays closed (~3 d)</td><td><span class="pill crit">T2 · not in this build</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="grid2">
+    <div class="card">
+      <h3>Navigation</h3>
+      <ul>
+        <li><b>One page, five URL params.</b> <span class="mono">/workspace?surface=celigo</span> (tiles) · <span class="mono">&amp;integration=</span> (flows table, <span class="mono">&amp;tab=</span>) · <span class="mono">&amp;flow=</span> (full page) · <span class="mono">&amp;step=</span> and <span class="mono">&amp;script=</span> (selection, drawer). Every state is a link; refresh keeps it; Back walks up. <span class="mono">surface</span> moves from React state into the URL — today a refresh drops you back to Files.</li>
+        <li><b>One writer for the URL.</b> The new route hook is the only thing that writes these params; it clears <span class="mono">?file=</span> when entering the Celigo surface and vice versa, and the existing file/workspace effect ignores Celigo params. With the feature flag off, <span class="mono">?surface=celigo</span> renders Files.</li>
+        <li>Breadcrumb at every level; the navigator hops between sibling flows without going up. ⌘B collapses it (the page-level handler branches on surface — today it is a silent no-op here). ⌘K is a real palette over all 122 flows, each result carrying its health dot and integration. Esc clears the selection; a second Esc closes the drawer.</li>
+        <li>The Celigo branch of the workspace page mounts <i>its own</i> panel group (rail · canvas · inspector) with its own persisted-layout id. The Files group — tree, changesets, diff, Deploy — is never in the tree on this branch. That guarantee gets a DOM-level page test, not a comment.</li>
+        <li>Nested routes (<span class="mono">/workspace/celigo/[flowId]</span>) were considered and dropped: they would need a second layout to carry the toolbar and the feature gate.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>What it takes · 13 days, +1.5 with names</h3>
+      <ul>
+        <li><b>Backend, T1, ~3 d</b> — step fact fields · router/branch projection · per-step error counts + error filters · integration summary · changes route · flow-level writes. Tests first; the layout gets a fixture matrix (single source→destination, top-level chain, one router with 2 lanes, empty lane, chained routers, duplicate step across branches, 0 steps).</li>
+        <li><b>Frontend, ~10 d</b> — URL state + breadcrumb (0.5) · tiles, list, filters, palette (1.5) · integration page + tabs + step drawer (1) · flow page shell in the panel group + rail (1) · canvas: layered layout, bubble, router, lanes, fit/zoom (2.5) · inspector tabs + Overview (1.5) · script drawer from the dialog (0.5) · stall heuristic + states (1) · tests, seeded Celigo fixture for e2e, retire the old map (1). The helpers being reused are module-private today and get extracted once.</li>
+        <li><b>Names sync, T2, ~1.5 d</b> — one column, one backfill parameter, one migration. Recommended in the same train (decision 1).</li>
+        <li><b>Not included</b> — connections (~2 d + live probe), NetSuite field mapping (~1 d), run history (~3 d).</li>
+        <li><b>Tier: T2 gate</b> for the PR either way (workspace shell change, new routes over customer JavaScript and error payloads; a migration if names ride along). Budget two gate rounds, not one.</li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Decisions to confirm</h3>
+      <ol>
+        <li><b>Names in the same train.</b> A Celigo bubble is recognised by the name you typed. Without the sync, "Update Currency" reads as "update customer" on day one. Recommended: ship the 1.5-day column with this build so the first demo uses your vocabulary. The alternative is an honest-fallback first release and names in a follow-up.</li>
+        <li><b>Celigo's three levels, kept.</b> Tiles → integration table → full-page flow. Tiles straight to flow saves one click and loses the place where 20 flows are compared.</li>
+        <li><b>Drawer for source, Scripts view for the family.</b> Not a page jump from a bubble. The drawer replaces today's dialog.</li>
+        <li><b>N2 holds.</b> Source in the drawer only, human-only, never in the inspector, never to the assistant; the palette searches names only. The existing viewer banner still promises "quoted to the assistant inside a sealed block" and changes with this.</li>
+        <li><b>No writes.</b> No Run, no Off/On, no retry/resolve, no Sync now. "Open in Celigo ↗" is the one way out; its URL shape is verified against one real flow before shipping.</li>
+      </ol>
+    </div>
+    <div class="card">
+      <h3>Risks</h3>
+      <ul>
+        <li><b>Stall detection is a heuristic on the one cron shape seen live.</b> It must say "stalled?" with the question mark, use sync time not wall time, and go silent on any cron it does not parse and on listener-driven flows.</li>
+        <li><b>Zero live errors means the error state ships against a fixture</b> — the recurring fixture-vs-live blind spot. Mitigation: the 17 Aug payload as the fixture, the cross-surface count assertion in the seeded e2e, and "untested live" on the PR.</li>
+        <li><b>Two counts of open errors</b> exist once Celigo's own number is projected: ours from stored rows, Celigo's from the flow object. The pill shows ours; a disagreement is captioned, never averaged.</li>
+        <li><b>Lookups inside imports are dropped by the sync</b> (a different thing from the lookup steps drawn here). A canvas cannot mark what it cannot see; the spec table names the gap.</li>
+        <li><b>reactflow's stylesheet is global once loaded</b> — lazy-load the canvas behind the Celigo branch and scope its CSS so Files users never pay for it.</li>
+        <li><b>The AI description is inherited on clone</b> and can describe an ancestor, as it does here. It is shown as Celigo's text with that caption, never as our summary; the derived sentence above it is ours.</li>
+      </ul>
+    </div>
+  </section>
+
+  <footer>Framework account, sync completed 2026-09-02 18:12 UTC, production only. Real: every integration, count, schedule, last run, record type, router, branch name and rule, hook function, script size, copy and version count on this page; the step and connection names under the second toggle (read live from Celigo, not yet synced); the 17 Aug 2026 error's source, code, message, trace keys and purge date. Illustrative and marked: the stalled row, the config-changed pill, the script body in the drawer, and the placement of the 17 Aug errors on today's pipeline.</footer>
+</div>
+
+<script>
+  function setNamed(on) {
+    document.body.classList.toggle('named', on);
+    document.getElementById('t-today').setAttribute('aria-pressed', String(!on));
+    document.getElementById('t-named').setAttribute('aria-pressed', String(on));
+  }
+  var NATURAL_W = 1686, NATURAL_H = 470, mode = 'fit';
+  function fitScale() {
+    var cw = document.getElementById('cw');
+    var avail = cw.clientWidth - 8;
+    return Math.max(0.6, Math.min(1, avail / NATURAL_W));
+  }
+  function apply() {
+    var s = mode === 'fit' ? fitScale() : 1;
+    document.getElementById('cs').style.transform = 'scale(' + s + ')';
+    var sizer = document.getElementById('sizer');
+    sizer.style.width = Math.round(NATURAL_W * s) + 'px';
+    sizer.style.height = Math.round(NATURAL_H * s) + 'px';
+    document.getElementById('zoomlbl').textContent = mode === 'fit' ? 'fit · ' + Math.round(s * 100) + '%' : '100%';
+  }
+  function zoom(m) { mode = m === 'fit' ? 'fit' : '100'; apply(); }
+  window.addEventListener('resize', function () { if (mode === 'fit') apply(); });
+  apply();
+</script>

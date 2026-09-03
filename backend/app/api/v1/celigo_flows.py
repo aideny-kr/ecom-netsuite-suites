@@ -47,17 +47,18 @@ from __future__ import annotations
 import uuid
 from collections import defaultdict
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, JsonValue
-from sqlalchemy import and_, case, distinct, func, select
+from sqlalchemy import and_, case, distinct, func, select, text, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.connector_status import _get_celigo_connection
 from app.core.database import get_db
 from app.core.dependencies import require_feature, require_permission
 from app.models.celigo import (
+    CeligoConfigChange,
     CeligoErrorSignature,
     CeligoFlow,
     CeligoFlowError,
@@ -66,12 +67,20 @@ from app.models.celigo import (
     CeligoScript,
     CeligoScriptAttachment,
     celigo_error_is_open,
+    celigo_flow_is_on_demand,
     celigo_integration_is_production,
     celigo_script_is_production,
 )
 from app.models.pipeline import CursorState
 from app.models.user import User
-from app.services.celigo.repository import list_logical_scripts
+from app.services.celigo.repository import list_logical_scripts, parse_celigo_timestamp
+from app.services.celigo.topology import (
+    ScriptFamilyFact,
+    adaptor_family,
+    project_routers,
+    script_family_facts,
+    step_kind,
+)
 
 router = APIRouter(prefix="/celigo", tags=["celigo"])
 
@@ -107,7 +116,55 @@ def _join_production_integration(stmt, tenant_id):
 CeligoSchedule = JsonValue
 
 
+class CeligoFlowScheduleOut(BaseModel):
+    """One row of `CeligoIntegrationOut.flow_schedules` -- the per-flow detail
+    behind the integration card's aggregate schedule counts, so the frontend
+    can list "which flows are on demand / paused / on what cron" without a
+    second call per integration."""
+
+    id: str
+    name: str
+    disabled: bool | None
+    schedule: CeligoSchedule
+    last_executed_at: datetime | None
+
+
 class CeligoIntegrationOut(BaseModel):
+    """Task 6 -- one request for the whole dashboard: every flow-schedule
+    bucket, topology/script/write aggregate, and open-error/config-change
+    count for this integration, each computed with one GROUP BY query across
+    every integration at once (never N+1 per integration).
+
+    `flow_count`/`paused_count`/`on_demand_count`/`scheduled_count` partition
+    every flow under the integration into exactly one bucket: `disabled IS
+    TRUE` is paused regardless of its schedule; among the rest, `celigo_flow_
+    is_on_demand()` (models.py) decides on-demand vs scheduled -- so
+    `scheduled_count + on_demand_count + paused_count == flow_count` always,
+    by construction (each bucket's SQL filter is mutually exclusive with the
+    other two, not derived by subtraction). `no_run_count` is flows whose
+    `last_executed_at` is NULL; `last_run_at` is the MAX across all of them.
+    `step_count`/`router_count`/`lookup_count` mirror `CeligoFlowSummaryOut`'s
+    same-named fields, rolled up to the integration. `writes` and
+    `adaptor_families` are set-level, not per-flow: `writes` sums a
+    `(record_type, count)` pair across every flow in the integration (same
+    write definition as `CeligoFlowSummaryOut.writes` --
+    `record_type IS NOT NULL AND operation IS NOT NULL`); `adaptor_families`
+    is the DISTINCT set of `topology.adaptor_family(adaptor_type)` results
+    across every step in the integration, dropping `None`. `script_count` is
+    DISTINCT production scripts attached anywhere in the integration.
+    `error_count` is OPEN (`celigo_error_is_open()`); `signature_count` is the
+    integration-wide twin of `CeligoFlowSummaryOut.signature_count` -- DISTINCT
+    root causes across every flow in the integration (Task 18, cross-surface
+    consistency: the tile's own `ErrorPill` used to default this to `error_count`
+    itself when the field didn't exist, which read "10 open · 10 root causes"
+    on this tile while the SAME 10 errors, one click away on the flows table or
+    the flow page, correctly read "1 root cause" -- the same audit-trail rows,
+    two different claims). `changes_last_24h` is
+    `celigo_config_changes` rows in the last rolling 24h -- a coarse "has
+    anything drifted recently" signal, not itself a health verdict.
+    `flow_schedules` is a second, plain per-flow projection (no aggregation)
+    for a drill-down list, not the buckets above."""
+
     id: str
     celigo_id: str
     name: str
@@ -115,6 +172,30 @@ class CeligoIntegrationOut(BaseModel):
     mode: str | None
     description: str | None
     celigo_last_modified: datetime | None
+    flow_count: int
+    scheduled_count: int
+    on_demand_count: int
+    paused_count: int
+    step_count: int
+    router_count: int
+    lookup_count: int
+    script_count: int
+    no_run_count: int
+    error_count: int
+    signature_count: int
+    changes_last_24h: int
+    last_run_at: datetime | None
+    writes: list[CeligoRecordWriteOut]
+    adaptor_families: list[str]
+    flow_schedules: list[CeligoFlowScheduleOut]
+
+
+class CeligoRecordWriteOut(BaseModel):
+    """One `(record_type, count)` row of a flow's write mix -- see
+    `CeligoFlowSummaryOut.writes`'s docstring."""
+
+    record_type: str
+    count: int
 
 
 class CeligoFlowSummaryOut(BaseModel):
@@ -122,7 +203,31 @@ class CeligoFlowSummaryOut(BaseModel):
     `signature_count` are OPEN counts (`resolved_at IS NULL AND purged_at IS
     NULL`) computed with one GROUP BY query across every flow in the
     integration -- never N+1. `disabled` flows are never filtered out (mockup
-    spec: paused flows stay visible, dimmed by the frontend on this flag)."""
+    spec: paused flows stay visible, dimmed by the frontend on this flag).
+
+    Task 5 -- topology/script/write aggregates for the flow-list table
+    columns, each computed with one GROUP BY query across every flow in the
+    integration, never N+1 (see `list_integration_flows`):
+    `step_count`/`router_count`/`branch_count` come from one query over
+    `celigo_flow_steps` (`COUNT(DISTINCT router_id)`/`COUNT(DISTINCT
+    branch_id)` -- NULLs excluded by SQL's own `COUNT(DISTINCT ...)`
+    semantics, which is exactly right: a step with no router/branch must not
+    count as a router/branch of its own). `lookup_count` is steps whose role
+    is `processor` and whose `adaptor_type` ends in "export"
+    (case-insensitive) -- the same rule `topology.step_kind` uses to call a
+    step a Lookup, restated here as a set-level GROUP BY count rather than
+    imported per-step (this endpoint never classifies individual steps).
+    `writes` is every `(record_type, count)` pair actually posted from this
+    flow (`record_type IS NOT NULL AND operation IS NOT NULL` -- a step can
+    carry a `record_type` from a lookup export with no `operation`, which is
+    a read, not a write), ordered by count desc then record_type so the
+    biggest write shows first. `script_count` is the DISTINCT script count
+    attached to this flow (production scripts only, `celigo_script_is_
+    production()`); `diverged_family_count` is how many of THIS flow's
+    attached script families have more than one distinct `content_hash`
+    across the family (a clone that has drifted from its original) -- see
+    `list_integration_flows`'s `diverged_keys` subquery. Every new field
+    defaults to 0 / `[]` for a flow with no steps/scripts, never omitted."""
 
     id: str
     celigo_id: str
@@ -133,6 +238,14 @@ class CeligoFlowSummaryOut(BaseModel):
     last_executed_at: datetime | None
     error_count: int
     signature_count: int
+    step_count: int
+    router_count: int
+    branch_count: int
+    lookup_count: int
+    script_count: int
+    diverged_family_count: int
+    writes: list[CeligoRecordWriteOut]
+    celigo_last_modified: datetime | None
 
 
 class CeligoAttachmentOut(BaseModel):
@@ -144,6 +257,17 @@ class CeligoAttachmentOut(BaseModel):
     function_name: str | None
     json_path: str
     site_type: str | None
+    # Script clone-family state, projected by `topology.script_family_facts`
+    # from the attachment's `script_id` -- `None` when the attachment's
+    # script row isn't (yet) synced locally, or is a sandbox copy (see
+    # `get_flow_detail`'s family query, which filters with
+    # `celigo_script_is_production()`).
+    script_name: str | None = None
+    script_size_chars: int | None = None
+    script_copies_count: int | None = None
+    script_versions_count: int | None = None
+    script_version_letter: str | None = None
+    script_content_diverged: bool | None = None
 
 
 class CeligoFlowStepOut(BaseModel):
@@ -156,11 +280,50 @@ class CeligoFlowStepOut(BaseModel):
     sequence: int
     adaptor_type: str | None
     connection_celigo_id: str | None
-    filter_json: dict | None
-    mapping_json: dict | None
+    reference_name: str | None
+    """Celigo's own export/import name; null until synced -- the UI must
+    fall back, never invent."""
+    # JsonValue, not `dict | None`: see CeligoSchedule's rationale above -- the
+    # first cut declared these off a fixture too, and any shape other than a
+    # plain object would 500 the whole flow the same way the schedule did.
+    filter_json: JsonValue
+    mapping_json: JsonValue
     proceed_on_failure: bool | None
     skip_retries: bool | None
+    # Celigo's own vocabulary (`topology.step_kind`): Source (generator),
+    # Lookup (a processor whose adaptor is an export), Destination (any
+    # other processor).
+    kind: str
+    record_type: str | None
+    operation: str | None
+    search_id: str | None
     attachments: list[CeligoAttachmentOut]
+    # Open (per `celigo_error_is_open()`) `celigo_flow_errors` count attributed
+    # to THIS step -- Task 4. Computed by `get_flow_detail`'s per-step GROUP BY
+    # query, never N+1; 0 when the step has no open error.
+    error_count: int
+
+
+class CeligoRouterBranchOut(BaseModel):
+    id: str | None
+    name: str | None
+    rule_count: int
+    next_router_id: str | None
+    order: int
+    declared_step_count: int
+
+
+class CeligoRouterOut(BaseModel):
+    """Projected from the synced flow object by `topology.project_routers` -- the
+    declared side of branching (names, order, rules, chain, mode) that step rows
+    cannot carry."""
+
+    id: str | None
+    name: str | None
+    route_records_to: str | None
+    route_records_using: str | None
+    has_script_slot: bool
+    branches: list[CeligoRouterBranchOut]
 
 
 class CeligoFlowDetailOut(BaseModel):
@@ -181,6 +344,26 @@ class CeligoFlowDetailOut(BaseModel):
     # belongs to the router itself, not to any one page-generator/processor
     # step (see `app/models/celigo.py`'s `CeligoScriptAttachment` docstring).
     unassigned_attachments: list[CeligoAttachmentOut]
+    routers: list[CeligoRouterOut]
+    # Celigo's OWN open-error count/timestamp, echoed from `raw_json`
+    # (`numOpenError`/`lastErrorAt`) -- distinct from this app's own
+    # `celigo_flow_errors` count, which Task 4 adds. `None` when the flow's
+    # raw object never carried the field (not yet observed, or omitted).
+    celigo_open_error_count: int | None
+    last_error_at: datetime | None
+    # This app's OWN open counts (Task 4). `error_count` is EVERY open error on
+    # the flow, including the ones no step owns: Celigo reports router-level and
+    # pre-dispatch failures against the flow with a null `flow_step_id`, and the
+    # flow total would understate reality if it dropped them. So the steps above
+    # can sum to LESS than this number -- the difference is exactly the
+    # unattributed bucket, and a UI that adds the bubbles up will not always
+    # reach the header figure (pinned by
+    # `TestFlowErrors::test_flow_error_count_includes_errors_no_step_owns`).
+    # `signature_count` is DISTINCT root causes across the whole flow, which a
+    # per-step sum would over-count when one signature spans multiple steps
+    # (see `get_flow_detail`'s second, non-grouped query).
+    error_count: int
+    signature_count: int
 
 
 class CeligoScriptAttachmentSiteOut(BaseModel):
@@ -270,6 +453,77 @@ class CeligoErrorsResponse(BaseModel):
     errors: list[CeligoErrorOut]
 
 
+class CeligoFlowErrorGroupOut(BaseModel):
+    """One root cause's worth of a flow's errors (Task 4) -- grouped by
+    `signature_id` in Python (never a SQL GROUP BY: the group also needs the
+    raw rows themselves, capped at `limit`, which a GROUP BY can't return
+    alongside its aggregates without a second query anyway). `signature` is
+    `None` for the (rare, pre-classification) rows a signature was never
+    assigned to -- still a real group, just an unclassified one."""
+
+    signature: CeligoErrorSignatureOut | None
+    count: int
+    step_ids: list[str | None]
+    first_seen_at: datetime | None
+    last_seen_at: datetime | None
+    # None only when every row in the group has retriable=NULL; False if ANY
+    # row is non-retriable (that is the operationally relevant answer -- "can
+    # I safely retry this whole group" is only true when EVERY row is).
+    retriable: bool | None
+    purge_at: datetime | None
+    # First 25 DISTINCT non-null trace keys, in first-seen order -- a cap, not
+    # a promise every trace key in the group is listed (`count` is the true
+    # total; this is enough to spot-check a handful of Celigo job runs).
+    trace_keys: list[str]
+    errors: list[CeligoErrorOut]
+
+
+class CeligoFlowErrorsOut(BaseModel):
+    flow_id: str
+    status: Literal["open", "resolved"]
+    # NOT the flow's whole-population count: it is the number of rows this
+    # request actually grouped, and `list_flow_errors` caps that fetch at 2000.
+    # A flow with more matching errors than the cap reports exactly 2000 here,
+    # so a caller must not render this as "N errors on this flow" without
+    # allowing for "at least". The flow's true open total is
+    # `CeligoFlowDetailOut.error_count` (an uncapped aggregate).
+    total: int
+    groups: list[CeligoFlowErrorGroupOut]
+
+
+class CeligoConfigChangeOut(BaseModel):
+    """Task 7 -- one row of `celigo_config_changes` (see that model's own
+    docstring for the polymorphic `object_kind`/`object_id`/`celigo_id` shape
+    and why `old_value`/`new_value` are JSON rather than typed per field).
+    `object_id` is stringified like every other id in this module; it carries
+    no FK (the model has none either), so it is relayed as-is, never resolved
+    or joined against here."""
+
+    id: str
+    object_kind: str
+    object_id: str | None
+    celigo_id: str
+    field: str
+    old_value: JsonValue
+    new_value: JsonValue
+    flow_id: str | None
+    created_at: datetime
+
+
+def _config_change_out(c: CeligoConfigChange) -> CeligoConfigChangeOut:
+    return CeligoConfigChangeOut(
+        id=str(c.id),
+        object_kind=c.object_kind,
+        object_id=str(c.object_id) if c.object_id is not None else None,
+        celigo_id=c.celigo_id,
+        field=c.field,
+        old_value=c.old_value,
+        new_value=c.new_value,
+        flow_id=str(c.flow_id) if c.flow_id is not None else None,
+        created_at=c.created_at,
+    )
+
+
 class CeligoSyncStatusOut(BaseModel):
     """`last_synced_at` is the freshness cursor Task 7's nightly sync worker
     writes to `cursor_states` (`object_type="celigo_flow_map"`) ONLY after a
@@ -326,18 +580,264 @@ async def list_integrations(
         .scalars()
         .all()
     )
-    return [
-        CeligoIntegrationOut(
-            id=str(i.id),
-            celigo_id=i.celigo_id,
-            name=i.name,
-            sandbox=i.sandbox,
-            mode=i.mode,
-            description=i.description,
-            celigo_last_modified=i.celigo_last_modified,
+    if not integrations:
+        return []
+
+    integration_ids = [i.id for i in integrations]
+
+    # Flow-schedule buckets: ONE grouped query, every bucket its own SQL
+    # filter (not derived by subtraction) so `scheduled_count + on_demand_count
+    # + paused_count == flow_count` holds by construction -- a flow can never
+    # land in more than one bucket's filter, or in none. `disabled IS TRUE`
+    # wins first regardless of schedule shape (a paused flow's schedule is
+    # irrelevant to the operator); `celigo_flow_is_on_demand()` (models.py)
+    # decides on-demand vs scheduled only among the rest.
+    on_demand_pred = celigo_flow_is_on_demand()
+    not_paused = CeligoFlow.disabled.isnot(True)
+    bucket_rows = (
+        await db.execute(
+            select(
+                CeligoFlow.integration_id,
+                func.count().label("flow_count"),
+                func.count().filter(CeligoFlow.disabled.is_(True)).label("paused_count"),
+                func.count().filter(and_(not_paused, on_demand_pred)).label("on_demand_count"),
+                func.count().filter(and_(not_paused, ~on_demand_pred)).label("scheduled_count"),
+                func.count().filter(CeligoFlow.last_executed_at.is_(None)).label("no_run_count"),
+                func.max(CeligoFlow.last_executed_at).label("last_run_at"),
+            )
+            .where(CeligoFlow.tenant_id == user.tenant_id, CeligoFlow.integration_id.in_(integration_ids))
+            .group_by(CeligoFlow.integration_id)
         )
-        for i in integrations
-    ]
+    ).all()
+    buckets_by_integration = {row.integration_id: row for row in bucket_rows}
+
+    # Per-flow schedule list -- a second, PLAIN (non-aggregated) projection
+    # for the drill-down list; the buckets above never touch this query.
+    schedule_rows = (
+        await db.execute(
+            select(
+                CeligoFlow.integration_id,
+                CeligoFlow.id,
+                CeligoFlow.name,
+                CeligoFlow.disabled,
+                CeligoFlow.schedule,
+                CeligoFlow.last_executed_at,
+            )
+            .where(CeligoFlow.tenant_id == user.tenant_id, CeligoFlow.integration_id.in_(integration_ids))
+            .order_by(CeligoFlow.name)
+        )
+    ).all()
+    schedules_by_integration: dict[uuid.UUID, list[CeligoFlowScheduleOut]] = defaultdict(list)
+    for row in schedule_rows:
+        schedules_by_integration[row.integration_id].append(
+            CeligoFlowScheduleOut(
+                id=str(row.id),
+                name=row.name,
+                disabled=row.disabled,
+                schedule=row.schedule,
+                last_executed_at=row.last_executed_at,
+            )
+        )
+
+    # Topology rollup (step/router/lookup counts) -- same Lookup rule as
+    # `list_integration_flows`'s topo query (a processor whose adaptor is an
+    # export), grouped by integration instead of by flow. Explicit tenant
+    # scope on BOTH joined tables, same discipline as every other join here.
+    topo_rows = (
+        await db.execute(
+            select(
+                CeligoFlow.integration_id,
+                func.count().label("steps"),
+                # DISTINCT on the (flow, router) PAIR, not on router_id alone:
+                # Celigo's router ids are unique within a flow, not within an
+                # integration, so a cloned flow carries its original's router
+                # ids verbatim. Counting router_id alone collapsed N cloned
+                # flows' routers into one and under-reported the topology.
+                # The FILTER is load-bearing: a row constructor whose members
+                # are NULL is not itself NULL, so without it every router-less
+                # step (most flow sources) would count `(flow_id, NULL)` as a
+                # router of its own.
+                func.count(distinct(tuple_(CeligoFlowStep.flow_id, CeligoFlowStep.router_id)))
+                .filter(CeligoFlowStep.router_id.isnot(None))
+                .label("routers"),
+                func.count()
+                .filter(and_(CeligoFlowStep.role == "processor", CeligoFlowStep.adaptor_type.ilike("%export")))
+                .label("lookups"),
+            )
+            .select_from(CeligoFlowStep)
+            .join(CeligoFlow, CeligoFlow.id == CeligoFlowStep.flow_id)
+            .where(
+                CeligoFlowStep.tenant_id == user.tenant_id,
+                CeligoFlow.tenant_id == user.tenant_id,
+                CeligoFlow.integration_id.in_(integration_ids),
+            )
+            .group_by(CeligoFlow.integration_id)
+        )
+    ).all()
+    topo_by_integration = {row.integration_id: (row.steps, row.routers, row.lookups) for row in topo_rows}
+
+    # Adaptor families -- DISTINCT adaptor_type per integration, mapped to a
+    # coarse family in Python (`topology.adaptor_family`) and deduped there;
+    # not a SQL-level aggregate because the family mapping is a Python rule,
+    # not a column.
+    adaptor_type_rows = (
+        await db.execute(
+            select(CeligoFlow.integration_id, CeligoFlowStep.adaptor_type)
+            .distinct()
+            .select_from(CeligoFlowStep)
+            .join(CeligoFlow, CeligoFlow.id == CeligoFlowStep.flow_id)
+            .where(
+                CeligoFlowStep.tenant_id == user.tenant_id,
+                CeligoFlow.tenant_id == user.tenant_id,
+                CeligoFlow.integration_id.in_(integration_ids),
+            )
+        )
+    ).all()
+    families_by_integration: dict[uuid.UUID, set[str]] = defaultdict(set)
+    for row in adaptor_type_rows:
+        family = adaptor_family(row.adaptor_type)
+        if family:
+            families_by_integration[row.integration_id].add(family)
+
+    # Write mix -- same definition as `CeligoFlowSummaryOut.writes`
+    # (`record_type IS NOT NULL AND operation IS NOT NULL`), rolled up to the
+    # integration instead of the flow.
+    write_rows = (
+        await db.execute(
+            select(CeligoFlow.integration_id, CeligoFlowStep.record_type, func.count().label("write_count"))
+            .select_from(CeligoFlowStep)
+            .join(CeligoFlow, CeligoFlow.id == CeligoFlowStep.flow_id)
+            .where(
+                CeligoFlowStep.tenant_id == user.tenant_id,
+                CeligoFlow.tenant_id == user.tenant_id,
+                CeligoFlow.integration_id.in_(integration_ids),
+                CeligoFlowStep.record_type.isnot(None),
+                CeligoFlowStep.operation.isnot(None),
+            )
+            .group_by(CeligoFlow.integration_id, CeligoFlowStep.record_type)
+            .order_by(func.count().desc(), CeligoFlowStep.record_type)
+        )
+    ).all()
+    writes_by_integration: dict[uuid.UUID, list[CeligoRecordWriteOut]] = defaultdict(list)
+    for row in write_rows:
+        writes_by_integration[row.integration_id].append(
+            CeligoRecordWriteOut(record_type=row.record_type, count=row.write_count)
+        )
+
+    # Scripts -- DISTINCT production script ids attached anywhere in the
+    # integration (`celigo_script_is_production()`, tenant-scoped on every
+    # joined table, same as `list_integration_flows`'s equivalent query).
+    scripts_rows = (
+        await db.execute(
+            select(CeligoFlow.integration_id, func.count(distinct(CeligoScriptAttachment.script_id)).label("scripts"))
+            .select_from(CeligoScriptAttachment)
+            .join(CeligoFlow, CeligoFlow.id == CeligoScriptAttachment.flow_id)
+            .join(CeligoScript, CeligoScript.id == CeligoScriptAttachment.script_id)
+            .where(
+                CeligoScriptAttachment.tenant_id == user.tenant_id,
+                CeligoFlow.tenant_id == user.tenant_id,
+                CeligoScript.tenant_id == user.tenant_id,
+                CeligoFlow.integration_id.in_(integration_ids),
+                celigo_script_is_production(),
+            )
+            .group_by(CeligoFlow.integration_id)
+        )
+    ).all()
+    scripts_by_integration = {row.integration_id: row.scripts for row in scripts_rows}
+
+    # Open errors -- single-sourced via `celigo_error_is_open()`, same rule as
+    # every other open-error count in this module.
+    error_rows = (
+        await db.execute(
+            select(CeligoFlow.integration_id, func.count().label("errors"))
+            .select_from(CeligoFlowError)
+            .join(CeligoFlow, CeligoFlow.id == CeligoFlowError.flow_id)
+            .where(
+                CeligoFlowError.tenant_id == user.tenant_id,
+                CeligoFlow.tenant_id == user.tenant_id,
+                CeligoFlow.integration_id.in_(integration_ids),
+                celigo_error_is_open(),
+            )
+            .group_by(CeligoFlow.integration_id)
+        )
+    ).all()
+    errors_by_integration = {row.integration_id: row.errors for row in error_rows}
+
+    # DISTINCT root causes across the whole integration -- same predicate as
+    # `error_rows` above, grouped the same way, just counting distinct
+    # `signature_id` instead of rows (mirrors the per-flow query at
+    # `get_flow_detail`'s `flow_signature_count`). This is what lets the
+    # tile's `ErrorPill` say "10 open · 1 root cause" instead of silently
+    # defaulting to "10 open · 10 root causes" (Task 18).
+    signature_rows = (
+        await db.execute(
+            select(
+                CeligoFlow.integration_id,
+                func.count(distinct(CeligoFlowError.signature_id)).label("signatures"),
+            )
+            .select_from(CeligoFlowError)
+            .join(CeligoFlow, CeligoFlow.id == CeligoFlowError.flow_id)
+            .where(
+                CeligoFlowError.tenant_id == user.tenant_id,
+                CeligoFlow.tenant_id == user.tenant_id,
+                CeligoFlow.integration_id.in_(integration_ids),
+                celigo_error_is_open(),
+            )
+            .group_by(CeligoFlow.integration_id)
+        )
+    ).all()
+    signatures_by_integration = {row.integration_id: row.signatures for row in signature_rows}
+
+    # Config changes in the last rolling 24h -- a coarse "something drifted
+    # recently" signal, not a health verdict on its own.
+    change_rows = (
+        await db.execute(
+            select(CeligoFlow.integration_id, func.count().label("changes"))
+            .select_from(CeligoConfigChange)
+            .join(CeligoFlow, CeligoFlow.id == CeligoConfigChange.flow_id)
+            .where(
+                CeligoConfigChange.tenant_id == user.tenant_id,
+                CeligoFlow.tenant_id == user.tenant_id,
+                CeligoFlow.integration_id.in_(integration_ids),
+                CeligoConfigChange.created_at >= func.now() - text("interval '24 hours'"),
+            )
+            .group_by(CeligoFlow.integration_id)
+        )
+    ).all()
+    changes_by_integration = {row.integration_id: row.changes for row in change_rows}
+
+    out: list[CeligoIntegrationOut] = []
+    for i in integrations:
+        bucket = buckets_by_integration.get(i.id)
+        steps, routers, lookups = topo_by_integration.get(i.id, (0, 0, 0))
+        out.append(
+            CeligoIntegrationOut(
+                id=str(i.id),
+                celigo_id=i.celigo_id,
+                name=i.name,
+                sandbox=i.sandbox,
+                mode=i.mode,
+                description=i.description,
+                celigo_last_modified=i.celigo_last_modified,
+                flow_count=bucket.flow_count if bucket else 0,
+                scheduled_count=bucket.scheduled_count if bucket else 0,
+                on_demand_count=bucket.on_demand_count if bucket else 0,
+                paused_count=bucket.paused_count if bucket else 0,
+                step_count=steps,
+                router_count=routers,
+                lookup_count=lookups,
+                script_count=scripts_by_integration.get(i.id, 0),
+                no_run_count=bucket.no_run_count if bucket else 0,
+                error_count=errors_by_integration.get(i.id, 0),
+                signature_count=signatures_by_integration.get(i.id, 0),
+                changes_last_24h=changes_by_integration.get(i.id, 0),
+                last_run_at=bucket.last_run_at if bucket else None,
+                writes=writes_by_integration.get(i.id, []),
+                adaptor_families=sorted(families_by_integration.get(i.id, set())),
+                flow_schedules=schedules_by_integration.get(i.id, []),
+            )
+        )
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -445,6 +945,95 @@ async def list_integration_flows(
         row.flow_id: (row.error_count, row.signature_count) for row in counts_result.all()
     }
 
+    # Task 5 -- topology (step/router/branch/lookup counts), one GROUP BY
+    # query over celigo_flow_steps for every flow in the integration at once.
+    # `lookups` mirrors `topology.step_kind`'s Lookup rule (a processor whose
+    # adaptor is an export) without importing that module's per-step
+    # projector -- this is a set-level count, not a per-step classification.
+    topo_result = await db.execute(
+        select(
+            CeligoFlowStep.flow_id,
+            func.count().label("steps"),
+            func.count(distinct(CeligoFlowStep.router_id)).label("routers"),
+            func.count(distinct(CeligoFlowStep.branch_id)).label("branches"),
+            func.count()
+            .filter(and_(CeligoFlowStep.role == "processor", CeligoFlowStep.adaptor_type.ilike("%export")))
+            .label("lookups"),
+        )
+        .where(CeligoFlowStep.tenant_id == user.tenant_id, CeligoFlowStep.flow_id.in_(flow_ids))
+        .group_by(CeligoFlowStep.flow_id)
+    )
+    topo_by_flow: dict[uuid.UUID, tuple[int, int, int, int]] = {
+        row.flow_id: (row.steps, row.routers, row.branches, row.lookups) for row in topo_result.all()
+    }
+
+    # This flow's actual write mix: `record_type IS NOT NULL AND operation IS
+    # NOT NULL` -- a lookup export step can carry `record_type` with no
+    # `operation` (a read, not a write), which must not show up here. Ordered
+    # by count desc then record_type in SQL so the frontend never has to sort.
+    writes_result = await db.execute(
+        select(CeligoFlowStep.flow_id, CeligoFlowStep.record_type, func.count().label("write_count"))
+        .where(
+            CeligoFlowStep.tenant_id == user.tenant_id,
+            CeligoFlowStep.flow_id.in_(flow_ids),
+            CeligoFlowStep.record_type.isnot(None),
+            CeligoFlowStep.operation.isnot(None),
+        )
+        .group_by(CeligoFlowStep.flow_id, CeligoFlowStep.record_type)
+        .order_by(func.count().desc(), CeligoFlowStep.record_type)
+    )
+    writes_by_flow: dict[uuid.UUID, list[CeligoRecordWriteOut]] = defaultdict(list)
+    for row in writes_result.all():
+        writes_by_flow[row.flow_id].append(CeligoRecordWriteOut(record_type=row.record_type, count=row.write_count))
+
+    # Script family state: a family "diverged" when its PRODUCTION members'
+    # distinct `content_hash` count is > 1 (a clone has drifted from its
+    # original) -- `celigo_script_is_production()` on this subquery too
+    # (gate finding, fix round 1): omitting it let a sandbox clone's hash
+    # flag a family whose production copies actually agree, or vice versa,
+    # exactly the "wrong by about half" failure mode that predicate's own
+    # docstring warns about. Tenant- AND connection-scoped, so a
+    # same-`dedup_key` coincidence under a different Celigo connection can
+    # never leak in. `integration.celigo_connection_id` is the
+    # tenant-verified connection this integration (and therefore every flow
+    # under it) actually belongs to -- there is no separate `connection` row
+    # resolved in this endpoint.
+    diverged_keys = (
+        select(CeligoScript.dedup_key)
+        .where(
+            CeligoScript.tenant_id == user.tenant_id,
+            CeligoScript.celigo_connection_id == integration.celigo_connection_id,
+            CeligoScript.content_hash.isnot(None),
+            celigo_script_is_production(),
+        )
+        .group_by(CeligoScript.dedup_key)
+        .having(func.count(distinct(CeligoScript.content_hash)) > 1)
+    )
+    scripts_result = await db.execute(
+        select(
+            CeligoScriptAttachment.flow_id,
+            func.count(distinct(CeligoScriptAttachment.script_id)).label("scripts"),
+            func.count(distinct(CeligoScript.dedup_key))
+            .filter(CeligoScript.dedup_key.in_(diverged_keys))
+            .label("diverged"),
+        )
+        .join(CeligoScript, CeligoScript.id == CeligoScriptAttachment.script_id)
+        .where(
+            CeligoScriptAttachment.tenant_id == user.tenant_id,
+            # Explicit tenant scope on BOTH joined tables (gate finding, fix
+            # round 1) -- the `diverged_keys` subquery three lines above
+            # already does this; RLS (FORCE) is the backstop, not the plan,
+            # same discipline as every other join in this module.
+            CeligoScript.tenant_id == user.tenant_id,
+            CeligoScriptAttachment.flow_id.in_(flow_ids),
+            celigo_script_is_production(),
+        )
+        .group_by(CeligoScriptAttachment.flow_id)
+    )
+    scripts_by_flow: dict[uuid.UUID, tuple[int, int]] = {
+        row.flow_id: (row.scripts, row.diverged) for row in scripts_result.all()
+    }
+
     return [
         CeligoFlowSummaryOut(
             id=str(f.id),
@@ -456,6 +1045,14 @@ async def list_integration_flows(
             last_executed_at=f.last_executed_at,
             error_count=counts_by_flow.get(f.id, (0, 0))[0],
             signature_count=counts_by_flow.get(f.id, (0, 0))[1],
+            step_count=topo_by_flow.get(f.id, (0, 0, 0, 0))[0],
+            router_count=topo_by_flow.get(f.id, (0, 0, 0, 0))[1],
+            branch_count=topo_by_flow.get(f.id, (0, 0, 0, 0))[2],
+            lookup_count=topo_by_flow.get(f.id, (0, 0, 0, 0))[3],
+            script_count=scripts_by_flow.get(f.id, (0, 0))[0],
+            diverged_family_count=scripts_by_flow.get(f.id, (0, 0))[1],
+            writes=writes_by_flow.get(f.id, []),
+            celigo_last_modified=f.celigo_last_modified,
         )
         for f in flows
     ]
@@ -555,9 +1152,71 @@ async def get_flow_detail(
         .all()
     )
 
+    # Script clone-family state (name/size/copies/versions/version-letter/
+    # diverged), projected by `topology.script_family_facts` -- one query for
+    # every attached script's whole family, never N+1. PRODUCTION ONLY: a
+    # sandbox copy of a script must not be counted into a production
+    # attachment's family state (see `celigo_script_is_production`'s
+    # docstring for why this predicate belongs on every `celigo_scripts`
+    # read, not just the by-id lookups).
+    script_ids = {a.script_id for a in attachments if a.script_id is not None}
+    facts: dict[uuid.UUID, ScriptFamilyFact] = {}
+    if script_ids:
+        dedup_keys = select(CeligoScript.dedup_key).where(
+            CeligoScript.tenant_id == user.tenant_id,
+            CeligoScript.id.in_(script_ids),
+        )
+        family_rows = (
+            (
+                await db.execute(
+                    select(CeligoScript).where(
+                        CeligoScript.tenant_id == user.tenant_id,
+                        CeligoScript.celigo_connection_id == flow.celigo_connection_id,
+                        CeligoScript.dedup_key.in_(dedup_keys),
+                        celigo_script_is_production(),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        facts = script_family_facts(family_rows)
+
+    # Task 4 -- open (`celigo_error_is_open()`) error counts, per step and for
+    # the flow as a whole. Per-step: ONE GROUP BY query for every step at
+    # once, never N+1. `signature_count` is NOT `sum` of a per-step distinct
+    # count (that would over-count a signature spanning multiple steps) --
+    # it's DISTINCT across the whole flow, hence the second, non-grouped
+    # query below with the identical predicate.
+    step_counts_result = await db.execute(
+        select(
+            CeligoFlowError.flow_step_id,
+            func.count().label("error_count"),
+        )
+        .where(
+            CeligoFlowError.tenant_id == user.tenant_id,
+            CeligoFlowError.flow_id == flow.id,
+            celigo_error_is_open(),
+        )
+        .group_by(CeligoFlowError.flow_step_id)
+    )
+    step_error_counts: dict[uuid.UUID | None, int] = {
+        row.flow_step_id: row.error_count for row in step_counts_result.all()
+    }
+    flow_signature_count = (
+        await db.execute(
+            select(func.count(distinct(CeligoFlowError.signature_id))).where(
+                CeligoFlowError.tenant_id == user.tenant_id,
+                CeligoFlowError.flow_id == flow.id,
+                celigo_error_is_open(),
+            )
+        )
+    ).scalar_one()
+
     attachments_by_step: dict[uuid.UUID, list[CeligoAttachmentOut]] = defaultdict(list)
     unassigned: list[CeligoAttachmentOut] = []
     for a in attachments:
+        fact = facts.get(a.script_id) if a.script_id is not None else None
         out = CeligoAttachmentOut(
             id=str(a.id),
             flow_id=str(a.flow_id),
@@ -567,6 +1226,12 @@ async def get_flow_detail(
             function_name=a.function_name,
             json_path=a.json_path,
             site_type=a.site_type,
+            script_name=fact.name if fact else None,
+            script_size_chars=fact.size_chars if fact else None,
+            script_copies_count=fact.copies_count if fact else None,
+            script_versions_count=fact.versions_count if fact else None,
+            script_version_letter=fact.version_letter if fact else None,
+            script_content_diverged=fact.content_diverged if fact else None,
         )
         if a.flow_step_id is not None:
             attachments_by_step[a.flow_step_id].append(out)
@@ -584,14 +1249,41 @@ async def get_flow_detail(
             sequence=s.sequence,
             adaptor_type=s.adaptor_type,
             connection_celigo_id=s.connection_celigo_id,
+            reference_name=s.reference_name,
             filter_json=s.filter_json,
             mapping_json=s.mapping_json,
             proceed_on_failure=s.proceed_on_failure,
             skip_retries=s.skip_retries,
+            kind=step_kind(s.role, s.adaptor_type),
+            record_type=s.record_type,
+            operation=s.operation,
+            search_id=s.search_id,
             attachments=attachments_by_step.get(s.id, []),
+            error_count=step_error_counts.get(s.id, 0),
         )
         for s in steps
     ]
+
+    raw_open_error_count = flow.raw_json.get("numOpenError") if isinstance(flow.raw_json, dict) else None
+    # `not isinstance(..., bool)` is load-bearing: in Python `True` IS an int,
+    # so a `numOpenError` of `true` would have been relayed as the count 1 --
+    # an error total fabricated out of a field that said no such thing. This
+    # is a shape nobody has seen, which is precisely why it must fail closed
+    # to None rather than to a number a UI will then print as fact.
+    celigo_open_error_count = (
+        raw_open_error_count
+        if isinstance(raw_open_error_count, int) and not isinstance(raw_open_error_count, bool)
+        else None
+    )
+    # The SYNC's own parser, not a second one: `raw_json["lastErrorAt"]` is
+    # the same Celigo wire value the repository already reads for
+    # `lastModified`/`lastExecutedAt`, and it comes in both shapes that API
+    # uses. This endpoint used to reimplement only the string half, so an
+    # epoch-ms value silently became NULL here while the sync's own columns
+    # parsed it correctly.
+    last_error_at = parse_celigo_timestamp(
+        flow.raw_json.get("lastErrorAt") if isinstance(flow.raw_json, dict) else None
+    )
 
     return CeligoFlowDetailOut(
         id=str(flow.id),
@@ -608,6 +1300,13 @@ async def get_flow_detail(
         celigo_last_modified=flow.celigo_last_modified,
         steps=step_outs,
         unassigned_attachments=unassigned,
+        routers=[CeligoRouterOut(**r) for r in project_routers(flow.raw_json)],
+        celigo_open_error_count=celigo_open_error_count,
+        last_error_at=last_error_at,
+        # Deliberately sums EVERY bucket, the `flow_step_id IS NULL` one
+        # included -- see `CeligoFlowDetailOut.error_count`'s comment.
+        error_count=sum(step_error_counts.values()),
+        signature_count=flow_signature_count,
     )
 
 
@@ -805,3 +1504,283 @@ async def get_errors_for_signature(
             for e in errors
         ],
     )
+
+
+# ---------------------------------------------------------------------------
+# GET /celigo/flows/{id}/errors
+# ---------------------------------------------------------------------------
+
+
+@router.get("/flows/{flow_id}/errors", response_model=CeligoFlowErrorsOut)
+async def list_flow_errors(
+    flow_id: uuid.UUID,
+    user: Annotated[User, Depends(require_permission("connections.view"))],
+    _flag: Annotated[User, Depends(require_feature("celigo"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    status_filter: Literal["open", "resolved"] = Query("open", alias="status"),
+    limit: int = Query(100, ge=1, le=500, description="Max errors returned per group, most recent first"),
+):
+    """A flow's errors (Task 4), grouped by root-cause signature -- the
+    "what's actually breaking" view a per-error list can't give: `/celigo/errors`
+    (above) already returns one signature's errors, but an operator opening a
+    FLOW needs every signature attached to it at once, ranked by how many
+    errors each is causing.
+
+    Loads the flow through the exact same production join as `get_flow_detail`
+    (404 for a flow that doesn't exist, belongs to another tenant, or lives
+    under a sandbox integration) -- a flow a caller can't otherwise see must
+    not leak its errors through this route either.
+
+    `status=open` uses `celigo_error_is_open()` (single-sourced, same as every
+    other open-count in this module); `status=resolved` is `resolved_at IS NOT
+    NULL` -- deliberately NOT "not open", since a row can be neither (purged
+    but never resolved) and that state belongs to neither list, exactly per
+    `celigo_error_is_open()`'s own docstring.
+
+    Grouping happens in PYTHON, not SQL: each group needs both aggregates
+    (first/last seen, retriable tri-state, distinct trace keys) AND a capped
+    slice of the raw rows themselves, which a single GROUP BY can't produce
+    together. Rows are capped at 2000 for grouping (a defensive ceiling, not a
+    page size -- a flow producing more open errors than that needs
+    operational attention no client-side page could show usefully anyway);
+    `limit` instead caps how many raw `errors` come back PER GROUP.
+
+    That cap bounds the response's `total` too: it counts the rows fetched, so
+    a flow past 2000 matching errors reports exactly 2000 and every group's
+    `count` is likewise a count of fetched rows. This route answers "what is
+    breaking, and roughly how much of each", never "exactly how many errors
+    does this flow have" -- `GET /celigo/flows/{id}`'s `error_count` is the
+    uncapped aggregate for that."""
+    flow = (
+        await db.execute(
+            _join_production_integration(select(CeligoFlow), user.tenant_id).where(
+                CeligoFlow.id == flow_id,
+                CeligoFlow.tenant_id == user.tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if flow is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Flow not found")
+
+    open_predicate = celigo_error_is_open() if status_filter == "open" else CeligoFlowError.resolved_at.isnot(None)
+
+    errors = (
+        (
+            await db.execute(
+                select(CeligoFlowError)
+                .where(
+                    CeligoFlowError.tenant_id == user.tenant_id,
+                    CeligoFlowError.flow_id == flow_id,
+                    open_predicate,
+                )
+                .order_by(CeligoFlowError.occurred_at.desc().nullslast(), CeligoFlowError.id.desc())
+                .limit(2000)
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    rows_by_signature: dict[uuid.UUID | None, list[CeligoFlowError]] = defaultdict(list)
+    for e in errors:
+        rows_by_signature[e.signature_id].append(e)
+
+    signature_ids = [sid for sid in rows_by_signature if sid is not None]
+    signatures_by_id: dict[uuid.UUID, CeligoErrorSignature] = {}
+    if signature_ids:
+        sig_rows = (
+            (
+                await db.execute(
+                    select(CeligoErrorSignature).where(
+                        CeligoErrorSignature.tenant_id == user.tenant_id,
+                        CeligoErrorSignature.id.in_(signature_ids),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        signatures_by_id = {s.id: s for s in sig_rows}
+
+    groups: list[CeligoFlowErrorGroupOut] = []
+    for sig_id, rows in rows_by_signature.items():
+        occurred_ats = [r.occurred_at for r in rows if r.occurred_at is not None]
+        purge_ats = [r.purge_at for r in rows if r.purge_at is not None]
+        retriable_values = {r.retriable for r in rows if r.retriable is not None}
+        # Tri-state: False if ANY row can't be retried (that's the operationally
+        # relevant answer), True only if EVERY row can, None when nothing in the
+        # group ever recorded a value either way.
+        if False in retriable_values:
+            group_retriable: bool | None = False
+        elif True in retriable_values:
+            group_retriable = True
+        else:
+            group_retriable = None
+
+        trace_keys: list[str] = []
+        seen_trace_keys: set[str] = set()
+        step_ids: list[str | None] = []
+        seen_step_ids: set[str | None] = set()
+        for r in rows:
+            if r.trace_key is not None and r.trace_key not in seen_trace_keys and len(trace_keys) < 25:
+                seen_trace_keys.add(r.trace_key)
+                trace_keys.append(r.trace_key)
+            step_key = str(r.flow_step_id) if r.flow_step_id is not None else None
+            if step_key not in seen_step_ids:
+                seen_step_ids.add(step_key)
+                step_ids.append(step_key)
+
+        sig = signatures_by_id.get(sig_id) if sig_id is not None else None
+        groups.append(
+            CeligoFlowErrorGroupOut(
+                signature=CeligoErrorSignatureOut(
+                    id=str(sig.id),
+                    fingerprint=sig.fingerprint,
+                    source=sig.source,
+                    code=sig.code,
+                    sample_message=sig.sample_message,
+                    occurrence_count=sig.occurrence_count,
+                    first_seen=sig.first_seen,
+                    last_seen=sig.last_seen,
+                )
+                if sig is not None
+                else None,
+                count=len(rows),
+                step_ids=step_ids,
+                first_seen_at=min(occurred_ats) if occurred_ats else None,
+                last_seen_at=max(occurred_ats) if occurred_ats else None,
+                retriable=group_retriable,
+                purge_at=min(purge_ats) if purge_ats else None,
+                trace_keys=trace_keys,
+                errors=[
+                    CeligoErrorOut(
+                        id=str(e.id),
+                        celigo_id=e.celigo_id,
+                        flow_id=str(e.flow_id) if e.flow_id else None,
+                        flow_step_id=str(e.flow_step_id) if e.flow_step_id else None,
+                        trace_key=e.trace_key,
+                        source=e.source,
+                        code=e.code,
+                        message=e.message,
+                        occurred_at=e.occurred_at,
+                        purge_at=e.purge_at,
+                        resolved_at=e.resolved_at,
+                        purged_at=e.purged_at,
+                        retriable=e.retriable,
+                    )
+                    for e in rows[:limit]
+                ],
+            )
+        )
+
+    groups.sort(key=lambda g: g.count, reverse=True)
+
+    return CeligoFlowErrorsOut(
+        flow_id=str(flow.id),
+        status=status_filter,
+        total=len(errors),
+        groups=groups,
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /celigo/integrations/{id}/changes
+# ---------------------------------------------------------------------------
+
+
+@router.get("/integrations/{integration_id}/changes", response_model=list[CeligoConfigChangeOut])
+async def list_integration_changes(
+    integration_id: uuid.UUID,
+    user: Annotated[User, Depends(require_permission("connections.view"))],
+    _flag: Annotated[User, Depends(require_feature("celigo"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: int = Query(200, ge=1, le=500, description="Max changes returned, most recent first"),
+):
+    """Every drift event (Task 7) attributed to a flow under this integration,
+    newest first. Resolves the integration through the same production
+    lookup `list_integration_flows` uses (404 for another tenant's row or a
+    sandbox integration -- hidden means hidden by id too, same discipline as
+    every other route in this module), then scopes `celigo_config_changes` to
+    flows under it via `flow_id IN (...)`. A 'script'-kind change (`flow_id`
+    IS NULL -- a script can be attached from many flows or none, see the
+    model's own docstring) is therefore never returned by THIS route; it has
+    no single owning integration to attribute it to."""
+    integration = (
+        await db.execute(
+            select(CeligoIntegration).where(
+                CeligoIntegration.id == integration_id,
+                CeligoIntegration.tenant_id == user.tenant_id,
+                celigo_integration_is_production(),
+            )
+        )
+    ).scalar_one_or_none()
+    if integration is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Integration not found")
+
+    flow_ids = select(CeligoFlow.id).where(
+        CeligoFlow.tenant_id == user.tenant_id,
+        CeligoFlow.integration_id == integration_id,
+    )
+    changes = (
+        (
+            await db.execute(
+                select(CeligoConfigChange)
+                .where(
+                    CeligoConfigChange.tenant_id == user.tenant_id,
+                    CeligoConfigChange.flow_id.in_(flow_ids),
+                )
+                .order_by(CeligoConfigChange.created_at.desc(), CeligoConfigChange.id.desc())
+                .limit(limit)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [_config_change_out(c) for c in changes]
+
+
+# ---------------------------------------------------------------------------
+# GET /celigo/flows/{id}/changes
+# ---------------------------------------------------------------------------
+
+
+@router.get("/flows/{flow_id}/changes", response_model=list[CeligoConfigChangeOut])
+async def list_flow_changes(
+    flow_id: uuid.UUID,
+    user: Annotated[User, Depends(require_permission("connections.view"))],
+    _flag: Annotated[User, Depends(require_feature("celigo"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: int = Query(200, ge=1, le=500, description="Max changes returned, most recent first"),
+):
+    """This flow's own drift events (Task 7) plus its steps' ('flow' and
+    'flow_step' kinds both carry THIS flow's id -- see the model's own
+    docstring), newest first. Resolves the flow through the same production
+    join `get_flow_detail`/`list_flow_errors` use (404 for another tenant's
+    row or a flow under a sandbox integration)."""
+    flow = (
+        await db.execute(
+            _join_production_integration(select(CeligoFlow), user.tenant_id).where(
+                CeligoFlow.id == flow_id,
+                CeligoFlow.tenant_id == user.tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if flow is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Flow not found")
+
+    changes = (
+        (
+            await db.execute(
+                select(CeligoConfigChange)
+                .where(
+                    CeligoConfigChange.tenant_id == user.tenant_id,
+                    CeligoConfigChange.flow_id == flow_id,
+                )
+                .order_by(CeligoConfigChange.created_at.desc(), CeligoConfigChange.id.desc())
+                .limit(limit)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [_config_change_out(c) for c in changes]
