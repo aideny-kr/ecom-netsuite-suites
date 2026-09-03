@@ -146,7 +146,7 @@ function renderInspector(props: {
   tab?: InspectorTab;
   onTabChange?: (tab: InspectorTab) => void;
   lastSyncedAt?: string | null;
-  onOpenScript?: (scriptId: string) => void;
+  onOpenScript?: (scriptId: string, opener: HTMLElement | null, jsonPath: string | null) => void;
 }) {
   return render(
     <CeligoStepInspector
@@ -154,7 +154,9 @@ function renderInspector(props: {
       step={props.step}
       tab={props.tab ?? "facts"}
       onTabChange={props.onTabChange ?? noop}
-      lastSyncedAt={props.lastSyncedAt ?? "2026-09-02T18:12:00.000Z"}
+      // `??` would swallow an EXPLICIT null — the state the fix-wave tests
+      // below exercise — so the default only applies when the key is absent.
+      lastSyncedAt={"lastSyncedAt" in props ? props.lastSyncedAt! : "2026-09-02T18:12:00.000Z"}
       onOpenScript={props.onOpenScript ?? noop}
     />,
   );
@@ -332,8 +334,12 @@ describe("Scripts tab", () => {
     expect(screen.getByText("33.3 KB")).toBeInTheDocument();
     expect(screen.getByText("66738c3d….hooks.preSavePage")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByText("Open source →"));
-    expect(onOpenScript).toHaveBeenCalledWith("script-1");
+    // Codex fix wave, items 24 + 25: the handler also carries WHICH element
+    // was clicked (so the drawer can hand focus back on close) and WHICH
+    // attachment site it was (one script can be attached at several).
+    const opener = screen.getByText("Open source →");
+    fireEvent.click(opener);
+    expect(onOpenScript).toHaveBeenCalledWith("script-1", opener, "66738c3d….hooks.preSavePage");
 
     expect(
       screen.getByText(
@@ -544,5 +550,87 @@ describe("tab switching", () => {
     // matches the established pattern in celigo-integration-page.test.tsx.
     fireEvent.mouseDown(screen.getByRole("tab", { name: /Errors/ }));
     expect(onTabChange).toHaveBeenCalledWith("errors");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Codex fix wave
+// ---------------------------------------------------------------------------
+
+describe("the quiet errors sentence never prints a dash for the sync time (item 2)", () => {
+  it("says the sync time is unavailable instead of 'on the last sync, —' on a clean flow", () => {
+    mocks.flowErrors.mockReturnValue(resolved({ flow_id: "flow-1", status: "open", total: 0, groups: [] }));
+    const step = makeStep({ id: "step-1" });
+    const { container } = renderInspector({
+      detail: makeDetail({ steps: [step], error_count: 0 }),
+      step,
+      tab: "errors",
+      lastSyncedAt: null,
+    });
+
+    expect(screen.getByText("No open errors on this step (sync time unavailable).")).toBeInTheDocument();
+    expect(container.textContent).not.toContain("last sync, —");
+  });
+
+  it("still says where the flow's other errors are, without the dash", () => {
+    mocks.flowErrors.mockReturnValue(
+      resolved({ flow_id: "flow-1", status: "open", total: 3, groups: [makeErrorGroup({ step_ids: ["other"] })] }),
+    );
+    const step = makeStep({ id: "step-1" });
+    const { container } = renderInspector({
+      detail: makeDetail({ steps: [step], error_count: 3 }),
+      step,
+      tab: "errors",
+      lastSyncedAt: null,
+    });
+
+    expect(container.textContent).toContain("No open errors on this step (sync time unavailable).");
+    expect(container.textContent).toContain("3 open elsewhere in this flow");
+    expect(container.textContent).not.toContain("last sync, —");
+  });
+});
+
+describe("an unknown adaptor is never called HTTP (item 6)", () => {
+  it("titles the step by its kind and says the adaptor is not synced", () => {
+    const step = makeStep({ id: "step-1", kind: "destination", adaptor_type: null, reference_name: null });
+    renderInspector({ detail: makeDetail({ steps: [step] }), step, tab: "facts" });
+
+    expect(screen.getByText("Destination · adaptor not synced")).toBeInTheDocument();
+    expect(screen.queryByText(/HTTP/)).not.toBeInTheDocument();
+  });
+});
+
+describe("the position line does not conflate a null router or branch id (item 16)", () => {
+  it("says 'top level' for a step with no router at all", () => {
+    const step = makeStep({ id: "step-1", kind: "lookup", router_id: null, branch_id: null });
+    const other = makeStep({ id: "step-2", kind: "lookup", router_id: null, branch_id: null, sequence: 1 });
+    renderInspector({ detail: makeDetail({ steps: [step, other] }), step, tab: "facts" });
+
+    expect(screen.getByText("lookup · top level · step 1 of 2")).toBeInTheDocument();
+  });
+
+  it("says 'branch id not synced' rather than naming a branch it cannot identify", () => {
+    const step = makeStep({ id: "step-1", kind: "lookup", router_id: "r1", branch_id: null });
+    const detail = makeDetail({
+      steps: [step],
+      routers: [
+        makeRouter({
+          id: "r1",
+          branches: [{ id: null, name: null, rule_count: 0, next_router_id: null, order: 0, declared_step_count: 1 }],
+        }),
+      ],
+    });
+    renderInspector({ detail, step, tab: "facts" });
+
+    expect(screen.getByText("lookup · router 1 · branch id not synced · step 1 of 1")).toBeInTheDocument();
+  });
+});
+
+describe("the five-tab strip survives the panel's 20% minimum (item 23)", () => {
+  it("lets the tab list wrap instead of clipping its last tabs", () => {
+    const step = makeStep({ id: "step-1" });
+    renderInspector({ detail: makeDetail({ steps: [step] }), step, tab: "facts" });
+
+    expect(screen.getByRole("tablist")).toHaveClass("flex-wrap");
   });
 });

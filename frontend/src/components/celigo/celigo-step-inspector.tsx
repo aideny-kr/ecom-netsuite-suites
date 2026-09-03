@@ -104,9 +104,23 @@ function stepPositionLine(detail: CeligoFlowDetail, step: CeligoFlowStep): strin
     const routerIndex = detail.routers.findIndex((r) => r.id === step.router_id);
     if (routerIndex !== -1) {
       parts.push(`router ${routerIndex + 1}`);
-      const branch = detail.routers[routerIndex].branches.find((b) => b.id === step.branch_id);
-      if (branch) parts.push(`branch ${branch.order + 1}`);
+      // A null `branch_id` used to MATCH a declared branch that also has no
+      // id, and then print that branch's ordinal — so an unattributed step
+      // was labelled "branch 1" with nothing behind the claim. The two are
+      // different facts: "Celigo put this in branch 1" and "Celigo did not
+      // record which branch this is in".
+      if (step.branch_id === null) {
+        parts.push("branch id not synced");
+      } else {
+        const branch = detail.routers[routerIndex].branches.find((b) => b.id === step.branch_id);
+        if (branch) parts.push(`branch ${branch.order + 1}`);
+      }
     }
+  } else {
+    // No router at all. The "step N of M" below then ranks this step among
+    // every OTHER top-level step, which the line has to say out loud or the
+    // reader reads the position as a rank inside a branch.
+    parts.push("top level");
   }
   const siblings = detail.steps
     .filter((s) => s.router_id === step.router_id && s.branch_id === step.branch_id)
@@ -187,12 +201,26 @@ function scriptFamilyLine(att: CeligoAttachmentLike): string | null {
   return `copy ${letter} of ${att.script_versions_count} ${versionsWord} · ${att.script_copies_count} copies`;
 }
 
+/** Opening a script from a site card. Beyond the script id it carries two
+ * facts only the CLICK knows, and which the drawer cannot recover on its own:
+ *
+ * - `opener` — the button that was pressed, so the drawer can put focus back
+ *   where it came from on close. Radix's `onCloseAutoFocus` needs a real
+ *   element; without one, closing the drawer dropped focus onto `<body>` and
+ *   a keyboard reader restarted at the top of the page.
+ * - `jsonPath` — WHICH attachment site this was. One script is routinely
+ *   attached at several sites on the same step (a preMap and a postMap, or
+ *   two clones of one family), and `flow_step_id` alone cannot tell them
+ *   apart, so the viewer's header named whichever site came back first.
+ */
+export type OpenScript = (scriptId: string, opener: HTMLElement | null, jsonPath: string | null) => void;
+
 function ScriptSiteCard({
   attachment,
   onOpenScript,
 }: {
   attachment: CeligoFlowStep["attachments"][number];
-  onOpenScript: (scriptId: string) => void;
+  onOpenScript: OpenScript;
 }) {
   const familyLine = scriptFamilyLine(attachment);
   const sizeLine = formatScriptSize(attachment.script_size_chars);
@@ -216,7 +244,7 @@ function ScriptSiteCard({
           <button
             type="button"
             className="text-[12px] font-medium text-foreground underline"
-            onClick={() => onOpenScript(attachment.script_id!)}
+            onClick={(e) => onOpenScript(attachment.script_id!, e.currentTarget, attachment.json_path)}
           >
             Open source →
           </button>
@@ -233,7 +261,7 @@ function ScriptsTab({
   onOpenScript,
 }: {
   step: CeligoFlowStep;
-  onOpenScript: (scriptId: string) => void;
+  onOpenScript: OpenScript;
 }) {
   if (step.attachments.length === 0) {
     return <p className="text-[12px] text-muted-foreground">No scripts attached to this step.</p>;
@@ -324,6 +352,20 @@ function ErrorsTab({
     // both cases -- a flow-wide claim, stated on a flow with open errors
     // sitting in other steps. The quiet sentence is only honest when the
     // flow's own count is zero; otherwise it says where the errors are.
+    // A missing sync timestamp used to render through `formatRelativeTime`'s
+    // "—", producing "on the last sync, —" — a sentence that names a moment
+    // and then refuses to say which one. When there is no timestamp the
+    // sentence says THAT instead, and drops the "Celigo reported 0" framing,
+    // which is a claim about a sync we cannot date.
+    if (!lastSyncedAt) {
+      return (
+        <p className="text-[12px] text-muted-foreground">
+          {flowErrorCount === 0
+            ? "No open errors on this step (sync time unavailable)."
+            : `No open errors on this step (sync time unavailable). ${flowErrorCount} open elsewhere in this flow.`}
+        </p>
+      );
+    }
     return (
       <p className="text-[12px] text-muted-foreground">
         {flowErrorCount === 0
@@ -354,7 +396,7 @@ export function CeligoStepInspector({
   tab: InspectorTab;
   onTabChange: (tab: InspectorTab) => void;
   lastSyncedAt: string | null;
-  onOpenScript: (scriptId: string) => void;
+  onOpenScript: OpenScript;
 }): JSX.Element {
   const errorsQuery = useCeligoFlowErrors(detail.id);
   const errorsState = queryState(errorsQuery);
@@ -402,20 +444,25 @@ export function CeligoStepInspector({
         onValueChange={(v) => onTabChange(v as InspectorTab)}
         className="flex flex-1 min-h-0 flex-col"
       >
-        <TabsList className="mx-3 mt-2 h-auto self-start">
-          <TabsTrigger value="facts" className="text-[12px]">
+        {/* Five triggers at the panel's 20% minimum overflowed a single
+            `inline-flex` row, and `TabsList` has no overflow rule of its own
+            — so Errors (and often Scripts) were simply clipped off the right
+            edge, unreachable by mouse. `flex-wrap` + narrower triggers let
+            the strip take a second line instead of hiding tabs. */}
+        <TabsList className="mx-3 mt-2 h-auto max-w-full flex-wrap justify-start gap-0.5 self-start overflow-x-auto">
+          <TabsTrigger value="facts" className="px-1.5 text-[12px]">
             Facts
           </TabsTrigger>
-          <TabsTrigger value="filter" className="text-[12px]">
+          <TabsTrigger value="filter" className="px-1.5 text-[12px]">
             {`Filter ${filterRuleCount === null ? "—" : filterRuleCount}`}
           </TabsTrigger>
-          <TabsTrigger value="mapping" className="text-[12px]">
+          <TabsTrigger value="mapping" className="px-1.5 text-[12px]">
             {`Mapping ${mappingFieldCount === null ? "—" : mappingFieldCount}`}
           </TabsTrigger>
-          <TabsTrigger value="scripts" className="text-[12px]">
+          <TabsTrigger value="scripts" className="px-1.5 text-[12px]">
             {`Scripts ${step.attachments.length}`}
           </TabsTrigger>
-          <TabsTrigger value="errors" className="text-[12px]">
+          <TabsTrigger value="errors" className="px-1.5 text-[12px]">
             {/* `step.error_count` came with `detail`, so this badge is a settled
                 number the moment the step is selected -- it no longer waits on
                 (or degrades to "…" with) the separate errors query. */}
