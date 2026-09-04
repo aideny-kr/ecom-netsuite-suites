@@ -94,6 +94,7 @@ vi.mock("react-resizable-panels", async (importOriginal) => {
 });
 
 import { CeligoFlowPage } from "../celigo-flow-page";
+import { AI_DESCRIPTION_CLAMP_CHARS } from "../celigo-flow-header";
 import { setCeligoPaletteOpen } from "../palette-open-state";
 
 function wrap(ui: React.ReactElement) {
@@ -297,8 +298,14 @@ const ROUTERS: CeligoRouter[] = [
   },
 ];
 
+// Long enough to clamp: the header only clamps (and only offers "Show more")
+// past `AI_DESCRIPTION_CLAMP_CHARS`, so the fixture is built to exceed it
+// rather than hoping a one-liner happens to.
 const AI_TEXT =
-  'The "Backfill Sales Order by Order Number - 6/7/22" flow retrieves sales order data from an API endpoint using an HTTP export.';
+  'The "Backfill Sales Order by Order Number - 6/7/22" flow retrieves sales order data from an API endpoint using an HTTP export. ' +
+  "The data is then imported into NetSuite using two imports. The first import creates or updates the customer record; " +
+  "the second adds the sales order itself. A router directs each record to the import for its business entity.";
+const SHORT_AI_TEXT = "Retrieves sales orders over HTTP and adds them to NetSuite.";
 
 function makeDetail(overrides: Partial<CeligoFlowDetail> = {}): CeligoFlowDetail {
   return {
@@ -723,6 +730,15 @@ describe("CeligoFlowPage — script drawer", () => {
 });
 
 describe("CeligoFlowPage — header AI description clamp (canvas gets the page, Part B.1)", () => {
+  it("a description that already fits two lines renders in full: no clamp, no toggle", () => {
+    expect(AI_TEXT.length).toBeGreaterThan(AI_DESCRIPTION_CLAMP_CHARS);
+    expect(SHORT_AI_TEXT.length).toBeLessThanOrEqual(AI_DESCRIPTION_CLAMP_CHARS);
+    mocks.detail.mockReturnValue(resolved(makeDetail({ ai_description_detailed: SHORT_AI_TEXT })));
+    wrap(<CeligoFlowPage />);
+    expect(screen.getByText(SHORT_AI_TEXT).className).not.toMatch(/line-clamp-2/);
+    expect(screen.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
+  });
+
   it("collapses the AI description to 2 lines by default, behind a 'Show more' toggle", () => {
     wrap(<CeligoFlowPage />);
     const quote = screen.getByText(AI_TEXT);

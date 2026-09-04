@@ -41,6 +41,11 @@ export type ClonedFromInfo = { resolvedName: string | null };
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
+/** Longest AI description shown in full without a clamp or a "Show more"
+ * toggle. Exported so the tests build fixtures from it instead of a
+ * re-hardcoded number. */
+export const AI_DESCRIPTION_CLAMP_CHARS = 200;
+
 /** localStorage key for "Focus canvas" -- `"1"` collapsed, absent (or
  * anything else) expanded. One key for the whole surface, not per-flow: a
  * viewer who wants the canvas maximized wants that on every flow they open. */
@@ -247,6 +252,13 @@ export function CeligoFlowHeader({
   // it is purely a per-view reading preference, not a fact about the flow.
   const [aiExpanded, setAiExpanded] = useState(false);
   const aiDescriptionId = `celigo-ai-description-${detail.id}`;
+  // A description that already fits in two lines gets no clamp and no
+  // toggle -- a "Show more" that shows nothing more teaches the reader to
+  // ignore the button. jsdom cannot measure line boxes, so "fits" is a
+  // character budget: two header lines hold ~200 characters at the
+  // narrowest inspector-open width.
+  const aiText = detail.ai_description_detailed ?? detail.ai_description_summary;
+  const aiClampable = !!aiText && aiText.length > AI_DESCRIPTION_CLAMP_CHARS;
 
   // "Focus canvas" -- the header collapses to its first row (pills, title,
   // actions), giving the canvas below the rest of the viewport (finding: the
@@ -294,7 +306,6 @@ export function CeligoFlowHeader({
   const lookupCount = detail.steps.filter((s) => s.kind === "lookup").length;
   const writes = computeFlowWrites(detail.steps);
   const scriptStats = computeScriptStats(detail);
-  const aiText = detail.ai_description_detailed ?? detail.ai_description_summary;
 
   const lastRanBeforeSync =
     detail.last_executed_at && lastSyncedAt ? minutesBetween(detail.last_executed_at, lastSyncedAt) : null;
@@ -423,19 +434,21 @@ export function CeligoFlowHeader({
                     `overflow-hidden` alongside it (see `step-bubble.tsx`'s
                     title, which notes `cn`/tailwind-merge would strip it back
                     out as a conflicting rule anyway). */}
-                <q id={aiDescriptionId} className={cn("text-muted-foreground", !aiExpanded && "line-clamp-2")}>
+                <q id={aiDescriptionId} className={cn("text-muted-foreground", aiClampable && !aiExpanded && "line-clamp-2")}>
                   {aiText}
                 </q>
               </div>
-              <button
-                type="button"
-                aria-expanded={aiExpanded}
-                aria-controls={aiDescriptionId}
-                onClick={() => setAiExpanded((prev) => !prev)}
-                className="self-start text-[10.5px] font-medium text-muted-foreground hover:text-foreground"
-              >
-                {aiExpanded ? "Show less" : "Show more"}
-              </button>
+              {aiClampable && (
+                <button
+                  type="button"
+                  aria-expanded={aiExpanded}
+                  aria-controls={aiDescriptionId}
+                  onClick={() => setAiExpanded((prev) => !prev)}
+                  className="self-start text-[10.5px] font-medium text-muted-foreground hover:text-foreground"
+                >
+                  {aiExpanded ? "Show less" : "Show more"}
+                </button>
+              )}
             </div>
           )}
           {/* "Synced —." was the same collapse the pills made: a dash standing
