@@ -503,17 +503,29 @@ function ErrorsTab({
       </p>
     );
   }
+  // The two queries are cached separately, so the rows can lag the
+  // integration row by one refetch in EITHER direction. Sum what the rows
+  // account for and say so when it is not the whole number.
+  const listed = flows.reduce((sum, f) => sum + f.error_count, 0);
   return (
-    <ul className="flex flex-col gap-1 text-[13px]">
-      {flows.map((f) => (
-        <li key={f.id} className="flex items-center justify-between rounded-lg border px-2.5 py-1.5">
-          <span>{f.name}</span>
-          <Pill tone="crit" dot="solid">
-            {f.error_count} open · {f.signature_count} root cause{f.signature_count === 1 ? "" : "s"}
-          </Pill>
-        </li>
-      ))}
-    </ul>
+    <div className="flex flex-col gap-1.5 text-[13px]">
+      <ul className="flex flex-col gap-1">
+        {flows.map((f) => (
+          <li key={f.id} className="flex items-center justify-between rounded-lg border px-2.5 py-1.5">
+            <span>{f.name}</span>
+            {/* The shared pill, so a flow whose own check is incomplete
+                carries the same "not fully checked" caveat here as it does
+                on its own page. */}
+            <ErrorPill count={f.error_count} signatureCount={f.signature_count} checkedAt={f.errors_checked_at} />
+          </li>
+        ))}
+      </ul>
+      {listed !== integrationErrorCount && (
+        <p className="text-muted-foreground">
+          {`${listed} of ${integrationErrorCount} open errors are listed above; the flow list is still refreshing.`}
+        </p>
+      )}
+    </div>
   );
 }
 

@@ -94,9 +94,10 @@ step", extended by fix round 1 -- see below):
     (`steps_with_inconsistent_errors` -- the endpoints disagree, and an
     empty listing is what the old bug looked like); and the flow's
     `errors_checked_at` cursor (`repository.mark_flow_errors_checked`) is
-    stamped ONLY when every step reached a verdict this run -- otherwise it
-    is left as it was (`flows_errors_unverified`), so a never-verified flow
-    keeps NULL and renders as "errors not checked yet", never a green zero.
+    stamped ONLY when the summary was complete and every step reached a
+    verdict this run -- otherwise it is CLEARED (`flows_errors_unverified`),
+    so an unverified flow shows NULL and renders as "errors not checked
+    yet", never a green zero dressed in yesterday's stamp.
     THE BUG THIS REPLACED: the pre-2026-09-03 version of this phase
     called `list_flow_errors_for_step` for every step UNCONDITIONALLY, with
     a `?_stepId=<step's own celigo_id>` query param on `GET /v1/flows/
@@ -237,12 +238,18 @@ class SyncSummary:
     #   step reached a verdict, so their errors_checked_at cursor was stamped
     #   this run.
     flows_errors_checked: int = 0
-    # flows_errors_unverified -- flows whose summary WAS consulted but at
-    #   least one step reached no verdict (absent from the summary, an
-    #   empty listing behind a non-zero count, or a truncated listing). Their
-    #   errors_checked_at is left exactly as it was: the stamp means "every
-    #   step verified as of", and an unverified run has not earned it.
+    # flows_errors_unverified -- flows whose summary WAS consulted but which
+    #   this run could not verify: the summary itself was incomplete, a step
+    #   was absent from it, a listing disagreed with it, was truncated, or
+    #   errors were reported on a resource with no step. Their
+    #   errors_checked_at is CLEARED (NULL): the stamp means "every step
+    #   verified as of", and an older stamp would dress today's unverified
+    #   count up as a checked one.
     flows_errors_unverified: int = 0
+    # flows_with_incomplete_summary -- the flow's summary came back as a 204
+    #   or contained an entry whose count could not be read. The entries it
+    #   did carry still drive their steps; the flow is not verified.
+    flows_with_incomplete_summary: int = 0
     # steps_with_inconsistent_errors -- the summary reported a NON-ZERO count
     #   but the per-resource listing came back empty. The two endpoints
     #   disagree; an empty `errors[]` is exactly what the pre-2026-09-03 bug
@@ -992,11 +999,17 @@ async def sync_flow_map_for_connection(
             # (`CeligoIncompleteListingError`, below) is ever contained to
             # just that step; a failure to even get the flow's summary says
             # nothing about any one step in particular.
-            counts = await list_flow_error_summary(flow_celigo_id, token=token, region=region, client=http)
+            error_summary = await list_flow_error_summary(flow_celigo_id, token=token, region=region, client=http)
+            counts = error_summary.counts
             # Every step must reach a verdict this run for the flow's
-            # errors_checked_at to advance -- see `SyncSummary.
-            # flows_errors_unverified` for the three ways one fails to.
-            flow_verified = True
+            # errors_checked_at to be stamped -- see `SyncSummary.
+            # flows_errors_unverified` for the ways one fails to. A summary
+            # that is itself incomplete (a 204, an entry whose count could
+            # not be read) can still drive the steps it DOES cover, but it
+            # cannot verify the flow: what it left out is unknown.
+            flow_verified = error_summary.complete
+            if not error_summary.complete:
+                summary.flows_with_incomplete_summary += 1
             # Resources already fetched for THIS flow. Errors are per
             # export/import, not per step, and `celigo_flow_errors` is unique
             # by error id -- a second step referencing the same resource
@@ -1082,7 +1095,11 @@ async def sync_flow_map_for_connection(
                     raw_errors_is_complete = False
                     summary.steps_with_incomplete_errors += 1
                     flow_verified = False
-                if raw_errors_is_complete and len(raw_errors) < counts[step_celigo_id]:
+                # Counted by DISTINCT persistable ids, not rows: `upsert_errors`
+                # skips an item without `errorId` and de-duplicates by id, so
+                # two rows can be one error -- or none -- once stored.
+                persistable = {e.get("errorId") for e in raw_errors if e.get("errorId")}
+                if raw_errors_is_complete and len(persistable) < counts[step_celigo_id]:
                     # The summary said N, the per-resource listing brought
                     # back FEWER than N (an empty body / 204 is the extreme
                     # case -- exactly what the pre-2026-09-03 bug produced;
@@ -1118,17 +1135,20 @@ async def sync_flow_map_for_connection(
                 flow_verified = False
 
             # Stamp the freshness cursor the data-status banner reads ONLY
-            # when every step of this flow reached a verdict (a verified zero
-            # or a complete non-empty listing) and nothing reported went
-            # unattached. Otherwise the stamp stays exactly as it was -- a
-            # flow never fully verified keeps NULL and renders as "errors not
-            # checked yet", never as a green zero.
+            # when the summary was complete, every step reached a verdict (a
+            # verified zero or a complete listing) and nothing reported went
+            # unattached. Otherwise the stamp is CLEARED: an older stamp
+            # left in place would present today's unverified count -- say,
+            # a flow verified clean yesterday whose summary now reports 3
+            # the listing could not bring back -- as a checked zero. NULL
+            # renders as "errors not checked yet", never as a green zero.
             if flow_verified:
                 await mark_flow_errors_checked(
                     db, tenant_id=tenant_id, flow_id=flow_local_id, checked_at=datetime.now(timezone.utc)
                 )
                 summary.flows_errors_checked += 1
             else:
+                await mark_flow_errors_checked(db, tenant_id=tenant_id, flow_id=flow_local_id, checked_at=None)
                 summary.flows_errors_unverified += 1
 
         # Purge marking -- last, once per connection, independent of any

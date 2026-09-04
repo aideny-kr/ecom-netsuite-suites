@@ -83,6 +83,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Iterable
+from typing import NamedTuple
 
 import httpx
 
@@ -473,13 +474,27 @@ async def get_resource(
     return sanitize(kind, body)
 
 
+class FlowErrorSummary(NamedTuple):
+    """What `list_flow_error_summary` could read of one flow's summary.
+
+    `complete` is False when the response was a 204 (nothing to read) or
+    when any entry was dropped as unreadable (no `_expOrImpId`, a count that
+    is not a whole non-negative number). The counts that WERE read are still
+    returned and still drive their steps; but a caller must not treat the
+    flow as verified on an incomplete picture -- what was dropped is exactly
+    what it does not know."""
+
+    counts: dict[str, int]
+    complete: bool
+
+
 async def list_flow_error_summary(
     flow_id: str,
     *,
     token: str,
     region: str = "us",
     client: httpx.AsyncClient | None = None,
-) -> dict[str, int]:
+) -> FlowErrorSummary:
     """Return `{export_or_import_id: open_error_count}` for every resource of
     one flow, from the flow's PER-FLOW ERROR SUMMARY.
 
@@ -514,7 +529,9 @@ async def list_flow_error_summary(
 
     _raise_for_status(response, context=f"listing the error summary for flow {flow_id}")
     if response.status_code == 204:
-        return {}
+        # Never observed live (zero-error flows come back as 200 with
+        # `numError: 0` entries). Nothing was read, so nothing is verified.
+        return FlowErrorSummary({}, complete=False)
     try:
         body = response.json()
     except ValueError:
@@ -523,12 +540,17 @@ async def list_flow_error_summary(
         raise CeligoError(f"Celigo returned an unparseable error summary for flow {flow_id}")
 
     counts: dict[str, int] = {}
+    complete = True
     for entry in body.get("flowErrors") or []:
+        # Anything dropped below is a resource whose count is UNKNOWN, and an
+        # unknown count is not a zero: the summary is then incomplete.
         if not isinstance(entry, dict):
+            complete = False
             continue
         exp_or_imp_id = entry.get("_expOrImpId")
         num_error = entry.get("numError")
         if not isinstance(exp_or_imp_id, str) or not exp_or_imp_id:
+            complete = False
             continue
         # A count arrives as an int live; a string of digits is still an
         # unambiguous count and is read as one (independent-model review
@@ -538,15 +560,18 @@ async def list_flow_error_summary(
         if isinstance(num_error, str) and num_error.strip().isdigit():
             num_error = int(num_error.strip())
         if not isinstance(num_error, (int, float)) or isinstance(num_error, bool):
+            complete = False
             continue
         # Only a whole, non-negative number is a count. `int(0.5)` would have
         # read as a verified zero and resolved real errors without a fetch.
         if isinstance(num_error, float) and not num_error.is_integer():
+            complete = False
             continue
         if num_error < 0:
+            complete = False
             continue
         counts[exp_or_imp_id] = int(num_error)
-    return counts
+    return FlowErrorSummary(counts, complete=complete)
 
 
 async def list_flow_errors_for_step(

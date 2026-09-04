@@ -42,6 +42,7 @@ from app.services.celigo.client import (
     CeligoError,
     CeligoIncompleteListingError,
     CeligoNotFoundError,
+    FlowErrorSummary,
     get_resource,
 )
 from app.services.celigo.errors import upsert_errors
@@ -260,6 +261,7 @@ def _fake_list_flow_error_summary(
     summary_by_flow: dict[str, dict[str, int]] | None = None,
     calls: list | None = None,
     flows: list[dict] | None = None,
+    incomplete_summary_flows: set[str] | None = None,
 ):
     """Fake for `client.list_flow_error_summary` -- the per-flow gate Phase E
     now reads before deciding whether a step gets fetched at all. By default
@@ -282,13 +284,17 @@ def _fake_list_flow_error_summary(
     for (flow_id, step_id), errs in (errors_by_step or {}).items():
         default_counts.setdefault(flow_id, {})[step_id] = len(errs)
     overrides = summary_by_flow or {}
+    incomplete = incomplete_summary_flows or set()
 
     async def _fake(flow_id, *, token, region="us", client=None):
         if calls is not None:
             calls.append(flow_id)
+        # `complete` mirrors the client: False for a flow named in
+        # *incomplete_summary_flows* (a 204, or an entry that could not be
+        # read), True otherwise -- the live shape.
         if flow_id in overrides:
-            return dict(overrides[flow_id])
-        return dict(default_counts.get(flow_id, {}))
+            return FlowErrorSummary(dict(overrides[flow_id]), complete=flow_id not in incomplete)
+        return FlowErrorSummary(dict(default_counts.get(flow_id, {})), complete=flow_id not in incomplete)
 
     return _fake
 
@@ -309,6 +315,7 @@ async def _run_sync(
     truncated_steps: dict[tuple[str, str], list[dict]] | None = None,
     summary_by_flow: dict[str, dict[str, int]] | None = None,
     summary_calls: list | None = None,
+    incomplete_summary_flows: set[str] | None = None,
     get_resource=None,
 ) -> SyncSummary:
     resource_data = {
@@ -332,7 +339,13 @@ async def _run_sync(
     )
     monkeypatch.setattr(
         "app.services.celigo.sync_service.list_flow_error_summary",
-        _fake_list_flow_error_summary(errors_by_step, summary_by_flow, summary_calls, flows=flows),
+        _fake_list_flow_error_summary(
+            errors_by_step,
+            summary_by_flow,
+            summary_calls,
+            flows=flows,
+            incomplete_summary_flows=incomplete_summary_flows,
+        ),
     )
     return await sync_flow_map_for_connection(
         db, tenant_id=tenant_id, connection_id=connection_id, token="unit-test-token", region="us"
@@ -2092,7 +2105,9 @@ class TestPhaseEHonestyGuards:
         assert by_id["err_old_1"].resolved_at is None and by_id["err_old_2"].resolved_at is None, (
             "a short listing must not resolve the errors it failed to bring back"
         )
-        assert (await self._flow_row(db, "flow_short")).errors_checked_at == stamp_after_first
+        assert (await self._flow_row(db, "flow_short")).errors_checked_at is None, (
+            "the run saw errors it could not bring back: yesterday's stamp must not dress that up as checked"
+        )
 
     async def test_a_flow_with_no_step_rows_still_has_its_summary_consulted(self, db: AsyncSession, monkeypatch):
         """A flow whose processors Phase B could not turn into steps (no
@@ -2182,8 +2197,9 @@ class TestPhaseEHonestyGuards:
         assert second.flows_errors_unverified == 1
         row = (await db.execute(select(CeligoFlowError).where(CeligoFlowError.celigo_id == "err_i"))).scalar_one()
         assert row.resolved_at is None, "an empty listing behind a non-zero summary is a disagreement, not a resolution"
-        assert (await self._flow_row(db, "flow_i")).errors_checked_at == stamp_after_first, (
-            "the stamp means 'every step verified as of'; an unverified run must not advance it"
+        assert (await self._flow_row(db, "flow_i")).errors_checked_at is None, (
+            "the stamp means 'every step verified as of'; an unverified run clears it rather than "
+            "leaving an older stamp to vouch for a count it never verified"
         )
 
     async def test_a_flow_with_a_step_absent_from_its_summary_is_never_stamped(self, db: AsyncSession, monkeypatch):
@@ -2346,6 +2362,86 @@ class TestPhaseEHonestyGuards:
         assert all(r.resolved_at is not None for r in rows), (
             "both the owner's and the duplicate's leftovers are resolved"
         )
+
+
+class TestPhaseESummaryCompleteness:
+    """Independent-model (codex) delta review: a summary can itself have a
+    hole in it, and a listing can match the summary by row count while
+    carrying fewer distinct errors. Neither may verify a flow."""
+
+    @staticmethod
+    async def _flow_row(db: AsyncSession, celigo_id: str) -> CeligoFlow:
+        return (await db.execute(select(CeligoFlow).where(CeligoFlow.celigo_id == celigo_id))).scalar_one()
+
+    async def test_an_incomplete_summary_clears_a_previous_stamp(self, db: AsyncSession, monkeypatch):
+        """A 204, or an entry the client could not read, is a summary with a
+        hole in it. The counts it did carry still drive their steps, but the
+        flow is not verified -- and a stamp from an earlier clean run must go,
+        not linger."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+        flow = _raw_flow("flow_h", integration_id="int_h", export_id="exp_h")
+
+        first = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_h")],
+            flows=[flow],
+        )
+        assert first.flows_errors_checked == 1
+        assert (await self._flow_row(db, "flow_h")).errors_checked_at is not None
+
+        second = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_h")],
+            flows=[flow],
+            incomplete_summary_flows={"flow_h"},
+        )
+        assert second.flows_with_incomplete_summary == 1
+        assert second.steps_skipped_zero_errors == 1, "the entry it did carry still resolved its step as zero"
+        assert second.flows_errors_checked == 0
+        assert second.flows_errors_unverified == 1
+        assert (await self._flow_row(db, "flow_h")).errors_checked_at is None
+
+    async def test_a_listing_short_by_distinct_ids_is_inconsistent_even_when_its_row_count_matches(
+        self, db: AsyncSession, monkeypatch
+    ):
+        """Two rows, one error: a duplicated errorId (or a row without one)
+        cannot stand in for the second error the summary promised."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+        flow = _raw_flow("flow_d", integration_id="int_d", export_id="exp_d")
+
+        await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_d")],
+            flows=[flow],
+            errors_by_step={("flow_d", "exp_d"): [_raw_error(celigo_id="err_d1"), _raw_error(celigo_id="err_d2")]},
+        )
+
+        summary = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_d")],
+            flows=[flow],
+            summary_by_flow={"flow_d": {"exp_d": 2}},
+            errors_by_step={("flow_d", "exp_d"): [_raw_error(celigo_id="err_d1"), _raw_error(celigo_id="err_d1")]},
+        )
+
+        assert summary.steps_with_inconsistent_errors == 1
+        assert summary.flows_errors_unverified == 1
+        row = (await db.execute(select(CeligoFlowError).where(CeligoFlowError.celigo_id == "err_d2"))).scalar_one()
+        assert row.resolved_at is None, "err_d2 was promised by the summary and never disproved"
 
 
 class TestFlowErrorsCheckedAtCursor:

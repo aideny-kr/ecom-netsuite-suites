@@ -655,7 +655,7 @@ describe("Errors tab", () => {
     // snapshot as errors_checked_at); the flows list only says WHERE.
     mocks.integrations.mockReturnValue(resolved([makeIntegration({ error_count: 5, signature_count: 1 })]));
     setup([
-      makeFlow({ id: "f1", name: "Errored Flow", error_count: 5, signature_count: 1 }),
+      makeFlow({ id: "f1", name: "Errored Flow", error_count: 5, signature_count: 1, errors_checked_at: SYNCED_AT }),
       makeFlow({ id: "f2", name: "Clean Flow", error_count: 0 }),
     ]);
     expect(screen.getByText("Errored Flow")).toBeInTheDocument();
@@ -700,6 +700,22 @@ describe("Errors tab", () => {
     expect(
       screen.getByText("5 open errors across this integration; the flow list is still refreshing."),
     ).toBeInTheDocument();
+  });
+
+  it("says how many of the integration's errors the listed flows account for when the two disagree", () => {
+    mocks.integrations.mockReturnValue(resolved([makeIntegration({ error_count: 5, signature_count: 2 })]));
+    setup([makeFlow({ id: "f1", name: "Partly Refreshed Flow", error_count: 2, signature_count: 1, errors_checked_at: SYNCED_AT })]);
+    expect(screen.getByText("Partly Refreshed Flow")).toBeInTheDocument();
+    expect(
+      screen.getByText("2 of 5 open errors are listed above; the flow list is still refreshing."),
+    ).toBeInTheDocument();
+  });
+
+  it("a listed flow whose own check is incomplete carries the shared 'not fully checked' caveat", () => {
+    mocks.integrations.mockReturnValue(resolved([makeIntegration({ error_count: 2, signature_count: 1 })]));
+    setup([makeFlow({ id: "f1", name: "Half Checked Flow", error_count: 2, signature_count: 1, errors_checked_at: null })]);
+    expect(screen.getByText(/2 open · 1 root cause/)).toBeInTheDocument();
+    expect(screen.getByText(/not fully checked/)).toBeInTheDocument();
   });
 });
 

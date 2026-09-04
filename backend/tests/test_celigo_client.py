@@ -776,9 +776,33 @@ class TestFlowErrorSummary:
             )
 
         async with _json_client(handler) as c:
-            counts = await list_flow_error_summary("flow1", token="tok", client=c)
+            result = await list_flow_error_summary("flow1", token="tok", client=c)
 
-        assert counts == {"exp_1": 0, "imp_1": 7, "imp_str": 4, "imp_float": 2}
+        assert result.counts == {"exp_1": 0, "imp_1": 7, "imp_str": 4, "imp_float": 2}
+        assert result.complete is False, "dropped entries are unknown counts -- the picture is incomplete"
+
+    @pytest.mark.asyncio
+    async def test_a_summary_with_every_entry_readable_is_complete(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={"flowErrors": [{"_expOrImpId": "exp_1", "numError": 0}, {"_expOrImpId": "imp_1", "numError": 2}]},
+            )
+
+        async with _json_client(handler) as c:
+            result = await list_flow_error_summary("flow1", token="tok", client=c)
+
+        assert result == ({"exp_1": 0, "imp_1": 2}, True)
+
+    @pytest.mark.asyncio
+    async def test_an_empty_flow_errors_list_is_a_complete_summary_of_nothing(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"flowErrors": []})
+
+        async with _json_client(handler) as c:
+            result = await list_flow_error_summary("flow1", token="tok", client=c)
+
+        assert result == ({}, True)
 
     @pytest.mark.asyncio
     async def test_request_has_no_query_params(self):
@@ -796,14 +820,15 @@ class TestFlowErrorSummary:
         assert seen["query"] == b""
 
     @pytest.mark.asyncio
-    async def test_204_returns_empty_dict(self):
+    async def test_204_is_an_incomplete_summary_not_a_verified_empty_one(self):
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(204)
 
         async with _json_client(handler) as c:
-            counts = await list_flow_error_summary("flow1", token="tok", client=c)
+            result = await list_flow_error_summary("flow1", token="tok", client=c)
 
-        assert counts == {}
+        assert result.counts == {}
+        assert result.complete is False
 
     @pytest.mark.asyncio
     async def test_unparseable_body_raises_celigo_error(self):
