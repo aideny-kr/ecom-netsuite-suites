@@ -60,11 +60,23 @@ from a truncated-but-not-raised list gets treated as resolved, so a sync
 that silently truncated still completed "successfully" and advanced the
 freshness cursor. There is no longer an asymmetry to remember here.
 
-TASK 3 ERRORS ARE PER-STEP, NOT PER-FLOW (observed-shapes.md, live-probed
-2026-08-27): passing a flow id alone (no step id) returns `steps: []` even
-when errors exist -- the useless mode. `list_flow_errors_for_step` makes that
-mode structurally unreachable: `flow_id` and `step_id` are both required
-positional parameters, never optional.
+TASK 3 ERRORS ARE PER-STEP, NOT PER-FLOW -- CORRECTED, VERIFIED LIVE
+2026-09-03 (supersedes the 2026-08-27 note this replaces, which claimed a
+flow id alone returns `steps: []`; that was never independently confirmed
+and the real shape is different): `GET /v1/flows/{flow_id}/errors` (no
+`resourceId`) returns the PER-FLOW SUMMARY --
+`{"flowErrors": [{"_expOrImpId", "numError"}, ...]}`, one entry per
+export/import in the flow -- and IGNORES a `_stepId` query parameter
+entirely, returning the identical summary whether or not one is given. The
+OPEN errors of one resource live at a DIFFERENT, more specific path:
+`GET /v1/flows/{flow_id}/{resourceId}/errors`. Building the per-step URL by
+appending `?_stepId=` to the summary endpoint (the shape this module used to
+build) silently asks the wrong question and gets the summary back regardless
+-- see `list_flow_errors_for_step`'s own docstring for exactly how that
+composed with `errors.upsert_errors` to falsely resolve every real error.
+`list_flow_errors_for_step` requires `flow_id` and `step_id` as both
+required positional parameters, never optional, so the useless
+flow-id-alone call can't be made through this function either way.
 """
 
 from __future__ import annotations
@@ -461,6 +473,69 @@ async def get_resource(
     return sanitize(kind, body)
 
 
+async def list_flow_error_summary(
+    flow_id: str,
+    *,
+    token: str,
+    region: str = "us",
+    client: httpx.AsyncClient | None = None,
+) -> dict[str, int]:
+    """Return `{export_or_import_id: open_error_count}` for every resource of
+    one flow, from the flow's PER-FLOW ERROR SUMMARY.
+
+    VERIFIED LIVE 2026-09-03 (read-only probes; supersedes every earlier
+    docstring in this module that told the `_stepId` story -- see
+    `list_flow_errors_for_step`'s own docstring for the bug that produced):
+    `GET /v1/flows/{flow_id}/errors`, with NO query params, returns
+    `{"flowErrors": [{"_expOrImpId": "<export or import id>", "numError":
+    <int>}, ...]}` -- one entry per resource (export/import) in the flow (10
+    entries for a 10-step flow). It IGNORES a `_stepId` query parameter
+    entirely: `?_stepId=X` returns the exact same summary, which is what made
+    the old per-step call silently see zero errors forever.
+
+    An entry missing a string `_expOrImpId` or carrying a non-numeric
+    `numError` is skipped, never given a fabricated key or a guessed count --
+    same fail-closed posture as `list_resource`'s non-dict-item skip. A 204
+    (nothing to summarize) returns `{}`. No sanitizer call: both fields are
+    non-PII (an object id and a count), never stored raw, and there is no
+    allowlist entry for a "summary" kind -- see the module's sanitizer
+    integration on the sibling fetchers for why every OTHER fetcher needs
+    one and this one doesn't.
+    """
+    owns_client = client is None
+    http = client or httpx.AsyncClient(timeout=_TIMEOUT)
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    url = f"{base_url(region)}/v1/flows/{flow_id}/errors"
+    try:
+        response = await _get_with_retry(http, url, headers=headers, params=None)
+    finally:
+        if owns_client:
+            await http.aclose()
+
+    _raise_for_status(response, context=f"listing the error summary for flow {flow_id}")
+    if response.status_code == 204:
+        return {}
+    try:
+        body = response.json()
+    except ValueError:
+        raise CeligoError(f"Celigo returned an unparseable error summary for flow {flow_id}") from None
+    if not isinstance(body, dict):
+        raise CeligoError(f"Celigo returned an unparseable error summary for flow {flow_id}")
+
+    counts: dict[str, int] = {}
+    for entry in body.get("flowErrors") or []:
+        if not isinstance(entry, dict):
+            continue
+        exp_or_imp_id = entry.get("_expOrImpId")
+        num_error = entry.get("numError")
+        if not isinstance(exp_or_imp_id, str) or not exp_or_imp_id:
+            continue
+        if not isinstance(num_error, (int, float)) or isinstance(num_error, bool):
+            continue
+        counts[exp_or_imp_id] = int(num_error)
+    return counts
+
+
 async def list_flow_errors_for_step(
     flow_id: str,
     step_id: str,
@@ -469,16 +544,30 @@ async def list_flow_errors_for_step(
     region: str = "us",
     client: httpx.AsyncClient | None = None,
 ) -> list[dict]:
-    """List every open error for one step of one flow, following the error
-    endpoint's body-based pagination (`nextPageURL`) until it's absent, and
-    sanitizing each error before it's returned.
+    """List every open error for one resource (export/import) of one flow,
+    following the error endpoint's body-based pagination (`nextPageURL`)
+    until it's absent, and sanitizing each error before it's returned.
 
     `flow_id` and `step_id` are BOTH required, non-optional parameters --
-    deliberately, not incidentally. A live probe (observed-shapes.md,
-    2026-08-27) found that querying by flow id alone returns `steps: []`
-    even when errors exist for that flow; this signature makes that useless
-    call structurally impossible to make through this function rather than
-    merely discouraging it in a docstring.
+    deliberately, not incidentally: a flow id alone names no resource to ask
+    about.
+
+    VERIFIED LIVE 2026-09-03 (supersedes every earlier version of this
+    docstring): `GET /v1/flows/{flow_id}/{resourceId}/errors` -- `resourceId`
+    is `step_id` here, the export/import id a step already carries as its
+    own `celigo_id` -- returns `{"errors": [...]}`, the OPEN errors of that
+    one resource, plus `nextPageURL` when paginated. There is NO `_stepId`
+    query parameter on this call (first request `params=None`); that was
+    this module's own unverified guess (Task 3's original report flagged it
+    as "inferred from the MCP tool's schema, never confirmed against a raw
+    REST call") and it was wrong: `GET /v1/flows/{flow_id}/errors?_stepId=X`
+    -- the URL this function used to build -- returns the PER-FLOW SUMMARY
+    (`list_flow_error_summary`'s shape) regardless of `_stepId`'s value, so
+    the old code read `body["errors"]` (absent from a summary body), got
+    `[]` every time, and `errors.upsert_errors(raw_errors=[],
+    raw_errors_is_complete=True)` then resolved every previously-open error
+    as if Celigo had reported none -- every run "succeeded", the freshness
+    cursor advanced, and no error ever landed.
 
     Returns a materialized `list`, not an async generator -- callers of this
     function need the full error set for one step (e.g. to fingerprint or
@@ -487,8 +576,8 @@ async def list_flow_errors_for_step(
     owns_client = client is None
     http = client or httpx.AsyncClient(timeout=_TIMEOUT)
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-    url: str | None = f"{base_url(region)}/v1/flows/{flow_id}/errors"
-    next_params: dict | None = {"_stepId": step_id}
+    url: str | None = f"{base_url(region)}/v1/flows/{flow_id}/{step_id}/errors"
+    next_params: dict | None = None
     errors: list[dict] = []
     try:
         pages = 0
