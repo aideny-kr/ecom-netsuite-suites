@@ -748,6 +748,68 @@ describe("CeligoFlowPage — header AI description clamp (canvas gets the page, 
   });
 });
 
+describe("CeligoFlowPage — header collapse ('Focus canvas', Part B.2)", () => {
+  const STORAGE_KEY = "celigo.flowHeaderCollapsed";
+
+  beforeEach(() => {
+    window.localStorage.removeItem(STORAGE_KEY);
+  });
+
+  it("defaults expanded, and 'Focus canvas' hides the facts line/What-it-does/AI block/Synced line", () => {
+    const { container } = wrap(<CeligoFlowPage />);
+    expect(container.textContent).toContain("modified in Celigo 2 Sep 2026");
+    expect(screen.getByText("What it does · derived")).toBeInTheDocument();
+    expect(screen.getByText(AI_TEXT)).toBeInTheDocument();
+    expect(container.textContent).toContain("Synced 21 min ago.");
+
+    const toggle = screen.getByRole("button", { name: "Focus canvas" });
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(toggle);
+
+    expect(container.textContent).not.toContain("modified in Celigo 2 Sep 2026");
+    expect(screen.queryByText("What it does · derived")).not.toBeInTheDocument();
+    expect(screen.queryByText(AI_TEXT)).not.toBeInTheDocument();
+    expect(container.textContent).not.toContain("Synced 21 min ago.");
+    // The first row survives collapse: pills, title, actions.
+    expect(screen.getByText(/0 open errors/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "New Sales Order to NetSuite - Multi-Subsidiary" }),
+    ).toBeInTheDocument();
+
+    const collapsedToggle = screen.getByRole("button", { name: "Show details" });
+    expect(collapsedToggle).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(collapsedToggle);
+    expect(screen.getByRole("button", { name: "Focus canvas" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByText("What it does · derived")).toBeInTheDocument();
+  });
+
+  it("persists the choice per viewer in localStorage, and a stored '1' starts collapsed", () => {
+    window.localStorage.setItem(STORAGE_KEY, "1");
+    wrap(<CeligoFlowPage />);
+    expect(screen.getByRole("button", { name: "Show details" })).toBeInTheDocument();
+    expect(screen.queryByText("What it does · derived")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show details" }));
+    expect(window.localStorage.getItem(STORAGE_KEY)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Focus canvas" }));
+    expect(window.localStorage.getItem(STORAGE_KEY)).toBe("1");
+  });
+
+  it("defaults expanded, never crashes, when localStorage throws", () => {
+    const getItemSpy = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("storage disabled");
+    });
+    try {
+      wrap(<CeligoFlowPage />);
+      expect(screen.getByRole("button", { name: "Focus canvas" })).toHaveAttribute("aria-pressed", "false");
+      expect(screen.getByText("What it does · derived")).toBeInTheDocument();
+    } finally {
+      getItemSpy.mockRestore();
+    }
+  });
+});
+
 describe("CeligoFlowPage — inspector resting state", () => {
   it("renders the Overview (AI description + sync freshness) and hands the inspector slot step: null", () => {
     wrap(<CeligoFlowPage />);
