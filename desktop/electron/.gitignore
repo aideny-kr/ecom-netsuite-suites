@@ -18,3 +18,8 @@ electron-builder-*.log
 # machine and must not be checked in.
 build/node-runtime/
 build/sidecar-dist/
+
+# Playwright e2e artifacts
+test-results/
+playwright-report/
+.playwright/
