@@ -145,8 +145,13 @@ grouping by `_sourceId` + content hash, the script list is unusable noise.
 sandbox and production resources. Mixing rejects with 422.
 
 **Two live-observed gotchas:**
-- `list_flow_errors` with `_id` only returned `steps: []` for a flow that the integration-scoped
-  summary showed had 12 errors. Use `_integrationId` summary mode, or `_id` + `_stepId`.
+- ~~`list_flow_errors` with `_id` only returned `steps: []` … use `_integrationId` summary mode, or
+  `_id` + `_stepId`.~~ **Superseded 2026-09-03 (live-verified against the REST API):**
+  `GET /v1/flows/{flowId}/errors` returns the per-flow summary `{flowErrors: [{_expOrImpId, numError}]}`
+  and IGNORES any `_stepId` query parameter; one resource's open errors live at
+  `GET /v1/flows/{flowId}/{resourceId}/errors` (`errors[]` + `nextPageURL`). The `_stepId` design
+  silently returned zero errors for every step — see `2026-08-25-celigo-flow-map-design.md` and
+  `client.py`'s docstrings.
 - `limit` was ignored in step mode (asked for 3, got 10).
 
 ## 4. Existing codebase shape
@@ -238,7 +243,9 @@ freshness-cursor discipline from `services/ingestion/base.py`. Errors are re-sna
 run; existing rows are never deleted on purge.
 
 **Sequencing:** integrations → flows (`/descendants` for the step graph) → scripts by id
-(N+1, fine at 300 req/s) → per-step errors via `_integrationId` summary then `_id`+`_stepId`.
+(N+1, fine at 300 req/s) → errors via the per-flow summary (`GET /v1/flows/{id}/errors`) then
+`GET /v1/flows/{id}/{resourceId}/errors` only for resources whose `numError` is non-zero (the
+`_id`+`_stepId` form written here originally never worked — corrected 2026-09-03).
 
 ### 5.5 Frontend
 

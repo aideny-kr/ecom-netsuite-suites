@@ -622,7 +622,19 @@ class TestListIntegrations:
 
         older = datetime(2026, 9, 1, tzinfo=timezone.utc)
         newer = datetime(2026, 9, 3, tzinfo=timezone.utc)
+
+        # MIXED: one flow checked, the other still NULL. This is the case the
+        # `bool_or(errors_checked_at IS NULL)` guard exists for -- a plain
+        # MIN() would skip the NULL and report the checked flow's timestamp,
+        # presenting an integration as verified while half of it never was.
         world["flow"].errors_checked_at = newer
+        await db.flush()
+
+        r = await client.get("/api/v1/celigo/integrations", headers=headers)
+        assert r.status_code == 200, r.text
+        row = next(i for i in r.json() if i["id"] == str(world["integration"].id))
+        assert row["errors_checked_at"] is None, "one unchecked flow keeps the whole integration unverified"
+
         second.errors_checked_at = older
         await db.flush()
 
