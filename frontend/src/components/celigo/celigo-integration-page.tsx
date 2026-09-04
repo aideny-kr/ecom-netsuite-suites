@@ -31,7 +31,7 @@ import {
 import { queryState, type QueryState } from "@/lib/query-state";
 import { cn } from "@/lib/utils";
 import { parseSchedule, stallState, type ParsedSchedule } from "./schedule";
-import { ErrorNotice, Medallions, Pill, SchedulePill, formatRelativeTime } from "./shared";
+import { ErrorNotice, ErrorPill, Medallions, Pill, SchedulePill, formatRelativeTime } from "./shared";
 import { useCeligoRoute, type CeligoTab } from "./celigo-route";
 import { CeligoBreadcrumb } from "./celigo-breadcrumb";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -240,44 +240,34 @@ function ScriptsCell({ flow }: { flow: Pick<CeligoFlowSummary, "script_count" | 
   return <span className="tabular-nums">{flow.script_count}</span>;
 }
 
-/** Errors column — "0" (a green pill when the flow is live, a bare dash
- * when it's paused: nothing is being checked for a flow Celigo isn't
- * running) or a clickable "{error_count} open · {signature_count} root
- * cause{s}" that opens the per-step drawer. `error_count` leads, matching
- * both the approved mockup's own copy ("10 open · 1 root cause", mockup
- * lines 800/816) and `shared.tsx`'s already-shipped `ErrorPill` convention
- * used elsewhere on this surface — this file previously reversed the
- * order (root cause leading), which read as a cross-page inconsistency;
- * fixed to match. */
+/** Errors column — a neutral `ErrorPill` zero (green "0 open errors ·
+ * checked N ago" when the flow's own `errors_checked_at` is set, the mute
+ * "errors not checked yet" state when it's `null`) when the flow is live, a
+ * bare dash when it's paused: nothing is being checked for a flow Celigo
+ * isn't running. A non-zero count is a clickable "{error_count} open ·
+ * {signature_count} root cause{s}" that opens the per-step drawer —
+ * `error_count` leads, matching both the approved mockup's own copy ("10
+ * open · 1 root cause", mockup lines 800/816) and `ErrorPill`'s own
+ * convention.
+ *
+ * The zero branch used to be titled off `lastSyncedAt` (the overall sync's
+ * completion time) rather than this flow's own `errors_checked_at` — the
+ * exact honesty bug the brief targets (the sync can complete while a
+ * flow's own error check never ran against the correct endpoint), now
+ * fixed by delegating to `ErrorPill`, the same component every other
+ * zero-error surface on this page already uses. */
 function ErrorsCell({
   flow,
   paused,
-  lastSyncedAt,
   onOpen,
 }: {
-  flow: Pick<CeligoFlowSummary, "error_count" | "signature_count">;
+  flow: Pick<CeligoFlowSummary, "error_count" | "signature_count" | "errors_checked_at">;
   paused: boolean;
-  /** The zero pill's timestamp. A zero is a CLAIM — "Celigo reported none as
-   * of this sync" — and without the moment attached it reads as "this flow is
-   * clean, now", which is a stronger statement than the data supports. Every
-   * other zero on this surface carries its check time (see `ErrorPill`); this
-   * cell's did not. */
-  lastSyncedAt: string | null;
   onOpen: () => void;
 }): JSX.Element {
   if (flow.error_count === 0) {
     if (paused) return <span className="text-muted-foreground">—</span>;
-    return (
-      <Pill
-        tone="ok"
-        dot="solid"
-        title={`0 open errors as of the sync ${
-          lastSyncedAt ? formatRelativeTime(lastSyncedAt) : "— sync time unavailable"
-        }`}
-      >
-        0
-      </Pill>
-    );
+    return <ErrorPill count={0} checkedAt={flow.errors_checked_at} />;
   }
   return (
     <button
@@ -362,7 +352,6 @@ function FlowRow({
         <ErrorsCell
           flow={flow}
           paused={paused}
-          lastSyncedAt={lastSyncedAt}
           onOpen={() => onOpenErrors(flow.id, flow.name)}
         />
       </TableCell>
@@ -420,9 +409,10 @@ function FlowsTable({
             <TableHead className="text-[10.5px]">Schedule</TableHead>
             <TableHead className="text-[10.5px]">Last run</TableHead>
             <TableHead className="text-[10.5px]">Last updated</TableHead>
-            {/* Named for what the column actually reports: Celigo's own open
-                count AS OF THE LAST SYNC, not a live figure. */}
-            <TableHead className="text-[10.5px]">Errors · as of sync</TableHead>
+            {/* No "as of sync" suffix: the zero pill itself now carries its
+                own check time (the flow's own `errors_checked_at`, via
+                `ErrorPill`), matching the header column's convention. */}
+            <TableHead className="text-[10.5px]">Errors</TableHead>
             <TableHead className="text-[10.5px]">Scripts</TableHead>
             <TableHead className="text-[10.5px]">State</TableHead>
           </TableRow>
