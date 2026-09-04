@@ -2012,6 +2012,109 @@ class TestPhaseEHonestyGuards:
     async def _flow_row(db: AsyncSession, celigo_id: str) -> CeligoFlow:
         return (await db.execute(select(CeligoFlow).where(CeligoFlow.celigo_id == celigo_id))).scalar_one()
 
+    async def test_a_listing_shorter_than_the_summary_count_records_what_arrived_but_resolves_nothing(
+        self, db: AsyncSession, monkeypatch
+    ):
+        """The subtler cousin of the empty listing: the summary says 3, the
+        per-resource endpoint returns 1 with no nextPageURL. The one that
+        arrived is recorded; the two that did not are NOT resolved, and the
+        flow is left unverified."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+        flow = _raw_flow("flow_short", integration_id="int_short", export_id="exp_short")
+
+        await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_short")],
+            flows=[flow],
+            errors_by_step={
+                ("flow_short", "exp_short"): [_raw_error(celigo_id="err_old_1"), _raw_error(celigo_id="err_old_2")]
+            },
+        )
+        stamp_after_first = (await self._flow_row(db, "flow_short")).errors_checked_at
+        assert stamp_after_first is not None
+
+        summary = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_short")],
+            flows=[flow],
+            summary_by_flow={"flow_short": {"exp_short": 3}},
+            errors_by_step={("flow_short", "exp_short"): [_raw_error(celigo_id="err_new")]},
+        )
+
+        assert summary.steps_with_inconsistent_errors == 1
+        assert summary.errors_snapshotted == 1, "what arrived is still recorded"
+        assert summary.flows_errors_unverified == 1
+        rows = (
+            (
+                await db.execute(
+                    select(CeligoFlowError).where(
+                        CeligoFlowError.flow_id == (await self._flow_row(db, "flow_short")).id
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        by_id = {r.celigo_id: r for r in rows}
+        assert set(by_id) == {"err_old_1", "err_old_2", "err_new"}
+        assert by_id["err_old_1"].resolved_at is None and by_id["err_old_2"].resolved_at is None, (
+            "a short listing must not resolve the errors it failed to bring back"
+        )
+        assert (await self._flow_row(db, "flow_short")).errors_checked_at == stamp_after_first
+
+    async def test_a_flow_with_no_step_rows_still_has_its_summary_consulted(self, db: AsyncSession, monkeypatch):
+        """A flow whose processors Phase B could not turn into steps (no
+        export/import id on any of them) must not slip past Phase E: its
+        summary is fetched; errors reported there leave it unverified, and a
+        clean summary verifies it like any other flow."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+        stepless = {
+            "_id": "flow_stepless",
+            "name": "No usable steps",
+            "_integrationId": "int_sl",
+            "disabled": False,
+            "schedule": None,
+            "pageProcessors": [{"type": "noop"}],  # neither _exportId nor _importId -> skipped by Phase B
+        }
+
+        summary_calls: list = []
+        summary = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_sl")],
+            flows=[stepless],
+            summary_by_flow={"flow_stepless": {"exp_ghost": 2}},
+            summary_calls=summary_calls,
+        )
+        assert summary_calls == ["flow_stepless"], "stepless is not summary-less"
+        assert summary.summary_errors_without_step == 1
+        assert summary.flows_errors_unverified == 1
+        assert (await self._flow_row(db, "flow_stepless")).errors_checked_at is None
+
+        clean = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_sl")],
+            flows=[stepless],
+            summary_by_flow={"flow_stepless": {}},
+        )
+        assert clean.flows_errors_checked == 1
+        assert (await self._flow_row(db, "flow_stepless")).errors_checked_at is not None, (
+            "Celigo's summary listed nothing open for it -- that IS a verified zero"
+        )
+
     async def test_nonzero_summary_with_an_empty_listing_resolves_nothing_and_does_not_advance_the_stamp(
         self, db: AsyncSession, monkeypatch
     ):

@@ -62,7 +62,7 @@ step", extended by fix round 1 -- see below):
   Phase E (REWRITTEN, VERIFIED LIVE 2026-09-03 -- read this before the
     "WHAT THIS DELIBERATELY STILL DOES NOT DO" section below, which used to
     describe a `_stepId` design this phase no longer has): for every FLOW
-    that had steps collected during Phase B, in first-seen flow order, its
+    Phase B upserted -- with or without step rows -- in that order, its
     per-flow error SUMMARY is fetched first (`client.list_flow_error_
     summary` -- `GET /v1/flows/{flow_id}/errors`, no query params, returns
     `{"flowErrors": [{"_expOrImpId", "numError"}, ...]}`, one entry per
@@ -724,6 +724,12 @@ async def sync_flow_map_for_connection(
 
         # Phase B -- flows, and each flow's own steps.
         pending_step_refs: list[tuple[str, str, _StepRef]] = []
+        # Every production flow Phase B upserted, in order, WITH OR WITHOUT
+        # steps -- Phase E consults each one's error summary. A flow whose
+        # processors carried no export/import id has no step rows, but
+        # Celigo can still report open errors on it (independent-model
+        # review 2026-09-03), so "no steps" must not mean "never checked".
+        synced_flows: dict[str, uuid.UUID] = {}
         # Populated across Phases B/C/D, consumed in Phase D:
         #   script_ids: script's own celigo_id -> local id (Phase C).
         #   export_import_flow_steps: an export/import's celigo_id -> {flow_local_id: first
@@ -773,6 +779,7 @@ async def sync_flow_map_for_connection(
                 sanitized=flow,
             )
             summary.flows_synced += 1
+            synced_flows[flow_celigo_id] = flow_local_id
 
             if flow_changes:
                 await _record_drift(
@@ -969,7 +976,8 @@ async def sync_flow_map_for_connection(
         for flow_celigo_id, step_celigo_id, step_ref in pending_step_refs:
             steps_by_flow[flow_celigo_id].append((step_celigo_id, step_ref))
 
-        for flow_celigo_id, steps in steps_by_flow.items():
+        for flow_celigo_id, flow_local_id in synced_flows.items():
+            steps = steps_by_flow.get(flow_celigo_id, [])
             # A `CeligoError` here (auth rejected, an unparseable body, a
             # 5xx) propagates and aborts the whole run -- exactly like
             # Phases A-D. Only ONE step's own listing
@@ -977,7 +985,6 @@ async def sync_flow_map_for_connection(
             # just that step; a failure to even get the flow's summary says
             # nothing about any one step in particular.
             counts = await list_flow_error_summary(flow_celigo_id, token=token, region=region, client=http)
-            flow_local_id = steps[0][1].flow_id
             # Every step must reach a verdict this run for the flow's
             # errors_checked_at to advance -- see `SyncSummary.
             # flows_errors_unverified` for the three ways one fails to.
@@ -1046,12 +1053,16 @@ async def sync_flow_map_for_connection(
                     raw_errors_is_complete = False
                     summary.steps_with_incomplete_errors += 1
                     flow_verified = False
-                if raw_errors_is_complete and not raw_errors:
-                    # The summary said "> 0", the per-resource listing said
-                    # "none" (a 204, or a body without `errors[]`). The
-                    # endpoints disagree, and an empty listing is exactly
-                    # what the pre-2026-09-03 bug produced -- treat it as
-                    # incomplete so nothing previously open gets resolved.
+                if raw_errors_is_complete and len(raw_errors) < counts[step_celigo_id]:
+                    # The summary said N, the per-resource listing brought
+                    # back FEWER than N (an empty body / 204 is the extreme
+                    # case -- exactly what the pre-2026-09-03 bug produced;
+                    # a short page with no nextPageURL is the subtler one).
+                    # The endpoints disagree, so the listing is treated as
+                    # incomplete: what arrived is recorded, nothing
+                    # previously open is resolved from it, and the flow is
+                    # not stamped. MORE than N is fine -- the summary is
+                    # simply older than the listing.
                     raw_errors_is_complete = False
                     summary.steps_with_inconsistent_errors += 1
                     flow_verified = False
