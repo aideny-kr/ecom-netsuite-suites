@@ -321,6 +321,11 @@ function makeDetail(overrides: Partial<CeligoFlowDetail> = {}): CeligoFlowDetail
     last_error_at: null,
     error_count: 0,
     signature_count: 0,
+    // Same moment as SYNCED_AT (21 min before NOW): the header's ErrorPill
+    // now reads its "checked N ago" off THIS field, not `lastSyncedAt` -- see
+    // the honesty brief. A test needing the "not checked yet" pill overrides
+    // it to `null`.
+    errors_checked_at: SYNCED_AT,
     ...overrides,
   };
 }
@@ -336,6 +341,7 @@ function makeSibling(overrides: Partial<CeligoFlowSummary> = {}): CeligoFlowSumm
     last_executed_at: FLOW_LAST_RUN,
     error_count: 0,
     signature_count: 0,
+    errors_checked_at: null,
     step_count: 10,
     router_count: 2,
     branch_count: 3,
@@ -374,6 +380,7 @@ function makeIntegration(overrides: Partial<CeligoIntegration> = {}): CeligoInte
     no_run_count: 0,
     error_count: 0,
     signature_count: 0,
+    errors_checked_at: null,
     changes_last_24h: 0,
     last_run_at: null,
     writes: [],

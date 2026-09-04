@@ -81,6 +81,11 @@ function makeIntegration(overrides: Partial<CeligoIntegration> = {}): CeligoInte
     no_run_count: 0,
     error_count: 0,
     signature_count: 0,
+    // Same moment as SYNCED_AT (21 min before NOW): the tile/table
+    // ErrorPill now reads its "checked N ago" off THIS field, not
+    // `lastSyncedAt` -- see the honesty brief. A test needing the "not
+    // checked yet" pill overrides it to `null`.
+    errors_checked_at: SYNCED_AT,
     changes_last_24h: 0,
     last_run_at: "2026-09-02T18:06:00.000Z",
     writes: [

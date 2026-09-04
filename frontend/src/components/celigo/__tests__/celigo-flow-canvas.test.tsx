@@ -155,6 +155,7 @@ function makeDetail(overrides: Partial<CeligoFlowDetail> = {}): CeligoFlowDetail
     last_error_at: null,
     error_count: 0,
     signature_count: 0,
+    errors_checked_at: null,
     ...overrides,
   };
 }

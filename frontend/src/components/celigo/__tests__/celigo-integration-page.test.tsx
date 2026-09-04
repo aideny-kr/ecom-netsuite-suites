@@ -92,6 +92,11 @@ function makeIntegration(overrides: Partial<CeligoIntegration> = {}): CeligoInte
     no_run_count: 0,
     error_count: 0,
     signature_count: 0,
+    // Same moment as SYNCED_AT: the ErrorsTab's quiet-errors sentence now
+    // reads its "as of the last check" off THIS field (the integration
+    // summary's own value), not `lastSyncedAt` -- see the honesty brief. A
+    // test needing the "not checked yet" copy overrides it to `null`.
+    errors_checked_at: SYNCED_AT,
     changes_last_24h: 0,
     last_run_at: "2026-09-02T18:06:00.000Z",
     writes: [
@@ -119,6 +124,7 @@ function makeFlow(overrides: Partial<CeligoFlowSummary> = {}): CeligoFlowSummary
     last_executed_at: FLOW_LAST_RUN,
     error_count: 0,
     signature_count: 0,
+    errors_checked_at: null,
     step_count: 3,
     router_count: 0,
     branch_count: 0,

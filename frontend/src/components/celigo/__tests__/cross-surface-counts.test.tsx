@@ -140,6 +140,7 @@ const INTEGRATION: CeligoIntegration = {
   no_run_count: 0,
   error_count: 10,
   signature_count: 1,
+  errors_checked_at: SYNCED_AT,
   changes_last_24h: 0,
   last_run_at: FLOW_LAST_RUN,
   writes: [],
@@ -159,6 +160,7 @@ const FLOW_SUMMARY: CeligoFlowSummary = {
   last_executed_at: FLOW_LAST_RUN,
   error_count: 10,
   signature_count: 1,
+  errors_checked_at: SYNCED_AT,
   step_count: 1,
   router_count: 0,
   branch_count: 0,
@@ -189,6 +191,7 @@ const FLOW_DETAIL: CeligoFlowDetail = {
   last_error_at: FLOW_LAST_RUN,
   error_count: 10,
   signature_count: 1,
+  errors_checked_at: SYNCED_AT,
 };
 
 const FLOW_ERRORS: CeligoFlowErrors = {
