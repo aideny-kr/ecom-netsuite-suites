@@ -368,7 +368,7 @@ function ErrorsTab({
         <p className="text-[12px] text-muted-foreground">
           {flowErrorCount === 0
             ? "Open errors haven't been checked yet for this flow."
-            : `No open errors on this step. ${flowErrorCount} open elsewhere in this flow.`}
+            : `No open errors on this step. ${flowErrorCount} open elsewhere in this flow (not fully checked yet).`}
         </p>
       );
     }

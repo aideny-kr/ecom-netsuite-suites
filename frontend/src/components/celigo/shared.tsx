@@ -350,6 +350,10 @@ export function ErrorPill({
   return (
     <Pill tone="crit" dot="solid">
       {count} open · {sig} root cause{sig === 1 ? "" : "s"}
+      {/* Rows exist, so the count is real -- but without a completed check
+          behind it the figure may be short (a step whose listing
+          disagreed with Celigo's summary is left unstamped on purpose). */}
+      {!checkedAt && <span className="opacity-70"> · not fully checked</span>}
     </Pill>
   );
 }

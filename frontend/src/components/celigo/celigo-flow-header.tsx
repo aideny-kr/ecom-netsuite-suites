@@ -379,10 +379,12 @@ export function CeligoFlowHeader({
       )}
       {integrationNotice}
 
-      {/* "Focus canvas" collapses everything below the first row -- pills,
+      {/* "Focus canvas" collapses the facts below the first row -- pills,
           title and actions survive so the flow's own identity and status
           stay visible while the canvas gets the rest of the viewport
-          (finding: the diagram was only getting half the height). */}
+          (finding: the diagram was only getting half the height). The two
+          error notices above are deliberately NOT collapsed: a failed
+          request is something to act on, not a detail to tuck away. */}
       {!headerCollapsed && (
         <>
         <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11.5px] tabular-nums text-muted-foreground">

@@ -588,7 +588,9 @@ describe("the quiet errors sentence says 'not checked yet', never a dash, when e
       errorsCheckedAt: null,
     });
 
-    expect(container.textContent).toContain("No open errors on this step. 3 open elsewhere in this flow.");
+    expect(container.textContent).toContain(
+      "No open errors on this step. 3 open elsewhere in this flow (not fully checked yet).",
+    );
     expect(container.textContent).not.toContain("last sync, —");
     expect(container.textContent).not.toContain("as of the last check");
   });

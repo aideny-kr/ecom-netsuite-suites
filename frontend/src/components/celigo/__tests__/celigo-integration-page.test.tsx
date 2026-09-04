@@ -651,6 +651,9 @@ describe("Errors tab", () => {
   });
 
   it("lists only the flows with open errors, pill reading 'N open · M root cause(s)'", () => {
+    // The verdict "errors exist" comes from the integration row (same
+    // snapshot as errors_checked_at); the flows list only says WHERE.
+    mocks.integrations.mockReturnValue(resolved([makeIntegration({ error_count: 5, signature_count: 1 })]));
     setup([
       makeFlow({ id: "f1", name: "Errored Flow", error_count: 5, signature_count: 1 }),
       makeFlow({ id: "f2", name: "Clean Flow", error_count: 0 }),
@@ -679,6 +682,19 @@ describe("Errors tab", () => {
       screen.getByText("Open errors haven't been checked yet for every flow here; the next sync checks them."),
     ).toBeInTheDocument();
     expect(screen.queryByText(/reported 0/)).not.toBeInTheDocument();
+  });
+
+  it("never claims 'no open errors' from a flows list that lags the integration row's own count", () => {
+    // Independent-model review: the two queries are cached separately. The
+    // integration row (checked at T1, 5 open) can arrive a refetch before
+    // the per-flow rows do; an empty errored-flows list must not be read
+    // as a verified zero for that moment.
+    mocks.integrations.mockReturnValue(resolved([makeIntegration({ error_count: 5, signature_count: 2 })]));
+    setup([makeFlow({ id: "f1", name: "Stale Clean Flow", error_count: 0 })]);
+    expect(screen.queryByText(/No open errors/)).not.toBeInTheDocument();
+    expect(
+      screen.getByText("5 open errors across this integration; the flow list is still refreshing."),
+    ).toBeInTheDocument();
   });
 });
 

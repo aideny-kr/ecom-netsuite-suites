@@ -322,6 +322,13 @@ describe("CeligoFlowCanvas — bubbles, routers, lanes, edges", () => {
 });
 
 describe("CeligoFlowCanvas — fit/zoom", () => {
+  it("pins the fit floor at 40% (0.6 clipped the last rank of a chained-router flow in an ~800px pane)", () => {
+    // Deliberately a literal, not derived from the export: the other tests
+    // compute their expectations FROM FIT_FLOOR, so only this one would go
+    // red on a regression back to 0.6.
+    expect(FIT_FLOOR).toBe(0.4);
+  });
+
   it("starts fit-to-width, reading 'fit · NN%' from the mocked wrap clientWidth", () => {
     const detail = makeDetail();
     const layout = computeLayout(detail);

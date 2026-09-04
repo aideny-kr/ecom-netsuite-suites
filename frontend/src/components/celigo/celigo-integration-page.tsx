@@ -474,17 +474,32 @@ function ScriptsTab({ flows }: { flows: CeligoFlowSummary[] }): JSX.Element {
  * state below must not read as a verified all-clear. */
 function ErrorsTab({
   flows,
+  integrationErrorCount,
   errorsCheckedAt,
 }: {
   flows: CeligoFlowSummary[];
+  /** The integration row's own open-error count -- the SAME snapshot as
+   * `errorsCheckedAt`. The flows list comes from a separate query that can
+   * lag a sync by one refetch, so the "no open errors" verdict is taken
+   * from this number, never from the list being empty. */
+  integrationErrorCount: number;
   errorsCheckedAt: string | null;
 }): JSX.Element {
-  if (flows.length === 0) {
+  if (integrationErrorCount === 0) {
     return (
       <p className="text-[13px] text-muted-foreground">
         {errorsCheckedAt
           ? `No open errors as of the last check, ${formatRelativeTime(errorsCheckedAt)}.`
           : "Open errors haven't been checked yet for every flow here; the next sync checks them."}
+      </p>
+    );
+  }
+  if (flows.length === 0) {
+    // The integration row already knows errors exist; the per-flow list
+    // has not caught up with that sync yet. Say so instead of "none".
+    return (
+      <p className="text-[13px] text-muted-foreground">
+        {`${integrationErrorCount} open error${integrationErrorCount === 1 ? "" : "s"} across this integration; the flow list is still refreshing.`}
       </p>
     );
   }
@@ -718,7 +733,11 @@ export function CeligoIntegrationPage(): JSX.Element {
             ) : flowsBlocked ? (
               <ErrorNotice message="Couldn't load flows." onRetry={retryFlowsAndSync} />
             ) : (
-              <ErrorsTab flows={errorFlows} errorsCheckedAt={integration.errors_checked_at} />
+              <ErrorsTab
+                flows={errorFlows}
+                integrationErrorCount={integration.error_count}
+                errorsCheckedAt={integration.errors_checked_at}
+              />
             )}
           </TabsContent>
           <TabsContent value="changes">
