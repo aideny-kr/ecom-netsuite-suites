@@ -59,14 +59,41 @@ step", extended by fix round 1 -- see below):
     which NetSuite record types" from `netsuite_da.recordType`/`operation`
     (imports) and `netsuite.restlet.recordType`/`searchId` (exports), fields
     this phase already fetches but, before this round, threw away.
-  Phase E: for every step collected during Phase B, in that same order, its
-    open errors (`client.list_flow_errors_for_step`) are fetched and
-    snapshotted (`errors.upsert_errors`). This is deliberately its OWN pass,
-    after every step already exists as a real `celigo_flow_steps` row --
-    `upsert_errors` needs a real `step.id`/`step.flow_id` (errors.py's own
-    docstring; Task 6's report flagged this as never exercised end-to-end
-    with a real orchestrator -- this module is the first real consumer, see
-    `_StepRef` below for how).
+  Phase E (REWRITTEN, VERIFIED LIVE 2026-09-03 -- read this before the
+    "WHAT THIS DELIBERATELY STILL DOES NOT DO" section below, which used to
+    describe a `_stepId` design this phase no longer has): for every FLOW
+    that had steps collected during Phase B, in first-seen flow order, its
+    per-flow error SUMMARY is fetched first (`client.list_flow_error_
+    summary` -- `GET /v1/flows/{flow_id}/errors`, no query params, returns
+    `{"flowErrors": [{"_expOrImpId", "numError"}, ...]}`, one entry per
+    export/import in the flow). Each of that flow's steps, in step order, is
+    then handled from the summary alone:
+      * absent from the summary -- neither fetched nor recorded
+        (`steps_not_in_error_summary`). Absence is not evidence of anything.
+      * a verified `numError == 0` -- resolved via `errors.upsert_errors(
+        raw_errors=[], raw_errors_is_complete=True)` WITHOUT a per-step
+        fetch (`steps_skipped_zero_errors`).
+      * a non-zero count -- only NOW is `client.list_flow_errors_for_step`
+        (`GET /v1/flows/{flow_id}/{resourceId}/errors`) called for that one
+        step's actual open errors, snapshotted the same way this phase
+        always has (`errors.upsert_errors`; `upsert_errors` needs a real
+        `step.id`/`step.flow_id`, which is why this is its own pass after
+        every step already exists as a real `celigo_flow_steps` row -- see
+        `_StepRef` below for how).
+    After a flow's steps are all handled, `repository.mark_flow_errors_
+    checked` stamps that flow's `errors_checked_at` cursor -- the run
+    consulted its summary, whether or not any step in it had a non-zero
+    count. THE BUG THIS REPLACED: the pre-2026-09-03 version of this phase
+    called `list_flow_errors_for_step` for every step UNCONDITIONALLY, with
+    a `?_stepId=<step's own celigo_id>` query param on `GET /v1/flows/
+    {flow_id}/errors` -- an endpoint that, verified live, IGNORES `_stepId`
+    entirely and returns the summary shape regardless. Reading
+    `body["errors"]` off a summary body (which has no such key) produced
+    `[]` every time, and `upsert_errors(raw_errors=[],
+    raw_errors_is_complete=True)` then resolved every previously-open error
+    as if Celigo had reported none. Every run "succeeded", the freshness
+    cursor advanced, and not one real error ever landed -- 112 open errors
+    across 16 production flows, invisible on staging, is what this fixes.
   Purge marking runs last, once per connection, independent of any single
   step's sync (`repository.mark_flow_errors_purged`'s own docstring).
 
@@ -83,13 +110,12 @@ failure must not advance it"), unlike those two services' documented
 graceful-degradation contracts.
 
 WHAT THIS DELIBERATELY STILL DOES NOT DO:
-  * `_stepId` (the query param `client.list_flow_errors_for_step` sends) is
-    populated with a step's OWN `celigo_id` -- the referenced export/import
-    id, the only Celigo-native id a step has anywhere in this schema. Task
-    3's own report flags `_stepId` as "inferred from the MCP tool's schema,
-    never confirmed against a raw REST call" -- this module inherits that
-    same unverified assumption, not a new one; see its report for the
-    reasoning that produced it.
+  * `list_flow_error_summary`'s counts are read as `int(numError)` and used
+    only to decide "fetch / resolve-as-zero / leave alone" for each step --
+    this module never stores a summary count itself, and never treats it as
+    a substitute for `celigo_flow_errors`' own rows (the audit trail is still
+    built exclusively from `list_flow_errors_for_step`'s per-resource
+    fetches, or from a verified zero).
 """
 
 from __future__ import annotations
@@ -110,6 +136,7 @@ from app.services.celigo.client import (
     CeligoIncompleteListingError,
     CeligoNotFoundError,
     get_resource,
+    list_flow_error_summary,
     list_flow_errors_for_step,
     list_resource,
 )
@@ -120,6 +147,7 @@ from app.services.celigo.repository import (
     backfill_flow_step_reference_info,
     extract_flow_steps,
     insert_config_change,
+    mark_flow_errors_checked,
     mark_flow_errors_purged,
     purge_sandbox_rows,
     upsert_flow,
@@ -178,6 +206,21 @@ class SyncSummary:
     # how a partial run stays visible now that one truncated step no longer
     # aborts the whole sync.
     steps_with_incomplete_errors: int = 0
+    # VERIFIED LIVE 2026-09-03: Phase E now gates on each flow's error
+    # SUMMARY (`list_flow_error_summary`) before deciding what to do with a
+    # step, rather than fetching every step unconditionally. These three
+    # counters say what the gate decided:
+    #   flows_errors_checked -- flows whose summary was fetched and whose
+    #     errors_checked_at cursor was therefore stamped this run.
+    steps_skipped_zero_errors: int = 0
+    # steps_skipped_zero_errors -- the summary reported a real ZERO for this
+    #   step: resolved via upsert_errors(raw_errors=[]) WITHOUT a per-step
+    #   fetch (a verified zero, not an absence).
+    steps_not_in_error_summary: int = 0
+    # steps_not_in_error_summary -- this step's id never appeared in its
+    #   flow's summary at all: neither fetched nor resolved, since absence
+    #   from a summary is not evidence anything is open OR resolved.
+    flows_errors_checked: int = 0
     config_changes_recorded: int = 0
     errors_purged: int = 0
 
@@ -886,42 +929,97 @@ async def sync_flow_map_for_connection(
                 summary.flow_steps_backfilled += rows_backfilled
                 summary.attachments_synced += attached
 
-        # Phase E -- errors, per step, in the order steps were synced. Only
-        # reachable once every step above has a REAL celigo_flow_steps row.
+        # Phase E -- errors, per FLOW (VERIFIED LIVE 2026-09-03; see module
+        # docstring's Phase E entry for the full story of why this replaced
+        # an unconditional per-step fetch). Steps are grouped by their flow,
+        # preserving first-seen flow order and, within a flow, step order --
+        # `pending_step_refs` was already built in exactly that order by
+        # Phase B, so a single pass over it is enough.
+        steps_by_flow: dict[str, list[tuple[str, _StepRef]]] = defaultdict(list)
         for flow_celigo_id, step_celigo_id, step_ref in pending_step_refs:
-            # FIX ROUND 9 (re-review R1b): truncation is contained to the ONE
-            # step it concerns. Before this, a single step exceeding
-            # `_MAX_ERROR_PAGES` aborted the entire connection sync (phases
-            # A-E) on every run until a human intervened -- and the per-step
-            # escape hatch built for exactly this case had no caller. Only
-            # `CeligoIncompleteListingError` is caught, never the base
-            # `CeligoError`: a rejected token, an unparseable body or a 5xx
-            # says nothing about one step in particular and must still abort.
-            try:
-                raw_errors = await list_flow_errors_for_step(
-                    flow_celigo_id, step_celigo_id, token=token, region=region, client=http
+            steps_by_flow[flow_celigo_id].append((step_celigo_id, step_ref))
+
+        for flow_celigo_id, steps in steps_by_flow.items():
+            # A `CeligoError` here (auth rejected, an unparseable body, a
+            # 5xx) propagates and aborts the whole run -- exactly like
+            # Phases A-D. Only ONE step's own listing
+            # (`CeligoIncompleteListingError`, below) is ever contained to
+            # just that step; a failure to even get the flow's summary says
+            # nothing about any one step in particular.
+            counts = await list_flow_error_summary(flow_celigo_id, token=token, region=region, client=http)
+            flow_local_id = steps[0][1].flow_id
+
+            for step_celigo_id, step_ref in steps:
+                if step_celigo_id not in counts:
+                    # This step's id never appeared in its flow's summary at
+                    # all -- absence is not evidence anything resolved (or
+                    # that anything is open), so nothing is fetched and
+                    # nothing is recorded either way.
+                    summary.steps_not_in_error_summary += 1
+                    continue
+
+                if counts[step_celigo_id] == 0:
+                    # A VERIFIED zero from the summary -- resolve any
+                    # previously-open error for this step WITHOUT a per-step
+                    # fetch. `raw_errors_is_complete=True` is correct here:
+                    # the summary IS this step's whole current listing, it
+                    # just happens to be empty.
+                    summary.steps_skipped_zero_errors += 1
+                    summary.steps_with_errors_checked += 1
+                    await upsert_errors(
+                        db,
+                        tenant_id=tenant_id,
+                        connection_id=connection_id,
+                        step=step_ref,
+                        raw_errors=[],
+                        raw_errors_is_complete=True,
+                    )
+                    continue
+
+                # Non-zero -- fetch this step's actual open errors. FIX ROUND
+                # 9 (re-review R1b): truncation is contained to the ONE step
+                # it concerns. Before this, a single step exceeding
+                # `_MAX_ERROR_PAGES` aborted the entire connection sync
+                # (phases A-E) on every run until a human intervened -- and
+                # the per-step escape hatch built for exactly this case had
+                # no caller. Only `CeligoIncompleteListingError` is caught,
+                # never the base `CeligoError`: a rejected token, an
+                # unparseable body or a 5xx says nothing about one step in
+                # particular and must still abort.
+                try:
+                    raw_errors = await list_flow_errors_for_step(
+                        flow_celigo_id, step_celigo_id, token=token, region=region, client=http
+                    )
+                    # The fetcher raises rather than truncate, so a list that
+                    # came back at all is this step's WHOLE current listing.
+                    raw_errors_is_complete = True
+                except CeligoIncompleteListingError as exc:
+                    # Record what did arrive; resolve nothing. Absence from
+                    # an admittedly-partial listing is not evidence an error
+                    # is gone.
+                    raw_errors = exc.partial_errors
+                    raw_errors_is_complete = False
+                    summary.steps_with_incomplete_errors += 1
+                summary.steps_with_errors_checked += 1
+                summary.errors_snapshotted += len(raw_errors)
+                await upsert_errors(
+                    db,
+                    tenant_id=tenant_id,
+                    connection_id=connection_id,
+                    step=step_ref,
+                    raw_errors=raw_errors,
+                    # Stated explicitly because `upsert_errors` has no
+                    # default for this (FIX ROUND 9) -- see its docstring.
+                    raw_errors_is_complete=raw_errors_is_complete,
                 )
-                # The fetcher raises rather than truncate, so a list that came
-                # back at all is this step's WHOLE current listing.
-                raw_errors_is_complete = True
-            except CeligoIncompleteListingError as exc:
-                # Record what did arrive; resolve nothing. Absence from an
-                # admittedly-partial listing is not evidence an error is gone.
-                raw_errors = exc.partial_errors
-                raw_errors_is_complete = False
-                summary.steps_with_incomplete_errors += 1
-            summary.steps_with_errors_checked += 1
-            summary.errors_snapshotted += len(raw_errors)
-            await upsert_errors(
-                db,
-                tenant_id=tenant_id,
-                connection_id=connection_id,
-                step=step_ref,
-                raw_errors=raw_errors,
-                # Stated explicitly because `upsert_errors` has no default for
-                # this (FIX ROUND 9) -- see its docstring.
-                raw_errors_is_complete=raw_errors_is_complete,
+
+            # This flow's summary was consulted this run (whether or not any
+            # of its steps had a non-zero count) -- stamp the freshness
+            # cursor the data-status banner reads.
+            await mark_flow_errors_checked(
+                db, tenant_id=tenant_id, flow_id=flow_local_id, checked_at=datetime.now(timezone.utc)
             )
+            summary.flows_errors_checked += 1
 
         # Purge marking -- last, once per connection, independent of any
         # single step's sync.
