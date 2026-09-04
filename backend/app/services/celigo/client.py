@@ -530,6 +530,13 @@ async def list_flow_error_summary(
         num_error = entry.get("numError")
         if not isinstance(exp_or_imp_id, str) or not exp_or_imp_id:
             continue
+        # A count arrives as an int live; a string of digits is still an
+        # unambiguous count and is read as one (independent-model review
+        # 2026-09-03: dropping "7" would make Phase E treat the resource as
+        # absent). null, booleans and anything else are dropped -- and the
+        # caller leaves such a flow UNVERIFIED rather than stamping it.
+        if isinstance(num_error, str) and num_error.strip().isdigit():
+            num_error = int(num_error.strip())
         if not isinstance(num_error, (int, float)) or isinstance(num_error, bool):
             continue
         counts[exp_or_imp_id] = int(num_error)

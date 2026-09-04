@@ -754,11 +754,18 @@ class TestFlowErrorSummary:
                     "flowErrors": [
                         {"_expOrImpId": "exp_1", "numError": 0},
                         {"_expOrImpId": "imp_1", "numError": 7},
-                        # Malformed -- missing _expOrImpId, or a non-numeric
-                        # numError, or not even a dict. All three are skipped,
-                        # never given a fabricated key or a guessed count.
+                        # A count that arrived as a string of digits is still
+                        # an unambiguous count (independent-model review:
+                        # dropping it would read as "absent" downstream).
+                        {"_expOrImpId": "imp_str", "numError": "4"},
+                        # Malformed -- missing _expOrImpId, a non-numeric or
+                        # null numError, a boolean, or not even a dict. All
+                        # are skipped, never given a fabricated key or a
+                        # guessed count.
                         {"numError": 3},
                         {"_expOrImpId": "bad_count", "numError": "not-a-number"},
+                        {"_expOrImpId": "null_count", "numError": None},
+                        {"_expOrImpId": "bool_count", "numError": True},
                         "not-a-dict",
                     ]
                 },
@@ -767,7 +774,7 @@ class TestFlowErrorSummary:
         async with _json_client(handler) as c:
             counts = await list_flow_error_summary("flow1", token="tok", client=c)
 
-        assert counts == {"exp_1": 0, "imp_1": 7}
+        assert counts == {"exp_1": 0, "imp_1": 7, "imp_str": 4}
 
     @pytest.mark.asyncio
     async def test_request_has_no_query_params(self):

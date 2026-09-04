@@ -258,17 +258,26 @@ def _fake_list_flow_error_summary(
     errors_by_step: dict[tuple[str, str], list[dict]] | None = None,
     summary_by_flow: dict[str, dict[str, int]] | None = None,
     calls: list | None = None,
+    flows: list[dict] | None = None,
 ):
     """Fake for `client.list_flow_error_summary` -- the per-flow gate Phase E
-    now reads before deciding whether a step gets fetched at all. By default,
-    built straight from *errors_by_step* (`numError = len(list)` per
-    `(flow, step)`), the same fixture every test already builds for the
-    per-step fetcher -- so a test that never asks about gating (most of this
-    file's tests) is unaffected. *summary_by_flow* OVERRIDES the default
-    entirely for a named flow (including to `{}`, meaning "this flow's
-    summary lists nothing" -- every one of its steps is then absent, not
-    zero), for the tests that need to prove the gating itself."""
+    now reads before deciding whether a step gets fetched at all. By default
+    it mirrors the live shape (10 entries for a 10-step flow, zeros
+    included): EVERY step of every raw flow in *flows* is listed with
+    `numError = 0`, then *errors_by_step* overlays `len(list)` per
+    `(flow, step)` -- so a test that never asks about gating (most of this
+    file's tests) sees every flow fully verified, as a real sync would.
+    *summary_by_flow* OVERRIDES the default entirely for a named flow
+    (including to `{}`, meaning "this flow's summary lists nothing" -- every
+    one of its steps is then absent, not zero), for the tests that need to
+    prove the gating itself."""
     default_counts: dict[str, dict[str, int]] = {}
+    for raw in flows or []:
+        flow_id = raw.get("_id")
+        if not flow_id:
+            continue
+        for step in extract_flow_steps(sanitize("flow", raw)):
+            default_counts.setdefault(flow_id, {}).setdefault(step.celigo_id, 0)
     for (flow_id, step_id), errs in (errors_by_step or {}).items():
         default_counts.setdefault(flow_id, {})[step_id] = len(errs)
     overrides = summary_by_flow or {}
@@ -322,7 +331,7 @@ async def _run_sync(
     )
     monkeypatch.setattr(
         "app.services.celigo.sync_service.list_flow_error_summary",
-        _fake_list_flow_error_summary(errors_by_step, summary_by_flow, summary_calls),
+        _fake_list_flow_error_summary(errors_by_step, summary_by_flow, summary_calls, flows=flows),
     )
     return await sync_flow_map_for_connection(
         db, tenant_id=tenant_id, connection_id=connection_id, token="unit-test-token", region="us"
@@ -359,22 +368,19 @@ class TestSyncSequencingAndPersistence:
         assert summary.flows_synced == 2
         assert summary.steps_synced == 2
         assert summary.scripts_synced == 1
-        # Only flow_1/exp_1 has an entry in the fixture's error summary
-        # (built from `errors_by_step`); flow_2/exp_2 has none, so it is
-        # ABSENT from its flow's summary, not zero -- Phase E's gating
-        # (verified live 2026-09-03) counts that as `steps_not_in_error_
-        # summary`, never fetches it, and never resolves anything from its
-        # absence. See TestPhaseEErrorSummaryGating for that behavior
-        # exercised directly.
-        assert summary.steps_with_errors_checked == 1
-        assert summary.steps_not_in_error_summary == 1
+        # The fixture's error summary mirrors the live shape (every step
+        # listed, zeros included): flow_1/exp_1 reports 1 and is fetched;
+        # flow_2/exp_2 reports a verified 0 and is resolved-as-zero without
+        # a fetch. Both steps reached a verdict, so both flows are stamped.
+        # See TestPhaseEErrorSummaryGating / TestPhaseEHonestyGuards for the
+        # absent / inconsistent / unowned cases exercised directly.
+        assert summary.steps_with_errors_checked == 2
+        assert summary.steps_skipped_zero_errors == 1
+        assert summary.steps_not_in_error_summary == 0
         assert summary.errors_snapshotted == 1
         assert summary.flows_skipped_no_integration == 0
-        # Every flow with steps gets its `errors_checked_at` cursor stamped,
-        # independent of whether its steps' counts were even present in the
-        # summary -- "checked" means "we asked Celigo's summary for this
-        # flow", not "every step had errors to fetch".
         assert summary.flows_errors_checked == 2
+        assert summary.flows_errors_unverified == 0
 
         integ_count = (
             await db.execute(
@@ -1989,6 +1995,181 @@ class TestPhaseEErrorSummaryGating:
         assert summary.steps_with_errors_checked == 0
         row = (await db.execute(select(CeligoFlowError).where(CeligoFlowError.celigo_id == "err_a"))).scalar_one()
         assert row.resolved_at is None
+
+
+class TestPhaseEHonestyGuards:
+    """Independent-model (codex) review of the 2026-09-03 rewrite, three
+    findings: (1) a NON-ZERO summary whose per-resource listing came back
+    empty must not resolve anything -- the two endpoints disagree, and an
+    empty `errors[]` (or a 204) is exactly what the OLD bug looked like;
+    (2) `errors_checked_at` must only advance when EVERY step of the flow
+    reached a verdict this run -- a flow with a step absent from its summary
+    is not a verified zero; (3) two steps of one flow referencing the same
+    export/import must fetch that resource once and keep the first step as
+    the errors' owner, never re-parenting on each duplicate."""
+
+    @staticmethod
+    async def _flow_row(db: AsyncSession, celigo_id: str) -> CeligoFlow:
+        return (await db.execute(select(CeligoFlow).where(CeligoFlow.celigo_id == celigo_id))).scalar_one()
+
+    async def test_nonzero_summary_with_an_empty_listing_resolves_nothing_and_does_not_advance_the_stamp(
+        self, db: AsyncSession, monkeypatch
+    ):
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+        flow = _raw_flow("flow_i", integration_id="int_i", export_id="exp_i")
+
+        first = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_i")],
+            flows=[flow],
+            errors_by_step={("flow_i", "exp_i"): [_raw_error(celigo_id="err_i")]},
+        )
+        assert first.flows_errors_checked == 1
+        stamp_after_first = (await self._flow_row(db, "flow_i")).errors_checked_at
+        assert stamp_after_first is not None
+
+        # Sync 2: the summary still says 3 open, but the per-resource listing
+        # comes back EMPTY (a 204, a body without `errors[]`). That is the
+        # shape the original bug produced -- it must never resolve err_i.
+        error_calls: list = []
+        second = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_i")],
+            flows=[flow],
+            summary_by_flow={"flow_i": {"exp_i": 3}},
+            errors_by_step={},  # the fake returns [] for a step with no entry
+            error_calls=error_calls,
+        )
+
+        assert error_calls == [("flow_i", "exp_i")]
+        assert second.steps_with_inconsistent_errors == 1
+        assert second.flows_errors_checked == 0
+        assert second.flows_errors_unverified == 1
+        row = (await db.execute(select(CeligoFlowError).where(CeligoFlowError.celigo_id == "err_i"))).scalar_one()
+        assert row.resolved_at is None, "an empty listing behind a non-zero summary is a disagreement, not a resolution"
+        assert (await self._flow_row(db, "flow_i")).errors_checked_at == stamp_after_first, (
+            "the stamp means 'every step verified as of'; an unverified run must not advance it"
+        )
+
+    async def test_a_flow_with_a_step_absent_from_its_summary_is_never_stamped(self, db: AsyncSession, monkeypatch):
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        summary = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_u")],
+            flows=[_raw_flow("flow_u", integration_id="int_u", export_id="exp_u")],
+            summary_by_flow={"flow_u": {}},
+        )
+
+        assert summary.steps_not_in_error_summary == 1
+        assert summary.flows_errors_checked == 0
+        assert summary.flows_errors_unverified == 1
+        assert (await self._flow_row(db, "flow_u")).errors_checked_at is None, (
+            "a step with no verdict leaves the flow unverified: NULL renders as 'errors not checked yet', never a green zero"
+        )
+
+    async def test_summary_errors_on_a_resource_with_no_local_step_leave_the_flow_unverified(
+        self, db: AsyncSession, monkeypatch
+    ):
+        """Celigo reports 5 open errors on a resource this sync has NO step
+        row for (Phase B skipped or never saw it). Nothing can be attached,
+        but the flow must not be stamped: its local zero would then render
+        as a verified zero while Celigo shows five."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+
+        error_calls: list = []
+        summary = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_g")],
+            flows=[_raw_flow("flow_g", integration_id="int_g", export_id="exp_g")],
+            summary_by_flow={"flow_g": {"exp_g": 0, "exp_ghost": 5}},
+            error_calls=error_calls,
+        )
+
+        assert error_calls == [], "no local step means nothing to fetch for"
+        assert summary.steps_skipped_zero_errors == 1
+        assert summary.summary_errors_without_step == 1
+        assert summary.flows_errors_checked == 0
+        assert summary.flows_errors_unverified == 1
+        assert (await self._flow_row(db, "flow_g")).errors_checked_at is None
+
+    async def test_two_steps_sharing_one_resource_fetch_it_once_and_keep_the_first_owner(
+        self, db: AsyncSession, monkeypatch
+    ):
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+        # Two router branches referencing ONE import -- Celigo allows it, and
+        # `uq_celigo_flow_steps_identity` includes `branch_key`, so both
+        # become real steps that share a celigo_id.
+        flow = {
+            "_id": "flow_s",
+            "name": "Shared resource",
+            "_integrationId": "int_s",
+            "disabled": False,
+            "schedule": None,
+            "pageGenerators": [{"_exportId": "exp_src"}],
+            "routers": [
+                {
+                    "id": "r1",
+                    "name": "",
+                    "branches": [
+                        {"branchId": "b1", "name": "A", "pageProcessors": [{"_importId": "imp_shared"}]},
+                        {"branchId": "b2", "name": "B", "pageProcessors": [{"_importId": "imp_shared"}]},
+                    ],
+                }
+            ],
+        }
+
+        error_calls: list = []
+        summary = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_s")],
+            flows=[flow],
+            summary_by_flow={"flow_s": {"exp_src": 0, "imp_shared": 1}},
+            errors_by_step={("flow_s", "imp_shared"): [_raw_error(celigo_id="err_s")]},
+            error_calls=error_calls,
+        )
+
+        assert error_calls == [("flow_s", "imp_shared")], "one resource, one fetch"
+        assert summary.steps_sharing_resource == 1
+        assert summary.errors_snapshotted == 1
+        assert summary.flows_errors_checked == 1
+        steps = (
+            (
+                await db.execute(
+                    select(CeligoFlowStep)
+                    .where(CeligoFlowStep.flow_id == (await self._flow_row(db, "flow_s")).id)
+                    .order_by(CeligoFlowStep.sequence)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert len(steps) == 3, "source + one import step per branch"
+        sharing = [s for s in steps if s.celigo_id == "imp_shared"]
+        assert len(sharing) == 2
+        row = (await db.execute(select(CeligoFlowError).where(CeligoFlowError.celigo_id == "err_s"))).scalar_one()
+        assert row.flow_step_id == sharing[0].id, (
+            "the first step referencing the resource owns its errors, deterministically"
+        )
 
 
 class TestFlowErrorsCheckedAtCursor:
