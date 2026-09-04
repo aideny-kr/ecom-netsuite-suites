@@ -188,6 +188,12 @@ class CeligoIntegrationOut(BaseModel):
     writes: list[CeligoRecordWriteOut]
     adaptor_families: list[str]
     flow_schedules: list[CeligoFlowScheduleOut]
+    errors_checked_at: datetime | None
+    """The oldest check among this integration's flows (migration 098,
+    `MIN(celigo_flows.errors_checked_at)`); NULL means at least one flow has
+    never been checked (or the integration has no flows at all), so a zero
+    open-error count anywhere in this response is not verified until this is
+    set."""
 
 
 class CeligoRecordWriteOut(BaseModel):
@@ -246,6 +252,10 @@ class CeligoFlowSummaryOut(BaseModel):
     diverged_family_count: int
     writes: list[CeligoRecordWriteOut]
     celigo_last_modified: datetime | None
+    errors_checked_at: datetime | None
+    """When this flow's error summary was last consulted (migration 098);
+    NULL = never checked with the correct endpoint, so a zero here is not a
+    verified zero."""
 
 
 class CeligoAttachmentOut(BaseModel):
@@ -364,6 +374,10 @@ class CeligoFlowDetailOut(BaseModel):
     # (see `get_flow_detail`'s second, non-grouped query).
     error_count: int
     signature_count: int
+    errors_checked_at: datetime | None
+    """When this run last obtained Celigo's per-flow error summary for this
+    flow (migration 098); NULL = never checked with the correct endpoint, so
+    `error_count`/`celigo_open_error_count` being 0 is not a verified zero."""
 
 
 class CeligoScriptAttachmentSiteOut(BaseModel):
@@ -806,6 +820,25 @@ async def list_integrations(
     ).all()
     changes_by_integration = {row.integration_id: row.changes for row in change_rows}
 
+    # errors_checked_at rollup (migration 098): MIN across the integration's
+    # flows, NULL if any of them is NULL -- `bool_or(... IS NULL)` decides
+    # that in the same grouped query rather than a second Python pass, same
+    # discipline as every other aggregate above.
+    errors_checked_rows = (
+        await db.execute(
+            select(
+                CeligoFlow.integration_id,
+                func.min(CeligoFlow.errors_checked_at).label("min_checked_at"),
+                func.bool_or(CeligoFlow.errors_checked_at.is_(None)).label("any_unchecked"),
+            )
+            .where(CeligoFlow.tenant_id == user.tenant_id, CeligoFlow.integration_id.in_(integration_ids))
+            .group_by(CeligoFlow.integration_id)
+        )
+    ).all()
+    errors_checked_by_integration: dict[uuid.UUID, datetime | None] = {
+        row.integration_id: None if row.any_unchecked else row.min_checked_at for row in errors_checked_rows
+    }
+
     out: list[CeligoIntegrationOut] = []
     for i in integrations:
         bucket = buckets_by_integration.get(i.id)
@@ -835,6 +868,7 @@ async def list_integrations(
                 writes=writes_by_integration.get(i.id, []),
                 adaptor_families=sorted(families_by_integration.get(i.id, set())),
                 flow_schedules=schedules_by_integration.get(i.id, []),
+                errors_checked_at=errors_checked_by_integration.get(i.id),
             )
         )
     return out
@@ -1053,6 +1087,7 @@ async def list_integration_flows(
             diverged_family_count=scripts_by_flow.get(f.id, (0, 0))[1],
             writes=writes_by_flow.get(f.id, []),
             celigo_last_modified=f.celigo_last_modified,
+            errors_checked_at=f.errors_checked_at,
         )
         for f in flows
     ]
@@ -1307,6 +1342,7 @@ async def get_flow_detail(
         # included -- see `CeligoFlowDetailOut.error_count`'s comment.
         error_count=sum(step_error_counts.values()),
         signature_count=flow_signature_count,
+        errors_checked_at=flow.errors_checked_at,
     )
 
 
