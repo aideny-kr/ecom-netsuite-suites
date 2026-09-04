@@ -313,9 +313,16 @@ export function Pill({
 // ---------------------------------------------------------------------------
 
 /** "0 open errors · checked 4 min ago" when clean — a zero is a claim with
- * a timestamp, never a bare decoration. "10 open · 1 root cause" when not —
- * root cause count leads (the actionable number), raw error count is the
- * headline figure next to it, never buried behind it. */
+ * a timestamp; without one it is not a claim. `checkedAt` is the flow/
+ * integration's own `errors_checked_at` (when the correct per-flow/
+ * per-resource error endpoint last actually ran for it), not merely the
+ * last sync time -- a sync can complete while a flow's own errors were
+ * never re-checked (a wrong-endpoint backfill gap, or a flow added since).
+ * `count === 0 && checkedAt === null` renders neither green nor a number:
+ * a bare "0" here would be Celigo reporting a check that never happened.
+ * "10 open · 1 root cause" when not clean — root cause count leads (the
+ * actionable number), raw error count is the headline figure next to it,
+ * never buried behind it. */
 export function ErrorPill({
   count,
   signatureCount,
@@ -326,6 +333,13 @@ export function ErrorPill({
   checkedAt: string | null;
 }): JSX.Element {
   if (count === 0) {
+    if (!checkedAt) {
+      return (
+        <Pill tone="mute" dot="hollow">
+          errors not checked yet
+        </Pill>
+      );
+    }
     return (
       <Pill tone="ok" dot="solid">
         0 open errors <span className="opacity-70">· checked {formatRelativeTime(checkedAt)}</span>
@@ -336,6 +350,10 @@ export function ErrorPill({
   return (
     <Pill tone="crit" dot="solid">
       {count} open · {sig} root cause{sig === 1 ? "" : "s"}
+      {/* Rows exist, so the count is real -- but without a completed check
+          behind it the figure may be short (a step whose listing
+          disagreed with Celigo's summary is left unstamped on purpose). */}
+      {!checkedAt && <span className="opacity-70"> · not fully checked</span>}
     </Pill>
   );
 }

@@ -26,7 +26,14 @@ import { RouterNode } from "./router-node";
 import { cn } from "@/lib/utils";
 
 const ARROW_MARKER_ID = "celigo-flow-arrowhead";
-const FIT_FLOOR = 0.6;
+/** The lowest scale fit-to-width will shrink to. Lowered from 0.6 -- at 0.6
+ * a ~10-step chained-router flow (2 routers, 2 branches, the shape every
+ * fixture on this surface draws) still clipped its last rank inside a
+ * ~800px canvas pane, so "fit to width" didn't. Exported so the test that
+ * pins the floor's own label ("min · NN%") computes off this constant
+ * instead of re-hardcoding it, which would silently drift the next time
+ * this changes. */
+export const FIT_FLOOR = 0.4;
 
 function clamp(n: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, n));

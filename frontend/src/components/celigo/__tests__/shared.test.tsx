@@ -150,6 +150,7 @@ describe("deriveFlowSummary — computed off the flow's own steps/routers, never
       last_error_at: null,
       error_count: 0,
       signature_count: 0,
+      errors_checked_at: null,
       routers: [
         {
           id: "r2",
@@ -232,6 +233,7 @@ describe("deriveFlowSummary — computed off the flow's own steps/routers, never
       last_error_at: null,
       error_count: 0,
       signature_count: 0,
+      errors_checked_at: null,
       routers: [],
       steps: [],
     };
@@ -258,6 +260,7 @@ describe("deriveFlowSummary — computed off the flow's own steps/routers, never
       last_error_at: null,
       error_count: 0,
       signature_count: 0,
+      errors_checked_at: null,
       routers: [],
       steps: [],
       ...over,
@@ -368,6 +371,32 @@ describe("ErrorPill — a zero is a claim with a timestamp, not a decoration", (
     render(<ErrorPill count={10} signatureCount={1} checkedAt={null} />);
     expect(screen.getByText(/10 open/)).toBeInTheDocument();
     expect(screen.getByText(/1 root cause/)).toBeInTheDocument();
+  });
+
+  // Backend fix (this branch): a zero with no `errors_checked_at` means the
+  // correct per-flow/per-resource error endpoint has never been asked for
+  // this flow -- a zero Celigo never actually reported. This must never
+  // render as the green "0 open errors" claim, which asserts a check that
+  // did not happen.
+  it("unverified zero: no checkedAt renders 'errors not checked yet', never a green zero", () => {
+    render(<ErrorPill count={0} checkedAt={null} />);
+    const pill = screen.getByText("errors not checked yet");
+    expect(pill).toBeInTheDocument();
+    expect(screen.queryByText(/0 open errors/)).not.toBeInTheDocument();
+    // Not just different words: not the green (ok) variant either.
+    expect(pill.className).not.toMatch(/green/);
+    expect(pill.className).toMatch(/text-muted-foreground/);
+  });
+
+  it("a non-zero count without a completed check says so, instead of reading as a settled figure", () => {
+    render(<ErrorPill count={3} signatureCount={1} checkedAt={null} />);
+    expect(screen.getByText(/3 open · 1 root cause/)).toBeInTheDocument();
+    expect(screen.getByText(/not fully checked/)).toBeInTheDocument();
+  });
+
+  it("a non-zero count with a completed check carries no caveat", () => {
+    render(<ErrorPill count={3} signatureCount={1} checkedAt="2026-09-03T21:39:00Z" />);
+    expect(screen.queryByText(/not fully checked/)).not.toBeInTheDocument();
   });
 });
 

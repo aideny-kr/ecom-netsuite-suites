@@ -110,6 +110,7 @@ function makeDetail(overrides: Partial<CeligoFlowDetail> & { steps: CeligoFlowSt
     last_error_at: null,
     error_count: 0,
     signature_count: 0,
+    errors_checked_at: null,
     ...overrides,
   };
 }
@@ -145,7 +146,7 @@ function renderInspector(props: {
   step: CeligoFlowStep | null;
   tab?: InspectorTab;
   onTabChange?: (tab: InspectorTab) => void;
-  lastSyncedAt?: string | null;
+  errorsCheckedAt?: string | null;
   onOpenScript?: (scriptId: string, opener: HTMLElement | null, jsonPath: string | null) => void;
 }) {
   return render(
@@ -156,7 +157,7 @@ function renderInspector(props: {
       onTabChange={props.onTabChange ?? noop}
       // `??` would swallow an EXPLICIT null — the state the fix-wave tests
       // below exercise — so the default only applies when the key is absent.
-      lastSyncedAt={"lastSyncedAt" in props ? props.lastSyncedAt! : "2026-09-02T18:12:00.000Z"}
+      errorsCheckedAt={"errorsCheckedAt" in props ? props.errorsCheckedAt! : "2026-09-02T18:12:00.000Z"}
       onOpenScript={props.onOpenScript ?? noop}
     />,
   );
@@ -411,17 +412,17 @@ describe("empty strings are absences, not values", () => {
 });
 
 describe("Errors tab", () => {
-  it("renders the quiet sentence with the sync time when the whole flow is clean", () => {
+  it("renders the quiet sentence with the check's relative time when the whole flow is clean", () => {
     mocks.flowErrors.mockReturnValue(resolved({ flow_id: "flow-1", status: "open", total: 0, groups: [] }));
     const step = makeStep({ id: "step-1" });
     renderInspector({
       detail: makeDetail({ steps: [step], error_count: 0 }),
       step,
       tab: "errors",
-      lastSyncedAt: "2026-09-02T18:12:00.000Z",
+      errorsCheckedAt: "2026-09-02T18:12:00.000Z",
     });
     expect(
-      screen.getByText("No open errors. Celigo reported 0 on the last sync, 4 min ago."),
+      screen.getByText("No open errors on this step as of the last check, 4 min ago."),
     ).toBeInTheDocument();
   });
 
@@ -429,6 +430,8 @@ describe("Errors tab", () => {
     // Gate fix wave, item 4. This pane used to say "Celigo reported 0 for the
     // whole flow" whenever no signature touched THIS step -- a flow-wide
     // claim, printed verbatim on a flow with open errors in other steps.
+    // Backend fix (this branch): "reported" is gone entirely -- Celigo never
+    // reports anything, this app CHECKS its per-flow error endpoint.
     mocks.flowErrors.mockReturnValue(
       resolved({
         flow_id: "flow-1",
@@ -442,11 +445,11 @@ describe("Errors tab", () => {
       detail: makeDetail({ steps: [step], error_count: 3 }),
       step,
       tab: "errors",
-      lastSyncedAt: "2026-09-02T18:12:00.000Z",
+      errorsCheckedAt: "2026-09-02T18:12:00.000Z",
     });
     expect(screen.queryByText("script_error")).not.toBeInTheDocument();
     expect(
-      screen.getByText("No open errors on this step. 3 open elsewhere in this flow as of the last sync, 4 min ago."),
+      screen.getByText("No open errors on this step. 3 open elsewhere in this flow as of the last check, 4 min ago."),
     ).toBeInTheDocument();
     expect(screen.queryByText(/reported 0/)).not.toBeInTheDocument();
   });
@@ -557,22 +560,23 @@ describe("tab switching", () => {
 // Codex fix wave
 // ---------------------------------------------------------------------------
 
-describe("the quiet errors sentence never prints a dash for the sync time (item 2)", () => {
-  it("says the sync time is unavailable instead of 'on the last sync, —' on a clean flow", () => {
+describe("the quiet errors sentence says 'not checked yet', never a dash, when errors_checked_at is null (item 2 + honesty brief)", () => {
+  it("says errors haven't been checked yet for this flow, not a claimed zero, on a clean flow", () => {
     mocks.flowErrors.mockReturnValue(resolved({ flow_id: "flow-1", status: "open", total: 0, groups: [] }));
     const step = makeStep({ id: "step-1" });
     const { container } = renderInspector({
       detail: makeDetail({ steps: [step], error_count: 0 }),
       step,
       tab: "errors",
-      lastSyncedAt: null,
+      errorsCheckedAt: null,
     });
 
-    expect(screen.getByText("No open errors on this step (sync time unavailable).")).toBeInTheDocument();
+    expect(screen.getByText("Open errors haven't been checked yet for this flow.")).toBeInTheDocument();
     expect(container.textContent).not.toContain("last sync, —");
+    expect(container.textContent).not.toContain("sync time unavailable");
   });
 
-  it("still says where the flow's other errors are, without the dash", () => {
+  it("still says where the flow's other errors are, without an 'as of' clause that names no moment", () => {
     mocks.flowErrors.mockReturnValue(
       resolved({ flow_id: "flow-1", status: "open", total: 3, groups: [makeErrorGroup({ step_ids: ["other"] })] }),
     );
@@ -581,12 +585,14 @@ describe("the quiet errors sentence never prints a dash for the sync time (item 
       detail: makeDetail({ steps: [step], error_count: 3 }),
       step,
       tab: "errors",
-      lastSyncedAt: null,
+      errorsCheckedAt: null,
     });
 
-    expect(container.textContent).toContain("No open errors on this step (sync time unavailable).");
-    expect(container.textContent).toContain("3 open elsewhere in this flow");
+    expect(container.textContent).toContain(
+      "No open errors on this step. 3 open elsewhere in this flow (not fully checked yet).",
+    );
     expect(container.textContent).not.toContain("last sync, —");
+    expect(container.textContent).not.toContain("as of the last check");
   });
 });
 

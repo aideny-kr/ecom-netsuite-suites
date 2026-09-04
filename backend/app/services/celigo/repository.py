@@ -349,6 +349,25 @@ async def upsert_flow(
     return (await db.execute(stmt)).scalar_one()
 
 
+async def mark_flow_errors_checked(
+    db: AsyncSession, *, tenant_id: uuid.UUID, flow_id: uuid.UUID, checked_at: datetime | None
+) -> None:
+    """Write one `celigo_flows.errors_checked_at` row -- `sync_service.py`'s
+    Phase E, once per flow. A datetime means "this run obtained the flow's
+    error summary (`client.list_flow_error_summary`, verified live
+    2026-09-03) AND every step reached a verdict". `None` CLEARS it: the
+    latest run could not verify the flow (a 204 or malformed summary, a
+    step absent from it, a listing that disagreed with the summary), and an
+    older stamp left in place would present today's unverified count as a
+    checked one. One UPDATE, scoped by `tenant_id` AND `id` -- same
+    tenant-and-identity scoping every other write in this module uses."""
+    await db.execute(
+        update(CeligoFlow)
+        .where(CeligoFlow.tenant_id == tenant_id, CeligoFlow.id == flow_id)
+        .values(errors_checked_at=checked_at, updated_at=func.now())
+    )
+
+
 # ---------------------------------------------------------------------------
 # celigo_flow_steps -- extraction (pure) + upsert (DB)
 # ---------------------------------------------------------------------------

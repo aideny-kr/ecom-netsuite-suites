@@ -59,14 +59,56 @@ step", extended by fix round 1 -- see below):
     which NetSuite record types" from `netsuite_da.recordType`/`operation`
     (imports) and `netsuite.restlet.recordType`/`searchId` (exports), fields
     this phase already fetches but, before this round, threw away.
-  Phase E: for every step collected during Phase B, in that same order, its
-    open errors (`client.list_flow_errors_for_step`) are fetched and
-    snapshotted (`errors.upsert_errors`). This is deliberately its OWN pass,
-    after every step already exists as a real `celigo_flow_steps` row --
-    `upsert_errors` needs a real `step.id`/`step.flow_id` (errors.py's own
-    docstring; Task 6's report flagged this as never exercised end-to-end
-    with a real orchestrator -- this module is the first real consumer, see
-    `_StepRef` below for how).
+  Phase E (REWRITTEN, VERIFIED LIVE 2026-09-03 -- read this before the
+    "WHAT THIS DELIBERATELY STILL DOES NOT DO" section below, which used to
+    describe a `_stepId` design this phase no longer has): for every FLOW
+    Phase B upserted -- with or without step rows -- in that order, its
+    per-flow error SUMMARY is fetched first (`client.list_flow_error_
+    summary` -- `GET /v1/flows/{flow_id}/errors`, no query params, returns
+    `{"flowErrors": [{"_expOrImpId", "numError"}, ...]}`, one entry per
+    export/import in the flow). Each of that flow's steps, in step order, is
+    then handled from the summary alone:
+      * absent from the summary -- neither fetched nor recorded
+        (`steps_not_in_error_summary`). Absence is not evidence of anything.
+        An EMPTY summary (`{}` -- a 204, or a body listing nothing) gives
+        every step this verdict: nothing is resolved, and the flow is left
+        unverified rather than read as "all clean". A 204 has never been
+        observed live (zero-error flows come back as 200 with `numError: 0`
+        entries); if Celigo ever does send one, honesty means unverified,
+        not a guessed zero.
+      * a verified `numError == 0` -- resolved via `errors.upsert_errors(
+        raw_errors=[], raw_errors_is_complete=True)` WITHOUT a per-step
+        fetch (`steps_skipped_zero_errors`).
+      * a non-zero count -- only NOW is `client.list_flow_errors_for_step`
+        (`GET /v1/flows/{flow_id}/{resourceId}/errors`) called for that one
+        step's actual open errors, snapshotted the same way this phase
+        always has (`errors.upsert_errors`; `upsert_errors` needs a real
+        `step.id`/`step.flow_id`, which is why this is its own pass after
+        every step already exists as a real `celigo_flow_steps` row -- see
+        `_StepRef` below for how).
+    Three guards (independent-model review, 2026-09-03): a step whose
+    export/import an EARLIER step of the same flow already referenced is
+    skipped (`steps_sharing_resource` -- errors are per resource, the first
+    step owns them); a non-zero count whose per-resource listing came back
+    EMPTY is recorded as incomplete and resolves nothing
+    (`steps_with_inconsistent_errors` -- the endpoints disagree, and an
+    empty listing is what the old bug looked like); and the flow's
+    `errors_checked_at` cursor (`repository.mark_flow_errors_checked`) is
+    stamped ONLY when the summary was complete and every step reached a
+    verdict this run -- otherwise it is CLEARED (`flows_errors_unverified`),
+    so an unverified flow shows NULL and renders as "errors not checked
+    yet", never a green zero dressed in yesterday's stamp.
+    THE BUG THIS REPLACED: the pre-2026-09-03 version of this phase
+    called `list_flow_errors_for_step` for every step UNCONDITIONALLY, with
+    a `?_stepId=<step's own celigo_id>` query param on `GET /v1/flows/
+    {flow_id}/errors` -- an endpoint that, verified live, IGNORES `_stepId`
+    entirely and returns the summary shape regardless. Reading
+    `body["errors"]` off a summary body (which has no such key) produced
+    `[]` every time, and `upsert_errors(raw_errors=[],
+    raw_errors_is_complete=True)` then resolved every previously-open error
+    as if Celigo had reported none. Every run "succeeded", the freshness
+    cursor advanced, and not one real error ever landed -- 112 open errors
+    across 16 production flows, invisible on staging, is what this fixes.
   Purge marking runs last, once per connection, independent of any single
   step's sync (`repository.mark_flow_errors_purged`'s own docstring).
 
@@ -83,13 +125,12 @@ failure must not advance it"), unlike those two services' documented
 graceful-degradation contracts.
 
 WHAT THIS DELIBERATELY STILL DOES NOT DO:
-  * `_stepId` (the query param `client.list_flow_errors_for_step` sends) is
-    populated with a step's OWN `celigo_id` -- the referenced export/import
-    id, the only Celigo-native id a step has anywhere in this schema. Task
-    3's own report flags `_stepId` as "inferred from the MCP tool's schema,
-    never confirmed against a raw REST call" -- this module inherits that
-    same unverified assumption, not a new one; see its report for the
-    reasoning that produced it.
+  * `list_flow_error_summary`'s counts are read as `int(numError)` and used
+    only to decide "fetch / resolve-as-zero / leave alone" for each step --
+    this module never stores a summary count itself, and never treats it as
+    a substitute for `celigo_flow_errors`' own rows (the audit trail is still
+    built exclusively from `list_flow_errors_for_step`'s per-resource
+    fetches, or from a verified zero).
 """
 
 from __future__ import annotations
@@ -110,6 +151,7 @@ from app.services.celigo.client import (
     CeligoIncompleteListingError,
     CeligoNotFoundError,
     get_resource,
+    list_flow_error_summary,
     list_flow_errors_for_step,
     list_resource,
 )
@@ -120,6 +162,7 @@ from app.services.celigo.repository import (
     backfill_flow_step_reference_info,
     extract_flow_steps,
     insert_config_change,
+    mark_flow_errors_checked,
     mark_flow_errors_purged,
     purge_sandbox_rows,
     upsert_flow,
@@ -178,6 +221,51 @@ class SyncSummary:
     # how a partial run stays visible now that one truncated step no longer
     # aborts the whole sync.
     steps_with_incomplete_errors: int = 0
+    # VERIFIED LIVE 2026-09-03: Phase E now gates on each flow's error
+    # SUMMARY (`list_flow_error_summary`) before deciding what to do with a
+    # step, rather than fetching every step unconditionally. The counters
+    # below say what the gate decided; each comment sits ABOVE its field.
+    #
+    # steps_skipped_zero_errors -- the summary reported a real ZERO for this
+    #   step: resolved via upsert_errors(raw_errors=[]) WITHOUT a per-step
+    #   fetch (a verified zero, not an absence).
+    steps_skipped_zero_errors: int = 0
+    # steps_not_in_error_summary -- this step's id never appeared in its
+    #   flow's summary at all: neither fetched nor resolved, since absence
+    #   from a summary is not evidence anything is open OR resolved.
+    steps_not_in_error_summary: int = 0
+    # flows_errors_checked -- flows whose summary was fetched AND whose every
+    #   step reached a verdict, so their errors_checked_at cursor was stamped
+    #   this run.
+    flows_errors_checked: int = 0
+    # flows_errors_unverified -- flows whose summary WAS consulted but which
+    #   this run could not verify: the summary itself was incomplete, a step
+    #   was absent from it, a listing disagreed with it, was truncated, or
+    #   errors were reported on a resource with no step. Their
+    #   errors_checked_at is CLEARED (NULL): the stamp means "every step
+    #   verified as of", and an older stamp would dress today's unverified
+    #   count up as a checked one.
+    flows_errors_unverified: int = 0
+    # flows_with_incomplete_summary -- the flow's summary came back as a 204
+    #   or contained an entry whose count could not be read. The entries it
+    #   did carry still drive their steps; the flow is not verified.
+    flows_with_incomplete_summary: int = 0
+    # steps_with_inconsistent_errors -- the summary reported a NON-ZERO count
+    #   but the per-resource listing came back empty. The two endpoints
+    #   disagree; an empty `errors[]` is exactly what the pre-2026-09-03 bug
+    #   looked like, so nothing is resolved from it (recorded as incomplete).
+    steps_with_inconsistent_errors: int = 0
+    # steps_sharing_resource -- a step referencing an export/import that an
+    #   earlier step of the SAME flow already referenced (Celigo lets two
+    #   router branches reuse one resource). Errors are per resource, so the
+    #   first step owns them; the duplicate is neither fetched nor upserted,
+    #   which is what stops each duplicate re-parenting the same error rows.
+    steps_sharing_resource: int = 0
+    # summary_errors_without_step -- the flow's summary reported a NON-ZERO
+    #   count on a resource this run has no step row for (Phase B skipped or
+    #   never saw it). Nothing can be attached, so nothing is fetched -- but
+    #   the flow is left unverified: its local zero is not Celigo's number.
+    summary_errors_without_step: int = 0
     config_changes_recorded: int = 0
     errors_purged: int = 0
 
@@ -651,6 +739,12 @@ async def sync_flow_map_for_connection(
 
         # Phase B -- flows, and each flow's own steps.
         pending_step_refs: list[tuple[str, str, _StepRef]] = []
+        # Every production flow Phase B upserted, in order, WITH OR WITHOUT
+        # steps -- Phase E consults each one's error summary. A flow whose
+        # processors carried no export/import id has no step rows, but
+        # Celigo can still report open errors on it (independent-model
+        # review 2026-09-03), so "no steps" must not mean "never checked".
+        synced_flows: dict[str, uuid.UUID] = {}
         # Populated across Phases B/C/D, consumed in Phase D:
         #   script_ids: script's own celigo_id -> local id (Phase C).
         #   export_import_flow_steps: an export/import's celigo_id -> {flow_local_id: first
@@ -700,6 +794,7 @@ async def sync_flow_map_for_connection(
                 sanitized=flow,
             )
             summary.flows_synced += 1
+            synced_flows[flow_celigo_id] = flow_local_id
 
             if flow_changes:
                 await _record_drift(
@@ -886,42 +981,175 @@ async def sync_flow_map_for_connection(
                 summary.flow_steps_backfilled += rows_backfilled
                 summary.attachments_synced += attached
 
-        # Phase E -- errors, per step, in the order steps were synced. Only
-        # reachable once every step above has a REAL celigo_flow_steps row.
+        # Phase E -- errors, per FLOW (VERIFIED LIVE 2026-09-03; see module
+        # docstring's Phase E entry for the full story of why this replaced
+        # an unconditional per-step fetch). Steps are grouped by their flow,
+        # preserving first-seen flow order and, within a flow, step order --
+        # `pending_step_refs` was already built in exactly that order by
+        # Phase B, so a single pass over it is enough.
+        steps_by_flow: dict[str, list[tuple[str, _StepRef]]] = defaultdict(list)
         for flow_celigo_id, step_celigo_id, step_ref in pending_step_refs:
-            # FIX ROUND 9 (re-review R1b): truncation is contained to the ONE
-            # step it concerns. Before this, a single step exceeding
-            # `_MAX_ERROR_PAGES` aborted the entire connection sync (phases
-            # A-E) on every run until a human intervened -- and the per-step
-            # escape hatch built for exactly this case had no caller. Only
-            # `CeligoIncompleteListingError` is caught, never the base
-            # `CeligoError`: a rejected token, an unparseable body or a 5xx
-            # says nothing about one step in particular and must still abort.
-            try:
-                raw_errors = await list_flow_errors_for_step(
-                    flow_celigo_id, step_celigo_id, token=token, region=region, client=http
+            steps_by_flow[flow_celigo_id].append((step_celigo_id, step_ref))
+
+        for flow_celigo_id, flow_local_id in synced_flows.items():
+            steps = steps_by_flow.get(flow_celigo_id, [])
+            # A `CeligoError` here (auth rejected, an unparseable body, a
+            # 5xx) propagates and aborts the whole run -- exactly like
+            # Phases A-D. Only ONE step's own listing
+            # (`CeligoIncompleteListingError`, below) is ever contained to
+            # just that step; a failure to even get the flow's summary says
+            # nothing about any one step in particular.
+            error_summary = await list_flow_error_summary(flow_celigo_id, token=token, region=region, client=http)
+            counts = error_summary.counts
+            # Every step must reach a verdict this run for the flow's
+            # errors_checked_at to be stamped -- see `SyncSummary.
+            # flows_errors_unverified` for the ways one fails to. A summary
+            # that is itself incomplete (a 204, an entry whose count could
+            # not be read) can still drive the steps it DOES cover, but it
+            # cannot verify the flow: what it left out is unknown.
+            flow_verified = error_summary.complete
+            if not error_summary.complete:
+                summary.flows_with_incomplete_summary += 1
+            # Resources already fetched for THIS flow. Errors are per
+            # export/import, not per step, and `celigo_flow_errors` is unique
+            # by error id -- a second step referencing the same resource
+            # would fetch the same rows again and re-parent them to itself.
+            seen_resources: set[str] = set()
+            # Per resource: did its verdict this run come from a COMPLETE
+            # picture (a verified zero, or a full listing)? A later step
+            # sharing the resource may clean up its own leftovers only then.
+            resource_complete: dict[str, bool] = {}
+
+            for step_celigo_id, step_ref in steps:
+                if step_celigo_id in seen_resources:
+                    summary.steps_sharing_resource += 1
+                    if resource_complete.get(step_celigo_id):
+                        # The resource's current listing (or verified zero)
+                        # was applied under the FIRST step, and the upsert's
+                        # ON CONFLICT moved every still-open error there.
+                        # Whatever is still open under THIS step is a
+                        # leftover from before ownership was deterministic,
+                        # absent from a complete listing -- so resolved.
+                        # Nothing is fetched twice, nothing is re-parented.
+                        await upsert_errors(
+                            db,
+                            tenant_id=tenant_id,
+                            connection_id=connection_id,
+                            step=step_ref,
+                            raw_errors=[],
+                            raw_errors_is_complete=True,
+                        )
+                    continue
+                seen_resources.add(step_celigo_id)
+
+                if step_celigo_id not in counts:
+                    # This step's id never appeared in its flow's summary at
+                    # all -- absence is not evidence anything resolved (or
+                    # that anything is open), so nothing is fetched and
+                    # nothing is recorded either way.
+                    summary.steps_not_in_error_summary += 1
+                    flow_verified = False
+                    continue
+
+                if counts[step_celigo_id] == 0:
+                    # A VERIFIED zero from the summary -- resolve any
+                    # previously-open error for this step WITHOUT a per-step
+                    # fetch. `raw_errors_is_complete=True` is correct here:
+                    # the summary IS this step's whole current listing, it
+                    # just happens to be empty.
+                    summary.steps_skipped_zero_errors += 1
+                    summary.steps_with_errors_checked += 1
+                    resource_complete[step_celigo_id] = True
+                    await upsert_errors(
+                        db,
+                        tenant_id=tenant_id,
+                        connection_id=connection_id,
+                        step=step_ref,
+                        raw_errors=[],
+                        raw_errors_is_complete=True,
+                    )
+                    continue
+
+                # Non-zero -- fetch this step's actual open errors. FIX ROUND
+                # 9 (re-review R1b): truncation is contained to the ONE step
+                # it concerns. Before this, a single step exceeding
+                # `_MAX_ERROR_PAGES` aborted the entire connection sync
+                # (phases A-E) on every run until a human intervened -- and
+                # the per-step escape hatch built for exactly this case had
+                # no caller. Only `CeligoIncompleteListingError` is caught,
+                # never the base `CeligoError`: a rejected token, an
+                # unparseable body or a 5xx says nothing about one step in
+                # particular and must still abort.
+                try:
+                    raw_errors = await list_flow_errors_for_step(
+                        flow_celigo_id, step_celigo_id, token=token, region=region, client=http
+                    )
+                    # The fetcher raises rather than truncate, so a list that
+                    # came back at all is this step's WHOLE current listing.
+                    raw_errors_is_complete = True
+                except CeligoIncompleteListingError as exc:
+                    # Record what did arrive; resolve nothing. Absence from
+                    # an admittedly-partial listing is not evidence an error
+                    # is gone.
+                    raw_errors = exc.partial_errors
+                    raw_errors_is_complete = False
+                    summary.steps_with_incomplete_errors += 1
+                    flow_verified = False
+                # Counted by DISTINCT persistable ids, not rows: `upsert_errors`
+                # skips an item without `errorId` and de-duplicates by id, so
+                # two rows can be one error -- or none -- once stored.
+                persistable = {e.get("errorId") for e in raw_errors if e.get("errorId")}
+                if raw_errors_is_complete and len(persistable) < counts[step_celigo_id]:
+                    # The summary said N, the per-resource listing brought
+                    # back FEWER than N (an empty body / 204 is the extreme
+                    # case -- exactly what the pre-2026-09-03 bug produced;
+                    # a short page with no nextPageURL is the subtler one).
+                    # The endpoints disagree, so the listing is treated as
+                    # incomplete: what arrived is recorded, nothing
+                    # previously open is resolved from it, and the flow is
+                    # not stamped. MORE than N is fine -- the summary is
+                    # simply older than the listing.
+                    raw_errors_is_complete = False
+                    summary.steps_with_inconsistent_errors += 1
+                    flow_verified = False
+                resource_complete[step_celigo_id] = raw_errors_is_complete
+                summary.steps_with_errors_checked += 1
+                summary.errors_snapshotted += len(raw_errors)
+                await upsert_errors(
+                    db,
+                    tenant_id=tenant_id,
+                    connection_id=connection_id,
+                    step=step_ref,
+                    raw_errors=raw_errors,
+                    # Stated explicitly because `upsert_errors` has no
+                    # default for this (FIX ROUND 9) -- see its docstring.
+                    raw_errors_is_complete=raw_errors_is_complete,
                 )
-                # The fetcher raises rather than truncate, so a list that came
-                # back at all is this step's WHOLE current listing.
-                raw_errors_is_complete = True
-            except CeligoIncompleteListingError as exc:
-                # Record what did arrive; resolve nothing. Absence from an
-                # admittedly-partial listing is not evidence an error is gone.
-                raw_errors = exc.partial_errors
-                raw_errors_is_complete = False
-                summary.steps_with_incomplete_errors += 1
-            summary.steps_with_errors_checked += 1
-            summary.errors_snapshotted += len(raw_errors)
-            await upsert_errors(
-                db,
-                tenant_id=tenant_id,
-                connection_id=connection_id,
-                step=step_ref,
-                raw_errors=raw_errors,
-                # Stated explicitly because `upsert_errors` has no default for
-                # this (FIX ROUND 9) -- see its docstring.
-                raw_errors_is_complete=raw_errors_is_complete,
-            )
+
+            # Errors Celigo reports on a resource this run has NO step for
+            # cannot be attached anywhere -- and a flow whose local zero
+            # hides them is not verified, whatever its own steps said.
+            unowned = [rid for rid, n in counts.items() if n > 0 and rid not in seen_resources]
+            if unowned:
+                summary.summary_errors_without_step += len(unowned)
+                flow_verified = False
+
+            # Stamp the freshness cursor the data-status banner reads ONLY
+            # when the summary was complete, every step reached a verdict (a
+            # verified zero or a complete listing) and nothing reported went
+            # unattached. Otherwise the stamp is CLEARED: an older stamp
+            # left in place would present today's unverified count -- say,
+            # a flow verified clean yesterday whose summary now reports 3
+            # the listing could not bring back -- as a checked zero. NULL
+            # renders as "errors not checked yet", never as a green zero.
+            if flow_verified:
+                await mark_flow_errors_checked(
+                    db, tenant_id=tenant_id, flow_id=flow_local_id, checked_at=datetime.now(timezone.utc)
+                )
+                summary.flows_errors_checked += 1
+            else:
+                await mark_flow_errors_checked(db, tenant_id=tenant_id, flow_id=flow_local_id, checked_at=None)
+                summary.flows_errors_unverified += 1
 
         # Purge marking -- last, once per connection, independent of any
         # single step's sync.

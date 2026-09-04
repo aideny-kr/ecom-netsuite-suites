@@ -15,6 +15,7 @@ from app.services.celigo.client import (
     CeligoIncompleteListingError,
     get_resource,
     list_error_summary_for_integration,
+    list_flow_error_summary,
     list_flow_errors_for_step,
     list_resource,
     mcp_server_url,
@@ -597,19 +598,28 @@ class TestFlowErrorsForStep:
         assert sig.parameters["step_id"].default is inspect.Parameter.empty
 
     @pytest.mark.asyncio
-    async def test_stepid_reaches_the_query_string_and_never_id_alone(self):
+    async def test_request_path_is_flow_step_errors_with_no_query(self):
+        """Verified live 2026-09-03: `GET /v1/flows/{flowId}/errors` is the
+        PER-FLOW SUMMARY (ignores `_stepId` entirely -- same response either
+        way). The OPEN errors of one resource live at
+        `GET /v1/flows/{flowId}/{resourceId}/errors` -- no `_stepId` query
+        param at all. This test is what proved the old `?_stepId=` request
+        was the bug: run against the pre-fix code, it asserted
+        `seen["path"] == "/v1/flows/flow1/errors"` and went GREEN on the
+        WRONG endpoint -- there was no test pinning the per-resource path
+        until this one."""
         seen = {}
 
         def handler(request: httpx.Request) -> httpx.Response:
             seen["path"] = request.url.path
-            seen["params"] = dict(request.url.params)
+            seen["query"] = request.url.query
             return httpx.Response(200, json={"errors": []})
 
         async with _json_client(handler) as c:
             await list_flow_errors_for_step("flow1", "step1", token="tok", client=c)
 
-        assert seen["path"] == "/v1/flows/flow1/errors"
-        assert seen["params"]["_stepId"] == "step1"
+        assert seen["path"] == "/v1/flows/flow1/step1/errors"
+        assert seen["query"] == b""
 
     @pytest.mark.asyncio
     async def test_paginates_via_next_page_url_until_absent(self):
@@ -726,6 +736,126 @@ class TestFlowErrorsPageCap:
         partial = excinfo.value.partial_errors
         assert len(partial) == _MAX_ERROR_PAGES
         assert partial[0]["errorId"] == "e1"
+
+
+class TestFlowErrorSummary:
+    """`list_flow_error_summary` -- `GET /v1/flows/{flowId}/errors`, verified
+    live 2026-09-03: `{"flowErrors": [{"_expOrImpId": ..., "numError": ...},
+    ...]}`, one entry per export/import in the flow. No query params (the
+    endpoint ignores `_stepId` regardless -- that's the bug this fixes; see
+    `TestFlowErrorsForStep`'s new path test for the per-resource sibling)."""
+
+    @pytest.mark.asyncio
+    async def test_parses_the_summary_shape_and_ignores_malformed_entries(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "flowErrors": [
+                        {"_expOrImpId": "exp_1", "numError": 0},
+                        {"_expOrImpId": "imp_1", "numError": 7},
+                        # A count that arrived as a string of digits is still
+                        # an unambiguous count (independent-model review:
+                        # dropping it would read as "absent" downstream).
+                        {"_expOrImpId": "imp_str", "numError": "4"},
+                        {"_expOrImpId": "imp_float", "numError": 2.0},
+                        # Malformed -- missing _expOrImpId, a non-numeric or
+                        # null numError, a boolean, a fraction (int(0.5) would
+                        # have become a verified ZERO), a negative, or not even
+                        # a dict. All are skipped, never given a fabricated key
+                        # or a guessed count.
+                        {"numError": 3},
+                        {"_expOrImpId": "bad_count", "numError": "not-a-number"},
+                        {"_expOrImpId": "null_count", "numError": None},
+                        {"_expOrImpId": "bool_count", "numError": True},
+                        {"_expOrImpId": "frac_count", "numError": 0.5},
+                        {"_expOrImpId": "neg_count", "numError": -1},
+                        "not-a-dict",
+                    ]
+                },
+            )
+
+        async with _json_client(handler) as c:
+            result = await list_flow_error_summary("flow1", token="tok", client=c)
+
+        assert result.counts == {"exp_1": 0, "imp_1": 7, "imp_str": 4, "imp_float": 2}
+        assert result.complete is False, "dropped entries are unknown counts -- the picture is incomplete"
+
+    @pytest.mark.asyncio
+    async def test_a_summary_with_every_entry_readable_is_complete(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={"flowErrors": [{"_expOrImpId": "exp_1", "numError": 0}, {"_expOrImpId": "imp_1", "numError": 2}]},
+            )
+
+        async with _json_client(handler) as c:
+            result = await list_flow_error_summary("flow1", token="tok", client=c)
+
+        assert result == ({"exp_1": 0, "imp_1": 2}, True)
+
+    @pytest.mark.asyncio
+    async def test_an_empty_flow_errors_list_is_a_complete_summary_of_nothing(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"flowErrors": []})
+
+        async with _json_client(handler) as c:
+            result = await list_flow_error_summary("flow1", token="tok", client=c)
+
+        assert result == ({}, True)
+
+    @pytest.mark.asyncio
+    async def test_request_has_no_query_params(self):
+        seen = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen["path"] = request.url.path
+            seen["query"] = request.url.query
+            return httpx.Response(200, json={"flowErrors": []})
+
+        async with _json_client(handler) as c:
+            await list_flow_error_summary("flow1", token="tok", client=c)
+
+        assert seen["path"] == "/v1/flows/flow1/errors"
+        assert seen["query"] == b""
+
+    @pytest.mark.asyncio
+    async def test_204_is_an_incomplete_summary_not_a_verified_empty_one(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(204)
+
+        async with _json_client(handler) as c:
+            result = await list_flow_error_summary("flow1", token="tok", client=c)
+
+        assert result.counts == {}
+        assert result.complete is False
+
+    @pytest.mark.asyncio
+    async def test_unparseable_body_raises_celigo_error(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"not json")
+
+        async with _json_client(handler) as c:
+            with pytest.raises(CeligoError):
+                await list_flow_error_summary("flow1", token="tok", client=c)
+
+    @pytest.mark.asyncio
+    async def test_non_dict_body_raises_celigo_error(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=[{"flowErrors": []}])
+
+        async with _json_client(handler) as c:
+            with pytest.raises(CeligoError):
+                await list_flow_error_summary("flow1", token="tok", client=c)
+
+    @pytest.mark.asyncio
+    async def test_401_raises_auth_error(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(401, json={"message": "Invalid token"})
+
+        async with _json_client(handler) as c:
+            with pytest.raises(CeligoAuthError):
+                await list_flow_error_summary("flow1", token="bad", client=c)
 
 
 class TestErrorSummaryForIntegration:

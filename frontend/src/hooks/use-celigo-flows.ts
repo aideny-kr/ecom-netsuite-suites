@@ -78,6 +78,13 @@ export interface CeligoIntegration {
   writes: CeligoRecordWrite[];
   adaptor_families: string[];
   flow_schedules: CeligoFlowSchedule[];
+  /** The OLDEST `errors_checked_at` among this integration's own flows, null
+   * if ANY flow is unchecked (or the integration has no flows) -- so a
+   * non-null value here is a promise that EVERY flow's open-error count was
+   * asked with the correct endpoint, not just some of them. Feeds
+   * `ErrorPill`'s `checkedAt`: `error_count === 0` with this `null` is not a
+   * verified zero, it is "not checked yet" (see that pill's docstring). */
+  errors_checked_at: string | null;
 }
 
 export interface CeligoFlowSummary {
@@ -104,6 +111,11 @@ export interface CeligoFlowSummary {
   diverged_family_count: number;
   writes: CeligoRecordWrite[];
   celigo_last_modified: string | null;
+  /** When this flow's OWN open-error count was last asked with the correct
+   * per-flow endpoint -- null when it never has been. Feeds `ErrorPill`'s
+   * `checkedAt`; see `CeligoIntegration.errors_checked_at`'s docstring for
+   * why a zero without this is not a verified zero. */
+  errors_checked_at: string | null;
 }
 
 export interface CeligoAttachment {
@@ -198,6 +210,11 @@ export interface CeligoFlowDetail {
    * signature spanning multiple steps). */
   error_count: number;
   signature_count: number;
+  /** When this flow's OWN open-error count was last asked with the correct
+   * per-flow endpoint -- null when it never has been. See
+   * `CeligoIntegration.errors_checked_at`'s docstring for why a zero
+   * without this is not a verified zero. */
+  errors_checked_at: string | null;
 }
 
 export function useCeligoIntegrations() {

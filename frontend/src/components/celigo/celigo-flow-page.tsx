@@ -255,6 +255,11 @@ export function CeligoFlowPage(): JSX.Element {
     body = (
       <div className="flex flex-1 min-h-0 flex-col">
         <CeligoFlowHeader
+          // Keyed per flow so the header's own view state (AI description
+          // expanded, focus mode read from storage) starts fresh when the
+          // navigator hops to a sibling whose detail is already cached --
+          // otherwise the second flow inherited the first one's "Show less".
+          key={d.id}
           detail={d}
           lastSyncedAt={lastSyncedAt}
           syncStatusState={syncStatusState}
@@ -333,7 +338,7 @@ export function CeligoFlowPage(): JSX.Element {
                 step={selectedStep}
                 tab={inspectorTab}
                 onTabChange={setInspectorTab}
-                lastSyncedAt={lastSyncedAt}
+                errorsCheckedAt={d.errors_checked_at}
                 onOpenScript={(scriptId, opener, jsonPath) => {
                   scriptOpenerRef.current = opener;
                   // The clicked SITE travels on the URL, so the drawer names

@@ -94,6 +94,7 @@ vi.mock("react-resizable-panels", async (importOriginal) => {
 });
 
 import { CeligoFlowPage } from "../celigo-flow-page";
+import { AI_DESCRIPTION_CLAMP_CHARS } from "../celigo-flow-header";
 import { setCeligoPaletteOpen } from "../palette-open-state";
 
 function wrap(ui: React.ReactElement) {
@@ -297,8 +298,14 @@ const ROUTERS: CeligoRouter[] = [
   },
 ];
 
+// Long enough to clamp: the header only clamps (and only offers "Show more")
+// past `AI_DESCRIPTION_CLAMP_CHARS`, so the fixture is built to exceed it
+// rather than hoping a one-liner happens to.
 const AI_TEXT =
-  'The "Backfill Sales Order by Order Number - 6/7/22" flow retrieves sales order data from an API endpoint using an HTTP export.';
+  'The "Backfill Sales Order by Order Number - 6/7/22" flow retrieves sales order data from an API endpoint using an HTTP export. ' +
+  "The data is then imported into NetSuite using two imports. The first import creates or updates the customer record; " +
+  "the second adds the sales order itself. A router directs each record to the import for its business entity.";
+const SHORT_AI_TEXT = "Retrieves sales orders over HTTP and adds them to NetSuite.";
 
 function makeDetail(overrides: Partial<CeligoFlowDetail> = {}): CeligoFlowDetail {
   return {
@@ -321,6 +328,11 @@ function makeDetail(overrides: Partial<CeligoFlowDetail> = {}): CeligoFlowDetail
     last_error_at: null,
     error_count: 0,
     signature_count: 0,
+    // Same moment as SYNCED_AT (21 min before NOW): the header's ErrorPill
+    // now reads its "checked N ago" off THIS field, not `lastSyncedAt` -- see
+    // the honesty brief. A test needing the "not checked yet" pill overrides
+    // it to `null`.
+    errors_checked_at: SYNCED_AT,
     ...overrides,
   };
 }
@@ -336,6 +348,7 @@ function makeSibling(overrides: Partial<CeligoFlowSummary> = {}): CeligoFlowSumm
     last_executed_at: FLOW_LAST_RUN,
     error_count: 0,
     signature_count: 0,
+    errors_checked_at: null,
     step_count: 10,
     router_count: 2,
     branch_count: 3,
@@ -374,6 +387,7 @@ function makeIntegration(overrides: Partial<CeligoIntegration> = {}): CeligoInte
     no_run_count: 0,
     error_count: 0,
     signature_count: 0,
+    errors_checked_at: null,
     changes_last_24h: 0,
     last_run_at: null,
     writes: [],
@@ -468,6 +482,24 @@ describe("CeligoFlowPage — header", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Copy link" }));
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith(window.location.href);
+  });
+
+  it("reads the error pill's checked time off errors_checked_at, not the sync time", () => {
+    // errors_checked_at deliberately differs from SYNCED_AT (both non-null,
+    // 18:12) -- a distinct "checked N ago" proves the pill reads THIS field,
+    // not `lastSyncedAt`, which the header still uses for the separate
+    // "Synced N ago." line below.
+    mocks.detail.mockReturnValue(resolved(makeDetail({ errors_checked_at: "2026-09-02T18:30:00.000Z" })));
+    const { container } = wrap(<CeligoFlowPage />);
+    expect(container.textContent).toContain("checked 3 min ago");
+    expect(container.textContent).not.toContain("checked 21 min ago");
+  });
+
+  it("renders 'errors not checked yet', never a green zero, when errors_checked_at is null", () => {
+    mocks.detail.mockReturnValue(resolved(makeDetail({ errors_checked_at: null })));
+    wrap(<CeligoFlowPage />);
+    expect(screen.getByText("errors not checked yet")).toBeInTheDocument();
+    expect(screen.queryByText(/0 open errors/)).not.toBeInTheDocument();
   });
 
   it("resolves 'cloned from {name}' when a sibling flow's celigo_id matches source_id", () => {
@@ -694,6 +726,103 @@ describe("CeligoFlowPage — script drawer", () => {
 
     expect(screen.getByText("HK preMap")).toBeInTheDocument();
     expect(screen.queryByText("HK preSavePage")).not.toBeInTheDocument();
+  });
+});
+
+describe("CeligoFlowPage — header AI description clamp (canvas gets the page, Part B.1)", () => {
+  it("a description that already fits two lines renders in full: no clamp, no toggle", () => {
+    expect(AI_TEXT.length).toBeGreaterThan(AI_DESCRIPTION_CLAMP_CHARS);
+    expect(SHORT_AI_TEXT.length).toBeLessThanOrEqual(AI_DESCRIPTION_CLAMP_CHARS);
+    mocks.detail.mockReturnValue(resolved(makeDetail({ ai_description_detailed: SHORT_AI_TEXT })));
+    wrap(<CeligoFlowPage />);
+    expect(screen.getByText(SHORT_AI_TEXT).className).not.toMatch(/line-clamp-2/);
+    expect(screen.queryByRole("button", { name: "Show more" })).not.toBeInTheDocument();
+  });
+
+  it("collapses the AI description to 2 lines by default, behind a 'Show more' toggle", () => {
+    wrap(<CeligoFlowPage />);
+    const quote = screen.getByText(AI_TEXT);
+    expect(quote.className).toMatch(/line-clamp-2/);
+    const toggle = screen.getByRole("button", { name: "Show more" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggle).toHaveAttribute("aria-controls", quote.id);
+    expect(quote.id).toBeTruthy();
+  });
+
+  it("expands on click (flipping aria-expanded and the label) and collapses again on a second click", () => {
+    wrap(<CeligoFlowPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Show more" }));
+
+    const expandedToggle = screen.getByRole("button", { name: "Show less" });
+    expect(expandedToggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText(AI_TEXT).className).not.toMatch(/line-clamp-2/);
+
+    fireEvent.click(expandedToggle);
+    const collapsedToggle = screen.getByRole("button", { name: "Show more" });
+    expect(collapsedToggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText(AI_TEXT).className).toMatch(/line-clamp-2/);
+  });
+});
+
+describe("CeligoFlowPage — header collapse ('Focus canvas', Part B.2)", () => {
+  const STORAGE_KEY = "celigo.flowHeaderCollapsed";
+
+  beforeEach(() => {
+    window.localStorage.removeItem(STORAGE_KEY);
+  });
+
+  it("defaults expanded, and 'Focus canvas' hides the facts line/What-it-does/AI block/Synced line", () => {
+    const { container } = wrap(<CeligoFlowPage />);
+    expect(container.textContent).toContain("modified in Celigo 2 Sep 2026");
+    expect(screen.getByText("What it does · derived")).toBeInTheDocument();
+    expect(screen.getByText(AI_TEXT)).toBeInTheDocument();
+    expect(container.textContent).toContain("Synced 21 min ago.");
+
+    const toggle = screen.getByRole("button", { name: "Focus canvas" });
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(toggle);
+
+    expect(container.textContent).not.toContain("modified in Celigo 2 Sep 2026");
+    expect(screen.queryByText("What it does · derived")).not.toBeInTheDocument();
+    expect(screen.queryByText(AI_TEXT)).not.toBeInTheDocument();
+    expect(container.textContent).not.toContain("Synced 21 min ago.");
+    // The first row survives collapse: pills, title, actions.
+    expect(screen.getByText(/0 open errors/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "New Sales Order to NetSuite - Multi-Subsidiary" }),
+    ).toBeInTheDocument();
+
+    const collapsedToggle = screen.getByRole("button", { name: "Show details" });
+    expect(collapsedToggle).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(collapsedToggle);
+    expect(screen.getByRole("button", { name: "Focus canvas" })).toHaveAttribute("aria-pressed", "false");
+    expect(screen.getByText("What it does · derived")).toBeInTheDocument();
+  });
+
+  it("persists the choice per viewer in localStorage, and a stored '1' starts collapsed", () => {
+    window.localStorage.setItem(STORAGE_KEY, "1");
+    wrap(<CeligoFlowPage />);
+    expect(screen.getByRole("button", { name: "Show details" })).toBeInTheDocument();
+    expect(screen.queryByText("What it does · derived")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show details" }));
+    expect(window.localStorage.getItem(STORAGE_KEY)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Focus canvas" }));
+    expect(window.localStorage.getItem(STORAGE_KEY)).toBe("1");
+  });
+
+  it("defaults expanded, never crashes, when localStorage throws", () => {
+    const getItemSpy = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("storage disabled");
+    });
+    try {
+      wrap(<CeligoFlowPage />);
+      expect(screen.getByRole("button", { name: "Focus canvas" })).toHaveAttribute("aria-pressed", "false");
+      expect(screen.getByText("What it does · derived")).toBeInTheDocument();
+    } finally {
+      getItemSpy.mockRestore();
+    }
   });
 });
 

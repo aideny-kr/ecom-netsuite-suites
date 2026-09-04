@@ -71,6 +71,11 @@ const SYNCED_AT = "2026-09-02T18:12:00.000Z";
 // A flow's own last run, 21 min before the sync — matches the mockup's own
 // "New Sales Order to NetSuite - Multi-Subsidiary" numbers exactly.
 const FLOW_LAST_RUN = "2026-09-02T17:51:00.000Z";
+// A flow's own `errors_checked_at`, deliberately NOT the same moment as
+// SYNCED_AT (2 h before NOW) — a flow's own error check can run at a
+// different time than the enclosing sync's `last_synced_at`, and the Errors
+// column's zero pill must read off THIS field, not the sync.
+const FLOW_CHECKED_AT = "2026-09-02T19:51:00.000Z"; // 21 min before NOW
 
 function makeIntegration(overrides: Partial<CeligoIntegration> = {}): CeligoIntegration {
   return {
@@ -92,6 +97,11 @@ function makeIntegration(overrides: Partial<CeligoIntegration> = {}): CeligoInte
     no_run_count: 0,
     error_count: 0,
     signature_count: 0,
+    // Same moment as SYNCED_AT: the ErrorsTab's quiet-errors sentence now
+    // reads its "as of the last check" off THIS field (the integration
+    // summary's own value), not `lastSyncedAt` -- see the honesty brief. A
+    // test needing the "not checked yet" copy overrides it to `null`.
+    errors_checked_at: SYNCED_AT,
     changes_last_24h: 0,
     last_run_at: "2026-09-02T18:06:00.000Z",
     writes: [
@@ -119,6 +129,7 @@ function makeFlow(overrides: Partial<CeligoFlowSummary> = {}): CeligoFlowSummary
     last_executed_at: FLOW_LAST_RUN,
     error_count: 0,
     signature_count: 0,
+    errors_checked_at: null,
     step_count: 3,
     router_count: 0,
     branch_count: 0,
@@ -298,26 +309,58 @@ describe("flows table — grouping and schedule cells", () => {
   // Codex fix wave, item 10. A zero is a claim, and on this surface every
   // claim carries the moment it was checked (`shared.tsx`'s ErrorPill says
   // "0 open errors · checked 4 min ago" for exactly this reason). The table's
-  // own zero pill said a bare "0" — read as "this flow is clean, now" rather
-  // than "Celigo reported none as of the last sync".
-  it("item 10: the Errors column names the sync, and the zero pill carries its time", () => {
-    setup([makeFlow({ id: "f1", name: "Clean Flow", disabled: false, error_count: 0 })]);
+  // own zero pill originally said a bare "0" titled off the overall sync
+  // time — the exact honesty bug this pill now must not reproduce: a flow's
+  // OWN `errors_checked_at` is the source, never `lastSyncedAt`.
+  it("item 10: the Errors column's zero pill carries the flow's OWN errors_checked_at, not the sync time", () => {
+    setup([
+      makeFlow({
+        id: "f1",
+        name: "Clean Flow",
+        disabled: false,
+        error_count: 0,
+        errors_checked_at: FLOW_CHECKED_AT,
+      }),
+    ]);
 
-    expect(screen.getByRole("columnheader", { name: "Errors · as of sync" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Errors" })).toBeInTheDocument();
     const row = screen.getByText("Clean Flow").closest("tr")!;
-    // Queried by TITLE, not by the text "0": the Scripts cell in the same row
-    // is also a bare "0". SYNCED_AT is 2 h before the test's frozen clock.
-    expect(within(row).getByTitle("0 open errors as of the sync 2 h ago")).toHaveTextContent("0");
+    // FLOW_CHECKED_AT is 21 min before NOW; SYNCED_AT (the sync) is 2 h
+    // before NOW. Asserting "21 min ago" (not "2 h ago") proves the source
+    // really is the flow's own field, not lastSyncedAt.
+    expect(within(row).getByText(/0 open errors/)).toBeInTheDocument();
+    expect(within(row).getByText(/checked 21 min ago/)).toBeInTheDocument();
   });
 
-  it("item 10: the zero pill says the sync time is unknown rather than inventing one", () => {
+  it("item 10: the zero pill still reads the flow's own errors_checked_at when the sync's own last_synced_at is null", () => {
     mocks.syncStatus.mockReturnValue(resolved({ last_synced_at: null }));
-    setup([makeFlow({ id: "f1", name: "Clean Flow", disabled: false, error_count: 0 })]);
+    setup([
+      makeFlow({
+        id: "f1",
+        name: "Clean Flow",
+        disabled: false,
+        error_count: 0,
+        errors_checked_at: FLOW_CHECKED_AT,
+      }),
+    ]);
 
     const row = screen.getByText("Clean Flow").closest("tr")!;
-    expect(
-      within(row).getByTitle("0 open errors as of the sync — sync time unavailable"),
-    ).toHaveTextContent("0");
+    expect(within(row).getByText(/checked 21 min ago/)).toBeInTheDocument();
+  });
+
+  it("honesty: says 'errors not checked yet', never a green zero titled off the sync, when the flow's own errors_checked_at is null", () => {
+    // The sync completed fine (last_synced_at is set, from the default mock)
+    // -- only this flow's own error check never ran against the correct
+    // endpoint. The old code read lastSyncedAt here and would have rendered
+    // a false claim ("0 open errors as of the sync 2 h ago") even though
+    // this flow itself was never checked.
+    setup([
+      makeFlow({ id: "f1", name: "Clean Flow", disabled: false, error_count: 0, errors_checked_at: null }),
+    ]);
+
+    const row = screen.getByText("Clean Flow").closest("tr")!;
+    expect(within(row).getByText("errors not checked yet")).toBeInTheDocument();
+    expect(within(row).queryByText(/0 open errors/)).not.toBeInTheDocument();
   });
 });
 
@@ -445,15 +488,15 @@ describe("flows table — scripts and errors cells", () => {
     expect(cells[7]).toHaveTextContent("0");
   });
 
-  it("shows 'N open · M root cause(s)' for a flow with open errors, else shows '0' — error_count leads, matching the mockup and shared.tsx's ErrorPill convention", () => {
+  it("shows 'N open · M root cause(s)' for a flow with open errors, else shows '0 open errors' (checked) — error_count leads, matching the mockup and shared.tsx's ErrorPill convention", () => {
     setup([
       makeFlow({ id: "f1", name: "Errored Flow", error_count: 10, signature_count: 1 }),
-      makeFlow({ id: "f2", name: "Clean Flow", error_count: 0 }),
+      makeFlow({ id: "f2", name: "Clean Flow", error_count: 0, errors_checked_at: FLOW_CHECKED_AT }),
     ]);
     const erroredRow = screen.getByText("Errored Flow").closest("tr")!;
     const cleanRow = screen.getByText("Clean Flow").closest("tr")!;
     expect(within(erroredRow).getAllByRole("cell")[6]).toHaveTextContent("10 open · 1 root cause");
-    expect(within(cleanRow).getAllByRole("cell")[6]).toHaveTextContent("0");
+    expect(within(cleanRow).getAllByRole("cell")[6]).toHaveTextContent("0 open errors");
   });
 
   it("opens a 'Flow: name' drawer listing step_ids with counts when a non-zero errors count is clicked", () => {
@@ -608,8 +651,11 @@ describe("Errors tab", () => {
   });
 
   it("lists only the flows with open errors, pill reading 'N open · M root cause(s)'", () => {
+    // The verdict "errors exist" comes from the integration row (same
+    // snapshot as errors_checked_at); the flows list only says WHERE.
+    mocks.integrations.mockReturnValue(resolved([makeIntegration({ error_count: 5, signature_count: 1 })]));
     setup([
-      makeFlow({ id: "f1", name: "Errored Flow", error_count: 5, signature_count: 1 }),
+      makeFlow({ id: "f1", name: "Errored Flow", error_count: 5, signature_count: 1, errors_checked_at: SYNCED_AT }),
       makeFlow({ id: "f2", name: "Clean Flow", error_count: 0 }),
     ]);
     expect(screen.getByText("Errored Flow")).toBeInTheDocument();
@@ -617,12 +663,59 @@ describe("Errors tab", () => {
     expect(screen.queryByText("Clean Flow")).not.toBeInTheDocument();
   });
 
-  it("shows the quiet-errors sentence with the sync's relative time when nothing is open", () => {
+  it("shows the quiet-errors sentence with the check's relative time when nothing is open", () => {
+    // Backend fix (this branch): the sentence names when the CORRECT
+    // per-flow/per-resource error endpoint was last asked, off the
+    // integration summary's own `errors_checked_at` -- Celigo itself never
+    // "reported" a zero, so that framing is gone. The check time here is
+    // deliberately NOT the sync time (3 h vs 2 h before NOW), so a
+    // component that gated on errors_checked_at but formatted
+    // last_synced_at would fail this test.
+    mocks.integrations.mockReturnValue(
+      resolved([makeIntegration({ errors_checked_at: "2026-09-02T17:12:00.000Z" })]),
+    );
     setup([makeFlow({ id: "f1", name: "Clean Flow", error_count: 0 })]);
-    // SYNCED_AT is 2h before NOW.
     expect(
-      screen.getByText("No open errors. Celigo reported 0 on the last sync, 2 h ago."),
+      screen.getByText("No open errors as of the last check, 3 h ago."),
     ).toBeInTheDocument();
+  });
+
+  it("says errors haven't been checked yet, never a stale 'reported 0', when errors_checked_at is null", () => {
+    mocks.integrations.mockReturnValue(resolved([makeIntegration({ errors_checked_at: null })]));
+    setup([makeFlow({ id: "f1", name: "Clean Flow", error_count: 0 })]);
+    expect(
+      screen.getByText("Open errors haven't been checked yet for every flow here; the next sync checks them."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/reported 0/)).not.toBeInTheDocument();
+  });
+
+  it("never claims 'no open errors' from a flows list that lags the integration row's own count", () => {
+    // Independent-model review: the two queries are cached separately. The
+    // integration row (checked at T1, 5 open) can arrive a refetch before
+    // the per-flow rows do; an empty errored-flows list must not be read
+    // as a verified zero for that moment.
+    mocks.integrations.mockReturnValue(resolved([makeIntegration({ error_count: 5, signature_count: 2 })]));
+    setup([makeFlow({ id: "f1", name: "Stale Clean Flow", error_count: 0 })]);
+    expect(screen.queryByText(/No open errors/)).not.toBeInTheDocument();
+    expect(
+      screen.getByText("5 open errors across this integration; the flow list is still refreshing."),
+    ).toBeInTheDocument();
+  });
+
+  it("says how many of the integration's errors the listed flows account for when the two disagree", () => {
+    mocks.integrations.mockReturnValue(resolved([makeIntegration({ error_count: 5, signature_count: 2 })]));
+    setup([makeFlow({ id: "f1", name: "Partly Refreshed Flow", error_count: 2, signature_count: 1, errors_checked_at: SYNCED_AT })]);
+    expect(screen.getByText("Partly Refreshed Flow")).toBeInTheDocument();
+    expect(
+      screen.getByText("2 of 5 open errors are listed above; the flow list is still refreshing."),
+    ).toBeInTheDocument();
+  });
+
+  it("a listed flow whose own check is incomplete carries the shared 'not fully checked' caveat", () => {
+    mocks.integrations.mockReturnValue(resolved([makeIntegration({ error_count: 2, signature_count: 1 })]));
+    setup([makeFlow({ id: "f1", name: "Half Checked Flow", error_count: 2, signature_count: 1, errors_checked_at: null })]);
+    expect(screen.getByText(/2 open · 1 root cause/)).toBeInTheDocument();
+    expect(screen.getByText(/not fully checked/)).toBeInTheDocument();
   });
 });
 

@@ -124,6 +124,13 @@ class CeligoFlow(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     ai_description_detailed: Mapped[str | None] = mapped_column(Text, nullable=True)
     ai_description_generated_on: Mapped[str | None] = mapped_column(Text, nullable=True)
     celigo_last_modified: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    errors_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    """When this run last obtained Celigo's per-flow error summary for this
+    flow (`client.list_flow_error_summary`, verified live 2026-09-03) --
+    stamped by `sync_service.py`'s Phase E once per flow, after that flow's
+    own step loop, independent of whether any step had a non-zero count.
+    NULL = never checked with the correct endpoint, so a zero count is not a
+    verified zero -- migration 098."""
     raw_json: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default=_EMPTY_JSONB)
 
 

@@ -81,6 +81,11 @@ function makeIntegration(overrides: Partial<CeligoIntegration> = {}): CeligoInte
     no_run_count: 0,
     error_count: 0,
     signature_count: 0,
+    // Same moment as SYNCED_AT (21 min before NOW): the tile/table
+    // ErrorPill now reads its "checked N ago" off THIS field, not
+    // `lastSyncedAt` -- see the honesty brief. A test needing the "not
+    // checked yet" pill overrides it to `null`.
+    errors_checked_at: SYNCED_AT,
     changes_last_24h: 0,
     last_run_at: "2026-09-02T18:06:00.000Z",
     writes: [
@@ -347,6 +352,23 @@ describe("CeligoIntegrationsPage", () => {
     wrap(<CeligoIntegrationsPage />);
     expect(screen.getByRole("table")).toBeInTheDocument();
     expect(screen.getByText("20 flows · 9 scheduled · 6 on demand · 5 paused · 94 steps")).toBeInTheDocument();
+  });
+
+  it("case 7: the tile renders 'errors not checked yet', never a green zero, when errors_checked_at is null", () => {
+    mocks.integrations.mockReturnValue(resolved([makeIntegration({ errors_checked_at: null })]));
+    wrap(<CeligoIntegrationsPage />);
+    const tile = screen.getByText("Solidus + NetSuite").closest("button") as HTMLElement;
+    expect(within(tile).getByText("errors not checked yet")).toBeInTheDocument();
+    expect(within(tile).queryByText(/0 open errors/)).not.toBeInTheDocument();
+  });
+
+  it("case 7b: the list-view row renders 'errors not checked yet', never a green zero, when errors_checked_at is null", () => {
+    routeMocks.view = "list";
+    mocks.integrations.mockReturnValue(resolved([makeIntegration({ errors_checked_at: null })]));
+    wrap(<CeligoIntegrationsPage />);
+    const row = screen.getByRole("table");
+    expect(within(row).getByText("errors not checked yet")).toBeInTheDocument();
+    expect(within(row).queryByText(/0 open errors/)).not.toBeInTheDocument();
   });
 
   it("case 6a: a pending integrations query renders a skeleton, never 'No integrations'", () => {

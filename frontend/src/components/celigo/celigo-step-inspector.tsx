@@ -321,13 +321,18 @@ function ErrorsTab({
   errorsState,
   groups,
   onRetry,
-  lastSyncedAt,
+  errorsCheckedAt,
   flowErrorCount,
 }: {
   errorsState: "pending" | "error" | "success";
   groups: CeligoFlowErrorGroup[];
   onRetry: () => void;
-  lastSyncedAt: string | null;
+  /** The flow's own `errors_checked_at` -- when its open-error count was
+   * last asked with the correct per-flow endpoint, null when it never has
+   * been. NOT the sync time: a sync can complete while this flow's own
+   * errors were never re-checked (see `ErrorPill`'s docstring in
+   * `shared.tsx` for the same distinction). */
+  errorsCheckedAt: string | null;
   /** `detail.error_count` -- every open error on THIS FLOW, not just this
    * step's. The empty state below says two different things depending on it,
    * and neither may be guessed from `groups` alone: `groups` is already
@@ -350,27 +355,28 @@ function ErrorsTab({
     // A step with no signatures of its own is not evidence that the FLOW is
     // clean. This used to print "Celigo reported 0 for the whole flow" in
     // both cases -- a flow-wide claim, stated on a flow with open errors
-    // sitting in other steps. The quiet sentence is only honest when the
-    // flow's own count is zero; otherwise it says where the errors are.
-    // A missing sync timestamp used to render through `formatRelativeTime`'s
-    // "—", producing "on the last sync, —" — a sentence that names a moment
-    // and then refuses to say which one. When there is no timestamp the
-    // sentence says THAT instead, and drops the "Celigo reported 0" framing,
-    // which is a claim about a sync we cannot date.
-    if (!lastSyncedAt) {
+    // sitting in other steps, AND a claim Celigo never actually made (it
+    // never "reports" a zero -- this app checks its per-flow endpoint). The
+    // quiet sentence is only honest when the flow's own count is zero;
+    // otherwise it says where the errors are. A null `errorsCheckedAt` means
+    // this flow's errors have never been checked with the correct endpoint
+    // at all -- a zero here would be a claim with no check behind it, so the
+    // sentence says that instead of naming a moment (or a dash standing in
+    // for one).
+    if (!errorsCheckedAt) {
       return (
         <p className="text-[12px] text-muted-foreground">
           {flowErrorCount === 0
-            ? "No open errors on this step (sync time unavailable)."
-            : `No open errors on this step (sync time unavailable). ${flowErrorCount} open elsewhere in this flow.`}
+            ? "Open errors haven't been checked yet for this flow."
+            : `No open errors on this step. ${flowErrorCount} open elsewhere in this flow (not fully checked yet).`}
         </p>
       );
     }
     return (
       <p className="text-[12px] text-muted-foreground">
         {flowErrorCount === 0
-          ? `No open errors. Celigo reported 0 on the last sync, ${formatRelativeTime(lastSyncedAt)}.`
-          : `No open errors on this step. ${flowErrorCount} open elsewhere in this flow as of the last sync, ${formatRelativeTime(lastSyncedAt)}.`}
+          ? `No open errors on this step as of the last check, ${formatRelativeTime(errorsCheckedAt)}.`
+          : `No open errors on this step. ${flowErrorCount} open elsewhere in this flow as of the last check, ${formatRelativeTime(errorsCheckedAt)}.`}
       </p>
     );
   }
@@ -388,14 +394,16 @@ export function CeligoStepInspector({
   step,
   tab,
   onTabChange,
-  lastSyncedAt,
+  errorsCheckedAt,
   onOpenScript,
 }: {
   detail: CeligoFlowDetail;
   step: CeligoFlowStep | null;
   tab: InspectorTab;
   onTabChange: (tab: InspectorTab) => void;
-  lastSyncedAt: string | null;
+  /** The flow's own `errors_checked_at` -- see `ErrorsTab`'s docstring for
+   * why this is not the sync time. */
+  errorsCheckedAt: string | null;
   onOpenScript: OpenScript;
 }): JSX.Element {
   const errorsQuery = useCeligoFlowErrors(detail.id);
@@ -495,7 +503,7 @@ export function CeligoStepInspector({
               errorsState={errorsState}
               groups={matchingGroups}
               onRetry={() => errorsQuery.refetch()}
-              lastSyncedAt={lastSyncedAt}
+              errorsCheckedAt={errorsCheckedAt}
               flowErrorCount={detail.error_count}
             />
           </TabsContent>

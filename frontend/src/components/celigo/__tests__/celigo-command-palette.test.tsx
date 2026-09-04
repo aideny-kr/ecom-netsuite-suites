@@ -97,6 +97,7 @@ function makeIntegration(overrides: Partial<CeligoIntegration> = {}): CeligoInte
     no_run_count: 0,
     error_count: 0,
     signature_count: 0,
+    errors_checked_at: null,
     changes_last_24h: 0,
     last_run_at: null,
     writes: [],

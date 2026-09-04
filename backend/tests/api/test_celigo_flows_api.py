@@ -601,6 +601,50 @@ class TestListIntegrations:
         row = next(i for i in r.json() if i["id"] == str(world["integration"].id))
         assert row["router_count"] == 0
 
+    async def test_errors_checked_at_is_null_when_any_flow_is_unchecked_and_min_when_all_are(
+        self, client, admin_user, db
+    ):
+        """Migration 098's honesty cursor, rolled up to the integration:
+        `MIN(errors_checked_at)` over the integration's production flows, and
+        NULL if the integration has no flows OR any flow's value is NULL --
+        a zero elsewhere in this response is not verified until every one of
+        this integration's flows has actually been checked with the correct
+        endpoint."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)  # errors_checked_at NULL by default
+        second = await _seed_cron_flow(db, world, name="Second Flow")
+        await db.flush()
+
+        r = await client.get("/api/v1/celigo/integrations", headers=headers)
+        assert r.status_code == 200, r.text
+        row = next(i for i in r.json() if i["id"] == str(world["integration"].id))
+        assert row["errors_checked_at"] is None, "world['flow'] was never checked -- NULL, not a zero-ish default"
+
+        older = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        newer = datetime(2026, 9, 3, tzinfo=timezone.utc)
+
+        # MIXED: one flow checked, the other still NULL. This is the case the
+        # `bool_or(errors_checked_at IS NULL)` guard exists for -- a plain
+        # MIN() would skip the NULL and report the checked flow's timestamp,
+        # presenting an integration as verified while half of it never was.
+        world["flow"].errors_checked_at = newer
+        await db.flush()
+
+        r = await client.get("/api/v1/celigo/integrations", headers=headers)
+        assert r.status_code == 200, r.text
+        row = next(i for i in r.json() if i["id"] == str(world["integration"].id))
+        assert row["errors_checked_at"] is None, "one unchecked flow keeps the whole integration unverified"
+
+        second.errors_checked_at = older
+        await db.flush()
+
+        r = await client.get("/api/v1/celigo/integrations", headers=headers)
+        assert r.status_code == 200, r.text
+        row = next(i for i in r.json() if i["id"] == str(world["integration"].id))
+        assert row["errors_checked_at"].startswith("2026-09-01"), (
+            "MIN across the integration's flows once all are checked"
+        )
+
     async def test_signature_count_dedupes_across_multiple_errors_sharing_one_signature(self, client, admin_user, db):
         """Task 18 (cross-surface consistency): `signature_count` is the
         DISTINCT root-cause count across the whole integration, the same
@@ -740,6 +784,24 @@ class TestListIntegrationFlows:
         assert flow_out["schedule"] == {"type": "everyN", "unit": "minutes", "value": 15}
         assert flow_out["error_count"] == 2, "the resolved error must not count as open"
         assert flow_out["signature_count"] == 1, "both open errors share one signature -- one root cause"
+
+    async def test_errors_checked_at_is_exposed_per_flow_row(self, client, admin_user, db):
+        """Migration 098 -- NULL until Phase E has consulted this flow's own
+        error summary at least once, then the timestamp of the last check."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)  # NULL by default
+
+        r = await client.get(f"/api/v1/celigo/integrations/{world['integration'].id}/flows", headers=headers)
+        assert r.status_code == 200, r.text
+        assert r.json()[0]["errors_checked_at"] is None
+
+        checked_at = datetime(2026, 9, 3, 1, 0, tzinfo=timezone.utc)
+        world["flow"].errors_checked_at = checked_at
+        await db.flush()
+
+        r = await client.get(f"/api/v1/celigo/integrations/{world['integration'].id}/flows", headers=headers)
+        assert r.status_code == 200, r.text
+        assert r.json()[0]["errors_checked_at"].startswith("2026-09-03T01:00")
 
     async def test_purged_but_unresolved_error_does_not_count_as_open(self, client, admin_user, db):
         """WHOLE-BRANCH REVIEW FINDING 5: this endpoint's own definition of
@@ -998,6 +1060,25 @@ class TestGetFlowDetail:
         assert att_out["script_id"] == str(world["script"].id)
 
         assert body["unassigned_attachments"] == []
+
+    async def test_errors_checked_at_is_null_until_checked(self, client, admin_user, db):
+        """Migration 098's honesty cursor on the flow detail response --
+        NULL by default (`_seed_world` never sets it), set once Phase E has
+        actually consulted this flow's error summary."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+
+        r = await client.get(f"/api/v1/celigo/flows/{world['flow'].id}", headers=headers)
+        assert r.status_code == 200, r.text
+        assert r.json()["errors_checked_at"] is None
+
+        checked_at = datetime(2026, 9, 3, 2, 30, tzinfo=timezone.utc)
+        world["flow"].errors_checked_at = checked_at
+        await db.flush()
+
+        r = await client.get(f"/api/v1/celigo/flows/{world['flow'].id}", headers=headers)
+        assert r.status_code == 200, r.text
+        assert r.json()["errors_checked_at"].startswith("2026-09-03T02:30")
 
     async def test_step_order_is_deterministic_across_a_three_way_sequence_tie(self, client, admin_user, db):
         """WHOLE-BRANCH REVIEW FINDING 7 (2026-08-27, PROVEN by execution):

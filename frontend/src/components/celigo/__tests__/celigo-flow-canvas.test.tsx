@@ -2,7 +2,7 @@ import { render, screen, within, fireEvent } from "@testing-library/react";
 import { describe, expect, it, vi, beforeAll, afterAll } from "vitest";
 import type { CeligoAttachment, CeligoFlowDetail, CeligoFlowStep, CeligoRouter } from "@/hooks/use-celigo-flows";
 import { computeLayout } from "../layout";
-import { CeligoFlowCanvas } from "../celigo-flow-canvas";
+import { CeligoFlowCanvas, FIT_FLOOR } from "../celigo-flow-canvas";
 
 // Task 15 — the real canvas (mockup screen 3): bubbles, router nodes,
 // branch lanes, edges, fit/zoom, selection. `CeligoFlowCanvas` takes
@@ -155,6 +155,7 @@ function makeDetail(overrides: Partial<CeligoFlowDetail> = {}): CeligoFlowDetail
     last_error_at: null,
     error_count: 0,
     signature_count: 0,
+    errors_checked_at: null,
     ...overrides,
   };
 }
@@ -321,10 +322,17 @@ describe("CeligoFlowCanvas — bubbles, routers, lanes, edges", () => {
 });
 
 describe("CeligoFlowCanvas — fit/zoom", () => {
+  it("pins the fit floor at 40% (0.6 clipped the last rank of a chained-router flow in an ~800px pane)", () => {
+    // Deliberately a literal, not derived from the export: the other tests
+    // compute their expectations FROM FIT_FLOOR, so only this one would go
+    // red on a regression back to 0.6.
+    expect(FIT_FLOOR).toBe(0.4);
+  });
+
   it("starts fit-to-width, reading 'fit · NN%' from the mocked wrap clientWidth", () => {
     const detail = makeDetail();
     const layout = computeLayout(detail);
-    const expectedPct = Math.round(clamp(WRAP_WIDTH / layout.width, 0.6, 1) * 100);
+    const expectedPct = Math.round(clamp(WRAP_WIDTH / layout.width, FIT_FLOOR, 1) * 100);
     renderCanvas(detail);
     expect(screen.getByText(`fit · ${expectedPct}%`)).toBeInTheDocument();
   });
@@ -332,7 +340,7 @@ describe("CeligoFlowCanvas — fit/zoom", () => {
   it("the '+' button switches the label to 100%, and '⤢' switches back to fit", () => {
     const detail = makeDetail();
     const layout = computeLayout(detail);
-    const expectedPct = Math.round(clamp(WRAP_WIDTH / layout.width, 0.6, 1) * 100);
+    const expectedPct = Math.round(clamp(WRAP_WIDTH / layout.width, FIT_FLOOR, 1) * 100);
     renderCanvas(detail);
     fireEvent.click(screen.getByRole("button", { name: "Zoom to 100%" }));
     expect(screen.getByText("100%")).toBeInTheDocument();
@@ -340,25 +348,29 @@ describe("CeligoFlowCanvas — fit/zoom", () => {
     expect(screen.getByText(`fit · ${expectedPct}%`)).toBeInTheDocument();
   });
 
-  // Codex fix wave, item 22 (ruling R19b). The 0.6 floor stays — below it the
-  // bubbles are unreadable and the canvas scrolls instead — but the label
-  // must stop calling the result "fit": at the floor the diagram does NOT fit
-  // the viewport, and a reader who trusts the word stops scrolling and
-  // misses steps.
-  it("item 22: says 'min · 60%', not 'fit', when the fit scale is clamped at the floor", () => {
-    // A twelve-step top-level chain is ~2.9k px wide against a 1200px wrap —
-    // an unclamped fit would be ~42%.
+  // Codex fix wave, item 22 (ruling R19b), floor lowered per this branch's
+  // brief (0.6 -> 0.4, so fit-to-width actually fits a chained-router flow in
+  // a ~800px canvas). The floor itself stays — below it the bubbles are
+  // unreadable and the canvas scrolls instead — but the label must stop
+  // calling the result "fit": at the floor the diagram does NOT fit the
+  // viewport, and a reader who trusts the word stops scrolling and misses
+  // steps.
+  it(`item 22: says 'min · ${FIT_FLOOR * 100}%', not 'fit', when the fit scale is clamped at the floor`, () => {
+    // A twenty-step top-level chain is well past 3000px wide against a
+    // 1200px wrap -- an unclamped fit is comfortably below the new 0.4
+    // floor (a 12-step chain, ~42% unclamped, no longer qualifies at this
+    // floor -- this fixture is deliberately longer than the minimum needed).
     const long = makeDetail({
-      steps: Array.from({ length: 12 }, (_, i) =>
+      steps: Array.from({ length: 20 }, (_, i) =>
         makeStep({ id: `chain-${i}`, sequence: i, kind: i === 0 ? "source" : "destination" }),
       ),
       routers: [],
     });
     const layout = computeLayout(long);
-    expect(WRAP_WIDTH / layout.width).toBeLessThan(0.6);
+    expect(WRAP_WIDTH / layout.width).toBeLessThan(FIT_FLOOR);
 
     renderCanvas(long);
-    expect(screen.getByText("min · 60%")).toBeInTheDocument();
+    expect(screen.getByText(`min · ${FIT_FLOOR * 100}%`)).toBeInTheDocument();
     expect(screen.queryByText(/^fit · /)).not.toBeInTheDocument();
   });
 });

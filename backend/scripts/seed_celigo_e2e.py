@@ -78,6 +78,11 @@ DEFAULT_PASSWORD = "CeligoE2E-Passw0rd!"
 # lookup -- matches `cross-surface-counts.test.tsx` (Task 18) and the
 # approved mockup's own "10 open · 1 root cause" / "Framework Intl" facts.
 ERROR_COUNT = 10
+# When the pretend sync last consulted each seeded flow's Celigo error summary
+# (migration 098's `celigo_flows.errors_checked_at`) -- shortly after the chain
+# flow's `last_executed_at`, so the page reads "checked N ago", never "errors
+# not checked yet" (which is what a NULL honestly renders as).
+ERRORS_CHECKED_AT = datetime(2026, 9, 2, 18, 12, tzinfo=timezone.utc)
 
 
 def _guard_tenant_slug(slug: str) -> None:
@@ -271,6 +276,10 @@ async def _seed_fixture_world(db: AsyncSession, tenant_id, conn_id: uuid.UUID) -
         timezone="America/Los_Angeles",
         last_executed_at=datetime(2026, 9, 2, 17, 51, tzinfo=timezone.utc),
         celigo_last_modified=datetime(2026, 9, 2, tzinfo=timezone.utc),
+        # Migration 098: the seed stands in for a sync that DID consult this
+        # flow's error summary, so its zero/non-zero counts render as checked
+        # ("checked N ago") rather than "errors not checked yet".
+        errors_checked_at=ERRORS_CHECKED_AT,
         raw_json={
             "numOpenError": ERROR_COUNT,
             "lastErrorAt": None,
@@ -497,6 +506,7 @@ async def _seed_fixture_world(db: AsyncSession, tenant_id, conn_id: uuid.UUID) -
             name="Nightly Backfill (paused)",
             disabled=True,
             schedule="? 0 */4 * * *",
+            errors_checked_at=ERRORS_CHECKED_AT,
             raw_json={},
         )
     )
@@ -509,6 +519,7 @@ async def _seed_fixture_world(db: AsyncSession, tenant_id, conn_id: uuid.UUID) -
             name="Manual Resync",
             disabled=False,
             schedule=None,
+            errors_checked_at=ERRORS_CHECKED_AT,
             raw_json={},
         )
     )

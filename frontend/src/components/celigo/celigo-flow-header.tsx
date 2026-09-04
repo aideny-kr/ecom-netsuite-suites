@@ -24,10 +24,12 @@
  * each one computes without mounting the header.
  */
 
+import { useState } from "react";
 import type { CeligoAttachment, CeligoFlowDetail, CeligoFlowStep, CeligoRecordWrite } from "@/hooks/use-celigo-flows";
 import type { QueryState } from "@/lib/query-state";
 import { parseSchedule, stallState } from "./schedule";
 import { ErrorNotice, ErrorPill, Pill, SchedulePill, formatRelativeTime, deriveFlowSummary } from "./shared";
+import { cn } from "@/lib/utils";
 
 /** Resolution of `detail.source_id` against the flow's siblings (the page
  * computes this — it alone holds the sibling list — and hands the header
@@ -38,6 +40,16 @@ import { ErrorNotice, ErrorPill, Pill, SchedulePill, formatRelativeTime, deriveF
 export type ClonedFromInfo = { resolvedName: string | null };
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** Longest AI description shown in full without a clamp or a "Show more"
+ * toggle. Exported so the tests build fixtures from it instead of a
+ * re-hardcoded number. */
+export const AI_DESCRIPTION_CLAMP_CHARS = 200;
+
+/** localStorage key for "Focus canvas" -- `"1"` collapsed, absent (or
+ * anything else) expanded. One key for the whole surface, not per-flow: a
+ * viewer who wants the canvas maximized wants that on every flow they open. */
+const FLOW_HEADER_COLLAPSED_KEY = "celigo.flowHeaderCollapsed";
 
 /** "2 Sep 2026" — day, short month, full year, read off UTC fields so the
  * date shown never depends on the viewer's (or the test runner's) local
@@ -233,6 +245,53 @@ export function CeligoFlowHeader({
    * "this flow has no integration". */
   integrationNotice?: JSX.Element | null;
 }): JSX.Element {
+  // The AI description is inherited free text (see the block below), not
+  // authored for this UI -- some run to ten lines. Collapsed to a 2-line
+  // excerpt by default (mockup: "a one-to-two-line excerpt with an
+  // ellipsis"), a `useState` rather than derived from anything else since
+  // it is purely a per-view reading preference, not a fact about the flow.
+  const [aiExpanded, setAiExpanded] = useState(false);
+  const aiDescriptionId = `celigo-ai-description-${detail.id}`;
+  // A description that already fits in two lines gets no clamp and no
+  // toggle -- a "Show more" that shows nothing more teaches the reader to
+  // ignore the button. jsdom cannot measure line boxes, so "fits" is a
+  // character budget: two header lines hold ~200 characters at the
+  // narrowest inspector-open width.
+  const aiText = detail.ai_description_detailed ?? detail.ai_description_summary;
+  const aiClampable = !!aiText && aiText.length > AI_DESCRIPTION_CLAMP_CHARS;
+
+  // "Focus canvas" -- the header collapses to its first row (pills, title,
+  // actions), giving the canvas below the rest of the viewport (finding: the
+  // approved mockup's diagram was getting only half the height). Persisted
+  // per VIEWER (not per flow -- one preference for the whole surface) under
+  // a fixed key; read once via a `useState` initializer so a real browser
+  // restores the choice before first paint but SSR/jsdom -- which never see
+  // `window` the same way twice -- always render expanded. Every read/write
+  // is try/catched: a viewer with storage disabled (private mode, blocked
+  // site data) must still get a working, just non-persistent, toggle.
+  const [headerCollapsed, setHeaderCollapsed] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    try {
+      return window.localStorage.getItem(FLOW_HEADER_COLLAPSED_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+
+  function toggleHeaderCollapsed() {
+    setHeaderCollapsed((prev) => {
+      const next = !prev;
+      try {
+        if (next) window.localStorage.setItem(FLOW_HEADER_COLLAPSED_KEY, "1");
+        else window.localStorage.removeItem(FLOW_HEADER_COLLAPSED_KEY);
+      } catch {
+        // Best effort -- the toggle still works for this render, it just
+        // won't survive a reload.
+      }
+      return next;
+    });
+  }
+
   const syncSettled = syncStatusState === "success";
   const paused = detail.disabled === true;
   const parsed = parseSchedule(detail.schedule);
@@ -247,7 +306,6 @@ export function CeligoFlowHeader({
   const lookupCount = detail.steps.filter((s) => s.kind === "lookup").length;
   const writes = computeFlowWrites(detail.steps);
   const scriptStats = computeScriptStats(detail);
-  const aiText = detail.ai_description_detailed ?? detail.ai_description_summary;
 
   const lastRanBeforeSync =
     detail.last_executed_at && lastSyncedAt ? minutesBetween(detail.last_executed_at, lastSyncedAt) : null;
@@ -268,7 +326,14 @@ export function CeligoFlowHeader({
       <div className="flex flex-wrap items-center gap-2.5">
         {syncSettled ? (
           <>
-            <ErrorPill count={detail.error_count} signatureCount={detail.signature_count} checkedAt={lastSyncedAt} />
+            <ErrorPill
+              count={detail.error_count}
+              signatureCount={detail.signature_count}
+              // The flow's OWN check timestamp, not the sync time -- a sync
+              // can complete while this flow's errors were never re-checked
+              // with the correct endpoint (see `ErrorPill`'s docstring).
+              checkedAt={detail.errors_checked_at}
+            />
             <SchedulePill stall={stall} parsed={parsed} />
           </>
         ) : (
@@ -281,6 +346,14 @@ export function CeligoFlowHeader({
           {detail.name}
         </h3>
         <div className="ml-auto flex items-center gap-1.5">
+          <button
+            type="button"
+            aria-pressed={headerCollapsed}
+            onClick={toggleHeaderCollapsed}
+            className="rounded-md border px-2 py-1 text-[11.5px] text-muted-foreground hover:text-foreground"
+          >
+            {headerCollapsed ? "Show details" : "Focus canvas"}
+          </button>
           <button
             type="button"
             onClick={handleCopyLink}
@@ -306,62 +379,92 @@ export function CeligoFlowHeader({
       )}
       {integrationNotice}
 
-      <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11.5px] tabular-nums text-muted-foreground">
-        <span>
-          {parsed.kind === "cron"
-            ? `${paused ? "kept: " : ""}${parsed.label} ${parsed.display}${detail.timezone ? ` · ${detail.timezone}` : ""}`
-            : parsed.kind === "on_demand"
-              ? "on demand"
-              : parsed.raw}
-        </span>
-        {detail.last_executed_at && lastSyncedAt && (
-          <span>{`last ran ${formatUtcTime(detail.last_executed_at)} · ${Math.abs(lastRanBeforeSync ?? 0)} min ${
-            (lastRanBeforeSync ?? 0) >= 0 ? "before" : "after"
-          } the sync`}</span>
-        )}
-        <span>{`${detail.steps.length} step${detail.steps.length === 1 ? "" : "s"} · ${routerCount} router${routerCount === 1 ? "" : "s"} · ${branchCount} branch${branchCount === 1 ? "" : "es"} · ${lookupCount} lookup${lookupCount === 1 ? "" : "s"}`}</span>
-        <span className="font-mono text-foreground">{formatFlowWritesLine(writes)}</span>
-        <span className="flex items-center gap-1.5">
-          <span>{`${scriptStats.count} script${scriptStats.count === 1 ? "" : "s"}`}</span>
-          {scriptStats.divergedFamilies > 0 && (
-            <Pill tone="warn">{`${scriptStats.divergedFamilies} diverged famil${scriptStats.divergedFamilies === 1 ? "y" : "ies"}`}</Pill>
-          )}
-        </span>
-        {clonedFrom && (
+      {/* "Focus canvas" collapses the facts below the first row -- pills,
+          title and actions survive so the flow's own identity and status
+          stay visible while the canvas gets the rest of the viewport
+          (finding: the diagram was only getting half the height). The two
+          error notices above are deliberately NOT collapsed: a failed
+          request is something to act on, not a detail to tuck away. */}
+      {!headerCollapsed && (
+        <>
+        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[11.5px] tabular-nums text-muted-foreground">
           <span>
-            {clonedFrom.resolvedName
-              ? `cloned from ${clonedFrom.resolvedName}`
-              : "cloned from a flow no longer in the account"}
+            {parsed.kind === "cron"
+              ? `${paused ? "kept: " : ""}${parsed.label} ${parsed.display}${detail.timezone ? ` · ${detail.timezone}` : ""}`
+              : parsed.kind === "on_demand"
+                ? "on demand"
+                : parsed.raw}
           </span>
-        )}
-        <span>{`modified in Celigo ${formatFullDate(detail.celigo_last_modified)}`}</span>
-      </div>
-
-      <div data-testid="celigo-overview" className="flex flex-col gap-1.5">
-        <div className="flex gap-2 text-[12.5px] text-foreground">
-          <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground">
-            What it does · derived
+          {detail.last_executed_at && lastSyncedAt && (
+            <span>{`last ran ${formatUtcTime(detail.last_executed_at)} · ${Math.abs(lastRanBeforeSync ?? 0)} min ${
+              (lastRanBeforeSync ?? 0) >= 0 ? "before" : "after"
+            } the sync`}</span>
+          )}
+          <span>{`${detail.steps.length} step${detail.steps.length === 1 ? "" : "s"} · ${routerCount} router${routerCount === 1 ? "" : "s"} · ${branchCount} branch${branchCount === 1 ? "" : "es"} · ${lookupCount} lookup${lookupCount === 1 ? "" : "s"}`}</span>
+          <span className="font-mono text-foreground">{formatFlowWritesLine(writes)}</span>
+          <span className="flex items-center gap-1.5">
+            <span>{`${scriptStats.count} script${scriptStats.count === 1 ? "" : "s"}`}</span>
+            {scriptStats.divergedFamilies > 0 && (
+              <Pill tone="warn">{`${scriptStats.divergedFamilies} diverged famil${scriptStats.divergedFamilies === 1 ? "y" : "ies"}`}</Pill>
+            )}
           </span>
-          <span>{deriveFlowSummary(detail)}</span>
-        </div>
-        {aiText && (
-          <div className="flex gap-2 rounded-md border border-border/70 bg-muted/40 px-2.5 py-1.5 text-[12px]">
-            <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground">
-              {`AI description · Celigo${detail.source_id ? " · inherited from the clone source" : ""}`}
+          {clonedFrom && (
+            <span>
+              {clonedFrom.resolvedName
+                ? `cloned from ${clonedFrom.resolvedName}`
+                : "cloned from a flow no longer in the account"}
             </span>
-            <q className="text-muted-foreground">{aiText}</q>
+          )}
+          <span>{`modified in Celigo ${formatFullDate(detail.celigo_last_modified)}`}</span>
+        </div>
+
+        <div data-testid="celigo-overview" className="flex flex-col gap-1.5">
+          <div className="flex gap-2 text-[12.5px] text-foreground">
+            <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground">
+              What it does · derived
+            </span>
+            <span>{deriveFlowSummary(detail)}</span>
           </div>
-        )}
-        {/* "Synced —." was the same collapse the pills made: a dash standing
-            in for three different truths. Each state says which one it is. */}
-        <p className="text-[11px] text-muted-foreground">
-          {syncSettled
-            ? `Synced ${formatRelativeTime(lastSyncedAt)}.`
-            : syncStatusState === "pending"
-              ? "Checking sync status…"
-              : "Sync status unavailable — every fact below is as of an unknown sync."}
-        </p>
-      </div>
+          {aiText && (
+            <div className="flex flex-col gap-1 rounded-md border border-border/70 bg-muted/40 px-2.5 py-1.5 text-[12px]">
+              <div className="flex gap-2">
+                <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground">
+                  {`AI description · Celigo${detail.source_id ? " · inherited from the clone source" : ""}`}
+                </span>
+                {/* `line-clamp-2` alone sets `overflow: hidden` and the
+                    `-webkit-box` display it needs -- no separate
+                    `overflow-hidden` alongside it (see `step-bubble.tsx`'s
+                    title, which notes `cn`/tailwind-merge would strip it back
+                    out as a conflicting rule anyway). */}
+                <q id={aiDescriptionId} className={cn("text-muted-foreground", aiClampable && !aiExpanded && "line-clamp-2")}>
+                  {aiText}
+                </q>
+              </div>
+              {aiClampable && (
+                <button
+                  type="button"
+                  aria-expanded={aiExpanded}
+                  aria-controls={aiDescriptionId}
+                  onClick={() => setAiExpanded((prev) => !prev)}
+                  className="self-start text-[10.5px] font-medium text-muted-foreground hover:text-foreground"
+                >
+                  {aiExpanded ? "Show less" : "Show more"}
+                </button>
+              )}
+            </div>
+          )}
+          {/* "Synced —." was the same collapse the pills made: a dash standing
+              in for three different truths. Each state says which one it is. */}
+          <p className="text-[11px] text-muted-foreground">
+            {syncSettled
+              ? `Synced ${formatRelativeTime(lastSyncedAt)}.`
+              : syncStatusState === "pending"
+                ? "Checking sync status…"
+                : "Sync status unavailable — every fact below is as of an unknown sync."}
+          </p>
+        </div>
+        </>
+      )}
     </div>
   );
 }

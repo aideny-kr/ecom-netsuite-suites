@@ -304,7 +304,9 @@ function IntegrationTile({
         <ErrorPill
           count={integration.error_count}
           signatureCount={integration.signature_count}
-          checkedAt={lastSyncedAt}
+          // The integration's OWN oldest check timestamp across its flows,
+          // not the sync time -- see `ErrorPill`'s docstring.
+          checkedAt={integration.errors_checked_at}
         />
         <AttentionPill attention={attention} />
         <span className="ml-auto">
@@ -383,10 +385,10 @@ function IntegrationsTable({
                 </td>
                 <td className="px-2.5 py-1.5">
                   <ErrorPill
-          count={integration.error_count}
-          signatureCount={integration.signature_count}
-          checkedAt={lastSyncedAt}
-        />
+                    count={integration.error_count}
+                    signatureCount={integration.signature_count}
+                    checkedAt={integration.errors_checked_at}
+                  />
                 </td>
                 <td className="px-2.5 py-1.5">
                   {/* Fix round 1, finding 2: the schedule/attention pill —
