@@ -722,6 +722,32 @@ describe("CeligoFlowPage — script drawer", () => {
   });
 });
 
+describe("CeligoFlowPage — header AI description clamp (canvas gets the page, Part B.1)", () => {
+  it("collapses the AI description to 2 lines by default, behind a 'Show more' toggle", () => {
+    wrap(<CeligoFlowPage />);
+    const quote = screen.getByText(AI_TEXT);
+    expect(quote.className).toMatch(/line-clamp-2/);
+    const toggle = screen.getByRole("button", { name: "Show more" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggle).toHaveAttribute("aria-controls", quote.id);
+    expect(quote.id).toBeTruthy();
+  });
+
+  it("expands on click (flipping aria-expanded and the label) and collapses again on a second click", () => {
+    wrap(<CeligoFlowPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Show more" }));
+
+    const expandedToggle = screen.getByRole("button", { name: "Show less" });
+    expect(expandedToggle).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText(AI_TEXT).className).not.toMatch(/line-clamp-2/);
+
+    fireEvent.click(expandedToggle);
+    const collapsedToggle = screen.getByRole("button", { name: "Show more" });
+    expect(collapsedToggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText(AI_TEXT).className).toMatch(/line-clamp-2/);
+  });
+});
+
 describe("CeligoFlowPage — inspector resting state", () => {
   it("renders the Overview (AI description + sync freshness) and hands the inspector slot step: null", () => {
     wrap(<CeligoFlowPage />);

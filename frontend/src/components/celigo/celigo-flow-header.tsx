@@ -24,10 +24,12 @@
  * each one computes without mounting the header.
  */
 
+import { useState } from "react";
 import type { CeligoAttachment, CeligoFlowDetail, CeligoFlowStep, CeligoRecordWrite } from "@/hooks/use-celigo-flows";
 import type { QueryState } from "@/lib/query-state";
 import { parseSchedule, stallState } from "./schedule";
 import { ErrorNotice, ErrorPill, Pill, SchedulePill, formatRelativeTime, deriveFlowSummary } from "./shared";
+import { cn } from "@/lib/utils";
 
 /** Resolution of `detail.source_id` against the flow's siblings (the page
  * computes this — it alone holds the sibling list — and hands the header
@@ -233,6 +235,14 @@ export function CeligoFlowHeader({
    * "this flow has no integration". */
   integrationNotice?: JSX.Element | null;
 }): JSX.Element {
+  // The AI description is inherited free text (see the block below), not
+  // authored for this UI -- some run to ten lines. Collapsed to a 2-line
+  // excerpt by default (mockup: "a one-to-two-line excerpt with an
+  // ellipsis"), a `useState` rather than derived from anything else since
+  // it is purely a per-view reading preference, not a fact about the flow.
+  const [aiExpanded, setAiExpanded] = useState(false);
+  const aiDescriptionId = `celigo-ai-description-${detail.id}`;
+
   const syncSettled = syncStatusState === "success";
   const paused = detail.disabled === true;
   const parsed = parseSchedule(detail.schedule);
@@ -352,11 +362,29 @@ export function CeligoFlowHeader({
           <span>{deriveFlowSummary(detail)}</span>
         </div>
         {aiText && (
-          <div className="flex gap-2 rounded-md border border-border/70 bg-muted/40 px-2.5 py-1.5 text-[12px]">
-            <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground">
-              {`AI description · Celigo${detail.source_id ? " · inherited from the clone source" : ""}`}
-            </span>
-            <q className="text-muted-foreground">{aiText}</q>
+          <div className="flex flex-col gap-1 rounded-md border border-border/70 bg-muted/40 px-2.5 py-1.5 text-[12px]">
+            <div className="flex gap-2">
+              <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground">
+                {`AI description · Celigo${detail.source_id ? " · inherited from the clone source" : ""}`}
+              </span>
+              {/* `line-clamp-2` alone sets `overflow: hidden` and the
+                  `-webkit-box` display it needs -- no separate
+                  `overflow-hidden` alongside it (see `step-bubble.tsx`'s
+                  title, which notes `cn`/tailwind-merge would strip it back
+                  out as a conflicting rule anyway). */}
+              <q id={aiDescriptionId} className={cn("text-muted-foreground", !aiExpanded && "line-clamp-2")}>
+                {aiText}
+              </q>
+            </div>
+            <button
+              type="button"
+              aria-expanded={aiExpanded}
+              aria-controls={aiDescriptionId}
+              onClick={() => setAiExpanded((prev) => !prev)}
+              className="self-start text-[10.5px] font-medium text-muted-foreground hover:text-foreground"
+            >
+              {aiExpanded ? "Show less" : "Show more"}
+            </button>
           </div>
         )}
         {/* "Synced —." was the same collapse the pills made: a dash standing
