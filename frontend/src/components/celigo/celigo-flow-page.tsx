@@ -333,7 +333,7 @@ export function CeligoFlowPage(): JSX.Element {
                 step={selectedStep}
                 tab={inspectorTab}
                 onTabChange={setInspectorTab}
-                lastSyncedAt={lastSyncedAt}
+                errorsCheckedAt={d.errors_checked_at}
                 onOpenScript={(scriptId, opener, jsonPath) => {
                   scriptOpenerRef.current = opener;
                   // The clicked SITE travels on the URL, so the drawer names

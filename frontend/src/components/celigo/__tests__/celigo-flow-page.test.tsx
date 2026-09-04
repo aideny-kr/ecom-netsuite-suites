@@ -477,6 +477,24 @@ describe("CeligoFlowPage — header", () => {
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith(window.location.href);
   });
 
+  it("reads the error pill's checked time off errors_checked_at, not the sync time", () => {
+    // errors_checked_at deliberately differs from SYNCED_AT (both non-null,
+    // 18:12) -- a distinct "checked N ago" proves the pill reads THIS field,
+    // not `lastSyncedAt`, which the header still uses for the separate
+    // "Synced N ago." line below.
+    mocks.detail.mockReturnValue(resolved(makeDetail({ errors_checked_at: "2026-09-02T18:30:00.000Z" })));
+    const { container } = wrap(<CeligoFlowPage />);
+    expect(container.textContent).toContain("checked 3 min ago");
+    expect(container.textContent).not.toContain("checked 21 min ago");
+  });
+
+  it("renders 'errors not checked yet', never a green zero, when errors_checked_at is null", () => {
+    mocks.detail.mockReturnValue(resolved(makeDetail({ errors_checked_at: null })));
+    wrap(<CeligoFlowPage />);
+    expect(screen.getByText("errors not checked yet")).toBeInTheDocument();
+    expect(screen.queryByText(/0 open errors/)).not.toBeInTheDocument();
+  });
+
   it("resolves 'cloned from {name}' when a sibling flow's celigo_id matches source_id", () => {
     mocks.detail.mockReturnValue(resolved(makeDetail({ source_id: "cel-flow-2" })));
     const { container } = wrap(<CeligoFlowPage />);

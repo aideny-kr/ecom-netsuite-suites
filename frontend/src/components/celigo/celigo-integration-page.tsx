@@ -476,11 +476,25 @@ function ScriptsTab({ flows }: { flows: CeligoFlowSummary[] }): JSX.Element {
   );
 }
 
-function ErrorsTab({ flows, lastSyncedAt }: { flows: CeligoFlowSummary[]; lastSyncedAt: string | null }): JSX.Element {
+/** `errorsCheckedAt` is the INTEGRATION summary's own `errors_checked_at`
+ * (the oldest check among its flows) -- not the sync time. Celigo never
+ * "reports" a zero; this app checks its per-flow/per-resource error
+ * endpoint, and a `null` here means at least one flow in this integration
+ * has never had that check run with the correct endpoint, so the empty
+ * state below must not read as a verified all-clear. */
+function ErrorsTab({
+  flows,
+  errorsCheckedAt,
+}: {
+  flows: CeligoFlowSummary[];
+  errorsCheckedAt: string | null;
+}): JSX.Element {
   if (flows.length === 0) {
     return (
       <p className="text-[13px] text-muted-foreground">
-        No open errors. Celigo reported 0 on the last sync, {formatRelativeTime(lastSyncedAt)}.
+        {errorsCheckedAt
+          ? `No open errors as of the last check, ${formatRelativeTime(errorsCheckedAt)}.`
+          : "Open errors haven't been checked yet for every flow here; the next sync checks them."}
       </p>
     );
   }
@@ -714,7 +728,7 @@ export function CeligoIntegrationPage(): JSX.Element {
             ) : flowsBlocked ? (
               <ErrorNotice message="Couldn't load flows." onRetry={retryFlowsAndSync} />
             ) : (
-              <ErrorsTab flows={errorFlows} lastSyncedAt={lastSyncedAt} />
+              <ErrorsTab flows={errorFlows} errorsCheckedAt={integration.errors_checked_at} />
             )}
           </TabsContent>
           <TabsContent value="changes">

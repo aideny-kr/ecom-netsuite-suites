@@ -354,6 +354,23 @@ describe("CeligoIntegrationsPage", () => {
     expect(screen.getByText("20 flows · 9 scheduled · 6 on demand · 5 paused · 94 steps")).toBeInTheDocument();
   });
 
+  it("case 7: the tile renders 'errors not checked yet', never a green zero, when errors_checked_at is null", () => {
+    mocks.integrations.mockReturnValue(resolved([makeIntegration({ errors_checked_at: null })]));
+    wrap(<CeligoIntegrationsPage />);
+    const tile = screen.getByText("Solidus + NetSuite").closest("button") as HTMLElement;
+    expect(within(tile).getByText("errors not checked yet")).toBeInTheDocument();
+    expect(within(tile).queryByText(/0 open errors/)).not.toBeInTheDocument();
+  });
+
+  it("case 7b: the list-view row renders 'errors not checked yet', never a green zero, when errors_checked_at is null", () => {
+    routeMocks.view = "list";
+    mocks.integrations.mockReturnValue(resolved([makeIntegration({ errors_checked_at: null })]));
+    wrap(<CeligoIntegrationsPage />);
+    const row = screen.getByRole("table");
+    expect(within(row).getByText("errors not checked yet")).toBeInTheDocument();
+    expect(within(row).queryByText(/0 open errors/)).not.toBeInTheDocument();
+  });
+
   it("case 6a: a pending integrations query renders a skeleton, never 'No integrations'", () => {
     mocks.integrations.mockReturnValue(pending());
     const { container } = wrap(<CeligoIntegrationsPage />);

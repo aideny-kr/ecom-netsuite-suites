@@ -268,7 +268,14 @@ export function CeligoFlowHeader({
       <div className="flex flex-wrap items-center gap-2.5">
         {syncSettled ? (
           <>
-            <ErrorPill count={detail.error_count} signatureCount={detail.signature_count} checkedAt={lastSyncedAt} />
+            <ErrorPill
+              count={detail.error_count}
+              signatureCount={detail.signature_count}
+              // The flow's OWN check timestamp, not the sync time -- a sync
+              // can complete while this flow's errors were never re-checked
+              // with the correct endpoint (see `ErrorPill`'s docstring).
+              checkedAt={detail.errors_checked_at}
+            />
             <SchedulePill stall={stall} parsed={parsed} />
           </>
         ) : (

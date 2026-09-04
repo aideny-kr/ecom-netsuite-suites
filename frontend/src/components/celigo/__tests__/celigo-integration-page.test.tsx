@@ -623,12 +623,25 @@ describe("Errors tab", () => {
     expect(screen.queryByText("Clean Flow")).not.toBeInTheDocument();
   });
 
-  it("shows the quiet-errors sentence with the sync's relative time when nothing is open", () => {
+  it("shows the quiet-errors sentence with the check's relative time when nothing is open", () => {
+    // Backend fix (this branch): the sentence names when the CORRECT
+    // per-flow/per-resource error endpoint was last asked, off the
+    // integration summary's own `errors_checked_at` -- Celigo itself never
+    // "reported" a zero, so that framing is gone. Default makeIntegration()
+    // carries `errors_checked_at: SYNCED_AT` (2h before NOW).
     setup([makeFlow({ id: "f1", name: "Clean Flow", error_count: 0 })]);
-    // SYNCED_AT is 2h before NOW.
     expect(
-      screen.getByText("No open errors. Celigo reported 0 on the last sync, 2 h ago."),
+      screen.getByText("No open errors as of the last check, 2 h ago."),
     ).toBeInTheDocument();
+  });
+
+  it("says errors haven't been checked yet, never a stale 'reported 0', when errors_checked_at is null", () => {
+    mocks.integrations.mockReturnValue(resolved([makeIntegration({ errors_checked_at: null })]));
+    setup([makeFlow({ id: "f1", name: "Clean Flow", error_count: 0 })]);
+    expect(
+      screen.getByText("Open errors haven't been checked yet for every flow here; the next sync checks them."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/reported 0/)).not.toBeInTheDocument();
   });
 });
 
