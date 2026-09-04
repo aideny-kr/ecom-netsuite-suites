@@ -758,14 +758,18 @@ class TestFlowErrorSummary:
                         # an unambiguous count (independent-model review:
                         # dropping it would read as "absent" downstream).
                         {"_expOrImpId": "imp_str", "numError": "4"},
+                        {"_expOrImpId": "imp_float", "numError": 2.0},
                         # Malformed -- missing _expOrImpId, a non-numeric or
-                        # null numError, a boolean, or not even a dict. All
-                        # are skipped, never given a fabricated key or a
-                        # guessed count.
+                        # null numError, a boolean, a fraction (int(0.5) would
+                        # have become a verified ZERO), a negative, or not even
+                        # a dict. All are skipped, never given a fabricated key
+                        # or a guessed count.
                         {"numError": 3},
                         {"_expOrImpId": "bad_count", "numError": "not-a-number"},
                         {"_expOrImpId": "null_count", "numError": None},
                         {"_expOrImpId": "bool_count", "numError": True},
+                        {"_expOrImpId": "frac_count", "numError": 0.5},
+                        {"_expOrImpId": "neg_count", "numError": -1},
                         "not-a-dict",
                     ]
                 },
@@ -774,7 +778,7 @@ class TestFlowErrorSummary:
         async with _json_client(handler) as c:
             counts = await list_flow_error_summary("flow1", token="tok", client=c)
 
-        assert counts == {"exp_1": 0, "imp_1": 7, "imp_str": 4}
+        assert counts == {"exp_1": 0, "imp_1": 7, "imp_str": 4, "imp_float": 2}
 
     @pytest.mark.asyncio
     async def test_request_has_no_query_params(self):

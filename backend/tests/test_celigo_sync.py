@@ -44,6 +44,7 @@ from app.services.celigo.client import (
     CeligoNotFoundError,
     get_resource,
 )
+from app.services.celigo.errors import upsert_errors
 from app.services.celigo.repository import (
     extract_flow_steps,
     sync_flow_steps,
@@ -53,7 +54,7 @@ from app.services.celigo.repository import (
     upsert_script,
 )
 from app.services.celigo.sanitizer import sanitize
-from app.services.celigo.sync_service import SyncSummary, _is_sandbox, sync_flow_map_for_connection
+from app.services.celigo.sync_service import SyncSummary, _is_sandbox, _StepRef, sync_flow_map_for_connection
 from tests.conftest import create_test_tenant
 
 # ---------------------------------------------------------------------------
@@ -2012,6 +2013,30 @@ class TestPhaseEHonestyGuards:
     async def _flow_row(db: AsyncSession, celigo_id: str) -> CeligoFlow:
         return (await db.execute(select(CeligoFlow).where(CeligoFlow.celigo_id == celigo_id))).scalar_one()
 
+    @staticmethod
+    def _shared_resource_flow() -> dict:
+        """Two router branches referencing ONE import -- Celigo allows it, and
+        `uq_celigo_flow_steps_identity` includes `branch_key`, so both become
+        real steps that share a celigo_id."""
+        return {
+            "_id": "flow_s",
+            "name": "Shared resource",
+            "_integrationId": "int_s",
+            "disabled": False,
+            "schedule": None,
+            "pageGenerators": [{"_exportId": "exp_src"}],
+            "routers": [
+                {
+                    "id": "r1",
+                    "name": "",
+                    "branches": [
+                        {"branchId": "b1", "name": "A", "pageProcessors": [{"_importId": "imp_shared"}]},
+                        {"branchId": "b2", "name": "B", "pageProcessors": [{"_importId": "imp_shared"}]},
+                    ],
+                }
+            ],
+        }
+
     async def test_a_listing_shorter_than_the_summary_count_records_what_arrived_but_resolves_nothing(
         self, db: AsyncSession, monkeypatch
     ):
@@ -2216,27 +2241,7 @@ class TestPhaseEHonestyGuards:
     ):
         tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
         conn_id = await _make_connection(db, tenant.id)
-        # Two router branches referencing ONE import -- Celigo allows it, and
-        # `uq_celigo_flow_steps_identity` includes `branch_key`, so both
-        # become real steps that share a celigo_id.
-        flow = {
-            "_id": "flow_s",
-            "name": "Shared resource",
-            "_integrationId": "int_s",
-            "disabled": False,
-            "schedule": None,
-            "pageGenerators": [{"_exportId": "exp_src"}],
-            "routers": [
-                {
-                    "id": "r1",
-                    "name": "",
-                    "branches": [
-                        {"branchId": "b1", "name": "A", "pageProcessors": [{"_importId": "imp_shared"}]},
-                        {"branchId": "b2", "name": "B", "pageProcessors": [{"_importId": "imp_shared"}]},
-                    ],
-                }
-            ],
-        }
+        flow = self._shared_resource_flow()
 
         error_calls: list = []
         summary = await _run_sync(
@@ -2272,6 +2277,74 @@ class TestPhaseEHonestyGuards:
         row = (await db.execute(select(CeligoFlowError).where(CeligoFlowError.celigo_id == "err_s"))).scalar_one()
         assert row.flow_step_id == sharing[0].id, (
             "the first step referencing the resource owns its errors, deterministically"
+        )
+
+    async def test_a_verified_zero_also_clears_a_leftover_under_the_duplicate_step(self, db: AsyncSession, monkeypatch):
+        """Before ownership was deterministic, an error could sit under the
+        SECOND step sharing a resource. A verified zero applied under the
+        first step must still resolve that leftover -- otherwise it stays
+        open forever on a flow that reads as checked."""
+        tenant = await create_test_tenant(db, name=f"Tenant {uuid.uuid4().hex[:6]}")
+        conn_id = await _make_connection(db, tenant.id)
+        flow = self._shared_resource_flow()
+
+        await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_s")],
+            flows=[flow],
+            summary_by_flow={"flow_s": {"exp_src": 0, "imp_shared": 1}},
+            errors_by_step={("flow_s", "imp_shared"): [_raw_error(celigo_id="err_s")]},
+        )
+        flow_row = await self._flow_row(db, "flow_s")
+        steps = (
+            (
+                await db.execute(
+                    select(CeligoFlowStep)
+                    .where(CeligoFlowStep.flow_id == flow_row.id)
+                    .order_by(CeligoFlowStep.sequence)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        second = [s for s in steps if s.celigo_id == "imp_shared"][1]
+        # The leftover, exactly as the pre-dedup code would have left it.
+        await upsert_errors(
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            step=_StepRef(id=second.id, flow_id=second.flow_id),
+            raw_errors=[_raw_error(celigo_id="err_legacy")],
+            raw_errors_is_complete=True,
+        )
+        await db.flush()
+
+        error_calls: list = []
+        summary = await _run_sync(
+            monkeypatch,
+            db,
+            tenant_id=tenant.id,
+            connection_id=conn_id,
+            integrations=[_raw_integration("int_s")],
+            flows=[flow],
+            summary_by_flow={"flow_s": {"exp_src": 0, "imp_shared": 0}},
+            error_calls=error_calls,
+        )
+
+        assert error_calls == [], "a verified zero fetches nothing"
+        assert summary.steps_sharing_resource == 1
+        assert summary.flows_errors_checked == 1
+        rows = (
+            (await db.execute(select(CeligoFlowError).where(CeligoFlowError.celigo_id.in_(["err_s", "err_legacy"]))))
+            .scalars()
+            .all()
+        )
+        assert {r.celigo_id for r in rows} == {"err_s", "err_legacy"}
+        assert all(r.resolved_at is not None for r in rows), (
+            "both the owner's and the duplicate's leftovers are resolved"
         )
 
 

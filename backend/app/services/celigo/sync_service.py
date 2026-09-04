@@ -70,6 +70,12 @@ step", extended by fix round 1 -- see below):
     then handled from the summary alone:
       * absent from the summary -- neither fetched nor recorded
         (`steps_not_in_error_summary`). Absence is not evidence of anything.
+        An EMPTY summary (`{}` -- a 204, or a body listing nothing) gives
+        every step this verdict: nothing is resolved, and the flow is left
+        unverified rather than read as "all clean". A 204 has never been
+        observed live (zero-error flows come back as 200 with `numError: 0`
+        entries); if Celigo ever does send one, honesty means unverified,
+        not a guessed zero.
       * a verified `numError == 0` -- resolved via `errors.upsert_errors(
         raw_errors=[], raw_errors_is_complete=True)` WITHOUT a per-step
         fetch (`steps_skipped_zero_errors`).
@@ -216,18 +222,20 @@ class SyncSummary:
     steps_with_incomplete_errors: int = 0
     # VERIFIED LIVE 2026-09-03: Phase E now gates on each flow's error
     # SUMMARY (`list_flow_error_summary`) before deciding what to do with a
-    # step, rather than fetching every step unconditionally. These three
-    # counters say what the gate decided:
-    #   flows_errors_checked -- flows whose summary was fetched and whose
-    #     errors_checked_at cursor was therefore stamped this run.
-    steps_skipped_zero_errors: int = 0
+    # step, rather than fetching every step unconditionally. The counters
+    # below say what the gate decided; each comment sits ABOVE its field.
+    #
     # steps_skipped_zero_errors -- the summary reported a real ZERO for this
     #   step: resolved via upsert_errors(raw_errors=[]) WITHOUT a per-step
     #   fetch (a verified zero, not an absence).
-    steps_not_in_error_summary: int = 0
+    steps_skipped_zero_errors: int = 0
     # steps_not_in_error_summary -- this step's id never appeared in its
     #   flow's summary at all: neither fetched nor resolved, since absence
     #   from a summary is not evidence anything is open OR resolved.
+    steps_not_in_error_summary: int = 0
+    # flows_errors_checked -- flows whose summary was fetched AND whose every
+    #   step reached a verdict, so their errors_checked_at cursor was stamped
+    #   this run.
     flows_errors_checked: int = 0
     # flows_errors_unverified -- flows whose summary WAS consulted but at
     #   least one step reached no verdict (absent from the summary, an
@@ -994,10 +1002,30 @@ async def sync_flow_map_for_connection(
             # by error id -- a second step referencing the same resource
             # would fetch the same rows again and re-parent them to itself.
             seen_resources: set[str] = set()
+            # Per resource: did its verdict this run come from a COMPLETE
+            # picture (a verified zero, or a full listing)? A later step
+            # sharing the resource may clean up its own leftovers only then.
+            resource_complete: dict[str, bool] = {}
 
             for step_celigo_id, step_ref in steps:
                 if step_celigo_id in seen_resources:
                     summary.steps_sharing_resource += 1
+                    if resource_complete.get(step_celigo_id):
+                        # The resource's current listing (or verified zero)
+                        # was applied under the FIRST step, and the upsert's
+                        # ON CONFLICT moved every still-open error there.
+                        # Whatever is still open under THIS step is a
+                        # leftover from before ownership was deterministic,
+                        # absent from a complete listing -- so resolved.
+                        # Nothing is fetched twice, nothing is re-parented.
+                        await upsert_errors(
+                            db,
+                            tenant_id=tenant_id,
+                            connection_id=connection_id,
+                            step=step_ref,
+                            raw_errors=[],
+                            raw_errors_is_complete=True,
+                        )
                     continue
                 seen_resources.add(step_celigo_id)
 
@@ -1018,6 +1046,7 @@ async def sync_flow_map_for_connection(
                     # just happens to be empty.
                     summary.steps_skipped_zero_errors += 1
                     summary.steps_with_errors_checked += 1
+                    resource_complete[step_celigo_id] = True
                     await upsert_errors(
                         db,
                         tenant_id=tenant_id,
@@ -1066,6 +1095,7 @@ async def sync_flow_map_for_connection(
                     raw_errors_is_complete = False
                     summary.steps_with_inconsistent_errors += 1
                     flow_verified = False
+                resource_complete[step_celigo_id] = raw_errors_is_complete
                 summary.steps_with_errors_checked += 1
                 summary.errors_snapshotted += len(raw_errors)
                 await upsert_errors(

@@ -667,11 +667,16 @@ describe("Errors tab", () => {
     // Backend fix (this branch): the sentence names when the CORRECT
     // per-flow/per-resource error endpoint was last asked, off the
     // integration summary's own `errors_checked_at` -- Celigo itself never
-    // "reported" a zero, so that framing is gone. Default makeIntegration()
-    // carries `errors_checked_at: SYNCED_AT` (2h before NOW).
+    // "reported" a zero, so that framing is gone. The check time here is
+    // deliberately NOT the sync time (3 h vs 2 h before NOW), so a
+    // component that gated on errors_checked_at but formatted
+    // last_synced_at would fail this test.
+    mocks.integrations.mockReturnValue(
+      resolved([makeIntegration({ errors_checked_at: "2026-09-02T17:12:00.000Z" })]),
+    );
     setup([makeFlow({ id: "f1", name: "Clean Flow", error_count: 0 })]);
     expect(
-      screen.getByText("No open errors as of the last check, 2 h ago."),
+      screen.getByText("No open errors as of the last check, 3 h ago."),
     ).toBeInTheDocument();
   });
 

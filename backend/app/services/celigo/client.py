@@ -539,6 +539,12 @@ async def list_flow_error_summary(
             num_error = int(num_error.strip())
         if not isinstance(num_error, (int, float)) or isinstance(num_error, bool):
             continue
+        # Only a whole, non-negative number is a count. `int(0.5)` would have
+        # read as a verified zero and resolved real errors without a fetch.
+        if isinstance(num_error, float) and not num_error.is_integer():
+            continue
+        if num_error < 0:
+            continue
         counts[exp_or_imp_id] = int(num_error)
     return counts
 
