@@ -302,6 +302,44 @@ TOOL_CONFIGS = {
         # a wrong list silently empties the compose payload.
         "allowlisted_params": ["title", "sections"],
     },
+    # Celigo flow-map read tools (spec docs/superpowers/specs/2026-09-04-celigo-chat-access.md
+    # §3, task 3) — read-only against a nightly-synced mirror, gated on the `celigo` feature
+    # flag AND the tenant's Celigo connection (re-checked inside every execute(), not just at
+    # inventory time). allowlisted_params must match celigo_flow_map.py's own param validation
+    # exactly — governance filters BEFORE the tool ever sees params, so a param missing here
+    # silently vanishes rather than raising the tool's own ValueError.
+    "celigo.integrations": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 15,
+        "rate_limit_per_minute": 30,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": [],
+    },
+    "celigo.flows": {
+        "default_limit": 50,
+        "max_limit": 200,
+        "timeout_seconds": 15,
+        "rate_limit_per_minute": 30,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": ["integration", "only_open_errors", "only_stalled", "limit"],
+    },
+    "celigo.flow_steps": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 15,
+        "rate_limit_per_minute": 30,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": ["flow"],
+    },
+    "celigo.flow_errors": {
+        "default_limit": 25,
+        "max_limit": 50,
+        "timeout_seconds": 15,
+        "rate_limit_per_minute": 30,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": ["flow", "status", "limit"],
+    },
 }
 
 
