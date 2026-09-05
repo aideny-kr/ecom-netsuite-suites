@@ -26,8 +26,11 @@ class TestAllowedChatToolsFromOld:
     def test_is_frozenset(self):
         assert isinstance(ALLOWED_CHAT_TOOLS, frozenset)
 
-    def test_contains_only_read_tools(self):
+    def test_contains_only_expected_guarded_tools(self):
         expected = {
+            "transaction_ops.configs",
+            "transaction_ops.run",
+            "transaction_ops.status",
             "netsuite.suiteql",
             "pivot.query_result",
             "cross_source.query",

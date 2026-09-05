@@ -11,6 +11,7 @@ import { TransactionOperationsPage } from "./operations-page";
 import { TransactionRunPage } from "./run-page";
 const mocks = vi.hoisted(() => ({
   allowed: true,
+  manage: false,
   tenant: "tenant",
   configs: [] as object[],
   runs: [] as object[],
@@ -33,6 +34,7 @@ vi.mock("@/hooks/use-transaction-ops", () => ({
     loading: false,
     error: null,
     tenantId: mocks.tenant,
+    canManage: mocks.manage,
   }),
   useTransactionConfigs: () => ({
     data: mocks.configs,
@@ -77,6 +79,7 @@ const config = {
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.allowed = true;
+  mocks.manage = false;
   mocks.tenant = "tenant";
   mocks.configs = [];
   mocks.runs = [];
@@ -86,6 +89,13 @@ beforeEach(() => {
   mocks.findingsError = null;
 });
 describe("transaction operations pages", () => {
+  it("links administrators to the explicit setup form", () => {
+    mocks.manage = true;
+    render(<TransactionOperationsPage />);
+    expect(
+      screen.getByRole("link", { name: "Configure a new scope" }),
+    ).toHaveAttribute("href", "/transaction-operations/setup");
+  });
   it("has an honest administrator setup empty state and Connections link", () => {
     render(<TransactionOperationsPage />);
     expect(screen.getByText(/administrator.*configure/i)).toBeInTheDocument();

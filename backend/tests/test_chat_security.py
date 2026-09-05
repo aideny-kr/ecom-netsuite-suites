@@ -21,9 +21,12 @@ class TestAllowedChatTools:
         """ALLOWED_CHAT_TOOLS must be immutable."""
         assert isinstance(ALLOWED_CHAT_TOOLS, frozenset)
 
-    def test_contains_only_read_tools(self):
+    def test_contains_only_expected_guarded_tools(self):
         """Only expected tools are in the set."""
         expected = {
+            "transaction_ops.configs",
+            "transaction_ops.run",
+            "transaction_ops.status",
             "netsuite.suiteql",
             "pivot.query_result",
             "cross_source.query",
@@ -73,6 +76,9 @@ class TestAllowedChatTools:
             "connection.delete",
             "user.create",
             "workspace.apply_patch",
+            "transaction_ops.approve",
+            "transaction_ops.execute",
+            "transaction_ops.resolve",
         ]
         for tool in write_tools:
             assert tool not in ALLOWED_CHAT_TOOLS, f"{tool} should be blocked"

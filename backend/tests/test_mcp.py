@@ -218,6 +218,9 @@ class TestToolConfigs:
 
     def test_all_tools_present(self):
         expected = {
+            "transaction_ops.configs",
+            "transaction_ops.run",
+            "transaction_ops.status",
             "health",
             "netsuite.suiteql",
             "netsuite.suiteql_stub",

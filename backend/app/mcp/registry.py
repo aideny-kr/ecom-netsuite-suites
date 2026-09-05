@@ -25,11 +25,39 @@ from app.mcp.tools import (
     sheets_tools,
     suitescript_sync_tool,
     task_file_tools,
+    transaction_ops_tools,
     web_search,
     workspace_tools,
 )
 
 TOOL_REGISTRY = {
+    "transaction_ops.configs": {
+        "description": "List configured Framework transaction investigation scopes before choosing a scope to inspect.",
+        "execute": transaction_ops_tools.execute_configs,
+        "params_schema": {},
+    },
+    "transaction_ops.run": {
+        "description": (
+            "Investigate missing or incorrect Framework orders against NetSuite in a configured scope. "
+            "Provide exact order references OR an aware time window of at most 31 days. "
+            "Creates a durable read-only investigation; proposed corrections require human approval in the review page."
+        ),
+        "execute": transaction_ops_tools.execute_run,
+        "params_schema": {
+            "config_id": {"type": "string", "required": True, "description": "Configured investigation scope UUID"},
+            "order_references": {"type": "array", "description": "Exact Framework order references, at most 200"},
+            "window_start": {"type": "string", "description": "ISO timestamp with timezone; use with window_end"},
+            "window_end": {"type": "string", "description": "ISO timestamp with timezone; use with window_start"},
+        },
+    },
+    "transaction_ops.status": {
+        "description": (
+            "Read investigation status and verified transaction differences. The evidence table renders automatically; "
+            "do not restate or recompute its amounts. Human decisions are made on the linked review page."
+        ),
+        "execute": transaction_ops_tools.execute_status,
+        "params_schema": {"run_id": {"type": "string", "required": True, "description": "Investigation run UUID"}},
+    },
     "health": {
         "description": "Health check — returns server status and registered tool count",
         "execute": health.execute,

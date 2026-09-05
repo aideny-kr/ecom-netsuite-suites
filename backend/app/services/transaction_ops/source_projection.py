@@ -2,7 +2,8 @@
 
 Numbers stay lossless decimal strings; pagination metadata is handled separately.
 Oversized or malformed known fields fail the read instead of silently truncating
-financial evidence. Customer/address, auth, HTTP and raw-stage objects are omitted.
+financial evidence. Customer/address fields require explicit create preparation;
+auth, HTTP and raw-stage objects are always omitted.
 """
 
 from decimal import Decimal
@@ -51,6 +52,11 @@ _PAYMENT = frozenset(
 id source_type source_id amount payment_method_id state created_at updated_at exchange_rate currency
 """.split()
 )
+_ADDRESS = frozenset("firstname lastname address1 address2 city zipcode phone state_name state_id country_id".split())
+_COUNTRY = frozenset("id iso iso3 name".split())
+_STATE = frozenset("id name abbr".split())
+_SHIPPING_METHOD = frozenset("id name code".split())
+_SHIPPING_RATE = frozenset("id name cost selected shipping_method_id".split())
 _MAX_ITEMS = 500
 _MAX_TEXT = 2048
 
@@ -105,28 +111,57 @@ def _line(value):
     )
 
 
-def _shipment(value):
+def _shipping_rate(value):
+    return _object(value, _SHIPPING_RATE, {"shipping_method": lambda v: _object(v, _SHIPPING_METHOD)})
+
+
+def _shipment(value, *, include_sync_data=False):
+    children = {
+        "adjustments": lambda v: _list(v, _adjustment),
+        "taxes": lambda v: _list(v, _tax),
+        "line_items": lambda v: _list(v, _line),
+    }
+    if include_sync_data:
+        children.update(
+            {
+                "shipping_rates": lambda v: _list(v, _shipping_rate),
+                "selected_shipping_rate": _shipping_rate,
+                "shipping_method": lambda v: _object(v, _SHIPPING_METHOD),
+            }
+        )
     return _object(
         value,
         _SHIPMENT,
-        {
-            "adjustments": lambda v: _list(v, _adjustment),
-            "taxes": lambda v: _list(v, _tax),
-            "line_items": lambda v: _list(v, _line),
-        },
+        children,
     )
 
 
-def project_order(value: dict) -> dict:
-    return _object(
+def project_order(value: dict, *, include_sync_data=False) -> dict:
+    if type(include_sync_data) is not bool:
+        raise ProjectionError("invalid_projection_mode")
+    projected = _object(
         value,
         _ORDER,
         {
             "line_items": lambda v: _list(v, _line),
             "adjustments": lambda v: _list(v, _adjustment),
             "taxes": lambda v: _list(v, _tax),
-            "shipments": lambda v: _list(v, _shipment),
+            "shipments": lambda v: _list(v, lambda item: _shipment(item, include_sync_data=include_sync_data)),
             "payments": lambda v: _list(v, lambda payment: _object(payment, _PAYMENT)),
             "business_entity": lambda v: _object(v, _BUSINESS) if isinstance(v, dict) else _scalar(v),
         },
     )
+    if include_sync_data:
+        projected.update(
+            _object(
+                value,
+                frozenset({"email"}),
+                {
+                    key: lambda v: _object(
+                        v, _ADDRESS, {"country": lambda c: _object(c, _COUNTRY), "state": lambda s: _object(s, _STATE)}
+                    )
+                    for key in ("bill_address", "ship_address")
+                },
+            )
+        )
+    return projected

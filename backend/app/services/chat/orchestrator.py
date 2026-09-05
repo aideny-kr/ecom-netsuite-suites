@@ -712,6 +712,10 @@ def _compute_source_pin_update(tool_calls_log: list[dict]) -> str | None:
         name = call.get("tool_name") or call.get("tool", "")
         cat = categorize(name)
 
+        # This evidence joins Framework and NetSuite; it is not a NetSuite source pin.
+        if name in ("transaction_ops.status", "transaction_ops_status"):
+            continue
+
         # M4: metric_compute is categorized as "data_table" but its actual source
         # depends on which backend executed the query (BigQuery vs SuiteQL vs expression).
         # Read source_kind from the result_payload (set by extract_result_payload for
@@ -795,6 +799,34 @@ def _intercept_tool_result(
     metric paths so the model can reference the result in ``report.compose`` and
     the id keys the in-turn full-payload sidecar (gate cluster A).
     """
+
+    # Investigation evidence is rendered deterministically, including currency.
+    # Suppress values even for FULL-context requests; a model cannot approve writes.
+    if tool_name in ("transaction_ops.status", "transaction_ops_status"):
+        invalid = json.dumps({"success": False, "error": "invalid_transaction_result"})
+        try:
+            parsed = json.loads(result_str)
+        except (ValueError, TypeError):
+            return None, None, invalid
+        if not isinstance(parsed, dict) or parsed.get("success") is not True:
+            return None, None, invalid
+        if not isinstance(parsed.get("rows"), list) or not isinstance(parsed.get("columns"), list):
+            return None, None, invalid
+        event = {key: parsed[key] for key in ("columns", "rows", "row_count", "truncated", "query") if key in parsed}
+        event.update(suppress_llm_value=True, source_kind="transaction_ops")
+        condensed = json.dumps(
+            {
+                "success": True,
+                "run_id": parsed.get("run_id"),
+                "status": parsed.get("status"),
+                "review_url": parsed.get("review_url"),
+                "termination_reason": parsed.get("termination_reason"),
+                "note": "Investigation evidence is displayed in the table. Do not restate or recompute its amounts. "
+                "Human decisions are made on the linked review page.",
+            }
+        )
+        condensed = _stamp_result_id(condensed, event, result_id)
+        return "data_table", event, condensed
 
     # --- Report card path ---
     if tool_name in ("report_compose", "report.compose"):

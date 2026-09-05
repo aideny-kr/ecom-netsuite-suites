@@ -1,0 +1,261 @@
+from copy import deepcopy
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+from uuid import uuid4
+
+import pytest
+
+from app.services.transaction_ops.runner import run_investigation
+
+NOW = datetime(2026, 9, 4, 12, tzinfo=timezone.utc)
+REF = "R100000001"
+
+
+def source_order():
+    return {
+        "source": "framework",
+        "scope": "order",
+        "page_complete": True,
+        "read_at": NOW.isoformat(),
+        "orders": [
+            {
+                "id": "1",
+                "number": REF,
+                "currency": "USD",
+                "state": "complete",
+                "updated_at": (NOW - timedelta(hours=1)).isoformat(),
+                "total": "100",
+                "item_total": "100",
+                "ship_total": "0",
+                "tax_total": "0",
+                "included_tax_total": "0",
+                "additional_tax_total": "0",
+                "adjustment_total": "0",
+                "adjustments": [],
+                "line_items": [{"id": "11", "quantity": "1", "price": "100", "total": "100", "adjustments": []}],
+                "shipments": [{"id": "1", "cost": "0", "adjustments": []}],
+            }
+        ],
+    }
+
+
+def missing_target():
+    return {
+        "provider": "netsuite",
+        "observed_at": NOW.isoformat(),
+        "complete": True,
+        "orders": [],
+        "lookup": {"complete": True},
+        "scope": {"account_id": "6738075", "subsidiary_id": "1"},
+        "api_calls": 1,
+    }
+
+
+class State:
+    def __init__(self, budget=100, window=False):
+        self.tenant, self.run_id, self.token = uuid4(), uuid4(), uuid4()
+        params = (
+            {"order_references": [REF]}
+            if not window
+            else {
+                "order_references": [],
+                "window_start": (NOW - timedelta(hours=2)).isoformat(),
+                "window_end": NOW.isoformat(),
+            }
+        )
+        self.run = SimpleNamespace(
+            id=self.run_id,
+            config_id=uuid4(),
+            params_json=params,
+            progress_json={},
+            status="pending",
+            termination_reason=None,
+            deadline_at=NOW + timedelta(minutes=15),
+            config_snapshot={
+                "source_step_id": str(uuid4()),
+                "netsuite_connection_id": str(uuid4()),
+                "netsuite_account_id": "6738075",
+                "subsidiary_id": "1",
+                "record_type": "salesorder",
+                "target_step_id": None,
+                "mapping_json": {
+                    "reference_field": "tranid",
+                    "currency_minor_units": {"USD": 2},
+                    "business_entity_subsidiaries": {"legacy": "1"},
+                },
+            },
+        )
+        self.budget, self.events, self.reports, self.claimable = budget, [], {}, True
+
+    async def get_run(self, *args, **kwargs):
+        return self.run
+
+    async def get_config(self, *args, **kwargs):
+        return SimpleNamespace(enabled=True)
+
+    async def claim_run(self, *args, **kwargs):
+        if not self.claimable:
+            return None
+        self.run.status = "running"
+        return self.token
+
+    async def reserve_budget(self, *args, api_calls=0, orders=0, lease_token=None, **kwargs):
+        assert lease_token == self.token
+        self.events.append(("reserve", api_calls, orders))
+        if api_calls > self.budget:
+            self.run.status, self.run.termination_reason = "finished", "budget"
+            return False
+        self.budget -= api_calls
+        return True
+
+    async def update_progress(self, *args, lease_token=None, **kwargs):
+        assert lease_token == self.token
+        self.run.progress_json = deepcopy(args[3].progress_json)
+
+    async def record_finding(self, *args, lease_token=None, **kwargs):
+        assert lease_token == self.token
+        self.reports[args[3]] = deepcopy(args[4])
+
+    async def finish_run(self, *args, lease_token=None, **kwargs):
+        assert lease_token == self.token
+        self.run.status, self.run.termination_reason = "finished", args[3]
+        return self.run
+
+
+async def execute(state, source=None, target=None, page=None, enabled=True):
+    async def read_source(*args, **kwargs):
+        state.events.append("source")
+        return source or source_order()
+
+    async def read_target(*args, **kwargs):
+        state.events.append("target")
+        return target or missing_target()
+
+    return await run_investigation(
+        None,
+        state.tenant,
+        state.run_id,
+        _state=state,
+        _source_reader=read_source,
+        _target_reader=read_target,
+        _page_reader=page,
+        _enabled=AsyncMock(return_value=enabled),
+        _clock=lambda: NOW,
+    )
+
+
+@pytest.mark.asyncio
+async def test_reads_are_reserved_before_calls_and_missing_observation_is_durable():
+    state = State()
+    result = await execute(state)
+    assert result["termination_reason"] == "done"
+    assert state.events == [("reserve", 2, 1), "source", ("reserve", 10, 0), "target"]
+    assert state.reports[REF]["comparison"]["recommended_action"] == "propose_missing_sync"
+    assert state.reports[REF]["source"]["total"] == "100"
+    assert state.run.progress_json["processed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_budget_exhaustion_preserves_unprocessed_reference_for_next_run():
+    state = State(budget=1)
+    result = await execute(state)
+    assert result["termination_reason"] == "budget"
+    assert "source" not in state.events and not state.reports
+    assert state.run.progress_json["pending_refs"] == [REF]
+
+
+@pytest.mark.asyncio
+async def test_disable_or_duplicate_dispatch_cannot_start_provider_reads():
+    state = State()
+    result = await execute(state, enabled=False)
+    assert result["termination_reason"] == "stall" and not state.events
+    state = State()
+    state.claimable = False
+    await execute(state)
+    assert not state.events
+
+
+@pytest.mark.asyncio
+async def test_feature_revocation_is_checked_again_before_the_next_provider_call():
+    state = State()
+    flags = AsyncMock(side_effect=[True, True, False])
+    source = AsyncMock(return_value=source_order())
+    target = AsyncMock(return_value=missing_target())
+    result = await run_investigation(
+        None,
+        state.tenant,
+        state.run_id,
+        _state=state,
+        _source_reader=source,
+        _target_reader=target,
+        _enabled=flags,
+        _clock=lambda: NOW,
+    )
+    assert result["termination_reason"] == "stall"
+    source.assert_awaited_once()
+    target.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_provider_error_does_not_turn_into_a_missing_transaction():
+    state = State()
+    result = await run_investigation(
+        None,
+        state.tenant,
+        state.run_id,
+        _state=state,
+        _source_reader=AsyncMock(side_effect=ValueError("sensitive upstream body")),
+        _target_reader=AsyncMock(),
+        _enabled=AsyncMock(return_value=True),
+        _clock=lambda: NOW,
+    )
+    assert result["termination_reason"] == "error"
+    assert not state.reports and "sensitive" not in str(result)
+
+
+@pytest.mark.asyncio
+async def test_incomplete_lookup_is_reported_without_claiming_absence():
+    state = State()
+    raw = missing_target()
+    raw["lookup"]["complete"] = False
+    await execute(state, target=raw)
+    assert state.reports[REF]["comparison"]["recommended_action"] == "gather_evidence"
+
+
+@pytest.mark.asyncio
+async def test_window_pages_are_checkpointed_and_only_complete_scan_finishes_done():
+    state = State(window=True)
+    page = AsyncMock(
+        return_value={
+            "page_complete": True,
+            "page": 1,
+            "page_size": 20,
+            "total_count": 1,
+            "pages": 1,
+            "orders": source_order()["orders"],
+            "next_page": None,
+        }
+    )
+    result = await execute(state, page=page)
+    assert result["termination_reason"] == "done" and state.run.progress_json["scan_complete"]
+    assert state.run.progress_json["scan_count"] == 1
+    page.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_population_change_between_pages_stalls_instead_of_claiming_complete_scan():
+    state = State(window=True)
+    first = {
+        "page_complete": True,
+        "page": 1,
+        "page_size": 20,
+        "total_count": 21,
+        "pages": 2,
+        "orders": source_order()["orders"],
+        "next_page": 2,
+    }
+    second = {**first, "page": 2, "total_count": 22, "orders": [], "next_page": None}
+    result = await execute(state, page=AsyncMock(side_effect=[first, second]))
+    assert result["termination_reason"] == "stall"
+    assert state.run.progress_json["restart_scan"]

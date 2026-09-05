@@ -209,9 +209,9 @@ async def _preview(db, tenant_id, step_id, relative_uri, *, client):
     return data[0], provenance
 
 
-def _project_orders(orders):
+def _project_orders(orders, *, include_sync_data=False):
     try:
-        return [project_order(order) for order in orders]
+        return [project_order(order, include_sync_data=include_sync_data) for order in orders]
     except ProjectionError:
         raise SourceReadError("invalid_business_evidence") from None
 
@@ -223,6 +223,7 @@ async def read_framework_order(
     order_reference: str,
     *,
     client: httpx.AsyncClient | None = None,
+    include_sync_data: bool = False,
 ) -> dict:
     """Read one exact order; a missing/error response never proves absence."""
     if (
@@ -237,7 +238,7 @@ async def read_framework_order(
     return {
         **provenance,
         "scope": "order",
-        "orders": _project_orders([order]),
+        "orders": _project_orders([order], include_sync_data=include_sync_data),
         "page_complete": True,
         "window_complete": False,
         "next_page": None,

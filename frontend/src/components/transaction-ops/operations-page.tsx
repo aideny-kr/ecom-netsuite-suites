@@ -14,6 +14,7 @@ import {
 import { TransactionAccessBoundary } from "./access-boundary";
 import { cardClass, inputClass, Status } from "./evidence";
 import { dateLabel, parseRunScope, runState, safeError } from "./format";
+import { ScopeControls } from "./scope-controls";
 
 export function TransactionOperationsPage() {
   const { tenantId } = useTransactionAccess();
@@ -24,6 +25,7 @@ export function TransactionOperationsPage() {
   );
 }
 function OperationsContent() {
+  const { canManage } = useTransactionAccess();
   const router = useRouter();
   const mounted = useRef(true);
   useEffect(() => {
@@ -91,6 +93,13 @@ function OperationsContent() {
           Review the evidence and exact proposed changes before approving an
           action.
         </p>
+        {canManage && (
+          <Button asChild variant="outline" className="mt-4">
+            <Link href="/transaction-operations/setup">
+              Configure a new scope
+            </Link>
+          </Button>
+        )}
       </header>
       {configs.isLoading ? (
         <p role="status">Loading configured scopes…</p>
@@ -272,6 +281,7 @@ function OperationsContent() {
                 <ArrowRight className="ml-2 h-4 w-4" />
               </Button>
             </form>
+            <ScopeControls config={config} />
           </section>
           <section className="space-y-4">
             <div>

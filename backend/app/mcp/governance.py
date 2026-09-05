@@ -43,6 +43,30 @@ MCP_REBASELINE_FACTOR = 2
 DEFAULT_TOOL_RATE_LIMIT = 60 * MCP_REBASELINE_FACTOR
 
 TOOL_CONFIGS = {
+    "transaction_ops.configs": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 10,
+        "rate_limit_per_minute": 30,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": [],
+    },
+    "transaction_ops.run": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 15,
+        "rate_limit_per_minute": 10,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": ["config_id", "order_references", "window_start", "window_end"],
+    },
+    "transaction_ops.status": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 15,
+        "rate_limit_per_minute": 30,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": ["run_id"],
+    },
     "health": {
         "default_limit": None,
         "max_limit": None,

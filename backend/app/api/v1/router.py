@@ -41,6 +41,10 @@ from app.api.v1 import (
     task_files,
     tenant_memory,
     tenants,
+    transaction_operation_results,
+    transaction_ops,
+    transaction_ops_setup,
+    transaction_sources,
     users,
     workspaces,
 )
@@ -85,6 +89,10 @@ api_router.include_router(agents.router)
 api_router.include_router(agent_instructions.router)
 api_router.include_router(connector_status.router)
 api_router.include_router(celigo_flows.router)
+api_router.include_router(transaction_sources.router)
+api_router.include_router(transaction_ops.router)
+api_router.include_router(transaction_ops_setup.router)
+api_router.include_router(transaction_operation_results.router)
 api_router.include_router(drive_folders.router)
 api_router.include_router(reconciliation.router)
 api_router.include_router(metrics.router)

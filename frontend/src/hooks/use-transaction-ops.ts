@@ -22,6 +22,7 @@ export function useTransactionAccess() {
   const { hasPermission } = usePermissions();
   return {
     tenantId: user?.tenant_id,
+    canManage: hasPermission("connections.manage"),
     loading: features.isLoading,
     error: features.error,
     allowed:

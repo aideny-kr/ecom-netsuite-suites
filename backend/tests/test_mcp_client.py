@@ -19,6 +19,9 @@ ACTOR_ID = str(uuid.uuid4())
 
 EXPECTED_TOOLS = {
     "health",
+    "transaction_ops.configs",
+    "transaction_ops.run",
+    "transaction_ops.status",
     "netsuite.suiteql",
     "netsuite.suiteql_stub",
     "netsuite.financial_report",
