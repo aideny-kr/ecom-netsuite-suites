@@ -33,6 +33,7 @@ import {
   type CeligoFlowSummary,
 } from "@/hooks/use-celigo-flows";
 import { queryState } from "@/lib/query-state";
+import { cn } from "@/lib/utils";
 import { ErrorNotice } from "./shared";
 import { useCeligoRoute } from "./celigo-route";
 import { CeligoBreadcrumb } from "./celigo-breadcrumb";
@@ -57,6 +58,70 @@ const NAV_COLLAPSED_PCT = 4;
 const NAV_DEFAULT_SIZE = "16%";
 const NAV_MIN_SIZE = `${NAV_MIN_PCT}%`;
 const NAV_COLLAPSED_SIZE = `${NAV_COLLAPSED_PCT}%`;
+
+/** Celigo flow sizing UI (approved mock: docs/superpowers/mockups/
+ * 2026-09-04-celigo-flow-sizing.html) -- header + canvas are now a VERTICAL
+ * `PanelGroup`, with a draggable divider between them and "Focus canvas" as
+ * the one-click version. Both persisted per VIEWER, as TWO SEPARATE facts
+ * that never derive from each other:
+ * - `flowHeaderCollapsed` ("1"/absent) -- moved here from
+ *   `celigo-flow-header.tsx` (which used to own it entirely) because
+ *   toggling it must ALSO shrink/restore the real header PANEL and hide/
+ *   show the divider, neither of which the header component can reach on
+ *   its own. The header stays the single place the toggle BUTTON lives, but
+ *   is now purely presentational for it (`headerCollapsed`/
+ *   `onToggleHeaderCollapsed` props), exactly like the navigator rail's
+ *   `collapsed`/`onToggle` below.
+ * - `flowHeaderSize` (a percentage STRING of the vertical group -- v4 reads
+ *   a bare number as PIXELS, same caveat as `NAV_DEFAULT_SIZE` above) --
+ *   the height the viewer last DRAGGED the divider to. `minSize` is a small
+ *   floor (not the first row's real height, which isn't knowable
+ *   statically) -- the header's own `overflow-hidden` plus its
+ *   `!headerCollapsed` conditional rendering keeps the first row (pills,
+ *   title, actions) visible at any height above that floor.
+ */
+const FLOW_HEADER_COLLAPSED_KEY = "celigo.flowHeaderCollapsed";
+const FLOW_HEADER_SIZE_KEY = "celigo.flowHeaderSize";
+const FLOW_HEADER_DEFAULT_SIZE = "34%";
+const FLOW_HEADER_MIN_SIZE = "8%";
+/** `onResize` persistence is debounced by this many ms so a drag doesn't
+ * hammer `localStorage` on every pointermove -- matches the mock's own
+ * "written on drag end" for the drawer's width, loosened slightly here
+ * since the library's `onResize` (a real `ResizeObserver`, unlike the
+ * drawer's own hand-rolled pointer handlers) has no separate "drag end"
+ * event to hook. */
+const FLOW_HEADER_RESIZE_DEBOUNCE_MS = 200;
+
+function readStoredHeaderCollapsed(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem(FLOW_HEADER_COLLAPSED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function readStoredHeaderSize(): string {
+  if (typeof window === "undefined") return FLOW_HEADER_DEFAULT_SIZE;
+  try {
+    const stored = window.localStorage.getItem(FLOW_HEADER_SIZE_KEY);
+    // A bare number (or anything else un-"%"-suffixed) would mean PIXELS to
+    // the library -- reject it rather than hand it a value that silently
+    // means something else.
+    return stored && /%$/.test(stored) ? stored : FLOW_HEADER_DEFAULT_SIZE;
+  } catch {
+    return FLOW_HEADER_DEFAULT_SIZE;
+  }
+}
+
+function persistHeaderSize(size: string): void {
+  try {
+    window.localStorage.setItem(FLOW_HEADER_SIZE_KEY, size);
+  } catch {
+    // Best effort -- the size still applies for this render, it just won't
+    // survive a reload.
+  }
+}
 
 /** `queryState()` only tells us the query settled with an error — it
  * doesn't say which one. The unknown-id state ("This flow is not in the
@@ -124,6 +189,58 @@ export function CeligoFlowPage(): JSX.Element {
   const navRef = useRef<PanelImperativeHandle>(null);
   const [navCollapsed, setNavCollapsed] = useState(true);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("facts");
+
+  // "Focus canvas" / the header↔canvas divider -- see the constants block
+  // above for why these two facts are tracked (and persisted) separately.
+  const headerPanelRef = useRef<PanelImperativeHandle>(null);
+  const [headerCollapsed, setHeaderCollapsed] = useState<boolean>(readStoredHeaderCollapsed);
+  const [headerSize, setHeaderSize] = useState<string>(readStoredHeaderSize);
+  // Guards the imperative `resize()` calls `toggleHeaderCollapsed` makes
+  // below from being read back by `onHeaderResize` as the VIEWER'S own drag
+  // -- without it, collapsing (or restoring) the panel would immediately
+  // overwrite `flowHeaderSize` with the collapsed height, and the very next
+  // "Show details" would restore to that instead of what the viewer
+  // actually dragged to.
+  const suppressHeaderResizePersistRef = useRef(false);
+  const headerResizeDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (headerResizeDebounceRef.current) clearTimeout(headerResizeDebounceRef.current);
+    };
+  }, []);
+
+  const onHeaderResize = useCallback((panelSize: PanelSize) => {
+    if (suppressHeaderResizePersistRef.current) return;
+    const size = `${panelSize.asPercentage}%`;
+    setHeaderSize(size);
+    if (headerResizeDebounceRef.current) clearTimeout(headerResizeDebounceRef.current);
+    headerResizeDebounceRef.current = setTimeout(() => persistHeaderSize(size), FLOW_HEADER_RESIZE_DEBOUNCE_MS);
+  }, []);
+
+  const toggleHeaderCollapsed = useCallback(() => {
+    setHeaderCollapsed((prev) => {
+      const next = !prev;
+      try {
+        if (next) window.localStorage.setItem(FLOW_HEADER_COLLAPSED_KEY, "1");
+        else window.localStorage.removeItem(FLOW_HEADER_COLLAPSED_KEY);
+      } catch {
+        // Best effort -- the toggle still works for this render, it just
+        // won't survive a reload.
+      }
+      suppressHeaderResizePersistRef.current = true;
+      if (next) headerPanelRef.current?.resize(FLOW_HEADER_MIN_SIZE);
+      else headerPanelRef.current?.resize(headerSize);
+      // A real ResizeObserver reports the new size on a later frame, not
+      // synchronously -- clear the guard on a microtask (not immediately)
+      // so it is still up when that report lands, without staying stuck on
+      // for whatever the viewer does next.
+      Promise.resolve().then(() => {
+        suppressHeaderResizePersistRef.current = false;
+      });
+      return next;
+    });
+  }, [headerSize]);
 
   // The element that opened the script drawer, so Radix can hand focus back
   // when it closes. Nothing else can supply it: the drawer is mounted here,
@@ -253,30 +370,69 @@ export function CeligoFlowPage(): JSX.Element {
     const hasSteps = d.steps.length > 0;
 
     body = (
-      <div className="flex flex-1 min-h-0 flex-col">
-        <CeligoFlowHeader
-          // Keyed per flow so the header's own view state (AI description
-          // expanded, focus mode read from storage) starts fresh when the
-          // navigator hops to a sibling whose detail is already cached --
-          // otherwise the second flow inherited the first one's "Show less".
-          key={d.id}
-          detail={d}
-          lastSyncedAt={lastSyncedAt}
-          syncStatusState={syncStatusState}
-          onRetrySyncStatus={() => syncStatusQuery.refetch()}
-          integrationName={integrationLabel}
-          integrationCeligoId={integration?.celigo_id ?? null}
-          clonedFrom={clonedFrom}
-          integrationNotice={
-            integrationsState === "error" ? (
-              <ErrorNotice
-                message="Couldn't load this integration."
-                onRetry={() => integrationsQuery.refetch()}
-              />
-            ) : null
-          }
-        />
-        <div className="flex-1 min-h-0">
+      // The vertical group: header pane, then (unless Focus canvas has
+      // hidden it) the draggable divider, then the body pane -- NOT keyed
+      // per flow, unlike the header inside it. The divider's size is a
+      // per-VIEWER preference, not a fact about any one flow; keying this
+      // group would reset it on every navigator hop the same bug the
+      // header's own `key={d.id}` deliberately causes for AI-description
+      // expansion (which SHOULD reset) would otherwise cause here too
+      // (which should NOT).
+      <PanelGroup id="celigo-flow-vertical" orientation="vertical" className="flex flex-1 min-h-0 flex-col">
+        <Panel
+          id="celigo-flow-header-pane"
+          panelRef={headerPanelRef}
+          defaultSize={headerSize}
+          minSize={FLOW_HEADER_MIN_SIZE}
+          onResize={onHeaderResize}
+          className="overflow-hidden"
+        >
+          <CeligoFlowHeader
+            // Keyed per flow so the header's own view state (AI description
+            // expanded) starts fresh when the navigator hops to a sibling
+            // whose detail is already cached -- otherwise the second flow
+            // inherited the first one's "Show less". `headerCollapsed` is
+            // no longer local state here (see the constants block above),
+            // so it survives this remount same as the divider's own size.
+            key={d.id}
+            detail={d}
+            lastSyncedAt={lastSyncedAt}
+            syncStatusState={syncStatusState}
+            onRetrySyncStatus={() => syncStatusQuery.refetch()}
+            integrationName={integrationLabel}
+            integrationCeligoId={integration?.celigo_id ?? null}
+            clonedFrom={clonedFrom}
+            integrationNotice={
+              integrationsState === "error" ? (
+                <ErrorNotice
+                  message="Couldn't load this integration."
+                  onRetry={() => integrationsQuery.refetch()}
+                />
+              ) : null
+            }
+            headerCollapsed={headerCollapsed}
+            onToggleHeaderCollapsed={toggleHeaderCollapsed}
+          />
+        </Panel>
+        {/* Hidden (unmounted, not just styled away) while Focus canvas has
+            collapsed the header -- mirrors the mock's `.divider.hidden`.
+            There is nothing to drag a divider FOR when the panel it borders
+            is pinned to its floor. */}
+        {!headerCollapsed && (
+          <PanelResizeHandle
+            id="celigo-flow-header-divider"
+            aria-label="Resize header"
+            className={cn(
+              "relative h-[7px] shrink-0 cursor-row-resize border-b bg-card",
+              // The library's own hover/active state, exposed as
+              // `data-separator="hover"` / `"active"` on this element
+              // (never a class) — the mock's own `:hover, .active`.
+              "before:absolute before:left-1/2 before:top-[2px] before:h-[3px] before:w-11 before:-translate-x-1/2 before:rounded-full before:bg-border",
+              "data-[separator=hover]:before:bg-accent data-[separator=active]:before:bg-accent",
+            )}
+          />
+        )}
+        <Panel id="celigo-flow-body-pane" minSize="20%">
           <PanelGroup id="celigo-flow-v1" orientation="horizontal" className="flex h-full w-full">
             {/* Sizes are PERCENTAGE STRINGS, never bare numbers:
                 `react-resizable-panels` 4.6.4 parses a number as PIXELS
@@ -350,8 +506,8 @@ export function CeligoFlowPage(): JSX.Element {
               />
             </Panel>
           </PanelGroup>
-        </div>
-      </div>
+        </Panel>
+      </PanelGroup>
     );
   }
 

@@ -890,6 +890,125 @@ describe("CeligoFlowPage — panel sizing", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Celigo flow sizing UI — the header↔canvas divider (Part 2). Behaviour
+// contract: docs/superpowers/mockups/2026-09-04-celigo-flow-sizing.html
+// ---------------------------------------------------------------------------
+
+describe("CeligoFlowPage — header/canvas divider", () => {
+  const SIZE_KEY = "celigo.flowHeaderSize";
+  const COLLAPSED_KEY = "celigo.flowHeaderCollapsed";
+
+  beforeEach(() => {
+    window.localStorage.removeItem(SIZE_KEY);
+    window.localStorage.removeItem(COLLAPSED_KEY);
+    panelSpy.props.length = 0;
+  });
+
+  it("wraps the header and body in a vertical group with a 'Resize header' separator", () => {
+    wrap(<CeligoFlowPage />);
+
+    const separator = screen.getByRole("separator", { name: "Resize header" });
+    // ARIA orientation describes the separator's own visual axis, not the
+    // drag direction: a HORIZONTAL divider bar (the mock's own
+    // `aria-orientation="horizontal"`) separates panels stacked
+    // VERTICALLY — the library reports the value on that convention.
+    expect(separator).toHaveAttribute("aria-orientation", "horizontal");
+
+    const headerPanelProps = panelSpy.props.filter((p) => p.id === "celigo-flow-header-pane").pop();
+    expect(headerPanelProps).toBeDefined();
+    expect(typeof headerPanelProps!.onResize).toBe("function");
+  });
+
+  it("defaults the header panel to 34% with no stored size", () => {
+    wrap(<CeligoFlowPage />);
+    const headerPanelProps = panelSpy.props.filter((p) => p.id === "celigo-flow-header-pane").pop()!;
+    expect(headerPanelProps.defaultSize).toBe("34%");
+  });
+
+  it("applies a stored header size as defaultSize", () => {
+    window.localStorage.setItem(SIZE_KEY, "42%");
+    panelSpy.props.length = 0;
+    wrap(<CeligoFlowPage />);
+    const headerPanelProps = panelSpy.props.filter((p) => p.id === "celigo-flow-header-pane").pop()!;
+    expect(headerPanelProps.defaultSize).toBe("42%");
+  });
+
+  it("ignores a stored size with no '%' suffix (a bare number would mean pixels to the library)", () => {
+    window.localStorage.setItem(SIZE_KEY, "500");
+    panelSpy.props.length = 0;
+    wrap(<CeligoFlowPage />);
+    const headerPanelProps = panelSpy.props.filter((p) => p.id === "celigo-flow-header-pane").pop()!;
+    expect(headerPanelProps.defaultSize).toBe("34%");
+  });
+
+  it("Focus canvas hides the 'Resize header' separator; Show details brings it back", () => {
+    wrap(<CeligoFlowPage />);
+    expect(screen.getByRole("separator", { name: "Resize header" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Focus canvas" }));
+    expect(screen.queryByRole("separator", { name: "Resize header" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Show details" }));
+    expect(screen.getByRole("separator", { name: "Resize header" })).toBeInTheDocument();
+  });
+
+  it("never crashes, and falls back to 34%, when the header-size storage throws on read", () => {
+    const getItemSpy = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("storage disabled");
+    });
+    try {
+      wrap(<CeligoFlowPage />);
+      const headerPanelProps = panelSpy.props.filter((p) => p.id === "celigo-flow-header-pane").pop()!;
+      expect(headerPanelProps.defaultSize).toBe("34%");
+      expect(screen.getByRole("separator", { name: "Resize header" })).toBeInTheDocument();
+    } finally {
+      getItemSpy.mockRestore();
+    }
+  });
+
+  it("never crashes when the header-size storage throws on write (Focus canvas toggle)", () => {
+    const setItemSpy = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("storage disabled");
+    });
+    try {
+      wrap(<CeligoFlowPage />);
+      fireEvent.click(screen.getByRole("button", { name: "Focus canvas" }));
+      expect(screen.getByRole("button", { name: "Show details" })).toBeInTheDocument();
+    } finally {
+      setItemSpy.mockRestore();
+    }
+  });
+
+  it("stores flowHeaderCollapsed and flowHeaderSize as two separate keys — toggling Focus canvas never touches the remembered size", () => {
+    window.localStorage.setItem(SIZE_KEY, "40%");
+    wrap(<CeligoFlowPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Focus canvas" }));
+    expect(window.localStorage.getItem(COLLAPSED_KEY)).toBe("1");
+    expect(window.localStorage.getItem(SIZE_KEY)).toBe("40%");
+
+    fireEvent.click(screen.getByRole("button", { name: "Show details" }));
+    expect(window.localStorage.getItem(COLLAPSED_KEY)).toBeNull();
+    expect(window.localStorage.getItem(SIZE_KEY)).toBe("40%");
+  });
+
+  it("a stored '1' starts the page with the header already collapsed and the separator already hidden", () => {
+    window.localStorage.setItem(COLLAPSED_KEY, "1");
+    wrap(<CeligoFlowPage />);
+
+    expect(screen.getByRole("button", { name: "Show details" })).toBeInTheDocument();
+    expect(screen.queryByRole("separator", { name: "Resize header" })).not.toBeInTheDocument();
+  });
+
+  it("the horizontal nav/canvas/inspector group and the navigator/canvas panels still render inside the body pane", () => {
+    wrap(<CeligoFlowPage />);
+    expect(screen.getByTestId("celigo-canvas-host")).toBeInTheDocument();
+    const bodyPaneProps = panelSpy.props.filter((p) => p.id === "celigo-flow-body-pane").pop();
+    expect(bodyPaneProps).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Codex fix wave — a pending query is never rendered as empty, and a failed
 // one is never rendered as either empty or settled.
 // ---------------------------------------------------------------------------
