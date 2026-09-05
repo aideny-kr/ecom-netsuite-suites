@@ -126,3 +126,9 @@ error, retry envelope and live flow/import/script configuration. Resolution
 sends only that error ID. Verification requires the exact resolved record and
 a current matching Framework/NetSuite comparison; an empty open queue is not
 proof of resolution.
+
+A known pre-dispatch failure, or an explicit guard rejection before save, may
+produce one further pending proposal after fresh evidence. It keeps the original
+ledger and requires a new authenticated human decision. There are at most two
+attempts for identical economic work. Rejection remains sticky, and uncertain
+writes never qualify for this retry.

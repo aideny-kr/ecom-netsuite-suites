@@ -505,40 +505,57 @@ async def propose(db, tenant_id, run_id, request: ProposalCreate, *, lease_token
     # The observation timestamp is freshness, not work identity. Before/after,
     # authoritative versions (fingerprint) and exact destination define the work.
     key = business_digest({"config": config.config_key, **request.model_dump(exclude={"observed_at", "evidence_json"})})
-    existing = (
-        await db.execute(
-            select(TransactionProposal)
-            .where(
-                TransactionProposal.tenant_id == tenant_id,
-                TransactionProposal.work_key == key,
+    base_key, previous_attempt = key, None
+    # At most two separately approved attempts for identical economic work.
+    # Each generation retains its own immutable decision and operation ledger.
+    for attempt_number in (1, 2):
+        existing = (
+            await db.execute(
+                select(TransactionProposal)
+                .where(TransactionProposal.tenant_id == tenant_id, TransactionProposal.work_key == key)
+                .order_by(
+                    TransactionProposal.status.in_(("pending", "approved")).desc(),
+                    TransactionProposal.created_at.desc(),
+                    TransactionProposal.id.desc(),
+                )
+                .limit(1)
             )
-            .order_by(
-                TransactionProposal.status.in_(("pending", "approved")).desc(),
-                TransactionProposal.created_at.desc(),
-                TransactionProposal.id.desc(),
-            )
-            .limit(1)
-        )
-    ).scalar_one_or_none()
-    if existing:
+        ).scalar_one_or_none()
+        if existing is None:
+            break
         attempted = (
             await db.execute(
-                select(TransactionOperation.id).where(
-                    TransactionOperation.tenant_id == tenant_id,
-                    TransactionOperation.work_key == key,
+                select(TransactionOperation).where(
+                    TransactionOperation.tenant_id == tenant_id, TransactionOperation.work_key == key
                 )
             )
         ).scalar_one_or_none()
-        if (
-            existing.status == "rejected"
-            or attempted is not None
-            or (existing.status in {"pending", "approved"} and now < existing.valid_until)
-        ):
+        if existing.status == "rejected":
+            await _commit(db, tenant_id)
+            return existing
+        if attempted is not None:
+            result = attempted.result_json or {}
+            known_no_write = attempted.status == "failed" and (
+                result.get("dispatch_reserved") is not True or result.get("code") == "provider_rejected_without_save"
+            )
+            if not known_no_write or attempt_number == 2:
+                await _commit(db, tenant_id)
+                return existing
+            previous_attempt = attempted.id
+            key = business_digest({"base_work": base_key, "retry_of_operation": attempted.id})
+            continue
+        if existing.status in {"pending", "approved"} and now < existing.valid_until:
             await _commit(db, tenant_id)
             return existing
         if existing.status in {"pending", "approved"}:
             existing.status = "superseded"
             await db.flush()
+        break
+    values = request.model_dump()
+    if previous_attempt is not None:
+        values["evidence_json"] = _bounded_json(
+            {**values["evidence_json"], "retry": {"previous_operation_id": str(previous_attempt), "attempt": 2}}
+        )
     row = TransactionProposal(
         tenant_id=tenant_id,
         config_id=config.id,
@@ -548,7 +565,7 @@ async def propose(db, tenant_id, run_id, request: ProposalCreate, *, lease_token
         subsidiary_id=config.subsidiary_id,
         record_type=config.record_type,
         valid_until=request.observed_at + _EVIDENCE_AGE,
-        **request.model_dump(),
+        **values,
     )
     db.add(row)
     await db.flush()

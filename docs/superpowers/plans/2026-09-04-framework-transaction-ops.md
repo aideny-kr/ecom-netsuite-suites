@@ -98,7 +98,7 @@ an individual completed slice does not mean the product is complete.
 - [ ] Rendered product verification and T2 gates.
 - [ ] PR delivery.
 
-The integrated backend full suite passes 7,396 tests (2 skipped), including
+The integrated backend full suite passes 7,399 tests (2 skipped), including
 PostgreSQL, RLS, approval, chat, worker and scheduler tests. The review and setup
 UI passes 1,027 frontend tests, TypeScript, lint and the production build.
 Intercepted browser QA passes
@@ -117,7 +117,7 @@ revalidation, single-use dispatch, and independent outcome verification. Unknown
 operations have one separate read-only recovery run with persisted budgets;
 recovery completion and its outcome are committed atomically. Generic queue
 redelivery routes a recovery run into the read-only path. All 449 transaction
-operations tests pass; the full backend suite also passes (7,396 tests, 2 skipped). No external
+operations tests pass; the full backend suite also passes (7,399 tests, 2 skipped). No external
 customer-data write has been performed.
 
 The NetSuite guard ships as an isolated SDF package with writes disabled. Its
@@ -128,7 +128,7 @@ process was stopped. Deployment and live write validation have not occurred.
 
 Remaining implementation is substantive: missing-order create preparation and
 guarded execution; explicit handling of Framework's legacy tax allocation
-profiles; bounded fresh-human retry after known no-write failures; seeded-tenant
+profiles; seeded-tenant
 HTTP end-to-end and actual process-death drills; complete independent T2 and
 shipping gates. An approved UI state alone never means an external change was executed
 or verified. The child agents remain usage-limited; root is continuing their
@@ -179,9 +179,11 @@ assumption.
 
 ## Next execution slices
 
-1. Known-no-write retries: preserve the original attempt and rejection, create at
-   most one further pending proposal for identical economic work after fresh
-   evidence. It requires a new human decision. An unknown attempt never qualifies.
+1. Known-no-write retries are implemented: the original attempt and rejection
+   remain immutable, and at most one further pending proposal is allowed for
+   identical economic work after fresh evidence. It requires a new human
+   decision. An unknown attempt never qualifies. Targeted retry/state/dispatch
+   tests pass (48 tests), and the complete backend suite passes 7,399 tests.
 2. Missing-order create: resolve one active customer by exact source identity and
    subsidiary, exact item SKUs with no ambiguous/bundle expansion, currency and
    precision, open period, transaction date, shipping, explicit addresses, and
@@ -200,3 +202,11 @@ assumption.
 4. Complete seeded-tenant HTTP/worker end-to-end coverage, an actual killed-process
    recovery drill, rendered create/retry controls, and the full independent T2
    review. The current Claude CLI review is supplementary, not that full gate.
+
+
+The independent Claude CLI execution review completed against the code later
+committed as `86905811`. It was tool-less and supplementary, not the T2 gate.
+It identified the known-no-write retry issue (now fixed), transient recovery
+stranding, proof/termination exception handling, Celigo worst-case call capacity,
+large-evidence run failure, and several lower-confidence guard/scheduling issues.
+Those remaining findings are being reproduced and addressed before delivery.
