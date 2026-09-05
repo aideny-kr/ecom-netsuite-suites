@@ -433,9 +433,34 @@ def _step_name(step) -> str:
     )
 
 
+def _cap_joined(parts: list[str]) -> str:
+    """Cap a "; "-joined cell at the same 300-char bound every other text
+    cell in this module uses (`_cap_message`) -- but unlike a free-text
+    message, truncating mid-string would print a broken fragment of a name
+    or path, so this caps by whole PART instead and says how many were
+    dropped ("… +N more"), the same honesty rule this module applies
+    everywhere else it can't show everything (spec §8's "truncated" bit,
+    just for a joined cell instead of a row set)."""
+    joined = "; ".join(parts)
+    if len(joined) <= _SAMPLE_MESSAGE_MAX:
+        return joined
+    kept: list[str] = []
+    total = 0
+    for part in parts:
+        added = len(part) if not kept else len(part) + 2  # + "; " separator
+        # Reserve room for the "; … +N more" suffix (worst case N is 2 digits).
+        if total + added > _SAMPLE_MESSAGE_MAX - 12:
+            break
+        kept.append(part)
+        total += added
+    remaining = len(parts) - len(kept)
+    suffix = f"… +{remaining} more"
+    return f"{'; '.join(kept)}; {suffix}" if kept else suffix
+
+
 def _join_scripts(attachments) -> tuple[str, str]:
-    names = "; ".join(a.script_name or a.script_celigo_id for a in attachments)
-    sites = "; ".join(a.json_path for a in attachments)
+    names = _cap_joined([a.script_name or a.script_celigo_id for a in attachments])
+    sites = _cap_joined([a.json_path for a in attachments])
     return names, sites
 
 

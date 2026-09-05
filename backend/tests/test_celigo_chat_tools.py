@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.mcp import governance, registry
 from app.mcp.tools import celigo_flow_map
+from app.models.celigo import CeligoScript, CeligoScriptAttachment
 from app.models.pipeline import CursorState
 from app.services.chat.nodes import ALLOWED_CHAT_TOOLS
 from app.services.chat.tool_categories import categorize, is_celigo_source
@@ -559,6 +560,71 @@ class TestN2Shape:
                     assert len(node) <= 300, f"oversized string cell: {node[:50]}..."
 
             _walk(parsed)
+
+
+class TestScriptCellCap:
+    """Task 4G: `_join_scripts` joined every attachment on a step with "; " and
+    NO cap, while every other text cell in this module is capped at 300 chars
+    (`_cap_message`). A step with several script attachments could therefore
+    produce a `scripts`/`script_sites` cell far past 300 chars -- exactly the
+    oversized-cell condition `TestN2Shape`'s generic walk already guards
+    against for every OTHER cell, so this fixture must make THAT walk fail
+    before the cap exists."""
+
+    async def test_many_script_attachments_on_one_step_stay_within_the_cap(self, db: AsyncSession):
+        tenant = await create_test_tenant(db, slug=f"celigo-scriptcap-{uuid.uuid4().hex[:6]}")
+        await enable_feature_flag(db, tenant.id, "celigo")
+        world = await _seed_world(db, tenant.id)
+        conn_id = world["connection_id"]
+        step = world["step"]
+
+        # world["step"] already carries one attachment (world["script"], "Transform
+        # Script"). Add three more with long names on the SAME step -- four
+        # attachments joined with "; " comfortably exceeds 300 chars unjoined.
+        long_names = [
+            "Pre-Save Page Validate Customer Business Entity Subsidiary Currency And Payment "
+            "Terms Mapping Before The Record Is Committed Script",
+            "Post-Save Page Synchronize The NetSuite Internal Id Back Onto The Celigo Custom "
+            "Field For Downstream Lookups Script",
+            "Input Filter Exclude Cancelled Refunded And Internal Test Orders From The "
+            "Nightly Export Batch Before It Reaches NetSuite Script",
+        ]
+        for i, name in enumerate(long_names):
+            script = CeligoScript(
+                tenant_id=tenant.id,
+                celigo_connection_id=conn_id,
+                celigo_id=f"scr_extra_{i}_{world['suffix']}",
+                name=name,
+                content="function onSave(scriptContext) { return true; }",
+            )
+            db.add(script)
+            await db.flush()
+            db.add(
+                CeligoScriptAttachment(
+                    tenant_id=tenant.id,
+                    celigo_connection_id=conn_id,
+                    flow_id=step.flow_id,
+                    flow_step_id=step.id,
+                    script_id=script.id,
+                    script_celigo_id=script.celigo_id,
+                    function_name="onSave",
+                    json_path=f"pageGenerators[0].extra_{i}.script",
+                    site_type="hook",
+                )
+            )
+        await db.flush()
+        await _sync_now(db, conn_id)
+
+        result = await celigo_flow_map.execute_flow_steps(
+            {"flow": str(world["flow"].id)}, context={"db": db, "tenant_id": str(tenant.id)}
+        )
+
+        scripts_col = result["columns"].index("scripts")
+        step_row = next(row for row in result["rows"] if row[scripts_col])
+        scripts_cell = step_row[scripts_col]
+
+        assert len(scripts_cell) <= 300, f"scripts cell not capped: {len(scripts_cell)} chars"
+        assert "more" in scripts_cell, "an oversized joined cell must say how many attachments were dropped"
 
 
 # ---------------------------------------------------------------------------
