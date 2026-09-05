@@ -300,6 +300,37 @@ class ErrorGroups:
     groups: list[FlowErrorGroup] = field(default_factory=list)
 
 
+# ---------------------------------------------------------------------------
+# Resolver return shapes -- task 3 (chat tools, spec §3). A chat argument is
+# free text ("integration": id or name fragment; "flow": id or exact name),
+# never a validated path param the way the routes' `uuid.UUID` FastAPI
+# parameter is -- these two dataclasses are deliberately NOT the same shape
+# as `IntegrationSummary`/`FlowSummary` above: a resolver's only job is
+# "which row(s), if any, did the caller mean", not the full aggregate a tool
+# then queries for separately via the functions above.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class IntegrationSummaryRef:
+    id: str
+    name: str
+
+
+@dataclass(frozen=True)
+class FlowRef:
+    id: str
+    name: str
+    integration_id: str
+    integration_name: str
+    # Carried here (not re-queried by the caller) because the tool-layer
+    # "no open errors for a CHECKED flow" honesty line (spec §8) needs it
+    # for the single-flow case, and this resolver already holds a live
+    # `CeligoFlow` row via the same production join that would otherwise be
+    # re-executed just to read one column back off it.
+    errors_checked_at: datetime | None
+
+
 def _error_out(e: CeligoFlowError) -> FlowError:
     return FlowError(
         id=str(e.id),
@@ -1236,3 +1267,117 @@ async def flow_error_groups(
         total=len(errors),
         groups=groups,
     )
+
+
+# ---------------------------------------------------------------------------
+# resolve_production_integration / resolve_production_flow -- task 3 (spec
+# §3). The routes above never needed a fragment/ambiguity-aware lookup: every
+# route takes a validated `uuid.UUID` path param and the ONE thing it can be
+# wrong about is "not found" (404). A chat argument is free text, so these
+# two additionally have to decide WHICH row(s) a name fragment or an exact
+# name means before the caller can go looking for its data -- that "which
+# row" decision belongs here, once, rather than duplicated in every one of
+# the four tools that needs it (`mcp/tools/celigo_flow_map.py`).
+# ---------------------------------------------------------------------------
+
+
+def _try_parse_uuid(key: str) -> uuid.UUID | None:
+    try:
+        return uuid.UUID(key)
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+async def resolve_production_integration(
+    db: AsyncSession, *, tenant_id: uuid.UUID, key: str
+) -> IntegrationSummaryRef | list[IntegrationSummaryRef] | None:
+    """The one PRODUCTION integration *key* names, under the tenant's active
+    Celigo connection -- *key* is either the integration's id or a
+    case-insensitive fragment of its name (never an exact-match requirement;
+    "ACME" must find "ACME ERP").
+
+    Returns `None` for no match, a single `IntegrationSummaryRef` for exactly
+    one, or a `list[IntegrationSummaryRef]` (every candidate, name order) when
+    a fragment is ambiguous -- the caller (a tool's `execute`) turns that into
+    an honest caveat naming the candidates rather than guessing one, per
+    spec §3's `celigo.flows` argument. A `key` that parses as a UUID is
+    always tried as an id lookup first (never as a name fragment, even if it
+    also happens to look like one) -- ids are exact by construction, so
+    there is nothing to disambiguate."""
+    connection = await _get_celigo_connection(db, tenant_id)
+    if connection is None:
+        return None
+
+    candidate_id = _try_parse_uuid(key)
+    if candidate_id is not None:
+        row = (
+            await db.execute(
+                select(CeligoIntegration.id, CeligoIntegration.name).where(
+                    CeligoIntegration.id == candidate_id,
+                    CeligoIntegration.tenant_id == tenant_id,
+                    CeligoIntegration.celigo_connection_id == connection.id,
+                    celigo_integration_is_production(),
+                )
+            )
+        ).one_or_none()
+        return IntegrationSummaryRef(id=str(row.id), name=row.name) if row else None
+
+    rows = (
+        await db.execute(
+            select(CeligoIntegration.id, CeligoIntegration.name)
+            .where(
+                CeligoIntegration.tenant_id == tenant_id,
+                CeligoIntegration.celigo_connection_id == connection.id,
+                celigo_integration_is_production(),
+                CeligoIntegration.name.ilike(f"%{key}%"),
+            )
+            .order_by(CeligoIntegration.name)
+        )
+    ).all()
+    if not rows:
+        return None
+    if len(rows) == 1:
+        return IntegrationSummaryRef(id=str(rows[0].id), name=rows[0].name)
+    return [IntegrationSummaryRef(id=str(r.id), name=r.name) for r in rows]
+
+
+async def resolve_production_flow(db: AsyncSession, *, tenant_id: uuid.UUID, key: str) -> list[FlowRef]:
+    """Every PRODUCTION, tenant-owned flow *key* names -- *key* is either the
+    flow's id or an EXACT case-insensitive match of its name (unlike the
+    integration resolver above, never a fragment: a flow name collision is
+    common enough across integrations, and within one, that a substring
+    match would return far more candidates than a caller could usefully
+    disambiguate). Empty when nothing matches; more than one element means
+    the name is genuinely ambiguous (two flows -- typically in different
+    integrations -- share it) and the caller must caveat rather than pick
+    one. Same production join as `flow_detail`/`flow_error_groups`
+    (`_join_production_integration`) -- a sandbox-integration flow is not a
+    match here either, same as it is not found by id on those routes."""
+    stmt = _join_production_integration(
+        select(
+            CeligoFlow.id,
+            CeligoFlow.name,
+            CeligoFlow.integration_id,
+            CeligoIntegration.name.label("integration_name"),
+            CeligoFlow.errors_checked_at,
+        ),
+        tenant_id,
+    ).where(CeligoFlow.tenant_id == tenant_id)
+
+    candidate_id = _try_parse_uuid(key)
+    if candidate_id is not None:
+        stmt = stmt.where(CeligoFlow.id == candidate_id)
+    else:
+        stmt = stmt.where(func.lower(CeligoFlow.name) == key.lower())
+
+    rows = (await db.execute(stmt.order_by(CeligoFlow.name))).all()
+    return [
+        FlowRef(
+            id=str(r.id),
+            name=r.name,
+            integration_id=str(r.integration_id),
+            integration_name=r.integration_name,
+            errors_checked_at=r.errors_checked_at,
+        )
+        for r in rows
+    ]
