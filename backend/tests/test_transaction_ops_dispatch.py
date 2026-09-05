@@ -37,7 +37,7 @@ async def ready(db, admin_user):
         actor=actor,
     )
     claim = await state.claim_approved_operation(
-        db, actor.tenant_id, proposal.id, fresh_evidence_fingerprint=proposal.evidence_fingerprint
+        db, actor.tenant_id, proposal.id, expected_evidence_fingerprint=proposal.evidence_fingerprint
     )
     return actor, config, proposal, claim
 

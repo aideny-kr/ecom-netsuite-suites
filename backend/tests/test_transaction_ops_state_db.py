@@ -197,7 +197,7 @@ async def test_unknown_outcome_never_reacquires_and_ledger_precedes_dispatch(db,
     actor, _, run = setup_state
     proposal = await new_proposal(db, actor, run)
     with pytest.raises(state.StateError, match="proposal_not_approved"):
-        await state.claim_approved_operation(db, actor.tenant_id, proposal.id, fresh_evidence_fingerprint="a" * 64)
+        await state.claim_approved_operation(db, actor.tenant_id, proposal.id, expected_evidence_fingerprint="a" * 64)
     await state.decide_proposal(
         db,
         actor.tenant_id,
@@ -205,7 +205,9 @@ async def test_unknown_outcome_never_reacquires_and_ledger_precedes_dispatch(db,
         ProposalDecision(decision="approve", evidence_fingerprint="a" * 64),
         actor=actor,
     )
-    claim = await state.claim_approved_operation(db, actor.tenant_id, proposal.id, fresh_evidence_fingerprint="a" * 64)
+    claim = await state.claim_approved_operation(
+        db, actor.tenant_id, proposal.id, expected_evidence_fingerprint="a" * 64
+    )
     assert claim.after_json == {"total": "121.00"}
     operation = (
         await db.execute(select(TransactionOperation).where(TransactionOperation.id == claim.operation_id))
@@ -215,7 +217,7 @@ async def test_unknown_outcome_never_reacquires_and_ledger_precedes_dispatch(db,
         db, actor.tenant_id, operation.id, outcome="unknown", result_json={"reason": "timeout"}
     )
     with pytest.raises(state.StateError, match="operation_already_attempted"):
-        await state.claim_approved_operation(db, actor.tenant_id, proposal.id, fresh_evidence_fingerprint="a" * 64)
+        await state.claim_approved_operation(db, actor.tenant_id, proposal.id, expected_evidence_fingerprint="a" * 64)
 
 
 async def test_revalidation_invalidates_approval_before_any_attempt(db, setup_state):
@@ -229,7 +231,7 @@ async def test_revalidation_invalidates_approval_before_any_attempt(db, setup_st
         actor=actor,
     )
     assert (
-        await state.claim_approved_operation(db, actor.tenant_id, proposal.id, fresh_evidence_fingerprint="b" * 64)
+        await state.claim_approved_operation(db, actor.tenant_id, proposal.id, expected_evidence_fingerprint="b" * 64)
         is None
     )
     await db.refresh(proposal)
@@ -299,7 +301,7 @@ async def test_claim_invalidates_human_approval_when_actor_is_revoked(db, setup_
         field, value = ("is_active", False) if revoke == "inactive" else ("actor_type", "agent")
         await db.execute(text(f"UPDATE users SET {field}=:value WHERE id=:id"), {"value": value, "id": actor.id})
     assert (
-        await state.claim_approved_operation(db, actor.tenant_id, proposal.id, fresh_evidence_fingerprint="a" * 64)
+        await state.claim_approved_operation(db, actor.tenant_id, proposal.id, expected_evidence_fingerprint="a" * 64)
         is None
     )
     assert (await state.get_proposal(db, actor.tenant_id, proposal.id)).status == "superseded"
@@ -319,7 +321,9 @@ async def test_unknown_attempt_blocks_changed_proposals_for_same_order(db, setup
     await state.decide_proposal(
         db, actor.tenant_id, first.id, ProposalDecision(decision="approve", evidence_fingerprint="a" * 64), actor=actor
     )
-    attempt = await state.claim_approved_operation(db, actor.tenant_id, first.id, fresh_evidence_fingerprint="a" * 64)
+    attempt = await state.claim_approved_operation(
+        db, actor.tenant_id, first.id, expected_evidence_fingerprint="a" * 64
+    )
     await state.complete_operation(
         db, actor.tenant_id, attempt.operation_id, outcome="unknown", result_json={"reason": "timeout"}
     )
@@ -328,7 +332,7 @@ async def test_unknown_attempt_blocks_changed_proposals_for_same_order(db, setup
         db, actor.tenant_id, second.id, ProposalDecision(decision="approve", evidence_fingerprint="b" * 64), actor=actor
     )
     with pytest.raises(state.StateError, match="operation_already_attempted"):
-        await state.claim_approved_operation(db, actor.tenant_id, second.id, fresh_evidence_fingerprint="b" * 64)
+        await state.claim_approved_operation(db, actor.tenant_id, second.id, expected_evidence_fingerprint="b" * 64)
 
 
 async def test_rejected_proposal_cannot_be_approved_later(db, setup_state):
@@ -417,7 +421,9 @@ async def test_claim_commits_attempt_before_return_and_restores_rls_context(db, 
 
     monkeypatch.setattr(db, "commit", commit)
     monkeypatch.setattr(state, "set_tenant_context", context)
-    intent = await state.claim_approved_operation(db, actor.tenant_id, proposal.id, fresh_evidence_fingerprint="a" * 64)
+    intent = await state.claim_approved_operation(
+        db, actor.tenant_id, proposal.id, expected_evidence_fingerprint="a" * 64
+    )
     assert intent is not None
     assert events[-2:] == ["commit_attempt", "tenant_context"]
 
@@ -471,3 +477,20 @@ async def test_approval_actor_comes_from_current_human_and_is_audited(db, setup_
             ProposalDecision(decision="approve", evidence_fingerprint="b" * 64),
             actor=actor,
         )
+
+
+@pytest.mark.parametrize(
+    "mapping", [{"reference_field": "tranid"}, {"reference_field": "tranid", "action_mode": "detect_only"}]
+)
+async def test_detect_only_scope_cannot_produce_a_proposal(db, admin_user, mapping):
+    actor, _ = admin_user
+    config = await seed_config(db, actor.tenant_id, actor, mapping_json=mapping)
+    run = await state.create_run(
+        db,
+        actor.tenant_id,
+        config.id,
+        RunCreate(evaluation_key="detect-only", order_references=["R123456789"]),
+        actor=actor,
+    )
+    with pytest.raises(state.StateError, match="actions_disabled"):
+        await new_proposal(db, actor, run)

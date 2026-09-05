@@ -36,6 +36,7 @@ from app.schemas.transaction_runs import (
     ConfigCreate,
     ConfigOut,
     FindingReport,
+    OperationReadPermit,
     ProgressUpdate,
     ProposalCreate,
     ProposalDecision,
@@ -49,6 +50,11 @@ from app.services.transaction_ops.normalization import TransactionMapping
 
 _LEASE = timedelta(seconds=180)
 _EVIDENCE_AGE = timedelta(minutes=15)
+_OPERATION_CALLS = 96
+_OPERATION_TIME = timedelta(seconds=300)
+_LEDGER_RESULT_KEYS = frozenset(
+    {"dispatch_reserved", "provider", "payload_fingerprint", "dispatch_reserved_at", "termination_reason"}
+)
 
 
 class StateError(ValueError):
@@ -493,6 +499,8 @@ async def propose(db, tenant_id, run_id, request: ProposalCreate, *, lease_token
     config = await get_config(db, tenant_id, run.config_id, lock=True)
     if not config.enabled:
         raise StateError("config_disabled")
+    if (config.mapping_json or {}).get("action_mode", "detect_only") != "propose_actions":
+        raise StateError("actions_disabled")
     run.lease_until = min(run.deadline_at, now + _LEASE)
     # The observation timestamp is freshness, not work identity. Before/after,
     # authoritative versions (fingerprint) and exact destination define the work.
@@ -569,7 +577,13 @@ async def decide_proposal(db, tenant_id, proposal_id, request: ProposalDecision,
     return row
 
 
-async def claim_approved_operation(db, tenant_id, proposal_id, *, fresh_evidence_fingerprint, now=None):
+async def claim_approved_operation(db, tenant_id, proposal_id, *, expected_evidence_fingerprint, now=None):
+    """Claim the approved intent before fresh, separately budgeted provider reads.
+
+    Matching an expected fingerprint here does not attest to fresh evidence.
+    The executor must compare fresh evidence with it before dispatch; the
+    provider adapter must enforce the final server-side conditional write.
+    """
     now = _clock(now)
     await set_tenant_context(db, str(tenant_id))
     # Different proposals can concern the same external order. Serialize only
@@ -625,7 +639,12 @@ async def claim_approved_operation(db, tenant_id, proposal_id, *, fresh_evidence
         await _commit(db, tenant_id)
         return None
     config = await get_config(db, tenant_id, row.config_id)
-    if not config.enabled or row.evidence_fingerprint != fresh_evidence_fingerprint or now >= row.valid_until:
+    if (
+        not config.enabled
+        or (config.mapping_json or {}).get("action_mode", "detect_only") != "propose_actions"
+        or row.evidence_fingerprint != expected_evidence_fingerprint
+        or now >= row.valid_until
+    ):
         row.status = "superseded"
         await _audit(db, tenant_id, "proposal.invalidate", row)
         await _commit(db, tenant_id)
@@ -636,6 +655,9 @@ async def claim_approved_operation(db, tenant_id, proposal_id, *, fresh_evidence
         work_key=row.work_key,
         entity_key=entity_key,
         attempted_at=now,
+        deadline_at=min(now + _OPERATION_TIME, row.valid_until),
+        max_api_calls=_OPERATION_CALLS,
+        api_calls_used=0,
         status="executing",
     )
     db.add(operation)
@@ -663,6 +685,8 @@ async def complete_operation(db, tenant_id, operation_id, *, outcome, result_jso
     if outcome not in {"verified", "unknown", "failed"}:
         raise ValueError("Invalid operation outcome")
     evidence = _bounded_json(result_json)
+    if _LEDGER_RESULT_KEYS.intersection(evidence):
+        raise StateError("reserved_operation_result_key")
     row = await _one(db, tenant_id, TransactionOperation, operation_id, lock=True)
     if row.status not in {"executing", "unknown"}:
         raise StateError("operation_terminal")
@@ -670,7 +694,12 @@ async def complete_operation(db, tenant_id, operation_id, *, outcome, result_jso
     # read-only provider verification; this service never dispatches it again.
     if row.status == "unknown" and evidence.get("reconciled") is not True:
         raise StateError("reconciliation_evidence_required")
-    row.status, row.completed_at, row.result_json = outcome, _clock(now), evidence
+    row.status, row.completed_at = outcome, _clock(now)
+    row.result_json = {
+        **(row.result_json or {}),
+        **evidence,
+        "termination_reason": {"verified": "done", "unknown": "stall", "failed": "error"}[outcome],
+    }
     await _audit(db, tenant_id, "operation.complete", row, payload={"outcome": outcome})
     await _commit(db, tenant_id)
     return row
@@ -742,7 +771,12 @@ async def reserve_operation_dispatch(
         )
     ).scalar_one_or_none()
     await _human(db, tenant_id, actor, "recon.run")
+    if now >= operation.deadline_at or operation.api_calls_used >= operation.max_api_calls:
+        await _exhaust_operation(db, tenant_id, operation, now, "operation_budget_exhausted")
+        raise StateError("operation_budget_exhausted")
+    operation.api_calls_used += 1
     operation.result_json = {
+        **(operation.result_json or {}),
         "dispatch_reserved": True,
         "provider": provider,
         "payload_fingerprint": payload_fingerprint,
@@ -757,3 +791,64 @@ async def reserve_operation_dispatch(
     )
     await _commit(db, tenant_id)
     return True
+
+
+async def _exhaust_operation(db, tenant_id, operation, now, code):
+    # This lock is shared with the dispatch permit. An old worker cannot send
+    # after recovery marks a pre-dispatch operation failed. A consumed permit
+    # cannot be distinguished from a sent request, so it always stays unknown.
+    operation.status = "unknown" if (operation.result_json or {}).get("dispatch_reserved") is True else "failed"
+    operation.completed_at = now
+    operation.result_json = {**(operation.result_json or {}), "termination_reason": "budget", "code": code}
+    await _audit(db, tenant_id, "operation.exhaust", operation, payload={"outcome": operation.status, "code": code})
+    await _commit(db, tenant_id)
+
+
+async def reserve_operation_budget(db, tenant_id, operation_id, *, api_calls, now=None):
+    """Commit the worst-case request cost before an execution-phase read.
+
+    No refunds, deadline extensions or replay after a terminal/unknown state.
+    A returned deadline must also bound the caller's transport timeout. Unknown
+    outcomes use a separate read-only reconciliation job, never this permit.
+    """
+    if type(api_calls) is not int or not 1 <= api_calls <= _OPERATION_CALLS:
+        raise ValueError("A bounded positive integer API-call cost is required")
+    now = _clock(now)
+    await set_tenant_context(db, str(tenant_id))
+    tenant = (
+        await db.execute(
+            select(Tenant).where(Tenant.id == tenant_id).with_for_update().execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if tenant is None or not tenant.is_active:
+        raise StateError("tenant_unavailable", 403)
+    operation = await _one(db, tenant_id, TransactionOperation, operation_id, lock=True)
+    if operation.status != "executing":
+        raise StateError("operation_not_executable")
+    if now >= operation.deadline_at or operation.api_calls_used + api_calls > operation.max_api_calls:
+        await _exhaust_operation(db, tenant_id, operation, now, "operation_budget_exhausted")
+        return None
+    flags = await get_all_flags(db, tenant_id)
+    if flags.get("celigo") is not True or flags.get("reconciliation") is not True:
+        raise StateError("feature_disabled", 403)
+    operation.api_calls_used += api_calls
+    permit = OperationReadPermit(
+        deadline_at=operation.deadline_at, remaining_api_calls=operation.max_api_calls - operation.api_calls_used
+    )
+    await _audit(db, tenant_id, "operation.read_budget", operation, payload={"api_calls": api_calls})
+    await _commit(db, tenant_id)
+    return permit
+
+
+async def recover_expired_operation(db, tenant_id, operation_id, *, now=None):
+    """Fence a lost executor without ever obtaining another send permit."""
+    now = _clock(now)
+    operation = await _one(db, tenant_id, TransactionOperation, operation_id, lock=True)
+    if operation.status != "executing" or now < operation.deadline_at:
+        await _commit(db, tenant_id)
+        return None
+    sent = (operation.result_json or {}).get("dispatch_reserved") is True
+    await _exhaust_operation(
+        db, tenant_id, operation, now, "interrupted_after_dispatch" if sent else "interrupted_before_dispatch"
+    )
+    return operation

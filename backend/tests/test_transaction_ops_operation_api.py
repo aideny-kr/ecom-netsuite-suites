@@ -22,7 +22,7 @@ async def test_execution_state_is_read_from_the_committed_ledger(client, db, adm
         actor=actor,
     )
     await state.claim_approved_operation(
-        db, actor.tenant_id, proposal.id, fresh_evidence_fingerprint=proposal.evidence_fingerprint
+        db, actor.tenant_id, proposal.id, expected_evidence_fingerprint=proposal.evidence_fingerprint
     )
     response = await client.get(f"/api/v1/transaction-ops/proposals/{proposal.id}/operation", headers=headers)
     assert response.status_code == 200, response.text

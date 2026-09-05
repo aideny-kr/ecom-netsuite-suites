@@ -160,6 +160,10 @@ class TransactionOperation(Base, UUIDPrimaryKeyMixin, TimestampMixin):
             ["tenant_id", "proposal_id"], ["transaction_ops_proposals.tenant_id", "transaction_ops_proposals.id"]
         ),
         CheckConstraint("status IN ('executing','verified','unknown','failed')", name="ck_tx_operation_status"),
+        CheckConstraint(
+            "max_api_calls BETWEEN 1 AND 96 AND api_calls_used >= 0 AND api_calls_used <= max_api_calls",
+            name="ck_tx_operation_spend",
+        ),
     )
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), index=True)
     proposal_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
@@ -167,6 +171,9 @@ class TransactionOperation(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     entity_key: Mapped[str] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(20), default="executing", index=True)
     attempted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    deadline_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    max_api_calls: Mapped[int] = mapped_column(Integer)
+    api_calls_used: Mapped[int] = mapped_column(Integer, default=0)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     result_json: Mapped[dict] = mapped_column(JSONB, default=dict)
 

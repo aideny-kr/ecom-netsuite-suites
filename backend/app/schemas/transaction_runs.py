@@ -201,8 +201,16 @@ class OperationOut(OutputModel):
     work_key: str
     status: str
     attempted_at: datetime
+    deadline_at: datetime
+    max_api_calls: int
+    api_calls_used: int
     completed_at: datetime | None
     result_json: dict
+
+
+class OperationReadPermit(InputModel):
+    deadline_at: AwareDatetime
+    remaining_api_calls: int = Field(ge=0, strict=True)
 
 
 class FindingOut(OutputModel):
