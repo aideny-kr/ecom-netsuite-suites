@@ -249,13 +249,19 @@ def _normalize_framework(evidence, *, mapping, account_id, subsidiary_id):
         status = "cancelled"
     elif state == "refunded":
         status = "refunded"
-    if order.get("requires_review") is True:
+    if order.get("requires_review") is not False:
         status = "unknown"
     currency = order.get("currency")
     business_entity = order.get("business_entity")
     if isinstance(business_entity, dict):
         business_entity = business_entity.get("id")
-    entity_key = "legacy" if business_entity is None else str(business_entity)
+    entity_key = (
+        "legacy"
+        if "business_entity" in order and order["business_entity"] is None
+        else str(business_entity)
+        if business_entity is not None and business_entity != "legacy"
+        else None
+    )
     mapped_subsidiary = mapping.business_entity_subsidiaries.get(entity_key)
     return TransactionSnapshot(
         system="framework",

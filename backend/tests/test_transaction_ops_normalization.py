@@ -15,6 +15,8 @@ def evidence(**changes):
         "id": "101",
         "number": "R100000001",
         "state": "complete",
+        "requires_review": False,
+        "business_entity": None,
         "shipment_state": "shipped",
         "currency": "EUR",
         "updated_at": "2026-09-04T10:00:00Z",
@@ -305,3 +307,26 @@ def test_netsuite_zero_tax_requires_explicit_line_evidence():
     assert target(raw).tax_complete
     del raw["lines"][0]["custcol_fw_vat_amount"]
     assert not target(raw).tax_complete
+
+
+@pytest.mark.parametrize("value", [True, None, "false", 0])
+def test_missing_or_nonboolean_review_status_cannot_be_confirmed(value):
+    assert normalized(evidence(requires_review=value)).status == "unknown"
+
+
+def test_absent_review_status_cannot_be_confirmed():
+    payload = evidence()
+    del payload["orders"][0]["requires_review"]
+    assert normalized(payload).status == "unknown"
+
+
+def test_omitted_business_entity_is_not_an_explicit_legacy_entity():
+    payload = evidence()
+    del payload["orders"][0]["business_entity"]
+    assert normalized(payload).subsidiary_id is None
+    assert normalized(evidence(business_entity=None)).subsidiary_id == "1"
+
+
+@pytest.mark.parametrize("entity", ["legacy", {"id": "legacy"}])
+def test_real_entity_cannot_collide_with_null_entity_routing_sentinel(entity):
+    assert normalized(evidence(business_entity=entity)).subsidiary_id is None

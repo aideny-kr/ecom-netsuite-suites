@@ -31,7 +31,7 @@ def upstream(monkeypatch):
                 "type": "http",
                 "http": {"baseURI": "https://private-direct-access.frame.work/api/"},
             }
-        if kwargs["body"]["http"]["relativeURI"].startswith("sync/"):
+        if kwargs["body"]["http"]["relativeURI"].startswith("sync/orders?"):
             return {
                 "data": [
                     {

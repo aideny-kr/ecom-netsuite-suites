@@ -232,7 +232,9 @@ async def read_framework_order(
         or not _ORDER_REFERENCE.fullmatch(order_reference)
     ):
         raise SourceReadError("invalid_order_reference", 422)
-    order, provenance = await _preview(db, tenant_id, step_id, f"orders/{order_reference}", client=client)
+    # The sync detail endpoint includes business entity and review holds as
+    # well as lines/addresses. The storefront detail endpoint omits routing.
+    order, provenance = await _preview(db, tenant_id, step_id, f"sync/orders/{order_reference}", client=client)
     if order.get("number") != order_reference:
         raise SourceReadError("order_identity_mismatch")
     return {

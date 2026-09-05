@@ -101,7 +101,7 @@ async def test_order_uses_fixed_read_preview_and_tenant_scoped_connection(source
         "_connectionId": REMOTE_CONNECTION,
         "type": "test",
         "test": {"limit": 1},
-        "http": {"method": "GET", "relativeURI": f"orders/{ORDER}", "followRedirects": False},
+        "http": {"method": "GET", "relativeURI": f"sync/orders/{ORDER}", "followRedirects": False},
     }
     assert all(request.headers["authorization"] == "Bearer celigo-secret" for request in requests)
     sql = str(source.execute.call_args.args[0].compile(dialect=postgresql.dialect()))

@@ -210,3 +210,13 @@ HTTP investigation/approval, the real worker and committed ledger, an actual
 delivery and exact tenant cleanup. The September 5 run passed with one stub write,
 21 original operation calls retained, a verified recovery outcome and zero residue.
 Provider behavior is simulated; no live NetSuite order was changed by this drill.
+
+
+Individual Framework reads use the live flow's `sync/orders/{number}` endpoint,
+which includes routing and review-hold fields together with detailed lines and
+addresses. An omitted review flag is unknown, and an omitted business entity does
+not select a legacy subsidiary. The `legacy` mapping key is reserved for explicit
+null entities; a literal entity with that name cannot use it. Each read still spends at most two Celigo calls
+under one 40-second deadline. The private projection for create preparation keeps
+single-field address names and explicit inventory/shipping identities; the public
+evidence API omits those private fields.

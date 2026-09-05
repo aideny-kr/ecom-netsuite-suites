@@ -296,12 +296,31 @@ validation remains unavailable with the expired sandbox SDK authentication;
 no script was deployed or live transaction changed.
 
 
-The latest exact source contract probe found complementary endpoint shapes:
-`orders/<number>` has detailed lines and addresses but omits business entity and
-review-hold metadata; an exact `sync/orders?q[number_eq]=...` read returns that
-routing metadata but no lines or addresses. The positive lookup returned one
-exact full reference, and a nonexistent suffixed reference returned zero. This
-must be addressed before missing-order preparation: selecting a subsidiary from
-an omitted business entity is not sufficient evidence. The live detailed address
-shape uses `name`, not separate first/last-name fields. Current default projections
-retain no address contacts outside explicit create preparation.
+### September 5 complete source endpoint
+
+The active Celigo source export uses `GET sync/orders/{{number}}`. A fresh
+read-only preview proved that this endpoint supplies detailed lines, shipments,
+addresses, business entity and review holds in one response. Both inspected
+Framework Admin and Prod2 connections support it. The reader now uses this fixed
+endpoint, preserving its two-call/40-second bound and its prohibition on executing
+saved export scripts, mappings, hooks or delta state. No cross-request merge or
+routing inference is needed. The existing list endpoint remains paginated.
+
+Normalization requires `requires_review` to be explicitly false before treating
+an order as confirmed or fulfilled. An omitted business entity no longer matches
+an explicit null/legacy subsidiary mapping. Private create preparation retains
+actual single-field address names, company/country/state fields, batch IDs,
+inventory-unit IDs and shipment IDs, stock-location names and shipping-method
+codes. Unknown fields, credentials and serial numbers are still excluded; normal
+public evidence does not acquire private contact or inventory routing fields.
+
+The exact local projection passed against a current live order with 11 lines,
+one shipment and complete address names. All 156 focused backend tests and 50 API/normalization tests pass, including
+reproduced missing-data and private-projection cases. The final complete backend
+suite passes 7,502 tests (2 skipped). The supplementary review reproduced a literal
+`legacy` entity collision; that sentinel is now reserved for explicit null only.
+Optional projection fields remain unknown when absent; future create preparation
+must require its inputs at the action boundary. A live execution of the exact local
+projection and collectors supplies evidence beyond the synthetic test fixture. Missing-order creation
+and dynamic tax-assessment evidence remain separate outstanding work; this change
+does not claim either of those execution paths is complete.

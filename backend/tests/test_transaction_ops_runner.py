@@ -24,6 +24,8 @@ def source_order():
                 "number": REF,
                 "currency": "USD",
                 "state": "complete",
+                "requires_review": False,
+                "business_entity": None,
                 "updated_at": (NOW - timedelta(hours=1)).isoformat(),
                 "total": "100",
                 "item_total": "100",

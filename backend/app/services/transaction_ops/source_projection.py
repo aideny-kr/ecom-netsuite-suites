@@ -52,11 +52,17 @@ _PAYMENT = frozenset(
 id source_type source_id amount payment_method_id state created_at updated_at exchange_rate currency
 """.split()
 )
-_ADDRESS = frozenset("firstname lastname address1 address2 city zipcode phone state_name state_id country_id".split())
+_ADDRESS = frozenset(
+    """
+name firstname lastname company address1 address2 city zipcode phone state_name state_text state_id
+country_id country_iso vat_id reverse_charge_status
+""".split()
+)
 _COUNTRY = frozenset("id iso iso3 name".split())
 _STATE = frozenset("id name abbr".split())
 _SHIPPING_METHOD = frozenset("id name code".split())
-_SHIPPING_RATE = frozenset("id name cost selected shipping_method_id".split())
+_SHIPPING_RATE = frozenset("id name cost selected shipping_method_id shipping_method_code".split())
+_INVENTORY_UNIT = frozenset("id shipment_id variant_id state".split())
 _MAX_ITEMS = 500
 _MAX_TEXT = 2048
 
@@ -99,15 +105,18 @@ def _tax(value):
     return _object(value, _TAX)
 
 
-def _line(value):
+def _line(value, *, include_sync_data=False):
+    children = {
+        "adjustments": lambda v: _list(v, _adjustment),
+        "taxes": lambda v: _list(v, _tax),
+        "variant": lambda v: _object(v, _VARIANT),
+    }
+    if include_sync_data:
+        children["inventory_units"] = lambda v: _list(v, lambda item: _object(item, _INVENTORY_UNIT))
     return _object(
         value,
-        _LINE,
-        {
-            "adjustments": lambda v: _list(v, _adjustment),
-            "taxes": lambda v: _list(v, _tax),
-            "variant": lambda v: _object(v, _VARIANT),
-        },
+        _LINE | {"batch_id"} if include_sync_data else _LINE,
+        children,
     )
 
 
@@ -119,7 +128,7 @@ def _shipment(value, *, include_sync_data=False):
     children = {
         "adjustments": lambda v: _list(v, _adjustment),
         "taxes": lambda v: _list(v, _tax),
-        "line_items": lambda v: _list(v, _line),
+        "line_items": lambda v: _list(v, lambda item: _line(item, include_sync_data=include_sync_data)),
     }
     if include_sync_data:
         children.update(
@@ -127,11 +136,12 @@ def _shipment(value, *, include_sync_data=False):
                 "shipping_rates": lambda v: _list(v, _shipping_rate),
                 "selected_shipping_rate": _shipping_rate,
                 "shipping_method": lambda v: _object(v, _SHIPPING_METHOD),
+                "shipping_methods": lambda v: _list(v, lambda item: _object(item, _SHIPPING_METHOD)),
             }
         )
     return _object(
         value,
-        _SHIPMENT,
+        _SHIPMENT | {"stock_location_name"} if include_sync_data else _SHIPMENT,
         children,
     )
 
@@ -143,7 +153,7 @@ def project_order(value: dict, *, include_sync_data=False) -> dict:
         value,
         _ORDER,
         {
-            "line_items": lambda v: _list(v, _line),
+            "line_items": lambda v: _list(v, lambda item: _line(item, include_sync_data=include_sync_data)),
             "adjustments": lambda v: _list(v, _adjustment),
             "taxes": lambda v: _list(v, _tax),
             "shipments": lambda v: _list(v, lambda item: _shipment(item, include_sync_data=include_sync_data)),
@@ -155,7 +165,7 @@ def project_order(value: dict, *, include_sync_data=False) -> dict:
         projected.update(
             _object(
                 value,
-                frozenset({"email"}),
+                frozenset({"email", "batch_name"}),
                 {
                     key: lambda v: _object(
                         v, _ADDRESS, {"country": lambda c: _object(c, _COUNTRY), "state": lambda s: _object(s, _STATE)}
