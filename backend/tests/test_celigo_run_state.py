@@ -35,47 +35,85 @@ HOURS = "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23"
         ),
         pytest.param(
             f"? 5,35 {HOURS} ? * *",
-            ParsedSchedule(kind="cron", cron=f"? 5,35 {HOURS} ? * *", interval_minutes=30, label="every 30 min", display=f"? 5,35 0…23 ? * *"),
+            ParsedSchedule(
+                kind="cron",
+                cron=f"? 5,35 {HOURS} ? * *",
+                interval_minutes=30,
+                label="every 30 min",
+                display="? 5,35 0…23 ? * *",
+            ),
             id="two-minutes-an-hour",
         ),
         pytest.param(
             f"? 10 {HOURS} ? * *",
-            ParsedSchedule(kind="cron", cron=f"? 10 {HOURS} ? * *", interval_minutes=60, label="hourly at :10", display="? 10 0…23 ? * *"),
+            ParsedSchedule(
+                kind="cron",
+                cron=f"? 10 {HOURS} ? * *",
+                interval_minutes=60,
+                label="hourly at :10",
+                display="? 10 0…23 ? * *",
+            ),
             id="single-minute-an-hour",
         ),
         pytest.param(
             "? 5 0,4,8,12,16,20 ? * *",
-            ParsedSchedule(kind="cron", cron="? 5 0,4,8,12,16,20 ? * *", interval_minutes=240, label="every 4 h", display="? 5 0,4,8,12,16,20 ? * *"),
+            ParsedSchedule(
+                kind="cron",
+                cron="? 5 0,4,8,12,16,20 ? * *",
+                interval_minutes=240,
+                label="every 4 h",
+                display="? 5 0,4,8,12,16,20 ? * *",
+            ),
             id="hour-list-evenly-spaced",
         ),
         pytest.param(
             "? 5 2,10,18 ? * *",
-            ParsedSchedule(kind="cron", cron="? 5 2,10,18 ? * *", interval_minutes=480, label="3×/day", display="? 5 2,10,18 ? * *"),
+            ParsedSchedule(
+                kind="cron", cron="? 5 2,10,18 ? * *", interval_minutes=480, label="3×/day", display="? 5 2,10,18 ? * *"
+            ),
             id="hour-list-not-whole-hours-under-8h-but-unevenly-spaced",
         ),
         pytest.param(
             "? 5 6 ? * *",
-            ParsedSchedule(kind="cron", cron="? 5 6 ? * *", interval_minutes=1440, label="daily 06:05", display="? 5 6 ? * *"),
+            ParsedSchedule(
+                kind="cron", cron="? 5 6 ? * *", interval_minutes=1440, label="daily 06:05", display="? 5 6 ? * *"
+            ),
             id="single-hour-single-minute-is-daily",
         ),
         pytest.param(
             "? 0 */6 * * *",
-            ParsedSchedule(kind="cron", cron="? 0 */6 * * *", interval_minutes=360, label="every 6 h", display="? 0 */6 ? * *"),
+            ParsedSchedule(
+                kind="cron", cron="? 0 */6 * * *", interval_minutes=360, label="every 6 h", display="? 0 */6 ? * *"
+            ),
             id="hours-step-N-with-star-day-of-month",
         ),
         pytest.param(
             "? 0,30 0,12 ? * *",
-            ParsedSchedule(kind="cron", cron="? 0,30 0,12 ? * *", interval_minutes=690, label="4×/day", display="? 0,30 0,12 ? * *"),
+            ParsedSchedule(
+                kind="cron", cron="? 0,30 0,12 ? * *", interval_minutes=690, label="4×/day", display="? 0,30 0,12 ? * *"
+            ),
             id="item-12-minutes-count-on-an-hour-subset",
         ),
         pytest.param(
             "? 0 0,6,12,18 ? * *",
-            ParsedSchedule(kind="cron", cron="? 0 0,6,12,18 ? * *", interval_minutes=360, label="every 6 h", display="? 0 0,6,12,18 ? * *"),
+            ParsedSchedule(
+                kind="cron",
+                cron="? 0 0,6,12,18 ? * *",
+                interval_minutes=360,
+                label="every 6 h",
+                display="? 0 0,6,12,18 ? * *",
+            ),
             id="item-12-evenly-spaced-hourly-set-still-every-N-h",
         ),
         pytest.param(
             "? 0,30 0,6,12,18 ? * *",
-            ParsedSchedule(kind="cron", cron="? 0,30 0,6,12,18 ? * *", interval_minutes=330, label="8×/day", display="? 0,30 0,6,12,18 ? * *"),
+            ParsedSchedule(
+                kind="cron",
+                cron="? 0,30 0,6,12,18 ? * *",
+                interval_minutes=330,
+                label="8×/day",
+                display="? 0,30 0,6,12,18 ? * *",
+            ),
             id="item-12-two-minutes-on-a-6-hourly-set-is-no-longer-every-6-h",
         ),
     ],
@@ -98,7 +136,7 @@ def test_parse_schedule_unknown_shapes_are_shown_verbatim() -> None:
 # --- Python-only additions called out in the brief --------------------------
 
 
-def test_parse_schedule_step_N_minutes() -> None:
+def test_parse_schedule_step_n_minutes() -> None:
     parsed = parse_schedule(f"? */15 {HOURS} ? * *")
     assert parsed.kind == "cron"
     assert parsed.interval_minutes == 15
@@ -121,7 +159,7 @@ def test_parse_schedule_day_of_month_question_mark_or_star_accepted(day_of_month
     assert parsed.label == "daily 06:05"
 
 
-def test_parse_schedule_day_of_month_L_rejected() -> None:
+def test_parse_schedule_day_of_month_l_rejected() -> None:
     assert parse_schedule("? 5 6 L * *") == ParsedSchedule(kind="unknown", raw="? 5 6 L * *")
 
 
@@ -149,12 +187,16 @@ SYNC = datetime(2026, 9, 2, 18, 12, 0, tzinfo=timezone.utc)
 
 def test_run_state_on_time_21_minutes_before_sync_on_15_minute_schedule() -> None:
     last = datetime(2026, 9, 2, 17, 51, 0, tzinfo=timezone.utc)
-    assert run_state(schedule=CRON15, disabled=False, last_executed_at=last, as_of=SYNC) == RunState(state="on_time", interval_minutes=15)
+    assert run_state(schedule=CRON15, disabled=False, last_executed_at=last, as_of=SYNC) == RunState(
+        state="on_time", interval_minutes=15
+    )
 
 
 def test_run_state_stalled_3_hours_before_sync_with_12_runs_missed() -> None:
     last = datetime(2026, 9, 2, 15, 12, 0, tzinfo=timezone.utc)
-    assert run_state(schedule=CRON15, disabled=False, last_executed_at=last, as_of=SYNC) == RunState(state="stalled", missed_runs=12, interval_minutes=15)
+    assert run_state(schedule=CRON15, disabled=False, last_executed_at=last, as_of=SYNC) == RunState(
+        state="stalled", missed_runs=12, interval_minutes=15
+    )
 
 
 def test_run_state_paused_never_stalled() -> None:
