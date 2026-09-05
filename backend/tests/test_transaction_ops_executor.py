@@ -17,9 +17,9 @@ from tests.test_transaction_ops_state_db import seed_config
 
 
 @pytest.fixture
-async def execution_case(db, admin_user, monkeypatch):
+async def execution_case(db, admin_user, monkeypatch, request):
     actor, _ = admin_user
-    case = planning_case()
+    case = planning_case(inventory=getattr(request, "param", False))
     config = await seed_config(db, actor.tenant_id, actor, subsidiary_id="3", mapping_json=case.config.mapping_json)
     case.config = config
     run = await state.create_run(
@@ -176,3 +176,26 @@ async def test_postwrite_source_change_is_not_called_verified(db, execution_case
 async def test_whole_guard_state_must_match_after_so_customer_drift_is_visible(db, execution_case):
     execution_case.after_guard["snapshot"]["entity"] = "999"
     assert (await execute(db, execution_case))["status"] == "unknown"
+
+
+@pytest.mark.parametrize("execution_case", [True], indirect=True)
+async def test_inventory_approval_reloads_private_source_for_both_execution_reads(db, execution_case):
+    result = await execute(db, execution_case)
+    assert result["status"] == "verified"
+    calls = execution_case.case.read_source.await_args_list
+    assert len(calls) == 2 and all(call.kwargs == {"include_sync_data": True} for call in calls)
+    execution_case.case.dispatch.assert_awaited_once()
+
+
+@pytest.mark.parametrize("execution_case", [True], indirect=True)
+@pytest.mark.parametrize("change", ["source_inventory", "source_sku", "target_inventory"])
+async def test_inventory_drift_after_approval_prevents_dispatch(db, execution_case, change):
+    case = execution_case.case
+    if change == "source_inventory":
+        case.source["orders"][0]["line_items"][0]["inventory_units"] = [{"id": "999"}]
+    elif change == "source_sku":
+        case.source["orders"][0]["line_items"][0]["variant"]["sku"] = "OTHER"
+    else:
+        execution_case.before["orders"][0]["lines"][0]["custcol_fw_inventory_unit_ids"] = "999"
+    assert (await execute(db, execution_case))["status"] == "failed"
+    case.dispatch.assert_not_awaited()

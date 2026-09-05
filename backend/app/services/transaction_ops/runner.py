@@ -113,7 +113,9 @@ def build_report(source_evidence, target_evidence, config, mapping, *, now):
     if scope.get("account_id") != account or scope.get("subsidiary_id") != config["subsidiary_id"]:
         raise ValueError("target_scope_mismatch")
     targets = [
-        normalize_netsuite_order(item, mapping=mapping, account_id=account, observed_at=target_evidence["observed_at"])
+        normalize_netsuite_order(
+            item, mapping=mapping, account_id=account, observed_at=target_evidence["observed_at"], source=source
+        )
         for item in target_evidence["orders"]
     ]
     lookup = TransactionLookup(
@@ -294,7 +296,10 @@ async def run_investigation(
             reference = progress["pending_refs"][0]
             if not await reserve(2, 1):
                 return await finish("budget")
-            source = await bounded_read(source_reader(db, tenant_id, UUID(config["source_step_id"]), reference))
+            source_options = {"include_sync_data": True} if mapping.line_identity_mode == "inventory_units" else {}
+            source = await bounded_read(
+                source_reader(db, tenant_id, UUID(config["source_step_id"]), reference, **source_options)
+            )
             if not await reserve(10):  # At most7 data reads plus ordinary OAuth token maintenance.
                 return await finish("budget")
             targets = await bounded_read(

@@ -21,6 +21,13 @@ from app.schemas.transaction_ops import (
     TransactionTax,
     _decimal,
 )
+from app.services.transaction_ops.inventory_identity import (
+    native_bindings,
+    native_inventory,
+    sku,
+    source_inventory,
+    unique_ownership,
+)
 from app.services.transaction_ops.netsuite_reader import _account
 
 
@@ -56,6 +63,7 @@ class NetSuiteLegacyTaxMapping(EvidenceModel):
 
 class TransactionMapping(EvidenceModel):
     action_mode: Literal["detect_only", "propose_actions"] = "detect_only"
+    line_identity_mode: Literal["source_line_id", "inventory_units"] = "source_line_id"
     netsuite_create: NetSuiteCreateMapping | None = None
     netsuite_legacy_tax: NetSuiteLegacyTaxMapping | None = None
     reference_field: str = Field(pattern=r"^(tranid|otherrefnum|externalid|custbody_[a-z0-9_]+)$", max_length=100)
@@ -193,7 +201,18 @@ def _normalize_framework(evidence, *, mapping, account_id, subsidiary_id):
                 if gross is None or _money(item, "total") != gross + item_additional + non_tax:
                     local_known = False
                 lines.append(
-                    TransactionLine(key=key, quantity=quantity, net=net, tax=item_tax if amounts_known else None)
+                    TransactionLine(
+                        key=key,
+                        quantity=quantity,
+                        net=net,
+                        tax=item_tax if amounts_known else None,
+                        inventory_unit_ids=source_inventory(item)
+                        if mapping.line_identity_mode == "inventory_units"
+                        else (),
+                        sku=sku((item.get("variant") or {}).get("sku"))
+                        if mapping.line_identity_mode == "inventory_units"
+                        else None,
+                    )
                 )
             else:
                 shipping_tax += item_tax
@@ -285,17 +304,19 @@ def _normalize_framework(evidence, *, mapping, account_id, subsidiary_id):
         discount=zero if simple_adjustments else None,
         lines=lines,
         tax_details=taxes,
-        lines_complete=True,
+        lines_complete=mapping.line_identity_mode != "inventory_units" or unique_ownership(lines),
         tax_complete=tax_complete,
     )
 
 
-def normalize_netsuite_order(order, *, mapping: TransactionMapping, account_id: str, observed_at: str):
+def normalize_netsuite_order(order, *, mapping: TransactionMapping, account_id: str, observed_at: str, source=None):
     with localcontext(Context(prec=60, Emin=-99, Emax=99, traps=[InvalidOperation, DivisionByZero, Overflow])):
-        return _normalize_netsuite(order, mapping=mapping, account_id=account_id, observed_at=observed_at)
+        return _normalize_netsuite(
+            order, mapping=mapping, account_id=account_id, observed_at=observed_at, source=source
+        )
 
 
-def _normalize_netsuite(order, *, mapping, account_id, observed_at):
+def _normalize_netsuite(order, *, mapping, account_id, observed_at, source=None):
     header = order["header"]
     currency_meta = order.get("currency_metadata") or {}
     currency = currency_meta.get("symbol")
@@ -310,9 +331,27 @@ def _normalize_netsuite(order, *, mapping, account_id, observed_at):
     lines_complete = isinstance(raw_lines, list) and bool(raw_lines)
     lines, refs, taxes = [], {}, []
     seen_keys = set()
+    inventory_mode = mapping.line_identity_mode == "inventory_units"
+    source_scope_matches = (
+        source is not None
+        and source.system == "framework"
+        and source.account_id == "frame.work"
+        and source.record_type == "order"
+        and source.authoritative
+        and source.order_reference == order.get("order_reference")
+        and source.subsidiary_id == str((header.get("subsidiary") or {}).get("id"))
+    )
+    bindings = native_bindings(raw_lines or [], source) if inventory_mode and source_scope_matches else {}
     for line in raw_lines or []:
         source_id = line.get("custcol_fw_solidus_line_id")
-        if isinstance(source_id, bool) or not isinstance(source_id, (str, int)) or not str(source_id).strip():
+        if inventory_mode:
+            match = bindings.get(str(line.get("line")))
+            if match is None:
+                lines_complete = False
+                key = f"netsuite_line:{_id(line, 'line')}"
+            else:
+                key = match.key
+        elif isinstance(source_id, bool) or not isinstance(source_id, (str, int)) or not str(source_id).strip():
             lines_complete = False
             key = f"netsuite_line:{_id(line, 'line')}"
         else:
@@ -330,7 +369,14 @@ def _normalize_netsuite(order, *, mapping, account_id, observed_at):
             raise ValueError("NetSuite line quantity is unknown")
         lines.append(
             TransactionLine(
-                key=key, quantity=quantity, net=_money(line, "amount"), tax=_money(line, "custcol_fw_vat_amount")
+                key=key,
+                quantity=quantity,
+                net=_money(line, "amount"),
+                tax=_money(line, "custcol_fw_vat_amount"),
+                inventory_unit_ids=native_inventory(line.get("custcol_fw_inventory_unit_ids"))
+                if inventory_mode
+                else (),
+                sku=sku(line.get("custcol_fw_original_ecom_sku")) if inventory_mode else None,
             )
         )
     raw_taxes = order.get("tax_details")
@@ -455,9 +501,7 @@ def _legacy_allocations(order, lines, profile, account_id):
         known = known and line.net is not None and line.net >= 0 and line.tax is not None and line.tax >= 0
         if profile.mode == "line_tax_amount":
             known = known and (
-                str((raw.get("taxCode") or {}).get("id")) == profile.tax_code_id
-                and raw.get("isTaxable") is True
-                and _money(raw, "tax1Amt") == line.tax
+                str((raw.get("taxCode") or {}).get("id")) == profile.tax_code_id and _money(raw, "tax1Amt") == line.tax
             )
         taxes.append(
             TransactionTax(

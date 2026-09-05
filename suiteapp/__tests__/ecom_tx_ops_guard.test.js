@@ -483,8 +483,8 @@ test.each(["aggregate_header", "line_tax_amount"])(
     expect(saved()).toBe(0);
     expect(input.before.tax_profile).toEqual({ mode, tax_code_id: "610" });
     expect(input.before.custbody_fw_solidus_tax_amount).toBe("18");
-    expect(input.before.lines[0].istaxable).toBe(true);
     if (mode === "aggregate_header") {
+      expect(input.before.lines[0].istaxable).toBe(true);
       expect(input.before.taxrate).toBe("19.5652174");
       expect(input.before.taxitem).toBe("610");
       expect(input.before.lines[0].taxcode).toBeUndefined();
@@ -640,8 +640,15 @@ test.each(["aggregate_header", "line_tax_amount"])(
     input.before.shippingcost = String(shipping);
     state.body.shippingtax1rate = 0;
     input.before.shippingtax1rate = "0";
-    state.lines[0].istaxable = false;
-    input.before.lines[0].istaxable = false;
+    if (mode === "aggregate_header") {
+      state.lines[0].istaxable = false;
+      input.before.lines[0].istaxable = false;
+    } else {
+      // Native line tax amounts, not an unavailable taxability checkbox,
+      // are authoritative for the B.V. legacy profile.
+      state.lines[0].tax1amt = 19;
+      input.before.lines[0].tax1amt = "19";
+    }
     expect(restlet.post(input).status).toBe("rejected");
     expect(saved()).toBe(0);
   },
@@ -729,3 +736,100 @@ test.each([
     expect(saved()).toBe(1);
   },
 );
+
+test("BV snapshot and guarded native amounts do not depend on an unavailable taxability field", () => {
+  const input = legacyRequest("line_tax_amount");
+  delete state.lines[0].istaxable;
+  delete input.before.lines[0].istaxable;
+  const result = restlet.post(input);
+  expect(result.status).toBe("saved");
+  expect(saved()).toBe(1);
+});
+
+function inventoryRequest(mode = "line_tax_amount") {
+  const input = legacyRequest(mode);
+  delete state.lines[0].custcol_fw_solidus_line_id;
+  Object.assign(state.lines[0], {
+    custcol_fw_inventory_unit_ids: "502, 501",
+    custcol_fw_original_ecom_sku: "FRAME-1",
+  });
+  input.before.line_identity_mode = "inventory_units";
+  delete input.before.lines[0].custcol_fw_solidus_line_id;
+  Object.assign(input.before.lines[0], {
+    inventory_unit_ids: ["501", "502"],
+    custcol_fw_original_ecom_sku: "FRAME-1",
+  });
+  return input;
+}
+
+test.each(["aggregate_header", "line_tax_amount"])(
+  "%s can guard exact inventory IDs without a fictional source-line field",
+  (mode) => {
+    const input = inventoryRequest(mode);
+    const result = restlet.get({
+      action: "snapshot",
+      record_id: "63",
+      reference_field: "tranid",
+      tax_mode: mode,
+      tax_code_id: "610",
+      line_identity_mode: "inventory_units",
+    });
+    expect(result.success).toBe(true);
+    expect(result.snapshot).toEqual(input.before);
+    expect(restlet.post(input).status).toBe("saved");
+    expect(saved()).toBe(1);
+    expect(
+      calls
+        .filter(([kind, field]) => kind === "line")
+        .map(([, field]) => field),
+    ).not.toContain("custcol_fw_inventory_unit_ids");
+  },
+);
+
+test.each([
+  undefined,
+  "",
+  "501,501",
+  "0501,502",
+  "501,secret",
+  "501",
+  "503,502",
+  501,
+  true,
+])("invalid or changed native inventory %s rejects before save", (value) => {
+  const input = inventoryRequest();
+  state.lines[0].custcol_fw_inventory_unit_ids = value;
+  expect(restlet.post(input).status).toBe("rejected");
+  expect(saved()).toBe(0);
+});
+
+test.each([undefined, "", "OTHER", " FRAME-1", "FRAME-1\n"])(
+  "missing or changed native original SKU %s rejects before save",
+  (value) => {
+    const input = inventoryRequest();
+    state.lines[0].custcol_fw_original_ecom_sku = value;
+    expect(restlet.post(input).status).toBe("rejected");
+    expect(saved()).toBe(0);
+  },
+);
+
+test("duplicate inventory ownership across native lines rejects even an identical approval", () => {
+  const input = inventoryRequest();
+  state.lines.push({ ...state.lines[0], line: "8", lineuniquekey: "12346" });
+  input.before.lines.push({
+    ...input.before.lines[0],
+    line: "8",
+    lineuniquekey: "12346",
+  });
+  expect(restlet.post(input).status).toBe("rejected");
+  expect(saved()).toBe(0);
+});
+
+test("save-time inventory replacement is an unknown outcome requiring investigation", () => {
+  const input = inventoryRequest();
+  saveHook = (copy) => {
+    copy.lines[0].custcol_fw_inventory_unit_ids = "999";
+  };
+  expect(restlet.post(input).status).toBe("unknown");
+  expect(saved()).toBe(1);
+});

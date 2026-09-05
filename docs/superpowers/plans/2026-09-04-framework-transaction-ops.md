@@ -336,12 +336,12 @@ origin main; no remote main branch has been changed by this task.
 Fresh read-only samples in USD, EUR and CZK show that the current import does not
 populate `custcol_fw_solidus_line_id`. It stores `custcol_fw_inventory_unit_ids`
 and `custcol_fw_original_ecom_sku`. All 23 sampled native lines match one complete,
-unique source inventory-unit set, with matching original SKU and quantity. The
-current reader correctly reports incomplete lines until this explicit identity
-profile is integrated; SKU-only or positional matching is not sufficient proof.
+unique source inventory-unit set, with matching original SKU and quantity. The explicit `inventory_units` profile now binds these exact sets and original
+SKUs throughout collection, comparison, approval, guarded correction, execution
+and read-only recovery; SKU-only or positional matching is not sufficient proof.
 The B.V. API also omits `isTaxable` on lines while supplying native `tax1Amt`,
-custom VAT and tax code 4059. An isolated regression-tested adapter change is
-being prepared; it is not yet part of this commit or a live deployment.
+custom VAT and tax code 4059. The BV adapter and guard use those native amounts without requiring the
+unavailable checkbox. Aggregate tax profiles still require explicit taxability.
 
 The current CZK source adjustments use tax source ID 7 and are finalized with
 update clocks. A bounded read of `tax_rates/7` through the Admin connection is
@@ -349,3 +349,39 @@ unavailable (Celigo HTTP 422). The inspected 61 Celigo connections contain no
 Avalara or Metabase connection. Neither this absence nor an effective rate proves
 a statutory calculation; dynamic assessment policy remains explicit outstanding
 work alongside missing-order creation.
+
+### Native identity validation
+
+A fresh live EUR sample exercised the local collectors and normalizer in memory,
+without deploying code or issuing financial writes. All seven source and native
+lines bound by exact inventory sets and SKU; native currency ID 4 resolved to
+EUR with precision 2, and native tax allocations were complete. Source tax
+remained incomplete because no statutory-rate policy was configured. A matching
+native allocation is not evidence of a statutory rate.
+
+The focused backend suite passes 286 tests, including changed inventory after
+approval, private source reads on both executor passes, and recovery that refuses
+replacement units without resending. All 107 SuiteApp tests pass; client-only SDF
+validation reports no errors. The full backend suite and supplementary review
+are recorded below when complete. No deployment or remote main changes occurred.
+
+The live REST sample also omits `handlingCost`. Correction preparation currently
+preserves that as unknown; the native guard's independently observed zero may
+supply this optional projection later only with matching record identity and
+version. Do not infer an omitted amount as zero.
+
+The scope setup now exposes explicit line-identity and legacy-tax selectors,
+binding the selected profile to the selected native account/subsidiary. Its 23
+focused tests and all 1,071 frontend tests pass, as does the production build.
+The actual React component with local fixture hooks was inspected at desktop,
+tablet and mobile widths, and a fixture submission retained the exact profile
+while actions and scheduling stayed disabled. No console errors were observed.
+The separate assessment-policy mock is a design preview only; that policy has
+not yet been implemented.
+
+Final native-identity regression verification: 7,670 backend tests passed,
+2 skipped (196 warnings; 475.01 seconds). All changed Python files pass Ruff
+and format checks. The required T2 pre-merge multi-angle workflow remains
+unverified because the independent Codex agents are quota-limited; a
+supplementary tool-less CLI review is separate from that gate. Temporary
+compiled UI and isolated SDF validation directories have been removed.

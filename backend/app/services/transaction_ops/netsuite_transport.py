@@ -109,6 +109,11 @@ async def _request(client, method, url, token, *, params=None, payload=None):
 async def _snapshot(client, url, token, config, record_id):
     reference = config.mapping_json["reference_field"]
     params = {"action": "snapshot", "record_id": record_id, "reference_field": reference}
+    identity_mode = config.mapping_json.get("line_identity_mode", "source_line_id")
+    if identity_mode not in {"source_line_id", "inventory_units"}:
+        raise NetSuiteActionError("guard_line_identity_unproven")
+    if identity_mode == "inventory_units":
+        params["line_identity_mode"] = identity_mode
     expected_profile = None
     if config.mapping_json.get("netsuite_legacy_tax") is not None:
         try:
@@ -132,6 +137,7 @@ async def _snapshot(client, url, token, config, record_id):
             or snapshot.get("subsidiary") != config.subsidiary_id
             or snapshot.get("reference_field") != reference
             or snapshot.get("tax_profile") != expected_profile
+            or snapshot.get("line_identity_mode") != ("inventory_units" if identity_mode == "inventory_units" else None)
         ):
             raise ValueError
     except (ValueError, TypeError):

@@ -132,7 +132,13 @@ async def execute_proposal(db, tenant_id, proposal_id, *, _clock=None):
             return await function(db, tenant_id, *args, **kwargs)
 
     async def pair():
-        source = await read(2, read_framework_order, config.source_step_id, proposal.order_reference)
+        source = await read(
+            2,
+            read_framework_order,
+            config.source_step_id,
+            proposal.order_reference,
+            **({"include_sync_data": True} if mapping.line_identity_mode == "inventory_units" else {}),
+        )
         targets = await read(
             10,
             read_netsuite_order,

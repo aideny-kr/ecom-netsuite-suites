@@ -304,7 +304,45 @@ define(["N/record", "N/query", "N/runtime", "N/log"], (
       fail("unsupported_tax_profile");
     return { mode: value.mode, tax_code_id: identifier(value.tax_code_id) };
   }
-  function snapshot(order, field, profile = null) {
+  function lineIdentityMode(value) {
+    if (value === undefined) return "source_line_id";
+    if (!["source_line_id", "inventory_units"].includes(value))
+      fail("unsupported_line_identity");
+    return value;
+  }
+  function inventoryIds(value) {
+    if (typeof value !== "string" || value.length > 15500)
+      fail("unknown_inventory_identity");
+    const ids = value
+      .split(",")
+      .map((id) => id.trim())
+      .sort();
+    if (
+      ids.length > 500 ||
+      ids.some((id) => !/^[1-9][0-9]{0,29}$/.test(id)) ||
+      new Set(ids).size !== ids.length
+    )
+      fail("unknown_inventory_identity");
+    return ids;
+  }
+  function originalSku(value) {
+    if (
+      typeof value !== "string" ||
+      !value.length ||
+      value.length > 255 ||
+      value !== value.trim() ||
+      /[\x00-\x1f]/.test(value)
+    )
+      fail("unknown_inventory_identity");
+    return value;
+  }
+  function snapshot(
+    order,
+    field,
+    profile = null,
+    identityMode = "source_line_id",
+  ) {
+    const inventoryMode = lineIdentityMode(identityMode) === "inventory_units";
     const get = (fieldId) => order.getValue({ fieldId });
     const ref = get(referenceField(field));
     if (
@@ -325,6 +363,7 @@ define(["N/record", "N/query", "N/runtime", "N/log"], (
       orderstatus: get("orderstatus"),
     };
     if (typeof data.orderstatus !== "string") fail("unknown_order_state");
+    if (inventoryMode) data.line_identity_mode = "inventory_units";
     BODY_MONEY.forEach((key) => {
       data[key] = decimal(get(key));
     });
@@ -351,15 +390,29 @@ define(["N/record", "N/query", "N/runtime", "N/log"], (
     if (!Number.isInteger(count) || count < 1 || count > 500)
       fail("unsupported_line_count");
     const seen = new Set();
+    const seenInventory = new Set();
     data.lines = Array.from({ length: count }, (_, line) => {
       const item = {},
         value = (fieldId) =>
           order.getSublistValue({ sublistId: "item", line, fieldId });
       LINE_IDS.forEach((key) => {
+        if (inventoryMode && key === "custcol_fw_solidus_line_id") return;
         if (profile && profile.mode === "aggregate_header" && key === "taxcode")
           return;
         item[key] = identifier(value(key));
       });
+      if (inventoryMode) {
+        item.inventory_unit_ids = inventoryIds(
+          value("custcol_fw_inventory_unit_ids"),
+        );
+        item.custcol_fw_original_ecom_sku = originalSku(
+          value("custcol_fw_original_ecom_sku"),
+        );
+        item.inventory_unit_ids.forEach((id) => {
+          if (seenInventory.has(id)) fail("ambiguous_inventory_identity");
+          seenInventory.add(id);
+        });
+      }
       LINE_MONEY.forEach((key) => {
         if (
           profile &&
@@ -370,8 +423,10 @@ define(["N/record", "N/query", "N/runtime", "N/log"], (
         item[key] = decimal(value(key));
       });
       if (profile) {
-        item.istaxable = value("istaxable");
-        if (typeof item.istaxable !== "boolean") fail("unknown_taxability");
+        if (profile.mode === "aggregate_header") {
+          item.istaxable = value("istaxable");
+          if (typeof item.istaxable !== "boolean") fail("unknown_taxability");
+        }
         if (profile.mode === "line_tax_amount")
           item.tax1amt = decimal(value("tax1amt"));
       }
@@ -423,9 +478,9 @@ define(["N/record", "N/query", "N/runtime", "N/log"], (
     if (EFFECT_FLAGS.some((fieldId) => order.getValue({ fieldId }) !== false))
       fail("record_side_effect_enabled");
     if (current.tax_profile) {
-      if (current.lines.some((line) => line.istaxable !== true))
-        fail("unknown_taxability");
       if (current.tax_profile.mode === "aggregate_header") {
+        if (current.lines.some((line) => line.istaxable !== true))
+          fail("unknown_taxability");
         if (
           current.istaxable !== true ||
           current.taxitem !== current.tax_profile.tax_code_id
@@ -459,7 +514,14 @@ define(["N/record", "N/query", "N/runtime", "N/log"], (
       budget(100);
       keys(
         input,
-        ["action", "record_id", "reference_field", "tax_mode", "tax_code_id"],
+        [
+          "action",
+          "record_id",
+          "reference_field",
+          "tax_mode",
+          "tax_code_id",
+          "line_identity_mode",
+        ],
         ["action", "record_id", "reference_field"],
       );
       if (input.action !== "snapshot") fail("unsupported_action");
@@ -476,6 +538,7 @@ define(["N/record", "N/query", "N/runtime", "N/log"], (
         order,
         referenceField(input.reference_field),
         profile,
+        lineIdentityMode(input.line_identity_mode),
       );
       return {
         success: true,
@@ -535,6 +598,7 @@ define(["N/record", "N/query", "N/runtime", "N/log"], (
         order,
         referenceField(input.before.reference_field),
         taxProfile(input.before.tax_profile),
+        lineIdentityMode(input.before.line_identity_mode),
       );
       if (!same(current, input.before)) fail("evidence_changed");
       safeState(order, current);
@@ -631,6 +695,7 @@ define(["N/record", "N/query", "N/runtime", "N/log"], (
           fresh,
           current.reference_field,
           current.tax_profile,
+          lineIdentityMode(current.line_identity_mode),
         );
         const expected = {
           ...current,

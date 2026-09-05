@@ -120,8 +120,6 @@ def test_multiple_components_are_validated_then_allocated_to_the_exact_native_co
     [
         lambda r: r["header"].update(custbody_fw_solidus_tax_amount="19"),
         lambda r: r["header"].update(shippingCost="2", shippingTax1Rate="20"),
-        lambda r: r["lines"][0].update(isTaxable=False),
-        lambda r: r["lines"][0].pop("isTaxable"),
         lambda r: r["header"].update(subsidiary={"id": "4"}),
     ],
 )
@@ -398,3 +396,98 @@ def test_header_rate_precision_must_reproduce_the_exact_currency_tax_amount():
     )
     with pytest.raises(mod.NetSuiteActionError, match="unsupported_header_tax_precision"):
         prepare(src=src)
+
+
+def test_bv_correction_keeps_native_amount_proof_without_taxability_field():
+    raw = legacy_target("line_tax_amount")
+    raw["lines"][0].pop("isTaxable")
+    plan = prepare(raw=raw, mode="line_tax_amount")
+    assert "istaxable" not in plan.before_json["lines"][0]
+    assert plan.after_json["line_changes"][0]["fields"]["tax1amt"] == "20"
+
+
+@pytest.mark.parametrize("value", [False, None])
+def test_aggregate_profile_still_requires_positive_line_taxability(value):
+    raw = legacy_target()
+    raw["lines"][0]["isTaxable"] = value
+    with pytest.raises(mod.NetSuiteActionError, match="tax_allocation"):
+        prepare(raw=raw)
+
+
+def inventory_action_case():
+    raw = legacy_target("line_tax_amount")
+    raw["lines"][0].pop("custcol_fw_solidus_line_id")
+    raw["lines"][0].update(custcol_fw_inventory_unit_ids="502,501", custcol_fw_original_ecom_sku="FRAME-1")
+    src = legacy_source("line_tax_amount")
+    src["lines"][0].update(inventory_unit_ids=["501", "502"], sku="FRAME-1")
+    return raw, src
+
+
+def test_correction_binds_exact_inventory_without_inventing_a_native_source_id():
+    raw, src = inventory_action_case()
+    plan = prepare(raw, src, mode="line_tax_amount", line_identity_mode="inventory_units")
+    assert plan.before_json["line_identity_mode"] == "inventory_units"
+    line = plan.before_json["lines"][0]
+    assert line["inventory_unit_ids"] == ["501", "502"]
+    assert line["custcol_fw_original_ecom_sku"] == "FRAME-1"
+    assert "custcol_fw_solidus_line_id" not in line
+    assert plan.after_json["line_changes"][0]["fields"]["amount"] == "100"
+
+
+@pytest.mark.parametrize(
+    "changes", [{"custcol_fw_inventory_unit_ids": "501"}, {"custcol_fw_original_ecom_sku": "OTHER"}]
+)
+def test_correction_rejects_inventory_or_original_sku_contradictions(changes):
+    raw, src = inventory_action_case()
+    raw["lines"][0].update(changes)
+    with pytest.raises(mod.NetSuiteActionError, match="line_identity_unproven"):
+        prepare(raw, src, mode="line_tax_amount", line_identity_mode="inventory_units")
+
+
+def test_inventory_binding_cannot_introduce_non_numeric_source_line_keys():
+    raw, src = inventory_action_case()
+    src["lines"][0]["key"] = "line:unproven"
+    src["tax_details"][0]["key"] = "line:unproven:tax:610"
+    with pytest.raises(mod.NetSuiteActionError, match="source_line_identity_unproven"):
+        prepare(raw, src, mode="line_tax_amount", line_identity_mode="inventory_units")
+
+
+@pytest.mark.parametrize("returned_mode", ["inventory_units", None, "source_line_id", "sku"])
+async def test_guard_transport_binds_the_requested_inventory_profile(returned_mode):
+    from types import SimpleNamespace
+
+    import httpx
+
+    from app.services.transaction_ops import netsuite_transport as transport
+
+    cfg = SimpleNamespace(
+        netsuite_account_id="1234567_SB1",
+        subsidiary_id="3",
+        mapping_json={"reference_field": "tranid", "line_identity_mode": "inventory_units"},
+    )
+    requested = []
+
+    async def handle(request):
+        requested.append(dict(request.url.params))
+        snapshot = {"record_id": "63", "subsidiary": "3", "reference_field": "tranid"}
+        if returned_mode is not None:
+            snapshot["line_identity_mode"] = returned_mode
+        return httpx.Response(
+            200, json={"success": True, "schema_version": 1, "account_id": "1234567_SB1", "snapshot": snapshot}
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        args = (
+            client,
+            "https://1234567-sb1.restlets.api.netsuite.com/app/site/hosting/restlet.nl",
+            "fixture",
+            cfg,
+            "63",
+        )
+        if returned_mode == "inventory_units":
+            result = await transport._snapshot(*args)
+            assert result["snapshot"]["line_identity_mode"] == returned_mode
+        else:
+            with pytest.raises(mod.NetSuiteActionError, match="snapshot"):
+                await transport._snapshot(*args)
+    assert requested[0]["line_identity_mode"] == "inventory_units"

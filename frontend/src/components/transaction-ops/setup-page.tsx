@@ -177,6 +177,7 @@ function SetupForm() {
       | "account"
       | "subsidiary"
       | "reference"
+      | "legacyTaxCode"
       | "interval"
       | "orders"
       | "calls"
@@ -327,6 +328,55 @@ function SetupForm() {
           <section className={`${cardClass} space-y-6`}>
             <h2 className="text-lg font-semibold">Transaction mappings</h2>
             {text("Full order reference field", "reference", "tranid")}
+            <label className="block space-y-2 text-[13px]">
+              Match order lines by
+              <select
+                className={inputClass}
+                value={draft.lineIdentity}
+                onChange={(e) => update("lineIdentity", e.target.value)}
+              >
+                <option value="source_line_id">Source line ID</option>
+                <option value="inventory_units">
+                  Inventory IDs and original SKU
+                </option>
+              </select>
+            </label>
+            <p className="text-[13px] text-muted-foreground">
+              {draft.lineIdentity === "inventory_units"
+                ? "Each native line must contain the complete source inventory set and matching original SKU. Missing or shared IDs keep the finding open."
+                : "Use this policy only when the import stores the source line ID on every NetSuite line."}
+            </p>
+            <label className="block space-y-2 text-[13px]">
+              Native tax layout
+              <select
+                className={inputClass}
+                value={draft.legacyTaxMode}
+                onChange={(e) => {
+                  update("legacyTaxMode", e.target.value);
+                  if (!e.target.value) update("legacyTaxCode", "");
+                }}
+              >
+                <option value="">SuiteTax or unconfigured</option>
+                <option value="aggregate_header">
+                  Legacy aggregate header tax
+                </option>
+                <option value="line_tax_amount">
+                  Legacy tax amounts on each line
+                </option>
+              </select>
+            </label>
+            {draft.legacyTaxMode && (
+              <>
+                {text("Native tax code ID", "legacyTaxCode")}
+                <p className="text-[13px] text-muted-foreground">
+                  This tax profile uses the destination account and subsidiary
+                  selected above. Source tax rules must still validate each
+                  adjustment.
+                  {draft.legacyTaxMode === "aggregate_header" &&
+                    " Header corrections also require explicit NetSuite rounding and zero shipping."}
+                </p>
+              </>
+            )}
             <p className="text-[13px] text-muted-foreground">
               Enter verified mappings only. Blank metadata stays unknown;
               currency never selects a subsidiary. Use “legacy” only for source

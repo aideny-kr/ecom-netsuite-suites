@@ -89,6 +89,7 @@ LINE_FIELDS = frozenset(
         "isDiscount",
         "itemType",
         "custcol_fw_solidus_line_id",
+        "custcol_fw_inventory_unit_ids",
         "custcol_fw_line_parent_id",
         "custcol_fw_item_sku",
         "custcol_fw_original_ecom_sku",

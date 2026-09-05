@@ -43,6 +43,17 @@ class TransactionLine(EvidenceModel):
     quantity: ExactDecimal
     net: ExactDecimal | None = None
     tax: ExactDecimal | None = None
+    # Populated only by the explicit inventory identity profile. No serial numbers.
+    inventory_unit_ids: tuple[Annotated[str, Field(pattern=r"^[1-9][0-9]{0,29}$")], ...] = Field(
+        default=(), max_length=500
+    )
+    sku: Identifier | None = None
+
+    @model_validator(mode="after")
+    def unique_inventory(self):
+        if len(set(self.inventory_unit_ids)) != len(self.inventory_unit_ids):
+            raise ValueError("Inventory-unit ownership must be unique")
+        return self
 
 
 class TransactionTax(EvidenceModel):

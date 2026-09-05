@@ -50,6 +50,30 @@ NetSuite, compare the expected outcome, and update the operation ledger.
 Review account-specific sales-order workflows and user-event scripts when
 enabling the guard, because NetSuite runs its configured save automation.
 
+## Exact inventory line identity
+
+For current Framework imports, set `mapping_json.line_identity_mode` to
+`inventory_units`. Every source line must supply a nonempty set of unique
+inventory-unit IDs and an exact SKU. Each native line must contain that exact
+set in `custcol_fw_inventory_unit_ids` and the same
+`custcol_fw_original_ecom_sku`. Shared IDs, partial sets, missing SKUs and
+ambiguous ownership make line evidence incomplete. Currency, position and SKU
+alone never establish a match. Quantity differences remain visible and prevent
+amount-only corrections.
+
+Investigations, execution and read-only recovery request the private sync
+projection for this profile. Canonical evidence and immutable approvals retain
+the inventory IDs and SKU; no serial numbers or customer contacts are added.
+The native guard receives `line_identity_mode=inventory_units`, snapshots those
+actual native fields, and compares them again before its single save. It does
+not require or write the unused `custcol_fw_solidus_line_id`. A post-save
+inventory replacement remains unknown pending independent verification.
+
+The default `source_line_id` profile remains available for integrations that
+actually populate that field. Changing an identity policy requires fresh
+proposals and human approval; existing approval evidence cannot silently change
+profiles.
+
 ## Explicit legacy tax profiles
 
 `mapping_json.netsuite_legacy_tax` supports version 1 profiles with an exact
@@ -63,7 +87,9 @@ header tax item/rate, explicit line taxability, custom line VAT and the custom
 header source tax amount must agree. It does not require nonexistent native
 line tax codes/rates. The line amount profile describes the BV import: each
 native `tax1amt` must equal the corresponding custom line VAT, with the exact
-configured native tax code. Both profiles require allocations to reconcile to
+configured native tax code. The BV profile does not require the line taxability
+checkbox, which the live BV record API omits; the aggregate profile still
+requires explicit header and line taxability. Both profiles require allocations to reconcile to
 the native header tax total. Taxed shipping still requires more evidence.
 
 Reported destination allocations have no claimed statutory rate. Source tax

@@ -81,3 +81,38 @@ describe("transaction scope input", () => {
     expect(() => buildConfigInput({ ...draft(), ...change })).toThrow();
   });
 });
+
+it("retains the existing line policy and no legacy tax profile by default", () => {
+  const value = buildConfigInput(draft()).mapping_json;
+  expect(value.line_identity_mode).toBe("source_line_id");
+  expect(value.netsuite_legacy_tax).toBeNull();
+});
+it.each(["aggregate_header", "line_tax_amount"])(
+  "binds explicit inventory and %s profiles to this destination",
+  (mode) => {
+    const value = buildConfigInput({
+      ...draft(),
+      lineIdentity: "inventory_units",
+      legacyTaxMode: mode,
+      legacyTaxCode: "4059",
+    }).mapping_json;
+    expect(value.line_identity_mode).toBe("inventory_units");
+    expect(value.netsuite_legacy_tax).toEqual({
+      schema_version: 1,
+      mode,
+      account_id: "6738075-sb1",
+      subsidiary_id: "5",
+      tax_code_id: "4059",
+    });
+  },
+);
+it.each([
+  { lineIdentity: "sku" },
+  { lineIdentity: "" },
+  { legacyTaxMode: "infer" },
+  { legacyTaxMode: "line_tax_amount", legacyTaxCode: "" },
+  { legacyTaxMode: "line_tax_amount", legacyTaxCode: "1 OR 1=1" },
+  { legacyTaxCode: "4059" },
+])("rejects unproven native policy %j", (change) => {
+  expect(() => buildConfigInput({ ...draft(), ...change })).toThrow();
+});

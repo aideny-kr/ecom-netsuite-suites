@@ -132,7 +132,6 @@ def test_missing_or_contradictory_aggregate_allocation_cannot_resolve_error(muta
         lambda r: r["lines"][0].update(tax1Amt="19"),
         lambda r: r["lines"][0].pop("taxCode"),
         lambda r: r["lines"][0].update(taxCode={"id": "16"}),
-        lambda r: r["lines"][0].update(isTaxable=False),
     ],
 )
 def test_line_amount_profile_requires_native_and_custom_vat_equality(mutate):
@@ -271,3 +270,13 @@ def test_reported_allocations_must_still_reconcile_to_target_tax_total():
     result = compare(source(), TransactionSnapshot.model_validate(raw))
     assert result.recommended_action == "human_review"
     assert "target_tax_allocation_inconsistent" in {f.code for f in result.findings}
+
+
+def test_bv_native_amount_profile_does_not_require_nonexistent_taxability_field():
+    raw = raw_target("line_tax_amount")
+    raw["lines"][0].pop("isTaxable")
+    raw["lines"][0]["taxRate1"] = "0"
+    dst = target(raw, config("line_tax_amount"))
+    assert dst.tax_complete
+    assert dst.tax_details[0].rate is None
+    assert compare(source(policy=config("line_tax_amount")), dst).recommended_action == "no_action"

@@ -120,3 +120,36 @@ it("discards a delayed creation response after the tenant changes", async () => 
   await act(async () => done({ id: "old", name: "Old tenant" }));
   expect(screen.queryByText(/Old tenant is ready/)).not.toBeInTheDocument();
 });
+
+it("shows explicit native matching and tax profiles and saves the selected scope", async () => {
+  mocks.create.mockResolvedValue({ id: "created", name: "EU orders" });
+  render(<TransactionSetupPage />);
+  fillRequired();
+  expect(screen.getByLabelText("Match order lines by")).toHaveValue(
+    "source_line_id",
+  );
+  expect(screen.queryByLabelText("Native tax code ID")).not.toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Match order lines by"), {
+    target: { value: "inventory_units" },
+  });
+  expect(screen.getByText(/complete source inventory set/)).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Native tax layout"), {
+    target: { value: "line_tax_amount" },
+  });
+  fireEvent.change(screen.getByLabelText("Native tax code ID"), {
+    target: { value: "4059" },
+  });
+  fireEvent.click(
+    screen.getByRole("button", { name: "Create investigation scope" }),
+  );
+  await waitFor(() => expect(mocks.create).toHaveBeenCalledOnce());
+  expect(mocks.create.mock.calls[0][0].mapping_json).toMatchObject({
+    line_identity_mode: "inventory_units",
+    netsuite_legacy_tax: {
+      mode: "line_tax_amount",
+      account_id: "6738075-sb1",
+      subsidiary_id: "5",
+      tax_code_id: "4059",
+    },
+  });
+});

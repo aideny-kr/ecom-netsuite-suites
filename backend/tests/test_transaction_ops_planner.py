@@ -13,7 +13,7 @@ from tests.test_transaction_ops_netsuite_actions import target as target_example
 from tests.test_transaction_ops_runner import source_order
 
 
-def planning_case():
+def planning_case(*, inventory=False):
     now = datetime.now(timezone.utc)
     config = SimpleNamespace(
         id=uuid4(),
@@ -48,14 +48,29 @@ def planning_case():
         "scope": {"account_id": "6738075-sb1", "subsidiary_id": "3"},
     }
     snapshot = {key: getattr(config, key) for key in ("netsuite_account_id", "subsidiary_id", "record_type")}
+    if inventory:
+        config.mapping_json["line_identity_mode"] = "inventory_units"
+        source["orders"][0]["line_items"][0].update(variant={"sku": "FRAME-1"}, inventory_units=[{"id": "501"}])
+        target["lines"][0].pop("custcol_fw_solidus_line_id")
+        target["lines"][0].update(custcol_fw_inventory_unit_ids="501", custcol_fw_original_ecom_sku="FRAME-1")
     report = build_report(source, targets, snapshot, TransactionMapping.model_validate(config.mapping_json), now=now)
-    plan = prepare_correction(target, report["source"], now=now)
+    plan = prepare_correction(
+        target, report["source"], now=now, line_identity_mode="inventory_units" if inventory else "source_line_id"
+    )
     guard = {"snapshot": plan.before_json, "actions_enabled": True, "observed_at": now.isoformat()}
     return SimpleNamespace(now=now, config=config, source=source, targets=targets, report=report, guard=guard)
 
 
 def proposal(case, **kwargs):
     return planner.plan_proposal(case.report, case.targets, case.config, guard=case.guard, now=case.now, **kwargs)
+
+
+def test_planner_binds_inventory_profile_and_native_ids_into_the_approval():
+    case = planning_case(inventory=True)
+    request = proposal(case)
+    assert request.before_json["line_identity_mode"] == "inventory_units"
+    assert request.before_json["lines"][0]["inventory_unit_ids"] == ["501"]
+    assert "custcol_fw_solidus_line_id" not in request.before_json["lines"][0]
 
 
 def test_finding_produces_exact_guarded_proposal_with_original_currency():

@@ -9,6 +9,9 @@ export function emptyDraft() {
     account: "",
     subsidiary: "",
     reference: "",
+    lineIdentity: "source_line_id",
+    legacyTaxMode: "",
+    legacyTaxCode: "",
     currencies: [] as MappingRow[],
     taxes: [] as MappingRow[],
     entities: [] as MappingRow[],
@@ -37,6 +40,14 @@ export interface ConfigInput {
   mapping_json: {
     action_mode: "detect_only" | "propose_actions";
     reference_field: string;
+    line_identity_mode: "source_line_id" | "inventory_units";
+    netsuite_legacy_tax: {
+      schema_version: 1;
+      mode: "aggregate_header" | "line_tax_amount";
+      account_id: string;
+      subsidiary_id: string;
+      tax_code_id: string;
+    } | null;
     currency_minor_units: Record<string, number>;
     business_entity_subsidiaries: Record<string, string>;
     tax_rules: Record<
@@ -89,6 +100,24 @@ export function buildConfigInput(draft: ScopeDraft): ConfigInput {
     fail("Enter the explicit destination subsidiary ID.");
   if (!/^(tranid|otherrefnum|externalid|custbody_[a-z0-9_]+)$/.test(reference))
     fail("Choose a supported exact order-reference field.");
+  const identity = draft.lineIdentity,
+    mode = draft.legacyTaxMode,
+    taxCode = draft.legacyTaxCode.trim();
+  if (identity !== "source_line_id" && identity !== "inventory_units")
+    fail("Choose an explicit order-line matching policy.");
+  if (mode !== "" && mode !== "aggregate_header" && mode !== "line_tax_amount")
+    fail("Choose a supported native tax layout.");
+  if ((mode && !/^[1-9][0-9]{0,29}$/.test(taxCode)) || (!mode && taxCode))
+    fail("A legacy tax layout requires its exact native tax code ID.");
+  const legacyTax: ConfigInput["mapping_json"]["netsuite_legacy_tax"] = mode
+    ? {
+        schema_version: 1,
+        mode,
+        account_id: account.replace("_", "-").toLowerCase(),
+        subsidiary_id: subsidiary,
+        tax_code_id: taxCode,
+      }
+    : null;
   const currencies = active(draft.currencies, "code", "Currency").map((row) => {
     if (!/^[A-Z]{3}$/.test(row.code))
       fail("Currency codes must use three uppercase ISO letters.");
@@ -147,6 +176,8 @@ export function buildConfigInput(draft: ScopeDraft): ConfigInput {
     mapping_json: {
       action_mode: draft.propose ? "propose_actions" : "detect_only",
       reference_field: reference,
+      line_identity_mode: identity,
+      netsuite_legacy_tax: legacyTax,
       currency_minor_units: Object.fromEntries(currencies),
       business_entity_subsidiaries: Object.fromEntries(entities),
       tax_rules: Object.fromEntries(taxes),

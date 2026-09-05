@@ -46,7 +46,7 @@ async def reconcile_operation_run(db, tenant_id, run_id, *, _clock=None):
     mapping = TransactionMapping.model_validate(config.mapping_json)
     reason, proof = "stall", None
 
-    async def read(cost, function, *args, orders=0):
+    async def read(cost, function, *args, orders=0, **kwargs):
         if not await enabled(db, tenant_id) or not (await state.get_config(db, tenant_id, config.id)).enabled:
             raise state.StateError("recovery_disabled")
         permit = await state.reserve_budget(
@@ -58,7 +58,7 @@ async def reconcile_operation_run(db, tenant_id, run_id, *, _clock=None):
         if remaining <= 0:
             raise TimeoutError
         async with asyncio.timeout(min(remaining, 170)):
-            return await function(db, tenant_id, *args)
+            return await function(db, tenant_id, *args, **kwargs)
 
     try:
         if operation.status == "unknown":
@@ -70,6 +70,7 @@ async def reconcile_operation_run(db, tenant_id, run_id, *, _clock=None):
                 config.source_step_id,
                 proposal.order_reference,
                 orders=0 if run.orders_used else 1,
+                **({"include_sync_data": True} if mapping.line_identity_mode == "inventory_units" else {}),
             )
             targets = await read(
                 10,

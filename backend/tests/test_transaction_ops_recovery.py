@@ -261,3 +261,18 @@ async def test_failed_database_transaction_is_rolled_back_before_recovery_record
         tenant_id
     )
     unknown_case.case.dispatch.assert_awaited_once()
+
+
+@pytest.mark.parametrize("execution_case", [True], indirect=True)
+@pytest.mark.parametrize("changed", [False, True])
+async def test_inventory_recovery_reads_private_evidence_and_never_accepts_replaced_units(
+    db, unknown_case, monkeypatch, changed
+):
+    row = await operation(db, unknown_case)
+    mock_recovery(monkeypatch, unknown_case)
+    if changed:
+        unknown_case.after["orders"][0]["lines"][0]["custcol_fw_inventory_unit_ids"] = "999"
+    result = await mod.recover_operation(db, unknown_case.actor.tenant_id, row.id)
+    assert result["status"] == ("unknown" if changed else "verified")
+    assert mod.read_framework_order.await_args.kwargs == {"include_sync_data": True}
+    unknown_case.case.dispatch.assert_awaited_once()

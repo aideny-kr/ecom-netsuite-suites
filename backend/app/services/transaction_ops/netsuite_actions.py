@@ -18,6 +18,7 @@ from pydantic import ValidationError
 
 from app.schemas.transaction_ops import TransactionSnapshot, _decimal
 from app.schemas.transaction_runs import _bounded_json
+from app.services.transaction_ops.inventory_identity import native_bindings
 from app.services.transaction_ops.netsuite_reader import NetSuiteEvidenceError, _account
 from app.services.transaction_ops.normalization import NetSuiteLegacyTaxMapping
 
@@ -149,6 +150,8 @@ def _source(source, now):
         for line in source.lines
     ):
         raise NetSuiteActionError("unknown_source_line")
+    if any(not re.fullmatch(r"line:[1-9][0-9]{0,29}", line.key) for line in source.lines):
+        raise NetSuiteActionError("source_line_identity_unproven")
     if (
         sum((line.net for line in source.lines), Decimal(0)) != source.subtotal
         or sum((line.tax for line in source.lines), Decimal(0)) != source.tax
@@ -176,13 +179,28 @@ def _source(source, now):
 
 
 def prepare_correction(
-    target, source, *, reference_field="tranid", now=None, legacy_tax=None, account_id=None, tax_rounding=None
+    target,
+    source,
+    *,
+    reference_field="tranid",
+    now=None,
+    legacy_tax=None,
+    account_id=None,
+    tax_rounding=None,
+    line_identity_mode="source_line_id",
 ):
     """Produce only existing-line money changes; retain a full guard snapshot."""
     try:
         with localcontext(Context(prec=60, Emin=-99, Emax=99)):
             return _prepare_correction(
-                target, source, reference_field, now or datetime.now(timezone.utc), legacy_tax, account_id, tax_rounding
+                target,
+                source,
+                reference_field,
+                now or datetime.now(timezone.utc),
+                legacy_tax,
+                account_id,
+                tax_rounding,
+                line_identity_mode,
             )
     except NetSuiteActionError:
         raise
@@ -190,8 +208,10 @@ def prepare_correction(
         raise NetSuiteActionError("invalid_correction_evidence") from None
 
 
-def _prepare_correction(target, source, reference_field, now, legacy_tax, account_id, tax_rounding):
+def _prepare_correction(target, source, reference_field, now, legacy_tax, account_id, tax_rounding, line_identity_mode):
     source = _source(source, now)
+    if line_identity_mode not in {"source_line_id", "inventory_units"}:
+        raise NetSuiteActionError("line_identity_unproven")
     if not isinstance(reference_field, str) or not re.fullmatch(
         r"tranid|otherrefnum|externalid|custbody_[a-z0-9_]+", reference_field
     ):
@@ -248,12 +268,18 @@ def _prepare_correction(target, source, reference_field, now, legacy_tax, accoun
     lines = target.get("lines")
     if not isinstance(lines, list) or len(lines) != len(source.lines):
         raise NetSuiteActionError("line_membership_changed")
+    bindings = {}
+    if line_identity_mode == "inventory_units":
+        bindings = native_bindings(lines, source)
+        if not bindings:
+            raise NetSuiteActionError("line_identity_unproven")
+        before["line_identity_mode"] = line_identity_mode
     before["lines"], changes, seen, seen_source = [], [], set(), set()
     source_lines = {line.key: line for line in source.lines}
     used_taxes = set()
     for line in lines:
-        line_id, source_id = _id(line.get("line")), _id(line.get("custcol_fw_solidus_line_id"))
-        key = f"line:{source_id}"
+        line_id = _id(line.get("line"))
+        key = bindings[line_id].key if bindings else f"line:{_id(line.get('custcol_fw_solidus_line_id'))}"
         if line_id in seen or key in seen_source or key not in source_lines:
             raise NetSuiteActionError("ambiguous_line_identity")
         seen.add(line_id)
@@ -298,9 +324,13 @@ def _prepare_correction(target, source, reference_field, now, legacy_tax, accoun
             "line": line_id,
             "lineuniquekey": _id(line.get("lineUniqueKey")),
             "item": _id(line.get("item")),
-            "custcol_fw_solidus_line_id": source_id,
             "isclosed": False,
         }
+        if bindings:
+            original["inventory_unit_ids"] = list(desired.inventory_unit_ids)
+            original["custcol_fw_original_ecom_sku"] = desired.sku
+        else:
+            original["custcol_fw_solidus_line_id"] = key.removeprefix("line:")
         if not profile or profile.mode == "line_tax_amount":
             original["taxcode"] = tax_id
         for api, guard in (
@@ -315,7 +345,8 @@ def _prepare_correction(target, source, reference_field, now, legacy_tax, accoun
         if not profile or profile.mode == "line_tax_amount":
             original["taxrate1"] = _text(line.get("taxRate1"))
         if profile:
-            original["istaxable"] = True
+            if profile.mode == "aggregate_header":
+                original["istaxable"] = True
             if profile.mode == "line_tax_amount":
                 original["tax1amt"] = _text(line.get("tax1Amt"))
         before["lines"].append(original)
@@ -385,7 +416,8 @@ def _legacy_before(target, source, profile, account_id):
         native_tax < 0
         or _number(header.get("custbody_fw_solidus_tax_amount")) != native_tax
         or sum((_number(line.get("custcol_fw_vat_amount")) for line in lines), Decimal(0)) != native_tax
-        or any(line.get("isTaxable") is not True or _number(line.get("custcol_fw_vat_amount")) < 0 for line in lines)
+        or any(_number(line.get("custcol_fw_vat_amount")) < 0 for line in lines)
+        or (profile.mode == "aggregate_header" and any(line.get("isTaxable") is not True for line in lines))
     ):
         raise NetSuiteActionError("legacy_tax_allocation_unproven")
     before = {

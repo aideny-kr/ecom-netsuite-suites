@@ -311,6 +311,15 @@ def _compare_transactions(source, netsuite_records, lookup, *, now, max_age):
     for field in _AMOUNTS:
         difference(field, getattr(source, field), getattr(target, field))
     for key in sorted(source_lines.keys() & target_lines.keys()):
+        expected_line, actual_line = source_lines[key], target_lines[key]
+        if (expected_line.inventory_unit_ids or actual_line.inventory_unit_ids) and (
+            expected_line.inventory_unit_ids != actual_line.inventory_unit_ids
+            or expected_line.sku is None
+            or expected_line.sku != actual_line.sku
+        ):
+            finding(
+                "line_identity_mismatch", "Exact inventory-unit ownership and original SKU must agree for this line."
+            )
         for field in ("quantity", "net", "tax"):
             difference(f"lines.{key}.{field}", getattr(source_lines[key], field), getattr(target_lines[key], field))
     for key in sorted(source_taxes.keys() & target_taxes.keys()):

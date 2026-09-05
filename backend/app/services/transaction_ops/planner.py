@@ -63,6 +63,7 @@ def plan_proposal(report, targets, config, *, now, guard=None, celigo=None):
                 legacy_tax=config.mapping_json.get("netsuite_legacy_tax"),
                 account_id=config.netsuite_account_id,
                 tax_rounding=config.mapping_json.get("netsuite_tax_rounding"),
+                line_identity_mode=config.mapping_json.get("line_identity_mode", "source_line_id"),
             )
         except NetSuiteActionError as exc:
             raise PlanningError(str(exc)) from None
