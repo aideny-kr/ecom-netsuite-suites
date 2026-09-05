@@ -1,5 +1,48 @@
 # Recon live-smoke harness (`recon_live_smoke.py`)
 
+## Framework transaction interruption drill
+
+`transaction_ops_crash_drill.py` is a separate, local-only seeded HTTP/worker
+lifecycle check. It accepts only `ecom_netsuite` or CI's `ecom_netsuite_test` on
+`localhost:5432` (or `127.0.0.1`), uses illustrative provider evidence, and forwards the conditional
+NetSuite transport exclusively to an ephemeral loopback HTTP stub.
+
+```sh
+backend/.venv/bin/python scripts/uat/transaction_ops_crash_drill.py \
+  --output /tmp/transaction-ops-crash-drill.json
+```
+
+The harness creates one temporary tenant, starts an investigation through the
+authenticated API, runs the investigation worker, proves that an unapproved
+proposal cannot execute, and approves the exact evidence through HTTP. A child
+execution worker reaches the stub's save; the stub withholds its response. The
+parent sends that child `SIGKILL`, checks the committed dispatch ledger, advances
+the recovery clock past the attempt deadline, and independently verifies the
+saved state. Re-delivery must cause no second write. Recovery cannot reset the
+original call spend or deadline. The final API read must show `verified`.
+
+Cleanup validates the exact generated tenant ID and slug, deletes only its rows,
+checks zero residue, and closes the stub and child process even on failure.
+Before committing seed data, the drill writes an atomic cleanup journal beside
+the result (`<output>.state.json`). The CI supervisor owns a separate process group,
+terminates that group on timeout, and uses the journal to clean the exact tenant
+and temporary directory if the parent could not finish. A second e2e case kills
+the parent group and verifies this cleanup. After stopping an interrupted manual
+drill's worker group, the same cleanup command is:
+
+```sh
+backend/.venv/bin/python scripts/uat/transaction_ops_crash_drill.py \
+  --cleanup-state /tmp/transaction-ops-crash-drill.json.state.json
+```
+
+The result distinguishes an actual process kill from a mocked exception. Provider
+credentials, financial mutations and NetSuite save automation are simulated;
+this does not establish live RESTlet behavior or replace the blocking T2 review.
+`backend/tests/e2e/test_transaction_ops_crash_e2e.py` runs it in the existing CI
+test job and checks the database guard before any mutation.
+
+## Reconciliation live smoke
+
 Reusable, parameterized, **zero-residue** live-smoke for the reconciliation
 write-path. Phase 3 of the UAT/review triad (CI seeded-tenant e2e = Phase 2).
 It exercises `create run -> approve bucket -> verify HITL invariants` against a

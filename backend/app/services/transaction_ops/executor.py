@@ -60,7 +60,7 @@ def verify_outcome(proposal, report, *, guard=None, resolution=None):
     evidence = proposal.evidence_json
     if (
         evidence.get("schema_version") != 1
-        or source_fingerprint(report["source"]) != evidence.get("source_fingerprint")
+        or source_fingerprint(report["source"]) != source_fingerprint(evidence["report"]["source"])
         or report["comparison"]["recommended_action"] != "no_action"
         or len(report["targets"]) != 1
         or report["targets"][0]["record_id"] != proposal.target_record_id

@@ -12,8 +12,8 @@ from uuid import UUID
 from sqlalchemy import select
 
 from app.models.tenant import Tenant
-from app.schemas.transaction_ops import TransactionLookup
-from app.schemas.transaction_runs import ProgressUpdate
+from app.schemas.transaction_ops import TransactionLookup, TransactionSnapshot
+from app.schemas.transaction_runs import ProgressUpdate, _bounded_json
 from app.services import feature_flag_service
 from app.services.transaction_ops import state_service
 from app.services.transaction_ops.comparison import compare_transactions
@@ -156,6 +156,47 @@ def build_report(source_evidence, target_evidence, config, mapping, *, now):
     }
 
 
+def limit_report(report, *, now):
+    """Retain a visible incomplete finding when detail exceeds the review bound.
+
+    A single large order must not repeatedly kill its whole scan. Detailed
+    snapshots are explicitly marked incomplete and cannot authorize a repair.
+    Known transaction-currency header observations remain available.
+    """
+    try:
+        return _bounded_json(report)
+    except ValueError:
+        source = TransactionSnapshot.model_validate(report["source"])
+        targets = [TransactionSnapshot.model_validate(item) for item in report["targets"]]
+        lookup = TransactionLookup.model_validate(report["lookup"])
+        limits = {
+            "code": "evidence_size_limit",
+            "source_line_count": len(source.lines),
+            "target_line_counts": [len(item.lines) for item in targets],
+        }
+
+        def omit_details(snapshot):
+            return snapshot.model_copy(
+                update={"lines": (), "tax_details": (), "lines_complete": False, "tax_complete": False}
+            )
+
+        source = omit_details(source)
+        targets = [omit_details(item) for item in targets]
+        summary = {
+            "order_reference": source.order_reference,
+            "source": source.model_dump(mode="json"),
+            "targets": [item.model_dump(mode="json") for item in targets],
+            "lookup": lookup.model_dump(mode="json"),
+            "comparison": compare_transactions(source, targets, lookup, now=now).model_dump(mode="json"),
+            "evidence_limits": limits,
+            "source_provenance": report.get("source_provenance", {}),
+            "netsuite_provenance": {
+                key: report.get("netsuite_provenance", {}).get(key) for key in ("scope", "observed_at")
+            },
+        }
+        return _bounded_json(summary)
+
+
 async def run_investigation(
     db,
     tenant_id: UUID,
@@ -267,7 +308,7 @@ async def run_investigation(
                     mapping.reference_field,
                 )
             )
-            report = build_report(source, targets, config, mapping, now=clock())
+            report = limit_report(build_report(source, targets, config, mapping, now=clock()), now=clock())
             if report["order_reference"] != reference:
                 raise ValueError("source_reference_mismatch")
             action = report["comparison"]["recommended_action"]

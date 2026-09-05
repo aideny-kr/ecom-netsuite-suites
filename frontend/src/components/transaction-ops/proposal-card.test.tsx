@@ -14,6 +14,8 @@ const mocks = vi.hoisted(() => ({
   operationError: null,
 }));
 vi.mock("@/hooks/use-transaction-ops", () => ({
+  useRecheckTransactionOperation: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useTransactionRun: () => ({ data: undefined }),
   useTransactionDecision: () => ({
     mutateAsync: mocks.mutate,
     isPending: false,
@@ -107,6 +109,7 @@ describe("immutable proposal review", () => {
     };
     render(<ProposalCard proposal={{ ...proposal, status: "approved" }} />);
     expect(screen.getByText("Execution outcome unknown")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Recheck outcome" })).toBeInTheDocument();
     expect(
       screen.getByText(/external outcome must be reconciled/i),
     ).toBeInTheDocument();

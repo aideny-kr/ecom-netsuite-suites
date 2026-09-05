@@ -166,3 +166,15 @@ def test_absent_open_error_is_not_a_resolution_proposal():
     case.celigo.update(complete=False)
     with pytest.raises(planner.PlanningError):
         proposal(case, celigo=case.celigo)
+
+
+def test_source_fingerprint_ignores_decimal_scale_and_equivalent_timezones():
+    case = planning_case()
+    original = case.report["source"]
+    changed = deepcopy(original)
+    changed["total"] = "100.000"
+    changed["lines"][0]["net"] = "100.00"
+    changed["updated_at"] = (
+        datetime.fromisoformat(original["updated_at"]).astimezone(timezone(timedelta(hours=-7))).isoformat()
+    )
+    assert planner.source_fingerprint(changed) == planner.source_fingerprint(original)

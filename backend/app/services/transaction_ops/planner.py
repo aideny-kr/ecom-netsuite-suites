@@ -20,7 +20,7 @@ class PlanningError(ValueError):
 
 def source_fingerprint(source):
     snapshot = TransactionSnapshot.model_validate(source)
-    return business_digest(snapshot.model_dump(mode="json", exclude={"observed_at"}))
+    return business_digest(snapshot.model_dump(mode="python", exclude={"observed_at"}))
 
 
 def plan_proposal(report, targets, config, *, now, guard=None, celigo=None):

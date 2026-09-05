@@ -3,7 +3,7 @@
 import asyncio
 from datetime import timezone
 
-from sqlalchemy import String, and_, cast, exists, or_, select
+from sqlalchemy import String, and_, cast, exists, func, or_, select
 from sqlalchemy.orm import aliased
 
 from app.core.database import set_tenant_context
@@ -64,7 +64,8 @@ async def _candidates(db, tenant_id, now):
         .where(
             Operation.tenant_id == tenant_id,
             Operation.status.in_(("executing", "unknown")),
-            related.netsuite_account_id == Proposal.netsuite_account_id,
+            func.lower(func.replace(related.netsuite_account_id, "_", "-"))
+            == func.lower(func.replace(Proposal.netsuite_account_id, "_", "-")),
             related.subsidiary_id == Proposal.subsidiary_id,
             related.record_type == Proposal.record_type,
             related.order_reference == Proposal.order_reference,

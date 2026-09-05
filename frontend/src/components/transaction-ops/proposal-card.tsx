@@ -32,6 +32,7 @@ import {
   Status,
 } from "./evidence";
 import type { TransactionProposal } from "./types";
+import { OutcomeRecheck } from "./outcome-recheck";
 
 export function ProposalCard({ proposal }: { proposal: TransactionProposal }) {
   const decision = useTransactionDecision();
@@ -142,10 +143,13 @@ export function ProposalCard({ proposal }: { proposal: TransactionProposal }) {
               : ""}
           </p>
           {operation.data.status === "unknown" && (
-            <p className="rounded-md border p-3">
-              The external outcome must be reconciled before another attempt. A
-              timeout does not prove the write failed.
-            </p>
+            <>
+              <p className="rounded-md border p-3">
+                The external outcome must be reconciled before another attempt. A
+                timeout does not prove the write failed.
+              </p>
+              <OutcomeRecheck key={proposal.id} proposalId={proposal.id} />
+            </>
           )}
           <EvidenceJson
             value={operation.data.result_json}

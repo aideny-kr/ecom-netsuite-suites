@@ -199,9 +199,9 @@ assumption.
    SOLIDUS effective header rate is statutory. Native tax fields and custom VAT
    fields must both be guarded and verified. This requires additional executable
    validation; current strict unknown-tax behavior remains in place meanwhile.
-4. Complete seeded-tenant HTTP/worker end-to-end coverage, an actual killed-process
-   recovery drill, rendered create/retry controls, and the full independent T2
-   review. The current Claude CLI review is supplementary, not that full gate.
+4. Seeded HTTP/worker coverage and the actual killed-process drill now run in CI.
+   Complete rendered missing-order controls and the full independent T2 review.
+   The current Claude CLI reviews are supplementary, not that full gate.
 
 
 The independent Claude CLI execution review completed against the code later
@@ -209,4 +209,42 @@ committed as `86905811`. It was tool-less and supplementary, not the T2 gate.
 It identified the known-no-write retry issue (now fixed), transient recovery
 stranding, proof/termination exception handling, Celigo worst-case call capacity,
 large-evidence run failure, and several lower-confidence guard/scheduling issues.
-Those remaining findings are being reproduced and addressed before delivery.
+The reproduced failure paths now have regression tests: explicit human read-only
+rechecks after inconclusive recovery; proof recorded only after finding persistence;
+Celigo's 18-call worst-case evidence budget; bounded, explicitly incomplete findings
+for oversized orders; canonical account aliases and source decimals/timestamps;
+ECMAScript millisecond UTC approval expiry; a separate dispatch timeout still capped
+by the operation deadline; and resumed recovery without counting its order twice.
+The recheck UI passed all 1,031 frontend tests, production compilation/type/lint
+checks, and mocked desktop/mobile browser QA. Rendered request and queued states
+were viewed; the browser made no unexpected network requests. The complete backend
+suite passed 7,423 tests (2 skipped) including the final database-recovery fix. A subsequent supplementary
+independent review identified the recovery evidence-size gap; it now has a reproduced
+regression test and fix. Automatic recovery also reuses an already queued human
+check, and API coverage includes an authenticated request from another real seeded
+tenant. Recovery now also rolls back a failed database transaction before recording
+the error, with a real PostgreSQL division-by-zero regression test proving that
+committed spending remains. Ruff and whitespace checks also pass.
+
+The seeded HTTP/worker interruption harness is implemented and passed. It starts
+an investigation via the authenticated API, invokes the real workers, denies an
+unapproved execution, approves the exact proposal over HTTP, then kills the child
+worker with `SIGKILL` after a loopback provider stub records one save. Recovery
+independently verifies that outcome, retains the original 21-call spend and send
+reservation, and duplicate delivery causes no second write. The harness checked
+zero residue after deleting its exact temporary tenant and closing its processes.
+This is executable process recovery evidence with simulated provider behavior,
+not a live NetSuite mutation or the full T2 gate.
+
+All 22 focused recovery/recheck/e2e tests pass. The e2e harness has an atomic cleanup
+journal before the first seed commit, bounded local database calls, SIGTERM cleanup,
+and a CI supervisor that owns and terminates its process group. A second real-kill
+test kills the drill parent and uses the journal to remove its exact tenant and
+temporary directory. Database-fence cases accept the existing CI test database
+and reject remote hosts, unrelated databases and other ports.
+
+The full scope still requires missing-order creation, validated legacy tax profiles,
+and the blocking T2 review. Lower-confidence review items
+remain explicit: live guard field/date shape and period-lock verification behavior,
+disabled-scope expired-ledger cleanup, and the resolved-queue search depth. A manual
+recheck does not claim that unavailable provider evidence has become conclusive.

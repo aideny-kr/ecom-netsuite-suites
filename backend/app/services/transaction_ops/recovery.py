@@ -4,6 +4,7 @@ import asyncio
 from datetime import datetime, timezone
 from uuid import UUID
 
+from app.core.database import set_tenant_context
 from app.models.transaction_ops import TransactionOperation
 from app.services.transaction_ops import state_service as state
 from app.services.transaction_ops.celigo_actions import MAX_READ_CALLS, read_celigo_resolution
@@ -11,7 +12,7 @@ from app.services.transaction_ops.executor import _result, verify_outcome
 from app.services.transaction_ops.netsuite_reader import read_netsuite_order
 from app.services.transaction_ops.netsuite_transport import MAX_GUARD_READ_CALLS, read_guard_snapshot
 from app.services.transaction_ops.normalization import TransactionMapping
-from app.services.transaction_ops.runner import build_report, enabled
+from app.services.transaction_ops.runner import build_report, enabled, limit_report
 from app.services.transaction_ops.source_reader import read_framework_order
 
 
@@ -61,7 +62,15 @@ async def reconcile_operation_run(db, tenant_id, run_id, *, _clock=None):
 
     try:
         if operation.status == "unknown":
-            source = await read(2, read_framework_order, config.source_step_id, proposal.order_reference, orders=1)
+            # A reclaimed lease resumes this exact order. Charge every read
+            # again, while counting the immutable order scope only once.
+            source = await read(
+                2,
+                read_framework_order,
+                config.source_step_id,
+                proposal.order_reference,
+                orders=0 if run.orders_used else 1,
+            )
             targets = await read(
                 10,
                 read_netsuite_order,
@@ -72,7 +81,7 @@ async def reconcile_operation_run(db, tenant_id, run_id, *, _clock=None):
                 mapping.reference_field,
             )
             scope = {key: getattr(config, key) for key in ("netsuite_account_id", "subsidiary_id", "record_type")}
-            report = build_report(source, targets, scope, mapping, now=clock())
+            report = limit_report(build_report(source, targets, scope, mapping, now=clock()), now=clock())
             guard = resolved = None
             if proposal.action == "correct_amounts":
                 guard = await read(MAX_GUARD_READ_CALLS, read_guard_snapshot, config, proposal.target_record_id)
@@ -80,21 +89,28 @@ async def reconcile_operation_run(db, tenant_id, run_id, *, _clock=None):
                 resolved = await read(
                     MAX_READ_CALLS, read_celigo_resolution, config.target_step_id, proposal.evidence_json["celigo"]
                 )
-            proof = verify_outcome(proposal, report, guard=guard, resolution=resolved)
+            candidate_proof = verify_outcome(proposal, report, guard=guard, resolution=resolved)
             await state.record_finding(
                 db, tenant_id, run_id, proposal.order_reference, report, lease_token=token, now=clock()
             )
+            proof = candidate_proof
             reason = "done" if proof is not None else "stall"
         else:
             reason = "done"
-    except TimeoutError:
-        reason = "budget"
-    except state.StateError as exc:
-        if exc.code == "run_lease_lost":
-            return _result(await state._one(db, tenant_id, TransactionOperation, operation_id))
-        reason = "stall"
-    except Exception:
-        reason = "error"
+    except Exception as exc:
+        # Provider helpers can fail inside a database transaction. Release
+        # that failed transaction before recording the outcome; committed
+        # spend/leases remain durable and are never refunded by this rollback.
+        await db.rollback()
+        await set_tenant_context(db, str(tenant_id))
+        if isinstance(exc, TimeoutError):
+            reason = "budget"
+        elif isinstance(exc, state.StateError):
+            if exc.code == "run_lease_lost":
+                return _result(await state._one(db, tenant_id, TransactionOperation, operation_id))
+            reason = "stall"
+        else:
+            reason = "error"
     operation = await state.finish_operation_recovery(
         db, tenant_id, run_id, lease_token=token, reason=reason, proof=proof, now=clock()
     )

@@ -259,3 +259,49 @@ async def test_population_change_between_pages_stalls_instead_of_claiming_comple
     result = await execute(state, page=AsyncMock(side_effect=[first, second]))
     assert result["termination_reason"] == "stall"
     assert state.run.progress_json["restart_scan"]
+
+
+async def test_oversize_evidence_is_flagged_without_stalling_the_scan():
+    import json
+
+    from app.schemas.transaction_runs import _bounded_json
+    from tests.test_transaction_ops_netsuite_actions import target as example_target
+
+    class BoundedState(State):
+        async def record_finding(self, *args, **kwargs):
+            _bounded_json(args[4])
+            await super().record_finding(*args, **kwargs)
+
+    state = BoundedState()
+    source = source_order()
+    source["orders"][0].update(total="50000", item_total="50000")
+    source["orders"][0]["line_items"] = [
+        {"id": str(100000000000000000 + i), "quantity": "1", "price": "100", "total": "100", "adjustments": []}
+        for i in range(500)
+    ]
+    target = example_target()
+    target["order_reference"] = REF
+    target["header"].update(subsidiary={"id": "1"}, subtotal="50000", total="50000", taxTotal="0", shippingCost="0")
+    target["currency_metadata"]["symbol"] = "USD"
+    base = target["lines"][0]
+    target["lines"] = [
+        {
+            **base,
+            "line": i + 1,
+            "quantity": "1",
+            "amount": "100",
+            "custcol_fw_vat_amount": "0",
+            "custcol_fw_solidus_line_id": str(100000000000000000 + i),
+        }
+        for i in range(500)
+    ]
+    targets = {**missing_target(), "orders": [target]}
+    result = await execute(state, source=source, target=targets)
+    assert result["termination_reason"] == "done"
+    report = state.reports[REF]
+    assert len(json.dumps(report).encode()) <= 65536
+    assert report["comparison"]["recommended_action"] == "gather_evidence"
+    assert report["evidence_limits"]["source_line_count"] == 500
+    assert report["evidence_limits"]["code"] == "evidence_size_limit"
+    assert report["source"]["lines_complete"] is False
+    assert state.run.progress_json["processed"] == 1

@@ -15,8 +15,9 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, localcontext
 
 from pydantic import ValidationError
-from sqlalchemy import and_, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.core.database import set_tenant_context
 from app.models.celigo import CeligoFlow, CeligoFlowStep
@@ -609,7 +610,7 @@ async def claim_approved_operation(db, tenant_id, proposal_id, *, expected_evide
     row = await get_proposal(db, tenant_id, proposal_id, lock=True)
     entity_key = business_digest(
         {
-            "account": row.netsuite_account_id,
+            "account": row.netsuite_account_id.replace("_", "-").lower(),
             "subsidiary": row.subsidiary_id,
             "record_type": row.record_type,
             "order_reference": row.order_reference,
@@ -625,13 +626,21 @@ async def claim_approved_operation(db, tenant_id, proposal_id, *, expected_evide
     ).scalar_one_or_none()
     if existing is not None:
         raise StateError("operation_already_attempted")
+    related = aliased(TransactionProposal)
     unresolved = (
         await db.execute(
-            select(TransactionOperation.id).where(
+            select(TransactionOperation.id)
+            .join(related, and_(related.id == TransactionOperation.proposal_id, related.tenant_id == tenant_id))
+            .where(
                 TransactionOperation.tenant_id == tenant_id,
-                TransactionOperation.entity_key == entity_key,
                 TransactionOperation.status.in_(("executing", "unknown")),
+                func.lower(func.replace(related.netsuite_account_id, "_", "-"))
+                == row.netsuite_account_id.replace("_", "-").lower(),
+                related.subsidiary_id == row.subsidiary_id,
+                related.record_type == row.record_type,
+                related.order_reference == row.order_reference,
             )
+            .limit(1)
         )
     ).scalar_one_or_none()
     if unresolved is not None:
@@ -871,22 +880,27 @@ async def recover_expired_operation(db, tenant_id, operation_id, *, now=None):
     return operation
 
 
-async def create_operation_recovery(db, tenant_id, operation_id, *, now=None):
-    """One finite read-only recovery allowance for a previously reserved write.
+async def create_operation_recovery(db, tenant_id, operation_id, *, actor=None, evaluation_key=None, now=None):
+    """One automatic pass, plus explicit, idempotent human read-only rechecks.
 
-    This internal origin is deliberately absent from RunCreate, API and chat.
-    It does not depend on an unrelated scan schedule being enabled, and cannot
-    reset an operation's spent budget, deadline or single-use dispatch marker.
+    Every recheck gets its own fixed run budget. No operation spend, approval,
+    deadline or dispatch reservation is reset. No schedule/model may supply a
+    new read-request key without a current authenticated human actor.
     """
     now = _clock(now)
+    manual = evaluation_key is not None
+    if manual:
+        if not isinstance(evaluation_key, uuid.UUID):
+            raise ValueError("A UUID recheck key is required")
+        await _human(db, tenant_id, actor, "recon.run")
     operation = await _one(db, tenant_id, TransactionOperation, operation_id, lock=True)
-    if operation.status != "unknown" or (operation.result_json or {}).get("dispatch_reserved") is not True:
-        raise StateError("operation_not_recoverable")
-    proposal = await get_proposal(db, tenant_id, operation.proposal_id)
-    config = await get_config(db, tenant_id, proposal.config_id)
-    if not config.enabled:
-        raise StateError("config_disabled")
-    key = business_digest({"kind": "operation_recovery", "operation_id": operation.id})
+    key = business_digest(
+        {
+            "kind": "operation_recheck" if manual else "operation_recovery",
+            "operation_id": operation.id,
+            **({"evaluation_key": evaluation_key} if manual else {}),
+        }
+    )
     existing = (
         await db.execute(
             select(TransactionRun).where(TransactionRun.tenant_id == tenant_id, TransactionRun.work_key == key)
@@ -895,22 +909,58 @@ async def create_operation_recovery(db, tenant_id, operation_id, *, now=None):
     if existing:
         await _commit(db, tenant_id)
         return existing
+    if operation.status != "unknown" or (operation.result_json or {}).get("dispatch_reserved") is not True:
+        raise StateError("operation_not_recoverable")
+    proposal = await get_proposal(db, tenant_id, operation.proposal_id)
+    config = await get_config(db, tenant_id, proposal.config_id)
+    if not config.enabled:
+        raise StateError("config_disabled")
+    pending = (
+        await db.execute(
+            select(TransactionRun)
+            .where(
+                TransactionRun.tenant_id == tenant_id,
+                TransactionRun.origin == "recovery",
+                TransactionRun.params_json["operation_id"].astext == str(operation.id),
+                TransactionRun.status.in_(("pending", "running")),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if pending is not None:
+        if manual:
+            raise StateError("recovery_already_pending")
+        # The automatic collector can race a queued human request. Deliver
+        # the existing check under its own lease instead of adding a budget.
+        await _commit(db, tenant_id)
+        return pending
     row = TransactionRun(
         tenant_id=tenant_id,
         config_id=config.id,
         work_key=key,
         origin="recovery",
-        params_json={"operation_id": str(operation.id), "order_references": [proposal.order_reference]},
+        params_json={
+            "operation_id": str(operation.id),
+            "order_references": [proposal.order_reference],
+            **({"manual_recheck": True, "evaluation_key": str(evaluation_key)} if manual else {}),
+        },
         config_snapshot=ConfigOut.model_validate(config).model_dump(mode="json"),
         max_api_calls=32,
         max_orders=1,
         deadline_at=now + timedelta(seconds=300),
         progress_json={},
-        initiated_by=None,
+        initiated_by=actor.id if manual else None,
     )
     db.add(row)
     await db.flush()
-    await _audit(db, tenant_id, "operation.recovery.create", row, payload={"operation_id": str(operation.id)})
+    await _audit(
+        db,
+        tenant_id,
+        "operation.recovery.create",
+        row,
+        actor if manual else None,
+        {"operation_id": str(operation.id), "manual_recheck": manual},
+    )
     await _commit(db, tenant_id)
     return row
 

@@ -440,3 +440,30 @@ async def test_exhausted_resolution_budget_stops_every_provider_call(env, monkey
     with pytest.raises(mod.CeligoActionError, match="operation_budget_exhausted"):
         await dispatch(env, claim, evidence)
     assert not env.requests
+
+
+async def test_maximum_supported_dependencies_and_three_error_pages_fit_the_read_budget(env):
+    exports = [EXPORT, "a" * 24, "b" * 24]
+    env.docs[f"/v1/flows/{FLOW}"]["pageGenerators"] = [{"_exportId": value} for value in exports]
+    for value in exports[1:]:
+        env.docs[f"/v1/exports/{value}"] = {"_id": value, "_connectionId": "6" * 24, "http": {"method": "GET"}}
+    scripts = [SCRIPT, *[f"{i:024x}" for i in range(101, 108)]]
+    env.docs[f"/v1/imports/{IMPORT}"]["hooks"] = {
+        f"hook{i}": {"_scriptId": value, "function": "hook"} for i, value in enumerate(scripts)
+    }
+    for value in scripts:
+        env.docs[f"/v1/scripts/{value}"] = {"_id": value, "content": "function hook(o) { return o; }"}
+    path = f"/v1/flows/{FLOW}/{IMPORT}/errors"
+    original = env.handler
+
+    def handler(request):
+        page = int(request.url.params.get("page", "1"))
+        if request.url.path == path and page < 3:
+            env.requests.append(request)
+            return httpx.Response(200, json={"errors": [], "nextPageURL": path + f"?page={page + 1}"})
+        return original(request)
+
+    env.handler = handler
+    result = await read(env)
+    assert result["complete"] is True and result["api_calls"] == 18
+    assert len(env.requests) == 18

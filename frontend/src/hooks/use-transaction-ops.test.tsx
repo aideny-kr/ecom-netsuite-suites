@@ -9,6 +9,7 @@ import {
   useTransactionDecision,
   useTransactionOperation,
   useStartTransactionRun,
+  useRecheckTransactionOperation,
 } from "./use-transaction-ops";
 const context = vi.hoisted(() => ({
   flags: { celigo: true, reconciliation: true },
@@ -50,6 +51,27 @@ beforeEach(() => {
   context.tenant = "tenant-a";
 });
 describe("transaction operations API boundary", () => {
+  it("requests a read-only recheck with a stable evaluation key and no write or actor payload", async () => {
+    vi.mocked(apiClient.post).mockResolvedValue({ id: "check" });
+    const { result } = renderHook(() => useRecheckTransactionOperation(), { wrapper });
+    const input = { id: "proposal/1", evaluation_key: "request-1" };
+    await act(async () => {
+      await result.current.mutateAsync(input);
+      await result.current.mutateAsync(input);
+    });
+    expect(apiClient.post).toHaveBeenNthCalledWith(2,
+      "/api/v1/transaction-ops/proposals/proposal%2F1/recheck",
+      { evaluation_key: "request-1" },
+    );
+  });
+  it("blocks outcome rechecks when permission is unavailable", async () => {
+    context.permission = false;
+    const { result } = renderHook(() => useRecheckTransactionOperation(), { wrapper });
+    await act(async () => {
+      await expect(result.current.mutateAsync({ id: "p", evaluation_key: "request-1" })).rejects.toThrow("Access unavailable");
+    });
+    expect(apiClient.post).not.toHaveBeenCalled();
+  });
   it.each(["celigo", "reconciliation", "permission"])(
     "does not fetch without %s",
     async (flag) => {

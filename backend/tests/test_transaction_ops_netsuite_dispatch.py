@@ -255,3 +255,54 @@ async def test_connection_revoked_during_preflight_cannot_use_the_send_permit(db
         with pytest.raises(mod.NetSuiteActionError, match="guard_connection_unavailable"):
             await mod.dispatch_netsuite_operation(db, actor.tenant_id, claim, client=client)
     assert len(requests) == 1
+
+
+async def test_approval_deadline_uses_ecmascript_millisecond_utc_date_contract(db, dispatch_case):
+    import json
+    import re
+
+    actor, proposal, claim, _ = dispatch_case
+    requests, handler = transport(dispatch_case)
+    async with httpx.AsyncClient(transport=handler) as client:
+        await mod.dispatch_netsuite_operation(db, actor.tenant_id, claim, client=client)
+    payload = json.loads(next(r.content for r in requests if r.method == "POST"))
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z", payload["approval_expires_at"])
+    from datetime import datetime
+
+    assert datetime.fromisoformat(payload["approval_expires_at"]) <= proposal.valid_until
+
+
+@pytest.mark.parametrize("near_deadline", [False, True])
+async def test_dispatch_has_time_for_preflight_and_write_but_never_extends_operation_deadline(
+    db, dispatch_case, monkeypatch, near_deadline
+):
+    import asyncio
+    from datetime import datetime, timedelta, timezone
+
+    actor, _, claim, _ = dispatch_case
+    requests, handler = transport(dispatch_case)
+    monkeypatch.setattr(mod, "READ_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(mod, "DISPATCH_TIMEOUT_SECONDS", 1, raising=False)
+    if near_deadline:
+        row = (
+            await db.execute(select(TransactionOperation).where(TransactionOperation.id == claim.operation_id))
+        ).scalar_one()
+
+        class NearDeadline(datetime):
+            @classmethod
+            def now(cls, tz=timezone.utc):
+                return row.deadline_at - timedelta(seconds=0.04)
+
+        monkeypatch.setattr(mod, "datetime", NearDeadline)
+
+    async def slow_response(request):
+        response = await handler.handle_async_request(request)
+        if request.method == "POST":
+            await asyncio.sleep(0.10)
+        return response
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(slow_response)) as client:
+        result = await mod.dispatch_netsuite_operation(db, actor.tenant_id, claim, client=client)
+    assert result["status"] == ("unknown" if near_deadline else "accepted")
+    assert result["verified"] is False
+    assert len([r for r in requests if r.method == "POST"]) == 1

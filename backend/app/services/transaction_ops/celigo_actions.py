@@ -33,11 +33,12 @@ from app.services.celigo.repository import extract_flow_steps
 from app.services.celigo.sanitizer import sanitize
 from app.services.transaction_ops import state_service
 
-MAX_READ_CALLS = 16
 _MAX_BYTES = 2 * 1024 * 1024
 _MAX_ERROR_PAGES = 3
 _MAX_SCRIPTS = 8
 _MAX_EXPORTS = 3
+# Flow, import, destination, all exports/scripts, error pages and retry data.
+MAX_READ_CALLS = 3 + _MAX_EXPORTS + _MAX_SCRIPTS + _MAX_ERROR_PAGES + 1
 _READ_SECONDS = 90
 _HTTP_TIMEOUT = httpx.Timeout(connect=5, read=20, write=10, pool=5)
 _REMOTE_ID = re.compile(r"[0-9a-f]{24}\Z")

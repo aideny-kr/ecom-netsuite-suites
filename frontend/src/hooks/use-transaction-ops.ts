@@ -158,3 +158,18 @@ export function useTransactionDecision() {
       }),
   });
 }
+
+export function useRecheckTransactionOperation() {
+  const access = useTransactionAccess();
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, evaluation_key }: { id: string; evaluation_key: string }) => {
+      if (!access.allowed) throw new Error("Access unavailable");
+      return apiClient.post<TransactionRun>(
+        `${base}/proposals/${encode(id)}/recheck`,
+        { evaluation_key },
+      );
+    },
+    onSuccess: () => client.invalidateQueries({ queryKey: ["transaction-ops", access.tenantId] }),
+  });
+}

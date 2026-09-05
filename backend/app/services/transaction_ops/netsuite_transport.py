@@ -29,6 +29,7 @@ from app.services.transaction_ops.netsuite_reader import _account, _invalid_cons
 MAX_GUARD_READ_CALLS = 4  # Conservative allowance including ordinary OAuth refresh.
 MAX_RESPONSE_BYTES = 2_000_000
 READ_TIMEOUT_SECONDS = 60
+DISPATCH_TIMEOUT_SECONDS = 120  # OAuth, final snapshot and one write; still capped by the operation deadline.
 _TIMEOUT = httpx.Timeout(connect=5, read=25, write=10, pool=5)
 
 
@@ -175,7 +176,7 @@ async def dispatch_netsuite_operation(db, tenant_id, claimed: ClaimedOperation, 
         remaining = (permit.deadline_at - datetime.now(timezone.utc)).total_seconds()
         if remaining <= 0:
             raise NetSuiteActionError("operation_budget_exhausted")
-        async with asyncio.timeout(min(READ_TIMEOUT_SECONDS, remaining)):
+        async with asyncio.timeout(min(DISPATCH_TIMEOUT_SECONDS, remaining)):
             url, token = await _load_guard_credentials(db, tenant_id, config)
             fresh = await _snapshot(http, url, token, config, claimed.target_record_id)
             if not fresh["actions_enabled"]:
@@ -192,7 +193,10 @@ async def dispatch_netsuite_operation(db, tenant_id, claimed: ClaimedOperation, 
                 "action": claimed.action,
                 "account_id": claimed.netsuite_account_id,
                 "work_key": claimed.work_key,
-                "approval_expires_at": min(proposal.valid_until, permit.deadline_at).isoformat(),
+                "approval_expires_at": min(proposal.valid_until, permit.deadline_at)
+                .astimezone(timezone.utc)
+                .isoformat(timespec="milliseconds")
+                .replace("+00:00", "Z"),
                 "before": claimed.before_json,
                 "after": claimed.after_json,
             }

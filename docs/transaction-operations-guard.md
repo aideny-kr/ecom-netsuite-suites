@@ -112,6 +112,9 @@ approver's permissions, spends a committed read budget, rereads the source and
 destination, and rejects changed evidence. The adapter rereads the guard before
 committing the one-use dispatch reservation. Each attempt has at most 96
 provider calls and 300 seconds, further limited by approval expiry.
+The final NetSuite dispatch has a separate 120-second transport allowance for
+authentication, the last snapshot and the single write. The original operation
+deadline still caps it; a slow response never extends approval or permits a retry.
 
 Provider acknowledgements remain unverified until fresh independent source,
 NetSuite and guard reads establish the desired state. A timeout or an
@@ -120,6 +123,27 @@ at most 32 calls and 300 seconds; it cannot reset the attempt or acquire another
 send permit. Recovery completion and its verified/unknown outcome are written
 atomically. If evidence remains inconclusive, the outcome remains unknown and
 blocks another operation on the order.
+
+An authenticated reviewer with `recon.run` can select **Recheck outcome** for an
+unknown operation. This creates a new read-only run with the same 32-call,
+one-order, 300-second limits. The request uses a UUID evaluation key so an
+unconfirmed HTTP response can be retried without buying another check. Concurrent
+human checks are rejected while a prior check is queued or running. The run page
+records the evidence and termination reason. Rechecks never reset the approval,
+dispatch reservation, operation deadline or original read spend. A reclaimed
+recovery lease spends again for each provider read and counts its fixed order
+scope once. If a finding cannot be persisted, the operation cannot become verified.
+Recovery rolls back a failed database transaction and restores tenant context
+before recording its error; prior committed read spending is preserved.
+An automatic collector racing a queued human check reuses that check and its
+lease. It cannot add a second recovery budget. Oversized fresh recovery evidence
+is recorded as an incomplete finding and remains unverified.
+
+Oversized investigation findings retain the available header observations and
+line counts, explicitly mark the omitted detail incomplete, and require more
+evidence. The investigation can continue to later orders; incomplete evidence
+cannot produce a repair approval. Account aliases with different case or
+underscore/hyphen separators share the same unresolved-operation fence.
 
 Celigo false-alarm proposals additionally bind the exact duplicate-create
 error, retry envelope and live flow/import/script configuration. Resolution
@@ -132,3 +156,10 @@ produce one further pending proposal after fresh evidence. It keeps the original
 ledger and requires a new authenticated human decision. There are at most two
 attempts for identical economic work. Rejection remains sticky, and uncertain
 writes never qualify for this retry.
+
+The local `scripts/uat/transaction_ops_crash_drill.py` harness covers authenticated
+HTTP investigation/approval, the real worker and committed ledger, an actual
+`SIGKILL` after a loopback provider stub records a save, read-only recovery, duplicate
+delivery and exact tenant cleanup. The September 5 run passed with one stub write,
+21 original operation calls retained, a verified recovery outcome and zero residue.
+Provider behavior is simulated; no live NetSuite order was changed by this drill.

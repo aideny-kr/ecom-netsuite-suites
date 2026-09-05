@@ -116,6 +116,10 @@ class ProposalCreate(InputModel):
     evidence_json: BoundedJSON
 
 
+class OperationRecheck(InputModel):
+    evaluation_key: UUID
+
+
 class ProposalDecision(InputModel):
     decision: Literal["approve", "reject"]
     evidence_fingerprint: Fingerprint
