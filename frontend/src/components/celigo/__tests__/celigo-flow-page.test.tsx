@@ -992,6 +992,44 @@ describe("CeligoFlowPage — header/canvas divider", () => {
     expect(window.localStorage.getItem(SIZE_KEY)).toBe("40%");
   });
 
+  // Gate-fix (finding: blocker) -- `onResize` is a REAL `ResizeObserver`
+  // notification in a real browser, which is delivered strictly after the
+  // microtask queue drains (a rendering-step callback, not a microtask
+  // itself) -- so it always lands AFTER `toggleHeaderCollapsed`'s own
+  // `Promise.resolve().then()` has already cleared a timing-based guard.
+  // jsdom's `ResizeObserver` is stubbed as a no-op (`vitest.setup.ts`, added
+  // for reactflow) so this path is otherwise never exercised here -- this
+  // test drives the real `onResize` prop directly (captured via `panelSpy`
+  // off the real `Panel`) to stand in for that delayed real-world report.
+  it("a header-resize notification reporting the just-requested collapse/expand target is treated as synthetic, not a real drag -- even when it lands after the toggle handler has already returned", async () => {
+    window.localStorage.setItem(SIZE_KEY, "40%");
+    wrap(<CeligoFlowPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Focus canvas" }));
+    // Let the microtask queue drain -- a real ResizeObserver notification is
+    // NOT itself a microtask (it's a later rendering-step callback), so by
+    // the time it lands, every microtask queued before it (including a
+    // `Promise.resolve().then()` cleanup) has already run. Awaiting one here
+    // reproduces that ordering instead of accidentally beating it.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const collapsedProps = panelSpy.props.filter((p) => p.id === "celigo-flow-header-pane").pop()!;
+    // Stands in for the real ResizeObserver's report of the imperative
+    // collapse this click just made -- landing, as it always does in a real
+    // browser, after this synchronous click handler has already returned.
+    act(() => (collapsedProps.onResize as (s: { asPercentage: number; inPixels: number }) => void)({ asPercentage: 8, inPixels: 80 }));
+
+    // The remembered size must survive that notification untouched --
+    // neither in memory (what "Show details" restores to) nor in storage.
+    expect(window.localStorage.getItem(SIZE_KEY)).toBe("40%");
+
+    fireEvent.click(screen.getByRole("button", { name: "Show details" }));
+    const restoredProps = panelSpy.props.filter((p) => p.id === "celigo-flow-header-pane").pop()!;
+    expect(restoredProps.defaultSize).toBe("40%");
+    expect(window.localStorage.getItem(SIZE_KEY)).toBe("40%");
+  });
+
   it("a stored '1' starts the page with the header already collapsed and the separator already hidden", () => {
     window.localStorage.setItem(COLLAPSED_KEY, "1");
     wrap(<CeligoFlowPage />);

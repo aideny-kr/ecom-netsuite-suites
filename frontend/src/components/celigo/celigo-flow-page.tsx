@@ -123,6 +123,25 @@ function persistHeaderSize(size: string): void {
   }
 }
 
+/** Parses a percentage STRING ("34%") down to its bare number (34), for
+ * comparing against `PanelSize.asPercentage`. Never throws -- an
+ * unparseable size (shouldn't happen; every caller here is one of our own
+ * constants or `readStoredHeaderSize`'s own "%"-suffix-checked output)
+ * reads as 0 rather than `NaN`, which would otherwise make every
+ * comparison against it false and silently defeat the guard below. */
+function percentValue(size: string): number {
+  const value = Number.parseFloat(size);
+  return Number.isFinite(value) ? value : 0;
+}
+
+/** How close a reported `asPercentage` has to land to a just-requested
+ * imperative target to be treated as THAT request's own report rather than
+ * a genuine drag -- a `resize()` call and the `ResizeObserver` notification
+ * it produces don't always round to the identical fraction (subpixel
+ * layout rounding), so an exact `===` would occasionally misclassify the
+ * request's own echo as a drag. */
+const HEADER_RESIZE_MATCH_EPSILON = 0.5;
+
 /** `queryState()` only tells us the query settled with an error — it
  * doesn't say which one. The unknown-id state ("This flow is not in the
  * last sync.") needs to tell a 404 (the id genuinely isn't in the last
@@ -201,7 +220,25 @@ export function CeligoFlowPage(): JSX.Element {
   // overwrite `flowHeaderSize` with the collapsed height, and the very next
   // "Show details" would restore to that instead of what the viewer
   // actually dragged to.
-  const suppressHeaderResizePersistRef = useRef(false);
+  //
+  // Gate-fix (finding: blocker): this used to be a BOOLEAN cleared on a
+  // microtask (`Promise.resolve().then()`), on the assumption that clearing
+  // it "one tick later" would still be up when the resulting notification
+  // arrived. It never was: `onResize` is driven by a real `ResizeObserver`,
+  // and a ResizeObserver's notifications are delivered as part of the
+  // browser's rendering step -- strictly AFTER the microtask queue drains,
+  // not as one more microtask in it. So by the time the real notification
+  // landed, the guard had already cleared itself, and it protected nothing.
+  // Invisible in this file's own tests only because `vitest.setup.ts` stubs
+  // `ResizeObserver` as a no-op (added for reactflow) -- the exact path this
+  // guard exists for never fires under vitest.
+  //
+  // The fix drops timing entirely: remember the exact percentage the
+  // imperative call just requested, and compare the REPORTED percentage
+  // against that value (not against a clock) when `onResize` runs. A match
+  // is this call's own echo, however late it lands; anything else is a
+  // genuine drag.
+  const pendingHeaderResizeTargetRef = useRef<number | null>(null);
   const headerResizeDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -211,7 +248,11 @@ export function CeligoFlowPage(): JSX.Element {
   }, []);
 
   const onHeaderResize = useCallback((panelSize: PanelSize) => {
-    if (suppressHeaderResizePersistRef.current) return;
+    const pendingTarget = pendingHeaderResizeTargetRef.current;
+    if (pendingTarget !== null) {
+      pendingHeaderResizeTargetRef.current = null;
+      if (Math.abs(panelSize.asPercentage - pendingTarget) <= HEADER_RESIZE_MATCH_EPSILON) return;
+    }
     const size = `${panelSize.asPercentage}%`;
     setHeaderSize(size);
     if (headerResizeDebounceRef.current) clearTimeout(headerResizeDebounceRef.current);
@@ -228,16 +269,9 @@ export function CeligoFlowPage(): JSX.Element {
         // Best effort -- the toggle still works for this render, it just
         // won't survive a reload.
       }
-      suppressHeaderResizePersistRef.current = true;
-      if (next) headerPanelRef.current?.resize(FLOW_HEADER_MIN_SIZE);
-      else headerPanelRef.current?.resize(headerSize);
-      // A real ResizeObserver reports the new size on a later frame, not
-      // synchronously -- clear the guard on a microtask (not immediately)
-      // so it is still up when that report lands, without staying stuck on
-      // for whatever the viewer does next.
-      Promise.resolve().then(() => {
-        suppressHeaderResizePersistRef.current = false;
-      });
+      const targetSize = next ? FLOW_HEADER_MIN_SIZE : headerSize;
+      pendingHeaderResizeTargetRef.current = percentValue(targetSize);
+      headerPanelRef.current?.resize(targetSize);
       return next;
     });
   }, [headerSize]);
