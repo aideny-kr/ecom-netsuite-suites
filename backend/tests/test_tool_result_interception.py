@@ -244,6 +244,120 @@ class TestInterceptSuiteQL:
         assert returned == result_str
 
 
+class TestInterceptDataTableCaveats:
+    """Task 4C (spec docs/superpowers/specs/2026-09-04-celigo-chat-access.md §8):
+    the ``data_table`` branch must carry a tool's ``caveats`` list (the honesty
+    channel any data_table tool can populate -- Celigo's four tools are the
+    first, but this is generic to the branch, not Celigo-specific) into both
+    the SSE payload the frontend renders and the condensed string the model
+    reads, in BOTH the FULL-context and preview branches, with a note telling
+    the model to relay them verbatim. A result with no ``caveats`` key must be
+    byte-identical to today (asserted on the exact dict) so every other
+    data_table tool is provably unaffected."""
+
+    _CAVEATS = [
+        "Nightly snapshot as of 2026-09-01T00:00:00+00:00.",
+        "2 of 5 flows not yet error-checked.",
+    ]
+
+    def _result_with_caveats(self) -> dict:
+        return {**SAMPLE_SUITEQL_RESULT, "caveats": self._CAVEATS}
+
+    def test_caveats_reach_sse_event_data(self):
+        result_str = _result_str(self._result_with_caveats())
+        _, sse_event, _ = _intercept_tool_result("celigo_flows", result_str)
+        assert sse_event["caveats"] == self._CAVEATS
+
+    def test_caveats_reach_condensed_preview_branch_with_relay_note(self):
+        result_str = _result_str(self._result_with_caveats())
+        _, _, condensed = _intercept_tool_result("celigo_flows", result_str)
+        parsed = json.loads(condensed)
+        assert parsed["caveats"] == self._CAVEATS
+        assert "Relay every caveat to the user verbatim before interpreting the table." in parsed["note"]
+
+    def test_caveats_reach_condensed_full_context_branch_with_relay_note(self):
+        from app.services.chat.orchestrator import ContextNeed
+
+        result_str = _result_str(self._result_with_caveats())
+        _, sse_event, condensed = _intercept_tool_result("celigo_flows", result_str, context_need=ContextNeed.FULL)
+        parsed = json.loads(condensed)
+        assert sse_event["caveats"] == self._CAVEATS
+        assert parsed["caveats"] == self._CAVEATS
+        assert "Relay every caveat to the user verbatim before interpreting the table." in parsed["note"]
+
+    def test_empty_caveats_list_is_treated_as_absent(self):
+        result_str = _result_str({**SAMPLE_SUITEQL_RESULT, "caveats": []})
+        _, sse_event, condensed = _intercept_tool_result("celigo_flows", result_str)
+        assert "caveats" not in sse_event
+        assert "caveats" not in json.loads(condensed)
+
+    def test_no_caveats_key_leaves_sse_event_data_byte_identical_to_today(self):
+        """Protects every OTHER data_table tool (no ``caveats`` key at all):
+        the payload shape must not change one bit."""
+        result_str = _result_str(SAMPLE_SUITEQL_RESULT)
+        _, sse_event, _ = _intercept_tool_result("netsuite_suiteql", result_str)
+        assert sse_event == {
+            "columns": ["tranid", "entity", "amount", "status"],
+            "rows": SAMPLE_SUITEQL_RESULT["rows"],
+            "row_count": 3,
+            "query": SAMPLE_SUITEQL_RESULT["query"],
+            "truncated": False,
+        }
+
+    def test_no_caveats_key_leaves_condensed_preview_byte_identical_to_today(self):
+        result_str = _result_str(SAMPLE_SUITEQL_RESULT)
+        _, _, condensed = _intercept_tool_result("netsuite_suiteql", result_str)
+        assert json.loads(condensed) == {
+            "columns": ["tranid", "entity", "amount", "status"],
+            "row_count": 3,
+            "rows_preview": SAMPLE_SUITEQL_RESULT["rows"],
+            "truncated": False,
+            "note": (
+                "The full data table has been sent to the frontend for rendering. "
+                "Do NOT rebuild or reproduce the table in your response. "
+                "Provide commentary, insights, and analysis only. "
+                "Use rows_preview for charting and follow-up analysis."
+            ),
+        }
+
+    def test_no_caveats_key_leaves_condensed_full_context_byte_identical_to_today(self):
+        from app.services.chat.orchestrator import ContextNeed
+
+        result_str = _result_str(SAMPLE_SUITEQL_RESULT)
+        _, _, condensed = _intercept_tool_result("netsuite_suiteql", result_str, context_need=ContextNeed.FULL)
+        assert json.loads(condensed) == {
+            "columns": ["tranid", "entity", "amount", "status"],
+            "row_count": 3,
+            "rows": SAMPLE_SUITEQL_RESULT["rows"],
+            "truncated": False,
+            "note": (
+                "The data table is also rendered in the frontend. "
+                "Do NOT reproduce the table. Analyze the data and explain findings."
+            ),
+        }
+
+    def test_metric_branch_is_untouched_by_caveats_even_when_present(self):
+        """Explicitly out of scope (brief §C): a suppressed metric payload's
+        condensed string must still withhold row values regardless of a
+        caveats key -- metric_compute never emits caveats today, but this
+        proves the metric branch is not accidentally routed through the
+        caveats-carrying code path."""
+        metric_result = {
+            "columns": ["Metric", "Value"],
+            "rows": [["Net Margin", "12.3"]],
+            "row_count": 1,
+            "query": "net_margin",
+            "truncated": False,
+            "suppress_llm_value": True,
+            "caveats": ["should not leak into condensed"],
+        }
+        result_str = _result_str(metric_result)
+        _, sse_event, condensed = _intercept_tool_result("metric_compute", result_str)
+        assert sse_event.get("suppress_llm_value") is True
+        assert "12.3" not in condensed
+        assert "Net Margin" not in condensed
+
+
 class TestInterceptNonMatchingTool:
     """Non-data tools should be untouched."""
 
