@@ -30,6 +30,7 @@ from app.services.celigo.client import (
     mcp_server_url,
     verify_token,
 )
+from app.services.celigo.read_queries import _get_celigo_connection
 from app.services.celigo_write_guard import (
     CeligoInvariantError,
     CeligoManagedElsewhereError,
@@ -564,16 +565,11 @@ async def trigger_netsuite_deposit_sync(
 # Celigo endpoints (read-only connector -- Plan A: connect/test/disconnect only)
 # ---------------------------------------------------------------------------
 
-
-async def _get_celigo_connection(db: AsyncSession, tenant_id) -> Connection | None:
-    result = await db.execute(
-        select(Connection).where(
-            Connection.tenant_id == tenant_id,
-            Connection.provider == "celigo",
-            Connection.status != "revoked",
-        )
-    )
-    return result.scalar_one_or_none()
+# `_get_celigo_connection` moved to `app.services.celigo.read_queries` (task 1
+# brief, 2026-09-04) so `celigo_flows.py`'s read routes and this module's
+# connect/test/disconnect endpoints share ONE lookup instead of two copies
+# that could drift; re-imported here (thin re-export, not re-implemented) so
+# every existing call site below is unchanged.
 
 
 async def _celigo_agent_access(db: AsyncSession, tenant_id) -> bool:

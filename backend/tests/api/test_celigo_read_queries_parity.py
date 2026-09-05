@@ -94,7 +94,7 @@ class TestSyncStatusParity:
         assert route_resp.status_code == 200, route_resp.text
 
         status = await read_queries.sync_status(db, tenant_id=user.tenant_id)
-        rebuilt = celigo_flows.CeligoSyncStatusOut(**status.__dict__).model_dump(mode="json")
+        rebuilt = celigo_flows._sync_status_out(status).model_dump(mode="json")
 
         assert _canon(rebuilt) == _canon(route_resp.json())
 
@@ -106,9 +106,7 @@ class TestFlowSummariesParity:
         await _seed_router_chain_flow(db, world)
         await _seed_cron_flow(db, world)
 
-        route_resp = await client.get(
-            f"/api/v1/celigo/integrations/{world['integration'].id}/flows", headers=headers
-        )
+        route_resp = await client.get(f"/api/v1/celigo/integrations/{world['integration'].id}/flows", headers=headers)
         assert route_resp.status_code == 200, route_resp.text
 
         summaries = await read_queries.flow_summaries(
@@ -150,7 +148,9 @@ class TestFlowErrorGroupsParity:
         groups = await read_queries.flow_error_groups(
             db, tenant_id=user.tenant_id, flow_id=world["flow"].id, status="open"
         )
-        rebuilt = celigo_flows._flow_errors_out(groups).model_dump(mode="json")
+        # 100 mirrors the route's own `Query(100, ...)` default -- the route
+        # wasn't asked for a non-default `limit`, so this must match it.
+        rebuilt = celigo_flows._flow_errors_out(groups, limit=100).model_dump(mode="json")
 
         assert _canon(rebuilt) == _canon(route_resp.json())
 
@@ -168,7 +168,7 @@ class TestFlowErrorGroupsParity:
         groups = await read_queries.flow_error_groups(
             db, tenant_id=user.tenant_id, flow_id=world["flow"].id, status="resolved"
         )
-        rebuilt = celigo_flows._flow_errors_out(groups).model_dump(mode="json")
+        rebuilt = celigo_flows._flow_errors_out(groups, limit=100).model_dump(mode="json")
 
         assert _canon(rebuilt) == _canon(route_resp.json())
 
