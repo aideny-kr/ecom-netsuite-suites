@@ -1,0 +1,317 @@
+<!--
+  BATCH WRITE REVIEW — APPROVED DESIGN REFERENCE
+  Approved by the operator 2026-08-31. Published copy:
+  https://claude.ai/code/artifact/9a7a2e27-482c-4fba-95bb-4b8464f8763d
+
+  This file is the ANTI-DRIFT reference. When the implementation and this
+  mock disagree, one of them is wrong and it must be decided deliberately —
+  not discovered later in a screenshot. Update this file in the same commit
+  as any intentional deviation, and say why in the commit message.
+
+  The three decisions this mock encodes, each of which cost an argument:
+
+  1. ROW VALUES ARE SHOWN, NEVER SUMMARISED. The approval has to attach to
+     content the human actually saw. "Approve 18 records" is the blank cheque
+     this design exists to refuse — it consents to whatever the extractor
+     produced, sight unseen.
+  2. THE ENVIRONMENT BADGE IS THE LOUDEST ELEMENT. It decides whether this is
+     a test or a customer's real ledger, and enforcement does NOT exist yet
+     (ClickUp 86bbp0pw3 — we shipped labelling only).
+  3. SCREEN 2 IS NOT A NICE-TO-HAVE. The "Unknown — sent, no answer" row is
+     the entire justification for the idempotency layer. Ship the batch
+     surface without it and a mid-batch failure leaves a ledger nobody can
+     reconcile. Observed once already at N=1: sandbox customer 5264348 was
+     created by a write the app reported as failed.
+-->
+<title>Batch write review — design mock</title>
+<style>
+  :root{
+    --ink:#12151A; --muted:#5C6673; --line:#D8DDE4; --card:#FFFFFF; --page:#EEF0F3;
+    --accent:#1F4E5F; --accent-soft:#E6EEF1;
+    --ready:#0F7A4F; --ready-soft:#E4F2EB;
+    --input:#A8620A; --input-soft:#FBEFDD;
+    --blocked:#B3261E; --blocked-soft:#FBE9E7;
+    --unknown:#5B4B8A; --unknown-soft:#ECE8F5;
+    --prod:#B3261E; --sand:#0F7A4F;
+    --serif:ui-serif,Georgia,"Iowan Old Style","Times New Roman",serif;
+    --sans:ui-sans-serif,-apple-system,"Segoe UI",Roboto,sans-serif;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --ink:#E6E9EE; --muted:#98A2B0; --line:#2A313B; --card:#171B21; --page:#0D1015;
+      --accent:#7FB8C9; --accent-soft:#16262C;
+      --ready:#4FBF8B; --ready-soft:#12241C;
+      --input:#E0A34A; --input-soft:#2A2013;
+      --blocked:#F0857C; --blocked-soft:#2B1614;
+      --unknown:#A996E0; --unknown-soft:#1E1A2B;
+      --prod:#F0857C; --sand:#4FBF8B;
+    }
+  }
+  :root[data-theme="dark"]{
+    --ink:#E6E9EE; --muted:#98A2B0; --line:#2A313B; --card:#171B21; --page:#0D1015;
+    --accent:#7FB8C9; --accent-soft:#16262C;
+    --ready:#4FBF8B; --ready-soft:#12241C; --input:#E0A34A; --input-soft:#2A2013;
+    --blocked:#F0857C; --blocked-soft:#2B1614; --unknown:#A996E0; --unknown-soft:#1E1A2B;
+    --prod:#F0857C; --sand:#4FBF8B;
+  }
+  :root[data-theme="light"]{
+    --ink:#12151A; --muted:#5C6673; --line:#D8DDE4; --card:#FFFFFF; --page:#EEF0F3;
+    --accent:#1F4E5F; --accent-soft:#E6EEF1;
+    --ready:#0F7A4F; --ready-soft:#E4F2EB; --input:#A8620A; --input-soft:#FBEFDD;
+    --blocked:#B3261E; --blocked-soft:#FBE9E7; --unknown:#5B4B8A; --unknown-soft:#ECE8F5;
+    --prod:#B3261E; --sand:#0F7A4F;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--page);color:var(--ink);font-family:var(--sans);
+       font-size:15px;line-height:1.55;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1080px;margin:0 auto;padding:40px 20px 80px;display:flex;flex-direction:column;gap:34px}
+  h1{font-family:var(--serif);font-size:30px;line-height:1.2;margin:0;text-wrap:balance;letter-spacing:-.01em}
+  h2{font-family:var(--serif);font-size:21px;margin:0 0 4px;text-wrap:balance}
+  .lede{color:var(--muted);margin:6px 0 0;max-width:66ch}
+  .eyebrow{font-size:11px;letter-spacing:.13em;text-transform:uppercase;color:var(--muted);font-weight:600}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;overflow:hidden}
+  .pad{padding:18px 20px}
+  .note{font-size:13px;color:var(--muted)}
+
+  /* provenance band */
+  .prov{display:flex;flex-wrap:wrap;gap:18px;align-items:center;justify-content:space-between;
+        padding:16px 20px;border-bottom:1px solid var(--line);background:var(--accent-soft)}
+  .prov-l{display:flex;align-items:center;gap:12px;min-width:0}
+  .file{font-family:var(--mono);font-size:13px;overflow:hidden;text-overflow:ellipsis}
+  .arrow{color:var(--muted)}
+  .env{display:inline-flex;align-items:center;gap:8px;border-radius:999px;padding:7px 14px;
+       font-weight:700;font-size:13px;letter-spacing:.04em;border:2px solid}
+  .env.sand{color:var(--sand);border-color:var(--sand);background:transparent}
+  .env.prod{color:var(--prod);border-color:var(--prod);background:transparent}
+  .dot{width:8px;height:8px;border-radius:50%;background:currentColor;flex:none}
+
+  /* mapping */
+  .map{display:flex;flex-wrap:wrap;gap:8px;padding:14px 20px;border-bottom:1px solid var(--line)}
+  .pair{display:inline-flex;align-items:center;gap:7px;border:1px solid var(--line);border-radius:8px;
+        padding:5px 10px;font-size:12px;font-family:var(--mono);background:var(--page)}
+  .pair b{font-weight:600;color:var(--accent)}
+
+  /* ledger */
+  .scroll{overflow-x:auto}
+  table{border-collapse:collapse;width:100%;min-width:840px}
+  th{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);font-weight:600;
+     text-align:left;padding:11px 12px;border-bottom:1px solid var(--line);white-space:nowrap}
+  td{padding:11px 12px;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:13px;
+     font-variant-numeric:tabular-nums;vertical-align:middle}
+  tr:last-child td{border-bottom:0}
+  .rownum{color:var(--muted);width:44px}
+  .chip{display:inline-flex;align-items:center;gap:6px;border-radius:6px;padding:3px 8px;
+        font-family:var(--sans);font-size:11.5px;font-weight:650;white-space:nowrap}
+  .c-ready{color:var(--ready);background:var(--ready-soft)}
+  .c-input{color:var(--input);background:var(--input-soft)}
+  .c-block{color:var(--blocked);background:var(--blocked-soft)}
+  .c-unknown{color:var(--unknown);background:var(--unknown-soft)}
+  .stripe{border-left:3px solid transparent}
+  .s-input{border-left-color:var(--input);background:color-mix(in srgb,var(--input-soft) 45%,transparent)}
+  .s-block{border-left-color:var(--blocked);background:color-mix(in srgb,var(--blocked-soft) 45%,transparent)}
+  .s-unknown{border-left-color:var(--unknown);background:color-mix(in srgb,var(--unknown-soft) 55%,transparent)}
+  .miss{color:var(--input);font-style:italic}
+  .sel{width:34px}
+  input[type=checkbox]{width:15px;height:15px;accent-color:var(--accent)}
+
+  /* bulk fill */
+  .fill{display:flex;flex-wrap:wrap;gap:12px;align-items:center;padding:13px 20px;
+        background:var(--input-soft);border-bottom:1px solid var(--line);font-size:13.5px}
+  .fill select{font-family:var(--mono);font-size:13px;padding:5px 9px;border-radius:7px;
+               border:1px solid var(--line);background:var(--card);color:var(--ink)}
+
+  /* commit bar */
+  .commit{display:flex;flex-wrap:wrap;gap:14px;align-items:center;justify-content:space-between;
+          padding:16px 20px;border-top:2px solid var(--ink);background:var(--card)}
+  .commit-text{font-size:14px;max-width:60ch}
+  .commit-text b{font-family:var(--mono)}
+  .btns{display:flex;gap:9px;flex:none}
+  .btn{border-radius:9px;padding:10px 17px;font-size:14px;font-weight:650;border:1px solid var(--line);
+       background:var(--card);color:var(--ink);cursor:pointer;font-family:var(--sans)}
+  .btn.go{background:var(--accent);border-color:var(--accent);color:#fff}
+  :root[data-theme="dark"] .btn.go,@media (prefers-color-scheme:dark){.btn.go{color:#0D1015}}
+
+  .cols2{display:grid;grid-template-columns:1fr;gap:14px}
+  @media(min-width:760px){.cols2{grid-template-columns:1fr 1fr}}
+  .kv{display:flex;justify-content:space-between;gap:14px;padding:7px 0;border-bottom:1px dashed var(--line);font-size:13.5px}
+  .kv:last-child{border-bottom:0}
+  .kv span:last-child{font-family:var(--mono);text-align:right}
+  ul.tight{margin:8px 0 0;padding-left:19px}
+  ul.tight li{margin:5px 0}
+  .warn{border-left:3px solid var(--blocked);background:var(--blocked-soft);padding:12px 15px;border-radius:0 10px 10px 0}
+  .why{border-left:3px solid var(--accent);background:var(--accent-soft);padding:12px 15px;border-radius:0 10px 10px 0}
+</style>
+
+<div class="wrap">
+
+  <header>
+    <p class="eyebrow">Design mock · not built</p>
+    <h1>Batch write review</h1>
+    <p class="lede">One approval covering many records — where every row is visible <em>before</em> you sign,
+      not after. This is the alternative to twenty separate cards, and to a blanket auto-approve that would
+      consent to payloads that do not exist yet.</p>
+  </header>
+
+  <!-- ─────────────── SCREEN 1 ─────────────── -->
+  <section>
+    <p class="eyebrow" style="margin-bottom:8px">Screen 1 · Review, before anything is written</p>
+    <div class="card">
+
+      <div class="prov">
+        <div class="prov-l">
+          <span class="eyebrow">Source</span>
+          <span class="file">vendors-q3.xlsx · 20 rows · uploaded 14:02</span>
+          <span class="arrow">→</span>
+          <span class="eyebrow">Creates</span>
+          <span class="file">customer</span>
+        </div>
+        <span class="env sand"><span class="dot"></span>SANDBOX 6738075-sb1</span>
+      </div>
+
+      <div class="map">
+        <span class="eyebrow" style="align-self:center;margin-right:4px">Columns</span>
+        <span class="pair">company_name <span class="arrow">→</span> <b>companyName</b></span>
+        <span class="pair">country <span class="arrow">→</span> <b>—</b></span>
+        <span class="pair">email <span class="arrow">→</span> <b>email</b></span>
+        <span class="pair">vat <span class="arrow">→</span> <b>vatRegNumber</b></span>
+        <span class="pair" style="border-style:dashed">subsidiary <span class="arrow">→</span> <b>not in file</b></span>
+      </div>
+
+      <div class="fill">
+        <strong>18 rows need <code style="font-family:var(--mono)">subsidiary</code>.</strong>
+        <span>Set for all:</span>
+        <select><option>Framework Computer UK Ltd (ID 5)</option><option>Framework Computer, Inc. (ID 1)</option></select>
+        <span class="note">Applied per row below — override any individually.</span>
+      </div>
+
+      <div class="scroll">
+        <table>
+          <thead><tr>
+            <th class="sel"></th><th class="rownum">Row</th><th>companyName</th><th>subsidiary</th>
+            <th>email</th><th>vatRegNumber</th><th>Status</th>
+          </tr></thead>
+          <tbody>
+            <tr class="stripe"><td class="sel"><input type="checkbox" checked></td><td class="rownum">1</td>
+              <td>Northwind Ltd</td><td>Framework UK (5)</td><td>ap@northwind.example</td><td>GB123456789</td>
+              <td><span class="chip c-ready">Ready</span></td></tr>
+            <tr class="stripe"><td class="sel"><input type="checkbox" checked></td><td class="rownum">2</td>
+              <td>Contoso GmbH</td><td>Framework UK (5)</td><td>rechnung@contoso.example</td><td>DE811234567</td>
+              <td><span class="chip c-ready">Ready</span></td></tr>
+            <tr class="stripe s-input"><td class="sel"><input type="checkbox" checked></td><td class="rownum">3</td>
+              <td>Fabrikam SA</td><td class="miss">choose…</td><td>compta@fabrikam.example</td><td>FR40303265045</td>
+              <td><span class="chip c-input">Needs subsidiary</span></td></tr>
+            <tr class="stripe s-block"><td class="sel"><input type="checkbox"></td><td class="rownum">4</td>
+              <td class="miss">(empty)</td><td>Framework UK (5)</td><td>—</td><td>—</td>
+              <td><span class="chip c-block">No company name</span></td></tr>
+            <tr class="stripe"><td class="sel"><input type="checkbox" checked></td><td class="rownum">5</td>
+              <td>Tailspin Toys</td><td>Framework UK (5)</td><td>ap@tailspin.example</td><td>GB998877665</td>
+              <td><span class="chip c-ready">Ready</span></td></tr>
+            <tr class="stripe s-block"><td class="sel"><input type="checkbox"></td><td class="rownum">6</td>
+              <td>Northwind Ltd</td><td>Framework UK (5)</td><td>ap@northwind.example</td><td>GB123456789</td>
+              <td><span class="chip c-block">Duplicate of row 1</span></td></tr>
+            <tr class="stripe"><td class="sel"><input type="checkbox" checked></td><td class="rownum">7…20</td>
+              <td colspan="4" class="note" style="font-family:var(--sans)">14 further rows · all Ready</td>
+              <td><span class="chip c-ready">Ready</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="commit">
+        <div class="commit-text">
+          Will create <b>18 customers</b> in <b>SANDBOX 6738075-sb1</b>.
+          <span class="note">2 rows excluded: 1 missing a company name, 1 duplicate of row 1. Nothing is written until you press this.</span>
+        </div>
+        <div class="btns">
+          <button class="btn">Cancel</button>
+          <button class="btn go">Approve 18 &amp; write</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="why" style="margin-top:14px">
+      <strong>Why the row values are shown, not summarised.</strong>
+      <span class="note">The approval has to attach to content you actually saw. A count alone
+      (“approve 18 records”) is the blank cheque we are trying to avoid — it consents to whatever
+      the extractor happened to produce.</span>
+    </div>
+  </section>
+
+  <!-- ─────────────── SCREEN 2 ─────────────── -->
+  <section>
+    <p class="eyebrow" style="margin-bottom:8px">Screen 2 · After a partial failure — the case that justifies the whole build</p>
+    <div class="card">
+      <div class="prov">
+        <div class="prov-l">
+          <span class="eyebrow">Batch</span>
+          <span class="file">corr_9f2a41 · 18 approved · started 14:06:22</span>
+        </div>
+        <span class="env sand"><span class="dot"></span>SANDBOX 6738075-sb1</span>
+      </div>
+
+      <div class="scroll">
+        <table>
+          <thead><tr><th class="rownum">Row</th><th>companyName</th><th>Outcome</th><th>NetSuite id</th><th>Recorded</th></tr></thead>
+          <tbody>
+            <tr class="stripe"><td class="rownum">1</td><td>Northwind Ltd</td>
+              <td><span class="chip c-ready">Written</span></td><td>5264501</td><td>14:06:23</td></tr>
+            <tr class="stripe"><td class="rownum">2</td><td>Contoso GmbH</td>
+              <td><span class="chip c-ready">Written</span></td><td>5264502</td><td>14:06:25</td></tr>
+            <tr class="stripe s-unknown"><td class="rownum">3</td><td>Fabrikam SA</td>
+              <td><span class="chip c-unknown">Unknown — sent, no answer</span></td><td>—</td><td>14:06:27</td></tr>
+            <tr class="stripe"><td class="rownum">4</td><td>Tailspin Toys</td>
+              <td><span class="chip">Not attempted</span></td><td>—</td><td>—</td></tr>
+            <tr class="stripe"><td class="rownum">5…18</td><td class="note" style="font-family:var(--sans)">14 rows</td>
+              <td><span class="chip">Not attempted</span></td><td>—</td><td>—</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="pad" style="border-top:1px solid var(--line)">
+        <div class="warn">
+          <strong>Row 3 is the whole problem.</strong>
+          <span class="note">The request was sent and NetSuite never answered — a timeout, a dropped
+          connection, a crash between send and confirm. The record may exist. Retrying blindly writes
+          it twice; skipping it loses a vendor. Today the system cannot tell you which.</span>
+        </div>
+        <div class="cols2" style="margin-top:14px">
+          <div>
+            <h2>What makes row 3 answerable</h2>
+            <ul class="tight note">
+              <li><strong>Idempotency key</strong> derived from the work itself (batch + row + payload hash), sent with the write — a retry cannot create a second record.</li>
+              <li><strong>Side-effect log written BEFORE the call</strong>, so a crash between send and confirm still leaves a trace saying “row 3 was attempted”.</li>
+              <li><strong>Reconcile on resume</strong> — query NetSuite by the key, then mark row 3 written or not-attempted from evidence rather than from a guess.</li>
+            </ul>
+          </div>
+          <div>
+            <h2>Resume, not restart</h2>
+            <div class="kv"><span>Rows written</span><span>2</span></div>
+            <div class="kv"><span>Unknown — verify first</span><span>1</span></div>
+            <div class="kv"><span>Not attempted</span><span>15</span></div>
+            <div class="kv"><span>Safe to resume</span><span>15 rows</span></div>
+            <p class="note" style="margin:10px 0 0">Resume is blocked until row 3 is resolved. That block is
+              the feature: a batch that silently skips its one uncertain row is how a ledger acquires a
+              duplicate nobody can explain.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card pad">
+    <h2>What this replaces</h2>
+    <div class="cols2" style="margin-top:10px">
+      <div>
+        <div class="kv"><span>Today — one card per record</span><span>20 clicks</span></div>
+        <div class="kv"><span>Blanket auto-approve</span><span>1 click, 0 seen</span></div>
+        <div class="kv"><span><strong>This</strong></span><span><strong>1 click, 20 seen</strong></span></div>
+      </div>
+      <div>
+        <p class="note" style="margin:0">Auto-approve and batch review cost the same effort. They differ in
+          what the approval attaches to: a promise about future payloads, or the specific rows in front of you.
+          Only the second survives a mis-mapped column.</p>
+      </div>
+    </div>
+  </section>
+
+</div>

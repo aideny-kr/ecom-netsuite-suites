@@ -548,6 +548,38 @@ def merge_slot_values(
     # to a populated `body`; writing back to `normalized.payload_key`
     # resolves both by construction.
     merged_record = {**normalized.record, **slot_values}
+
+    # RE-STAMP. The card was stamped at build time; filling slots CHANGES the
+    # payload, so the key derived from the draft no longer identifies this
+    # work. Leaving it gave two differently-completed drafts one externalId —
+    # NetSuite refuses the second, and a duplicate refusal classifies as
+    # WRITTEN, reporting a record created that never existed.
+    #
+    # `payload_with_idempotency_key` replaces OUR key and never a caller's, and
+    # is stable for unchanged work (our own key is scrubbed from the hash
+    # material), so re-merging identical values does not churn it. Best-effort:
+    # a keying failure must not block a human from completing their own card.
+    try:
+        from app.services.chat.write_side_effect import payload_with_idempotency_key
+
+        merged_record, _ = payload_with_idempotency_key(
+            merged_record,
+            batch_id=None,
+            row_index=None,
+            record_type=structured_output.get("record_type"),
+            mutation_type=structured_output.get("mutation_type"),
+            record_id=normalized.record_id,
+        )
+    except Exception:
+        # This module has no module-level logger; resolve one here rather than
+        # referencing a name that does not exist. The first draft of this block
+        # called `logger.warning(...)` and would have raised NameError — turning
+        # a best-effort guard into the crash it exists to prevent, on a path no
+        # test covered because it was marked `pragma: no cover`.
+        import logging
+
+        logging.getLogger(__name__).warning("idempotency key not re-stamped after slot merge", exc_info=True)
+
     merged_input = dict(tool_input)
     original_value = tool_input.get(normalized.payload_key)
     if isinstance(original_value, str):

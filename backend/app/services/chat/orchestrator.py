@@ -2185,6 +2185,97 @@ async def run_chat_turn(
                 # retry, auto-revert-to-pending) risks a SECOND post for a
                 # write NetSuite already accepted. A human must check the
                 # NetSuite record and resolve it manually.
+                # ── Side-effect log: recorded and COMMITTED before the call ──
+                # agent-graph.md #10. The ordering is the whole mechanism: a
+                # row written AFTER the call, or left uncommitted, vanishes in
+                # exactly the crash it exists to survive. Drilled with a real
+                # kill -9 (see the design spec) — resume then settles the row
+                # by ASKING NetSuite, never by retrying blind.
+                #
+                # Best-effort: a logging failure must not block a write a human
+                # already approved. It degrades to today's behaviour, which is
+                # the same unrecoverable timeout we have always had — no worse.
+                _idem_key_for_write: str | None = None
+                try:
+                    from app.services.chat.write_payload import PayloadParseError
+                    from app.services.chat.write_payload import normalize_write_payload as _norm_se
+                    from app.services.chat.write_side_effect import build_idempotency_key
+                    from app.services.chat.write_side_effect_repo import record_attempt_isolated
+
+                    # `.record`, not `.fields` — the FULL payload including line
+                    # sublists. `.fields` strips them, which would log a
+                    # header-only copy of a write that had lines and derive a
+                    # key two different orders could share.
+                    try:
+                        # Parse ONCE. `record` and `record_id` are independent:
+                        # a call shaped {"id": "42", "data": "{}"} parses fine
+                        # with an EMPTY record and a real id. Gating record_id
+                        # on `if _se_payload` treated that legitimate shape as
+                        # a parse failure and dropped the id from the key,
+                        # reintroducing the delete-5-vs-delete-99 collision the
+                        # key material exists to prevent.
+                        _se_parsed = _norm_se(tool_input)
+                        _se_payload, _se_record_id = _se_parsed.record, _se_parsed.record_id
+                    except PayloadParseError:
+                        # A payload-less mutation shape. Caught by TYPE so a
+                        # real parse bug still surfaces.
+                        _se_payload, _se_record_id = {}, None
+
+                    # Which account this write is aimed at. It participates
+                    # in the key (sandbox and production are not the same
+                    # write) AND is stored on the row, because a write is only
+                    # reconcilable against the connector it was sent to — the
+                    # model's own docstring says so, and nothing was setting it.
+                    _conn_for_idem = None
+                    try:
+                        from app.services.chat.tools import parse_external_tool_name
+
+                        _parsed_tool = parse_external_tool_name(tool_name)
+                        _conn_for_idem = _parsed_tool[0] if _parsed_tool else None
+                    except Exception:
+                        _conn_for_idem = None
+
+                    _idem_key_for_write = (
+                        _se_payload.get("externalId")
+                        or _se_payload.get("externalid")
+                        or build_idempotency_key(
+                            batch_id=None,
+                            row_index=None,
+                            payload=_se_payload,
+                            connector_id=str(_conn_for_idem) if _conn_for_idem else None,
+                            record_type=_so.get("record_type"),
+                            mutation_type=_so.get("mutation_type"),
+                            # record_id from the SAME source the card used
+                            # (normalize_write_payload, which reads tool_input
+                            # "id" or the payload's own "id"). Reading
+                            # `tool_input["recordId"]` here instead made the
+                            # orchestrator derive a DIFFERENT key than the one
+                            # stamped on the card for identical work.
+                            record_id=_se_record_id,
+                        )
+                    )
+                    # ISOLATED SESSION — the log shares no transactional fate
+                    # with this turn. It cannot commit our pending state, and
+                    # its failure cannot leave our session needing a rollback
+                    # (which would expire every ORM object here and make the
+                    # next `session.id` access raise MissingGreenlet). Returns
+                    # None instead of raising; never needs a compensating
+                    # rollback on the caller's session, because it never
+                    # touched it.
+                    _idem_key_for_write = await record_attempt_isolated(
+                        tenant_id=tenant_id,
+                        idempotency_key=_idem_key_for_write,
+                        record_type=_so.get("record_type", "record"),
+                        mutation_type=_so.get("mutation_type", "write"),
+                        payload=_se_payload,
+                        connector_id=_conn_for_idem,
+                        correlation_id=correlation_id,
+                        session_id=session.id,
+                    )
+                except Exception:
+                    logger.warning("side-effect log not recorded; write proceeds", exc_info=True)
+                    _idem_key_for_write = None
+
                 _exec_result_str = await execute_tool_call(
                     # The ONE place this may be True. `tool_name`/`tool_input`
                     # here came from validate_and_extract_confirmation, which
@@ -2201,6 +2292,22 @@ async def run_chat_turn(
                     db=db,
                     session_id=str(session.id),
                 )
+
+                # Settle the side-effect row from what NetSuite actually said.
+                # Only a DEFINITE answer moves it off 'attempted' — a timeout
+                # leaves it there, which is the state that means "go and look"
+                # and the one the system could not represent before.
+                if _idem_key_for_write:
+                    # Also isolated: NetSuite has already acted by now, so a
+                    # bookkeeping failure must not be able to crash the turn
+                    # that reports it. Swallows and returns ATTEMPTED.
+                    from app.services.chat.write_side_effect_repo import settle_from_result_isolated
+
+                    await settle_from_result_isolated(
+                        tenant_id=tenant_id,
+                        idempotency_key=_idem_key_for_write,
+                        raw_result=_exec_result_str,
+                    )
 
                 _mutation_type = _so.get("mutation_type", "write")
                 _record_type = _so.get("record_type", "record")

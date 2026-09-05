@@ -1210,3 +1210,96 @@ class TestServerEnforcesDeclaredSlotCoverage:
         error_events = [e for e in events if e.get("type") == "error"]
         assert error_events
         assert "not editable" in error_events[0]["error"]
+
+
+class TestSlotMergeRestampsTheKey:
+    """T2 gate round 4. `payload_with_idempotency_key` recomputes our own key
+    whenever the payload changes — but `merge_slot_values` never called it, so
+    the guarantee was documented and not delivered on the one path that
+    actually changes a payload after stamping.
+
+    Two drafts of one card completed differently are different writes. Sharing
+    an externalId makes NetSuite refuse the second, and a duplicate refusal
+    classifies as WRITTEN — reporting a record created that never existed.
+    """
+
+    def _card(self):
+        from app.services.chat.write_side_effect import payload_with_idempotency_key
+        from app.services.chat.write_validator import EditableSlot, ValidationResult
+
+        # A card as base_agent builds it: stamped at build time, with a
+        # required slot the human has yet to fill.
+        stamped, _ = payload_with_idempotency_key(
+            {"companyname": "test ai customer"},
+            batch_id=None,
+            row_index=None,
+            record_type="customer",
+        )
+        validation = ValidationResult(
+            ok=False,
+            missing_required=["subsidiary"],
+            editable_slots=[
+                EditableSlot(
+                    name="subsidiary",
+                    label="Primary Subsidiary",
+                    type="select",
+                    allowed=[
+                        {"value": "1", "label": "Framework Inc"},
+                        {"value": "2", "label": "Framework Ltd"},
+                    ],
+                )
+            ],
+        )
+        payload = build_confirmation_payload(
+            mutation_type="create",
+            record_type="customer",
+            tool_name=TOOL,
+            tool_input={"recordType": "customer", "data": json.dumps(stamped)},
+            session_id=SESSION,
+            validation=validation,
+        )
+        assert payload is not None
+        return json.loads(json.dumps(payload.model_dump()))
+
+    def _merged_external_id(self, slot_values):
+        return self._merge(self._card(), slot_values)
+
+    @staticmethod
+    def _merge(structured_output, slot_values):
+        from app.services.chat.write_confirmation_service import merge_slot_values
+
+        ok, _tool, merged, err = merge_slot_values(structured_output, slot_values, SESSION)
+        assert ok, err
+        return json.loads(merged["data"])["externalId"]
+
+    def test_two_different_completions_get_different_keys(self):
+        a = self._merged_external_id({"subsidiary": "1"})
+        b = self._merged_external_id({"subsidiary": "2"})
+        assert a != b, "a changed payload must carry a changed key"
+
+    def test_the_same_completion_is_stable(self):
+        """Idempotent: re-merging identical values must not churn the key, or a
+        retry of the same work becomes a new write."""
+        assert self._merged_external_id({"subsidiary": "1"}) == self._merged_external_id({"subsidiary": "1"})
+
+    def test_a_restamp_failure_does_not_break_the_merge(self):
+        """The guard is best-effort, so its failure path must actually run.
+
+        Its first draft called a `logger` this module does not define — the
+        except branch would have raised NameError and crashed the merge it was
+        meant to protect. `pragma: no cover` is why no test caught it.
+        agent-graph.md #12: recovery code that has never run is not recovery
+        code.
+        """
+        # Build the card FIRST — the patch must scope to the merge alone,
+        # or it fires while the draft is still being stamped.
+        structured_output = self._card()
+        with patch(
+            "app.services.chat.write_side_effect.payload_with_idempotency_key",
+            side_effect=RuntimeError("boom"),
+        ):
+            external_id = self._merge(structured_output, {"subsidiary": "1"})
+
+        # The merge still completed, carrying the draft's key unchanged —
+        # exactly the pre-restamp behaviour, which is no worse than before.
+        assert external_id.startswith("ss-idem-")
