@@ -79,3 +79,15 @@ class TestCeligoIsNotANetSuiteSource:
         """The control: the external-MCP branch must keep working for NetSuite."""
         calls = [{"tool": "ext__c0ffee00c0ffee00c0ffee00c0ffee00__ns_runCustomSuiteQL"}]
         assert _compute_source_pin_update(calls) == "netsuite"
+
+    def test_a_local_celigo_flows_only_turn_leaves_the_pin_alone(self):
+        """Task 4B: the local celigo.* tools (LLM-facing `celigo_flows` etc.)
+        are just as much Celigo-not-NetSuite as the external connector's read
+        tools -- `_compute_source_pin_update` widens from `is_celigo_tool`
+        (external-only) to `is_celigo_source` (both families, both spellings)
+        for exactly this reason."""
+        assert _compute_source_pin_update([{"tool": "celigo_flows"}]) == "leave_pin"
+
+    def test_a_local_celigo_flows_call_alongside_netsuite_still_pins_netsuite(self):
+        calls = [{"tool": "celigo_flows"}, {"tool": "netsuite_suiteql"}]
+        assert _compute_source_pin_update(calls) == "netsuite"

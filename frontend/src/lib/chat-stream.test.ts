@@ -112,4 +112,62 @@ describe("normalizeStreamEvent — live path regression (shared helper)", () => 
       expect(event.data.isMetric).toBe(false);
     }
   });
+
+  it("preserves a caveats list carried on the data_table SSE payload", () => {
+    const event = normalizeStreamEvent({
+      type: "data_table",
+      data: {
+        columns: ["flow"],
+        rows: [["Sales Order Sync"]],
+        row_count: 1,
+        query: "",
+        truncated: false,
+        caveats: ["Nightly snapshot as of 2026-09-01T00:00:00+00:00."],
+      },
+    });
+    if (event?.type === "data_table") {
+      expect(event.data.caveats).toEqual(["Nightly snapshot as of 2026-09-01T00:00:00+00:00."]);
+    }
+  });
+
+  it("leaves caveats undefined when absent from the payload", () => {
+    const event = normalizeStreamEvent({
+      type: "data_table",
+      data: {
+        columns: ["tranid"],
+        rows: [["T-001"]],
+        row_count: 1,
+        query: "SELECT tranid FROM transaction",
+        truncated: false,
+      },
+    });
+    if (event?.type === "data_table") {
+      expect(event.data.caveats).toBeUndefined();
+    }
+  });
+});
+
+describe("coerceDataTableData — caveats", () => {
+  it("round-trips a caveats list from a persisted payload", () => {
+    const coerced = coerceDataTableData({
+      columns: ["flow"],
+      rows: [["Sales Order Sync"]],
+      row_count: 1,
+      query: "",
+      truncated: false,
+      caveats: ["2 of 5 flows not yet error-checked."],
+    });
+    expect(coerced.caveats).toEqual(["2 of 5 flows not yet error-checked."]);
+  });
+
+  it("leaves caveats undefined when the persisted payload has none", () => {
+    const coerced = coerceDataTableData({
+      columns: ["tranid"],
+      rows: [["T-001"]],
+      row_count: 1,
+      query: "SELECT tranid FROM transaction",
+      truncated: false,
+    });
+    expect(coerced.caveats).toBeUndefined();
+  });
 });

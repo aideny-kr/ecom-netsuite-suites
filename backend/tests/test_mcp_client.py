@@ -72,6 +72,10 @@ EXPECTED_TOOLS = {
     "docs.create",
     "metric.resolve",
     "metric.compute",
+    "celigo.integrations",
+    "celigo.flows",
+    "celigo.flow_steps",
+    "celigo.flow_errors",
 }
 
 

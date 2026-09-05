@@ -46,6 +46,7 @@ TEST_ALLOWLIST = {
     "tests/services/test_celigo_dispatcher_feature_flag.py",  # seeds a celigo_mcp row to drive the dispatcher
     "tests/test_connections.py",  # seeds Celigo rows to test the generic-DELETE refusal
     "tests/test_celigo_write_guard_containment.py",  # names the token to check for it
+    "tests/test_chat_tools_celigo_inventory.py",  # seeds a celigo_mcp row alongside the flow-map connection
 }
 
 GUARDED_TABLES = ("connections", "mcp_connectors")

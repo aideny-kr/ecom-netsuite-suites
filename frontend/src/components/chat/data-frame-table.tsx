@@ -37,7 +37,7 @@ interface DataFrameTableProps {
 type SortDirection = "asc" | "desc" | null;
 
 export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
-  const { columns, rows, row_count, truncated, isMetric } = data;
+  const { columns, rows, row_count, truncated, isMetric, caveats } = data;
   const { exportToExcel, exportFromQuery, isExporting } = useExcelExport();
   const [sortCol, setSortCol] = useState<number | null>(null);
   const [sortDir, setSortDir] = useState<SortDirection>(null);
@@ -290,6 +290,20 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
           </TableBody>
         </table>
       </div>
+
+      {/* Caveats — the honesty channel any data_table tool may carry (spec
+          docs/superpowers/specs/2026-09-04-celigo-chat-access.md §8): snapshot age,
+          unchecked-error flags, stall verdicts, etc. Nothing rendered when absent. */}
+      {caveats && caveats.length > 0 && (
+        <div data-testid="data-table-caveats" className="space-y-1 border-t px-4 py-2">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Note</p>
+          {caveats.map((caveat, i) => (
+            <p key={i} className="text-[11px] text-muted-foreground">
+              {caveat}
+            </p>
+          ))}
+        </div>
+      )}
 
       {/* Footer */}
       <div className="flex items-center justify-between border-t px-4 py-2">

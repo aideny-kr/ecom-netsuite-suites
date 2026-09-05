@@ -143,6 +143,16 @@ def _all_known_tool_names_for_tenant_with_every_connector() -> set[str]:
         "sheets_read_range",
         "metric_resolve",
         "metric_compute",
+        # Celigo flow-map read tools (task 3/4, spec
+        # docs/superpowers/specs/2026-09-04-celigo-chat-access.md) -- gated on the
+        # `celigo` flag + flow-map connection (task 4A), so absent from THIS
+        # tenant-with-every-connector fixture unless that gate is also satisfied;
+        # listed here because the sanitized names are still the known-tool set the
+        # prompt-noise check must recognise.
+        "celigo_integrations",
+        "celigo_flows",
+        "celigo_flow_steps",
+        "celigo_flow_errors",
         # Synthetic control tool (Layer-2 reasoning escalation signal)
         "escalate_reasoning",
         # Added by build_all_tool_definitions (result_reference_tool)

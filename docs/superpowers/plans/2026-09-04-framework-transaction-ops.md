@@ -324,3 +324,28 @@ must require its inputs at the action boundary. A live execution of the exact lo
 projection and collectors supplies evidence beyond the synthetic test fixture. Missing-order creation
 and dynamic tax-assessment evidence remain separate outstanding work; this change
 does not claim either of those execution paths is complete.
+
+
+### Latest-main integration and live native identity evidence
+
+The branch integrates origin/main through `b5ff89cd` without conflicts. The merged
+backend passes 7,626 tests (2 skipped), and the frontend passes 1,061 tests plus
+its production build. Framework main remains an ancestor eight commits behind
+origin main; no remote main branch has been changed by this task.
+
+Fresh read-only samples in USD, EUR and CZK show that the current import does not
+populate `custcol_fw_solidus_line_id`. It stores `custcol_fw_inventory_unit_ids`
+and `custcol_fw_original_ecom_sku`. All 23 sampled native lines match one complete,
+unique source inventory-unit set, with matching original SKU and quantity. The
+current reader correctly reports incomplete lines until this explicit identity
+profile is integrated; SKU-only or positional matching is not sufficient proof.
+The B.V. API also omits `isTaxable` on lines while supplying native `tax1Amt`,
+custom VAT and tax code 4059. An isolated regression-tested adapter change is
+being prepared; it is not yet part of this commit or a live deployment.
+
+The current CZK source adjustments use tax source ID 7 and are finalized with
+update clocks. A bounded read of `tax_rates/7` through the Admin connection is
+unavailable (Celigo HTTP 422). The inspected 61 Celigo connections contain no
+Avalara or Metabase connection. Neither this absence nor an effective rate proves
+a statutory calculation; dynamic assessment policy remains explicit outstanding
+work alongside missing-order creation.

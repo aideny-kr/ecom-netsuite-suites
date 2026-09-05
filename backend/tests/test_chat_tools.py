@@ -57,6 +57,45 @@ class TestBuildLocalToolDefinitions:
         assert "query" in suiteql["input_schema"]["required"]
 
 
+class TestBooleanParamsRenderAsBooleans:
+    """Task 4F: `_schema_property_to_anthropic` had no ``"boolean"`` branch, so
+    every boolean-typed MCP param (registry ``"type": "boolean"``) fell through
+    to the ``else`` branch and was advertised to the model as
+    ``{"type": "string", "default": false}`` -- the model then sends a JSON
+    string, and the handler's strict ``_validate_bool`` rejects it as an
+    execution error. This asserts the built Anthropic tool schema for several
+    real boolean params, across several registry entries, so the fix is not
+    accidentally narrow to one tool."""
+
+    def test_celigo_flows_boolean_params_are_boolean(self):
+        defs = build_local_tool_definitions()
+        celigo_flows = next(d for d in defs if d["name"] == "celigo_flows")
+        props = celigo_flows["input_schema"]["properties"]
+        assert props["only_open_errors"]["type"] == "boolean"
+        assert props["only_open_errors"]["default"] is False
+        assert props["only_stalled"]["type"] == "boolean"
+        assert props["only_stalled"]["default"] is False
+
+    def test_pivot_include_total_is_boolean(self):
+        defs = build_local_tool_definitions()
+        pivot = next(d for d in defs if d["name"] == "pivot_query_result")
+        assert pivot["input_schema"]["properties"]["include_total"]["type"] == "boolean"
+
+    def test_workspace_list_files_recursive_is_boolean(self):
+        defs = build_local_tool_definitions()
+        list_files = next(d for d in defs if d["name"] == "workspace_list_files")
+        prop = list_files["input_schema"]["properties"]["recursive"]
+        assert prop["type"] == "boolean"
+        assert prop["default"] is True
+
+    def test_non_boolean_params_are_unaffected(self):
+        """Control: a string param on the same tool must still come out as
+        a string, not accidentally widened by the new branch."""
+        defs = build_local_tool_definitions()
+        celigo_flows = next(d for d in defs if d["name"] == "celigo_flows")
+        assert celigo_flows["input_schema"]["properties"]["integration"]["type"] == "string"
+
+
 # ---------------------------------------------------------------------------
 # build_external_tool_definitions
 # ---------------------------------------------------------------------------

@@ -38,6 +38,23 @@ class TestBuildToolInventoryBlock:
         block = build_tool_inventory_block([_tool("netsuite_suiteql", "SuiteQL.", "data_table")])
         assert "BigQuery" not in block
 
+    def test_celigo_tool_triggers_dialect_free_hint(self):
+        """Task 4D (spec docs/superpowers/specs/2026-09-04-celigo-chat-access.md
+        §6-§7): the hint carries no table/column/schema words -- it's an intent
+        pointer ("use the celigo tools"), not a dialect rule like BigQuery's."""
+        block = build_tool_inventory_block(
+            [
+                _tool("netsuite_suiteql", "SuiteQL.", "data_table"),
+                _tool("celigo_flows", "List Celigo flows.", "data_table"),
+            ]
+        )
+        assert "Celigo" in block
+        assert "read-only snapshots" in block
+
+    def test_no_celigo_hint_when_no_celigo_tool(self):
+        block = build_tool_inventory_block([_tool("netsuite_suiteql", "SuiteQL.", "data_table")])
+        assert "Celigo" not in block
+
     def test_external_mcp_tool_listed_with_prefix_hint(self):
         block = build_tool_inventory_block(
             [_tool("ext__shopify_list_orders", "[shopify_mcp] List Shopify orders.", "other")]

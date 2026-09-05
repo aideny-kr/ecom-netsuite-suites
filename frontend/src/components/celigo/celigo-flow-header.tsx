@@ -46,11 +46,6 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
  * re-hardcoded number. */
 export const AI_DESCRIPTION_CLAMP_CHARS = 200;
 
-/** localStorage key for "Focus canvas" -- `"1"` collapsed, absent (or
- * anything else) expanded. One key for the whole surface, not per-flow: a
- * viewer who wants the canvas maximized wants that on every flow they open. */
-const FLOW_HEADER_COLLAPSED_KEY = "celigo.flowHeaderCollapsed";
-
 /** "2 Sep 2026" — day, short month, full year, read off UTC fields so the
  * date shown never depends on the viewer's (or the test runner's) local
  * timezone. Deliberately carries the year (unlike `celigo-integration-
@@ -228,6 +223,8 @@ export function CeligoFlowHeader({
   integrationCeligoId,
   clonedFrom,
   integrationNotice,
+  headerCollapsed,
+  onToggleHeaderCollapsed,
 }: {
   detail: CeligoFlowDetail;
   lastSyncedAt: string | null;
@@ -244,6 +241,18 @@ export function CeligoFlowHeader({
    * integration name and Open-in-Celigo link need an explanation that is not
    * "this flow has no integration". */
   integrationNotice?: JSX.Element | null;
+  /** "Focus canvas" -- the header collapses to its first row (pills, title,
+   * actions), giving the canvas below the rest of the viewport. Lifted to
+   * `celigo-flow-page.tsx` (celigo flow sizing UI) rather than owned here:
+   * the parent ALSO has to shrink the real header PANEL and hide the
+   * divider between it and the canvas when this flips, neither of which
+   * this component can reach on its own -- so it is the single source of
+   * truth for both the boolean and its `localStorage` persistence, and this
+   * component is purely presentational for it (same pattern the navigator
+   * rail's `collapsed`/`onToggle` props already use for the SAME reason:
+   * `celigo-flow-page.tsx`'s `navCollapsed`/`toggleNav`). */
+  headerCollapsed: boolean;
+  onToggleHeaderCollapsed: () => void;
 }): JSX.Element {
   // The AI description is inherited free text (see the block below), not
   // authored for this UI -- some run to ten lines. Collapsed to a 2-line
@@ -259,38 +268,6 @@ export function CeligoFlowHeader({
   // narrowest inspector-open width.
   const aiText = detail.ai_description_detailed ?? detail.ai_description_summary;
   const aiClampable = !!aiText && aiText.length > AI_DESCRIPTION_CLAMP_CHARS;
-
-  // "Focus canvas" -- the header collapses to its first row (pills, title,
-  // actions), giving the canvas below the rest of the viewport (finding: the
-  // approved mockup's diagram was getting only half the height). Persisted
-  // per VIEWER (not per flow -- one preference for the whole surface) under
-  // a fixed key; read once via a `useState` initializer so a real browser
-  // restores the choice before first paint but SSR/jsdom -- which never see
-  // `window` the same way twice -- always render expanded. Every read/write
-  // is try/catched: a viewer with storage disabled (private mode, blocked
-  // site data) must still get a working, just non-persistent, toggle.
-  const [headerCollapsed, setHeaderCollapsed] = useState<boolean>(() => {
-    if (typeof window === "undefined") return false;
-    try {
-      return window.localStorage.getItem(FLOW_HEADER_COLLAPSED_KEY) === "1";
-    } catch {
-      return false;
-    }
-  });
-
-  function toggleHeaderCollapsed() {
-    setHeaderCollapsed((prev) => {
-      const next = !prev;
-      try {
-        if (next) window.localStorage.setItem(FLOW_HEADER_COLLAPSED_KEY, "1");
-        else window.localStorage.removeItem(FLOW_HEADER_COLLAPSED_KEY);
-      } catch {
-        // Best effort -- the toggle still works for this render, it just
-        // won't survive a reload.
-      }
-      return next;
-    });
-  }
 
   const syncSettled = syncStatusState === "success";
   const paused = detail.disabled === true;
@@ -349,7 +326,7 @@ export function CeligoFlowHeader({
           <button
             type="button"
             aria-pressed={headerCollapsed}
-            onClick={toggleHeaderCollapsed}
+            onClick={onToggleHeaderCollapsed}
             className="rounded-md border px-2 py-1 text-[11.5px] text-muted-foreground hover:text-foreground"
           >
             {headerCollapsed ? "Show details" : "Focus canvas"}
