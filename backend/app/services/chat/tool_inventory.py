@@ -19,14 +19,26 @@ _BIGQUERY_HINT = (
     "with SuiteQL — they are different dialects."
 )
 
+# Task 4D (spec docs/superpowers/specs/2026-09-04-celigo-chat-access.md §6-§7):
+# ONE dialect-free hint sentence, mirroring the BigQuery pattern above -- but
+# unlike BigQuery's SQL-syntax warning, this carries no table/column/schema
+# words at all (the profile fragment owns the honesty/read-only rules; this
+# is just an intent pointer so the model reaches for these tools).
+_CELIGO_HINT = (
+    "\nCELIGO FLOW MAP:\n"
+    "This workspace has a synced Celigo flow map -- use the celigo tools for "
+    "integration and flow health; they are read-only snapshots."
+)
+
 
 def build_tool_inventory_block(tool_definitions: list[dict]) -> str:
     """Render the tool schema as a prompt block the LLM can trust.
 
     Format: an XML block listing every tool's name and description, followed
-    by an optional BigQuery dialect hint when BigQuery tools are present.
-    Returns "" for an empty tool list so callers can unconditionally inject
-    the result into a prompt template.
+    by an optional BigQuery dialect hint when BigQuery tools are present, and
+    an optional Celigo hint when celigo.* tools are present. Returns "" for an
+    empty tool list so callers can unconditionally inject the result into a
+    prompt template.
     """
     if not tool_definitions:
         return ""
@@ -41,6 +53,10 @@ def build_tool_inventory_block(tool_definitions: list[dict]) -> str:
     has_bigquery = any(td.get("name", "").startswith("bigquery_") for td in tool_definitions)
     if has_bigquery:
         lines.append(_BIGQUERY_HINT)
+
+    has_celigo = any(td.get("name", "").startswith("celigo_") for td in tool_definitions)
+    if has_celigo:
+        lines.append(_CELIGO_HINT)
 
     return "\n".join(lines)
 
