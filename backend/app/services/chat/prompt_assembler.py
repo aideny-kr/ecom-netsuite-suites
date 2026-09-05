@@ -57,7 +57,10 @@ def build_source_pin_hint(source_pin: str | None) -> str:
     """Build a lightweight prompt hint for session source affinity."""
     if not source_pin:
         return ""
-    source_name = {"bigquery": "BigQuery", "netsuite": "NetSuite"}.get(source_pin, source_pin)
+    # "celigo" never actually reaches here today (_compute_source_pin_update treats
+    # Celigo as source-agnostic and leaves the pin alone -- see its docstring), but
+    # the name map stays complete for every source that function could return.
+    source_name = {"bigquery": "BigQuery", "netsuite": "NetSuite", "celigo": "Celigo"}.get(source_pin, source_pin)
     return (
         f"\n\n## Session Context\n"
         f"Previous queries in this session used {source_name}. "

@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.services.chat.prompt_cache import split_system_prompt
-from app.services.chat.tool_categories import categorize, is_celigo_tool
+from app.services.chat.tool_categories import categorize, is_celigo_source
 from app.services.drive_rag.retriever import retrieve_drive_chunks
 from app.services.metrics.metric_compute import condense_metric_for_llm, is_suppressed_metric_payload
 
@@ -732,7 +732,13 @@ def _compute_source_pin_update(tool_calls_log: list[dict]) -> str | None:
         # NetSuite and made a Celigo+BigQuery turn look like a source conflict.
         # Source-agnostic, so it contributes nothing either way -- the same
         # treatment metric_compute's `expression` backend gets above.
-        if is_celigo_tool(name):
+        #
+        # is_celigo_source (not is_celigo_tool) -- task 4B: is_celigo_tool only
+        # recognises the EXTERNAL connector's `ext__...` names; this repo's own
+        # local `celigo.*`/`celigo_*` chat tools (task 3) are exactly as much
+        # "not NetSuite" as the external ones, and is_celigo_source is the one
+        # place both spellings of both families are recognized.
+        if is_celigo_source(name):
             continue
 
         if cat == "bigquery":

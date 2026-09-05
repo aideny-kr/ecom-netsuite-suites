@@ -133,3 +133,11 @@ class TestSourcePinHint:
     def test_no_pin(self):
         result = build_source_pin_hint(None)
         assert result == ""
+
+    def test_celigo_pin(self):
+        # Task 4B: harmless today (Celigo is source-agnostic and never
+        # actually sets the pin -- see _compute_source_pin_update), but keeps
+        # the name map complete for every source _compute_source_pin_update
+        # could in principle return.
+        result = build_source_pin_hint("celigo")
+        assert "Celigo" in result
