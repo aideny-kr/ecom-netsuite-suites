@@ -78,8 +78,11 @@ const SCRIPT = {
   used_by: [siteA, siteB, siteC, siteD, otherCopySite],
 };
 
+const DRAWER_WIDTH_KEY = "celigo.scriptDrawerWidth";
+
 beforeEach(() => {
   mocks.script.mockReset();
+  window.localStorage.removeItem(DRAWER_WIDTH_KEY);
 });
 
 describe("CeligoScriptDrawer — mount/unmount", () => {
@@ -115,26 +118,19 @@ describe("CeligoScriptDrawer — pending / error", () => {
 });
 
 describe("CeligoScriptDrawer — loaded, as a right-panel drawer over the inspector", () => {
-  it("renders role=dialog aria-label='Script source', with the drawer's fixed right-panel classes", () => {
+  it("renders role=dialog aria-label='Script source', with the drawer's fixed right-panel classes, opening at 560px with no stored width", () => {
     mocks.script.mockReturnValue(resolved(SCRIPT));
     wrap(<CeligoScriptDrawer scriptId="scr-1" onClose={vi.fn()} />);
 
     const dialog = screen.getByRole("dialog");
     expect(dialog).toHaveAttribute("aria-label", "Script source");
-    for (const cls of [
-      "fixed",
-      "inset-y-0",
-      "right-0",
-      "h-full",
-      "w-[560px]",
-      "max-w-[95vw]",
-      "translate-x-0",
-      "translate-y-0",
-      "rounded-none",
-      "border-l",
-    ]) {
+    for (const cls of ["fixed", "inset-y-0", "right-0", "h-full", "translate-x-0", "translate-y-0", "rounded-none", "border-l"]) {
       expect(dialog.className).toContain(cls);
     }
+    // Width is now dynamic (resizable), applied as inline style rather than
+    // a fixed Tailwind class — 560px is the documented default with no
+    // stored preference.
+    expect(dialog.style.width).toBe("560px");
   });
 
   it("renders the header hook chip + name, the copies/diverged and sites/flows pills, the code, the N2 banner, the Scripts-view text, and the used-by rows", () => {
@@ -275,5 +271,175 @@ describe("CeligoScriptDrawer — focus management", () => {
 
     await waitFor(() => expect(anchor).toHaveFocus());
     document.body.removeChild(anchor);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Celigo flow sizing UI — the drawer's left-edge grip (width) and maximize.
+// Behaviour contract: docs/superpowers/mockups/2026-09-04-celigo-flow-sizing.html
+// ---------------------------------------------------------------------------
+
+function maxDrawerWidthForTest(): number {
+  return window.innerWidth * 0.96;
+}
+
+describe("CeligoScriptDrawer — width persistence", () => {
+  it("opens at a stored width", () => {
+    window.localStorage.setItem(DRAWER_WIDTH_KEY, "640");
+    mocks.script.mockReturnValue(resolved(SCRIPT));
+    wrap(<CeligoScriptDrawer scriptId="scr-1" onClose={vi.fn()} />);
+
+    expect(screen.getByRole("dialog").style.width).toBe("640px");
+  });
+
+  it("clamps a stored width beyond the max to 96% of the viewport", () => {
+    window.localStorage.setItem(DRAWER_WIDTH_KEY, "5000");
+    mocks.script.mockReturnValue(resolved(SCRIPT));
+    wrap(<CeligoScriptDrawer scriptId="scr-1" onClose={vi.fn()} />);
+
+    const width = parseFloat(screen.getByRole("dialog").style.width);
+    expect(width).toBeCloseTo(maxDrawerWidthForTest(), 1);
+  });
+
+  it("clamps a stored width below the 480px minimum", () => {
+    window.localStorage.setItem(DRAWER_WIDTH_KEY, "100");
+    mocks.script.mockReturnValue(resolved(SCRIPT));
+    wrap(<CeligoScriptDrawer scriptId="scr-1" onClose={vi.fn()} />);
+
+    expect(screen.getByRole("dialog").style.width).toBe("480px");
+  });
+
+  it("falls back to 560 when localStorage.getItem throws", () => {
+    const getItemSpy = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("storage disabled");
+    });
+    try {
+      mocks.script.mockReturnValue(resolved(SCRIPT));
+      wrap(<CeligoScriptDrawer scriptId="scr-1" onClose={vi.fn()} />);
+      expect(screen.getByRole("dialog").style.width).toBe("560px");
+    } finally {
+      getItemSpy.mockRestore();
+    }
+  });
+
+  it("does not crash when localStorage.setItem throws on drag end", () => {
+    const setItemSpy = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("storage disabled");
+    });
+    try {
+      mocks.script.mockReturnValue(resolved(SCRIPT));
+      wrap(<CeligoScriptDrawer scriptId="scr-1" onClose={vi.fn()} />);
+      const grip = screen.getByRole("separator", { name: "Resize drawer" });
+      fireEvent.pointerDown(grip, { clientX: 500, pointerId: 1 });
+      fireEvent.pointerMove(grip, { clientX: 400, pointerId: 1 });
+      fireEvent.pointerUp(grip, { clientX: 400, pointerId: 1 });
+      expect(screen.getByRole("dialog").style.width).toBe("660px");
+    } finally {
+      setItemSpy.mockRestore();
+    }
+  });
+});
+
+describe("CeligoScriptDrawer — the left-edge grip", () => {
+  it("has the separator role/aria/tabIndex the brief specifies", () => {
+    mocks.script.mockReturnValue(resolved(SCRIPT));
+    wrap(<CeligoScriptDrawer scriptId="scr-1" onClose={vi.fn()} />);
+
+    const grip = screen.getByRole("separator", { name: "Resize drawer" });
+    expect(grip).toHaveAttribute("aria-orientation", "vertical");
+    expect(grip).toHaveAttribute("tabIndex", "0");
+    expect(grip).toHaveAttribute("aria-valuemin", "480");
+    expect(grip).toHaveAttribute("aria-valuenow", "560");
+  });
+
+  it("pointer drag on the grip changes the width — dragging left widens (grip on the LEFT edge)", () => {
+    mocks.script.mockReturnValue(resolved(SCRIPT));
+    wrap(<CeligoScriptDrawer scriptId="scr-1" onClose={vi.fn()} />);
+    const grip = screen.getByRole("separator", { name: "Resize drawer" });
+    const dialog = screen.getByRole("dialog");
+
+    fireEvent.pointerDown(grip, { clientX: 500, pointerId: 7 });
+    fireEvent.pointerMove(grip, { clientX: 440, pointerId: 7 }); // moved 60px left
+    expect(dialog.style.width).toBe("620px"); // 560 + 60
+    fireEvent.pointerUp(grip, { clientX: 440, pointerId: 7 });
+
+    // Persisted on drag end.
+    expect(window.localStorage.getItem(DRAWER_WIDTH_KEY)).toBe("620");
+  });
+
+  it("dragging right narrows the drawer", () => {
+    mocks.script.mockReturnValue(resolved(SCRIPT));
+    wrap(<CeligoScriptDrawer scriptId="scr-1" onClose={vi.fn()} />);
+    const grip = screen.getByRole("separator", { name: "Resize drawer" });
+    const dialog = screen.getByRole("dialog");
+
+    fireEvent.pointerDown(grip, { clientX: 500, pointerId: 3 });
+    fireEvent.pointerMove(grip, { clientX: 540, pointerId: 3 }); // moved 40px right
+    expect(dialog.style.width).toBe("520px"); // 560 - 40
+    fireEvent.pointerUp(grip, { clientX: 540, pointerId: 3 });
+  });
+
+  it("ArrowLeft widens by 24px and persists immediately, ArrowRight narrows", () => {
+    mocks.script.mockReturnValue(resolved(SCRIPT));
+    wrap(<CeligoScriptDrawer scriptId="scr-1" onClose={vi.fn()} />);
+    const grip = screen.getByRole("separator", { name: "Resize drawer" });
+    const dialog = screen.getByRole("dialog");
+
+    fireEvent.keyDown(grip, { key: "ArrowLeft" });
+    expect(dialog.style.width).toBe("584px");
+    expect(window.localStorage.getItem(DRAWER_WIDTH_KEY)).toBe("584");
+
+    fireEvent.keyDown(grip, { key: "ArrowRight" });
+    fireEvent.keyDown(grip, { key: "ArrowRight" });
+    expect(dialog.style.width).toBe("536px");
+  });
+
+  it("Home jumps to the 480px minimum, End jumps to the max", () => {
+    mocks.script.mockReturnValue(resolved(SCRIPT));
+    wrap(<CeligoScriptDrawer scriptId="scr-1" onClose={vi.fn()} />);
+    const grip = screen.getByRole("separator", { name: "Resize drawer" });
+    const dialog = screen.getByRole("dialog");
+
+    fireEvent.keyDown(grip, { key: "Home" });
+    expect(dialog.style.width).toBe("480px");
+
+    fireEvent.keyDown(grip, { key: "End" });
+    expect(parseFloat(dialog.style.width)).toBeCloseTo(maxDrawerWidthForTest(), 1);
+  });
+});
+
+describe("CeligoScriptDrawer — maximize", () => {
+  it("toggles aria-pressed, hides the grip, sets the drawer to full width, and restores the remembered width on restore", () => {
+    window.localStorage.setItem(DRAWER_WIDTH_KEY, "620");
+    mocks.script.mockReturnValue(resolved(SCRIPT));
+    wrap(<CeligoScriptDrawer scriptId="scr-1" onClose={vi.fn()} />);
+
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.style.width).toBe("620px");
+
+    const maximizeBtn = screen.getByRole("button", { name: "Maximize" });
+    expect(maximizeBtn).toHaveAttribute("aria-pressed", "false");
+    fireEvent.click(maximizeBtn);
+
+    const restoreBtn = screen.getByRole("button", { name: "Restore width" });
+    expect(restoreBtn).toHaveAttribute("aria-pressed", "true");
+    expect(dialog.className).toContain("w-full");
+    expect(screen.queryByRole("separator", { name: "Resize drawer" })).not.toBeInTheDocument();
+
+    fireEvent.click(restoreBtn);
+    expect(screen.getByRole("button", { name: "Maximize" })).toHaveAttribute("aria-pressed", "false");
+    expect(dialog.style.width).toBe("620px");
+    expect(screen.getByRole("separator", { name: "Resize drawer" })).toBeInTheDocument();
+  });
+
+  it("maximize is session state, not persisted — a fresh mount is not maximized even right after toggling it", () => {
+    mocks.script.mockReturnValue(resolved(SCRIPT));
+    const { unmount } = wrap(<CeligoScriptDrawer scriptId="scr-1" onClose={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "Maximize" }));
+    expect(screen.getByRole("button", { name: "Restore width" })).toBeInTheDocument();
+    unmount();
+
+    wrap(<CeligoScriptDrawer scriptId="scr-1" onClose={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "Maximize" })).toBeInTheDocument();
   });
 });
