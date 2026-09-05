@@ -39,6 +39,8 @@ def _schema_property_to_anthropic(name: str, spec: dict) -> dict:
     typ = spec.get("type", "string")
     if typ == "integer":
         prop["type"] = "integer"
+    elif typ == "boolean":
+        prop["type"] = "boolean"
     elif typ == "array":
         prop["type"] = "array"
     elif typ == "object":
