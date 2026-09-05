@@ -56,7 +56,13 @@ def plan_proposal(report, targets, config, *, now, guard=None, celigo=None):
             raise PlanningError("guard_stale")
         try:
             prepared = prepare_correction(
-                targets["orders"][0], source, reference_field=config.mapping_json["reference_field"], now=now
+                targets["orders"][0],
+                source,
+                reference_field=config.mapping_json["reference_field"],
+                now=now,
+                legacy_tax=config.mapping_json.get("netsuite_legacy_tax"),
+                account_id=config.netsuite_account_id,
+                tax_rounding=config.mapping_json.get("netsuite_tax_rounding"),
             )
         except NetSuiteActionError as exc:
             raise PlanningError(str(exc)) from None
@@ -64,6 +70,8 @@ def plan_proposal(report, targets, config, *, now, guard=None, celigo=None):
             raise PlanningError("guard_evidence_changed")
         action, before, after = prepared.action, prepared.before_json, prepared.after_json
         evidence["guard"] = guard
+        if config.mapping_json.get("netsuite_legacy_tax"):
+            evidence["native_tax_rounding"] = config.mapping_json.get("netsuite_tax_rounding")
     elif comparison.recommended_action == "no_action" and celigo and celigo.get("complete") is True:
         if celigo.get("provider") != "celigo" or celigo.get("order_reference") != source.order_reference:
             raise PlanningError("error_identity_unproven")
@@ -110,6 +118,7 @@ def plan_proposal(report, targets, config, *, now, guard=None, celigo=None):
                 key: value for key, value in report.get("source_provenance", {}).items() if key != "read_at"
             },
             "celigo": celigo.get("fingerprint") if action == "resolve_celigo_error" else None,
+            "native_tax_rounding": evidence.get("native_tax_rounding"),
         }
     )
     observations = [source.observed_at, lookup.observed_at, *(record.observed_at for record in records)]

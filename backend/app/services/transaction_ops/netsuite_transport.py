@@ -25,6 +25,7 @@ from app.services.netsuite_oauth_service import get_valid_token
 from app.services.transaction_ops import state_service as state
 from app.services.transaction_ops.netsuite_actions import NetSuiteActionError, validate_guard_url
 from app.services.transaction_ops.netsuite_reader import _account, _invalid_constant, _object
+from app.services.transaction_ops.normalization import NetSuiteLegacyTaxMapping
 
 MAX_GUARD_READ_CALLS = 4  # Conservative allowance including ordinary OAuth refresh.
 MAX_RESPONSE_BYTES = 2_000_000
@@ -107,9 +108,21 @@ async def _request(client, method, url, token, *, params=None, payload=None):
 
 async def _snapshot(client, url, token, config, record_id):
     reference = config.mapping_json["reference_field"]
-    body = await _request(
-        client, "GET", url, token, params={"action": "snapshot", "record_id": record_id, "reference_field": reference}
-    )
+    params = {"action": "snapshot", "record_id": record_id, "reference_field": reference}
+    expected_profile = None
+    if config.mapping_json.get("netsuite_legacy_tax") is not None:
+        try:
+            profile = NetSuiteLegacyTaxMapping.model_validate(config.mapping_json["netsuite_legacy_tax"])
+            if (
+                profile.account_id != _account(config.netsuite_account_id)
+                or profile.subsidiary_id != config.subsidiary_id
+            ):
+                raise ValueError
+        except ValueError:
+            raise NetSuiteActionError("guard_profile_scope_mismatch") from None
+        expected_profile = {"mode": profile.mode, "tax_code_id": profile.tax_code_id}
+        params.update(tax_mode=profile.mode, tax_code_id=profile.tax_code_id)
+    body = await _request(client, "GET", url, token, params=params)
     try:
         snapshot = _bounded_json(body.get("snapshot"))
         if (
@@ -118,6 +131,7 @@ async def _snapshot(client, url, token, config, record_id):
             or snapshot.get("record_id") != record_id
             or snapshot.get("subsidiary") != config.subsidiary_id
             or snapshot.get("reference_field") != reference
+            or snapshot.get("tax_profile") != expected_profile
         ):
             raise ValueError
     except (ValueError, TypeError):

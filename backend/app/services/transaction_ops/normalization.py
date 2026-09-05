@@ -21,6 +21,7 @@ from app.schemas.transaction_ops import (
     TransactionTax,
     _decimal,
 )
+from app.services.transaction_ops.netsuite_reader import _account
 
 
 class SourceTaxRule(EvidenceModel):
@@ -40,9 +41,23 @@ class NetSuiteCreateMapping(EvidenceModel):
     terms_id: str | None = Field(default=None, pattern=r"^[0-9]{1,30}$")
 
 
+class NetSuiteLegacyTaxMapping(EvidenceModel):
+    schema_version: Literal[1]
+    mode: Literal["aggregate_header", "line_tax_amount"]
+    account_id: str
+    subsidiary_id: str = Field(pattern=r"^[0-9]{1,30}$")
+    tax_code_id: str = Field(pattern=r"^[0-9]{1,30}$")
+
+    @field_validator("account_id")
+    @classmethod
+    def canonical_account(cls, value):
+        return _account(value)
+
+
 class TransactionMapping(EvidenceModel):
     action_mode: Literal["detect_only", "propose_actions"] = "detect_only"
     netsuite_create: NetSuiteCreateMapping | None = None
+    netsuite_legacy_tax: NetSuiteLegacyTaxMapping | None = None
     reference_field: str = Field(pattern=r"^(tranid|otherrefnum|externalid|custbody_[a-z0-9_]+)$", max_length=100)
     currency_minor_units: dict[str, Annotated[int, Field(strict=True, ge=0, le=6)]] = Field(
         default_factory=dict, max_length=100
@@ -191,13 +206,17 @@ def _normalize_framework(evidence, *, mapping, account_id, subsidiary_id):
             )
             for amount, source_tax_id, rule, adjustment_id in local_taxes:
                 tax_key = rule.netsuite_tax_id if rule else f"source_rate:{source_tax_id}"
+                allocation_key = None
                 if tax_counts[tax_key] > 1:
-                    # Distinct components mapped to a generic tax item remain
-                    # separate evidence; this mapping cannot prove allocation.
-                    local_known = False
+                    profile = mapping.netsuite_legacy_tax
+                    if profile and profile.subsidiary_id == subsidiary_id and profile.tax_code_id == tax_key:
+                        allocation_key = f"{key}:tax:{tax_key}"
+                    else:
+                        local_known = False
                     tax_key += f":source_rate:{source_tax_id}:adjustment:{adjustment_id}"
                 data = {
                     "key": f"{key}:tax:{tax_key}",
+                    "allocation_key": allocation_key,
                     "basis": net,
                     "amount": amount,
                     "rate": rule.rate if rule else None,
@@ -350,7 +369,10 @@ def _normalize_netsuite(order, *, mapping, account_id, observed_at):
     # Legacy SOLIDUS stores an effective aggregate header rate. It must not be
     # presented as each line's statutory rate. Preserve the observed line VAT
     # and header total, pending evidence of that integration's allocation rules.
-    if raw_taxes is None and header_tax:
+    if raw_taxes is None and mapping.netsuite_legacy_tax:
+        taxes, legacy_complete = _legacy_allocations(order, lines, mapping.netsuite_legacy_tax, account_id)
+        tax_complete = lines_complete and legacy_complete
+    elif raw_taxes is None and header_tax:
         code = (header.get("taxItem") or {}).get("id")
         for line in lines:
             if line.tax is not None and code is not None:
@@ -395,3 +417,48 @@ def _normalize_netsuite(order, *, mapping, account_id, observed_at):
         lines_complete=lines_complete,
         tax_complete=tax_complete,
     )
+
+
+def _legacy_allocations(order, lines, profile, account_id):
+    """Prove native/custom allocation agreement, never reverse-engineer rates.
+
+    These profiles describe the inspected Celigo imports. Taxed shipping is
+    intentionally incomplete until a distinct shipment-to-native allocation is
+    available. A native SuiteTax sublist always takes precedence over a profile.
+    """
+    header = order["header"]
+    known = (
+        _account(account_id) == profile.account_id
+        and str((header.get("subsidiary") or {}).get("id")) == profile.subsidiary_id
+        and _money(header, "custbody_fw_solidus_tax_amount") == _money(header, "taxTotal")
+        and (
+            _money(header, "shippingCost") == 0
+            or (_money(header, "shippingTax1Rate") == 0 and _money(header, "shippingTax2Rate") == 0)
+        )
+    )
+    if profile.mode == "aggregate_header":
+        rate = _money(header, "taxRate")
+        known = known and (
+            str((header.get("taxItem") or {}).get("id")) == profile.tax_code_id
+            and header.get("isTaxable") is True
+            and rate is not None
+            and 0 <= rate <= 1000
+        )
+    taxes = []
+    for line, raw in zip(lines, order.get("lines") or [], strict=True):
+        known = known and line.net is not None and line.net >= 0 and line.tax is not None and line.tax >= 0
+        if profile.mode == "line_tax_amount":
+            known = known and (
+                str((raw.get("taxCode") or {}).get("id")) == profile.tax_code_id
+                and raw.get("isTaxable") is True
+                and _money(raw, "tax1Amt") == line.tax
+            )
+        taxes.append(
+            TransactionTax(
+                key=f"{line.key}:tax:{profile.tax_code_id}",
+                calculation="reported_allocation",
+                basis=line.net,
+                amount=line.tax,
+            )
+        )
+    return taxes, known

@@ -50,6 +50,53 @@ NetSuite, compare the expected outcome, and update the operation ledger.
 Review account-specific sales-order workflows and user-event scripts when
 enabling the guard, because NetSuite runs its configured save automation.
 
+## Explicit legacy tax profiles
+
+`mapping_json.netsuite_legacy_tax` supports version 1 profiles with an exact
+`account_id`, `subsidiary_id`, numeric `tax_code_id`, and a `mode` of
+`aggregate_header` or `line_tax_amount`. Account aliases are canonicalized.
+The profile is explicit configuration; currency or a tax item's display name
+never selects it. Native SuiteTax detail takes precedence when present.
+
+The aggregate profile describes the inspected Framework Inc import: native
+header tax item/rate, explicit line taxability, custom line VAT and the custom
+header source tax amount must agree. It does not require nonexistent native
+line tax codes/rates. The line amount profile describes the BV import: each
+native `tax1amt` must equal the corresponding custom line VAT, with the exact
+configured native tax code. Both profiles require allocations to reconcile to
+the native header tax total. Taxed shipping still requires more evidence.
+
+Reported destination allocations have no claimed statutory rate. Source tax
+components retain their actual configured rates, rounding and adjustment IDs;
+each component must validate before multiple components can be compared with
+one destination allocation. A complete empty source adjustment list can prove
+zero tax. Missing source rates still prevent a repair or false-alarm proposal.
+
+The guard snapshot request adds `tax_mode` and `tax_code_id`. Its response must
+contain the same exact profile and native tax fields. Inc corrections require zero shipping on both sides and an explicit
+`netsuite_tax_rounding` policy (`half_up` or `half_even`). Their seven-place
+header rate is source tax divided by the proven taxable net line subtotal,
+multiplied by 100. The rounded native calculation must reproduce the exact
+source tax at the verified currency precision. The guard independently checks
+the seven-place rate using bounded integer arithmetic. This avoids copying the
+import's currency-dependent approximation when its denominator is unsuitable.
+BV corrections update
+native `tax1amt` and custom VAT together while retaining native `taxrate1`.
+The custom header source tax amount is guarded and updated in both modes.
+Mode-incompatible writes and positive tax rounded into a zero native rate are
+rejected. After save, the guard checks the complete native profile again; any
+changed native field leaves its receipt unknown. Independent platform
+verification still includes all these fields and the unchanged source.
+
+Live read-only checks on September 5 confirmed the current Inc native shape and
+that recent source adjustments omit a rate breakdown. An Avalara reporting
+mirror was inspected through the existing active BigQuery connector; its table
+was last modified in 2022 and contains only transaction/order IDs and timestamps.
+It is not current tax-calculation evidence. No source rate is inferred from it.
+NetSuite accounting-period dates are requested explicitly as ISO strings; the
+live API returned the open September 2026 period with `2026-09-01` and
+`2026-09-30`, independent of its default display-date locale.
+
 ## Build and validate the isolated SDF artifact
 
 From `suiteapp`, run:

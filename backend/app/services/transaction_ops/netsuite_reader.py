@@ -61,6 +61,9 @@ HEADER_FIELDS = frozenset(
         "taxRate",
         "isTaxable",
         "custbody_fw_solidus_order_total",
+        "custbody_fw_solidus_tax_amount",
+        "shippingTax1Rate",
+        "shippingTax2Rate",
     }
 )
 LINE_FIELDS = frozenset(
@@ -268,7 +271,8 @@ class _Reader:
             return {"complete": False, "items": [], "reason": "invalid_transaction_date"}
         if tran_date not in self.periods:
             query = (
-                "SELECT id, periodname, closed, alllocked, arlocked, aplocked, isadjust, startdate, enddate "
+                "SELECT id, periodname, closed, alllocked, arlocked, aplocked, isadjust, "
+                "TO_CHAR(startdate, 'YYYY-MM-DD') AS startdate, TO_CHAR(enddate, 'YYYY-MM-DD') AS enddate "
                 f"FROM accountingperiod WHERE startdate <= TO_DATE('{tran_date}', 'YYYY-MM-DD') "
                 f"AND enddate >= TO_DATE('{tran_date}', 'YYYY-MM-DD') AND isquarter = 'F' AND isyear = 'F'"
             )

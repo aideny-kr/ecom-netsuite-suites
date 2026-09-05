@@ -19,6 +19,7 @@ from pydantic import ValidationError
 from app.schemas.transaction_ops import TransactionSnapshot, _decimal
 from app.schemas.transaction_runs import _bounded_json
 from app.services.transaction_ops.netsuite_reader import NetSuiteEvidenceError, _account
+from app.services.transaction_ops.normalization import NetSuiteLegacyTaxMapping
 
 
 class NetSuiteActionError(ValueError):
@@ -174,18 +175,22 @@ def _source(source, now):
     return source
 
 
-def prepare_correction(target, source, *, reference_field="tranid", now=None):
+def prepare_correction(
+    target, source, *, reference_field="tranid", now=None, legacy_tax=None, account_id=None, tax_rounding=None
+):
     """Produce only existing-line money changes; retain a full guard snapshot."""
     try:
         with localcontext(Context(prec=60, Emin=-99, Emax=99)):
-            return _prepare_correction(target, source, reference_field, now or datetime.now(timezone.utc))
+            return _prepare_correction(
+                target, source, reference_field, now or datetime.now(timezone.utc), legacy_tax, account_id, tax_rounding
+            )
     except NetSuiteActionError:
         raise
     except (ValueError, TypeError, KeyError, AttributeError, DecimalException):
         raise NetSuiteActionError("invalid_correction_evidence") from None
 
 
-def _prepare_correction(target, source, reference_field, now):
+def _prepare_correction(target, source, reference_field, now, legacy_tax, account_id, tax_rounding):
     source = _source(source, now)
     if not isinstance(reference_field, str) or not re.fullmatch(
         r"tranid|otherrefnum|externalid|custbody_[a-z0-9_]+", reference_field
@@ -225,6 +230,10 @@ def _prepare_correction(target, source, reference_field, now):
         "orderstatus": "B",
     }
     before["period_id"] = _period(target, before["trandate"])
+    profile = None
+    if legacy_tax is not None:
+        profile = NetSuiteLegacyTaxMapping.model_validate(legacy_tax)
+        before.update(_legacy_before(target, source, profile, account_id))
     for api, guard in (
         ("exchangeRate", "exchangerate"),
         ("total", "total"),
@@ -261,12 +270,23 @@ def _prepare_correction(target, source, reference_field, now):
         rate = desired.net / desired.quantity
         if rate * desired.quantity != desired.net or rate.as_tuple().exponent < -12:
             raise NetSuiteActionError("unsupported_exact_rate")
-        tax_id = _id(line.get("taxCode"))
+        tax_id = profile.tax_code_id if profile and profile.mode == "aggregate_header" else _id(line.get("taxCode"))
         taxes = [tax for tax in source.tax_details if tax.key.startswith(f"{key}:tax:")]
-        if len(taxes) > 1 or (desired.tax != 0 and not taxes):
+        if (not profile and len(taxes) > 1) or (desired.tax != 0 and not taxes):
             raise NetSuiteActionError("unsupported_tax_allocation")
-        percent = _number(line.get("taxRate1"))
-        if taxes:
+        percent = None if profile else _number(line.get("taxRate1"))
+        if profile:
+            if (
+                tax_id != profile.tax_code_id
+                or any(
+                    (tax.allocation_key or tax.key) != f"{key}:tax:{tax_id}" or tax.basis != desired.net
+                    for tax in taxes
+                )
+                or sum((tax.amount for tax in taxes), Decimal(0)) != desired.tax
+            ):
+                raise NetSuiteActionError("tax_code_or_allocation_changed")
+            used_taxes.update(tax.key for tax in taxes)
+        elif taxes:
             tax = taxes[0]
             if tax.key != f"{key}:tax:{tax_id}" or tax.amount != desired.tax:
                 raise NetSuiteActionError("tax_code_or_allocation_changed")
@@ -279,9 +299,10 @@ def _prepare_correction(target, source, reference_field, now):
             "lineuniquekey": _id(line.get("lineUniqueKey")),
             "item": _id(line.get("item")),
             "custcol_fw_solidus_line_id": source_id,
-            "taxcode": tax_id,
             "isclosed": False,
         }
+        if not profile or profile.mode == "line_tax_amount":
+            original["taxcode"] = tax_id
         for api, guard in (
             ("quantity", "quantity"),
             ("quantityFulfilled", "quantityfulfilled"),
@@ -289,12 +310,19 @@ def _prepare_correction(target, source, reference_field, now):
             ("rate", "rate"),
             ("amount", "amount"),
             ("custcol_fw_vat_amount", "custcol_fw_vat_amount"),
-            ("taxRate1", "taxrate1"),
         ):
             original[guard] = _text(line.get(api))
+        if not profile or profile.mode == "line_tax_amount":
+            original["taxrate1"] = _text(line.get("taxRate1"))
+        if profile:
+            original["istaxable"] = True
+            if profile.mode == "line_tax_amount":
+                original["tax1amt"] = _text(line.get("tax1Amt"))
         before["lines"].append(original)
         fields = {"rate": _text(rate), "amount": _text(desired.net), "custcol_fw_vat_amount": _text(desired.tax)}
-        if percent != _number(line.get("taxRate1")):
+        if profile and profile.mode == "line_tax_amount":
+            fields["tax1amt"] = _text(desired.tax)
+        elif not profile and percent != _number(line.get("taxRate1")):
             fields["taxrate1"] = _text(percent)
         if any(original[field] != value for field, value in fields.items()):
             changes.append({"line": line_id, "fields": fields})
@@ -304,6 +332,32 @@ def _prepare_correction(target, source, reference_field, now):
     for field, value in (("custbody_fw_solidus_order_total", source.total), ("shippingcost", source.shipping)):
         if _number(before[field]) != value:
             body[field] = _text(value)
+    if profile:
+        if _number(before["custbody_fw_solidus_tax_amount"]) != source.tax:
+            body["custbody_fw_solidus_tax_amount"] = _text(source.tax)
+        if profile.mode == "aggregate_header":
+            if tax_rounding not in {"half_up", "half_even"}:
+                raise NetSuiteActionError("native_tax_rounding_unproven")
+            # All native lines are explicitly taxable and shipping is zero.
+            # The native basis is their net subtotal, even when source prices
+            # include VAT. The import's currency-dependent approximation is
+            # not sufficient evidence of NetSuite's taxable basis.
+            basis = source.subtotal
+            if source.tax and basis <= 0:
+                raise NetSuiteActionError("unsupported_header_tax_basis")
+            rate = (
+                (source.tax * 100 / basis).quantize(Decimal("0.0000001"), rounding=ROUND_HALF_UP)
+                if basis
+                else Decimal(0)
+            )
+            if rate > 1000 or (source.tax > 0 and rate == 0):
+                raise NetSuiteActionError("unsupported_header_tax_rate")
+            unit = Decimal(1).scaleb(-source.currency_minor_unit)
+            rounding = ROUND_HALF_UP if tax_rounding == "half_up" else ROUND_HALF_EVEN
+            if (basis * rate / 100).quantize(unit, rounding=rounding) != source.tax:
+                raise NetSuiteActionError("unsupported_header_tax_precision")
+            if _number(before["taxrate"]) != rate:
+                body["taxrate"] = _text(rate)
     if not changes and not body:
         raise NetSuiteActionError("no_change")
     after = {
@@ -318,3 +372,39 @@ def _prepare_correction(target, source, reference_field, now):
         },
     }
     return PreparedAction("correct_amounts", json.dumps(_bounded_json(before)), json.dumps(_bounded_json(after)))
+
+
+def _legacy_before(target, source, profile, account_id):
+    if _account(account_id) != profile.account_id or source.subsidiary_id != profile.subsidiary_id:
+        raise NetSuiteActionError("legacy_tax_scope_mismatch")
+    if target.get("tax_details", "missing") is not None:
+        raise NetSuiteActionError("legacy_tax_record_required")
+    header, lines = target["header"], target["lines"]
+    native_tax = _number(header.get("taxTotal"))
+    if (
+        native_tax < 0
+        or _number(header.get("custbody_fw_solidus_tax_amount")) != native_tax
+        or sum((_number(line.get("custcol_fw_vat_amount")) for line in lines), Decimal(0)) != native_tax
+        or any(line.get("isTaxable") is not True or _number(line.get("custcol_fw_vat_amount")) < 0 for line in lines)
+    ):
+        raise NetSuiteActionError("legacy_tax_allocation_unproven")
+    before = {
+        "tax_profile": {"mode": profile.mode, "tax_code_id": profile.tax_code_id},
+        "custbody_fw_solidus_tax_amount": _text(native_tax),
+    }
+    for api, field in (("shippingTax1Rate", "shippingtax1rate"), ("shippingTax2Rate", "shippingtax2rate")):
+        before[field] = _text(header[api]) if header.get(api) is not None else None
+        if (source.shipping or _number(header.get("shippingCost"))) and before[field] != "0":
+            raise NetSuiteActionError("unsupported_shipping_tax")
+    if profile.mode == "aggregate_header":
+        if source.shipping != 0 or _number(header.get("shippingCost")) != 0:
+            raise NetSuiteActionError("unsupported_aggregate_shipping")
+        if _id(header.get("taxItem")) != profile.tax_code_id or header.get("isTaxable") is not True:
+            raise NetSuiteActionError("legacy_tax_code_changed")
+        rate = _number(header.get("taxRate"))
+        if not 0 <= rate <= 1000:
+            raise NetSuiteActionError("legacy_tax_rate_unproven")
+        before.update(taxitem=profile.tax_code_id, taxrate=_text(rate), istaxable=True)
+    elif any(_number(line.get("tax1Amt")) != _number(line.get("custcol_fw_vat_amount")) for line in lines):
+        raise NetSuiteActionError("legacy_tax_allocation_unproven")
+    return before

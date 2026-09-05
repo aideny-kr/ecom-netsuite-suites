@@ -103,9 +103,27 @@ beforeEach(() => {
           save: jest.fn((options) => {
             calls.push(["save", options]);
             if (saveHook) saveHook(copy);
-            copy.body.subtotal = 100;
-            copy.body.taxtotal = 20;
-            copy.body.total = 122;
+            copy.body.subtotal = copy.lines.reduce(
+              (total, line) => total + line.amount,
+              0,
+            );
+            copy.body.taxtotal = copy.body.taxitem
+              ? Math.round(copy.body.subtotal * copy.body.taxrate) / 100
+              : copy.lines.reduce(
+                  (total, line) =>
+                    total +
+                    (line.tax1amt === undefined
+                      ? line.custcol_fw_vat_amount
+                      : line.tax1amt),
+                  0,
+                );
+            copy.body.total =
+              Math.round(
+                (copy.body.subtotal +
+                  copy.body.taxtotal +
+                  copy.body.shippingcost) *
+                  100,
+              ) / 100;
             copy.body.lastmodifieddate = new Date("2026-09-04T12:01:00Z");
             state = clone(copy);
             return 63;
@@ -416,3 +434,298 @@ test("a changed line amount must equal the exact approved quantity times rate", 
   expect(restlet.post(input).status).toBe("rejected");
   expect(saved()).toBe(0);
 });
+
+function legacyRequest(mode = "aggregate_header") {
+  const input = request();
+  Object.assign(state.body, {
+    custbody_fw_solidus_tax_amount: 18,
+    shippingtax1rate: 0,
+    shippingtax2rate: 0,
+  });
+  state.lines[0].istaxable = true;
+  if (mode === "aggregate_header") {
+    Object.assign(state.body, {
+      taxitem: "610",
+      taxrate: 19.5652174,
+      shippingcost: 0,
+      total: 108,
+      custbody_fw_solidus_order_total: 108,
+      istaxable: true,
+    });
+    delete state.lines[0].taxcode;
+    delete state.lines[0].taxrate1;
+    input.after.body_changes.taxrate = "20";
+    input.after.body_changes.custbody_fw_solidus_order_total = "120";
+    input.after.expected_totals.shippingcost = "0";
+    input.after.expected_totals.total = "120";
+  } else {
+    state.lines[0].tax1amt = 18;
+    state.lines[0].taxrate1 = 20.001;
+    input.after.line_changes[0].fields.tax1amt = "20";
+  }
+  const result = restlet.get({
+    action: "snapshot",
+    record_id: "63",
+    reference_field: "tranid",
+    tax_mode: mode,
+    tax_code_id: "610",
+  });
+  expect(result).toEqual(expect.objectContaining({ success: true }));
+  input.before = result.snapshot;
+  input.after.body_changes.custbody_fw_solidus_tax_amount = "20";
+  return input;
+}
+
+test.each(["aggregate_header", "line_tax_amount"])(
+  "legacy %s snapshot binds native and custom tax fields before one save",
+  (mode) => {
+    const input = legacyRequest(mode);
+    expect(saved()).toBe(0);
+    expect(input.before.tax_profile).toEqual({ mode, tax_code_id: "610" });
+    expect(input.before.custbody_fw_solidus_tax_amount).toBe("18");
+    expect(input.before.lines[0].istaxable).toBe(true);
+    if (mode === "aggregate_header") {
+      expect(input.before.taxrate).toBe("19.5652174");
+      expect(input.before.taxitem).toBe("610");
+      expect(input.before.lines[0].taxcode).toBeUndefined();
+      expect(input.before.lines[0].taxrate1).toBeUndefined();
+    } else {
+      expect(input.before.lines[0].tax1amt).toBe("18");
+      expect(input.before.lines[0].taxrate1).toBe("20.001");
+    }
+    expect(restlet.post(input).status).toBe("saved");
+    expect(saved()).toBe(1);
+    expect(state.body.custbody_fw_solidus_tax_amount).toBe(20);
+    if (mode === "line_tax_amount") {
+      expect(state.lines[0].tax1amt).toBe(20);
+      expect(state.lines[0].taxrate1).toBe(20.001);
+    } else {
+      expect(state.body.taxrate).toBe(20);
+    }
+  },
+);
+
+test.each([
+  [
+    "aggregate_header",
+    () => {
+      state.body.taxrate = 21;
+    },
+  ],
+  [
+    "aggregate_header",
+    () => {
+      state.body.taxitem = "611";
+    },
+  ],
+  [
+    "aggregate_header",
+    () => {
+      state.body.istaxable = false;
+    },
+  ],
+  [
+    "aggregate_header",
+    () => {
+      state.lines[0].istaxable = false;
+    },
+  ],
+  [
+    "line_tax_amount",
+    () => {
+      state.lines[0].tax1amt = 19;
+    },
+  ],
+  [
+    "line_tax_amount",
+    () => {
+      state.lines[0].taxcode = "611";
+    },
+  ],
+  [
+    "line_tax_amount",
+    () => {
+      state.lines[0].taxrate1 = 25;
+    },
+  ],
+  [
+    "line_tax_amount",
+    () => {
+      state.body.custbody_fw_solidus_tax_amount = 19;
+    },
+  ],
+])("legacy %s native drift rejects before any save", (mode, change) => {
+  const input = legacyRequest(mode);
+  change();
+  expect(restlet.post(input).status).toBe("rejected");
+  expect(saved()).toBe(0);
+});
+
+test.each([
+  [
+    "aggregate_header",
+    (input) => {
+      input.after.body_changes.custbody_fw_solidus_tax_amount = "21";
+    },
+  ],
+  [
+    "aggregate_header",
+    (input) => {
+      input.after.body_changes.taxrate = "0";
+    },
+  ],
+  [
+    "aggregate_header",
+    (input) => {
+      input.after.body_changes.taxrate = "1001";
+    },
+  ],
+  [
+    "aggregate_header",
+    (input) => {
+      input.after.line_changes[0].fields.taxrate1 = "20";
+    },
+  ],
+  [
+    "aggregate_header",
+    (input) => {
+      input.after.line_changes[0].fields.tax1amt = "20";
+    },
+  ],
+  [
+    "line_tax_amount",
+    (input) => {
+      input.after.line_changes[0].fields.tax1amt = "19";
+    },
+  ],
+  [
+    "line_tax_amount",
+    (input) => {
+      delete input.after.line_changes[0].fields.tax1amt;
+    },
+  ],
+  [
+    "line_tax_amount",
+    (input) => {
+      input.after.line_changes[0].fields.taxrate1 = "20";
+    },
+  ],
+  [
+    "line_tax_amount",
+    (input) => {
+      input.after.body_changes.taxrate = "20";
+    },
+  ],
+])(
+  "legacy %s disallows inconsistent native tax or writes for another mode",
+  (mode, change) => {
+    const input = legacyRequest(mode);
+    change(input);
+    expect(restlet.post(input).status).toBe("rejected");
+    expect(saved()).toBe(0);
+  },
+);
+
+test.each(["aggregate_header", "line_tax_amount"])(
+  "legacy %s rejects taxed shipping and unproven line taxability",
+  (mode) => {
+    const input = legacyRequest(mode);
+    const shipping = state.body.shippingcost;
+    state.body.shippingcost = 2;
+    input.before.shippingcost = "2";
+    state.body.shippingtax1rate = 20;
+    input.before.shippingtax1rate = "20";
+    expect(restlet.post(input).status).toBe("rejected");
+    state.body.shippingcost = shipping;
+    input.before.shippingcost = String(shipping);
+    state.body.shippingtax1rate = 0;
+    input.before.shippingtax1rate = "0";
+    state.lines[0].istaxable = false;
+    input.before.lines[0].istaxable = false;
+    expect(restlet.post(input).status).toBe("rejected");
+    expect(saved()).toBe(0);
+  },
+);
+
+test.each([
+  [
+    "aggregate_header",
+    (copy) => {
+      copy.body.taxrate = 19;
+    },
+  ],
+  [
+    "aggregate_header",
+    (copy) => {
+      copy.body.custbody_fw_solidus_tax_amount = 21;
+    },
+  ],
+  [
+    "line_tax_amount",
+    (copy) => {
+      copy.lines[0].tax1amt = 19;
+    },
+  ],
+  [
+    "line_tax_amount",
+    (copy) => {
+      copy.lines[0].taxrate1 = 30;
+    },
+  ],
+])(
+  "legacy %s save-time native override stays unknown even with matching totals",
+  (mode, mutate) => {
+    const input = legacyRequest(mode);
+    saveHook = mutate;
+    expect(restlet.post(input).status).toBe("unknown");
+    expect(saved()).toBe(1);
+  },
+);
+
+test("aggregate header refuses nonzero shipping even when separate rates are zero", () => {
+  const input = legacyRequest("aggregate_header");
+  state.body.shippingcost = 2;
+  input.before.shippingcost = "2";
+  input.after.expected_totals.shippingcost = "2";
+  input.after.expected_totals.total = "122";
+  input.after.body_changes.custbody_fw_solidus_order_total = "122";
+  expect(restlet.post(input).status).toBe("rejected");
+  expect(saved()).toBe(0);
+});
+
+test("aggregate header rate must calculate from the approved taxable line subtotal", () => {
+  const input = legacyRequest("aggregate_header");
+  input.after.body_changes.taxrate = "19";
+  expect(restlet.post(input).status).toBe("rejected");
+  expect(saved()).toBe(0);
+});
+
+test.each([
+  [4062, 428.58, "10.5509601"],
+  [3, 1, "33.3333333"],
+  [6, 1, "16.6666667"],
+  [800, 0.01, "0.00125"],
+])(
+  "aggregate rate uses exact bounded seven-place rounding for subtotal %s",
+  (subtotal, tax, rate) => {
+    const input = legacyRequest("aggregate_header");
+    const total = String(Math.round((subtotal + tax) * 100) / 100);
+    Object.assign(input.after.line_changes[0].fields, {
+      amount: String(subtotal),
+      rate: String(subtotal / 2),
+      custcol_fw_vat_amount: String(tax),
+    });
+    Object.assign(input.after.expected_totals, {
+      subtotal: String(subtotal),
+      taxtotal: String(tax),
+      total,
+    });
+    Object.assign(input.after.body_changes, {
+      taxrate: rate,
+      custbody_fw_solidus_tax_amount: String(tax),
+      custbody_fw_solidus_order_total: total,
+    });
+    expect(restlet.post(input).status).toBe("saved");
+    expect(saved()).toBe(1);
+  },
+);

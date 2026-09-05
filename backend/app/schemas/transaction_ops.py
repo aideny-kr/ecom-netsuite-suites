@@ -49,6 +49,10 @@ class TransactionTax(EvidenceModel):
     # One taxable event, not a sum of separately rounded line taxes. Collectors
     # must retain individual components when the provider rounds per line.
     key: Identifier
+    calculation: Literal["statutory_rate", "reported_allocation"] = "statutory_rate"
+    # A collector may bind several separately validated source components to
+    # one legacy destination tax allocation. Their original keys/rates remain.
+    allocation_key: Identifier | None = None
     basis: ExactDecimal | None = None
     rate: ExactDecimal | None = None  # fraction (0.20), not a percentage (20)
     amount: ExactDecimal | None = None
@@ -60,6 +64,19 @@ class TransactionTax(EvidenceModel):
 
     @model_validator(mode="after")
     def included_calculation(self):
+        if self.allocation_key is not None and not self.key.startswith(self.allocation_key + ":source_rate:"):
+            raise ValueError("An allocation must retain the original taxable-event identity")
+        if self.calculation == "reported_allocation" and any(
+            value is not None
+            for value in (
+                self.rate,
+                self.rounding,
+                self.included_gross_basis,
+                self.included_rate_total,
+                self.allocation_key,
+            )
+        ):
+            raise ValueError("Reported allocations cannot claim a statutory calculation or further aggregation")
         if (self.included_gross_basis is None) != (self.included_rate_total is None):
             raise ValueError("Included tax needs both gross basis and total included rate")
         if self.included_gross_basis is not None and (
@@ -96,6 +113,10 @@ class TransactionSnapshot(EvidenceModel):
 
     @model_validator(mode="after")
     def unique_detail_keys(self):
+        if self.system != "netsuite" and any(tax.calculation != "statutory_rate" for tax in self.tax_details):
+            raise ValueError("Source taxes require statutory calculation evidence")
+        if self.system == "netsuite" and any(tax.allocation_key is not None for tax in self.tax_details):
+            raise ValueError("Only source components can request a destination allocation")
         for values in (self.lines, self.tax_details):
             if len({item.key for item in values}) != len(values):
                 raise ValueError("Detail keys must be unique; ambiguous lines cannot be collapsed")

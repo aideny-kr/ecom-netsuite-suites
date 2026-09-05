@@ -163,7 +163,9 @@ def _compare_transactions(source, netsuite_records, lookup, *, now, max_age):
             finding("version_unproven", "A source version/time no later than the observation is required.")
         if any(getattr(snapshot, field) is None for field in _AMOUNTS):
             finding("unknown_amount", "Missing tax, shipping, discount or totals cannot be treated as zero.")
-        if snapshot.currency_minor_unit is None or any(tax.rounding is None for tax in snapshot.tax_details):
+        if snapshot.currency_minor_unit is None or any(
+            tax.rounding is None for tax in snapshot.tax_details if tax.calculation == "statutory_rate"
+        ):
             finding(
                 "tax_calculation_unproven", "Currency precision and each tax component's rounding policy must be known."
             )
@@ -173,7 +175,8 @@ def _compare_transactions(source, netsuite_records, lookup, *, now, max_age):
                 "Complete line and tax evidence is required before proposing a repair or resolving an error.",
             )
         if any(line.net is None or line.tax is None for line in snapshot.lines) or any(
-            tax.basis is None or tax.rate is None or tax.amount is None for tax in snapshot.tax_details
+            tax.basis is None or tax.amount is None or (tax.calculation == "statutory_rate" and tax.rate is None)
+            for tax in snapshot.tax_details
         ):
             finding("incomplete_detail", "A line or tax detail contains unknown values.")
         if snapshot.tax and not snapshot.tax_details:
@@ -226,8 +229,16 @@ def _compare_transactions(source, netsuite_records, lookup, *, now, max_age):
         finding("source_tax_inconsistent", "Source tax details do not reconcile to the source tax total.")
         return result("human_review")
     for side, snapshot in (("source", source), *(("target", target) for target in netsuite_records)):
+        if any(tax.calculation == "reported_allocation" for tax in snapshot.tax_details) and (
+            sum((tax.amount for tax in snapshot.tax_details), Decimal(0)) != snapshot.tax
+            or sum((line.tax for line in snapshot.lines), Decimal(0)) + snapshot.shipping_tax != snapshot.tax
+        ):
+            finding("target_tax_allocation_inconsistent", "Observed target allocations do not reconcile to native tax.")
+            return result("human_review")
         quantum = Decimal(1).scaleb(-snapshot.currency_minor_unit)
         for tax in snapshot.tax_details:
+            if tax.calculation == "reported_allocation":
+                continue  # Native/custom amount agreement is the collector's explicit profile proof.
             rounding = ROUND_HALF_UP if tax.rounding == "half_up" else ROUND_HALF_EVEN
             calculated = tax.basis * tax.rate
             if tax.included_gross_basis is not None:
@@ -256,8 +267,24 @@ def _compare_transactions(source, netsuite_records, lookup, *, now, max_age):
         finding("state_mismatch", "The source and destination lifecycle states differ.")
     source_lines = {line.key: line for line in source.lines}
     target_lines = {line.key: line for line in target.lines}
-    source_taxes = {tax.key: tax for tax in source.tax_details}
+    source_taxes = {}
+    for tax in source.tax_details:
+        source_taxes.setdefault(tax.allocation_key or tax.key, []).append(tax)
     target_taxes = {tax.key: tax for tax in target.tax_details}
+    # A complete empty source adjustment list proves zero tax. Do not invent a
+    # statutory source component solely because the legacy target uses a tax
+    # item with a zero observed allocation. Nonzero/unknown values never qualify.
+    target_taxes = {
+        key: tax
+        for key, tax in target_taxes.items()
+        if not (
+            tax.calculation == "reported_allocation"
+            and tax.amount == 0
+            and key not in source_taxes
+            and key.rpartition(":tax:")[0] in source_lines
+            and source_lines[key.rpartition(":tax:")[0]].tax == 0
+        )
+    }
     if source_lines.keys() != target_lines.keys():
         finding(
             "line_structure_mismatch", "Source and destination line identities differ; explicit mapping is required."
@@ -267,6 +294,13 @@ def _compare_transactions(source, netsuite_records, lookup, *, now, max_age):
             "tax_structure_mismatch",
             "Tax jurisdiction/code identities differ; amount equality does not establish correctness.",
         )
+    for key in source_taxes.keys() & target_taxes.keys():
+        components, actual = source_taxes[key], target_taxes[key]
+        if len({tax.basis for tax in components}) != 1 or (
+            actual.calculation != "reported_allocation"
+            and (len(components) != 1 or components[0].allocation_key is not None)
+        ):
+            finding("tax_structure_mismatch", "A destination allocation must cover one proven taxable event.")
 
     def difference(field, expected, actual):
         if expected != actual:
@@ -280,10 +314,12 @@ def _compare_transactions(source, netsuite_records, lookup, *, now, max_age):
         for field in ("quantity", "net", "tax"):
             difference(f"lines.{key}.{field}", getattr(source_lines[key], field), getattr(target_lines[key], field))
     for key in sorted(source_taxes.keys() & target_taxes.keys()):
-        for field in ("basis", "rate", "amount"):
-            difference(
-                f"tax_details.{key}.{field}", getattr(source_taxes[key], field), getattr(target_taxes[key], field)
-            )
+        components, actual = source_taxes[key], target_taxes[key]
+        for field in ("basis", "amount"):
+            expected = sum((tax.amount for tax in components), Decimal(0)) if field == "amount" else components[0].basis
+            difference(f"tax_details.{key}.{field}", expected, getattr(actual, field))
+        if actual.calculation == "statutory_rate" and len(components) == 1:
+            difference(f"tax_details.{key}.rate", components[0].rate, actual.rate)
     if findings:
         return result("human_review")
     if differences:

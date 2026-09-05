@@ -248,3 +248,60 @@ and the blocking T2 review. Lower-confidence review items
 remain explicit: live guard field/date shape and period-lock verification behavior,
 disabled-scope expired-ledger cleanup, and the resolved-queue search depth. A manual
 recheck does not claim that unavailable provider evidence has become conclusive.
+
+
+### September 5 legacy tax implementation
+
+Explicit account/subsidiary/code profiles now normalize Inc aggregate-header
+and BV native-line tax amounts as observed allocations. Source statutory
+components remain separate and must calculate correctly before aggregation.
+The planner and transport bind the selected profile, and the guard compares
+native tax fields, custom VAT, taxability and header source tax before one save.
+BV preserves its native tax rate while writing native/custom amounts together;
+Inc derives a seven-place rate from the proven taxable net line subtotal. Fresh independent
+verification includes the native tax fields. Source rate omissions remain
+incomplete evidence; the newly inspected active BigQuery connection's Avalara
+mirror contains only stale IDs/timestamps, not a current calculation breakdown.
+
+The bounded live checks confirmed current Inc line/header shapes and the source
+adjustment omissions. A reproduced period-date eligibility failure is fixed by
+requesting ISO dates in SuiteQL; the live read returned the open September 2026
+period in the requested format. Focused backend tests passed 223 cases before
+that final date fix, and all 78 SuiteApp tests pass. A complete backend run is
+in progress. The supplementary independent tax-normalization/preparation review
+found no arithmetic or equality bypass; it raised a latent identifier-delimiter
+concern. Actual repair IDs are already numeric at the action boundary, so no
+reported live exploit was established. The separate native guard integration
+review is still in progress. Neither review substitutes for the blocking T2 gate.
+
+
+The native-guard supplementary review identified an unsuitable rate denominator
+for nonzero shipping and a weaker immediate post-save check. Reproduced tests now
+reject aggregate corrections with shipping on either side, retain the net native
+basis even for tax-inclusive USD source prices, and require configured NetSuite
+rounding to reproduce the exact source tax at the currency's precision. That
+rounding policy is part of the immutable proposal fingerprint. The guard also
+independently validates the seven-place header rate with bounded integer arithmetic
+and compares the entire native profile after save; a native override remains
+unknown with one save only. The missing `tax_details` concern was not a bug: the
+reader always emits explicit `None` for a complete legacy record, while an omitted
+key is incomplete evidence. No fallback from an omitted key was added.
+
+All 88 SuiteApp tests and 77 focused backend review-fix tests pass
+against the final patch. The full backend suite previously passed 7,483 tests
+before these final review fixes. The fresh complete backend run now passes
+7,489 tests (2 skipped); Ruff and whitespace checks also pass. The isolated
+SDF artifact passed installed Oracle client-side metadata validation. Server
+validation remains unavailable with the expired sandbox SDK authentication;
+no script was deployed or live transaction changed.
+
+
+The latest exact source contract probe found complementary endpoint shapes:
+`orders/<number>` has detailed lines and addresses but omits business entity and
+review-hold metadata; an exact `sync/orders?q[number_eq]=...` read returns that
+routing metadata but no lines or addresses. The positive lookup returned one
+exact full reference, and a nonexistent suffixed reference returned zero. This
+must be addressed before missing-order preparation: selecting a subsidiary from
+an omitted business entity is not sufficient evidence. The live detailed address
+shape uses `name`, not separate first/last-name fields. Current default projections
+retain no address contacts outside explicit create preparation.

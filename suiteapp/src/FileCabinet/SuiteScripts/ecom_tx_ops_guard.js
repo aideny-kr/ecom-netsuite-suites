@@ -164,6 +164,35 @@ define(["N/record", "N/query", "N/runtime", "N/log"], (
       b = scaleOf(right);
     return fromScaled(scaledInteger(left, a) * scaledInteger(right, b), a + b);
   }
+  function effectiveHeaderRate(subtotal, tax) {
+    // Half-up percentage to seven places, using integers throughout. Outside
+    // the proven arithmetic range, stop before save instead of rounding money.
+    const scale = Math.max(scaleOf(subtotal), scaleOf(tax));
+    const denominator = scaledInteger(subtotal, scale);
+    const numerator = scaledInteger(tax, scale) * 1000000000;
+    if (!Number.isSafeInteger(numerator)) fail("arithmetic_precision");
+    if (denominator === 0) {
+      if (numerator !== 0) fail("legacy_tax_rate_unproven");
+      return "0";
+    }
+    if (denominator < 0 || numerator < 0) fail("legacy_tax_rate_unproven");
+    let quotient = Math.floor(numerator / denominator);
+    const multiplied = quotient * denominator;
+    if (!Number.isSafeInteger(multiplied)) fail("arithmetic_precision");
+    let remainder = numerator - multiplied;
+    // Correct a floating division that lands on an adjacent integer against
+    // its exact safe-integer product before applying the rounding policy.
+    if (remainder < 0) {
+      quotient -= 1;
+      remainder += denominator;
+    } else if (remainder >= denominator) {
+      quotient += 1;
+      remainder -= denominator;
+    }
+    if (remainder < 0 || remainder >= denominator) fail("arithmetic_precision");
+    if (remainder >= denominator - remainder) quotient += 1;
+    return fromScaled(quotient, 7);
+  }
   function checkArithmetic(current, after) {
     const lines = current.lines.map((line) => {
       const change = after.line_changes.find(
@@ -201,6 +230,40 @@ define(["N/record", "N/query", "N/runtime", "N/log"], (
       )
     )
       fail("expected_totals_inconsistent");
+    if (current.tax_profile) {
+      const body = { ...current, ...after.body_changes };
+      if (
+        current.custbody_fw_solidus_tax_amount !== current.taxtotal ||
+        decimal(body.custbody_fw_solidus_tax_amount) !== totals.taxtotal ||
+        ((current.shippingcost !== "0" || totals.shippingcost !== "0") &&
+          (current.shippingtax1rate !== "0" ||
+            current.shippingtax2rate !== "0"))
+      )
+        fail("legacy_tax_allocation_unproven");
+      if (current.tax_profile.mode === "line_tax_amount") {
+        if (
+          current.lines.some(
+            (line) => line.tax1amt !== line.custcol_fw_vat_amount,
+          ) ||
+          lines.some(
+            (line) =>
+              decimal(line.tax1amt) !== decimal(line.custcol_fw_vat_amount),
+          )
+        )
+          fail("legacy_tax_allocation_unproven");
+      } else {
+        if (current.shippingcost !== "0" || totals.shippingcost !== "0")
+          fail("unsupported_aggregate_shipping");
+        const rate = writeNumber(body.taxrate);
+        if (
+          rate > 1000 ||
+          (rate === 0) !== (totals.taxtotal === "0") ||
+          decimal(body.taxrate) !==
+            effectiveHeaderRate(totals.subtotal, totals.taxtotal)
+        )
+          fail("legacy_tax_rate_unproven");
+      }
+    }
   }
   function instant(value) {
     if (!(value instanceof Date) || !Number.isFinite(value.getTime()))
@@ -234,7 +297,14 @@ define(["N/record", "N/query", "N/runtime", "N/log"], (
       fail("period_unavailable");
     return identifier(rows[0].id);
   }
-  function snapshot(order, field) {
+  function taxProfile(value) {
+    if (value === undefined || value === null) return null;
+    keys(value, ["mode", "tax_code_id"]);
+    if (!["aggregate_header", "line_tax_amount"].includes(value.mode))
+      fail("unsupported_tax_profile");
+    return { mode: value.mode, tax_code_id: identifier(value.tax_code_id) };
+  }
+  function snapshot(order, field, profile = null) {
     const get = (fieldId) => order.getValue({ fieldId });
     const ref = get(referenceField(field));
     if (
@@ -258,6 +328,25 @@ define(["N/record", "N/query", "N/runtime", "N/log"], (
     BODY_MONEY.forEach((key) => {
       data[key] = decimal(get(key));
     });
+    if (profile) {
+      data.tax_profile = profile;
+      data.custbody_fw_solidus_tax_amount = decimal(
+        get("custbody_fw_solidus_tax_amount"),
+      );
+      ["shippingtax1rate", "shippingtax2rate"].forEach((key) => {
+        const value = get(key);
+        data[key] =
+          value === undefined || value === null || value === ""
+            ? null
+            : decimal(value);
+      });
+      if (profile.mode === "aggregate_header") {
+        data.taxitem = identifier(get("taxitem"));
+        data.taxrate = decimal(get("taxrate"));
+        data.istaxable = get("istaxable");
+        if (typeof data.istaxable !== "boolean") fail("unknown_taxability");
+      }
+    }
     const count = order.getLineCount({ sublistId: "item" });
     if (!Number.isInteger(count) || count < 1 || count > 500)
       fail("unsupported_line_count");
@@ -267,11 +356,25 @@ define(["N/record", "N/query", "N/runtime", "N/log"], (
         value = (fieldId) =>
           order.getSublistValue({ sublistId: "item", line, fieldId });
       LINE_IDS.forEach((key) => {
+        if (profile && profile.mode === "aggregate_header" && key === "taxcode")
+          return;
         item[key] = identifier(value(key));
       });
       LINE_MONEY.forEach((key) => {
+        if (
+          profile &&
+          profile.mode === "aggregate_header" &&
+          key === "taxrate1"
+        )
+          return;
         item[key] = decimal(value(key));
       });
+      if (profile) {
+        item.istaxable = value("istaxable");
+        if (typeof item.istaxable !== "boolean") fail("unknown_taxability");
+        if (profile.mode === "line_tax_amount")
+          item.tax1amt = decimal(value("tax1amt"));
+      }
       item.isclosed = value("isclosed");
       if (typeof item.isclosed !== "boolean" || seen.has(item.line))
         fail("incomplete_lines");
@@ -319,6 +422,23 @@ define(["N/record", "N/query", "N/runtime", "N/log"], (
     // Existing email/payment flags can cause a second external side effect on save.
     if (EFFECT_FLAGS.some((fieldId) => order.getValue({ fieldId }) !== false))
       fail("record_side_effect_enabled");
+    if (current.tax_profile) {
+      if (current.lines.some((line) => line.istaxable !== true))
+        fail("unknown_taxability");
+      if (current.tax_profile.mode === "aggregate_header") {
+        if (
+          current.istaxable !== true ||
+          current.taxitem !== current.tax_profile.tax_code_id
+        )
+          fail("legacy_tax_code_changed");
+      } else if (
+        current.lines.some(
+          (line) => line.taxcode !== current.tax_profile.tax_code_id,
+        )
+      ) {
+        fail("legacy_tax_code_changed");
+      }
+    }
   }
   function responseError(error, sent) {
     const code =
@@ -337,14 +457,26 @@ define(["N/record", "N/query", "N/runtime", "N/log"], (
   function get(input) {
     try {
       budget(100);
-      keys(input, ["action", "record_id", "reference_field"]);
+      keys(
+        input,
+        ["action", "record_id", "reference_field", "tax_mode", "tax_code_id"],
+        ["action", "record_id", "reference_field"],
+      );
       if (input.action !== "snapshot") fail("unsupported_action");
       const order = record.load({
         type: "salesorder",
         id: identifier(input.record_id),
         isDynamic: false,
       });
-      const data = snapshot(order, referenceField(input.reference_field));
+      const profile =
+        input.tax_mode !== undefined || input.tax_code_id !== undefined
+          ? taxProfile({ mode: input.tax_mode, tax_code_id: input.tax_code_id })
+          : null;
+      const data = snapshot(
+        order,
+        referenceField(input.reference_field),
+        profile,
+      );
       return {
         success: true,
         schema_version: VERSION,
@@ -402,11 +534,31 @@ define(["N/record", "N/query", "N/runtime", "N/log"], (
       const current = snapshot(
         order,
         referenceField(input.before.reference_field),
+        taxProfile(input.before.tax_profile),
       );
       if (!same(current, input.before)) fail("evidence_changed");
       safeState(order, current);
       keys(input.after, ["body_changes", "line_changes", "expected_totals"]);
-      keys(input.after.body_changes, BODY_WRITES, []);
+      const bodyWrites = current.tax_profile
+        ? [
+            ...BODY_WRITES,
+            "custbody_fw_solidus_tax_amount",
+            ...(current.tax_profile.mode === "aggregate_header"
+              ? ["taxrate"]
+              : []),
+          ]
+        : BODY_WRITES;
+      const lineWrites = current.tax_profile
+        ? [
+            "rate",
+            "amount",
+            "custcol_fw_vat_amount",
+            ...(current.tax_profile.mode === "line_tax_amount"
+              ? ["tax1amt"]
+              : []),
+          ]
+        : LINE_WRITES;
+      keys(input.after.body_changes, bodyWrites, []);
       keys(input.after.expected_totals, TOTALS);
       Object.values(input.after.expected_totals).forEach(writeNumber);
       if (
@@ -419,7 +571,7 @@ define(["N/record", "N/query", "N/runtime", "N/log"], (
       let changed = false;
       for (const change of input.after.line_changes) {
         keys(change, ["line", "fields"]);
-        keys(change.fields, LINE_WRITES, []);
+        keys(change.fields, lineWrites, []);
         const lineId = identifier(change.line),
           index = current.lines.findIndex((line) => line.line === lineId);
         if (
@@ -474,6 +626,26 @@ define(["N/record", "N/query", "N/runtime", "N/log"], (
         )
       )
         fail("post_save_mismatch");
+      if (current.tax_profile) {
+        const actual = snapshot(
+          fresh,
+          current.reference_field,
+          current.tax_profile,
+        );
+        const expected = {
+          ...current,
+          ...input.after.body_changes,
+          ...input.after.expected_totals,
+          version: actual.version,
+          lines: current.lines.map((line) => {
+            const change = input.after.line_changes.find(
+              (change) => String(change.line) === line.line,
+            );
+            return { ...line, ...(change ? change.fields : {}) };
+          }),
+        };
+        if (!same(actual, expected)) fail("post_save_native_tax_mismatch");
+      }
       // The platform independently re-reads source + NetSuite before it
       // calls the operation verified. A RESTlet receipt cannot do that.
       return {

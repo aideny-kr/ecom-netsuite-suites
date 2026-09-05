@@ -329,3 +329,19 @@ async def test_request_budget_is_enforced_before_additional_external_read(contex
     monkeypatch.setattr(reader, "MAX_API_CALLS", 1)
     with pytest.raises(reader.NetSuiteEvidenceError, match="api_call_budget"):
         await read(context, [lookup()])
+
+
+async def test_period_eligibility_does_not_depend_on_suiteql_display_date_locale():
+    from app.services.transaction_ops.netsuite_actions import _period
+
+    async def provider(request):
+        query = json.loads(request.content)["q"]
+        row = {"id": "99", "closed": "F", "alllocked": "F", "arlocked": "F", "aplocked": "F", "isadjust": "F"}
+        for field, iso, display in (("startdate", "2026-09-01", "09/01/2026"), ("enddate", "2026-09-30", "09/30/2026")):
+            row[field] = iso if f"TO_CHAR({field}, 'YYYY-MM-DD') AS {field}" in query else display
+        return httpx.Response(200, json=lookup([row]))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
+        collector = reader._Reader(client, "https://6738075.suitetalk.api.netsuite.com/services/rest", "fixture-token")
+        periods = await collector.period("2026-09-04")
+    assert _period({"periods": periods}, "2026-09-04") == "99"
