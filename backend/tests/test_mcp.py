@@ -248,6 +248,10 @@ class TestToolConfigs:
             "sheets.write_range",
             "sheets.read_range",
             "report.compose",
+            "celigo.integrations",
+            "celigo.flows",
+            "celigo.flow_steps",
+            "celigo.flow_errors",
         }
         assert set(TOOL_CONFIGS.keys()) == expected
 
