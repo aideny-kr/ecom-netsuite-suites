@@ -259,22 +259,24 @@ export function CeligoFlowPage(): JSX.Element {
     headerResizeDebounceRef.current = setTimeout(() => persistHeaderSize(size), FLOW_HEADER_RESIZE_DEBOUNCE_MS);
   }, []);
 
+  // The side effects (storage, the pending-target ref, the imperative panel
+  // resize) live OUTSIDE the state updater: React may invoke an updater more
+  // than once per commit (StrictMode, replayed updates), and an updater is
+  // meant to be pure. `next` is computed from the rendered value instead.
   const toggleHeaderCollapsed = useCallback(() => {
-    setHeaderCollapsed((prev) => {
-      const next = !prev;
-      try {
-        if (next) window.localStorage.setItem(FLOW_HEADER_COLLAPSED_KEY, "1");
-        else window.localStorage.removeItem(FLOW_HEADER_COLLAPSED_KEY);
-      } catch {
-        // Best effort -- the toggle still works for this render, it just
-        // won't survive a reload.
-      }
-      const targetSize = next ? FLOW_HEADER_MIN_SIZE : headerSize;
-      pendingHeaderResizeTargetRef.current = percentValue(targetSize);
-      headerPanelRef.current?.resize(targetSize);
-      return next;
-    });
-  }, [headerSize]);
+    const next = !headerCollapsed;
+    try {
+      if (next) window.localStorage.setItem(FLOW_HEADER_COLLAPSED_KEY, "1");
+      else window.localStorage.removeItem(FLOW_HEADER_COLLAPSED_KEY);
+    } catch {
+      // Best effort -- the toggle still works for this render, it just
+      // won't survive a reload.
+    }
+    const targetSize = next ? FLOW_HEADER_MIN_SIZE : headerSize;
+    pendingHeaderResizeTargetRef.current = percentValue(targetSize);
+    headerPanelRef.current?.resize(targetSize);
+    setHeaderCollapsed(next);
+  }, [headerCollapsed, headerSize]);
 
   // The element that opened the script drawer, so Radix can hand focus back
   // when it closes. Nothing else can supply it: the drawer is mounted here,
