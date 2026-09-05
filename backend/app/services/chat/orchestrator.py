@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.services.chat.prompt_cache import split_system_prompt
-from app.services.chat.tool_categories import categorize, is_celigo_tool
+from app.services.chat.tool_categories import categorize, is_celigo_source
 from app.services.drive_rag.retriever import retrieve_drive_chunks
 from app.services.metrics.metric_compute import condense_metric_for_llm, is_suppressed_metric_payload
 
@@ -732,7 +732,13 @@ def _compute_source_pin_update(tool_calls_log: list[dict]) -> str | None:
         # NetSuite and made a Celigo+BigQuery turn look like a source conflict.
         # Source-agnostic, so it contributes nothing either way -- the same
         # treatment metric_compute's `expression` backend gets above.
-        if is_celigo_tool(name):
+        #
+        # is_celigo_source (not is_celigo_tool) -- task 4B: is_celigo_tool only
+        # recognises the EXTERNAL connector's `ext__...` names; this repo's own
+        # local `celigo.*`/`celigo_*` chat tools (task 3) are exactly as much
+        # "not NetSuite" as the external ones, and is_celigo_source is the one
+        # place both spellings of both families are recognized.
+        if is_celigo_source(name):
             continue
 
         if cat == "bigquery":
@@ -975,6 +981,16 @@ def _intercept_tool_result(
             "query": query,
             "truncated": truncated,
         }
+        # Honesty channel (spec docs/superpowers/specs/2026-09-04-celigo-chat-access.md
+        # §8, task 4C): ANY data_table tool may carry a `caveats` list -- snapshot age,
+        # unchecked-error flags, stall verdicts, whatever a caller wants the model to
+        # relay rather than reason past. Generic to the branch, not Celigo-specific.
+        # Absent/empty for every tool that doesn't set it, so this is a no-op for
+        # everything that predates it -- asserted by the byte-identical tests above.
+        caveats = parsed.get("caveats")
+        has_caveats = isinstance(caveats, list) and len(caveats) > 0 and all(isinstance(c, str) for c in caveats)
+        if has_caveats:
+            sse_event_data["caveats"] = caveats
         # Metric trust boundary: a metric_data_table is a single computed number.
         # The SSE event_data above STILL carries the full rows (the FE renders the
         # value), but the LLM-facing condensed string must withhold every row value
@@ -997,37 +1013,38 @@ def _intercept_tool_result(
         # Investigation queries (FULL context): send all rows so LLM can reason
         # over system notes, field changes, timelines, etc.
         # Standard queries: 5-row preview to save tokens.
+        _relay_note = " Relay every caveat to the user verbatim before interpreting the table." if has_caveats else ""
         if context_need == ContextNeed.FULL:
-            condensed = json.dumps(
-                {
-                    "columns": columns,
-                    "row_count": row_count,
-                    "rows": rows,
-                    "truncated": truncated,
-                    "note": (
-                        "The data table is also rendered in the frontend. "
-                        "Do NOT reproduce the table. Analyze the data and explain findings."
-                    ),
-                },
-                default=str,
-            )
+            condensed_payload = {
+                "columns": columns,
+                "row_count": row_count,
+                "rows": rows,
+                "truncated": truncated,
+                "note": (
+                    "The data table is also rendered in the frontend. "
+                    "Do NOT reproduce the table. Analyze the data and explain findings." + _relay_note
+                ),
+            }
+            if has_caveats:
+                condensed_payload["caveats"] = caveats
+            condensed = json.dumps(condensed_payload, default=str)
         else:
             row_preview = rows[:30]
-            condensed = json.dumps(
-                {
-                    "columns": columns,
-                    "row_count": row_count,
-                    "rows_preview": row_preview,
-                    "truncated": truncated,
-                    "note": (
-                        "The full data table has been sent to the frontend for rendering. "
-                        "Do NOT rebuild or reproduce the table in your response. "
-                        "Provide commentary, insights, and analysis only. "
-                        "Use rows_preview for charting and follow-up analysis."
-                    ),
-                },
-                default=str,
-            )
+            condensed_payload = {
+                "columns": columns,
+                "row_count": row_count,
+                "rows_preview": row_preview,
+                "truncated": truncated,
+                "note": (
+                    "The full data table has been sent to the frontend for rendering. "
+                    "Do NOT rebuild or reproduce the table in your response. "
+                    "Provide commentary, insights, and analysis only. "
+                    "Use rows_preview for charting and follow-up analysis." + _relay_note
+                ),
+            }
+            if has_caveats:
+                condensed_payload["caveats"] = caveats
+            condensed = json.dumps(condensed_payload, default=str)
         condensed = _stamp_result_id(condensed, sse_event_data, result_id)
         return "data_table", sse_event_data, condensed
 

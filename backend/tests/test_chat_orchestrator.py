@@ -60,5 +60,9 @@ class TestAllowedChatToolsFromOld:
             "sheets.read_range",
             "metric.resolve",
             "metric.compute",
+            "celigo.integrations",
+            "celigo.flows",
+            "celigo.flow_steps",
+            "celigo.flow_errors",
         }
         assert ALLOWED_CHAT_TOOLS == expected

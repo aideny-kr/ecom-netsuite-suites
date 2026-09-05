@@ -1,5 +1,6 @@
 from app.mcp.tools import (
     bigquery_tools,
+    celigo_flow_map,
     cross_source_tool,
     data_sample,
     docs_tools,
@@ -943,6 +944,98 @@ TOOL_REGISTRY = {
                 "type": "object",
                 "required": False,
                 "description": 'typed params, e.g. {"period": "last_quarter"}',
+            },
+        },
+    },
+    # Celigo flow-map read tools (spec docs/superpowers/specs/2026-09-04-celigo-chat-access.md
+    # §3, task 3). Source is a nightly production-only snapshot, never Celigo's live API --
+    # every row carries how fresh it is, and a caveat says so. Read-only by construction: no
+    # entry in this family names a handler outside `celigo_flow_map.py` (asserted by
+    # `test_celigo_chat_tools.py`'s static test).
+    "celigo.integrations": {
+        "description": (
+            "List the tenant's production Celigo integrations from last night's synced snapshot — "
+            "one row per integration with its flow counts, open-error rollup, and how recently its "
+            "error counts were last verified."
+        ),
+        "execute": celigo_flow_map.execute_integrations,
+        "params_schema": {},
+    },
+    "celigo.flows": {
+        "description": (
+            "List production Celigo flows from last night's synced snapshot — one row per flow with "
+            "its schedule, whether it is on pace or stalled, and its open-error rollup. Optionally "
+            "scope to one integration (by id or a name fragment) and filter to flows with open "
+            "errors or a stalled run state."
+        ),
+        "execute": celigo_flow_map.execute_flows,
+        "params_schema": {
+            "integration": {
+                "type": "string",
+                "required": False,
+                "description": "Integration id, or a case-insensitive fragment of its name",
+            },
+            "only_open_errors": {
+                "type": "boolean",
+                "required": False,
+                "default": False,
+                "description": "Only flows with at least one open error",
+            },
+            "only_stalled": {
+                "type": "boolean",
+                "required": False,
+                "default": False,
+                "description": "Only flows whose run state is stalled",
+            },
+            "limit": {
+                "type": "integer",
+                "required": False,
+                "default": 50,
+                "description": "Max flows to return (max 200)",
+            },
+        },
+    },
+    "celigo.flow_steps": {
+        "description": (
+            "Show how one production Celigo flow is built, in run order — one row per step or "
+            "router, from last night's synced snapshot: what it does, which branch it belongs to, "
+            "its open-error count, and which named scripts attach to it (never their code)."
+        ),
+        "execute": celigo_flow_map.execute_flow_steps,
+        "params_schema": {
+            "flow": {
+                "type": "string",
+                "required": True,
+                "description": "Flow id, or its exact name (case-insensitive)",
+            },
+        },
+    },
+    "celigo.flow_errors": {
+        "description": (
+            "List the root causes behind a production Celigo flow's errors from last night's synced "
+            "snapshot — one row per distinct cause with how often it has occurred, when it was first "
+            "and last seen, and one sample message. Omit the flow to see root causes across every "
+            "production flow, or list resolved causes instead of open ones."
+        ),
+        "execute": celigo_flow_map.execute_flow_errors,
+        "params_schema": {
+            "flow": {
+                "type": "string",
+                "required": False,
+                "description": "Flow id, or its exact name (case-insensitive); omitted = every production flow",
+            },
+            "status": {
+                "type": "string",
+                "required": False,
+                "default": "open",
+                "enum": ["open", "resolved"],
+                "description": "Which errors to group",
+            },
+            "limit": {
+                "type": "integer",
+                "required": False,
+                "default": 25,
+                "description": "Max root-cause groups to return (max 50)",
             },
         },
     },

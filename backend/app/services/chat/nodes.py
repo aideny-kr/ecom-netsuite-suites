@@ -70,6 +70,16 @@ ALLOWED_CHAT_TOOLS: frozenset[str] = frozenset(
         "sheets.read_range",
         "metric.resolve",
         "metric.compute",
+        # celigo.* (spec docs/superpowers/specs/2026-09-04-celigo-chat-access.md §5-§6, task 3):
+        # unlike the recon.* family excluded above, this family carries its OWN feature-flag
+        # (`celigo`) + Celigo-connection gating inside every execute() in celigo_flow_map.py --
+        # the "the chat path lacked gating" reason recon.* is absent does not apply here. It is
+        # also read-only by construction (no tool in the family has a write path), so it needs
+        # no HITL confirmation card either.
+        "celigo.integrations",
+        "celigo.flows",
+        "celigo.flow_steps",
+        "celigo.flow_errors",
     }
 )
 

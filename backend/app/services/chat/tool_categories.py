@@ -71,6 +71,19 @@ _EXACT: dict[str, Category] = {
     "report_compose": "report",
     "report.compose": "report",
     "escalate_reasoning": "control",
+    # Local celigo.* chat tools (spec docs/superpowers/specs/2026-09-04-celigo-chat-access.md
+    # §6, task 3) — their output is row data over a synced snapshot, same interception need as
+    # netsuite_suiteql; both spellings so a lookup on either the dotted registry name or the
+    # underscored LLM-facing name lands here. See `is_celigo_source` below for why "data_table"
+    # must NOT be read as "NetSuite" for these four.
+    "celigo_integrations": "data_table",
+    "celigo.integrations": "data_table",
+    "celigo_flows": "data_table",
+    "celigo.flows": "data_table",
+    "celigo_flow_steps": "data_table",
+    "celigo.flow_steps": "data_table",
+    "celigo_flow_errors": "data_table",
+    "celigo.flow_errors": "data_table",
 }
 
 
@@ -95,6 +108,26 @@ def is_celigo_tool(tool_name: str) -> bool:
 
     parsed = parse_external_tool_name(tool_name)
     return parsed is not None and is_read_only_celigo_tool(parsed[1])
+
+
+def is_celigo_source(tool_name: str) -> bool:
+    """Whether *tool_name* is ANY Celigo tool -- the external hosted-API
+    family (``is_celigo_tool``, ``ext__*``) or this repo's own local
+    ``celigo.*``/``celigo_*`` chat tools (spec
+    ``docs/superpowers/specs/2026-09-04-celigo-chat-access.md`` §6, task 3).
+
+    ``is_celigo_tool`` alone answers "is this the external connector's read
+    tool" -- it deliberately returns ``False`` for a local name, because a
+    local dotted tool never goes through ``parse_external_tool_name``. That
+    is the right answer for its own callers (``categorize``'s mutation-guard
+    branch only ever sees ``ext__`` names), but `_compute_source_pin_update`
+    (``chat/orchestrator.py``) needs the WIDER question -- "is this turn's
+    data Celigo, so it must not be pinned to NetSuite or BigQuery" -- and a
+    local ``celigo.flows``/``celigo_flows`` call is exactly as much "not
+    NetSuite" as the external one. This is the single place both spellings
+    of both families are recognized, so a caller never has to enumerate them
+    itself."""
+    return is_celigo_tool(tool_name) or tool_name.startswith("celigo_") or tool_name.startswith("celigo.")
 
 
 def categorize(tool_name: str) -> Category:
