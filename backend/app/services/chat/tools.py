@@ -268,6 +268,32 @@ async def build_all_tool_definitions(
     """
     tools = build_local_tool_definitions()
 
+    # Celigo local tools (spec docs/superpowers/specs/2026-09-04-celigo-chat-access.md
+    # §5, task 4A): gated on the tenant's `celigo` feature flag AND its flow-map
+    # `connections` row -- NOT the `celigo_mcp` external connector (Framework has the
+    # connection and no connector), so this does NOT go through
+    # `_CONNECTOR_GATED_TOOLS` below (that dict's keys double as the provider EXCLUSION
+    # list for external tool definitions; adding `celigo_mcp` there would silently drop
+    # every external Celigo MCP tool alongside these local ones). The `celigo` flag is
+    # the kill switch for the whole Celigo surface; every celigo.* execute() re-checks
+    # both the flag and the connection independently (dispatch-side, celigo_flow_map.py)
+    # -- this is only the inventory half, so a tool_use emitted before the flag flipped
+    # still fails closed at dispatch even if this half raced ahead of the flip.
+    celigo_local = {t["name"] for t in tools if t["name"].startswith("celigo_")}
+    if celigo_local:
+        try:
+            from app.services.celigo.read_queries import _get_celigo_connection
+            from app.services.feature_flag_service import is_enabled as _celigo_flag_is_enabled
+
+            celigo_ok = await _celigo_flag_is_enabled(db, tenant_id, "celigo") and (
+                await _get_celigo_connection(db, tenant_id) is not None
+            )
+        except Exception:
+            celigo_ok = False
+            logger.warning("Failed to gate Celigo local tools for tenant", exc_info=True)
+        if not celigo_ok:
+            tools = [t for t in tools if t["name"] not in celigo_local]
+
     try:
         from app.services.mcp_connector_service import get_active_connectors_for_tenant
 
