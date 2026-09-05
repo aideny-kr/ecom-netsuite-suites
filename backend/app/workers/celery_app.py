@@ -62,6 +62,10 @@ celery_app.conf.include = [
 ]
 
 celery_app.conf.beat_schedule = {
+    "transaction-operations-actions-minute": {
+        "task": "tasks.transaction_ops_collect_actions",
+        "schedule": 60.0,
+    },
     "transaction-operations-minute": {
         "task": "tasks.transaction_ops_collect_due",
         "schedule": 60.0,

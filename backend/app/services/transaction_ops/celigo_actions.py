@@ -429,6 +429,99 @@ async def read_celigo_error_evidence(db, tenant_id, target_step_id, order_refere
             return await _read(_Transport(owned, token, region), step, flow, connection, order_reference, error_id)
 
 
+async def read_celigo_resolution(db, tenant_id, target_step_id, approved_evidence, *, client=None):
+    """Positive proof from Celigo's resolved queue, never from open-error absence.
+
+    The caller separately proves the financial outcome in NetSuite and reserves
+    MAX_READ_CALLS before invoking this bounded, read-only collector.
+    """
+    if (
+        not isinstance(approved_evidence, dict)
+        or approved_evidence.get("provider") != "celigo"
+        or approved_evidence.get("complete") is not True
+    ):
+        _fail("approved_error_evidence_required")
+    reference = approved_evidence.get("order_reference")
+    if not isinstance(reference, str) or len(reference) > 100 or not _REFERENCE.fullmatch(reference):
+        _fail("invalid_order_reference")
+    approved_error = approved_evidence.get("error") or {}
+    identifier = _opaque(approved_error.get("error_id"))
+    retry_key = _opaque(approved_error.get("retry_data_key"))
+
+    async def read(http, step, flow, connection):
+        destination, fingerprint, _ = await _configuration(http, step, flow)
+        scope = {
+            "connection_id": str(connection.id),
+            "target_step_id": str(step.id),
+            "flow_id": flow.celigo_id,
+            "import_id": step.celigo_id,
+            "branch_id": step.branch_id,
+            **destination,
+        }
+        if fingerprint != approved_evidence.get("config_fingerprint") or scope != approved_evidence.get("scope"):
+            _fail("provider_configuration_changed")
+        evidence = {
+            "provider": "celigo",
+            "order_reference": reference,
+            "error_id": identifier,
+            "scope": scope,
+            "config_fingerprint": fingerprint,
+            "complete": False,
+            "resolved": False,
+        }
+        path = f"/v1/flows/{flow.celigo_id}/{step.celigo_id}/resolved"
+        next_path, seen = path, set()
+        for _ in range(_MAX_ERROR_PAGES):
+            if next_path in seen:
+                _fail("invalid_pagination")
+            seen.add(next_path)
+            _, page = await http.request("GET", next_path)
+            # Celigo's FlowStepResolvedResponse uses 'resolved', whereas its
+            # open-error response uses 'errors'. These aren't interchangeable.
+            rows = page.get("resolved")
+            if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+                _fail("invalid_resolved_page")
+            matches = [row for row in rows if row.get("errorId") == identifier]
+            if len(matches) > 1:
+                _fail("ambiguous_resolved_error")
+            if matches:
+                found = matches[0]
+                _error_metadata(found)
+                if (
+                    found.get("retryDataKey") != retry_key
+                    or found.get("traceKey") not in (None, reference)
+                    or found.get("code") != approved_error.get("code")
+                    or found.get("source") != approved_error.get("source")
+                    or found.get("occurredAt") != approved_error.get("occurred_at")
+                ):
+                    _fail("resolved_error_identity_changed")
+                try:
+                    resolved_at = found.get("resolvedAt")
+                    if not isinstance(resolved_at, str) or len(resolved_at) > 64:
+                        raise ValueError
+                    resolved = datetime.fromisoformat(resolved_at.replace("Z", "+00:00"))
+                    if resolved.utcoffset() is None or resolved > datetime.now(timezone.utc):
+                        raise ValueError
+                except (ValueError, TypeError):
+                    _fail("resolution_time_unproven")
+                evidence.update(
+                    complete=True, resolved=True, resolved_at=resolved_at, resolution_fingerprint=_digest(found)
+                )
+                break
+            if not page.get("nextPageURL"):
+                break
+            next_path = _next_page(page["nextPageURL"], path, http.base)
+        evidence.update(observed_at=datetime.now(timezone.utc).isoformat(), api_calls=http.calls)
+        return evidence
+
+    async with asyncio.timeout(_READ_SECONDS):
+        step, flow, connection, token, region = await _load_scope(db, tenant_id, target_step_id)
+        if client is not None:
+            return await read(_Transport(client, token, region), step, flow, connection)
+        async with httpx.AsyncClient() as owned:
+            return await read(_Transport(owned, token, region), step, flow, connection)
+
+
 async def dispatch_celigo_resolution(db, tenant_id, claimed: ClaimedOperation, fresh_evidence, *, client=None):
     """Reserve once, send one exact resolve PUT, return an unverified receipt."""
     if claimed.action != "resolve_celigo_error" or not claimed.target_record_id or claimed.record_type != "salesorder":
@@ -458,46 +551,57 @@ async def dispatch_celigo_resolution(db, tenant_id, claimed: ClaimedOperation, f
         "celigo_error_state": "resolved",
     }:
         _fail("unsupported_resolution_intent")
+    permit = await state_service.reserve_operation_budget(db, tenant_id, claimed.operation_id, api_calls=MAX_READ_CALLS)
+    if permit is None:
+        _fail("operation_budget_exhausted")
+    remaining = (permit.deadline_at - datetime.now(timezone.utc)).total_seconds()
+    if remaining <= 0:
+        _fail("operation_budget_exhausted")
     owns = client is None
     client = client or httpx.AsyncClient()
+    reserved = False
     try:
-        live = await read_celigo_error_evidence(
-            db, tenant_id, config.target_step_id, proposal.order_reference, error_id=error_id, client=client
-        )
-        if not live["complete"] or live["fingerprint"] != approved.get("fingerprint"):
-            _fail("provider_evidence_changed")
-        scope, error = live["scope"], live["error"]
-        if (
-            scope["account_id"] != _account(claimed.netsuite_account_id)
-            or scope["subsidiary_id"] != claimed.subsidiary_id
-            or scope["record_type"] != claimed.record_type
-            or error["kind"] != "duplicate_transaction"
-        ):
-            _fail("resolution_scope_unproven")
-        path = f"/v1/flows/{_remote(scope['flow_id'])}/{_remote(scope['import_id'])}/resolved"
-        body = {"errors": [_opaque(error["error_id"])]}
-        fingerprint = _digest(
-            {"method": "PUT", "path": path, "body": body, "provider_fingerprint": live["fingerprint"]}
-        )
-        # Final credential/scope load occurs before the durable reservation.
-        _, _, _, token, region = await _load_scope(db, tenant_id, config.target_step_id)
-        reserved = await state_service.reserve_operation_dispatch(
-            db, tenant_id, claimed, provider="celigo", payload_fingerprint=fingerprint
-        )
-        if not reserved:
-            _fail("dispatch_already_reserved")
-        try:
-            status, _ = await _Transport(client, token, region).request("PUT", path, body=body)
-        except (CeligoActionError, TimeoutError):
-            return {"status": "unknown", "verified": False, "payload_fingerprint": fingerprint}
-        # Any non-204 result is conservatively uncertain. The caller must use
-        # read-only reconciliation; no failure status permits an automatic retry.
-        return {
-            "status": "accepted" if status == 204 else "unknown",
-            "verified": False,
-            "http_status": status,
-            "payload_fingerprint": fingerprint,
-        }
+        async with asyncio.timeout(min(_READ_SECONDS, remaining)):
+            live = await read_celigo_error_evidence(
+                db, tenant_id, config.target_step_id, proposal.order_reference, error_id=error_id, client=client
+            )
+            if not live["complete"] or live["fingerprint"] != approved.get("fingerprint"):
+                _fail("provider_evidence_changed")
+            scope, error = live["scope"], live["error"]
+            if (
+                scope["account_id"] != _account(claimed.netsuite_account_id)
+                or scope["subsidiary_id"] != claimed.subsidiary_id
+                or scope["record_type"] != claimed.record_type
+                or error["kind"] != "duplicate_transaction"
+            ):
+                _fail("resolution_scope_unproven")
+            path = f"/v1/flows/{_remote(scope['flow_id'])}/{_remote(scope['import_id'])}/resolved"
+            body = {"errors": [_opaque(error["error_id"])]}
+            fingerprint = _digest(
+                {"method": "PUT", "path": path, "body": body, "provider_fingerprint": live["fingerprint"]}
+            )
+            # Final credential/scope load occurs before the durable reservation.
+            _, _, _, token, region = await _load_scope(db, tenant_id, config.target_step_id)
+            reserved = await state_service.reserve_operation_dispatch(
+                db, tenant_id, claimed, provider="celigo", payload_fingerprint=fingerprint
+            )
+            if not reserved:
+                _fail("dispatch_already_reserved")
+            try:
+                status, _ = await _Transport(client, token, region).request("PUT", path, body=body)
+            except (CeligoActionError, TimeoutError):
+                return {"status": "unknown", "verified": False}
+            # Any non-204 result is conservatively uncertain. The caller must use
+            # read-only reconciliation; no failure status permits an automatic retry.
+            return {
+                "status": "accepted" if status == 204 else "unknown",
+                "verified": False,
+                "http_status": status,
+            }
+    except TimeoutError:
+        if reserved:
+            return {"status": "unknown", "verified": False}
+        _fail("provider_read_deadline")
     finally:
         if owns:
             await client.aclose()

@@ -2,8 +2,9 @@
 
 This RESTlet provides a conditional save for an existing, unfulfilled sales
 order. Its tests and SDF package are part of the transaction-operations feature.
-The platform planner, executor and missing-order creation path are still being
-integrated; installing this artifact alone does not enable end-to-end repairs.
+The platform planner and executor use it for human-approved corrections.
+Missing-order creation is still being implemented. Installing this artifact
+alone does not configure or enable repairs.
 
 ## Contract
 
@@ -92,3 +93,36 @@ https://<account>.restlets.api.netsuite.com/app/site/hosting/restlet.nl?script=c
 
 No source credentials, account tokens or browser authentication files belong
 in the generated artifact.
+
+## Platform execution and recovery
+
+The selected active NetSuite connection needs
+`metadata_json.transaction_ops_guard_url` set to the account's HTTPS RESTlet URL,
+with `script=customscript_ecom_tx_ops_guard` and
+`deploy=customdeploy_ecom_tx_ops_guard`. The transport accepts only those exact
+script/deployment identifiers on that connection's account-specific NetSuite
+RESTlet host. The configured currency, subsidiary, source endpoint and explicit
+business mappings must match the collected evidence.
+
+Detection-only configuration creates findings. With `action_mode` set to
+`propose_actions`, complete eligible comparisons and a matching enabled guard
+can produce pending human proposals. Approval authorizes the exact displayed
+intent. A minute worker claims the persisted approval, rechecks the current
+approver's permissions, spends a committed read budget, rereads the source and
+destination, and rejects changed evidence. The adapter rereads the guard before
+committing the one-use dispatch reservation. Each attempt has at most 96
+provider calls and 300 seconds, further limited by approval expiry.
+
+Provider acknowledgements remain unverified until fresh independent source,
+NetSuite and guard reads establish the desired state. A timeout or an
+unverified result stays unknown. Recovery gets one separate read-only run with
+at most 32 calls and 300 seconds; it cannot reset the attempt or acquire another
+send permit. Recovery completion and its verified/unknown outcome are written
+atomically. If evidence remains inconclusive, the outcome remains unknown and
+blocks another operation on the order.
+
+Celigo false-alarm proposals additionally bind the exact duplicate-create
+error, retry envelope and live flow/import/script configuration. Resolution
+sends only that error ID. Verification requires the exact resolved record and
+a current matching Framework/NetSuite comparison; an empty open queue is not
+proof of resolution.

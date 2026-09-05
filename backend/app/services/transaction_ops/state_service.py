@@ -852,3 +852,87 @@ async def recover_expired_operation(db, tenant_id, operation_id, *, now=None):
         db, tenant_id, operation, now, "interrupted_after_dispatch" if sent else "interrupted_before_dispatch"
     )
     return operation
+
+
+async def create_operation_recovery(db, tenant_id, operation_id, *, now=None):
+    """One finite read-only recovery allowance for a previously reserved write.
+
+    This internal origin is deliberately absent from RunCreate, API and chat.
+    It does not depend on an unrelated scan schedule being enabled, and cannot
+    reset an operation's spent budget, deadline or single-use dispatch marker.
+    """
+    now = _clock(now)
+    operation = await _one(db, tenant_id, TransactionOperation, operation_id, lock=True)
+    if operation.status != "unknown" or (operation.result_json or {}).get("dispatch_reserved") is not True:
+        raise StateError("operation_not_recoverable")
+    proposal = await get_proposal(db, tenant_id, operation.proposal_id)
+    config = await get_config(db, tenant_id, proposal.config_id)
+    if not config.enabled:
+        raise StateError("config_disabled")
+    key = business_digest({"kind": "operation_recovery", "operation_id": operation.id})
+    existing = (
+        await db.execute(
+            select(TransactionRun).where(TransactionRun.tenant_id == tenant_id, TransactionRun.work_key == key)
+        )
+    ).scalar_one_or_none()
+    if existing:
+        await _commit(db, tenant_id)
+        return existing
+    row = TransactionRun(
+        tenant_id=tenant_id,
+        config_id=config.id,
+        work_key=key,
+        origin="recovery",
+        params_json={"operation_id": str(operation.id), "order_references": [proposal.order_reference]},
+        config_snapshot=ConfigOut.model_validate(config).model_dump(mode="json"),
+        max_api_calls=32,
+        max_orders=1,
+        deadline_at=now + timedelta(seconds=300),
+        progress_json={},
+        initiated_by=None,
+    )
+    db.add(row)
+    await db.flush()
+    await _audit(db, tenant_id, "operation.recovery.create", row, payload={"operation_id": str(operation.id)})
+    await _commit(db, tenant_id)
+    return row
+
+
+async def finish_operation_recovery(db, tenant_id, run_id, *, lease_token, reason, proof=None, now=None):
+    """Atomically persist the recovery's terminal state and verified/unknown outcome."""
+    if reason not in {"done", "budget", "stall", "error"} or (proof is not None and reason != "done"):
+        raise ValueError("Invalid recovery outcome")
+    now = _clock(now)
+    run = await get_run(db, tenant_id, run_id, lock=True)
+    if run.origin != "recovery":
+        raise StateError("not_a_recovery_run")
+    operation = await _one(db, tenant_id, TransactionOperation, uuid.UUID(run.params_json["operation_id"]), lock=True)
+    if run.status == "finished":
+        await _commit(db, tenant_id)
+        return operation
+    if not (
+        reason == "budget" and now >= run.deadline_at and run.status == "running" and lease_token == run.lease_token
+    ):
+        _lease(run, lease_token, now)
+    _finish(run, reason, now)
+    if operation.status == "unknown":
+        details = _bounded_json(
+            {
+                "reconciled": True,
+                "recovery": {"run_id": str(run_id), "termination_reason": reason},
+                **({"verification": proof} if proof is not None else {}),
+            }
+        )
+        operation.status = "verified" if proof is not None else "unknown"
+        operation.completed_at = now
+        operation.result_json = {
+            **(operation.result_json or {}),
+            **details,
+            "termination_reason": "done" if proof is not None else reason,
+        }
+    await _audit(
+        db, tenant_id, "operation.recovery.complete", operation, payload={"run_id": str(run_id), "reason": reason}
+    )
+    await _audit(db, tenant_id, "run.finish", run, payload={"reason": reason})
+    await _commit(db, tenant_id)
+    return operation

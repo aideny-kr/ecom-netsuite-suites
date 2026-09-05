@@ -52,3 +52,70 @@ def transaction_ops_collect_due():
         return asyncio.run(execute())
     except Exception:
         raise RuntimeError("transaction_scheduler_failed") from None
+
+
+@celery_app.task(
+    base=InstrumentedTask,
+    name="tasks.transaction_ops_execute",
+    queue="recon",
+    max_retries=0,
+    soft_time_limit=330,
+    time_limit=340,
+)
+def transaction_ops_execute(tenant_id: str, proposal_id: str):
+    async def execute():
+        from app.services.transaction_ops.executor import execute_proposal
+
+        tenant, proposal = uuid.UUID(tenant_id), uuid.UUID(proposal_id)
+        async with worker_async_session() as db:
+            await set_tenant_context(db, str(tenant))
+            return await execute_proposal(db, tenant, proposal)
+
+    try:
+        return asyncio.run(execute())
+    except Exception:
+        raise RuntimeError("transaction_execution_failed") from None
+
+
+@celery_app.task(
+    base=InstrumentedTask,
+    name="tasks.transaction_ops_recover",
+    queue="recon",
+    max_retries=0,
+    soft_time_limit=330,
+    time_limit=340,
+)
+def transaction_ops_recover(tenant_id: str, operation_id: str):
+    async def execute():
+        from app.services.transaction_ops.recovery import recover_operation
+
+        tenant, operation = uuid.UUID(tenant_id), uuid.UUID(operation_id)
+        async with worker_async_session() as db:
+            await set_tenant_context(db, str(tenant))
+            return await recover_operation(db, tenant, operation)
+
+    try:
+        return asyncio.run(execute())
+    except Exception:
+        raise RuntimeError("transaction_recovery_failed") from None
+
+
+@celery_app.task(
+    base=InstrumentedTask,
+    name="tasks.transaction_ops_collect_actions",
+    queue="recon",
+    max_retries=0,
+    soft_time_limit=50,
+    time_limit=55,
+)
+def transaction_ops_collect_actions():
+    async def execute():
+        from app.services.transaction_ops.action_scheduler import collect_due_actions
+
+        async with worker_async_session() as db:
+            return await collect_due_actions(db, datetime.now(timezone.utc))
+
+    try:
+        return asyncio.run(execute())
+    except Exception:
+        raise RuntimeError("transaction_action_scheduler_failed") from None

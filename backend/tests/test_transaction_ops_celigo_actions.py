@@ -226,6 +226,8 @@ async def prepare_dispatch(env, monkeypatch):
     monkeypatch.setattr(mod.state_service, "get_config", AsyncMock(return_value=config))
     reservation = AsyncMock(return_value=True)
     monkeypatch.setattr(mod.state_service, "reserve_operation_dispatch", reservation, raising=False)
+    env.read_budget = AsyncMock(return_value=SimpleNamespace(deadline_at=now + timedelta(minutes=5)))
+    monkeypatch.setattr(mod.state_service, "reserve_operation_budget", env.read_budget)
     env.requests.clear()
     return claim, evidence, reservation, proposal
 
@@ -348,3 +350,93 @@ async def test_dynamic_subsidiary_is_unknown_and_cannot_authorize_resolution(env
     with pytest.raises(mod.CeligoActionError, match="resolution_scope_unproven"):
         await dispatch(env, claim, evidence)
     reserve.assert_not_awaited()
+
+
+async def test_resolution_verification_requires_the_exact_resolved_record(env):
+    approved = await read(env)
+    open_path = f"/v1/flows/{FLOW}/{IMPORT}/errors"
+    resolved = deepcopy(env.docs[open_path]["errors"][0])
+    resolved.update(resolvedAt="2026-09-04T00:05:00Z", resolvedBy="private-person@example.test")
+    env.docs[open_path] = {"errors": []}
+    env.docs[f"/v1/flows/{FLOW}/{IMPORT}/resolved"] = {"resolved": [resolved]}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(env.handler)) as client:
+        verified = await mod.read_celigo_resolution(env.db, env.tenant, env.step.id, approved, client=client)
+    assert verified["complete"] is True and verified["resolved"] is True
+    assert verified["error_id"] == ERROR and verified["order_reference"] == REF
+    assert verified["config_fingerprint"] == approved["config_fingerprint"]
+    assert "private-person" not in json.dumps(verified) and "customer@example.com" not in json.dumps(verified)
+    assert not env.writes
+
+
+async def test_disappearance_from_open_errors_does_not_verify_resolution(env):
+    approved = await read(env)
+    env.docs[f"/v1/flows/{FLOW}/{IMPORT}/errors"] = {"errors": []}
+    env.docs[f"/v1/flows/{FLOW}/{IMPORT}/resolved"] = {"resolved": []}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(env.handler)) as client:
+        result = await mod.read_celigo_resolution(env.db, env.tenant, env.step.id, approved, client=client)
+    assert result["complete"] is False and result["resolved"] is False
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("retryDataKey", "other-snapshot"),
+        ("traceKey", "R123456789"),
+        ("resolvedAt", None),
+        ("resolvedAt", "no-clock"),
+        ("resolvedAt", "2999-01-01T00:00:00Z"),
+        ("code", "DIFFERENT_CODE"),
+        ("source", {"email": "private@example.test"}),
+    ],
+)
+async def test_conflicting_resolved_error_cannot_confirm_the_approved_outcome(env, field, value):
+    approved = await read(env)
+    resolved = deepcopy(env.docs[f"/v1/flows/{FLOW}/{IMPORT}/errors"]["errors"][0])
+    resolved["resolvedAt"] = "2026-09-04T00:05:00Z"
+    resolved[field] = value
+    env.docs[f"/v1/flows/{FLOW}/{IMPORT}/resolved"] = {"resolved": [resolved]}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(env.handler)) as client:
+        with pytest.raises(mod.CeligoActionError):
+            await mod.read_celigo_resolution(env.db, env.tenant, env.step.id, approved, client=client)
+    assert not env.writes
+
+
+async def test_resolved_error_pagination_cannot_leave_the_known_provider_path(env):
+    approved = await read(env)
+    env.docs[f"/v1/flows/{FLOW}/{IMPORT}/resolved"] = {
+        "resolved": [],
+        "nextPageURL": "https://untrusted.example/resolved",
+    }
+    async with httpx.AsyncClient(transport=httpx.MockTransport(env.handler)) as client:
+        with pytest.raises(mod.CeligoActionError, match="pagination"):
+            await mod.read_celigo_resolution(env.db, env.tenant, env.step.id, approved, client=client)
+    assert all(r.url.host == "api.integrator.io" for r in env.requests)
+
+
+async def test_changed_live_configuration_blocks_resolution_verification(env):
+    approved = await read(env)
+    env.docs[f"/v1/scripts/{SCRIPT}"]["content"] += "// changed"
+    async with httpx.AsyncClient(transport=httpx.MockTransport(env.handler)) as client:
+        with pytest.raises(mod.CeligoActionError, match="configuration_changed"):
+            await mod.read_celigo_resolution(env.db, env.tenant, env.step.id, approved, client=client)
+
+
+async def test_resolution_preflight_reserves_read_cost_before_first_provider_read(env, monkeypatch):
+    claim, evidence, _, _ = await prepare_dispatch(env, monkeypatch)
+
+    async def reserve(*args, **kwargs):
+        assert not env.requests
+        assert kwargs["api_calls"] == mod.MAX_READ_CALLS
+        return SimpleNamespace(deadline_at=datetime.now(timezone.utc) + timedelta(minutes=5))
+
+    env.read_budget.side_effect = reserve
+    await dispatch(env, claim, evidence)
+    env.read_budget.assert_awaited_once()
+
+
+async def test_exhausted_resolution_budget_stops_every_provider_call(env, monkeypatch):
+    claim, evidence, _, _ = await prepare_dispatch(env, monkeypatch)
+    env.read_budget.return_value = None
+    with pytest.raises(mod.CeligoActionError, match="operation_budget_exhausted"):
+        await dispatch(env, claim, evidence)
+    assert not env.requests

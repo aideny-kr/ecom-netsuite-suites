@@ -98,12 +98,12 @@ an individual completed slice does not mean the product is complete.
 - [ ] Rendered product verification and T2 gates.
 - [ ] PR delivery.
 
-The integrated backend full suite passes 7,278 tests (2 skipped), including
+The integrated backend full suite passes 7,396 tests (2 skipped), including
 PostgreSQL, RLS, approval, chat, worker and scheduler tests. The review and setup
 UI passes 1,027 frontend tests, TypeScript, lint and the production build.
 Intercepted browser QA passes
 manual run creation, immutable approval, expired evidence, unknown outcomes,
-empty/gated states and mobile layout; final stable screenshots are being checked.
+empty/gated states and mobile layout. Setup was also verified in a rendered, intercepted browser run; screenshots were inspected.
 
 The exact Celigo error reader/resolver and a single-use dispatch reservation
 are implemented and tested. The live source and NetSuite reader modules were
@@ -111,10 +111,26 @@ exercised together with eight provider reads: an exact matching EUR transaction
 correctly remains in gather-evidence state because statutory tax metadata is
 incomplete. Source/target setup and schedule controls are implemented.
 
-Remaining implementation is substantive: connect finding-to-proposal planning,
-fresh execution revalidation, persistent operation read budgets and crash
-recovery; implement guarded NetSuite corrections/creates; complete delivery
-gates. An approved UI state alone never means an external change was executed
+The correction/resolution execution slice now connects findings to immutable
+proposals, authenticated approval to a minute worker, fresh source/NetSuite/guard
+revalidation, single-use dispatch, and independent outcome verification. Unknown
+operations have one separate read-only recovery run with persisted budgets;
+recovery completion and its outcome are committed atomically. Generic queue
+redelivery routes a recovery run into the read-only path. All 449 transaction
+operations tests pass; the full backend suite also passes (7,396 tests, 2 skipped). No external
+customer-data write has been performed.
+
+The NetSuite guard ships as an isolated SDF package with writes disabled. Its
+48 guard tests plus packaging and existing SuiteApp tests total 57 passing.
+Client-side SDF validation passes. Server validation could not complete because
+the saved sandbox SDK authentication had expired; the waiting authentication
+process was stopped. Deployment and live write validation have not occurred.
+
+Remaining implementation is substantive: missing-order create preparation and
+guarded execution; explicit handling of Framework's legacy tax allocation
+profiles; bounded fresh-human retry after known no-write failures; seeded-tenant
+HTTP end-to-end and actual process-death drills; complete independent T2 and
+shipping gates. An approved UI state alone never means an external change was executed
 or verified. The child agents remain usage-limited; root is continuing their
 remaining work, and their failed turns are not counted as reviews.
 
@@ -140,3 +156,47 @@ guarantee will be claimed. Missing-order creation must not use an upsert.
 External mutations require a concrete human-approved action in the product.
 The user's authorization to build the feature is not approval to change a
 customer transaction while developing or testing it.
+
+## Missing-order creation evidence (September 5)
+
+Current Inc and BV Celigo imports both map the complete Framework `number` to
+NetSuite `externalid`. Creation must retain that shared identity. Oracle documents
+external IDs as unique across the transaction record group, including sales orders
+and invoices, not merely per subsidiary or sales-order record type:
+https://docs.oracle.com/en/cloud/saas/netsuite/ns-online-help/section_N3436356.html
+An account-wide external-ID conflict is therefore a human-review condition.
+Never change the key or use an upsert to bypass a conflict.
+
+REST sales-order writes do not support legacy taxation (Oracle's sales-order REST
+documentation). The conditional SuiteScript guard remains the intended narrow
+write boundary. Customer, item, currency/precision, period, addresses, tax-code
+mapping, shipping and date must be explicit before a missing-order proposal.
+Existing Celigo import invoke is not an upstream flow dry run: its mapping/hooks
+run, but export transformation, branch routing and customer lookup are not proven
+by that invocation alone. No raw Solidus order will be submitted based on that
+assumption.
+
+
+## Next execution slices
+
+1. Known-no-write retries: preserve the original attempt and rejection, create at
+   most one further pending proposal for identical economic work after fresh
+   evidence. It requires a new human decision. An unknown attempt never qualifies.
+2. Missing-order create: resolve one active customer by exact source identity and
+   subsidiary, exact item SKUs with no ambiguous/bundle expansion, currency and
+   precision, open period, transaction date, shipping, explicit addresses, and
+   any configured location/form/terms. Preserve `number` as external ID and
+   check account-wide transaction conflicts. Reject unsupported promotions,
+   inventory allocations or ambiguous routing as visible findings. The guard
+   rechecks reference absence and original entity/item/currency evidence before
+   one standard-mode save; no upsert, customer create, fulfillment, charge or
+   broad Celigo flow execution. Independently find and verify the created order.
+3. Legacy tax profiles: keep statutory source calculation separate from observed
+   NetSuite allocations. Explicit Inc aggregate-header and BV line-tax-amount
+   profiles may validate reported tax amounts without pretending a generic
+   SOLIDUS effective header rate is statutory. Native tax fields and custom VAT
+   fields must both be guarded and verified. This requires additional executable
+   validation; current strict unknown-tax behavior remains in place meanwhile.
+4. Complete seeded-tenant HTTP/worker end-to-end coverage, an actual killed-process
+   recovery drill, rendered create/retry controls, and the full independent T2
+   review. The current Claude CLI review is supplementary, not that full gate.

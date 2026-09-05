@@ -64,7 +64,7 @@ class TransactionRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
             ["tenant_id", "config_id"], ["transaction_ops_configs.tenant_id", "transaction_ops_configs.id"]
         ),
         CheckConstraint("status IN ('pending','running','finished')", name="ck_tx_run_status"),
-        CheckConstraint("origin IN ('manual','chat','schedule')", name="ck_tx_run_origin"),
+        CheckConstraint("origin IN ('manual','chat','schedule','recovery')", name="ck_tx_run_origin"),
         CheckConstraint(
             "termination_reason IS NULL OR termination_reason IN ('done','budget','stall','error')",
             name="ck_tx_run_reason",

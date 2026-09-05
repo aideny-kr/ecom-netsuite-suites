@@ -165,16 +165,25 @@ async def run_investigation(
     _source_reader=None,
     _target_reader=None,
     _page_reader=None,
+    _guard_reader=None,
+    _celigo_reader=None,
     _enabled=None,
     _clock=None,
 ):
+    from app.services.transaction_ops.celigo_actions import MAX_READ_CALLS, read_celigo_error_evidence
     from app.services.transaction_ops.netsuite_reader import read_netsuite_order
+    from app.services.transaction_ops.netsuite_transport import MAX_GUARD_READ_CALLS, read_guard_snapshot
+    from app.services.transaction_ops.planner import PlanningError, plan_proposal
     from app.services.transaction_ops.source_reader import read_framework_order, read_framework_orders_page
 
     state, clock = _state or state_service, _clock or (lambda: datetime.now(timezone.utc))
     source_reader, target_reader = _source_reader or read_framework_order, _target_reader or read_netsuite_order
     page_reader = _page_reader or read_framework_orders_page
     run = await state.get_run(db, tenant_id, run_id)
+    if getattr(run, "origin", None) == "recovery":
+        from app.services.transaction_ops.recovery import reconcile_operation_run
+
+        return await reconcile_operation_run(db, tenant_id, run_id, _clock=clock)
     token = await state.claim_run(db, tenant_id, run_id, now=clock())
     if token is None:
         return {"run_id": str(run_id), "status": run.status, "termination_reason": run.termination_reason}
@@ -261,6 +270,43 @@ async def run_investigation(
             report = build_report(source, targets, config, mapping, now=clock())
             if report["order_reference"] != reference:
                 raise ValueError("source_reference_mismatch")
+            action = report["comparison"]["recommended_action"]
+            if mapping.action_mode == "propose_actions" and action in {
+                "propose_amount_correction",
+                "no_action",
+                "propose_missing_sync",
+            }:
+                # Preserve detection even when extra action evidence is unavailable
+                # or its budget cannot fit. Models never manufacture this proof.
+                await state.record_finding(db, tenant_id, run_id, reference, report, lease_token=token, now=clock())
+                current_config = await state.get_config(db, tenant_id, run.config_id)
+                guard = celigo = None
+                try:
+                    if action == "propose_amount_correction":
+                        if not await reserve(MAX_GUARD_READ_CALLS):
+                            return await finish("budget")
+                        guard = await bounded_read(
+                            (_guard_reader or read_guard_snapshot)(
+                                db, tenant_id, current_config, targets["orders"][0]["record_id"]
+                            )
+                        )
+                    elif action == "no_action" and current_config.target_step_id:
+                        if not await reserve(MAX_READ_CALLS):
+                            return await finish("budget")
+                        celigo = await bounded_read(
+                            (_celigo_reader or read_celigo_error_evidence)(
+                                db, tenant_id, current_config.target_step_id, reference
+                            )
+                        )
+                    request = plan_proposal(report, targets, current_config, now=clock(), guard=guard, celigo=celigo)
+                    proposal = await state.propose(db, tenant_id, run_id, request, lease_token=token, now=clock())
+                    report = {**report, "automation": {"status": proposal.status, "proposal_id": str(proposal.id)}}
+                except PlanningError as exc:
+                    report = {**report, "automation": {"status": "blocked", "code": str(exc)}}
+                except (state_service.StateError, FeatureRevokedError):
+                    raise
+                except Exception:
+                    report = {**report, "automation": {"status": "blocked", "code": "action_evidence_unavailable"}}
             await state.record_finding(db, tenant_id, run_id, reference, report, lease_token=token, now=clock())
             progress["processed"] += 1
             action = report["comparison"]["recommended_action"]
