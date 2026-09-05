@@ -10,6 +10,8 @@ prompt string — call this helper at prompt-assembly time.
 
 from __future__ import annotations
 
+from app.services.chat.tool_categories import is_celigo_source
+
 _BIGQUERY_HINT = (
     "\nBIGQUERY DATA WAREHOUSE:\n"
     "This tenant has BigQuery connected. Use `bigquery_sql` for ad-hoc queries, "
@@ -54,7 +56,7 @@ def build_tool_inventory_block(tool_definitions: list[dict]) -> str:
     if has_bigquery:
         lines.append(_BIGQUERY_HINT)
 
-    has_celigo = any(td.get("name", "").startswith("celigo_") for td in tool_definitions)
+    has_celigo = any(is_celigo_source(td.get("name", "")) for td in tool_definitions)
     if has_celigo:
         lines.append(_CELIGO_HINT)
 

@@ -904,7 +904,9 @@ async def list_flow_errors(
     if flow is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Flow not found")
 
-    groups = await read_queries.flow_error_groups(db, tenant_id=user.tenant_id, flow_id=flow_id, status=status_filter)
+    groups = await read_queries.flow_error_groups(
+        db, tenant_id=user.tenant_id, flow_id=flow_id, status=status_filter, errors_limit=limit
+    )
     return _flow_errors_out(groups, limit=limit)
 
 

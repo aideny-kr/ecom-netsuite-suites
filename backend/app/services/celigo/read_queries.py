@@ -1144,6 +1144,7 @@ async def flow_error_groups(
     tenant_id: uuid.UUID,
     flow_id: uuid.UUID,
     status: Literal["open", "resolved"],
+    errors_limit: int | None = None,
 ) -> ErrorGroups:
     """A flow's errors, grouped by root-cause signature -- the "what's
     actually breaking" view a per-error list can't give.
@@ -1252,10 +1253,12 @@ async def flow_error_groups(
                 retriable=group_retriable,
                 purge_at=min(purge_ats) if purge_ats else None,
                 trace_keys=trace_keys,
-                # The caller's per-group display `limit` is applied by the
-                # route mapping this onto the response, same split as the
-                # 2000-row grouping cap above vs. the response-level `total`.
-                errors=[_error_out(e) for e in rows],
+                # `count` is the true group size; `errors` is the per-group
+                # listing, capped HERE at `errors_limit` so a caller that only
+                # needs the first row (the chat tool) or the first N (the
+                # route's `limit`) never materialises up to 2000 dataclasses
+                # per group to throw them away. None keeps every row.
+                errors=[_error_out(e) for e in (rows if errors_limit is None else rows[:errors_limit])],
             )
         )
 

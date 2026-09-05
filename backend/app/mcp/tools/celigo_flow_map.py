@@ -108,6 +108,12 @@ async def _gate(context: dict, columns: tuple[str, ...]):
     if db is None:
         return _empty(columns, "No database session — nothing was read."), None, None, None
 
+    # A context without a tenant is a caller bug, but the honest answer is
+    # still an empty envelope with a reason -- never a tenant-less query and
+    # never a raised exception that the dispatcher would turn into a bare
+    # "execution failed".
+    if context.get("tenant_id") in (None, ""):
+        return _empty(columns, "No tenant in context — nothing was read."), None, None, None
     tenant_id = _as_uuid(context.get("tenant_id"))
 
     if not await feature_flag_service.is_enabled(db, tenant_id, "celigo"):
@@ -466,7 +472,9 @@ def _join_scripts(attachments) -> tuple[str, str]:
 
 def _router_row(seq: int, router: dict) -> list:
     rid = router.get("id")
-    name = router.get("name") or (f"Router {rid}" if rid else None) or "(unnamed router)"
+    # `is not None`, not truthiness: Celigo router ids are strings and "0" is a
+    # real id that must read "Router 0", not "(unnamed router)".
+    name = router.get("name") or (f"Router {rid}" if rid not in (None, "") else None) or "(unnamed router)"
     return [seq, "router", name, None, None, None, None, None, "", ""]
 
 
@@ -623,8 +631,10 @@ async def execute_flow_errors(params: dict, **kwargs) -> dict:
                 caveat = f"'{flow_key}' matches {len(refs)} flows: {names}."
                 return _envelope(columns, [], "Ambiguous flow.", caveats=[*caveats, caveat])
             single_ref = refs[0]
+            # errors_limit=1: this tool reads one sample message per group,
+            # never the per-error list -- do not materialise it.
             groups_result = await read_queries.flow_error_groups(
-                db, tenant_id=tenant_id, flow_id=_as_uuid(single_ref.id), status=status
+                db, tenant_id=tenant_id, flow_id=_as_uuid(single_ref.id), status=status, errors_limit=1
             )
             tagged = [(single_ref.name, g) for g in groups_result.groups]
         else:
@@ -638,7 +648,7 @@ async def execute_flow_errors(params: dict, **kwargs) -> dict:
                 flows = await read_queries.flow_summaries(db, tenant_id=tenant_id, integration_id=_as_uuid(integ.id))
                 for f in flows:
                     groups_result = await read_queries.flow_error_groups(
-                        db, tenant_id=tenant_id, flow_id=_as_uuid(f.id), status=status
+                        db, tenant_id=tenant_id, flow_id=_as_uuid(f.id), status=status, errors_limit=1
                     )
                     tagged.extend((f.name, g) for g in groups_result.groups)
             tagged.sort(key=lambda pair: pair[1].count, reverse=True)

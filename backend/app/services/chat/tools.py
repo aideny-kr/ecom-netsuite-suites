@@ -281,7 +281,9 @@ async def build_all_tool_definitions(
     # both the flag and the connection independently (dispatch-side, celigo_flow_map.py)
     # -- this is only the inventory half, so a tool_use emitted before the flag flipped
     # still fails closed at dispatch even if this half raced ahead of the flip.
-    celigo_local = {t["name"] for t in tools if t["name"].startswith("celigo_")}
+    from app.services.chat.tool_categories import is_celigo_source
+
+    celigo_local = {t["name"] for t in tools if is_celigo_source(t["name"])}
     if celigo_local:
         try:
             from app.services.celigo.read_queries import _get_celigo_connection
