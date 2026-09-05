@@ -1,14 +1,13 @@
-const SuiteCloudJestStubs = require('@oracle/suitecloud-unit-testing/SuiteCloudJestStubs');
+jest.mock('N/query');
+jest.mock('N/log');
+jest.mock('N/runtime');
 
 describe('ecom_mock_data_restlet', () => {
     let restlet;
 
-    beforeAll(() => {
-        SuiteCloudJestStubs.install();
-    });
-
     beforeEach(() => {
         jest.resetModules();
+        require('N/runtime').getCurrentScript.mockReturnValue({getRemainingUsage: () => 1000});
         restlet = require('../src/FileCabinet/SuiteScripts/ecom_mock_data_restlet');
     });
 
