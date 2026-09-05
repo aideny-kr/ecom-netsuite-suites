@@ -217,3 +217,31 @@ describe("chat-stream: normalizeStreamEvent — data_table with suppress_llm_val
     }
   });
 });
+
+describe("DataFrameTable — caveats (spec docs/superpowers/specs/2026-09-04-celigo-chat-access.md §8)", () => {
+  it("renders each caveat as a muted note line under the table", () => {
+    render(
+      <DataFrameTable
+        data={makeQueryData({
+          caveats: [
+            "Nightly snapshot as of 2026-09-01T00:00:00+00:00.",
+            "2 of 5 flows not yet error-checked.",
+          ],
+        })}
+      />,
+    );
+    expect(screen.getByText("Nightly snapshot as of 2026-09-01T00:00:00+00:00.")).toBeInTheDocument();
+    expect(screen.getByText("2 of 5 flows not yet error-checked.")).toBeInTheDocument();
+  });
+
+  it("renders a 'Note' eyebrow when caveats are present", () => {
+    render(<DataFrameTable data={makeQueryData({ caveats: ["Snapshot only."] })} />);
+    expect(screen.getByText(/note/i)).toBeInTheDocument();
+  });
+
+  it("renders nothing extra when caveats are absent", () => {
+    const { container } = render(<DataFrameTable data={makeQueryData()} />);
+    expect(screen.queryByText(/note/i)).toBeNull();
+    expect(container.querySelectorAll("[data-testid='data-table-caveats']")).toHaveLength(0);
+  });
+});
