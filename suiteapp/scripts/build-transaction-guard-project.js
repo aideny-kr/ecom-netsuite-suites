@@ -6,7 +6,12 @@ const path = require('node:path');
 
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'framework-transaction-guard-'));
 try {
-    for (const relative of ['Objects/customscript_ecom_tx_ops_guard.xml', 'FileCabinet/SuiteScripts/ecom_tx_ops_guard.js']) {
+    for (const relative of [
+        'Objects/customscript_ecom_tx_ops_guard.xml',
+        'Objects/custbody_ecom_tx_ops_work_key.xml',
+        'FileCabinet/SuiteScripts/ecom_tx_ops_guard.js',
+        'FileCabinet/SuiteScripts/ecom_tx_ops_create.js',
+    ]) {
         const target = path.join(directory, relative);
         fs.mkdirSync(path.dirname(target), {recursive: true});
         fs.copyFileSync(path.join(__dirname, '../src', relative), target);

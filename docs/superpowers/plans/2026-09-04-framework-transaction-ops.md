@@ -461,3 +461,24 @@ diff checks also pass. Native draft construction, guarded create dispatch, indep
 verification, recovery and the create-review UI remain outstanding. The temporary
 input implementation checkout was removed after a byte-for-byte verified copy
 into the main task worktree.
+
+
+### Native missing-order draft and single-save guard
+
+The native library now constructs a bounded unsaved draft from the exact creation
+input, resolves existing customer/currency/item/unit/location/shipping metadata
+and verifies the actual native fields. The parent guard compares the human-frozen
+preview, attributes the order with its work key, repeats absence/period/deadline
+checks and permits one save into pending approval. The separate creation flag
+defaults off. Read-only attributed snapshots support later independent platform
+verification.
+
+Adversarial tests reproduced and fixed header tax-code and taxability changes
+that preserved amounts. All 141 SuiteApp tests now pass, including aggregate and
+cross-subsidiary routing, duplicate races, held customers, currency/unit mismatch,
+closed periods, missing attribution, late expiry and unknown save-time changes.
+Client-side SDF validation reports no errors for the isolated package containing
+the libraries, work-key field and disabled deployment. Eight owned files were
+ported with byte-for-byte checks. No native deployment or live write occurred.
+Platform preview/dispatch/verification/recovery, create review UI and create crash
+drill remain outstanding.

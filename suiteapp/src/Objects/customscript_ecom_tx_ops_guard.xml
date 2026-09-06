@@ -4,11 +4,16 @@
     <isinactive>F</isinactive>
     <notifyadmins>F</notifyadmins>
     <notifyowner>F</notifyowner>
-    <description>Conditional sales-order amount corrections with exact approved before values. Writes require the explicit enable parameter and platform human approval.</description>
+    <description>Conditional sales-order corrections and pending-approval creation with exact approved values. Each write path requires its explicit enable parameter and platform human approval.</description>
     <scriptfile>[/SuiteScripts/ecom_tx_ops_guard.js]</scriptfile>
     <scriptcustomfields>
         <scriptcustomfield scriptid="custscript_ecom_tx_ops_enabled">
             <label>Enable approved transaction corrections</label>
+            <fieldtype>CHECKBOX</fieldtype>
+            <defaultchecked>F</defaultchecked>
+        </scriptcustomfield>
+        <scriptcustomfield scriptid="custscript_ecom_tx_create_enabled">
+            <label>Enable approved missing-order creation</label>
             <fieldtype>CHECKBOX</fieldtype>
             <defaultchecked>F</defaultchecked>
         </scriptcustomfield>

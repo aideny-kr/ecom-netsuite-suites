@@ -10,11 +10,12 @@
  * Period locks are separate records: checked immediately before save, without
  * claiming an atomic transaction spanning the period and the sales order.
  */
-define(["N/record", "N/query", "N/runtime", "N/log"], (
+define(["N/record", "N/query", "N/runtime", "N/log", "./ecom_tx_ops_create"], (
   record,
   query,
   runtime,
   log,
+  create,
 ) => {
   const VERSION = 1;
   const TOTALS = [
@@ -512,6 +513,59 @@ define(["N/record", "N/query", "N/runtime", "N/log"], (
   function get(input) {
     try {
       budget(100);
+      if (input && input.action === "created_snapshot") {
+        keys(input, [
+          "action",
+          "record_id",
+          "line_count",
+          "tax_mode",
+          "tax_code_id",
+          "inventory_mode",
+        ]);
+        if (
+          !/^(?:[1-9][0-9]?|100)$/.test(String(input.line_count)) ||
+          !["line_location", "cross_subsidiary"].includes(input.inventory_mode)
+        )
+          fail("invalid_create_snapshot");
+        const profile = taxProfile({
+          mode: input.tax_mode,
+          tax_code_id: input.tax_code_id,
+        });
+        const id = identifier(input.record_id);
+        const order = record.load({ type: "salesorder", id, isDynamic: false });
+        const workKey = order.getValue({
+          fieldId: "custbody_ecom_tx_ops_work_key",
+        });
+        if (
+          String(order.id) !== id ||
+          typeof workKey !== "string" ||
+          !/^[a-f0-9]{64}$/.test(workKey)
+        )
+          fail("create_attribution_unproven");
+        const projected = create.snapshot(
+          order,
+          {
+            lines: Array(Number(input.line_count)),
+            inventory_mode: input.inventory_mode,
+            tax_profile: profile,
+          },
+          createHelpers(),
+        );
+        return {
+          success: true,
+          schema_version: VERSION,
+          account_id: runtime.accountId,
+          creation: {
+            record_id: id,
+            version: instant(order.getValue({ fieldId: "lastmodifieddate" })),
+            work_key: workKey,
+            tax_profile: profile,
+            inventory_mode: input.inventory_mode,
+            record: projected,
+          },
+          remainingUsage: usage(),
+        };
+      }
       keys(
         input,
         [
@@ -555,7 +609,151 @@ define(["N/record", "N/query", "N/runtime", "N/log"], (
       return responseError(error, false);
     }
   }
+  function createHelpers() {
+    return {
+      keys,
+      identifier,
+      account,
+      fail,
+      budget,
+      decimal,
+      writeNumber,
+      scaleOf,
+      product,
+      sum,
+      inventoryIds,
+      same,
+      openPeriod,
+      effectiveHeaderRate,
+    };
+  }
+  function postCreate(input) {
+    let sent = false;
+    try {
+      budget(200);
+      if (JSON.stringify(input).length > 65536) fail("intent_too_large");
+      if (account(input.account_id) !== account(runtime.accountId))
+        fail("account_mismatch");
+      if (input.action === "preview_create") {
+        keys(input, ["schema_version", "action", "account_id", "input"]);
+        if (
+          input.schema_version !== VERSION ||
+          account(input.input.account_id) !== account(input.account_id)
+        )
+          fail("invalid_intent");
+        const draft = create.prepare(input.input, createHelpers());
+        return {
+          success: true,
+          schema_version: VERSION,
+          account_id: runtime.accountId,
+          create_enabled:
+            runtime
+              .getCurrentScript()
+              .getParameter({ name: "custscript_ecom_tx_create_enabled" }) ===
+            true,
+          preview: draft.preview,
+          remainingUsage: usage(),
+        };
+      }
+      keys(input, [
+        "schema_version",
+        "action",
+        "account_id",
+        "work_key",
+        "approval_expires_at",
+        "before",
+        "after",
+      ]);
+      if (
+        input.schema_version !== VERSION ||
+        input.action !== "sync_missing_order"
+      )
+        fail("unsupported_action");
+      if (
+        runtime
+          .getCurrentScript()
+          .getParameter({ name: "custscript_ecom_tx_create_enabled" }) !== true
+      )
+        fail("create_disabled");
+      if (
+        typeof input.work_key !== "string" ||
+        !/^[a-f0-9]{64}$/.test(input.work_key)
+      )
+        fail("invalid_work_key");
+      expiration(input.approval_expires_at);
+      keys(input.before, ["missing", "order_reference"]);
+      keys(input.after, ["input", "preview"]);
+      if (
+        input.before.missing !== true ||
+        input.before.order_reference !== input.after.input.order_reference ||
+        account(input.after.input.account_id) !== account(input.account_id)
+      )
+        fail("invalid_intent");
+      const helpers = createHelpers(),
+        draft = create.prepare(input.after.input, helpers);
+      if (!same(draft.preview, input.after.preview))
+        fail("create_evidence_changed");
+      draft.order.setValue({
+        fieldId: "custbody_ecom_tx_ops_work_key",
+        value: input.work_key,
+      });
+      if (
+        draft.order.getValue({ fieldId: "custbody_ecom_tx_ops_work_key" }) !==
+          input.work_key ||
+        !same(
+          create.snapshot(draft.order, input.after.input, helpers, true),
+          draft.preview.record,
+        )
+      )
+        fail("create_work_key_unproven");
+      create.absent(input.before.order_reference, helpers);
+      if (
+        openPeriod(input.after.input.transaction_date) !==
+        draft.preview.period_id
+      )
+        fail("period_changed");
+      budget(100);
+      expiration(input.approval_expires_at);
+      sent = true;
+      const id = identifier(
+        draft.order.save({
+          enableSourcing: false,
+          ignoreMandatoryFields: false,
+        }),
+      );
+      log.audit({
+        title: "Transaction guard create",
+        details: { work_key: input.work_key, record_id: id },
+      });
+      const fresh = record.load({ type: "salesorder", id, isDynamic: false });
+      if (
+        fresh.getValue({ fieldId: "custbody_ecom_tx_ops_work_key" }) !==
+          input.work_key ||
+        !same(
+          create.snapshot(fresh, input.after.input, helpers),
+          draft.preview.record,
+        )
+      )
+        fail("post_create_mismatch");
+      return {
+        success: true,
+        schema_version: VERSION,
+        status: "saved",
+        record_id: id,
+        work_key: input.work_key,
+        verified: false,
+        remainingUsage: usage(),
+      };
+    } catch (error) {
+      return responseError(error, sent);
+    }
+  }
   function post(input) {
+    if (
+      input &&
+      ["preview_create", "sync_missing_order"].includes(input.action)
+    )
+      return postCreate(input);
     let sent = false;
     try {
       budget(200);

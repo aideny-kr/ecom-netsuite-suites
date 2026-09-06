@@ -1,9 +1,10 @@
 # Framework transaction guard
 
-This RESTlet provides a conditional save for an existing, unfulfilled sales
-order. Its tests and SDF package are part of the transaction-operations feature.
-The platform planner and executor use it for human-approved corrections.
-Missing-order creation is still being implemented. Installing this artifact
+This RESTlet provides conditional saves for existing, unfulfilled sales orders
+and exact missing-order creation in pending-approval state. Its tests and SDF
+package are part of the transaction-operations feature. The platform planner and
+executor use it for human-approved corrections. Platform creation wiring is
+still being implemented. Installing this artifact
 alone does not configure or enable repairs.
 
 ## Contract
@@ -317,3 +318,37 @@ null entities; a literal entity with that name cannot use it. Each read still sp
 under one 40-second deadline. The private projection for create preparation keeps
 single-field address names and explicit inventory/shipping identities; the public
 evidence API omits those private fields.
+
+
+## Native missing-order contract
+
+`POST action=preview_create` accepts the prepared exact source input and resolves
+bounded native customer, currency, item, unit, shipping, location and period
+metadata. It builds an unsaved dynamic sales order, verifies its actual sourced
+values against the input, and returns the complete draft projection. This preview
+works while writes are disabled and never calls `record.save`. The projection
+contains the exact billing and shipping addresses needed for private human review.
+It must not be published as ordinary investigation evidence.
+
+`POST action=sync_missing_order` requires the separate
+`custscript_ecom_tx_create_enabled` parameter, which defaults to false, and the
+exact approved input and preview. It rebuilds and compares the complete native
+draft, checks account-wide external-ID and sales-order-reference absence twice,
+checks the open period again and writes the operation hash into
+`custbody_ecom_tx_ops_work_key`. One save creates a pending-approval (`A`) sales
+order with email, fax, payment processing, purchase-order and work-order creation
+disabled. Native currency/FX, units, addresses, shipping, inventory ownership, tax
+code, taxability and totals are bound to approval. A changed draft prevents a
+save; any uncertain save outcome remains unknown. External-ID uniqueness also
+provides the native account-wide duplicate constraint.
+
+`GET action=created_snapshot` independently reads an attributed order using its
+record ID, expected line count, tax profile and inventory mode. It requires the
+64-character work key and returns the actual record version and full creation
+projection. It performs no draft construction or save. Platform source/private
+fingerprint verification and create recovery must still be wired before this
+contract can produce completed platform operations.
+
+The isolated SDF package includes both libraries, the work-key field and two
+disabled-by-default write switches. All 141 SuiteApp tests and client-side SDF
+validation pass. No server validation, deployment or live creation was performed.
