@@ -415,3 +415,18 @@ are not independently verified. No browser console errors were observed. All
 diff checks pass. Missing-order creation and the native observation bridge for
 omitted REST handling cost remain outstanding. The compiled UI preview was
 removed after visual verification; no deployment or financial writes occurred.
+
+### Native observation for an omitted REST handling charge
+
+Correction preparation now accepts the native guard's handling charge only when
+REST omits it and the entire native projection matches the remaining REST
+evidence. It copies the header locally, never mutates collected evidence or
+overrides an explicit REST amount. The planner supplies its fresh account-scoped
+guard observation. Unknown, nonzero, stale, foreign or changed evidence blocks
+the proposal or execution. Twenty failing regression cases were reproduced
+before implementation; 101 action/planner tests and 56 lifecycle/observation
+tests now pass, including one human-approved save with omitted handling on both
+independent REST reads. Full regression verification is in progress.
+The complete backend run passed 7,726 tests with 2 skipped (198 warnings;
+446.86 seconds). Ruff, formatting and diff checks passed. No native deployment
+or financial write was performed.

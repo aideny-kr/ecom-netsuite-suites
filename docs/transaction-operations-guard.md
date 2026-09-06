@@ -15,6 +15,14 @@ line fulfillment/billing state, tax values and open accounting-period ID.
 The response excludes customer contact details and credentials. Unknown fields
 or periods cause a rejection rather than guessed defaults.
 
+When REST omits `handlingCost`, correction preparation can use `handlingcost`
+from the independently read native guard. The complete guard snapshot must
+match the REST record identity, version, customer, subsidiary, currency, FX,
+period and all line values. The transport has already checked its account and
+the planner checks freshness. An explicit REST amount is never overwritten;
+missing native evidence remains unknown and a nonzero handling charge remains
+unsupported. Execution repeats these checks before reserving its one send.
+
 `POST` accepts version 1, `correct_amounts`, the exact account, a work-key hash,
 an unexpired approval deadline, the complete approved snapshot in `before`, and
 `after` with `body_changes`, `line_changes` and `expected_totals`.

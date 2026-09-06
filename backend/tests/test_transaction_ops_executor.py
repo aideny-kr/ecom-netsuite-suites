@@ -103,6 +103,18 @@ async def test_human_approval_runs_once_and_independent_reads_verify_changes(db,
     assert case.read_source.await_count == 2
 
 
+@pytest.mark.parametrize("execution_case", [{"inventory": True, "assessment": True}], indirect=True)
+async def test_native_observation_bridges_omitted_rest_handling_through_verified_execution(db, execution_case):
+    for evidence in (execution_case.before, execution_case.after):
+        del evidence["orders"][0]["header"]["handlingCost"]
+    assert (await execute(db, execution_case))["status"] == "verified"
+    execution_case.case.dispatch.assert_awaited_once()
+    row = await operation(db, execution_case)
+    assert row.result_json["verification"]["guard"]["snapshot"]["handlingcost"] == "0"
+    assert (await execute(db, execution_case))["status"] == "verified"
+    execution_case.case.dispatch.assert_awaited_once()
+
+
 @pytest.mark.parametrize("change", ["source_amount", "source_version", "target_version", "target_currency"])
 async def test_changed_approved_evidence_stops_before_every_external_write(db, execution_case, change):
     case = execution_case.case

@@ -200,6 +200,7 @@ def prepare_correction(
     account_id=None,
     tax_rounding=None,
     line_identity_mode="source_line_id",
+    native_snapshot=None,
 ):
     """Produce only existing-line money changes; retain a full guard snapshot."""
     try:
@@ -213,6 +214,7 @@ def prepare_correction(
                 account_id,
                 tax_rounding,
                 line_identity_mode,
+                native_snapshot,
             )
     except NetSuiteActionError:
         raise
@@ -220,7 +222,9 @@ def prepare_correction(
         raise NetSuiteActionError("invalid_correction_evidence") from None
 
 
-def _prepare_correction(target, source, reference_field, now, legacy_tax, account_id, tax_rounding, line_identity_mode):
+def _prepare_correction(
+    target, source, reference_field, now, legacy_tax, account_id, tax_rounding, line_identity_mode, native_snapshot
+):
     source = _source(source, now)
     if legacy_tax is None and any(tax.calculation == "source_assessment" for tax in source.tax_details):
         raise NetSuiteActionError("assessment_requires_native_profile")
@@ -236,7 +240,12 @@ def _prepare_correction(target, source, reference_field, now, legacy_tax, accoun
         or target.get("order_reference") != source.order_reference
     ):
         raise NetSuiteActionError("target_identity_unproven")
-    header, metadata = target["header"], target["currency_metadata"]
+    header, metadata = dict(target["header"]), target["currency_metadata"]
+    # REST can omit handlingCost. Only the independently read guard can supply
+    # it, and its entire projection must agree with the REST evidence below.
+    # Never convert absence into zero or overwrite an explicit REST amount.
+    if header.get("handlingCost") is None and isinstance(native_snapshot, dict):
+        header["handlingCost"] = native_snapshot.get("handlingcost")
     if (
         _id(header.get("currency")) != _id(metadata.get("id"))
         or metadata.get("symbol") != source.currency
@@ -416,6 +425,8 @@ def _prepare_correction(target, source, reference_field, now, legacy_tax, accoun
             "discounttotal": "0",
         },
     }
+    if native_snapshot is not None and before != native_snapshot:
+        raise NetSuiteActionError("guard_evidence_changed")
     return PreparedAction("correct_amounts", json.dumps(_bounded_json(before)), json.dumps(_bounded_json(after)))
 
 
