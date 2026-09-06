@@ -186,6 +186,49 @@ describe("CeligoScriptViewerBody — content_diverged correction", () => {
   });
 });
 
+describe("CeligoScriptViewerBody — layout prop (celigo flow sizing UI, fix 2)", () => {
+  // Task 17's drawer wants the code region to fill the drawer's remaining
+  // height; the settings dialog this file's other tests exercise must keep
+  // its existing fixed 320px cap. `layout` (default "dialog") is how the two
+  // callers now diverge without duplicating this whole component.
+  it("defaults to the dialog cap: the highlighter's <pre> keeps maxHeight: 320px", () => {
+    render(<CeligoScriptViewerBody script={baseScript} />);
+    const pre = document.querySelector("pre")!;
+    expect(pre.style.maxHeight).toBe("320px");
+  });
+
+  it('layout="fill" drops the maxHeight cap and makes the code region flex to fill its container', () => {
+    render(<CeligoScriptViewerBody script={baseScript} layout="fill" />);
+    const pre = document.querySelector("pre")!;
+    expect(pre.style.maxHeight).toBe("");
+
+    const codeContainer = pre.closest('[class*="min-h-0"]');
+    expect(codeContainer).not.toBeNull();
+    expect(codeContainer!.className).toMatch(/flex-1/);
+    expect(codeContainer!.className).toMatch(/overflow-auto/);
+  });
+
+  it('layout="fill" makes the root a full-height flex column and caps the attachment-sites table', () => {
+    const { container } = render(<CeligoScriptViewerBody script={baseScript} layout="fill" />);
+    const root = container.firstElementChild as HTMLElement;
+    expect(root.className).toMatch(/flex/);
+    expect(root.className).toMatch(/h-full/);
+    expect(root.className).toMatch(/min-h-0/);
+
+    const table = screen.getByRole("table");
+    const tableWrap = table.closest('[class*="max-h-"]');
+    expect(tableWrap).not.toBeNull();
+    expect(tableWrap!.className).toMatch(/overflow-auto/);
+    expect(tableWrap!.className).toMatch(/shrink-0/);
+  });
+
+  it('layout="dialog" (the default) never applies the fill-only classes', () => {
+    const { container } = render(<CeligoScriptViewerBody script={baseScript} />);
+    const root = container.firstElementChild as HTMLElement;
+    expect(root.className).not.toMatch(/h-full/);
+  });
+});
+
 describe("CeligoScriptViewerBody — untrusted content", () => {
   it("renders the script source and the untrusted-content banner", () => {
     render(<CeligoScriptViewerBody script={baseScript} />);
