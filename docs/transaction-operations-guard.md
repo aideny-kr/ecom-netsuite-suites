@@ -155,6 +155,45 @@ NetSuite accounting-period dates are requested explicitly as ISO strings; the
 live API returned the open September 2026 period with `2026-09-01` and
 `2026-09-30`, independent of its default display-date locale.
 
+## Missing-order input preparation
+
+Missing-order input preparation is implemented separately from native preview and
+dispatch. `mapping_json.netsuite_create` requires version 1, an empty
+`external_id_prefix`, `tax_mode=legacy_tax_codes`, an explicit
+`transaction_timezone`, and these exact mappings:
+
+| Setting | Meaning |
+| --- | --- |
+| `sku_rules` | Source SKU to `netsuite_sku` and positive integer `quantity_multiplier` |
+| `stock_location_ids` | Source stock-location name to native location ID |
+| `inventory_subsidiary_ids` | The same stock-location name to its native inventory owner |
+| `shipping_method_ids` | Source shipping-method ID to native shipping-method ID |
+| `inventory_mode` | `line_location` or explicit `cross_subsidiary` routing |
+
+Inventory ownership is independent of the sales subsidiary and currency. Native
+location mode requires the same subsidiary; cross-subsidiary mode preserves the
+explicit inventory owner. The live BV import uses Inc-owned inventory. Creation
+also requires the exact inventory identity profile and a matching legacy tax
+profile. Aggregate tax needs zero shipping and an explicit native rounding rule.
+
+The current input contract supports complete, paid, ready consumer marketplace
+orders with no review hold, credit sale, store credit, deposit or unsupported
+adjustment. Completed Stripe-source payments must reconcile to the source total;
+explicit conflicting currency or FX evidence blocks preparation. No payment is
+created or moved. Source line quantities, native quantity multipliers, exact unit
+prices, tax allocations, parent identities, inventory and shipment relationships
+must all reconcile. Native unit prices are never rounded to fit. Input is bounded
+to 100 lines and 64 KiB.
+
+Every source SKU needs a mapping, including unchanged SKUs. Shipments may identify
+their owner by the full order reference or numeric source ID; a conflicting owner
+is rejected. The verified individual sync response also supports shipments nested
+under their order without a redundant owner field. Addresses and the private sync
+projection receive a separate immutable fingerprint. These prepared inputs are
+read-only and do not themselves establish native absence, grant approval or save
+an order. Native preview, guarded save and platform integration remain subsequent
+steps.
+
 ## Build and validate the isolated SDF artifact
 
 From `suiteapp`, run:

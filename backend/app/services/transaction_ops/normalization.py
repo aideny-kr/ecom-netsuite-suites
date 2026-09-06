@@ -48,6 +48,18 @@ class SourceTaxRule(EvidenceModel):
         return self
 
 
+class NetSuiteCreateSkuRule(EvidenceModel):
+    netsuite_sku: str = Field(min_length=1, max_length=255)
+    quantity_multiplier: int = Field(strict=True, ge=1, le=1000)
+
+    @field_validator("netsuite_sku")
+    @classmethod
+    def exact_sku(cls, value):
+        if sku(value) is None:
+            raise ValueError("A complete exact destination SKU is required")
+        return value
+
+
 class NetSuiteCreateMapping(EvidenceModel):
     schema_version: Literal[1]
     external_id_prefix: str = Field(pattern=r"^[A-Za-z0-9_-]{0,50}$")
@@ -56,6 +68,19 @@ class NetSuiteCreateMapping(EvidenceModel):
     shipping_item_id: str | None = Field(default=None, pattern=r"^[0-9]{1,30}$")
     custom_form_id: str | None = Field(default=None, pattern=r"^[0-9]{1,30}$")
     terms_id: str | None = Field(default=None, pattern=r"^[0-9]{1,30}$")
+    transaction_timezone: str | None = Field(default=None, max_length=100)
+    inventory_mode: Literal["line_location", "cross_subsidiary"] | None = None
+    sku_rules: dict[str, NetSuiteCreateSkuRule] = Field(default_factory=dict, max_length=500)
+    stock_location_ids: dict[str, str] = Field(default_factory=dict, max_length=100)
+    inventory_subsidiary_ids: dict[str, str] = Field(default_factory=dict, max_length=100)
+    shipping_method_ids: dict[str, str] = Field(default_factory=dict, max_length=100)
+
+    @field_validator("sku_rules", "stock_location_ids", "inventory_subsidiary_ids", "shipping_method_ids")
+    @classmethod
+    def exact_mapping_keys(cls, value):
+        if any(sku(key) is None for key in value):
+            raise ValueError("Create mappings require exact nonempty source identities")
+        return value
 
 
 class NetSuiteLegacyTaxMapping(EvidenceModel):

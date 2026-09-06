@@ -426,7 +426,38 @@ guard observation. Unknown, nonzero, stale, foreign or changed evidence blocks
 the proposal or execution. Twenty failing regression cases were reproduced
 before implementation; 101 action/planner tests and 56 lifecycle/observation
 tests now pass, including one human-approved save with omitted handling on both
-independent REST reads. Full regression verification is in progress.
+independent REST reads.
 The complete backend run passed 7,726 tests with 2 skipped (198 warnings;
 446.86 seconds). Ruff, formatting and diff checks passed. No native deployment
 or financial write was performed.
+
+### Exact missing-order inputs
+
+Read-only creation preparation now binds financial source evidence and a separate
+private-input fingerprint. Its explicit maps cover source/native SKUs and quantity
+multipliers, stock locations, inventory-owning subsidiaries, shipping methods and
+the transaction timezone. It retains every financial line, parent identity and
+inventory unit, verifies exact native unit rates and rejects unsupported funding,
+holds, stale or incomplete input. The current supported source state is a paid,
+ready consumer marketplace order funded by completed Stripe-source payments,
+without credit, store credit or deposits. It does not create or move payments.
+
+The native routing read confirmed BV sales subsidiary 2 uses inventory subsidiary
+1 and location 30; this distinction is explicit configuration, never inferred
+from the tax profile or currency. A fresh seven-line EUR input was successfully
+prepared using exact mappings observed from its existing native record. Source
+and native quantities, complete addresses and both fingerprints were retained.
+The live shipment's owner field uses the full order reference rather than the
+numeric source ID. Exact numeric owners and omitted redundant owner fields are
+also supported, with conflicting references and suffixes rejected. The probe
+performed no absence claim, native draft preview or save; its mappings lived only
+in memory.
+
+All 113 focused input/assessment/normalization tests pass, including zero-, two-
+and three-decimal currencies, nonterminating unit rates, cross-currency payment
+evidence and explicit cross-subsidiary inventory. The full backend suite passes
+7,774 tests with 2 skipped (197 warnings; 447.31 seconds). Ruff, formatting and
+diff checks also pass. Native draft construction, guarded create dispatch, independent create
+verification, recovery and the create-review UI remain outstanding. The temporary
+input implementation checkout was removed after a byte-for-byte verified copy
+into the main task worktree.
