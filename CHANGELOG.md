@@ -26,6 +26,7 @@
   outcome rechecks. Chat displays computed financial evidence directly.
 - Local seeded HTTP/worker tests that kill an execution process after a stub
   save and prove one write, read-only recovery and exact temporary-tenant cleanup.
+- Required CI jobs for the frontend unit suite and SuiteApp native guard tests.
 
 ### Delivery status
 

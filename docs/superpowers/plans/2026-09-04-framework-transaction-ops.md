@@ -98,7 +98,7 @@ an individual completed slice does not mean the product is complete.
 - [x] Rendered setup, run and frozen approval verification.
 - [x] Seeded HTTP/worker e2e and real process-death recovery for correction and creation.
 - [ ] Independent blocking T2 review and deployed sandbox smoke before merge/release.
-- [ ] PR delivery.
+- [x] Draft PR delivery to both repositories.
 
 The implementation is complete through creation execution and recovery. Current
 validation is recorded in the final entries below; earlier entries preserve the
@@ -565,3 +565,15 @@ installation, so local minor-version arithmetic is used; neither remote has an
 open PR claiming a version. Native sandbox deployment and the blocking T2
 workflow remain unverified. No live financial write or remote-main mutation
 was performed.
+
+### PR delivery and required unit-test jobs
+
+Draft PRs are open in [origin #225](https://github.com/aideny-kr/ecom-netsuite-suites/pull/225)
+and [Framework #3](https://github.com/FrameworkComputer/ai-den/pull/3). The tested
+runtime code is identical in both. CI inspection found that the existing workflow
+did not execute either frontend unit tests or SuiteApp tests. Both suites now have
+dedicated required jobs using the committed lockfiles; native tests use mocks
+without downloading the SDK or accessing a NetSuite account. The existing
+Playwright smoke job remains advisory and is not counted as full-stack evidence.
+The seeded backend HTTP/worker interruption tests are required through the backend
+test job. T2 and native sandbox validation remain open as stated in both PRs.
