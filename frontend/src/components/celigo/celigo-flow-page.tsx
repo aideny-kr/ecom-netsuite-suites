@@ -74,10 +74,12 @@ const NAV_COLLAPSED_SIZE = `${NAV_COLLAPSED_PCT}%`;
  * - `flowHeaderHeight` -- a PIXEL count (never a percentage: unlike a
  *   `Panel`'s `%`-of-group sizing, this height is compared directly against
  *   MIN/MAX measurements taken in real pixels) of the height the viewer last
- *   dragged/keyed the divider to. `null` (never stored, or a corrupt/legacy
- *   value) means "no preference yet" -- the applied height then tracks MAX
- *   (the header's own full, unclipped content height) directly, so a first
- *   visit looks exactly like today's page.
+ *   dragged/keyed the divider to. `null` (never stored, a corrupt/legacy
+ *   value, or a drag/key that landed ON MAX -- see `clearHeaderHeight`)
+ *   means "no preference" -- the applied height then tracks MAX (the
+ *   header's own full, unclipped content height) directly, so a first visit
+ *   looks exactly like today's page and "all the way down" keeps following
+ *   the content as it grows.
  *
  * MIN/MAX fix (the header-sizing bug this replaces): the OLD header lived in
  * a `Panel` sized as a percentage of the vertical group, with a `minSize`
@@ -130,6 +132,21 @@ function persistHeaderHeight(px: number): void {
   } catch {
     // Best effort -- the height still applies for this render, it just
     // won't survive a reload.
+  }
+}
+
+/** "All the way down" is not a pixel preference. A drag or key that lands
+ * ON MAX means "show everything", and everything is a moving target (Show
+ * more on the AI description, a longer sibling flow) -- so the preference is
+ * cleared instead of frozen at whatever MAX happened to be at that moment,
+ * and the applied height goes back to tracking MAX directly. Storing the
+ * pixel value here is exactly what would clip the text a later "Show more"
+ * reveals. */
+function clearHeaderHeight(): void {
+  try {
+    window.localStorage.removeItem(FLOW_HEADER_HEIGHT_KEY);
+  } catch {
+    // Best effort -- see `persistHeaderHeight`.
   }
 }
 
@@ -226,7 +243,12 @@ export function CeligoFlowPage(): JSX.Element {
   const [headerMinHeight, setHeaderMinHeight] = useState<number>(HEADER_FIRST_ROW_FALLBACK_HEIGHT_PX);
   const [headerMaxHeight, setHeaderMaxHeight] = useState<number>(HEADER_FIRST_ROW_FALLBACK_HEIGHT_PX);
   const headerWrapRef = useRef<HTMLDivElement>(null);
-  const headerDragRef = useRef<{ pointerId: number; startY: number; startHeight: number } | null>(null);
+  // `latest` is the last clamped height the drag applied, so the drag END can
+  // commit it directly (no side effect inside a state updater, which React
+  // may invoke twice) -- `null` until the first pointermove.
+  const headerDragRef = useRef<{ pointerId: number; startY: number; startHeight: number; latest: number | null } | null>(
+    null,
+  );
   const [headerDragging, setHeaderDragging] = useState(false);
 
   const handleHeaderBoundsChange = useCallback((min: number, max: number) => {
@@ -255,10 +277,26 @@ export function CeligoFlowPage(): JSX.Element {
     ? headerMinHeight
     : clampHeaderHeight(headerMinHeight, storedHeaderHeight ?? headerMaxHeight, headerMaxHeight);
 
+  // The one place a viewer-chosen height is applied AND remembered (drag end,
+  // every key): landing on MAX clears the preference (see
+  // `clearHeaderHeight`), anything short of it is stored in pixels.
+  const commitHeaderHeight = useCallback(
+    (next: number) => {
+      if (next >= headerMaxHeight) {
+        setStoredHeaderHeight(null);
+        clearHeaderHeight();
+        return;
+      }
+      setStoredHeaderHeight(next);
+      persistHeaderHeight(next);
+    },
+    [headerMaxHeight],
+  );
+
   const handleHeaderGripPointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
       const startHeight = headerWrapRef.current?.getBoundingClientRect().height ?? appliedHeaderHeight;
-      headerDragRef.current = { pointerId: e.pointerId, startY: e.clientY, startHeight };
+      headerDragRef.current = { pointerId: e.pointerId, startY: e.clientY, startHeight, latest: null };
       setHeaderDragging(true);
       e.currentTarget.setPointerCapture?.(e.pointerId);
     },
@@ -271,27 +309,28 @@ export function CeligoFlowPage(): JSX.Element {
       if (!drag || drag.pointerId !== e.pointerId) return;
       // Moving the pointer DOWN (a larger clientY) grows the header -- the
       // mock's own `setH(startH + (e.clientY - startY))`.
-      setStoredHeaderHeight(
-        clampHeaderHeight(headerMinHeight, drag.startHeight + (e.clientY - drag.startY), headerMaxHeight),
-      );
+      const next = clampHeaderHeight(headerMinHeight, drag.startHeight + (e.clientY - drag.startY), headerMaxHeight);
+      drag.latest = next;
+      setStoredHeaderHeight(next);
     },
     [headerMinHeight, headerMaxHeight],
   );
 
-  const handleHeaderGripPointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
-    const drag = headerDragRef.current;
-    if (!drag || drag.pointerId !== e.pointerId) return;
-    headerDragRef.current = null;
-    setHeaderDragging(false);
-    e.currentTarget.releasePointerCapture?.(e.pointerId);
-    // Persisted on drag END, not per-move -- a rapid drag would otherwise
-    // hammer localStorage on every pointermove (same reasoning as the
-    // script drawer's own grip).
-    setStoredHeaderHeight((h) => {
-      if (h !== null) persistHeaderHeight(h);
-      return h;
-    });
-  }, []);
+  const handleHeaderGripPointerUp = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      const drag = headerDragRef.current;
+      if (!drag || drag.pointerId !== e.pointerId) return;
+      headerDragRef.current = null;
+      setHeaderDragging(false);
+      e.currentTarget.releasePointerCapture?.(e.pointerId);
+      // Committed on drag END, not per-move -- a rapid drag would otherwise
+      // hammer localStorage on every pointermove (same reasoning as the
+      // script drawer's own grip). A pointerdown with no move commits
+      // nothing: the preference stays whatever it was.
+      if (drag.latest !== null) commitHeaderHeight(drag.latest);
+    },
+    [commitHeaderHeight],
+  );
 
   const handleHeaderGripKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLDivElement>) => {
@@ -302,12 +341,11 @@ export function CeligoFlowPage(): JSX.Element {
       else if (e.key === "End") next = headerMaxHeight;
       if (next === null) return;
       e.preventDefault();
-      // A keyboard move has no separate "end" event to persist from --
-      // apply and persist together, unlike the drag handlers above.
-      setStoredHeaderHeight(next);
-      persistHeaderHeight(next);
+      // A keyboard move has no separate "end" event to commit from --
+      // apply and remember together, unlike the drag handlers above.
+      commitHeaderHeight(next);
     },
-    [headerMinHeight, headerMaxHeight, appliedHeaderHeight],
+    [headerMinHeight, headerMaxHeight, appliedHeaderHeight, commitHeaderHeight],
   );
 
   // No imperative panel resize, no "was that echo my own drag" guard: this

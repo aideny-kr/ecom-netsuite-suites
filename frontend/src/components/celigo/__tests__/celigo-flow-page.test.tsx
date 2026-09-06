@@ -1038,6 +1038,48 @@ describe("CeligoFlowPage — header/body divider (pixel MIN/MAX clamp)", () => {
     expect(screen.getByTestId("celigo-flow-header-wrap").style.height).toBe("500px");
   });
 
+  it("reaching MAX by keyboard clears the stored preference, so the header keeps following its content when it grows (Show more)", () => {
+    window.localStorage.setItem(HEIGHT_KEY, "300");
+    const { remeasure } = renderPage();
+    setHeaderBounds({ min: 60, max: 500 });
+    remeasure();
+    const separator = screen.getByRole("separator", { name: "Resize header" });
+
+    fireEvent.keyDown(separator, { key: "End" });
+    expect(screen.getByTestId("celigo-flow-header-wrap").style.height).toBe("500px");
+    // "All the way down" is not a pixel preference — it means "show everything".
+    expect(window.localStorage.getItem(HEIGHT_KEY)).toBeNull();
+
+    // The AI description expanded (Show more): MAX grows and the header
+    // follows it instead of clipping the newly revealed text at 500px.
+    setHeaderBounds({ max: 700 });
+    remeasure();
+    expect(screen.getByTestId("celigo-flow-header-wrap").style.height).toBe("700px");
+  });
+
+  it("a drag that ends at MAX clears the stored preference; one that ends short of it persists the pixel height", () => {
+    window.localStorage.setItem(HEIGHT_KEY, "300");
+    const { remeasure } = renderPage();
+    setHeaderBounds({ min: 60, max: 500 });
+    remeasure();
+    const separator = screen.getByRole("separator", { name: "Resize header" });
+
+    // jsdom reports the wrapper's height as 0, so the drag starts from 0 and
+    // a 200px pull lands at 200px — short of MAX — and is remembered.
+    fireEvent.pointerDown(separator, { pointerId: 1, clientY: 0 });
+    fireEvent.pointerMove(separator, { pointerId: 1, clientY: 200 });
+    fireEvent.pointerUp(separator, { pointerId: 1, clientY: 200 });
+    expect(screen.getByTestId("celigo-flow-header-wrap").style.height).toBe("200px");
+    expect(window.localStorage.getItem(HEIGHT_KEY)).toBe("200");
+
+    // A pull past MAX clamps to MAX and clears the preference.
+    fireEvent.pointerDown(separator, { pointerId: 2, clientY: 0 });
+    fireEvent.pointerMove(separator, { pointerId: 2, clientY: 900 });
+    fireEvent.pointerUp(separator, { pointerId: 2, clientY: 900 });
+    expect(screen.getByTestId("celigo-flow-header-wrap").style.height).toBe("500px");
+    expect(window.localStorage.getItem(HEIGHT_KEY)).toBeNull();
+  });
+
   it("Focus canvas collapses to MIN and hides the separator; Show details restores the clamped stored height", () => {
     window.localStorage.setItem(HEIGHT_KEY, "300");
     const { remeasure } = renderPage();
