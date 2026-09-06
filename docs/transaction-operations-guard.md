@@ -7,6 +7,31 @@ executor and read-only recovery use it for human-approved corrections and
 missing-order creation. Installing this artifact alone does not configure or
 enable repairs.
 
+## Setup and investigations
+
+Enable the tenant's `celigo` and `reconciliation` feature flags. Dashboard access,
+investigations and human decisions require `recon.run`; scope setup and controls
+also require `connections.manage`. Chat investigation tools additionally require
+`connections.view`.
+
+At `/transaction-operations/setup`, select the Framework source step, active
+NetSuite connection and exact account/subsidiary, then enter the reference,
+currency, business-entity, line-identity and tax mappings described below. Select
+the target Celigo step when configuring duplicate-error resolution. Setup choices
+come from the Celigo mirror and are not proof of current provider configuration;
+each investigation verifies live evidence. Native rollout also requires an
+operator-provisioned `metadata_json.transaction_ops_guard_url` on the connection.
+The scope screen does not set that URL.
+
+New scopes default to `detect_only` with scheduling off. At
+`/transaction-operations`, investigate up to 200 exact order references or an
+ordered, timezone-aware window of at most 31 days. Default run limits are 100
+orders, 100 provider calls and 900 seconds; setup exposes those limits and the
+schedule interval, which defaults to 60 minutes. Run history retains progress,
+findings, spent budgets and a `done`, `budget`, `stall` or `error` termination
+reason. Enabling a schedule does not authorize a repair; proposals still require
+an authenticated human decision.
+
 ## Contract
 
 `GET action=snapshot&record_id=<internal-id>&reference_field=<configured-field>`
@@ -206,10 +231,10 @@ node scripts/build-transaction-guard-project.js
 ```
 
 The last command prints a newly created temporary project directory. It
-contains the guard source and its deployment definition, together with a
-dedicated manifest and deploy file. The packaging test checks the exact
-source, scope, and disabled defaults. Delete the temporary directory after
-validation or packaging.
+contains both native libraries, the work-key field and guard deployment
+definition, together with a dedicated manifest and deploy file. The packaging
+test checks the exact source, scope, and disabled defaults. Delete the temporary
+directory after validation or packaging.
 
 Use an installed Oracle SDK to validate that directory with the intended
 sandbox authentication ID. For the Java CLI the command is:
@@ -387,3 +412,6 @@ to verified and clean their exact temporary tenant.
 The isolated SDF package includes both libraries, the work-key field and two
 disabled-by-default write switches. All 142 SuiteApp tests and client-side SDF
 validation pass. No server validation, deployment or live creation was performed.
+The blocking T2 review is still required before merge. Target-sandbox validation
+of actual native sourcing, save automation and independent rereads remains
+required before release.

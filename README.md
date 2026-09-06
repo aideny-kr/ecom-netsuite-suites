@@ -61,7 +61,7 @@ An AI platform that connects NetSuite ERP and BigQuery data warehouses to an int
 - Use one committed send reservation and independent outcome verification. Uncertain saves block another write and use bounded read-only recovery, including recovery after worker interruption.
 - Configure scopes at `/transaction-operations/setup`; actions and scheduling start disabled. The feature requires the Celigo and reconciliation flags, appropriate reconciliation permissions, explicit mappings and a configured native guard for NetSuite writes.
 
-The isolated native guard's two write switches default off. Account-side sandbox validation and the blocking T2 review are required before release. See the [setup and guard runbook](docs/transaction-operations-guard.md) and [local create/correction crash drill](scripts/uat/README.md#framework-transaction-interruption-drill).
+The isolated native guard's two write switches default off. Account-side sandbox validation and the blocking T2 review are required before release. See the [setup and guard runbook](docs/transaction-operations-guard.md), [local create/correction crash drill](scripts/uat/README.md#framework-transaction-interruption-drill), and [release notes](CHANGELOG.md).
 
 ### Platform
 - **Role-based access control** (RBAC) with row-level security (RLS) and plan-based entitlements
@@ -125,6 +125,7 @@ ecom-netsuite-suites/
           adapters/        # LLM provider adapters (Anthropic, OpenAI, Gemini)
         ingestion/         # Stripe sync, NetSuite deposit sync, Shopify sync
         reconciliation/    # Matching engine, pipeline, evidence packs, variance classifier
+        transaction_ops/   # Evidence, proposals, guarded execution and read-only recovery
       workers/             # Celery app and background tasks
       mcp/                 # MCP tool server, governance, registry
         tools/             # Tool executors (SuiteQL, BigQuery, RAG, workspace)
@@ -140,12 +141,13 @@ ecom-netsuite-suites/
         workspace/         # File tree, constellation view, changeset panel
         settings/          # Connection sections (NetSuite, BigQuery, Stripe), team management
         analytics/         # Saved queries, preview modal
+        transaction-ops/   # Scope setup, run evidence, frozen approvals and outcome rechecks
         ui/                # shadcn/ui primitives
       hooks/               # React Query hooks
       lib/                 # API client, types, chat-stream, utilities
   suiteapp/
     src/
-      FileCabinet/SuiteScripts/  # RESTlets (file cabinet, mock data)
+      FileCabinet/SuiteScripts/  # RESTlets (file cabinet, mock data, transaction guard/create)
       Objects/                    # SDF deployment descriptors
     __tests__/                    # Jest unit tests for SuiteScripts
   docker-compose.yml       # Full-stack development environment
