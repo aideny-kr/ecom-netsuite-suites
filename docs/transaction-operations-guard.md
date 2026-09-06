@@ -92,11 +92,35 @@ checkbox, which the live BV record API omits; the aggregate profile still
 requires explicit header and line taxability. Both profiles require allocations to reconcile to
 the native header tax total. Taxed shipping still requires more evidence.
 
-Reported destination allocations have no claimed statutory rate. Source tax
-components retain their actual configured rates, rounding and adjustment IDs;
-each component must validate before multiple components can be compared with
-one destination allocation. A complete empty source adjustment list can prove
-zero tax. Missing source rates still prevent a repair or false-alarm proposal.
+Reported destination allocations have no claimed statutory rate. Under the
+default `statutory_rate` source policy, components retain their actual configured
+rates, rounding and adjustment IDs; each component must validate before multiple
+components can be compared with one destination allocation. A complete empty
+source adjustment list can prove zero tax. Missing rates remain incomplete under
+this policy.
+
+An explicit `source_assessment` policy instead uses finalized Framework tax
+adjustments. It requires a matching legacy native tax profile and configured
+included/additional basis and native tax code for each source tax ID. Each
+component retains its exact positive source-tax and adjustment IDs, unique owner,
+literal finalized flag and timezone-aware update clock. The adjustment cannot be
+newer than the source version or observation. Source headers, lines, shipping and
+included/additional totals must still reconcile exactly. The collector,
+comparison and action boundary independently reject incomplete or changed proof;
+the final monetary values must fit the verified currency precision.
+
+This policy does not independently verify statutory rates and never invents a
+rate or rounding rule. Setup, comparison evidence and the frozen human approval
+show that limitation. The setup selector applies the chosen policy to every tax
+rule and clears incompatible rates and rounding. Changed assessment identities,
+timestamps or finalized flags invalidate an approved correction. Recovery also
+requires the unchanged proof before verifying an outcome.
+
+A finalized shipping assessment with both zero basis and zero tax may be absent
+from native reported allocations only when both complete orders explicitly have
+zero shipping and shipping tax. Its proof remains in the source evidence and
+approval fingerprint. Positive amounts, unknown amounts and other tax policies
+do not receive this exception.
 
 The guard snapshot request adds `tax_mode` and `tax_code_id`. Its response must
 contain the same exact profile and native tax fields. Inc corrections require zero shipping on both sides and an explicit

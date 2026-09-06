@@ -19,7 +19,8 @@ from tests.test_transaction_ops_state_db import seed_config
 @pytest.fixture
 async def execution_case(db, admin_user, monkeypatch, request):
     actor, _ = admin_user
-    case = planning_case(inventory=getattr(request, "param", False))
+    options = getattr(request, "param", False)
+    case = planning_case(**options) if isinstance(options, dict) else planning_case(inventory=options)
     config = await seed_config(db, actor.tenant_id, actor, subsidiary_id="3", mapping_json=case.config.mapping_json)
     case.config = config
     run = await state.create_run(
@@ -49,6 +50,15 @@ async def execution_case(db, admin_user, monkeypatch, request):
     after_guard = deepcopy(case.guard)
     after_guard["snapshot"].update(total="100", subtotal="100", custbody_fw_solidus_order_total="100")
     after_guard["snapshot"]["lines"][0].update(rate="100", amount="100")
+    if case.config.mapping_json.get("netsuite_legacy_tax"):
+        after["orders"][0]["header"].update(
+            total="120", taxTotal="20", custbody_fw_solidus_order_total="120", custbody_fw_solidus_tax_amount="20"
+        )
+        after["orders"][0]["lines"][0].update(custcol_fw_vat_amount="20", tax1Amt="20")
+        after_guard["snapshot"].update(
+            total="120", taxtotal="20", custbody_fw_solidus_order_total="120", custbody_fw_solidus_tax_amount="20"
+        )
+        after_guard["snapshot"]["lines"][0].update(custcol_fw_vat_amount="20", tax1amt="20")
     case.read_source = AsyncMock(return_value=case.source)
     case.read_target = AsyncMock(side_effect=[before, after])
     case.read_guard = AsyncMock(side_effect=[case.guard, after_guard])
@@ -199,3 +209,29 @@ async def test_inventory_drift_after_approval_prevents_dispatch(db, execution_ca
         execution_case.before["orders"][0]["lines"][0]["custcol_fw_inventory_unit_ids"] = "999"
     assert (await execute(db, execution_case))["status"] == "failed"
     case.dispatch.assert_not_awaited()
+
+
+@pytest.mark.parametrize("execution_case", [{"inventory": True, "assessment": True}], indirect=True)
+async def test_finalized_assessment_approval_executes_once_and_verifies_native_tax(db, execution_case):
+    result = await execute(db, execution_case)
+    assert result["status"] == "verified"
+    execution_case.case.dispatch.assert_awaited_once()
+    row = await operation(db, execution_case)
+    taxes = row.result_json["verification"]["report"]["source"]["tax_details"]
+    assert taxes[0]["calculation"] == "source_assessment" and taxes[0]["assessment"]["adjustment_id"] == "99"
+
+
+@pytest.mark.parametrize("execution_case", [{"inventory": True, "assessment": True}], indirect=True)
+@pytest.mark.parametrize("change", ["identity", "clock", "finalized"])
+async def test_changed_final_tax_assessment_invalidates_approval_before_dispatch(db, execution_case, change):
+    raw = execution_case.case.source["orders"][0]
+    adjustment = raw["line_items"][0]["adjustments"][0]
+    if change == "identity":
+        adjustment["id"] = "100"
+    elif change == "clock":
+        adjustment["updated_at"] = (datetime.fromisoformat(raw["updated_at"]) - timedelta(seconds=1)).isoformat()
+    else:
+        adjustment["finalized"] = False
+        adjustment["eligible"] = True
+    assert (await execute(db, execution_case))["status"] == "failed"
+    execution_case.case.dispatch.assert_not_awaited()

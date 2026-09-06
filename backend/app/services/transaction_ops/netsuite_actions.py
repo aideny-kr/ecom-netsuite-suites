@@ -21,6 +21,7 @@ from app.schemas.transaction_runs import _bounded_json
 from app.services.transaction_ops.inventory_identity import native_bindings
 from app.services.transaction_ops.netsuite_reader import NetSuiteEvidenceError, _account
 from app.services.transaction_ops.normalization import NetSuiteLegacyTaxMapping
+from app.services.transaction_ops.source_assessment import assessments_proven
 
 
 class NetSuiteActionError(ValueError):
@@ -159,7 +160,18 @@ def _source(source, now):
     ):
         raise NetSuiteActionError("source_amount_inconsistent")
     unit = Decimal(1).scaleb(-source.currency_minor_unit)
+    final_amounts = [
+        getattr(source, field) for field in ("total", "subtotal", "tax", "shipping", "shipping_tax", "discount")
+    ]
+    final_amounts.extend(value for line in source.lines for value in (line.net, line.tax))
+    final_amounts.extend(tax.amount for tax in source.tax_details if tax.amount is not None)
+    if any(value != value.quantize(unit) for value in final_amounts):
+        raise NetSuiteActionError("source_currency_precision")
+    if not assessments_proven(source):
+        raise NetSuiteActionError("source_assessment_unproven")
     for tax in source.tax_details:
+        if tax.calculation == "source_assessment":
+            continue
         if (
             tax.basis is None
             or tax.rate is None
@@ -210,6 +222,8 @@ def prepare_correction(
 
 def _prepare_correction(target, source, reference_field, now, legacy_tax, account_id, tax_rounding, line_identity_mode):
     source = _source(source, now)
+    if legacy_tax is None and any(tax.calculation == "source_assessment" for tax in source.tax_details):
+        raise NetSuiteActionError("assessment_requires_native_profile")
     if line_identity_mode not in {"source_line_id", "inventory_units"}:
         raise NetSuiteActionError("line_identity_unproven")
     if not isinstance(reference_field, str) or not re.fullmatch(

@@ -79,6 +79,28 @@ export function EvidenceJson({
     </details>
   );
 }
+export function TaxEvidenceNotice({ evidence }: { evidence: JsonObject }) {
+  const report = Object.keys(objectValue(evidence.report)).length
+    ? objectValue(evidence.report)
+    : evidence;
+  const source = objectValue(report.source);
+  if (
+    !Array.isArray(source.tax_details) ||
+    !source.tax_details.some(
+      (tax) => objectValue(tax).calculation === "source_assessment",
+    )
+  )
+    return null;
+  return (
+    <div className="rounded-md border bg-muted/40 p-4 text-[13px]">
+      <p className="font-semibold">Source tax evidence</p>
+      <p className="mt-2">
+        Tax policy: finalized Framework assessments. Statutory rates are not
+        independently verified.
+      </p>
+    </div>
+  );
+}
 export function ComparisonEvidence({ report }: { report: JsonObject }) {
   const comparison = objectValue(report.comparison);
   const reasons = Array.isArray(comparison.findings)
@@ -91,6 +113,7 @@ export function ComparisonEvidence({ report }: { report: JsonObject }) {
     typeof comparison.currency === "string" ? comparison.currency : null;
   return (
     <div className="space-y-4">
+      <TaxEvidenceNotice evidence={report} />
       {reasons.length > 0 && (
         <ul className="space-y-2 text-[13px]">
           {reasons.map((item, i) => (

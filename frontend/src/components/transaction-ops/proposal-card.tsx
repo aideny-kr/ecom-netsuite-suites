@@ -30,6 +30,7 @@ import {
   ExactChanges,
   inputClass,
   Status,
+  TaxEvidenceNotice,
 } from "./evidence";
 import type { TransactionProposal } from "./types";
 import { OutcomeRecheck } from "./outcome-recheck";
@@ -145,8 +146,8 @@ export function ProposalCard({ proposal }: { proposal: TransactionProposal }) {
           {operation.data.status === "unknown" && (
             <>
               <p className="rounded-md border p-3">
-                The external outcome must be reconciled before another attempt. A
-                timeout does not prove the write failed.
+                The external outcome must be reconciled before another attempt.
+                A timeout does not prove the write failed.
               </p>
               <OutcomeRecheck key={proposal.id} proposalId={proposal.id} />
             </>
@@ -233,6 +234,7 @@ export function ProposalCard({ proposal }: { proposal: TransactionProposal }) {
                   {review.proposal.record_type}{" "}
                   {review.proposal.target_record_id}
                 </p>
+                <TaxEvidenceNotice evidence={review.proposal.evidence_json} />
                 <ExactChanges
                   before={review.proposal.before_json}
                   after={review.proposal.after_json}

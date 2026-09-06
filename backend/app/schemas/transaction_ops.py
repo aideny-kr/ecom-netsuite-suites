@@ -56,11 +56,26 @@ class TransactionLine(EvidenceModel):
         return self
 
 
+class SourceTaxAssessment(EvidenceModel):
+    authority: Literal["framework_finalized_adjustment"] = "framework_finalized_adjustment"
+    source_tax_id: str = Field(pattern=r"^[1-9][0-9]{0,29}$")
+    adjustment_id: str = Field(pattern=r"^[1-9][0-9]{0,29}$")
+    finalized: bool = Field(strict=True)
+    updated_at: AwareDatetime
+
+    @model_validator(mode="after")
+    def final_only(self):
+        if self.finalized is not True:
+            raise ValueError("A tax assessment must be finalized")
+        return self
+
+
 class TransactionTax(EvidenceModel):
     # One taxable event, not a sum of separately rounded line taxes. Collectors
     # must retain individual components when the provider rounds per line.
     key: Identifier
-    calculation: Literal["statutory_rate", "reported_allocation"] = "statutory_rate"
+    calculation: Literal["statutory_rate", "source_assessment", "reported_allocation"] = "statutory_rate"
+    assessment: SourceTaxAssessment | None = None
     # A collector may bind several separately validated source components to
     # one legacy destination tax allocation. Their original keys/rates remain.
     allocation_key: Identifier | None = None
@@ -75,6 +90,22 @@ class TransactionTax(EvidenceModel):
 
     @model_validator(mode="after")
     def included_calculation(self):
+        if self.calculation != "source_assessment" and self.assessment is not None:
+            raise ValueError("Only source assessments can carry finalized adjustment evidence")
+        if self.calculation == "source_assessment" and any(
+            value is not None
+            for value in (self.rate, self.rounding, self.included_gross_basis, self.included_rate_total)
+        ):
+            raise ValueError("An assessed amount cannot claim an independently validated statutory rate")
+        if self.assessment is not None and (
+            self.allocation_key is None
+            or self.key
+            != (
+                f"{self.allocation_key}:source_rate:{self.assessment.source_tax_id}"
+                f":adjustment:{self.assessment.adjustment_id}"
+            )
+        ):
+            raise ValueError("Assessment identity must match its source component key")
         if self.allocation_key is not None and not self.key.startswith(self.allocation_key + ":source_rate:"):
             raise ValueError("An allocation must retain the original taxable-event identity")
         if self.calculation == "reported_allocation" and any(
@@ -124,7 +155,11 @@ class TransactionSnapshot(EvidenceModel):
 
     @model_validator(mode="after")
     def unique_detail_keys(self):
-        if self.system != "netsuite" and any(tax.calculation != "statutory_rate" for tax in self.tax_details):
+        if any(tax.calculation == "source_assessment" for tax in self.tax_details) and (
+            self.system != "framework" or self.account_id != "frame.work"
+        ):
+            raise ValueError("Finalized Framework assessments require the exact source account")
+        if self.system != "netsuite" and any(tax.calculation == "reported_allocation" for tax in self.tax_details):
             raise ValueError("Source taxes require statutory calculation evidence")
         if self.system == "netsuite" and any(tax.allocation_key is not None for tax in self.tax_details):
             raise ValueError("Only source components can request a destination allocation")

@@ -11,11 +11,12 @@ from datetime import datetime
 from decimal import Context, Decimal, DivisionByZero, InvalidOperation, Overflow, localcontext
 from typing import Annotated, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from app.schemas.transaction_ops import (
     EvidenceModel,
     ExactDecimal,
+    SourceTaxAssessment,
     TransactionLine,
     TransactionSnapshot,
     TransactionTax,
@@ -32,10 +33,19 @@ from app.services.transaction_ops.netsuite_reader import _account
 
 
 class SourceTaxRule(EvidenceModel):
-    rate: ExactDecimal = Field(ge=0, le=10)
+    calculation: Literal["statutory_rate", "source_assessment"] = "statutory_rate"
+    rate: ExactDecimal | None = Field(default=None, ge=0, le=10)
     included: bool = Field(strict=True)
-    rounding: Literal["half_up", "half_even"]
+    rounding: Literal["half_up", "half_even"] | None = None
     netsuite_tax_id: str = Field(pattern=r"^[0-9]+$", max_length=30)
+
+    @model_validator(mode="after")
+    def explicit_calculation(self):
+        if self.calculation == "statutory_rate" and (self.rate is None or self.rounding is None):
+            raise ValueError("Statutory rules require an exact rate and rounding policy")
+        if self.calculation == "source_assessment" and (self.rate is not None or self.rounding is not None):
+            raise ValueError("Assessment rules must not invent a statutory rate or rounding policy")
+        return self
 
 
 class NetSuiteCreateMapping(EvidenceModel):
@@ -122,6 +132,12 @@ def _normalize_framework(evidence, *, mapping, account_id, subsidiary_id):
     identities = [_id(line) for line in raw_lines]
     if len(set(identities)) != len(identities):
         raise ValueError("Duplicate source line identities are ambiguous")
+    adjustment_owners = Counter(
+        str(adjustment.get("id"))
+        for item in [*raw_lines, *raw_shipments]
+        for adjustment in (item["adjustments"] if isinstance(item.get("adjustments"), list) else [])
+        if isinstance(adjustment, dict) and adjustment.get("source_type") == "Spree::TaxRate"
+    )
 
     tax_complete = isinstance(order.get("adjustments"), list) and not order.get("adjustments")
     simple_adjustments = tax_complete
@@ -152,6 +168,7 @@ def _normalize_framework(evidence, *, mapping, account_id, subsidiary_id):
                 simple_adjustments = False
                 adjustments = []
             local_taxes = []
+            assessments = {}
             non_tax = zero
             local_known = True
             for adjustment in adjustments:
@@ -180,7 +197,36 @@ def _normalize_framework(evidence, *, mapping, account_id, subsidiary_id):
                     local_known = False
                 if rule is None or amount < 0:
                     local_known = False
-                local_taxes.append((amount, source_tax_id, rule, _id(adjustment)))
+                adjustment_id = _id(adjustment)
+                if rule and rule.calculation == "source_assessment":
+                    profile = mapping.netsuite_legacy_tax
+                    if (
+                        not profile
+                        or profile.subsidiary_id != subsidiary_id
+                        or profile.tax_code_id != rule.netsuite_tax_id
+                    ):
+                        local_known = False
+                    proof = None
+                    try:
+                        proof = SourceTaxAssessment(
+                            source_tax_id=source_tax_id,
+                            adjustment_id=adjustment_id,
+                            finalized=adjustment.get("finalized"),
+                            updated_at=adjustment.get("updated_at"),
+                        )
+                        version = _time(order.get("updated_at"))
+                        if (
+                            version is None
+                            or not proof.updated_at <= version <= observed_at
+                            or adjustment_owners[adjustment_id] != 1
+                        ):
+                            proof = None
+                    except (ValueError, TypeError):
+                        proof = None
+                    assessments[adjustment_id] = proof
+                    if proof is None:
+                        local_known = False
+                local_taxes.append((amount, source_tax_id, rule, adjustment_id))
             item_tax = sum((amount for amount, _, _, _ in local_taxes), zero)
             item_included = sum(
                 (amount for amount, _, rule, _ in local_taxes if rule is not None and rule.included), zero
@@ -190,8 +236,15 @@ def _normalize_framework(evidence, *, mapping, account_id, subsidiary_id):
             )
             all_rules_known = all(rule is not None for _, _, rule, _ in local_taxes)
             included_rates = sum(
-                (rule.rate for _, _, rule, _ in local_taxes if rule is not None and rule.included), zero
+                (
+                    rule.rate
+                    for _, _, rule, _ in local_taxes
+                    if rule is not None and rule.included and rule.rate is not None
+                ),
+                zero,
             )
+            if len({rule.calculation for _, _, rule, _ in local_taxes if rule and rule.included}) > 1:
+                local_known = False
             net = (
                 gross - item_included
                 if gross is not None and all_rules_known and amounts_known and not non_tax
@@ -226,12 +279,14 @@ def _normalize_framework(evidence, *, mapping, account_id, subsidiary_id):
             for amount, source_tax_id, rule, adjustment_id in local_taxes:
                 tax_key = rule.netsuite_tax_id if rule else f"source_rate:{source_tax_id}"
                 allocation_key = None
-                if tax_counts[tax_key] > 1:
+                if tax_counts[tax_key] > 1 or (rule and rule.calculation == "source_assessment"):
                     profile = mapping.netsuite_legacy_tax
                     if profile and profile.subsidiary_id == subsidiary_id and profile.tax_code_id == tax_key:
                         allocation_key = f"{key}:tax:{tax_key}"
                     else:
                         local_known = False
+                    if rule and rule.calculation == "source_assessment":
+                        allocation_key = f"{key}:tax:{tax_key}"
                     tax_key += f":source_rate:{source_tax_id}:adjustment:{adjustment_id}"
                 data = {
                     "key": f"{key}:tax:{tax_key}",
@@ -241,7 +296,15 @@ def _normalize_framework(evidence, *, mapping, account_id, subsidiary_id):
                     "rate": rule.rate if rule else None,
                     "rounding": rule.rounding if rule else None,
                 }
-                if rule and rule.included and gross is not None and all_rules_known:
+                if rule and rule.calculation == "source_assessment":
+                    data.update(calculation="source_assessment", assessment=assessments.get(adjustment_id))
+                if (
+                    rule
+                    and rule.calculation == "statutory_rate"
+                    and rule.included
+                    and gross is not None
+                    and all_rules_known
+                ):
                     data.update(included_gross_basis=gross, included_rate_total=included_rates)
                 taxes.append(TransactionTax(**data))
             included_sum += item_included

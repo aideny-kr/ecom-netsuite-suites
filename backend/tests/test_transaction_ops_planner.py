@@ -13,7 +13,7 @@ from tests.test_transaction_ops_netsuite_actions import target as target_example
 from tests.test_transaction_ops_runner import source_order
 
 
-def planning_case(*, inventory=False):
+def planning_case(*, inventory=False, assessment=False):
     now = datetime.now(timezone.utc)
     config = SimpleNamespace(
         id=uuid4(),
@@ -53,9 +53,52 @@ def planning_case(*, inventory=False):
         source["orders"][0]["line_items"][0].update(variant={"sku": "FRAME-1"}, inventory_units=[{"id": "501"}])
         target["lines"][0].pop("custcol_fw_solidus_line_id")
         target["lines"][0].update(custcol_fw_inventory_unit_ids="501", custcol_fw_original_ecom_sku="FRAME-1")
+    if assessment:
+        config.mapping_json["netsuite_legacy_tax"] = {
+            "schema_version": 1,
+            "mode": "line_tax_amount",
+            "account_id": config.netsuite_account_id,
+            "subsidiary_id": "3",
+            "tax_code_id": "610",
+        }
+        config.mapping_json["tax_rules"] = {
+            "7": {"calculation": "source_assessment", "included": False, "netsuite_tax_id": "610"}
+        }
+        order = source["orders"][0]
+        order.update(total="120", tax_total="20", additional_tax_total="20", adjustment_total="20")
+        order["line_items"][0].update(
+            total="120",
+            adjustments=[
+                {
+                    "id": "99",
+                    "source_id": "7",
+                    "source_type": "Spree::TaxRate",
+                    "adjustable_id": "11",
+                    "adjustable_type": "Spree::LineItem",
+                    "amount": "20",
+                    "finalized": True,
+                    "updated_at": order["updated_at"],
+                }
+            ],
+        )
+        target["tax_details"] = None
+        target["header"].update(
+            total="108",
+            taxTotal="18",
+            custbody_fw_solidus_order_total="108",
+            custbody_fw_solidus_tax_amount="18",
+            shippingTax1Rate="0",
+            shippingTax2Rate="0",
+        )
+        target["lines"][0].update(custcol_fw_vat_amount="18", taxCode={"id": "610"}, tax1Amt="18")
     report = build_report(source, targets, snapshot, TransactionMapping.model_validate(config.mapping_json), now=now)
     plan = prepare_correction(
-        target, report["source"], now=now, line_identity_mode="inventory_units" if inventory else "source_line_id"
+        target,
+        report["source"],
+        now=now,
+        line_identity_mode="inventory_units" if inventory else "source_line_id",
+        legacy_tax=config.mapping_json.get("netsuite_legacy_tax"),
+        account_id=config.netsuite_account_id,
     )
     guard = {"snapshot": plan.before_json, "actions_enabled": True, "observed_at": now.isoformat()}
     return SimpleNamespace(now=now, config=config, source=source, targets=targets, report=report, guard=guard)

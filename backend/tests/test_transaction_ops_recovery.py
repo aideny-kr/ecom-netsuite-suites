@@ -276,3 +276,15 @@ async def test_inventory_recovery_reads_private_evidence_and_never_accepts_repla
     assert result["status"] == ("unknown" if changed else "verified")
     assert mod.read_framework_order.await_args.kwargs == {"include_sync_data": True}
     unknown_case.case.dispatch.assert_awaited_once()
+
+
+@pytest.mark.parametrize("execution_case", [{"inventory": True, "assessment": True}], indirect=True)
+@pytest.mark.parametrize("changed", [False, True])
+async def test_recovery_binds_original_final_tax_assessment_and_never_resends(db, unknown_case, monkeypatch, changed):
+    row = await operation(db, unknown_case)
+    mock_recovery(monkeypatch, unknown_case)
+    if changed:
+        unknown_case.case.source["orders"][0]["line_items"][0]["adjustments"][0]["id"] = "100"
+    result = await mod.recover_operation(db, unknown_case.actor.tenant_id, row.id)
+    assert result["status"] == ("unknown" if changed else "verified")
+    unknown_case.case.dispatch.assert_awaited_once()

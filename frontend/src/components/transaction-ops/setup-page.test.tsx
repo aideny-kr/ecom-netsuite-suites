@@ -153,3 +153,27 @@ it("shows explicit native matching and tax profiles and saves the selected scope
     },
   });
 });
+
+it("makes the assessment limitation explicit and clears rate inputs when switching policies", () => {
+  render(<TransactionSetupPage />);
+  fireEvent.click(screen.getByRole("button", { name: "Add tax rule" }));
+  fireEvent.change(screen.getByLabelText("Tax rule 1 Rate fraction"), {
+    target: { value: "0.2" },
+  });
+  expect(screen.getByLabelText("Source tax evidence")).toHaveValue(
+    "statutory_rate",
+  );
+  fireEvent.change(screen.getByLabelText("Source tax evidence"), {
+    target: { value: "source_assessment" },
+  });
+  expect(
+    screen.queryByLabelText("Tax rule 1 Rate fraction"),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.getByText(/statutory rates are not independently verified/i),
+  ).toBeInTheDocument();
+  fireEvent.change(screen.getByLabelText("Source tax evidence"), {
+    target: { value: "statutory_rate" },
+  });
+  expect(screen.getByLabelText("Tax rule 1 Rate fraction")).toHaveValue("");
+});

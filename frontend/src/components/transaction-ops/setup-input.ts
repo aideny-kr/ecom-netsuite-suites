@@ -16,6 +16,7 @@ export function emptyDraft() {
     taxes: [] as MappingRow[],
     entities: [] as MappingRow[],
     taxRounding: "",
+    taxEvidence: "statutory_rate",
     propose: false,
     schedule: false,
     interval: "60",
@@ -53,9 +54,10 @@ export interface ConfigInput {
     tax_rules: Record<
       string,
       {
-        rate: string;
+        calculation: "statutory_rate" | "source_assessment";
+        rate?: string;
         included: boolean;
-        rounding: "half_up" | "half_even";
+        rounding?: "half_up" | "half_even";
         netsuite_tax_id: string;
       }
     >;
@@ -133,9 +135,36 @@ export function buildConfigInput(draft: ScopeDraft): ConfigInput {
       return [row.entity, row.subsidiary] as const;
     },
   );
+  if (
+    draft.taxEvidence !== "statutory_rate" &&
+    draft.taxEvidence !== "source_assessment"
+  )
+    fail("Choose an explicit source tax evidence policy.");
+  if (draft.taxEvidence === "source_assessment" && !legacyTax)
+    fail("Finalized assessments require an explicit legacy tax layout.");
   const taxes = active(draft.taxes, "source", "Tax rule").map((row) => {
     if (!/^\d{1,30}$/.test(row.source) || !/^\d{1,30}$/.test(row.destination))
       fail("Tax rules require explicit source and NetSuite tax IDs.");
+    if (!["included", "additional"].includes(row.basis))
+      fail("Choose whether each tax is included or additional.");
+    if (draft.taxEvidence === "source_assessment") {
+      if (
+        row.rate ||
+        row.rounding ||
+        row.destination !== legacyTax?.tax_code_id
+      )
+        fail(
+          "Assessment rules require the selected native tax code and no statutory rate or rounding.",
+        );
+      return [
+        row.source,
+        {
+          calculation: "source_assessment",
+          included: row.basis === "included",
+          netsuite_tax_id: row.destination,
+        },
+      ] as const;
+    }
     if (!/^(?:[0-9](?:\.\d{1,12})?|10(?:\.0{1,12})?)$/.test(row.rate))
       fail(
         "Enter each tax rate as an exact fraction from 0 to 10, for example 0.20.",
@@ -147,6 +176,7 @@ export function buildConfigInput(draft: ScopeDraft): ConfigInput {
     return [
       row.source,
       {
+        calculation: "statutory_rate",
         rate: row.rate,
         included: row.basis === "included",
         rounding: row.rounding,

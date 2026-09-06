@@ -14,7 +14,10 @@ const mocks = vi.hoisted(() => ({
   operationError: null,
 }));
 vi.mock("@/hooks/use-transaction-ops", () => ({
-  useRecheckTransactionOperation: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useRecheckTransactionOperation: () => ({
+    mutateAsync: vi.fn(),
+    isPending: false,
+  }),
   useTransactionRun: () => ({ data: undefined }),
   useTransactionDecision: () => ({
     mutateAsync: mocks.mutate,
@@ -109,7 +112,9 @@ describe("immutable proposal review", () => {
     };
     render(<ProposalCard proposal={{ ...proposal, status: "approved" }} />);
     expect(screen.getByText("Execution outcome unknown")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Recheck outcome" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Recheck outcome" }),
+    ).toBeInTheDocument();
     expect(
       screen.getByText(/external outcome must be reconciled/i),
     ).toBeInTheDocument();
@@ -157,5 +162,33 @@ it("allows authenticated rejection of expired pending evidence without enabling 
       evidence_fingerprint: proposal.evidence_fingerprint,
       note: undefined,
     }),
+  );
+});
+
+it("keeps the source assessment limitation in the immutable approval even when the live card changes", () => {
+  const assessed = {
+    ...proposal,
+    evidence_json: {
+      report: {
+        source: { tax_details: [{ calculation: "source_assessment" }] },
+        comparison: { findings: [], differences: [] },
+      },
+    },
+  };
+  const view = render(<ProposalCard proposal={assessed} />);
+  expect(
+    screen.getByText(/statutory rates are not independently verified/i),
+  ).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Review approval" }));
+  expect(screen.getByRole("alertdialog")).toHaveTextContent(
+    /statutory rates are not independently verified/i,
+  );
+  view.rerender(
+    <ProposalCard
+      proposal={{ ...proposal, evidence_fingerprint: "b".repeat(64) }}
+    />,
+  );
+  expect(screen.getByRole("alertdialog")).toHaveTextContent(
+    /statutory rates are not independently verified/i,
   );
 });

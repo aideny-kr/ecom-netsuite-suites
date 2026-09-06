@@ -116,3 +116,32 @@ it.each([
 ])("rejects unproven native policy %j", (change) => {
   expect(() => buildConfigInput({ ...draft(), ...change })).toThrow();
 });
+
+it("binds explicit finalized assessments without inventing a tax rate", () => {
+  const value = buildConfigInput({
+    ...draft(),
+    taxEvidence: "source_assessment",
+    legacyTaxMode: "line_tax_amount",
+    legacyTaxCode: "4059",
+    taxes: [{ source: "7", destination: "4059", basis: "included" }],
+  }).mapping_json;
+  expect(value.tax_rules["7"]).toEqual({
+    calculation: "source_assessment",
+    included: true,
+    netsuite_tax_id: "4059",
+  });
+});
+it.each([
+  { taxEvidence: "automatic" },
+  { taxEvidence: "source_assessment" },
+  {
+    taxEvidence: "source_assessment",
+    legacyTaxMode: "line_tax_amount",
+    legacyTaxCode: "4059",
+    taxes: [
+      { source: "7", destination: "4059", basis: "included", rate: "0.2" },
+    ],
+  },
+])("rejects unproven or misleading assessment policy %j", (change) => {
+  expect(() => buildConfigInput({ ...draft(), ...change })).toThrow();
+});

@@ -400,11 +400,41 @@ function SetupForm() {
               rows={draft.entities}
               change={(rows) => update("entities", rows)}
             />
+            <label className="block space-y-2 text-[13px]">
+              Source tax evidence
+              <select
+                className={inputClass}
+                value={draft.taxEvidence}
+                onChange={(e) => {
+                  update("taxEvidence", e.target.value);
+                  update(
+                    "taxes",
+                    draft.taxes.map(
+                      ({ rate: _rate, rounding: _rounding, ...row }) => row,
+                    ),
+                  );
+                }}
+              >
+                <option value="statutory_rate">Statutory rate (default)</option>
+                <option value="source_assessment">
+                  Finalized Framework assessment
+                </option>
+              </select>
+            </label>
+            {draft.taxEvidence === "source_assessment" && (
+              <p className="rounded-md border bg-muted/40 p-4 text-[13px]">
+                Each tax rule uses final Framework adjustment amounts, IDs and
+                timestamps. Statutory rates are not independently verified. This
+                limitation remains visible in every approval.
+              </p>
+            )}
             <MappingRows
               title="Tax rule"
               columns={[
                 { key: "source", label: "Source tax rate ID" },
-                { key: "rate", label: "Rate fraction" },
+                ...(draft.taxEvidence === "statutory_rate"
+                  ? [{ key: "rate", label: "Rate fraction" }]
+                  : []),
                 {
                   key: "basis",
                   label: "Tax basis",
@@ -413,16 +443,18 @@ function SetupForm() {
                     ["additional", "Additional"],
                   ],
                 },
-                { key: "rounding", label: "Rounding", options: rounding },
+                ...(draft.taxEvidence === "statutory_rate"
+                  ? [{ key: "rounding", label: "Rounding", options: rounding }]
+                  : []),
                 { key: "destination", label: "NetSuite tax ID" },
               ]}
               rows={draft.taxes}
               change={(rows) => update("taxes", rows)}
             />
             <p className="text-[13px] text-muted-foreground">
-              Rates are fractions: enter 0.20 for 20%. Source tax IDs come from
-              the order’s adjustments; a label or effective aggregate rate is
-              insufficient.
+              {draft.taxEvidence === "statutory_rate"
+                ? "Rates are fractions: enter 0.20 for 20%. Source tax IDs come from the order’s adjustments; a label or effective aggregate rate is insufficient."
+                : "Enter each exact source tax ID and whether the amount is included or additional. Its native tax ID must match the legacy tax profile above."}
             </p>
             <label className="block space-y-2 text-[13px]">
               NetSuite tax component rounding

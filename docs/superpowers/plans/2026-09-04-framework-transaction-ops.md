@@ -385,3 +385,33 @@ and format checks. The required T2 pre-merge multi-angle workflow remains
 unverified because the independent Codex agents are quota-limited; a
 supplementary tool-less CLI review is separate from that gate. Temporary
 compiled UI and isolated SDF validation directories have been removed.
+
+### Explicit finalized source assessments
+
+The source-assessment policy is now implemented separately from the default
+statutory-rate policy. It requires finalized Framework adjustments with exact
+owner, source-tax and adjustment identities, unique ownership, valid update
+clocks and complete header/line reconciliation. No statutory rate is inferred.
+The matching native legacy profile remains explicit. Fresh execution and
+read-only recovery reject altered proof; final money must fit the verified
+currency precision. Tests cover malformed flags and clocks, duplicate identities,
+wrong owners, mixed incompatible included-tax bases, missing profiles, stale
+approvals and unchanged-versus-changed recovery evidence.
+
+A fresh read-only run of the exact local collectors against a seven-line EUR
+order produced complete source and native evidence, zero differences and
+`no_action`. Eight source assessments included a finalized zero-basis, zero-tax
+shipping component for which NetSuite has no row. Comparison permits only this
+explicit zero-shipping case against complete reported native allocations; it
+retains the original component in the evidence fingerprint.
+
+The actual setup and frozen approval components were rendered and inspected at
+desktop and mobile sizes after a design mock. A fixture submission retained the
+explicit policy, inventory identity and account/subsidiary-bound native profile,
+with scheduling and actions disabled. The approval states that statutory rates
+are not independently verified. No browser console errors were observed. All
+1,077 frontend tests and the production build pass. The full backend suite passes
+7,704 tests with 2 skipped (197 warnings; 444.62 seconds). Ruff, formatting and
+diff checks pass. Missing-order creation and the native observation bridge for
+omitted REST handling cost remain outstanding. The compiled UI preview was
+removed after visual verification; no deployment or financial writes occurred.

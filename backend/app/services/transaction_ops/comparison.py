@@ -29,6 +29,7 @@ from app.schemas.transaction_ops import (
     TransactionLookup,
     TransactionSnapshot,
 )
+from app.services.transaction_ops.source_assessment import assessments_proven
 
 _AMOUNTS = ("total", "subtotal", "shipping", "shipping_tax", "discount", "tax")
 _IMPORTABLE = frozenset({"confirmed", "fulfilled"})
@@ -181,6 +182,11 @@ def _compare_transactions(source, netsuite_records, lookup, *, now, max_age):
             finding("incomplete_detail", "A line or tax detail contains unknown values.")
         if snapshot.tax and not snapshot.tax_details:
             finding("incomplete_detail", "Nonzero tax requires tax detail evidence.")
+    if not assessments_proven(source):
+        finding(
+            "source_assessment_unproven",
+            "Each source tax assessment needs a unique finalized adjustment and a proven version.",
+        )
     if findings:
         # Detection remains useful when a collector still lacks tax metadata.
         # These observations never promote incomplete evidence into a repair.
@@ -237,7 +243,7 @@ def _compare_transactions(source, netsuite_records, lookup, *, now, max_age):
             return result("human_review")
         quantum = Decimal(1).scaleb(-snapshot.currency_minor_unit)
         for tax in snapshot.tax_details:
-            if tax.calculation == "reported_allocation":
+            if tax.calculation in {"reported_allocation", "source_assessment"}:
                 continue  # Native/custom amount agreement is the collector's explicit profile proof.
             rounding = ROUND_HALF_UP if tax.rounding == "half_up" else ROUND_HALF_EVEN
             calculated = tax.basis * tax.rate
@@ -271,6 +277,26 @@ def _compare_transactions(source, netsuite_records, lookup, *, now, max_age):
     for tax in source.tax_details:
         source_taxes.setdefault(tax.allocation_key or tax.key, []).append(tax)
     target_taxes = {tax.key: tax for tax in target.tax_details}
+    # Framework retains a finalized zero assessment for free shipping. The
+    # explicit legacy native profile proves zero shipping and shipping tax,
+    # without a per-shipment native tax row. Keep the source proof in the
+    # immutable snapshot; only this zero-basis, zero-amount event needs no row.
+    if (
+        source.shipping == source.shipping_tax == target.shipping == target.shipping_tax == 0
+        and target.tax_details
+        and all(tax.calculation == "reported_allocation" for tax in target.tax_details)
+    ):
+        source_taxes = {
+            key: components
+            for key, components in source_taxes.items()
+            if not (
+                key.startswith("shipment:")
+                and key not in target_taxes
+                and all(
+                    tax.calculation == "source_assessment" and tax.basis == 0 and tax.amount == 0 for tax in components
+                )
+            )
+        }
     # A complete empty source adjustment list proves zero tax. Do not invent a
     # statutory source component solely because the legacy target uses a tax
     # item with a zero observed allocation. Nonzero/unknown values never qualify.
@@ -298,7 +324,11 @@ def _compare_transactions(source, netsuite_records, lookup, *, now, max_age):
         components, actual = source_taxes[key], target_taxes[key]
         if len({tax.basis for tax in components}) != 1 or (
             actual.calculation != "reported_allocation"
-            and (len(components) != 1 or components[0].allocation_key is not None)
+            and (
+                len(components) != 1
+                or components[0].allocation_key is not None
+                or components[0].calculation == "source_assessment"
+            )
         ):
             finding("tax_structure_mismatch", "A destination allocation must cover one proven taxable event.")
 
@@ -327,7 +357,7 @@ def _compare_transactions(source, netsuite_records, lookup, *, now, max_age):
         for field in ("basis", "amount"):
             expected = sum((tax.amount for tax in components), Decimal(0)) if field == "amount" else components[0].basis
             difference(f"tax_details.{key}.{field}", expected, getattr(actual, field))
-        if actual.calculation == "statutory_rate" and len(components) == 1:
+        if actual.calculation == "statutory_rate" and len(components) == 1 and components[0].rate is not None:
             difference(f"tax_details.{key}.rate", components[0].rate, actual.rate)
     if findings:
         return result("human_review")
