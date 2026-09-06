@@ -894,155 +894,216 @@ describe("CeligoFlowPage — panel sizing", () => {
 // contract: docs/superpowers/mockups/2026-09-04-celigo-flow-sizing.html
 // ---------------------------------------------------------------------------
 
-describe("CeligoFlowPage — header/canvas divider", () => {
-  const SIZE_KEY = "celigo.flowHeaderSize";
+describe("CeligoFlowPage — header/body divider (pixel MIN/MAX clamp)", () => {
+  const HEIGHT_KEY = "celigo.flowHeaderHeight";
+  const LEGACY_SIZE_KEY = "celigo.flowHeaderSize";
   const COLLAPSED_KEY = "celigo.flowHeaderCollapsed";
 
   beforeEach(() => {
-    window.localStorage.removeItem(SIZE_KEY);
+    window.localStorage.removeItem(HEIGHT_KEY);
+    window.localStorage.removeItem(LEGACY_SIZE_KEY);
     window.localStorage.removeItem(COLLAPSED_KEY);
-    panelSpy.props.length = 0;
   });
 
-  it("wraps the header and body in a vertical group with a 'Resize header' separator", () => {
-    wrap(<CeligoFlowPage />);
+  // jsdom has no real layout engine -- `getBoundingClientRect`/`scrollHeight`
+  // read 0 on every element unless overridden. This overrides them on the
+  // SPECIFIC first-row / content-wrapper DOM nodes `CeligoFlowHeader` renders
+  // (found by the test ids it exposes for exactly this purpose), the same
+  // per-instance-property approach `celigo-flow-canvas.test.tsx` uses on the
+  // shared `HTMLElement.prototype` for its own single `clientWidth` bound --
+  // here two DIFFERENT bounds are needed at once, so each is set on its own
+  // node rather than the shared prototype.
+  function setHeaderBounds({ min, max }: { min?: number; max?: number }) {
+    if (min !== undefined) {
+      Object.defineProperty(screen.getByTestId("celigo-flow-header-first-row"), "getBoundingClientRect", {
+        configurable: true,
+        value: () => ({ height: min, width: 0, top: 0, left: 0, right: 0, bottom: 0, x: 0, y: 0, toJSON() {} }),
+      });
+    }
+    if (max !== undefined) {
+      Object.defineProperty(screen.getByTestId("celigo-flow-header-content"), "scrollHeight", {
+        configurable: true,
+        value: max,
+      });
+    }
+  }
+
+  // `CeligoFlowHeader`'s own MIN/MAX-measuring effect runs after EVERY
+  // render (see its docstring) but reads the LIVE DOM at that moment --
+  // mutating a mocked getter on an already-mounted node does nothing until
+  // something re-renders the header. `rerender` with a fresh element of the
+  // SAME type reconciles (an update, not a remount) and forces exactly that,
+  // without touching any state under test — the same technique this file's
+  // own "Escape closes an open script drawer" test already uses.
+  function renderPage() {
+    const view = wrap(<CeligoFlowPage />);
+    function remeasure() {
+      view.rerender(
+        <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+          <CeligoFlowPage />
+        </QueryClientProvider>,
+      );
+    }
+    return { ...view, remeasure };
+  }
+
+  it("wraps the header in a clipped div with a horizontal 'Resize header' separator below it, and a plain flex body pane below that", () => {
+    renderPage();
+
+    const wrapEl = screen.getByTestId("celigo-flow-header-wrap");
+    expect(wrapEl.className).toContain("overflow-hidden");
 
     const separator = screen.getByRole("separator", { name: "Resize header" });
     // ARIA orientation describes the separator's own visual axis, not the
     // drag direction: a HORIZONTAL divider bar (the mock's own
-    // `aria-orientation="horizontal"`) separates panels stacked
-    // VERTICALLY — the library reports the value on that convention.
+    // `aria-orientation="horizontal"`) separates panels stacked VERTICALLY.
     expect(separator).toHaveAttribute("aria-orientation", "horizontal");
+    expect(separator).toHaveAttribute("tabIndex", "0");
 
-    const headerPanelProps = panelSpy.props.filter((p) => p.id === "celigo-flow-header-pane").pop();
-    expect(headerPanelProps).toBeDefined();
-    expect(typeof headerPanelProps!.onResize).toBe("function");
+    expect(screen.getByTestId("celigo-canvas-host")).toBeInTheDocument();
+    expect(screen.getByTestId("celigo-flow-body-pane").className).toMatch(/flex-1/);
   });
 
-  it("defaults the header panel to 34% with no stored size", () => {
-    wrap(<CeligoFlowPage />);
-    const headerPanelProps = panelSpy.props.filter((p) => p.id === "celigo-flow-header-pane").pop()!;
-    expect(headerPanelProps.defaultSize).toBe("34%");
+  it("removes the retired '%'-based flowHeaderSize key on mount", () => {
+    window.localStorage.setItem(LEGACY_SIZE_KEY, "42%");
+    renderPage();
+    expect(window.localStorage.getItem(LEGACY_SIZE_KEY)).toBeNull();
   });
 
-  it("applies a stored header size as defaultSize", () => {
-    window.localStorage.setItem(SIZE_KEY, "42%");
-    panelSpy.props.length = 0;
-    wrap(<CeligoFlowPage />);
-    const headerPanelProps = panelSpy.props.filter((p) => p.id === "celigo-flow-header-pane").pop()!;
-    expect(headerPanelProps.defaultSize).toBe("42%");
+  it("defaults to MAX (nothing clipped) with no stored height", () => {
+    const { remeasure } = renderPage();
+    setHeaderBounds({ min: 60, max: 500 });
+    remeasure();
+    expect(screen.getByTestId("celigo-flow-header-wrap").style.height).toBe("500px");
   });
 
-  it("ignores a stored size with no '%' suffix (a bare number would mean pixels to the library)", () => {
-    window.localStorage.setItem(SIZE_KEY, "500");
-    panelSpy.props.length = 0;
-    wrap(<CeligoFlowPage />);
-    const headerPanelProps = panelSpy.props.filter((p) => p.id === "celigo-flow-header-pane").pop()!;
-    expect(headerPanelProps.defaultSize).toBe("34%");
+  it("clamps a stored height above MAX down to MAX", () => {
+    window.localStorage.setItem(HEIGHT_KEY, "900");
+    const { remeasure } = renderPage();
+    setHeaderBounds({ min: 60, max: 500 });
+    remeasure();
+    expect(screen.getByTestId("celigo-flow-header-wrap").style.height).toBe("500px");
   });
 
-  it("Focus canvas hides the 'Resize header' separator; Show details brings it back", () => {
-    wrap(<CeligoFlowPage />);
-    expect(screen.getByRole("separator", { name: "Resize header" })).toBeInTheDocument();
+  it("clamps a stored height below MIN up to MIN", () => {
+    window.localStorage.setItem(HEIGHT_KEY, "10");
+    const { remeasure } = renderPage();
+    setHeaderBounds({ min: 60, max: 500 });
+    remeasure();
+    expect(screen.getByTestId("celigo-flow-header-wrap").style.height).toBe("60px");
+  });
+
+  it("shrinks the applied height when MAX shrinks below it — the header can never be taller than its content", () => {
+    window.localStorage.setItem(HEIGHT_KEY, "400");
+    const { remeasure } = renderPage();
+    setHeaderBounds({ min: 60, max: 500 });
+    remeasure();
+    expect(screen.getByTestId("celigo-flow-header-wrap").style.height).toBe("400px");
+
+    // The content got shorter (Show less, a shorter sibling flow) — MAX
+    // drops below the still-stored 400px preference.
+    setHeaderBounds({ max: 250 });
+    remeasure();
+    expect(screen.getByTestId("celigo-flow-header-wrap").style.height).toBe("250px");
+  });
+
+  it("ArrowUp/ArrowDown move the applied height by 24px and persist pixels", () => {
+    window.localStorage.setItem(HEIGHT_KEY, "300");
+    const { remeasure } = renderPage();
+    setHeaderBounds({ min: 60, max: 500 });
+    remeasure();
+    const separator = screen.getByRole("separator", { name: "Resize header" });
+
+    fireEvent.keyDown(separator, { key: "ArrowDown" });
+    expect(screen.getByTestId("celigo-flow-header-wrap").style.height).toBe("324px");
+    expect(window.localStorage.getItem(HEIGHT_KEY)).toBe("324");
+
+    fireEvent.keyDown(separator, { key: "ArrowUp" });
+    fireEvent.keyDown(separator, { key: "ArrowUp" });
+    expect(screen.getByTestId("celigo-flow-header-wrap").style.height).toBe("276px");
+    expect(window.localStorage.getItem(HEIGHT_KEY)).toBe("276");
+  });
+
+  it("Home jumps to MIN, End jumps to MAX", () => {
+    window.localStorage.setItem(HEIGHT_KEY, "300");
+    const { remeasure } = renderPage();
+    setHeaderBounds({ min: 60, max: 500 });
+    remeasure();
+    const separator = screen.getByRole("separator", { name: "Resize header" });
+
+    fireEvent.keyDown(separator, { key: "Home" });
+    expect(screen.getByTestId("celigo-flow-header-wrap").style.height).toBe("60px");
+
+    fireEvent.keyDown(separator, { key: "End" });
+    expect(screen.getByTestId("celigo-flow-header-wrap").style.height).toBe("500px");
+  });
+
+  it("Focus canvas collapses to MIN and hides the separator; Show details restores the clamped stored height", () => {
+    window.localStorage.setItem(HEIGHT_KEY, "300");
+    const { remeasure } = renderPage();
+    setHeaderBounds({ min: 60, max: 500 });
+    remeasure();
+    expect(screen.getByTestId("celigo-flow-header-wrap").style.height).toBe("300px");
 
     fireEvent.click(screen.getByRole("button", { name: "Focus canvas" }));
+    expect(screen.getByTestId("celigo-flow-header-wrap").style.height).toBe("60px");
     expect(screen.queryByRole("separator", { name: "Resize header" })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Show details" }));
+    expect(screen.getByTestId("celigo-flow-header-wrap").style.height).toBe("300px");
     expect(screen.getByRole("separator", { name: "Resize header" })).toBeInTheDocument();
   });
 
-  it("never crashes, and falls back to 34%, when the header-size storage throws on read", () => {
+  it("a stored '1' starts the page with the header already collapsed and the separator already hidden", () => {
+    window.localStorage.setItem(COLLAPSED_KEY, "1");
+    renderPage();
+    expect(screen.getByRole("button", { name: "Show details" })).toBeInTheDocument();
+    expect(screen.queryByRole("separator", { name: "Resize header" })).not.toBeInTheDocument();
+  });
+
+  it("stores flowHeaderCollapsed and flowHeaderHeight as two separate keys — toggling Focus canvas never touches the remembered height", () => {
+    window.localStorage.setItem(HEIGHT_KEY, "300");
+    renderPage();
+
+    fireEvent.click(screen.getByRole("button", { name: "Focus canvas" }));
+    expect(window.localStorage.getItem(COLLAPSED_KEY)).toBe("1");
+    expect(window.localStorage.getItem(HEIGHT_KEY)).toBe("300");
+
+    fireEvent.click(screen.getByRole("button", { name: "Show details" }));
+    expect(window.localStorage.getItem(COLLAPSED_KEY)).toBeNull();
+    expect(window.localStorage.getItem(HEIGHT_KEY)).toBe("300");
+  });
+
+  it("never crashes, and falls back to MAX, when the header-height storage throws on read", () => {
     const getItemSpy = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
       throw new Error("storage disabled");
     });
     try {
-      wrap(<CeligoFlowPage />);
-      const headerPanelProps = panelSpy.props.filter((p) => p.id === "celigo-flow-header-pane").pop()!;
-      expect(headerPanelProps.defaultSize).toBe("34%");
+      const { remeasure } = renderPage();
+      setHeaderBounds({ min: 60, max: 500 });
+      remeasure();
+      expect(screen.getByTestId("celigo-flow-header-wrap").style.height).toBe("500px");
       expect(screen.getByRole("separator", { name: "Resize header" })).toBeInTheDocument();
     } finally {
       getItemSpy.mockRestore();
     }
   });
 
-  it("never crashes when the header-size storage throws on write (Focus canvas toggle)", () => {
+  it("never crashes when the header-height storage throws on write (a keyboard move)", () => {
     const setItemSpy = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
       throw new Error("storage disabled");
     });
     try {
-      wrap(<CeligoFlowPage />);
-      fireEvent.click(screen.getByRole("button", { name: "Focus canvas" }));
-      expect(screen.getByRole("button", { name: "Show details" })).toBeInTheDocument();
+      const { remeasure } = renderPage();
+      setHeaderBounds({ min: 60, max: 500 });
+      remeasure();
+      fireEvent.keyDown(screen.getByRole("separator", { name: "Resize header" }), { key: "ArrowDown" });
+      // Already at MAX (no stored preference), so ArrowDown clamps right
+      // back to 500 -- the assertion here is simply that nothing crashed.
+      expect(screen.getByTestId("celigo-flow-header-wrap").style.height).toBe("500px");
     } finally {
       setItemSpy.mockRestore();
     }
-  });
-
-  it("stores flowHeaderCollapsed and flowHeaderSize as two separate keys — toggling Focus canvas never touches the remembered size", () => {
-    window.localStorage.setItem(SIZE_KEY, "40%");
-    wrap(<CeligoFlowPage />);
-
-    fireEvent.click(screen.getByRole("button", { name: "Focus canvas" }));
-    expect(window.localStorage.getItem(COLLAPSED_KEY)).toBe("1");
-    expect(window.localStorage.getItem(SIZE_KEY)).toBe("40%");
-
-    fireEvent.click(screen.getByRole("button", { name: "Show details" }));
-    expect(window.localStorage.getItem(COLLAPSED_KEY)).toBeNull();
-    expect(window.localStorage.getItem(SIZE_KEY)).toBe("40%");
-  });
-
-  // Gate-fix (finding: blocker) -- `onResize` is a REAL `ResizeObserver`
-  // notification in a real browser, which is delivered strictly after the
-  // microtask queue drains (a rendering-step callback, not a microtask
-  // itself) -- so it always lands AFTER `toggleHeaderCollapsed`'s own
-  // `Promise.resolve().then()` has already cleared a timing-based guard.
-  // jsdom's `ResizeObserver` is stubbed as a no-op (`vitest.setup.ts`, added
-  // for reactflow) so this path is otherwise never exercised here -- this
-  // test drives the real `onResize` prop directly (captured via `panelSpy`
-  // off the real `Panel`) to stand in for that delayed real-world report.
-  it("a header-resize notification reporting the just-requested collapse/expand target is treated as synthetic, not a real drag -- even when it lands after the toggle handler has already returned", async () => {
-    window.localStorage.setItem(SIZE_KEY, "40%");
-    wrap(<CeligoFlowPage />);
-
-    fireEvent.click(screen.getByRole("button", { name: "Focus canvas" }));
-    // Let the microtask queue drain -- a real ResizeObserver notification is
-    // NOT itself a microtask (it's a later rendering-step callback), so by
-    // the time it lands, every microtask queued before it (including a
-    // `Promise.resolve().then()` cleanup) has already run. Awaiting one here
-    // reproduces that ordering instead of accidentally beating it.
-    await act(async () => {
-      await Promise.resolve();
-    });
-    const collapsedProps = panelSpy.props.filter((p) => p.id === "celigo-flow-header-pane").pop()!;
-    // Stands in for the real ResizeObserver's report of the imperative
-    // collapse this click just made -- landing, as it always does in a real
-    // browser, after this synchronous click handler has already returned.
-    act(() => (collapsedProps.onResize as (s: { asPercentage: number; inPixels: number }) => void)({ asPercentage: 8, inPixels: 80 }));
-
-    // The remembered size must survive that notification untouched --
-    // neither in memory (what "Show details" restores to) nor in storage.
-    expect(window.localStorage.getItem(SIZE_KEY)).toBe("40%");
-
-    fireEvent.click(screen.getByRole("button", { name: "Show details" }));
-    const restoredProps = panelSpy.props.filter((p) => p.id === "celigo-flow-header-pane").pop()!;
-    expect(restoredProps.defaultSize).toBe("40%");
-    expect(window.localStorage.getItem(SIZE_KEY)).toBe("40%");
-  });
-
-  it("a stored '1' starts the page with the header already collapsed and the separator already hidden", () => {
-    window.localStorage.setItem(COLLAPSED_KEY, "1");
-    wrap(<CeligoFlowPage />);
-
-    expect(screen.getByRole("button", { name: "Show details" })).toBeInTheDocument();
-    expect(screen.queryByRole("separator", { name: "Resize header" })).not.toBeInTheDocument();
-  });
-
-  it("the horizontal nav/canvas/inspector group and the navigator/canvas panels still render inside the body pane", () => {
-    wrap(<CeligoFlowPage />);
-    expect(screen.getByTestId("celigo-canvas-host")).toBeInTheDocument();
-    const bodyPaneProps = panelSpy.props.filter((p) => p.id === "celigo-flow-body-pane").pop();
-    expect(bodyPaneProps).toBeDefined();
   });
 });
 
