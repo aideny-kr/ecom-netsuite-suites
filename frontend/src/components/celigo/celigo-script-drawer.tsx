@@ -255,7 +255,7 @@ export function CeligoScriptDrawer({
             }
           }}
           className={cn(
-            "fixed inset-y-0 right-0 z-50 h-full translate-x-0 translate-y-0",
+            "fixed inset-y-0 right-0 z-50 flex h-full flex-col translate-x-0 translate-y-0",
             "overflow-y-auto rounded-none border-l bg-background p-4 shadow-lg duration-200",
             "data-[state=open]:animate-in data-[state=closed]:animate-out",
             "data-[state=closed]:slide-out-to-right data-[state=open]:slide-in-from-right",
@@ -338,7 +338,15 @@ export function CeligoScriptDrawer({
           ) : scriptState !== "success" || !script ? (
             <DrawerSkeleton />
           ) : (
-            <div className={cn("pt-6", maximized && "celigo-script-drawer--maximized")}>
+            // Fix 2 (celigo flow sizing UI): `flex-1 min-h-0` so this wrapper
+            // -- the only flex-flow sibling inside the now-flex-column
+            // `DialogPrimitive.Content` (the grip/buttons/sr-only Title-
+            // Description are all `absolute`/`sr-only`, so they consume no
+            // flex space) -- takes every pixel below the drawer's fixed
+            // chrome, in BOTH normal and maximized modes. `layout="fill"`
+            // tells the body to drop its dialog-only 320px code cap and grow
+            // to match.
+            <div className={cn("flex-1 min-h-0 pt-6", maximized && "celigo-script-drawer--maximized")}>
               {/* The selected step, passed straight through: the body picks
                   out that step's own `used_by` site so the header names the
                   hook the reader actually opened, and still falls back to
@@ -347,6 +355,7 @@ export function CeligoScriptDrawer({
                 script={script}
                 currentStepId={currentStepId}
                 currentJsonPath={currentJsonPath}
+                layout="fill"
               />
             </div>
           )}
