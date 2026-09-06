@@ -209,13 +209,19 @@ async def run_investigation(
     _target_reader=None,
     _page_reader=None,
     _guard_reader=None,
+    _create_reader=None,
     _celigo_reader=None,
     _enabled=None,
     _clock=None,
 ):
     from app.services.transaction_ops.celigo_actions import MAX_READ_CALLS, read_celigo_error_evidence
+    from app.services.transaction_ops.netsuite_create import CreateInputError, prepare_create_input
     from app.services.transaction_ops.netsuite_reader import read_netsuite_order
-    from app.services.transaction_ops.netsuite_transport import MAX_GUARD_READ_CALLS, read_guard_snapshot
+    from app.services.transaction_ops.netsuite_transport import (
+        MAX_GUARD_READ_CALLS,
+        read_create_preview,
+        read_guard_snapshot,
+    )
     from app.services.transaction_ops.planner import PlanningError, plan_proposal
     from app.services.transaction_ops.source_reader import read_framework_order, read_framework_orders_page
 
@@ -326,7 +332,7 @@ async def run_investigation(
                 # or its budget cannot fit. Models never manufacture this proof.
                 await state.record_finding(db, tenant_id, run_id, reference, report, lease_token=token, now=clock())
                 current_config = await state.get_config(db, tenant_id, run.config_id)
-                guard = celigo = None
+                guard = celigo = creation = None
                 try:
                     if action == "propose_amount_correction":
                         if not await reserve(MAX_GUARD_READ_CALLS):
@@ -334,6 +340,21 @@ async def run_investigation(
                         guard = await bounded_read(
                             (_guard_reader or read_guard_snapshot)(
                                 db, tenant_id, current_config, targets["orders"][0]["record_id"]
+                            )
+                        )
+                    elif action == "propose_missing_sync":
+                        creation = prepare_create_input(
+                            source,
+                            current_config.mapping_json,
+                            account_id=current_config.netsuite_account_id,
+                            subsidiary_id=current_config.subsidiary_id,
+                            now=clock(),
+                        )
+                        if not await reserve(MAX_GUARD_READ_CALLS):
+                            return await finish("budget")
+                        guard = await bounded_read(
+                            (_create_reader or read_create_preview)(
+                                db, tenant_id, current_config, creation.payload_json
                             )
                         )
                     elif action == "no_action" and current_config.target_step_id:
@@ -344,10 +365,12 @@ async def run_investigation(
                                 db, tenant_id, current_config.target_step_id, reference
                             )
                         )
-                    request = plan_proposal(report, targets, current_config, now=clock(), guard=guard, celigo=celigo)
+                    request = plan_proposal(
+                        report, targets, current_config, now=clock(), guard=guard, celigo=celigo, creation=creation
+                    )
                     proposal = await state.propose(db, tenant_id, run_id, request, lease_token=token, now=clock())
                     report = {**report, "automation": {"status": proposal.status, "proposal_id": str(proposal.id)}}
-                except PlanningError as exc:
+                except (PlanningError, CreateInputError) as exc:
                     report = {**report, "automation": {"status": "blocked", "code": str(exc)}}
                 except (state_service.StateError, FeatureRevokedError):
                     raise

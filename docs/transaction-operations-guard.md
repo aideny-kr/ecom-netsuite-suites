@@ -2,10 +2,10 @@
 
 This RESTlet provides conditional saves for existing, unfulfilled sales orders
 and exact missing-order creation in pending-approval state. Its tests and SDF
-package are part of the transaction-operations feature. The platform planner and
-executor use it for human-approved corrections. Platform creation wiring is
-still being implemented. Installing this artifact
-alone does not configure or enable repairs.
+package are part of the transaction-operations feature. The platform planner,
+executor and read-only recovery use it for human-approved corrections and
+missing-order creation. Installing this artifact alone does not configure or
+enable repairs.
 
 ## Contract
 
@@ -192,8 +192,8 @@ is rejected. The verified individual sync response also supports shipments neste
 under their order without a redundant owner field. Addresses and the private sync
 projection receive a separate immutable fingerprint. These prepared inputs are
 read-only and do not themselves establish native absence, grant approval or save
-an order. Native preview, guarded save and platform integration remain subsequent
-steps.
+an order. Native preview, guarded save and independent platform verification
+are separate steps described below.
 
 ## Build and validate the isolated SDF artifact
 
@@ -345,10 +345,45 @@ provides the native account-wide duplicate constraint.
 `GET action=created_snapshot` independently reads an attributed order using its
 record ID, expected line count, tax profile and inventory mode. It requires the
 64-character work key and returns the actual record version and full creation
-projection. It performs no draft construction or save. Platform source/private
-fingerprint verification and create recovery must still be wired before this
-contract can produce completed platform operations.
+projection. It performs no draft construction or save. The platform validates
+this native contract, including an actual timezone-aware, non-future record
+version. A receipt's record ID cannot replace the independent exact-reference
+lookup.
+
+The planner validates the complete unsaved preview and stores the exact input,
+resolved metadata and native projection in the private human proposal. Its
+fingerprint also binds private payment/address evidence. Execution reconstructs
+that proposal from fresh source, absence and native preview reads, then performs
+one further native preflight before reserving its single send. Changed source
+payment IDs or addresses invalidate approval even if totals remain unchanged.
+
+Verification requires exactly one independently located order with the approved
+work key, a matching native/REST version, the unchanged source and private-input
+fingerprints, and the full approved native projection. Creation deliberately
+produces pending approval (`A`) and may use an explicitly mapped SKU quantity
+multiplier. Its proof retains those raw native observations and separately
+compares the proven source-unit equivalents. This verifies the requested pending
+order; it does not approve or fulfill it in NetSuite. General anomaly detection
+continues to expose lifecycle and quantity differences for review.
+
+Creation proofs exceeding 48 KiB use an explicit summary after the full
+verification has succeeded. The ledger retains the approval fingerprint, source
+and private fingerprints, raw header/state/version observations, exact lookup
+scope and completeness, every original source/native quantity, and approved and
+observed native projection digests. The complete matching native projection
+remains in the immutable human proposal. Both completion and recovery envelopes
+must still fit the 64 KiB limit. Recovery checks the full observations before
+separately limiting the displayed finding; a shortened display is never used as
+the verification input.
+
+Read-only recovery uses the same proof and only `created_snapshot`, never a new
+draft or create dispatch. A wrong attribution, duplicate match, changed address,
+quantity, tax or amount remains unknown and cannot trigger another save. The
+local crash drill now covers both corrections and missing-order creation through
+authenticated HTTP, actual worker `SIGKILL`, durable budgets and a loopback
+provider. Both paths retain one save and the original operation spend, recover
+to verified and clean their exact temporary tenant.
 
 The isolated SDF package includes both libraries, the work-key field and two
-disabled-by-default write switches. All 141 SuiteApp tests and client-side SDF
+disabled-by-default write switches. All 142 SuiteApp tests and client-side SDF
 validation pass. No server validation, deployment or live creation was performed.

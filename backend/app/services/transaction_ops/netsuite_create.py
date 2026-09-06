@@ -274,3 +274,176 @@ def _prepare(evidence, mapping, account_id, subsidiary_id, now):
         business_digest(source.model_dump(mode="python", exclude={"observed_at"})),
         business_digest({"schema_version": 1, "order": project_order(order, include_sync_data=True)}),
     )
+
+
+def validate_create_preview(payload, raw):
+    """Accept only the exact native draft contract, retaining source-approved PII.
+
+    Native reads establish metadata and sourcing. This independent check keeps a
+    malformed or incompatible guard response out of immutable human approvals.
+    """
+    try:
+        with localcontext(Context(prec=60, Emin=-99, Emax=99)):
+            preview = _bounded_json(raw)
+            _preview_keys(preview, {"schema_version", "metadata", "period_id", "record"})
+            if type(preview["schema_version"]) is not int or preview["schema_version"] != 1:
+                raise ValueError
+            _native_id(preview["period_id"])
+            meta = preview["metadata"]
+            _preview_keys(meta, {"customer", "currency", "items", "locations"})
+            customer, currency = meta["customer"], meta["currency"]
+            _preview_keys(customer, {"id", "primary_subsidiary", "currency_ids", "credit_hold", "credit_limit"})
+            _preview_keys(currency, {"id", "symbol", "precision"})
+            _native_id(customer["id"])
+            _native_id(customer["primary_subsidiary"])
+            _native_id(currency["id"])
+            currencies = customer["currency_ids"]
+            if not isinstance(currencies, list) or not 1 <= len(currencies) <= 101:
+                raise ValueError
+            if len({_native_id(v) for v in currencies}) != len(currencies) or currency["id"] not in currencies:
+                raise ValueError
+            if customer["credit_hold"] not in {"AUTO", "OFF"}:
+                raise ValueError
+            if customer["credit_limit"] is not None:
+                limit = _native_decimal(customer["credit_limit"])
+                if customer["credit_hold"] == "AUTO" and limit != "0":
+                    raise ValueError
+            if (
+                currency["symbol"] != payload["currency"]["symbol"]
+                or type(currency["precision"]) is not int
+                or currency["precision"] != payload["currency"]["precision"]
+            ):
+                raise ValueError
+            if not isinstance(meta["items"], list) or not isinstance(meta["locations"], list):
+                raise ValueError
+            items, item_ids = {}, set()
+            for item in meta["items"]:
+                _preview_keys(item, {"id", "sku", "type", "unitstype", "units"})
+                for key in ("id", "unitstype", "units"):
+                    _native_id(item[key])
+                if (
+                    item["sku"] in items
+                    or item["id"] in item_ids
+                    or item["type"] not in {"InvtPart", "Assembly", "Service"}
+                ):
+                    raise ValueError
+                items[item["sku"]] = item
+                item_ids.add(item["id"])
+            if set(items) != {line["netsuite_sku"] for line in payload["lines"]}:
+                raise ValueError
+            locations = {}
+            for location in meta["locations"]:
+                _preview_keys(location, {"id", "subsidiary"})
+                _native_id(location["id"])
+                _native_id(location["subsidiary"])
+                if location["id"] in locations:
+                    raise ValueError
+                locations[location["id"]] = location["subsidiary"]
+            if set(locations) != {line["location_id"] for line in payload["lines"]} or any(
+                locations[line["location_id"]] != line["inventory_subsidiary_id"] for line in payload["lines"]
+            ):
+                raise ValueError
+            record = preview["record"]
+            _preview_keys(record, {"body", "lines", "billing_address", "shipping_address"})
+            body = record["body"]
+            expected_body = {
+                **payload["expected_totals"],
+                "entity": customer["id"],
+                "subsidiary": payload["subsidiary_id"],
+                "currency": currency["id"],
+                "shipmethod": payload["shipping_method_id"],
+                "customform": _native_id(body["customform"]),
+                "terms": None if body["terms"] is None else _native_id(body["terms"]),
+                "discountitem": None,
+                "exchangerate": _native_decimal(body["exchangerate"], positive=True),
+                "custbody_fw_solidus_order_total": payload["expected_totals"]["total"],
+                "custbody_fw_solidus_tax_amount": payload["expected_totals"]["taxtotal"],
+                "tranid": payload["order_reference"],
+                "externalid": payload["external_id"],
+                "trandate": payload["transaction_date"],
+                "orderstatus": "A",
+                "iscrosssubtransaction": payload["inventory_mode"] == "cross_subsidiary",
+                "tobeemailed": False,
+                "tobefaxed": False,
+                "getauth": False,
+                "paypalprocess": False,
+            }
+            for key, native in (("custom_form_id", "customform"), ("terms_id", "terms")):
+                if payload[key] is not None and expected_body[native] != payload[key]:
+                    raise ValueError
+            if payload["tax_profile"]["mode"] == "aggregate_header":
+                from decimal import ROUND_HALF_UP
+
+                basis, tax = (_number(payload["expected_totals"][key]) for key in ("subtotal", "taxtotal"))
+                rate = (
+                    (tax * 100 / basis).quantize(Decimal("0.0000001"), rounding=ROUND_HALF_UP) if basis else Decimal(0)
+                )
+                if rate > 1000 or (tax and not rate):
+                    raise ValueError
+                expected_body.update(taxitem=payload["tax_profile"]["tax_code_id"], taxrate=_text(rate), istaxable=True)
+            lines = record["lines"]
+            if not isinstance(lines, list) or len(lines) != len(payload["lines"]):
+                raise ValueError
+            expected_lines = []
+            for native, source in zip(lines, payload["lines"], strict=True):
+                item = items[source["netsuite_sku"]]
+                line = {
+                    "item": item["id"],
+                    "units": item["units"],
+                    "quantity": source["quantity"],
+                    "rate": source["rate"],
+                    "amount": source["amount"],
+                    "custcol_fw_vat_amount": source["tax_amount"],
+                    "quantityfulfilled": "0",
+                    "quantitybilled": "0",
+                    "isclosed": False,
+                    "createwo": False,
+                    "createpo": "",
+                    "price": "-1",
+                    "inventory_unit_ids": sorted(source["inventory_unit_ids"]),
+                    "original_sku": source["source_sku"],
+                }
+                if payload["inventory_mode"] == "cross_subsidiary":
+                    line.update(
+                        inventorylocation=source["location_id"], inventorysubsidiary=source["inventory_subsidiary_id"]
+                    )
+                else:
+                    line["location"] = source["location_id"]
+                if payload["tax_profile"]["mode"] == "line_tax_amount":
+                    line.update(
+                        taxcode=source["tax_code_id"],
+                        tax1amt=source["tax_amount"],
+                        taxrate1=_native_decimal(native["taxrate1"]),
+                    )
+                else:
+                    line["istaxable"] = True
+                expected_lines.append(line)
+            expected = {
+                "body": expected_body,
+                "lines": expected_lines,
+                **{key: payload[key] for key in ("billing_address", "shipping_address")},
+            }
+            # Serialization distinguishes true from 1 and false from 0 as well
+            # as enforcing exact field membership and canonical decimal strings.
+            if json.dumps(record, sort_keys=True) != json.dumps(expected, sort_keys=True):
+                raise ValueError
+            return preview
+    except (ValueError, TypeError, KeyError, IndexError, AttributeError, DecimalException):
+        raise CreateInputError("create_preview_unproven") from None
+
+
+def _preview_keys(value, keys):
+    if not isinstance(value, dict) or set(value) != keys:
+        raise CreateInputError("create_preview_unproven")
+
+
+def _native_id(value):
+    if not isinstance(value, str) or _id(value) != value:
+        raise CreateInputError("create_preview_unproven")
+    return value
+
+
+def _native_decimal(value, *, positive=False):
+    if not isinstance(value, str) or _text(value) != value or _number(value) < 0 or (positive and not _number(value)):
+        raise CreateInputError("create_preview_unproven")
+    return value

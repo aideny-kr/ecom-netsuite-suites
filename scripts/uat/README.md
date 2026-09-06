@@ -10,6 +10,9 @@ NetSuite transport exclusively to an ephemeral loopback HTTP stub.
 ```sh
 backend/.venv/bin/python scripts/uat/transaction_ops_crash_drill.py \
   --output /tmp/transaction-ops-crash-drill.json
+
+backend/.venv/bin/python scripts/uat/transaction_ops_crash_drill.py \
+  --action sync_missing_order --output /tmp/transaction-ops-create-crash-drill.json
 ```
 
 The harness creates one temporary tenant, starts an investigation through the
@@ -20,6 +23,10 @@ parent sends that child `SIGKILL`, checks the committed dispatch ledger, advance
 the recovery clock past the attempt deadline, and independently verifies the
 saved state. Re-delivery must cause no second write. Recovery cannot reset the
 original call spend or deadline. The final API read must show `verified`.
+The default action checks amount correction. `sync_missing_order` additionally
+checks the native preview/attribution contract, unchanged private source inputs,
+pending-approval state and an explicit source/native quantity multiplier. Both
+actions use the real transport adapter and exactly one stub save.
 
 Cleanup validates the exact generated tenant ID and slug, deletes only its rows,
 checks zero residue, and closes the stub and child process even on failure.

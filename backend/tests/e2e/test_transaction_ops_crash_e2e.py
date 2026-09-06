@@ -66,10 +66,11 @@ def test_crash_drill_refuses_remote_or_unrelated_databases_before_mutation(datab
     assert "fixture" not in result.stdout + result.stderr
 
 
-def test_seeded_http_approval_and_actual_sigkill_recovery_with_zero_residue(tmp_path):
+@pytest.mark.parametrize("action", ["correct_amounts", "sync_missing_order"])
+def test_seeded_http_approval_and_actual_sigkill_recovery_with_zero_residue(tmp_path, action):
     output = tmp_path / "crash-result.json"
     process = subprocess.Popen(
-        [sys.executable, str(DRILL), "--output", str(output)],
+        [sys.executable, str(DRILL), "--output", str(output), "--action", action],
         cwd=ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -84,6 +85,11 @@ def test_seeded_http_approval_and_actual_sigkill_recovery_with_zero_residue(tmp_
     report = json.loads(output.read_text())
     assert report["passed"] and report["http_human_approval"] and report["real_process_kill"]
     assert report["writes"] == 1 and report["outcome"] == "verified" and report["zero_residue"]
+    assert report["action"] == action
+    if action == "sync_missing_order":
+        assert report["original_api_calls"] == 21
+        assert report["native_state"] == "A" and report["native_quantity"] == "2"
+        assert report["source_quantity"] == "1" and report["private_source_unchanged"] is True
 
 
 def test_hard_killed_drill_parent_leaves_a_journal_for_exact_supervisor_cleanup(tmp_path):

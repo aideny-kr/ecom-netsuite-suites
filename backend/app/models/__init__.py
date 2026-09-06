@@ -49,7 +49,13 @@ from app.models.tenant_memory_edge import TenantMemoryEdge
 from app.models.tenant_memory_link import TenantMemoryLink
 from app.models.tenant_profile import TenantProfile
 from app.models.tenant_wallet import TenantWallet
-from app.models.transaction_ops import TransactionConfig, TransactionFinding, TransactionOperation, TransactionProposal, TransactionRun
+from app.models.transaction_ops import (
+    TransactionConfig,
+    TransactionFinding,
+    TransactionOperation,
+    TransactionProposal,
+    TransactionRun,
+)
 from app.models.user import Permission, Role, RolePermission, User, UserRole
 from app.models.user_dashboard_preference import UserDashboardPreference  # noqa: F401
 from app.models.workspace import (

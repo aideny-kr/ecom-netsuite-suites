@@ -35,12 +35,11 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 
 import httpx
+from app.core.config import settings
 from cryptography.fernet import Fernet
 from sqlalchemy import select, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-
-from app.core.config import settings
 
 settings.APP_DEBUG = False
 DATABASE = settings.DATABASE_URL_DIRECT or settings.DATABASE_URL
@@ -75,6 +74,7 @@ from tests.conftest import (
     enable_feature_flag,
     make_auth_headers,
 )
+from tests.test_transaction_ops_create_planning import missing_case
 from tests.test_transaction_ops_netsuite_dispatch import URL
 from tests.test_transaction_ops_planner import planning_case
 from tests.test_transaction_ops_state_db import seed_config
@@ -166,6 +166,13 @@ def install_providers(stack, data, port, *, saved=None):
         async with httpx.AsyncClient(transport=httpx.MockTransport(forward)) as client:
             return await original_dispatch(*args, **kwargs, client=client)
 
+    def wrapped_read(original):
+        async def read(*args, **kwargs):
+            async with httpx.AsyncClient(transport=httpx.MockTransport(forward)) as client:
+                return await original(*args, **kwargs, client=client)
+
+        return read
+
     stack.enter_context(patch.object(netsuite_transport, "get_valid_token", AsyncMock(return_value=TOKEN)))
     stack.enter_context(patch.object(netsuite_transport, "read_guard_snapshot", guard))
     for module in (source_reader, executor, recovery):
@@ -174,6 +181,11 @@ def install_providers(stack, data, port, *, saved=None):
         stack.enter_context(patch.object(module, "read_netsuite_order", read_target))
     for module in (executor, recovery):
         stack.enter_context(patch.object(module, "read_guard_snapshot", guard))
+    for name in ("read_create_preview", "read_created_snapshot"):
+        read = wrapped_read(getattr(netsuite_transport, name))
+        for module in (netsuite_transport, executor, recovery):
+            if hasattr(module, name):
+                stack.enter_context(patch.object(module, name, read))
     stack.enter_context(patch.object(executor, "dispatch_netsuite_operation", dispatch))
 
 
@@ -196,6 +208,17 @@ def provider_server(data, saved, release, counts):
         def do_GET(self):
             assert self.headers.get("Authorization") == f"Bearer {TOKEN}"
             counts["reads"] += 1
+            if data["action"] == "sync_missing_order":
+                assert saved.is_set() and "action=created_snapshot" in self.path
+                self.respond(
+                    {
+                        "schema_version": 1,
+                        "success": True,
+                        "account_id": "6738075_SB1",
+                        "creation": data["after_guard"],
+                    }
+                )
+                return
             self.respond(
                 {
                     "schema_version": 1,
@@ -211,8 +234,27 @@ def provider_server(data, saved, release, counts):
             size = int(self.headers.get("Content-Length", "0"))
             assert 0 < size <= 65536
             payload = json.loads(self.rfile.read(size))
-            assert payload["before"] == data["guard"] and payload["after"] == data["intent"]
-            assert payload["work_key"] == data["work_key"] and payload["action"] == "correct_amounts"
+            if payload["action"] == "preview_create":
+                assert data["action"] == "sync_missing_order" and not saved.is_set()
+                assert payload["input"] == data["create_input"]
+                counts["reads"] += 1
+                self.respond(
+                    {
+                        "schema_version": 1,
+                        "success": True,
+                        "account_id": "6738075_SB1",
+                        "create_enabled": True,
+                        "preview": data["preview"],
+                    }
+                )
+                return
+            expected_before = (
+                {"missing": True, "order_reference": "R123456789"}
+                if data["action"] == "sync_missing_order"
+                else data["guard"]
+            )
+            assert payload["before"] == expected_before and payload["after"] == data["intent"]
+            assert payload["work_key"] == data["work_key"] and payload["action"] == data["action"]
             counts["writes"] += 1
             saved.set()
             release.wait(timeout=30)
@@ -264,7 +306,7 @@ async def cleanup(factory, tenant_id, slug):
         ).scalar_one() == 0
 
 
-async def parent(output):
+async def parent(output, action):
     settings.ENCRYPTION_KEY = Fernet.generate_key().decode()
     engine = create_async_engine(DATABASE, echo=False, connect_args={"timeout": 5, "command_timeout": 15})
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -273,12 +315,23 @@ async def parent(output):
     journal = Path(str(output) + ".state.json")
     if journal.exists():
         raise RuntimeError("An unfinished cleanup journal exists; run --cleanup-state after stopping its worker")
-    journal_data = {"slug": slug, "database": parsed.database, "host": parsed.host, "phase": "seeding"}
+    journal_data = {
+        "slug": slug,
+        "database": parsed.database,
+        "host": parsed.host,
+        "phase": "seeding",
+    }
     saved, release = threading.Event(), threading.Event()
     counts = {"reads": 0, "writes": 0}
-    result = {"passed": False, "provider": "loopback stub", "real_process_kill": False}
+    result = {
+        "passed": False,
+        "provider": "loopback stub",
+        "real_process_kill": False,
+        "action": action,
+    }
     try:
-        case = planning_case()
+        creating = action == "sync_missing_order"
+        case = missing_case() if creating else planning_case()
         async with factory() as db:
             tenant = await create_test_tenant(db, name="Ephemeral transaction crash drill", slug=slug)
             tenant_id = tenant.id
@@ -302,8 +355,8 @@ async def parent(output):
             await db.commit()
             headers, config_id = make_auth_headers(actor), config.id
         case.source["celigo_step_id"] = str(config.source_step_id)
-        after = deepcopy(case.targets)
-        after_guard = deepcopy(case.guard["snapshot"])
+        after = planning_case(inventory=True, assessment=True).targets if creating else deepcopy(case.targets)
+        after_guard = {} if creating else deepcopy(case.guard["snapshot"])
         version = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
         after["orders"][0]["version"] = version
         after["orders"][0]["header"].update(
@@ -319,14 +372,38 @@ async def parent(output):
             custbody_fw_solidus_order_total="100",
             version=version,
         )
-        after_guard["lines"][0].update(rate="100", amount="100")
+        if not creating:
+            after_guard["lines"][0].update(rate="100", amount="100")
         data = {
+            "action": action,
             "source": case.source,
             "before": case.targets,
             "after": after,
-            "guard": case.guard["snapshot"],
+            "guard": None if creating else case.guard["snapshot"],
             "after_guard": after_guard,
         }
+        if creating:
+            native = after["orders"][0]
+            native["header"].update(
+                orderStatus={"id": "A"},
+                total="120",
+                taxTotal="20",
+                custbody_fw_solidus_order_total="120",
+                custbody_fw_solidus_tax_amount="20",
+            )
+            native["lines"][0].update(quantity="2", rate="50", custcol_fw_vat_amount="20", tax1Amt="20")
+            data.update(
+                create_input=case.prepared.payload_json,
+                preview=case.preview,
+                after_guard={
+                    "record_id": "63",
+                    "version": version,
+                    "work_key": None,
+                    "tax_profile": {"mode": "line_tax_amount", "tax_code_id": "610"},
+                    "inventory_mode": "line_location",
+                    "record": case.preview["record"],
+                },
+            )
         server, server_thread = provider_server(data, saved, release, counts)
         port = server.server_address[1]
         app = create_app()
@@ -363,6 +440,7 @@ async def parent(output):
                 assert response.status_code == 200 and len(response.json()) == 1, response.text
                 proposal = response.json()[0]
                 assert proposal["status"] == "pending" and proposal["currency"] == "EUR"
+                assert proposal["action"] == action
                 proposal_id = proposal["id"]
                 waiting = await asyncio.to_thread(workers.transaction_ops_execute.run, str(tenant_id), proposal_id)
                 assert waiting["status"] == "pending" and counts["writes"] == 0
@@ -380,6 +458,8 @@ async def parent(output):
                     intent=proposal["after_json"],
                     work_key=proposal["work_key"],
                 )
+                if creating:
+                    data["after_guard"]["work_key"] = proposal["work_key"]
                 fixtures = Path(directory) / "fixtures.json"
                 fixtures.write_text(json.dumps(data))
                 with (Path(directory) / "worker.log").open("w+") as log:
@@ -444,6 +524,14 @@ async def parent(output):
                             row.result_json["dispatch_reserved"] is True
                             and row.result_json["verification"]["source_unchanged"] is True
                         )
+                        if creating:
+                            proof = row.result_json["verification"]
+                            result.update(
+                                native_state=proof["creation_policy"]["native_order_status"],
+                                native_quantity=proof["report"]["targets"][0]["lines"][0]["quantity"],
+                                source_quantity=proof["report"]["source"]["lines"][0]["quantity"],
+                                private_source_unchanged=proof["private_source_unchanged"],
+                            )
                     duplicate = await asyncio.to_thread(
                         workers.transaction_ops_execute.run, str(tenant_id), proposal_id
                     )
@@ -480,12 +568,12 @@ async def parent(output):
     print(json.dumps(result))
 
 
-async def supervised_parent(output):
+async def supervised_parent(output, action):
     loop = asyncio.get_running_loop()
     task = asyncio.current_task()
     loop.add_signal_handler(signal.SIGTERM, task.cancel)
     try:
-        await parent(output)
+        await parent(output, action)
     finally:
         loop.remove_signal_handler(signal.SIGTERM)
 
@@ -493,9 +581,18 @@ async def supervised_parent(output):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", default="/tmp/transaction-ops-crash-drill.json")
+    parser.add_argument(
+        "--action",
+        choices=("correct_amounts", "sync_missing_order"),
+        default="correct_amounts",
+    )
     parser.add_argument("--worker", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--port", type=int, help=argparse.SUPPRESS)
-    parser.add_argument("--cleanup-state", type=Path, help="Clean the exact journal after its worker group has stopped")
+    parser.add_argument(
+        "--cleanup-state",
+        type=Path,
+        help="Clean the exact journal after its worker group has stopped",
+    )
     args = parser.parse_args()
     if args.cleanup_state:
         print(json.dumps(asyncio.run(cleanup_journal(args.cleanup_state))))
@@ -505,4 +602,4 @@ if __name__ == "__main__":
             install_providers(providers, fixture_data, args.port)
             workers.transaction_ops_execute.run(fixture_data["tenant_id"], fixture_data["proposal_id"])
     else:
-        asyncio.run(supervised_parent(args.output))
+        asyncio.run(supervised_parent(args.output, args.action))

@@ -310,6 +310,12 @@ test("read-only native draft preview works while create writes remain disabled",
   expect(record.create).toHaveBeenCalledTimes(1);
   expect(saved).toHaveLength(0);
 });
+test("native preview matches the shared Python transport contract fixture", () => {
+  expect(preview().preview).toEqual(
+    require("./fixtures/transaction_create_preview.json"),
+  );
+  expect(saved).toHaveLength(0);
+});
 test("a duplicate full reference anywhere in the account prevents even draft construction", () => {
   data.absence = [{ id: "999" }];
   expect(preview()).toEqual(expect.objectContaining({ success: false }));

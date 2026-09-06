@@ -10,6 +10,7 @@ from app.schemas.transaction_ops import TransactionLookup, TransactionSnapshot
 from app.schemas.transaction_runs import ProposalCreate
 from app.services.transaction_ops.comparison import compare_transactions
 from app.services.transaction_ops.netsuite_actions import NetSuiteActionError, prepare_correction
+from app.services.transaction_ops.netsuite_create import CreateInputError, validate_create_preview
 from app.services.transaction_ops.normalization import _time
 from app.services.transaction_ops.state_service import business_digest
 
@@ -23,7 +24,7 @@ def source_fingerprint(source):
     return business_digest(snapshot.model_dump(mode="python", exclude={"observed_at"}))
 
 
-def plan_proposal(report, targets, config, *, now, guard=None, celigo=None):
+def plan_proposal(report, targets, config, *, now, guard=None, celigo=None, creation=None):
     if not config.enabled or config.mapping_json.get("action_mode", "detect_only") != "propose_actions":
         raise PlanningError("actions_disabled")
     source = TransactionSnapshot.model_validate(report["source"])
@@ -74,6 +75,28 @@ def plan_proposal(report, targets, config, *, now, guard=None, celigo=None):
         evidence["guard"] = guard
         if config.mapping_json.get("netsuite_legacy_tax"):
             evidence["native_tax_rounding"] = config.mapping_json.get("netsuite_tax_rounding")
+    elif comparison.recommended_action == "propose_missing_sync":
+        if targets["orders"] or not creation or not guard or guard.get("create_enabled") is not True:
+            raise PlanningError("create_guard_unavailable")
+        if not timedelta(0) <= now - _time(guard["observed_at"]) < timedelta(minutes=15):
+            raise PlanningError("guard_stale")
+        payload = creation.payload_json
+        if (
+            creation.source_fingerprint != evidence["source_fingerprint"]
+            or payload["order_reference"] != source.order_reference
+            or payload["account_id"] != config.netsuite_account_id.replace("_", "-").lower()
+            or payload["subsidiary_id"] != config.subsidiary_id
+            or payload["currency"]["symbol"] != source.currency
+        ):
+            raise PlanningError("create_source_changed")
+        try:
+            preview = validate_create_preview(payload, guard.get("preview"))
+        except CreateInputError as exc:
+            raise PlanningError(str(exc)) from None
+        action = "sync_missing_order"
+        before = {"missing": True, "order_reference": source.order_reference}
+        after = {"input": payload, "preview": preview}
+        evidence["creation"] = {"private_source_fingerprint": creation.private_fingerprint}
     elif comparison.recommended_action == "no_action" and celigo and celigo.get("complete") is True:
         if celigo.get("provider") != "celigo" or celigo.get("order_reference") != source.order_reference:
             raise PlanningError("error_identity_unproven")
@@ -121,17 +144,18 @@ def plan_proposal(report, targets, config, *, now, guard=None, celigo=None):
             },
             "celigo": celigo.get("fingerprint") if action == "resolve_celigo_error" else None,
             "native_tax_rounding": evidence.get("native_tax_rounding"),
+            **({"creation": evidence["creation"]} if action == "sync_missing_order" else {}),
         }
     )
     observations = [source.observed_at, lookup.observed_at, *(record.observed_at for record in records)]
-    if action == "correct_amounts":
+    if action in {"correct_amounts", "sync_missing_order"}:
         observations.append(_time(guard["observed_at"]))
     else:
         observations.append(_time(celigo["observed_at"]))
     return ProposalCreate(
         source_record_id=source.record_id,
         order_reference=source.order_reference,
-        target_record_id=records[0].record_id,
+        target_record_id=records[0].record_id if records else None,
         action=action,
         currency=source.currency,
         evidence_fingerprint=fingerprint,

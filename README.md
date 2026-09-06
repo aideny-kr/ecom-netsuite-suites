@@ -54,6 +54,15 @@ An AI platform that connects NetSuite ERP and BigQuery data warehouses to an int
 - **Evidence packs** — Excel export with matched/unmatched/exception breakdowns
 - **Month-end close workflow** — approve matches, lock periods, audit trail
 
+### Framework transaction operations
+- Investigate missing orders and transaction-currency amount/VAT differences from the dashboard, chat or bounded schedules, using Framework API connections discovered through Celigo and independent NetSuite reads.
+- Review immutable proposals for corrections to unfulfilled orders, missing-order creation in NetSuite pending approval, and proven Celigo duplicate-error resolution. Execution requires an authenticated human decision and fresh matching evidence.
+- Preserve explicit currency precision, native FX, tax policy, inventory identities and subsidiary routing. Incomplete or unsupported evidence remains for review; source-assessment mode does not claim independent statutory-rate validation.
+- Use one committed send reservation and independent outcome verification. Uncertain saves block another write and use bounded read-only recovery, including recovery after worker interruption.
+- Configure scopes at `/transaction-operations/setup`; actions and scheduling start disabled. The feature requires the Celigo and reconciliation flags, appropriate reconciliation permissions, explicit mappings and a configured native guard for NetSuite writes.
+
+The isolated native guard's two write switches default off. Account-side sandbox validation and the blocking T2 review are required before release. See the [setup and guard runbook](docs/transaction-operations-guard.md) and [local create/correction crash drill](scripts/uat/README.md#framework-transaction-interruption-drill).
+
 ### Platform
 - **Role-based access control** (RBAC) with row-level security (RLS) and plan-based entitlements
 - **Audit trail** recording every mutation with correlation IDs

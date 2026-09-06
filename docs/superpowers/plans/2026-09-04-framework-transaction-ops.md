@@ -93,10 +93,19 @@ an individual completed slice does not mean the product is complete.
   completeness, identity, currency and tax mapping constraints.
 - [x] Bounded Framework and NetSuite readers, backed by read-only live evidence.
 - [x] Durable scheduled/chat investigation implementation and targeted tests.
-- [ ] Human review and execution.
-- [ ] Recovery, verification and Celigo resolution.
-- [ ] Rendered product verification and T2 gates.
+- [x] Human review and execution, including native missing-order creation.
+- [x] Recovery, verification and exact Celigo false-alarm resolution.
+- [x] Rendered setup, run and frozen approval verification.
+- [x] Seeded HTTP/worker e2e and real process-death recovery for correction and creation.
+- [ ] Independent blocking T2 review and deployed sandbox smoke before merge/release.
 - [ ] PR delivery.
+
+The implementation is complete through creation execution and recovery. Current
+validation is recorded in the final entries below; earlier entries preserve the
+evidence and remaining work at each intermediate commit. No financial write or
+deployment has been performed in a live NetSuite account. Both native write
+switches default off. Draft PR delivery does not certify the outstanding T2 gate
+or account-specific save automation.
 
 The integrated backend full suite passes 7,399 tests (2 skipped), including
 PostgreSQL, RLS, approval, chat, worker and scheduler tests. The review and setup
@@ -511,3 +520,48 @@ were copied into the task checkout with byte-for-byte checks; complete locked
 dependencies were transferred into its verified empty dependency directory.
 Native creation executor, independent verification/recovery and the create crash
 drill remain outstanding. No deployment or live financial write occurred.
+
+### Native creation execution and independent recovery
+
+The platform now validates the native unsaved draft, binds private source inputs
+into the immutable proposal and reconstructs that exact proposal before execution.
+The transport repeats the native preflight and commits one send reservation before
+dispatch. Verification uses a fresh exact-reference lookup, the native work key,
+matching native/REST versions and the full approved projection. It preserves the
+raw pending-approval state and native quantities while separately proving the
+explicit source-unit conversion. Changed payment identity, address, source
+version, native FX, duplicate matches, tax, quantities or totals cannot become
+verified. Recovery uses only reads and preserves the original spend/deadline.
+
+The loopback seeded HTTP drill now covers both correction and creation. A real
+child worker is killed after the provider stub records its save. Recovery verifies
+the attributed pending order, and duplicate worker delivery still produces one
+save with zero temporary-tenant residue. The backend/native shared JSON fixture
+also prevents the two preview contracts from drifting.
+
+Two independent read-only reviews inspected the creation pipeline and native
+guard. The pipeline reviewer reproduced a 50-line proof that exceeded the 64 KiB
+ledger limit after a valid save. The fix verifies complete evidence first, then
+retains an explicitly identified compact proof with raw headers/states/quantities,
+lookup authority, actual source/private fingerprints, immutable approval identity
+and matching approved/observed native projection digests. Recovery verifies the
+full report before separately limiting its displayed finding. The reviewer
+rechecked the exact fix through 75 lines: the result fits in 8,770 bytes even
+when its raw report exceeds 64 KiB. No remaining actionable issue was found in
+that bounded review. Native review independently passed 133 creation/correction
+tests and reported no confirmed defect. These reviews do not replace T2.
+
+The targeted pipeline/recovery/e2e suite passes 52 tests, including 50/75-line
+execution and recovery, a large post-save amount mismatch and both actual-kill
+drills. The final full backend run passes 7,850 tests with 2 skipped and 196
+warnings in 577.65 seconds. Coverage is 77.16%, above CI's 60% requirement. All 142
+SuiteApp tests pass. Both remotes now have the same `main` at `9c0de616`, which
+was merged into this branch. The combined frontend passes 1,105 tests and its
+production build. Whole-backend Ruff and formatting checks pass.
+
+Ship metadata uses `0.1.0.0`; no root release version previously existed and both
+application packages are `0.1.0`. The queue helper is unavailable in this skill
+installation, so local minor-version arithmetic is used; neither remote has an
+open PR claiming a version. Native sandbox deployment and the blocking T2
+workflow remain unverified. No live financial write or remote-main mutation
+was performed.

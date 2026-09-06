@@ -20,10 +20,14 @@ from app.services.transaction_ops.celigo_actions import (
     read_celigo_error_evidence,
     read_celigo_resolution,
 )
+from app.services.transaction_ops.create_verification import verify_created_outcome
+from app.services.transaction_ops.netsuite_create import prepare_create_input
 from app.services.transaction_ops.netsuite_reader import read_netsuite_order
 from app.services.transaction_ops.netsuite_transport import (
     MAX_GUARD_READ_CALLS,
     dispatch_netsuite_operation,
+    read_create_preview,
+    read_created_snapshot,
     read_guard_snapshot,
 )
 from app.services.transaction_ops.normalization import TransactionMapping, _time
@@ -55,8 +59,12 @@ def _result(row):
     }
 
 
-def verify_outcome(proposal, report, *, guard=None, resolution=None):
+def verify_outcome(proposal, report, *, guard=None, resolution=None, creation=None, now=None):
     """Proof of the approved desired state, never proof inferred from a receipt."""
+    if proposal.action == "sync_missing_order":
+        return verify_created_outcome(
+            proposal, report, guard=guard, creation=creation, now=now or datetime.now(timezone.utc)
+        )
     evidence = proposal.evidence_json
     if (
         evidence.get("schema_version") != 1
@@ -151,7 +159,7 @@ async def execute_proposal(db, tenant_id, proposal_id, *, _clock=None):
         report = build_report(source, targets, scope, mapping, now=clock())
         if report["order_reference"] != proposal.order_reference:
             raise ExecutionStoppedError("source_identity_changed")
-        return targets, report
+        return source, targets, report
 
     async def complete(outcome, code, **details):
         row = await _operation(db, tenant_id, proposal, operation_id=claimed.operation_id)
@@ -163,10 +171,17 @@ async def execute_proposal(db, tenant_id, proposal_id, *, _clock=None):
         return _result(row)
 
     try:
-        targets, report = await pair()
-        guard = celigo = None
+        source, targets, report = await pair()
+        guard = celigo = creation = None
         if claimed.action == "correct_amounts":
             guard = await read(MAX_GUARD_READ_CALLS, read_guard_snapshot, config, claimed.target_record_id)
+        elif claimed.action == "sync_missing_order":
+            if report["comparison"]["recommended_action"] != "propose_missing_sync":
+                return await complete("failed", "approved_evidence_changed")
+            creation = prepare_create_input(
+                source, mapping, account_id=config.netsuite_account_id, subsidiary_id=config.subsidiary_id, now=clock()
+            )
+            guard = await read(MAX_GUARD_READ_CALLS, read_create_preview, config, creation.payload_json)
         elif claimed.action == "resolve_celigo_error":
             celigo = await read(
                 MAX_READ_CALLS,
@@ -177,7 +192,7 @@ async def execute_proposal(db, tenant_id, proposal_id, *, _clock=None):
             )
         else:
             raise ExecutionStoppedError("unsupported_action")
-        fresh = plan_proposal(report, targets, config, now=clock(), guard=guard, celigo=celigo)
+        fresh = plan_proposal(report, targets, config, now=clock(), guard=guard, celigo=celigo, creation=creation)
         if (
             fresh.evidence_fingerprint != proposal.evidence_fingerprint
             or fresh.before_json != claimed.before_json
@@ -185,21 +200,33 @@ async def execute_proposal(db, tenant_id, proposal_id, *, _clock=None):
         ):
             return await complete("failed", "approved_evidence_changed")
         # Adapters own the final live guard + committed one-use send reservation.
-        if claimed.action == "correct_amounts":
+        if claimed.action in {"correct_amounts", "sync_missing_order"}:
             receipt = await dispatch_netsuite_operation(db, tenant_id, claimed)
         else:
             receipt = await dispatch_celigo_resolution(db, tenant_id, claimed, celigo)
         if receipt["status"] == "failed":
             return await complete("failed", "provider_rejected_without_save")
-        _, report = await pair()
-        guard = resolution = None
+        source, _, report = await pair()
+        guard = resolution = creation = None
         if claimed.action == "correct_amounts":
             guard = await read(MAX_GUARD_READ_CALLS, read_guard_snapshot, config, claimed.target_record_id)
+        elif claimed.action == "sync_missing_order":
+            creation = prepare_create_input(
+                source, mapping, account_id=config.netsuite_account_id, subsidiary_id=config.subsidiary_id, now=clock()
+            )
+            if len(report["targets"]) == 1:
+                guard = await read(
+                    MAX_GUARD_READ_CALLS,
+                    read_created_snapshot,
+                    config,
+                    report["targets"][0]["record_id"],
+                    claimed.after_json,
+                )
         else:
             resolution = await read(
                 MAX_READ_CALLS, read_celigo_resolution, config.target_step_id, proposal.evidence_json["celigo"]
             )
-        proof = verify_outcome(proposal, report, guard=guard, resolution=resolution)
+        proof = verify_outcome(proposal, report, guard=guard, resolution=resolution, creation=creation, now=clock())
         if proof is not None:
             return await complete("verified", "independently_verified", verification=proof)
         return await complete("unknown", "verification_unproven")
