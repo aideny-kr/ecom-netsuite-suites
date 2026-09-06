@@ -69,6 +69,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { ShieldAlert } from "lucide-react";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
+import { cn } from "@/lib/utils";
 
 /** `x ?? fallback` does not catch `""` -- the exact bug shape that shipped
  * for the Celigo card's `account_name` earlier this session. Guard both. */
@@ -136,9 +137,9 @@ function formatContentSize(content: string | null): string | null {
  * which (wrongly) promised the source would be quoted TO the assistant
  * inside a sealed block. It never is: N2 keeps script content off every
  * chat/tool path entirely, so the banner must not imply otherwise. */
-function UntrustedContentBanner() {
+function UntrustedContentBanner({ className }: { className?: string }) {
   return (
-    <div className="flex items-start gap-2.5 rounded-xl border border-amber-500/30 bg-amber-500/5 p-3">
+    <div className={cn("flex items-start gap-2.5 rounded-xl border border-amber-500/30 bg-amber-500/5 p-3", className)}>
       <ShieldAlert className="h-4 w-4 text-amber-600 mt-0.5 shrink-0" aria-hidden />
       <p className="text-[12px] text-muted-foreground">{N2_SHIELD_TEXT}</p>
     </div>
@@ -162,11 +163,20 @@ function UntrustedContentBanner() {
  * Omitted (e.g. a future Scripts-view context with no owning step) falls
  * back to the first used_by entry / first copy group, exactly this
  * component's pre-Task-17 behavior.
+ *
+ * `layout` (celigo flow sizing UI): `"dialog"` (default, unchanged) is the
+ * settings dialog's own centered/scrolling presentation -- the code region
+ * keeps its fixed 320px cap. `"fill"` is `CeligoScriptDrawer`'s: the root
+ * becomes a full-height flex column, the attachment-sites table is capped at
+ * 35% of that height (its own scrollbar past that), and the code region
+ * takes every remaining pixel instead of stopping at 320px -- so maximizing
+ * the drawer grows the code both wider AND taller.
  */
 export function CeligoScriptViewerBody({
   script,
   currentStepId,
   currentJsonPath,
+  layout = "dialog",
 }: {
   script: CeligoScript;
   currentStepId?: string | null;
@@ -177,7 +187,9 @@ export function CeligoScriptViewerBody({
    * when both are given; an unrecognised path (an old link, a site that has
    * since moved) falls through to the step, then to the first site. */
   currentJsonPath?: string | null;
+  layout?: "dialog" | "fill";
 }): JSX.Element {
+  const fill = layout === "fill";
   const copyGroups = groupSitesByCopy(script.used_by);
   const currentSite =
     (currentJsonPath ? script.used_by.find((s) => s.json_path === currentJsonPath) : undefined) ??
@@ -192,8 +204,8 @@ export function CeligoScriptViewerBody({
   const sizeLabel = formatContentSize(script.content);
 
   return (
-    <div className="flex flex-col gap-3">
-      <div className="flex flex-col gap-1.5">
+    <div className={cn("flex flex-col gap-3", fill && "h-full min-h-0")}>
+      <div className={cn("flex flex-col gap-1.5", fill && "shrink-0")}>
         <div className="flex flex-wrap items-center gap-2">
           <Badge
             variant="outline"
@@ -227,74 +239,85 @@ export function CeligoScriptViewerBody({
           builds one; out of scope per the plan's Deferred table). Rendered
           as inert text, not a button or anchor, so this surface never
           implies an affordance it can't back. */}
-      <div className="flex items-center justify-end border-b pb-2">
+      <div className={cn("flex items-center justify-end border-b pb-2", fill && "shrink-0")}>
         <span className="text-[12px] font-medium text-muted-foreground">Scripts view ↗</span>
       </div>
 
-      {script.used_by.length === 0 ? (
-        // Genuinely-empty, distinct from the isError branch the caller
-        // handles above -- a script that synced with no recorded
-        // attachment sites is a real (if unusual) state, not a failed
-        // request.
-        <p className="py-2 text-[12px] text-muted-foreground">
-          No attachment sites recorded for this script.
-        </p>
-      ) : (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead className="h-8 text-[11px]">Attached to</TableHead>
-              <TableHead className="h-8 text-[11px]">Where</TableHead>
-              <TableHead className="h-8 text-[11px]">Function</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {shownSites.map((site, i) => (
-              <TableRow key={`${site.script_celigo_id}-${site.json_path}-${i}`}>
-                <TableCell className="py-1.5">
-                  <p className="text-[13px]">{site.flow_name}</p>
-                  <p className="text-[11px] text-muted-foreground">{siteLocationLabel(site)}</p>
-                </TableCell>
-                <TableCell className="py-1.5 font-mono text-[12px] break-all">{site.json_path}</TableCell>
-                <TableCell className="py-1.5 font-mono text-[12px]">
-                  {displayOr(site.function_name)}
-                </TableCell>
-              </TableRow>
-            ))}
-            {remainingCopies > 0 && (
+      {/* Fix 2 (celigo flow sizing UI): in `layout="fill"` this wrapper is
+          capped at 35% of the drawer's own height with its own scrollbar --
+          a script attached at many sites must not be able to push the code
+          area (below) down to nothing. The dialog layout leaves this
+          unconstrained, exactly as before. */}
+      <div className={cn(fill && "max-h-[35%] shrink-0 overflow-auto")}>
+        {script.used_by.length === 0 ? (
+          // Genuinely-empty, distinct from the isError branch the caller
+          // handles above -- a script that synced with no recorded
+          // attachment sites is a real (if unusual) state, not a failed
+          // request.
+          <p className="py-2 text-[12px] text-muted-foreground">
+            No attachment sites recorded for this script.
+          </p>
+        ) : (
+          <Table>
+            <TableHeader>
               <TableRow>
-                <TableCell colSpan={3} className="py-1.5 text-[12px] text-muted-foreground">
-                  {script.content_diverged
-                    ? `+ ${remainingCopies} further copies — content differs across copies; the source below is only this copy's own version, not a canonical one for the group.`
-                    : `+ ${remainingCopies} further copies, identical source`}
-                </TableCell>
+                <TableHead className="h-8 text-[11px]">Attached to</TableHead>
+                <TableHead className="h-8 text-[11px]">Where</TableHead>
+                <TableHead className="h-8 text-[11px]">Function</TableHead>
               </TableRow>
-            )}
-          </TableBody>
-        </Table>
-      )}
+            </TableHeader>
+            <TableBody>
+              {shownSites.map((site, i) => (
+                <TableRow key={`${site.script_celigo_id}-${site.json_path}-${i}`}>
+                  <TableCell className="py-1.5">
+                    <p className="text-[13px]">{site.flow_name}</p>
+                    <p className="text-[11px] text-muted-foreground">{siteLocationLabel(site)}</p>
+                  </TableCell>
+                  <TableCell className="py-1.5 font-mono text-[12px] break-all">{site.json_path}</TableCell>
+                  <TableCell className="py-1.5 font-mono text-[12px]">
+                    {displayOr(site.function_name)}
+                  </TableCell>
+                </TableRow>
+              ))}
+              {remainingCopies > 0 && (
+                <TableRow>
+                  <TableCell colSpan={3} className="py-1.5 text-[12px] text-muted-foreground">
+                    {script.content_diverged
+                      ? `+ ${remainingCopies} further copies — content differs across copies; the source below is only this copy's own version, not a canonical one for the group.`
+                      : `+ ${remainingCopies} further copies, identical source`}
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        )}
+      </div>
 
-      <div className="space-y-2">
+      <div className={cn("space-y-2", fill && "flex min-h-0 flex-1 flex-col")}>
         {script.content_diverged && (
-          <p className="text-[12px] text-amber-600">
+          <p className={cn("text-[12px] text-amber-600", fill && "shrink-0")}>
             This script&apos;s copies have diverged — the source below is this specific copy&apos;s
             own version, not a single canonical version for the group.
           </p>
         )}
-        <div className="overflow-hidden rounded-lg border">
+        <div className={cn("rounded-lg border", fill ? "min-h-0 flex-1 overflow-auto" : "overflow-hidden")}>
           <SyntaxHighlighter
             language="javascript"
             style={oneDark}
             showLineNumbers
             wrapLongLines
-            customStyle={{ margin: 0, padding: "1rem", fontSize: "12px", maxHeight: "320px" }}
+            customStyle={
+              fill
+                ? { margin: 0, padding: "1rem", fontSize: "12px" }
+                : { margin: 0, padding: "1rem", fontSize: "12px", maxHeight: "320px" }
+            }
           >
             {script.content ? script.content : "// No source recorded for this script."}
           </SyntaxHighlighter>
         </div>
       </div>
 
-      <UntrustedContentBanner />
+      <UntrustedContentBanner className={fill ? "shrink-0" : undefined} />
     </div>
   );
 }

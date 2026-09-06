@@ -408,6 +408,42 @@ describe("CeligoScriptDrawer — the left-edge grip", () => {
   });
 });
 
+describe("CeligoScriptDrawer — the code region fills the drawer (celigo flow sizing UI, fix 2)", () => {
+  // Fix 2 root cause: `CeligoScriptViewerBody`'s highlighter carried a fixed
+  // `maxHeight: "320px"` regardless of its container, and the drawer had no
+  // flex column asking the code to fill the rest of its height -- so the
+  // code stayed ~300px tall with empty space below it, even maximized.
+  it("renders the dialog as a flex column and the body in layout=\"fill\" (no 320px cap on the highlighter)", () => {
+    mocks.script.mockReturnValue(resolved(SCRIPT));
+    wrap(<CeligoScriptDrawer scriptId="scr-1" onClose={vi.fn()} />);
+
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.className).toContain("flex");
+    expect(dialog.className).toContain("flex-col");
+    expect(dialog.className).toContain("h-full");
+
+    const pre = document.querySelector("pre")!;
+    expect(pre.style.maxHeight).toBe("");
+    const codeContainer = pre.closest('[class*="min-h-0"]');
+    expect(codeContainer).not.toBeNull();
+    expect(codeContainer!.className).toMatch(/flex-1/);
+    expect(codeContainer!.className).toMatch(/overflow-auto/);
+  });
+
+  it("the body wrapper around CeligoScriptViewerBody is flex-1 min-h-0, in both normal and maximized modes", () => {
+    mocks.script.mockReturnValue(resolved(SCRIPT));
+    wrap(<CeligoScriptDrawer scriptId="scr-1" onClose={vi.fn()} />);
+
+    const wrapEl = document.querySelector('[class*="flex-1"][class*="min-h-0"].pt-6') as HTMLElement | null;
+    expect(wrapEl).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Maximize" }));
+    const maximizedWrapEl = document.querySelector('[class*="flex-1"][class*="min-h-0"].pt-6') as HTMLElement | null;
+    expect(maximizedWrapEl).not.toBeNull();
+    expect(maximizedWrapEl!.className).toContain("celigo-script-drawer--maximized");
+  });
+});
+
 describe("CeligoScriptDrawer — maximize", () => {
   it("toggles aria-pressed, hides the grip, sets the drawer to full width, and restores the remembered width on restore", () => {
     window.localStorage.setItem(DRAWER_WIDTH_KEY, "620");

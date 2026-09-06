@@ -37,7 +37,7 @@ import { cn } from "@/lib/utils";
 import { ErrorNotice } from "./shared";
 import { useCeligoRoute } from "./celigo-route";
 import { CeligoBreadcrumb } from "./celigo-breadcrumb";
-import { CeligoFlowHeader, type ClonedFromInfo } from "./celigo-flow-header";
+import { CeligoFlowHeader, HEADER_FIRST_ROW_FALLBACK_HEIGHT_PX, type ClonedFromInfo } from "./celigo-flow-header";
 import { CeligoFlowNavigator } from "./celigo-flow-navigator";
 import { CeligoFlowCanvas } from "./celigo-flow-canvas";
 import { CeligoStepInspector, type InspectorTab } from "./celigo-step-inspector";
@@ -60,37 +60,48 @@ const NAV_MIN_SIZE = `${NAV_MIN_PCT}%`;
 const NAV_COLLAPSED_SIZE = `${NAV_COLLAPSED_PCT}%`;
 
 /** Celigo flow sizing UI (approved mock: docs/superpowers/mockups/
- * 2026-09-04-celigo-flow-sizing.html) -- header + canvas are now a VERTICAL
- * `PanelGroup`, with a draggable divider between them and "Focus canvas" as
- * the one-click version. Both persisted per VIEWER, as TWO SEPARATE facts
- * that never derive from each other:
- * - `flowHeaderCollapsed` ("1"/absent) -- moved here from
- *   `celigo-flow-header.tsx` (which used to own it entirely) because
- *   toggling it must ALSO shrink/restore the real header PANEL and hide/
- *   show the divider, neither of which the header component can reach on
- *   its own. The header stays the single place the toggle BUTTON lives, but
- *   is now purely presentational for it (`headerCollapsed`/
- *   `onToggleHeaderCollapsed` props), exactly like the navigator rail's
- *   `collapsed`/`onToggle` below.
- * - `flowHeaderSize` (a percentage STRING of the vertical group -- v4 reads
- *   a bare number as PIXELS, same caveat as `NAV_DEFAULT_SIZE` above) --
- *   the height the viewer last DRAGGED the divider to. `minSize` is a small
- *   floor (not the first row's real height, which isn't knowable
- *   statically) -- the header's own `overflow-hidden` plus its
- *   `!headerCollapsed` conditional rendering keeps the first row (pills,
- *   title, actions) visible at any height above that floor.
- */
+ * 2026-09-04-celigo-flow-sizing.html) -- the header sits in a plain clipped
+ * `div` (never a `react-resizable-panels` `Panel`; see the header-fix
+ * docstring below for why), with a draggable divider between it and the
+ * body and "Focus canvas" as the one-click version. Both persisted per
+ * VIEWER, as TWO SEPARATE facts that never derive from each other:
+ * - `flowHeaderCollapsed` ("1"/absent) -- toggling it must ALSO shrink/
+ *   restore the header's own clipped height and hide/show the divider,
+ *   neither of which the header component can reach on its own. The header
+ *   stays the single place the toggle BUTTON lives, but is purely
+ *   presentational for it (`headerCollapsed`/`onToggleHeaderCollapsed`
+ *   props), exactly like the navigator rail's `collapsed`/`onToggle` below.
+ * - `flowHeaderHeight` -- a PIXEL count (never a percentage: unlike a
+ *   `Panel`'s `%`-of-group sizing, this height is compared directly against
+ *   MIN/MAX measurements taken in real pixels) of the height the viewer last
+ *   dragged/keyed the divider to. `null` (never stored, a corrupt/legacy
+ *   value, or a drag/key that landed ON MAX -- see `clearHeaderHeight`)
+ *   means "no preference" -- the applied height then tracks MAX (the
+ *   header's own full, unclipped content height) directly, so a first visit
+ *   looks exactly like today's page and "all the way down" keeps following
+ *   the content as it grows.
+ *
+ * MIN/MAX fix (the header-sizing bug this replaces): the OLD header lived in
+ * a `Panel` sized as a percentage of the vertical group, with a `minSize`
+ * floor and NO `maxSize` -- so dragging the divider past the header's own
+ * natural content height opened a blank band between the header and the
+ * canvas (the header's fixed-height content simply didn't stretch to fill
+ * whatever height the panel was given). This wrapper instead measures the
+ * header's REAL bounds and never allows an applied height outside them:
+ * `headerMinHeight` is `CeligoFlowHeader`'s own first-row height (reported
+ * via `onBoundsChange`, `celigo-flow-header.tsx`) and `headerMaxHeight` is
+ * its whole natural content height -- so `clampHeaderHeight(min, x, max)`
+ * can never produce a height the header itself doesn't fill. */
 const FLOW_HEADER_COLLAPSED_KEY = "celigo.flowHeaderCollapsed";
-const FLOW_HEADER_SIZE_KEY = "celigo.flowHeaderSize";
-const FLOW_HEADER_DEFAULT_SIZE = "34%";
-const FLOW_HEADER_MIN_SIZE = "8%";
-/** `onResize` persistence is debounced by this many ms so a drag doesn't
- * hammer `localStorage` on every pointermove -- matches the mock's own
- * "written on drag end" for the drawer's width, loosened slightly here
- * since the library's `onResize` (a real `ResizeObserver`, unlike the
- * drawer's own hand-rolled pointer handlers) has no separate "drag end"
- * event to hook. */
-const FLOW_HEADER_RESIZE_DEBOUNCE_MS = 200;
+const FLOW_HEADER_HEIGHT_KEY = "celigo.flowHeaderHeight";
+/** The retired `%`-based key from before this fix. Never read for a value
+ * any more (a percentage of a `Panel` group means nothing against a pixel
+ * clamp) -- removed on mount purely so an old browser doesn't keep carrying
+ * a value nothing will ever look at again. */
+const FLOW_HEADER_LEGACY_SIZE_KEY = "celigo.flowHeaderSize";
+/** ArrowUp/ArrowDown step on the divider, matching the mock's own `setH(h ±
+ * 24)` and the script drawer's `DRAWER_WIDTH_STEP`. */
+const HEADER_KEYBOARD_STEP_PX = 24;
 
 function readStoredHeaderCollapsed(): boolean {
   if (typeof window === "undefined") return false;
@@ -101,46 +112,51 @@ function readStoredHeaderCollapsed(): boolean {
   }
 }
 
-function readStoredHeaderSize(): string {
-  if (typeof window === "undefined") return FLOW_HEADER_DEFAULT_SIZE;
+/** `null` (never stored, a blank value, or anything unparseable) means "no
+ * preference" -- the caller then clamps against MAX itself, which is what
+ * makes a first visit show the full header rather than some fixed guess. */
+function readStoredHeaderHeight(): number | null {
+  if (typeof window === "undefined") return null;
   try {
-    const stored = window.localStorage.getItem(FLOW_HEADER_SIZE_KEY);
-    // A bare number (or anything else un-"%"-suffixed) would mean PIXELS to
-    // the library -- reject it rather than hand it a value that silently
-    // means something else.
-    return stored && /%$/.test(stored) ? stored : FLOW_HEADER_DEFAULT_SIZE;
+    const raw = window.localStorage.getItem(FLOW_HEADER_HEIGHT_KEY);
+    const parsed = raw !== null ? Number.parseFloat(raw) : NaN;
+    return Number.isFinite(parsed) ? parsed : null;
   } catch {
-    return FLOW_HEADER_DEFAULT_SIZE;
+    return null;
   }
 }
 
-function persistHeaderSize(size: string): void {
+function persistHeaderHeight(px: number): void {
   try {
-    window.localStorage.setItem(FLOW_HEADER_SIZE_KEY, size);
+    window.localStorage.setItem(FLOW_HEADER_HEIGHT_KEY, String(Math.round(px)));
   } catch {
-    // Best effort -- the size still applies for this render, it just won't
-    // survive a reload.
+    // Best effort -- the height still applies for this render, it just
+    // won't survive a reload.
   }
 }
 
-/** Parses a percentage STRING ("34%") down to its bare number (34), for
- * comparing against `PanelSize.asPercentage`. Never throws -- an
- * unparseable size (shouldn't happen; every caller here is one of our own
- * constants or `readStoredHeaderSize`'s own "%"-suffix-checked output)
- * reads as 0 rather than `NaN`, which would otherwise make every
- * comparison against it false and silently defeat the guard below. */
-function percentValue(size: string): number {
-  const value = Number.parseFloat(size);
-  return Number.isFinite(value) ? value : 0;
+/** "All the way down" is not a pixel preference. A drag or key that lands
+ * ON MAX means "show everything", and everything is a moving target (Show
+ * more on the AI description, a longer sibling flow) -- so the preference is
+ * cleared instead of frozen at whatever MAX happened to be at that moment,
+ * and the applied height goes back to tracking MAX directly. Storing the
+ * pixel value here is exactly what would clip the text a later "Show more"
+ * reveals. */
+function clearHeaderHeight(): void {
+  try {
+    window.localStorage.removeItem(FLOW_HEADER_HEIGHT_KEY);
+  } catch {
+    // Best effort -- see `persistHeaderHeight`.
+  }
 }
 
-/** How close a reported `asPercentage` has to land to a just-requested
- * imperative target to be treated as THAT request's own report rather than
- * a genuine drag -- a `resize()` call and the `ResizeObserver` notification
- * it produces don't always round to the identical fraction (subpixel
- * layout rounding), so an exact `===` would occasionally misclassify the
- * request's own echo as a drag. */
-const HEADER_RESIZE_MATCH_EPSILON = 0.5;
+/** Clamps to MAX first, then to MIN -- the same order the mock's own
+ * `setH` uses (`Math.max(MIN_H, Math.min(maxH(), h))`). MIN wins when the
+ * two invert (a MAX that has shrunk below MIN, however briefly mid-remeasure)
+ * so the header is never asked to render shorter than its own first row. */
+function clampHeaderHeight(min: number, value: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
 
 /** `queryState()` only tells us the query settled with an error — it
  * doesn't say which one. The unknown-id state ("This flow is not in the
@@ -209,60 +225,136 @@ export function CeligoFlowPage(): JSX.Element {
   const [navCollapsed, setNavCollapsed] = useState(true);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("facts");
 
-  // "Focus canvas" / the header↔canvas divider -- see the constants block
+  // "Focus canvas" / the header↔body divider -- see the constants block
   // above for why these two facts are tracked (and persisted) separately.
-  const headerPanelRef = useRef<PanelImperativeHandle>(null);
   const [headerCollapsed, setHeaderCollapsed] = useState<boolean>(readStoredHeaderCollapsed);
-  const [headerSize, setHeaderSize] = useState<string>(readStoredHeaderSize);
-  // Guards the imperative `resize()` calls `toggleHeaderCollapsed` makes
-  // below from being read back by `onHeaderResize` as the VIEWER'S own drag
-  // -- without it, collapsing (or restoring) the panel would immediately
-  // overwrite `flowHeaderSize` with the collapsed height, and the very next
-  // "Show details" would restore to that instead of what the viewer
-  // actually dragged to.
-  //
-  // Gate-fix (finding: blocker): this used to be a BOOLEAN cleared on a
-  // microtask (`Promise.resolve().then()`), on the assumption that clearing
-  // it "one tick later" would still be up when the resulting notification
-  // arrived. It never was: `onResize` is driven by a real `ResizeObserver`,
-  // and a ResizeObserver's notifications are delivered as part of the
-  // browser's rendering step -- strictly AFTER the microtask queue drains,
-  // not as one more microtask in it. So by the time the real notification
-  // landed, the guard had already cleared itself, and it protected nothing.
-  // Invisible in this file's own tests only because `vitest.setup.ts` stubs
-  // `ResizeObserver` as a no-op (added for reactflow) -- the exact path this
-  // guard exists for never fires under vitest.
-  //
-  // The fix drops timing entirely: remember the exact percentage the
-  // imperative call just requested, and compare the REPORTED percentage
-  // against that value (not against a clock) when `onResize` runs. A match
-  // is this call's own echo, however late it lands; anything else is a
-  // genuine drag.
-  const pendingHeaderResizeTargetRef = useRef<number | null>(null);
-  const headerResizeDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // `null` = no dragged/keyed preference yet -- the applied height then
+  // tracks MAX directly (see `appliedHeaderHeight` below), which is what
+  // makes a first visit show the full, unclipped header.
+  const [storedHeaderHeight, setStoredHeaderHeight] = useState<number | null>(readStoredHeaderHeight);
+  // Placeholder seeds only -- `CeligoFlowHeader`'s own layout effect
+  // (`onBoundsChange`) overwrites both with a real measurement before the
+  // very first paint in a real browser (a `useLayoutEffect` inside a child
+  // flushes synchronously before the parent's own paint). jsdom has no real
+  // layout engine, so these stay at their seed values in a test that never
+  // mocks `scrollHeight`/`getBoundingClientRect` -- harmless, since the
+  // resulting fixed height only affects VISUAL clipping, which jsdom does
+  // not enforce against `screen.getByText` queries either way.
+  const [headerMinHeight, setHeaderMinHeight] = useState<number>(HEADER_FIRST_ROW_FALLBACK_HEIGHT_PX);
+  const [headerMaxHeight, setHeaderMaxHeight] = useState<number>(HEADER_FIRST_ROW_FALLBACK_HEIGHT_PX);
+  const headerWrapRef = useRef<HTMLDivElement>(null);
+  // `latest` is the last clamped height the drag applied, so the drag END can
+  // commit it directly (no side effect inside a state updater, which React
+  // may invoke twice) -- `null` until the first pointermove.
+  const headerDragRef = useRef<{ pointerId: number; startY: number; startHeight: number; latest: number | null } | null>(
+    null,
+  );
+  const [headerDragging, setHeaderDragging] = useState(false);
 
+  const handleHeaderBoundsChange = useCallback((min: number, max: number) => {
+    setHeaderMinHeight(min);
+    setHeaderMaxHeight(max);
+  }, []);
+
+  // The retired `%`-based key means nothing against a pixel clamp -- removed
+  // once, on mount, so an old browser's stored value doesn't linger forever
+  // pointing at nothing.
   useEffect(() => {
-    return () => {
-      if (headerResizeDebounceRef.current) clearTimeout(headerResizeDebounceRef.current);
-    };
-  }, []);
-
-  const onHeaderResize = useCallback((panelSize: PanelSize) => {
-    const pendingTarget = pendingHeaderResizeTargetRef.current;
-    if (pendingTarget !== null) {
-      pendingHeaderResizeTargetRef.current = null;
-      if (Math.abs(panelSize.asPercentage - pendingTarget) <= HEADER_RESIZE_MATCH_EPSILON) return;
+    try {
+      window.localStorage.removeItem(FLOW_HEADER_LEGACY_SIZE_KEY);
+    } catch {
+      // Best effort -- next mount tries again.
     }
-    const size = `${panelSize.asPercentage}%`;
-    setHeaderSize(size);
-    if (headerResizeDebounceRef.current) clearTimeout(headerResizeDebounceRef.current);
-    headerResizeDebounceRef.current = setTimeout(() => persistHeaderSize(size), FLOW_HEADER_RESIZE_DEBOUNCE_MS);
   }, []);
 
-  // The side effects (storage, the pending-target ref, the imperative panel
-  // resize) live OUTSIDE the state updater: React may invoke an updater more
-  // than once per commit (StrictMode, replayed updates), and an updater is
-  // meant to be pure. `next` is computed from the rendered value instead.
+  // The header can never be taller than its own content: collapsed pins it
+  // to MIN (the first row only); otherwise the stored preference (or MAX,
+  // absent one) is clamped into `[headerMinHeight, headerMaxHeight]` on
+  // every render -- so a MAX that shrinks (Show less, a shorter flow, the
+  // navigator hopping to a sibling with a shorter header) pulls the applied
+  // height down with it instead of leaving a blank band below the header.
+  const appliedHeaderHeight = headerCollapsed
+    ? headerMinHeight
+    : clampHeaderHeight(headerMinHeight, storedHeaderHeight ?? headerMaxHeight, headerMaxHeight);
+
+  // The one place a viewer-chosen height is applied AND remembered (drag end,
+  // every key): landing on MAX clears the preference (see
+  // `clearHeaderHeight`), anything short of it is stored in pixels.
+  const commitHeaderHeight = useCallback(
+    (next: number) => {
+      if (next >= headerMaxHeight) {
+        setStoredHeaderHeight(null);
+        clearHeaderHeight();
+        return;
+      }
+      setStoredHeaderHeight(next);
+      persistHeaderHeight(next);
+    },
+    [headerMaxHeight],
+  );
+
+  const handleHeaderGripPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      const startHeight = headerWrapRef.current?.getBoundingClientRect().height ?? appliedHeaderHeight;
+      headerDragRef.current = { pointerId: e.pointerId, startY: e.clientY, startHeight, latest: null };
+      setHeaderDragging(true);
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+    },
+    [appliedHeaderHeight],
+  );
+
+  const handleHeaderGripPointerMove = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      const drag = headerDragRef.current;
+      if (!drag || drag.pointerId !== e.pointerId) return;
+      // Moving the pointer DOWN (a larger clientY) grows the header -- the
+      // mock's own `setH(startH + (e.clientY - startY))`.
+      const next = clampHeaderHeight(headerMinHeight, drag.startHeight + (e.clientY - drag.startY), headerMaxHeight);
+      drag.latest = next;
+      setStoredHeaderHeight(next);
+    },
+    [headerMinHeight, headerMaxHeight],
+  );
+
+  const handleHeaderGripPointerUp = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      const drag = headerDragRef.current;
+      if (!drag || drag.pointerId !== e.pointerId) return;
+      headerDragRef.current = null;
+      setHeaderDragging(false);
+      e.currentTarget.releasePointerCapture?.(e.pointerId);
+      // Committed on drag END, not per-move -- a rapid drag would otherwise
+      // hammer localStorage on every pointermove (same reasoning as the
+      // script drawer's own grip). A pointerdown with no move commits
+      // nothing: the preference stays whatever it was.
+      if (drag.latest !== null) commitHeaderHeight(drag.latest);
+    },
+    [commitHeaderHeight],
+  );
+
+  const handleHeaderGripKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLDivElement>) => {
+      let next: number | null = null;
+      if (e.key === "ArrowUp") next = clampHeaderHeight(headerMinHeight, appliedHeaderHeight - HEADER_KEYBOARD_STEP_PX, headerMaxHeight);
+      else if (e.key === "ArrowDown") next = clampHeaderHeight(headerMinHeight, appliedHeaderHeight + HEADER_KEYBOARD_STEP_PX, headerMaxHeight);
+      else if (e.key === "Home") next = headerMinHeight;
+      else if (e.key === "End") next = headerMaxHeight;
+      if (next === null) return;
+      e.preventDefault();
+      // A keyboard move has no separate "end" event to commit from --
+      // apply and remember together, unlike the drag handlers above.
+      commitHeaderHeight(next);
+    },
+    [headerMinHeight, headerMaxHeight, appliedHeaderHeight, commitHeaderHeight],
+  );
+
+  // No imperative panel resize, no "was that echo my own drag" guard: this
+  // header is no longer a `react-resizable-panels` `Panel`, so the whole
+  // synthetic-vs-real-drag problem the old `onHeaderResize` guarded against
+  // (a library `ResizeObserver` echoing an imperative `resize()` call back
+  // as if it were a viewer drag) does not exist for this implementation --
+  // `appliedHeaderHeight` above already re-derives the right height purely
+  // from `headerCollapsed` on every render, with no separate echo to filter.
   const toggleHeaderCollapsed = useCallback(() => {
     const next = !headerCollapsed;
     try {
@@ -272,11 +364,8 @@ export function CeligoFlowPage(): JSX.Element {
       // Best effort -- the toggle still works for this render, it just
       // won't survive a reload.
     }
-    const targetSize = next ? FLOW_HEADER_MIN_SIZE : headerSize;
-    pendingHeaderResizeTargetRef.current = percentValue(targetSize);
-    headerPanelRef.current?.resize(targetSize);
     setHeaderCollapsed(next);
-  }, [headerCollapsed, headerSize]);
+  }, [headerCollapsed]);
 
   // The element that opened the script drawer, so Radix can hand focus back
   // when it closes. Nothing else can supply it: the drawer is mounted here,
@@ -406,22 +495,28 @@ export function CeligoFlowPage(): JSX.Element {
     const hasSteps = d.steps.length > 0;
 
     body = (
-      // The vertical group: header pane, then (unless Focus canvas has
-      // hidden it) the draggable divider, then the body pane -- NOT keyed
-      // per flow, unlike the header inside it. The divider's size is a
-      // per-VIEWER preference, not a fact about any one flow; keying this
-      // group would reset it on every navigator hop the same bug the
+      // A plain flex column: the clipped header wrap, then (unless Focus
+      // canvas has hidden it) the draggable divider, then the body -- NOT
+      // keyed per flow, unlike the header inside it. The divider's height is
+      // a per-VIEWER preference, not a fact about any one flow; keying this
+      // wrapper would reset it on every navigator hop the same bug the
       // header's own `key={d.id}` deliberately causes for AI-description
       // expansion (which SHOULD reset) would otherwise cause here too
       // (which should NOT).
-      <PanelGroup id="celigo-flow-vertical" orientation="vertical" className="flex flex-1 min-h-0 flex-col">
-        <Panel
-          id="celigo-flow-header-pane"
-          panelRef={headerPanelRef}
-          defaultSize={headerSize}
-          minSize={FLOW_HEADER_MIN_SIZE}
-          onResize={onHeaderResize}
+      //
+      // Never a `react-resizable-panels` `Panel`: a `Panel`'s height is
+      // whatever the group hands it, with no way to cap it at the header's
+      // own natural content height -- which is exactly how the header-
+      // sizing bug this replaces shipped (dragging past that height opened a
+      // blank band below the header instead of stopping). `appliedHeaderHeight`
+      // (computed above) is already clamped to the header's REAL measured
+      // bounds, so the wrapper below can apply it directly.
+      <div className="flex flex-1 min-h-0 flex-col">
+        <div
+          ref={headerWrapRef}
+          data-testid="celigo-flow-header-wrap"
           className="overflow-hidden"
+          style={{ height: `${appliedHeaderHeight}px` }}
         >
           <CeligoFlowHeader
             // Keyed per flow so the header's own view state (AI description
@@ -429,7 +524,11 @@ export function CeligoFlowPage(): JSX.Element {
             // whose detail is already cached -- otherwise the second flow
             // inherited the first one's "Show less". `headerCollapsed` is
             // no longer local state here (see the constants block above),
-            // so it survives this remount same as the divider's own size.
+            // so it survives this remount same as the divider's own height.
+            // The remount also re-seeds `headerMinHeight`/`headerMaxHeight`
+            // from the NEW flow's own content via `onBoundsChange`'s mount
+            // effect -- a shorter sibling's header is never stuck clamped to
+            // a taller one's bounds.
             key={d.id}
             detail={d}
             lastSyncedAt={lastSyncedAt}
@@ -448,27 +547,39 @@ export function CeligoFlowPage(): JSX.Element {
             }
             headerCollapsed={headerCollapsed}
             onToggleHeaderCollapsed={toggleHeaderCollapsed}
+            onBoundsChange={handleHeaderBoundsChange}
           />
-        </Panel>
+        </div>
         {/* Hidden (unmounted, not just styled away) while Focus canvas has
             collapsed the header -- mirrors the mock's `.divider.hidden`.
-            There is nothing to drag a divider FOR when the panel it borders
-            is pinned to its floor. */}
+            There is nothing to drag a divider FOR when the header is pinned
+            to its floor. */}
         {!headerCollapsed && (
-          <PanelResizeHandle
-            id="celigo-flow-header-divider"
+          <div
+            role="separator"
+            aria-orientation="horizontal"
             aria-label="Resize header"
-            className={cn(
-              "relative h-[7px] shrink-0 cursor-row-resize border-b bg-card",
-              // The library's own hover/active state, exposed as
-              // `data-separator="hover"` / `"active"` on this element
-              // (never a class) — the mock's own `:hover, .active`.
-              "before:absolute before:left-1/2 before:top-[2px] before:h-[3px] before:w-11 before:-translate-x-1/2 before:rounded-full before:bg-border",
-              "data-[separator=hover]:before:bg-accent data-[separator=active]:before:bg-accent",
-            )}
-          />
+            aria-valuemin={headerMinHeight}
+            aria-valuemax={headerMaxHeight}
+            aria-valuenow={appliedHeaderHeight}
+            tabIndex={0}
+            onPointerDown={handleHeaderGripPointerDown}
+            onPointerMove={handleHeaderGripPointerMove}
+            onPointerUp={handleHeaderGripPointerUp}
+            onKeyDown={handleHeaderGripKeyDown}
+            className="group relative h-[7px] shrink-0 cursor-row-resize touch-none border-b bg-card focus:outline-none"
+          >
+            <span
+              aria-hidden="true"
+              className={cn(
+                "absolute left-1/2 top-[2px] h-[3px] w-11 -translate-x-1/2 rounded-full bg-border",
+                "group-hover:bg-accent",
+                headerDragging && "bg-accent",
+              )}
+            />
+          </div>
         )}
-        <Panel id="celigo-flow-body-pane" minSize="20%">
+        <div data-testid="celigo-flow-body-pane" className="flex-1 min-h-0">
           <PanelGroup id="celigo-flow-v1" orientation="horizontal" className="flex h-full w-full">
             {/* Sizes are PERCENTAGE STRINGS, never bare numbers:
                 `react-resizable-panels` 4.6.4 parses a number as PIXELS
@@ -542,8 +653,8 @@ export function CeligoFlowPage(): JSX.Element {
               />
             </Panel>
           </PanelGroup>
-        </Panel>
-      </PanelGroup>
+        </div>
+      </div>
     );
   }
 

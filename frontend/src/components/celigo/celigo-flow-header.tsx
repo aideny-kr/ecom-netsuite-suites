@@ -24,7 +24,7 @@
  * each one computes without mounting the header.
  */
 
-import { useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { CeligoAttachment, CeligoFlowDetail, CeligoFlowStep, CeligoRecordWrite } from "@/hooks/use-celigo-flows";
 import type { QueryState } from "@/lib/query-state";
 import { parseSchedule, stallState } from "./schedule";
@@ -45,6 +45,13 @@ const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "
  * toggle. Exported so the tests build fixtures from it instead of a
  * re-hardcoded number. */
 export const AI_DESCRIPTION_CLAMP_CHARS = 200;
+
+/** Fallback MIN (the first row's own height) when it hasn't been measured
+ * yet -- a fresh mount before layout, or jsdom (which has no real layout
+ * engine and always reports 0), must not collapse the divider's floor down
+ * to nothing. Exported so `celigo-flow-page.tsx` seeds its own placeholder
+ * state with the same number rather than a second hardcoded 44. */
+export const HEADER_FIRST_ROW_FALLBACK_HEIGHT_PX = 44;
 
 /** "2 Sep 2026" — day, short month, full year, read off UTC fields so the
  * date shown never depends on the viewer's (or the test runner's) local
@@ -225,6 +232,7 @@ export function CeligoFlowHeader({
   integrationNotice,
   headerCollapsed,
   onToggleHeaderCollapsed,
+  onBoundsChange,
 }: {
   detail: CeligoFlowDetail;
   lastSyncedAt: string | null;
@@ -253,6 +261,16 @@ export function CeligoFlowHeader({
    * `celigo-flow-page.tsx`'s `navCollapsed`/`toggleNav`). */
   headerCollapsed: boolean;
   onToggleHeaderCollapsed: () => void;
+  /** Reports this header's own measured MIN (the first row's rendered
+   * height) and MAX (the header's whole natural content height) every time
+   * either could have changed. The parent (`celigo-flow-page.tsx`) owns the
+   * clipped wrapper div and the divider that drag/keyboard-resizes it --
+   * neither of which this component can size itself, since it has no
+   * visibility into the divider or the sibling body pane beside it (the
+   * same split `headerCollapsed`/`onToggleHeaderCollapsed` already draw for
+   * the SAME reason). Optional so a hypothetical caller that never sizes
+   * this header isn't forced to supply a no-op. */
+  onBoundsChange?: (min: number, max: number) => void;
 }): JSX.Element {
   // The AI description is inherited free text (see the block below), not
   // authored for this UI -- some run to ten lines. Collapsed to a 2-line
@@ -261,6 +279,49 @@ export function CeligoFlowHeader({
   // it is purely a per-view reading preference, not a fact about the flow.
   const [aiExpanded, setAiExpanded] = useState(false);
   const aiDescriptionId = `celigo-ai-description-${detail.id}`;
+
+  // MIN/MAX measurement (celigo flow sizing UI): the parent clips this
+  // header to a pixel height it owns, and needs this header's own real
+  // bounds to clamp against -- see `onBoundsChange`'s docstring above.
+  const firstRowRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+  // Read through a ref rather than closed over directly, so the
+  // ResizeObserver effect below can stay mount-once (`[]`) instead of
+  // resubscribing every time the caller re-creates this callback.
+  const onBoundsChangeRef = useRef(onBoundsChange);
+  onBoundsChangeRef.current = onBoundsChange;
+
+  // Runs after EVERY render (deliberately no dependency array) -- a Show
+  // more/less toggle, a sync-status change, a paused banner appearing, all
+  // reflow this header's own natural height without any PROP from the
+  // parent changing, so a dependency array here would miss most of what MAX
+  // has to track. Cheap: two DOM reads and a callback.
+  useLayoutEffect(() => {
+    const minH = firstRowRef.current?.getBoundingClientRect().height ?? 0;
+    const maxH = contentRef.current?.scrollHeight ?? 0;
+    onBoundsChangeRef.current?.(minH > 0 ? minH : HEADER_FIRST_ROW_FALLBACK_HEIGHT_PX, maxH);
+  });
+
+  // A real browser can also reflow this header from OUTSIDE any React
+  // render -- a window resize rewrapping the facts strip onto more/fewer
+  // lines, a webfont finishing its swap -- neither of which touches React
+  // state. `ResizeObserver` catches those; the always-runs effect above
+  // already covers every render-driven change. jsdom has no real layout
+  // engine and stubs `ResizeObserver` as a no-op (`vitest.setup.ts`), so
+  // this path is inert under vitest -- the effect above is what tests
+  // exercise.
+  useEffect(() => {
+    if (typeof ResizeObserver === "undefined") return;
+    function measure() {
+      const minH = firstRowRef.current?.getBoundingClientRect().height ?? 0;
+      const maxH = contentRef.current?.scrollHeight ?? 0;
+      onBoundsChangeRef.current?.(minH > 0 ? minH : HEADER_FIRST_ROW_FALLBACK_HEIGHT_PX, maxH);
+    }
+    const ro = new ResizeObserver(measure);
+    if (firstRowRef.current) ro.observe(firstRowRef.current);
+    if (contentRef.current) ro.observe(contentRef.current);
+    return () => ro.disconnect();
+  }, []);
   // A description that already fits in two lines gets no clamp and no
   // toggle -- a "Show more" that shows nothing more teaches the reader to
   // ignore the button. jsdom cannot measure line boxes, so "fits" is a
@@ -299,8 +360,12 @@ export function CeligoFlowHeader({
       : null;
 
   return (
-    <div className="flex flex-col gap-2 border-b bg-card px-4 py-2.5">
-      <div className="flex flex-wrap items-center gap-2.5">
+    <div
+      ref={contentRef}
+      data-testid="celigo-flow-header-content"
+      className="flex flex-col gap-2 border-b bg-card px-4 py-2.5"
+    >
+      <div ref={firstRowRef} data-testid="celigo-flow-header-first-row" className="flex flex-wrap items-center gap-2.5">
         {syncSettled ? (
           <>
             <ErrorPill
