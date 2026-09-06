@@ -3,6 +3,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { ProposalCard } from "./proposal-card";
 import type { TransactionProposal } from "./types";
+import creation from "./__fixtures__/creation.json";
 const mocks = vi.hoisted(() => ({
   mutate: vi.fn(),
   operation: null as null | {
@@ -59,6 +60,46 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.operation = null;
   mocks.mutate.mockResolvedValue({ status: "approved" });
+});
+it("keeps the exact native quantities, addresses and pending state in a frozen creation approval", async () => {
+  const value = {
+    ...proposal,
+    action: "sync_missing_order",
+    target_record_id: null,
+    before_json: { missing: true, order_reference: proposal.order_reference },
+    after_json: creation,
+  };
+  const view = render(<ProposalCard proposal={value} />);
+  expect(
+    screen.getByRole("heading", { name: "Lines to create · EUR" }),
+  ).toBeInTheDocument();
+  expect(screen.getByText("Native quantity")).toBeInTheDocument();
+  expect(
+    screen.getByText(/NetSuite approval remains required/),
+  ).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Review approval" }));
+  const dialog = screen.getByRole("alertdialog");
+  expect(dialog).toHaveTextContent("NATIVE-1");
+  expect(dialog).toHaveTextContent("1 Example Street");
+  expect(dialog).toHaveTextContent("EUR 120");
+  expect(dialog).toHaveTextContent("Inventory-owning subsidiary 3");
+  expect(dialog).toHaveTextContent("501");
+  const changed = structuredClone(creation);
+  changed.input.shipping_address.addr1 = "Changed after review";
+  view.rerender(
+    <ProposalCard
+      proposal={{
+        ...value,
+        after_json: changed,
+        evidence_fingerprint: "c".repeat(64),
+      }}
+    />,
+  );
+  expect(dialog).not.toHaveTextContent("Changed after review");
+  fireEvent.click(
+    screen.getByRole("button", { name: "Approve this proposal" }),
+  );
+  expect(mocks.mutate).not.toHaveBeenCalled();
 });
 describe("immutable proposal review", () => {
   it("shows exact before and after without amount-edit fields and requires a concrete confirmation", async () => {

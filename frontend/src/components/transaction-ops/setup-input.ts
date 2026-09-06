@@ -17,6 +17,14 @@ export function emptyDraft() {
     entities: [] as MappingRow[],
     taxRounding: "",
     taxEvidence: "statutory_rate",
+    createMissing: false,
+    createTimezone: "",
+    createInventoryMode: "",
+    createForm: "",
+    createTerms: "",
+    createSkus: [] as MappingRow[],
+    createLocations: [] as MappingRow[],
+    createShipping: [] as MappingRow[],
     propose: false,
     schedule: false,
     interval: "60",
@@ -62,6 +70,22 @@ export interface ConfigInput {
       }
     >;
     netsuite_tax_rounding: "half_up" | "half_even" | null;
+    netsuite_create: {
+      schema_version: 1;
+      external_id_prefix: "";
+      tax_mode: "legacy_tax_codes";
+      transaction_timezone: string;
+      inventory_mode: "line_location" | "cross_subsidiary";
+      custom_form_id: string | null;
+      terms_id: string | null;
+      sku_rules: Record<
+        string,
+        { netsuite_sku: string; quantity_multiplier: number }
+      >;
+      stock_location_ids: Record<string, string>;
+      inventory_subsidiary_ids: Record<string, string>;
+      shipping_method_ids: Record<string, string>;
+    } | null;
   };
 }
 function fail(message: string): never {
@@ -86,6 +110,97 @@ function active(rows: MappingRow[], key: string, label: string) {
     seen.add(row[key]);
   }
   return clean;
+}
+function creationMapping(
+  draft: ScopeDraft,
+): ConfigInput["mapping_json"]["netsuite_create"] {
+  if (!draft.createMissing) return null;
+  if (
+    draft.reference.trim() !== "tranid" ||
+    draft.lineIdentity !== "inventory_units" ||
+    !draft.legacyTaxMode
+  )
+    fail(
+      "Missing-order creation requires tranid, inventory IDs and an explicit legacy tax profile.",
+    );
+  const timezone = draft.createTimezone.trim(),
+    mode = draft.createInventoryMode;
+  if (!timezone)
+    fail("Enter the transaction timezone used by the native import.");
+  try {
+    new Intl.DateTimeFormat("en", { timeZone: timezone });
+  } catch {
+    fail(
+      "Enter a valid transaction timezone, for example America/Los_Angeles.",
+    );
+  }
+  if (mode !== "line_location" && mode !== "cross_subsidiary")
+    fail("Choose an explicit inventory routing policy.");
+  const id = (value: string, label: string) => {
+    if (!/^[1-9][0-9]{0,29}$/.test(value))
+      fail(`${label} requires an exact positive native ID.`);
+    return value;
+  };
+  const text = (value: string, label: string) => {
+    if (!value || value.length > 255 || /[\x00-\x1f]/.test(value))
+      fail(`Enter an exact ${label}.`);
+    return value;
+  };
+  const skus = active(draft.createSkus, "source", "SKU mapping");
+  const locations = active(draft.createLocations, "source", "Stock location");
+  const shipping = active(draft.createShipping, "source", "Shipping method");
+  if (!skus.length || !locations.length || !shipping.length)
+    fail("Creation requires SKU, stock-location and shipping-method mappings.");
+  const skuRules = skus.map(
+    (row) =>
+      [
+        text(row.source, "Framework SKU"),
+        {
+          netsuite_sku: text(row.destination, "NetSuite SKU"),
+          quantity_multiplier: integer(
+            row.multiplier,
+            1,
+            1000,
+            "Native quantity multiplier",
+          ),
+        },
+      ] as const,
+  );
+  for (const row of locations) {
+    text(row.source, "Framework stock location");
+    id(row.location, "Stock location");
+    id(row.subsidiary, "Inventory-owning subsidiary");
+    if (mode === "line_location" && row.subsidiary !== draft.subsidiary.trim())
+      fail(
+        "Line-location inventory must belong to the destination sales subsidiary.",
+      );
+  }
+  return {
+    schema_version: 1,
+    external_id_prefix: "",
+    tax_mode: "legacy_tax_codes",
+    transaction_timezone: timezone,
+    inventory_mode: mode,
+    custom_form_id: draft.createForm.trim()
+      ? id(draft.createForm.trim(), "Custom form")
+      : null,
+    terms_id: draft.createTerms.trim()
+      ? id(draft.createTerms.trim(), "Terms")
+      : null,
+    sku_rules: Object.fromEntries(skuRules),
+    stock_location_ids: Object.fromEntries(
+      locations.map((row) => [row.source, row.location]),
+    ),
+    inventory_subsidiary_ids: Object.fromEntries(
+      locations.map((row) => [row.source, row.subsidiary]),
+    ),
+    shipping_method_ids: Object.fromEntries(
+      shipping.map((row) => [
+        id(row.source, "Framework shipping method"),
+        id(row.destination, "NetSuite shipping method"),
+      ]),
+    ),
+  };
 }
 export function buildConfigInput(draft: ScopeDraft): ConfigInput {
   const name = draft.name.trim(),
@@ -208,6 +323,7 @@ export function buildConfigInput(draft: ScopeDraft): ConfigInput {
       reference_field: reference,
       line_identity_mode: identity,
       netsuite_legacy_tax: legacyTax,
+      netsuite_create: creationMapping(draft),
       currency_minor_units: Object.fromEntries(currencies),
       business_entity_subsidiaries: Object.fromEntries(entities),
       tax_rules: Object.fromEntries(taxes),

@@ -34,6 +34,7 @@ import {
 } from "./evidence";
 import type { TransactionProposal } from "./types";
 import { OutcomeRecheck } from "./outcome-recheck";
+import { CreationReview } from "./creation-review";
 
 export function ProposalCard({ proposal }: { proposal: TransactionProposal }) {
   const decision = useTransactionDecision();
@@ -115,7 +116,14 @@ export function ProposalCard({ proposal }: { proposal: TransactionProposal }) {
         </Status>
       </div>
       {Object.keys(report).length > 0 && <ComparisonEvidence report={report} />}
-      <ExactChanges before={proposal.before_json} after={proposal.after_json} />
+      {proposal.action === "sync_missing_order" ? (
+        <CreationReview after={proposal.after_json} />
+      ) : (
+        <ExactChanges
+          before={proposal.before_json}
+          after={proposal.after_json}
+        />
+      )}
       <div className="space-y-3 rounded-lg bg-muted/40 p-4">
         <h4 className="text-[13px] font-semibold">Sources &amp; method</h4>
         <p className="text-[13px] text-muted-foreground">
@@ -208,7 +216,9 @@ export function ProposalCard({ proposal }: { proposal: TransactionProposal }) {
           if (!open && !decision.isPending) setReview(null);
         }}
       >
-        <AlertDialogContent className="max-h-[90dvh] overflow-y-auto max-sm:w-[calc(100%-2rem)]">
+        <AlertDialogContent
+          className={`max-h-[90dvh] overflow-y-auto overflow-x-hidden max-sm:w-[calc(100%-2rem)] [&>*]:min-w-0 ${review?.proposal.action === "sync_missing_order" ? "sm:max-w-5xl" : ""}`}
+        >
           <AlertDialogHeader>
             <AlertDialogTitle>
               {review?.decision === "approve"
@@ -223,7 +233,7 @@ export function ProposalCard({ proposal }: { proposal: TransactionProposal }) {
           </AlertDialogHeader>
           {review && (
             <>
-              <div className="space-y-2 text-[13px]">
+              <div className="min-w-0 space-y-2 text-[13px]">
                 <p className="font-semibold break-all">
                   {actionLabel(review.proposal.action)} ·{" "}
                   {review.proposal.order_reference} · {review.proposal.currency}
@@ -235,10 +245,14 @@ export function ProposalCard({ proposal }: { proposal: TransactionProposal }) {
                   {review.proposal.target_record_id}
                 </p>
                 <TaxEvidenceNotice evidence={review.proposal.evidence_json} />
-                <ExactChanges
-                  before={review.proposal.before_json}
-                  after={review.proposal.after_json}
-                />
+                {review.proposal.action === "sync_missing_order" ? (
+                  <CreationReview after={review.proposal.after_json} />
+                ) : (
+                  <ExactChanges
+                    before={review.proposal.before_json}
+                    after={review.proposal.after_json}
+                  />
+                )}
                 <p className="break-all font-mono text-xs">
                   {review.proposal.evidence_fingerprint}
                 </p>

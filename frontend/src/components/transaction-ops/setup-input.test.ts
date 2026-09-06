@@ -82,6 +82,76 @@ describe("transaction scope input", () => {
   });
 });
 
+function creationDraft() {
+  return {
+    ...draft(),
+    lineIdentity: "inventory_units",
+    legacyTaxMode: "line_tax_amount",
+    legacyTaxCode: "610",
+    createMissing: true,
+    createTimezone: "America/Los_Angeles",
+    createInventoryMode: "cross_subsidiary",
+    createSkus: [
+      { source: "FRAME-1", destination: "NATIVE-1", multiplier: "2" },
+    ],
+    createLocations: [
+      { source: "Warehouse A", location: "30", subsidiary: "1" },
+    ],
+    createShipping: [{ source: "8", destination: "7" }],
+  };
+}
+it("keeps native creation opt-in and retains exact inventory-owner and SKU mappings", () => {
+  expect(buildConfigInput(draft()).mapping_json.netsuite_create).toBeNull();
+  const value = buildConfigInput(creationDraft());
+  expect(value.schedule_enabled).toBe(false);
+  expect(value.mapping_json.action_mode).toBe("detect_only");
+  expect(value.mapping_json.netsuite_create).toEqual({
+    schema_version: 1,
+    external_id_prefix: "",
+    tax_mode: "legacy_tax_codes",
+    transaction_timezone: "America/Los_Angeles",
+    inventory_mode: "cross_subsidiary",
+    custom_form_id: null,
+    terms_id: null,
+    sku_rules: {
+      "FRAME-1": { netsuite_sku: "NATIVE-1", quantity_multiplier: 2 },
+    },
+    stock_location_ids: { "Warehouse A": "30" },
+    inventory_subsidiary_ids: { "Warehouse A": "1" },
+    shipping_method_ids: { "8": "7" },
+  });
+});
+it.each([
+  { reference: "externalid" },
+  { lineIdentity: "source_line_id" },
+  { legacyTaxMode: "", legacyTaxCode: "" },
+  { createTimezone: "" },
+  { createTimezone: "No/Such_Zone" },
+  { createInventoryMode: "automatic" },
+  { createInventoryMode: "line_location" },
+  { createSkus: [] },
+  { createLocations: [] },
+  { createShipping: [] },
+  {
+    createSkus: [
+      { source: "FRAME-1", destination: "NATIVE-1", multiplier: "1.5" },
+    ],
+  },
+  { createSkus: [{ source: "FRAME-1", destination: "", multiplier: "1" }] },
+  {
+    createLocations: [
+      { source: "Warehouse A", location: "30", subsidiary: "" },
+    ],
+  },
+  { createShipping: [{ source: "8", destination: "0" }] },
+  { createForm: "0" },
+])(
+  "rejects incomplete creation mappings before saving a scope: %j",
+  (change) => {
+    expect(() => buildConfigInput({ ...creationDraft(), ...change })).toThrow();
+  },
+);
+
 it("retains the existing line policy and no legacy tax profile by default", () => {
   const value = buildConfigInput(draft()).mapping_json;
   expect(value.line_identity_mode).toBe("source_line_id");

@@ -482,3 +482,32 @@ the libraries, work-key field and disabled deployment. Eight owned files were
 ported with byte-for-byte checks. No native deployment or live write occurred.
 Platform preview/dispatch/verification/recovery, create review UI and create crash
 drill remain outstanding.
+
+
+### Missing-order setup and frozen review UI
+
+The isolated frontend slice owns the setup input/page, proposal card and new
+creation review component, their tests and one illustrative native-contract
+fixture. It adds opt-in timezone, SKU multiplier, stock-location/inventory-owner
+and shipping-method mappings. Every mapping is explicit, and selecting creation
+does not enable actions or schedules. The review shows exact transaction-currency
+amounts, source/native quantities, routing, existing customer, addresses, native
+FX and pending-approval state. The open confirmation retains its frozen input
+when a refreshed proposal changes.
+
+An illustrative HTML mock preceded implementation. Actual desktop/mobile setup
+and approval components were rendered and inspected. Visual inspection found
+and fixed horizontal overflow in the confirmation; its 390px mobile viewport now
+contains a 358px dialog with no horizontal overflow. All financial rows remain
+scrollable and the bottom decision controls are reachable. A local fixture
+submission retained every selected mapping with actions and scheduling off. No
+browser console errors occurred. All 1,095 frontend tests and the production
+build pass after the final change.
+
+A shared dependency installation was emptied during a repeat build (the deleting
+actor is unconfirmed). A fresh isolated npm-ci installation from the lockfile
+restored both the complete test run and production build. Eight owned UI files
+were copied into the task checkout with byte-for-byte checks; complete locked
+dependencies were transferred into its verified empty dependency directory.
+Native creation executor, independent verification/recovery and the create crash
+drill remain outstanding. No deployment or live financial write occurred.

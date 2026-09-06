@@ -177,3 +177,51 @@ it("makes the assessment limitation explicit and clears rate inputs when switchi
   });
   expect(screen.getByLabelText("Tax rule 1 Rate fraction")).toHaveValue("");
 });
+
+it("keeps creation disabled until selected and submits explicit native routing without enabling actions", async () => {
+  mocks.create.mockResolvedValue({ id: "created", name: "EU orders" });
+  render(<TransactionSetupPage />);
+  fillRequired();
+  expect(
+    screen.getByLabelText("Prepare missing orders for human review"),
+  ).not.toBeChecked();
+  expect(
+    screen.queryByLabelText("Transaction timezone"),
+  ).not.toBeInTheDocument();
+  fireEvent.click(
+    screen.getByLabelText("Prepare missing orders for human review"),
+  );
+  const change = (label: string, value: string) =>
+    fireEvent.change(screen.getByLabelText(label), { target: { value } });
+  change("Match order lines by", "inventory_units");
+  change("Native tax layout", "line_tax_amount");
+  change("Native tax code ID", "610");
+  change("Transaction timezone", "America/Los_Angeles");
+  change("Inventory routing", "cross_subsidiary");
+  fireEvent.click(screen.getByRole("button", { name: "Add sku mapping" }));
+  change("SKU mapping 1 Framework SKU", "FRAME-1");
+  change("SKU mapping 1 NetSuite SKU", "NATIVE-1");
+  change("SKU mapping 1 Native quantity multiplier", "2");
+  fireEvent.click(screen.getByRole("button", { name: "Add stock location" }));
+  change("Stock location 1 Framework stock location", "Warehouse A");
+  change("Stock location 1 NetSuite location ID", "30");
+  change("Stock location 1 Inventory-owning subsidiary ID", "1");
+  fireEvent.click(screen.getByRole("button", { name: "Add shipping method" }));
+  change("Shipping method 1 Framework shipping method ID", "8");
+  change("Shipping method 1 NetSuite shipping method ID", "7");
+  fireEvent.click(
+    screen.getByRole("button", { name: "Create investigation scope" }),
+  );
+  await waitFor(() => expect(mocks.create).toHaveBeenCalledOnce());
+  expect(mocks.create.mock.calls[0][0].mapping_json).toMatchObject({
+    action_mode: "detect_only",
+    netsuite_create: {
+      transaction_timezone: "America/Los_Angeles",
+      inventory_mode: "cross_subsidiary",
+      sku_rules: {
+        "FRAME-1": { netsuite_sku: "NATIVE-1", quantity_multiplier: 2 },
+      },
+      inventory_subsidiary_ids: { "Warehouse A": "1" },
+    },
+  });
+});

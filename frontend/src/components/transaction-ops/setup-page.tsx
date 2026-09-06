@@ -178,6 +178,9 @@ function SetupForm() {
       | "subsidiary"
       | "reference"
       | "legacyTaxCode"
+      | "createTimezone"
+      | "createForm"
+      | "createTerms"
       | "interval"
       | "orders"
       | "calls"
@@ -471,6 +474,102 @@ function SetupForm() {
                 ))}
               </select>
             </label>
+          </section>
+          <section className={`${cardClass} space-y-5`}>
+            <h2 className="text-lg font-semibold">Missing-order creation</h2>
+            <label className="flex items-center gap-3">
+              <input
+                type="checkbox"
+                checked={draft.createMissing}
+                onChange={(e) => update("createMissing", e.target.checked)}
+              />
+              Prepare missing orders for human review
+            </label>
+            <p className="text-[13px] text-muted-foreground">
+              Each proposal uses an existing eligible NetSuite customer and an
+              exact native draft. Created orders remain pending approval in
+              NetSuite.
+            </p>
+            {draft.createMissing && (
+              <>
+                <div className="grid gap-5 md:grid-cols-2">
+                  {text(
+                    "Transaction timezone",
+                    "createTimezone",
+                    "America/Los_Angeles",
+                  )}
+                  <label className="block space-y-2 text-[13px]">
+                    Inventory routing
+                    <select
+                      className={inputClass}
+                      value={draft.createInventoryMode}
+                      onChange={(e) =>
+                        update("createInventoryMode", e.target.value)
+                      }
+                    >
+                      <option value="">Choose a routing policy…</option>
+                      <option value="line_location">
+                        Line location within sales subsidiary
+                      </option>
+                      <option value="cross_subsidiary">
+                        Cross-subsidiary inventory
+                      </option>
+                    </select>
+                  </label>
+                  {text(
+                    "Custom form ID (optional)",
+                    "createForm",
+                    "Use native sourced form",
+                  )}
+                  {text(
+                    "Terms ID (optional)",
+                    "createTerms",
+                    "Use native sourced terms",
+                  )}
+                </div>
+                <MappingRows
+                  title="SKU mapping"
+                  columns={[
+                    { key: "source", label: "Framework SKU" },
+                    { key: "destination", label: "NetSuite SKU" },
+                    { key: "multiplier", label: "Native quantity multiplier" },
+                  ]}
+                  rows={draft.createSkus}
+                  change={(rows) => update("createSkus", rows)}
+                />
+                <MappingRows
+                  title="Stock location"
+                  columns={[
+                    { key: "source", label: "Framework stock location" },
+                    { key: "location", label: "NetSuite location ID" },
+                    {
+                      key: "subsidiary",
+                      label: "Inventory-owning subsidiary ID",
+                    },
+                  ]}
+                  rows={draft.createLocations}
+                  change={(rows) => update("createLocations", rows)}
+                />
+                <MappingRows
+                  title="Shipping method"
+                  columns={[
+                    { key: "source", label: "Framework shipping method ID" },
+                    {
+                      key: "destination",
+                      label: "NetSuite shipping method ID",
+                    },
+                  ]}
+                  rows={draft.createShipping}
+                  change={(rows) => update("createShipping", rows)}
+                />
+                <p className="rounded-md border bg-muted/40 p-4 text-[13px]">
+                  Creation requires tranid, exact inventory IDs, a legacy tax
+                  profile and complete paid source evidence. Enter each mapping
+                  explicitly; missing or ambiguous metadata keeps the finding
+                  open for review.
+                </p>
+              </>
+            )}
           </section>
           <section className={`${cardClass} space-y-5`}>
             <h2 className="text-lg font-semibold">Run controls</h2>
