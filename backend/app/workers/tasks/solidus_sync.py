@@ -30,11 +30,13 @@ def solidus_sync(
 
     summary = asyncio.run(run())
     remaining = pages_remaining - max(1, summary["pages_read"])
-    if summary["termination_reason"] == "budget":
+    contention = summary["termination_reason"] == "stall" and summary.get("reason") == "refresh_in_progress"
+    if summary["termination_reason"] == "budget" or contention:
         if remaining > 0 and summary["pages_read"] > 0:
             continuation = celery_app.send_task(
                 "tasks.solidus_sync",
                 queue="sync",
+                countdown=5 if contention else 0,
                 kwargs={
                     "tenant_id": tenant_id,
                     "connection_id": connection_id,

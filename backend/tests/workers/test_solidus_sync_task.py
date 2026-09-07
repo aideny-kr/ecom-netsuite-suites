@@ -44,6 +44,29 @@ def test_exhausted_budget_stays_explicitly_partial(monkeypatch):
     send.assert_not_called()
 
 
+@pytest.mark.parametrize("remaining", [1, 20])
+def test_brief_connection_contention_retries_with_delay_and_consumes_existing_budget(monkeypatch, remaining):
+    _, send = mocks(
+        monkeypatch,
+        {
+            "termination_reason": "stall",
+            "reason": "refresh_in_progress",
+            "complete": False,
+            "pages_read": 1,
+        },
+    )
+    result = worker.solidus_sync(
+        tenant_id=str(uuid.uuid4()), connection_id=str(uuid.uuid4()), pages_remaining=remaining
+    )
+    if remaining == 1:
+        send.assert_not_called()
+        assert result["reason"] == "refresh_budget_exhausted"
+    else:
+        assert send.call_args.kwargs["countdown"] == 5
+        assert send.call_args.kwargs["kwargs"]["pages_remaining"] == remaining - 1
+        assert result["continuation_task_id"] == send.return_value.id
+
+
 def test_source_failure_propagates_to_instrumented_failed_job(monkeypatch):
     sync, send = mocks(monkeypatch, {})
     sync.side_effect = SolidusImportError("source_rate_limited")
