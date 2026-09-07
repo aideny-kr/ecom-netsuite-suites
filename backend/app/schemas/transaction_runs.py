@@ -177,6 +177,8 @@ class RunOut(OutputModel):
     progress_json: dict
     created_at: datetime
     finished_at: datetime | None
+    continuation_run_id: UUID | None = None
+    continuation_blocked: str | None = None
 
 
 class ProposalOut(OutputModel):

@@ -23,6 +23,7 @@ from app.services.transaction_ops.normalization import (
     _time,
     normalize_framework_order,
     normalize_netsuite_order,
+    source_entity_key,
 )
 from app.services.transaction_ops.order_reconciliation import reconcile_order
 
@@ -43,6 +44,10 @@ class FeatureRevokedError(ValueError):
     pass
 
 
+class SourceScopeError(ValueError):
+    pass
+
+
 def _initial_progress(run):
     current = dict(run.progress_json or {})
     if current and not current.get("restart_scan"):
@@ -60,17 +65,23 @@ def _initial_progress(run):
         "restart_scan": False,
         "matched": 0,
         "needs_review": 0,
+        "not_verified": 0,
         "skipped_after_window": 0,
+        "outside_scope": 0,
+        "scan_mode": "keyset" if run.config_snapshot.get("source_connection_id") else "offset",
     }
 
 
-def _page_progress(page, progress, params):
-    if page.get("page_complete") is not True or page.get("page") != progress["page"]:
+def _page_progress(page, progress, params, config=None):
+    keyset = progress.get("scan_mode") == "keyset"
+    if page.get("page_complete") is not True or page.get("page") != (1 if keyset else progress["page"]):
         raise ScanChangedError("incomplete_source_page")
     total = page.get("total_count")
     if type(total) is not int or total < 0 or not isinstance(page.get("orders"), list):
         raise ScanChangedError("invalid_page_metadata")
-    if progress["expected_total"] is None:
+    if keyset:
+        progress["expected_total"] = progress["scan_count"] + total
+    elif progress["expected_total"] is None:
         progress["expected_total"] = total
     elif progress["expected_total"] != total:
         raise ScanChangedError("source_population_changed")
@@ -92,15 +103,19 @@ def _page_progress(page, progress, params):
         if updated is None or updated < _time(params["window_start"]):
             raise ScanChangedError("source_window_unproven")
         if updated <= _time(params["window_end"]):
-            refs.append(order["number"])
+            entities = ((config or {}).get("mapping_json") or {}).get("business_entity_subsidiaries") or {}
+            if config and entities.get(source_entity_key(order)) != config["subsidiary_id"]:
+                progress["outside_scope"] = progress.get("outside_scope", 0) + 1
+            else:
+                refs.append(order["number"])
         else:
             progress["skipped_after_window"] += 1
     progress["scan_count"] += len(page["orders"])
     next_page = page.get("next_page")
-    if next_page is not None and (type(next_page) is not int or next_page != progress["page"] + 1):
+    if next_page is not None and (type(next_page) is not int or next_page != (2 if keyset else progress["page"] + 1)):
         raise ScanChangedError("invalid_next_page")
     if next_page is None:
-        if progress["scan_count"] != total:
+        if progress["scan_count"] != progress["expected_total"]:
             raise ScanChangedError("source_scan_incomplete")
         progress["scan_complete"] = True
     progress["pending_refs"], progress["next_page"] = refs, next_page
@@ -301,8 +316,14 @@ async def run_investigation(
             if not progress["pending_refs"]:
                 if progress["scan_complete"]:
                     return await finish("done")
-                if progress["next_page"] is not None:
+                keyset = progress.get("scan_mode") == "keyset"
+                if progress["next_page"] is not None and not keyset:
                     progress["page"] = progress["next_page"]
+                page_options = (
+                    {"after_id": progress["last_source_id"], "updated_before": _time(run.params_json["window_end"])}
+                    if keyset
+                    else {}
+                )
                 await save()
                 if not await reserve(2):
                     return await finish("budget")
@@ -312,12 +333,13 @@ async def run_investigation(
                         tenant_id,
                         source_step_id,
                         _time(run.params_json["window_start"]),
-                        page=progress["page"],
+                        page=1 if keyset else progress["page"],
                         page_size=20,
                         **direct_source,
+                        **page_options,
                     )
                 )
-                _page_progress(page, progress, run.params_json)
+                _page_progress(page, progress, run.params_json, config)
                 await save()
                 continue
             reference = progress["pending_refs"][0]
@@ -327,6 +349,11 @@ async def run_investigation(
             source = await bounded_read(
                 source_reader(db, tenant_id, source_step_id, reference, **source_options, **direct_source)
             )
+            orders = source.get("orders") or []
+            if len(orders) != 1 or orders[0].get("number") != reference:
+                raise ValueError("source_reference_mismatch")
+            if mapping.business_entity_subsidiaries.get(source_entity_key(orders[0])) != config["subsidiary_id"]:
+                raise SourceScopeError
             if not await reserve(10):  # At most7 data reads plus ordinary OAuth token maintenance.
                 return await finish("budget")
             targets = await bounded_read(
@@ -399,11 +426,22 @@ async def run_investigation(
                     report = {**report, "automation": {"status": "blocked", "code": "action_evidence_unavailable"}}
             await state.record_finding(db, tenant_id, run_id, reference, report, lease_token=token, now=clock())
             progress["processed"] += 1
-            action = report["comparison"]["recommended_action"]
-            progress["matched" if action == "no_action" else "needs_review"] += 1
+            balance_status = report["balance"]["status"]
+            group = (
+                "matched"
+                if balance_status == "matched"
+                else "needs_review"
+                if balance_status in {"difference", "ambiguous", "currency_mismatch", "missing_in_netsuite"}
+                else "not_verified"
+            )
+            progress[group] = progress.get(group, 0) + 1
             progress["pending_refs"] = progress["pending_refs"][1:]
             await save()
     except FeatureRevokedError:
+        return await finish("stall")
+    except SourceScopeError:
+        progress["reason"] = "source_subsidiary_unproven"
+        await save()
         return await finish("stall")
     except ScanChangedError:
         progress["restart_scan"] = True

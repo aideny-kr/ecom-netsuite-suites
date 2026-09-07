@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import exists, extract, func, literal, or_, select
+from sqlalchemy import String, and_, cast, exists, extract, func, literal, or_, select
+from sqlalchemy.orm import aliased
 
 from app.core.database import set_tenant_context
+from app.models.audit import AuditEvent
 from app.services import feature_flag_service
 from app.workers.celery_app import celery_app
 
@@ -35,12 +37,47 @@ def _bucket(now, interval_minutes):
 async def _recovery_ids(db, tenant_id, now):
     _, _, _, run = _dependencies()
     await set_tenant_context(db, str(tenant_id))
+    child = aliased(run)
+    has_child = exists(
+        select(child.id).where(
+            child.tenant_id == tenant_id, child.progress_json["continuation_of"].astext == cast(run.id, String)
+        )
+    )
+    blocked = exists(
+        select(AuditEvent.id).where(
+            AuditEvent.tenant_id == tenant_id,
+            AuditEvent.action == "transaction_ops.run.continuation_blocked",
+            AuditEvent.resource_type == run.__tablename__,
+            AuditEvent.resource_id == cast(run.id, String),
+        )
+    )
     query = (
         select(run.id)
         .where(
             run.tenant_id == tenant_id,
-            run.status.in_(("pending", "running")),
-            or_(run.status == "pending", run.lease_until.is_(None), run.lease_until <= now, run.deadline_at <= now),
+            or_(
+                and_(
+                    run.status.in_(("pending", "running")),
+                    or_(
+                        run.status == "pending",
+                        run.lease_until.is_(None),
+                        run.lease_until <= now,
+                        run.deadline_at <= now,
+                    ),
+                ),
+                and_(
+                    run.status == "finished",
+                    run.termination_reason == "budget",
+                    run.origin != "recovery",
+                    run.finished_at > now - timedelta(days=1),
+                    or_(
+                        run.progress_json["processed"].astext.notin_(("0", "")),
+                        run.progress_json["scan_count"].astext.notin_(("0", "")),
+                    ),
+                    ~has_child,
+                    ~blocked,
+                ),
+            ),
         )
         .order_by(run.created_at, run.id)
         .limit(_SCAN_LIMIT + 1)

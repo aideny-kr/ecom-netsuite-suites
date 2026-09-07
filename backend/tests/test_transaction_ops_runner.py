@@ -147,6 +147,51 @@ async def execute(state, source=None, target=None, page=None, enabled=True):
     )
 
 
+async def test_direct_window_filters_other_entities_before_native_reads_and_uses_keyset():
+    state = State(window=True)
+    state.run.config_snapshot.update(source_step_id=None, source_connection_id=str(uuid4()))
+    first = deepcopy(source_order()["orders"][0])
+    first["business_entity"] = "Another entity"
+    first["number"] = "R200000001"
+    second = deepcopy(source_order()["orders"][0])
+    second["id"] = "2"
+    page = AsyncMock(
+        side_effect=[
+            {"page_complete": True, "page": 1, "total_count": 2, "orders": [first], "next_page": 2},
+            {"page_complete": True, "page": 1, "total_count": 1, "orders": [second], "next_page": None},
+        ]
+    )
+    result = await execute(state, page=page)
+    assert result["termination_reason"] == "done"
+    assert list(state.reports) == [REF]
+    assert state.events.count("target") == 1
+    assert state.run.progress_json["outside_scope"] == 1
+    assert page.call_args_list[1].kwargs["after_id"] == 1
+    assert page.call_args_list[1].kwargs["page"] == 1
+    assert page.call_args_list[0].kwargs["updated_before"] == NOW
+
+
+async def test_changed_source_entity_stops_before_wrong_subsidiary_lookup():
+    state = State()
+    source = source_order()
+    source["orders"][0]["business_entity"] = "Wrong subsidiary"
+    result = await execute(state, source=source)
+    assert result["termination_reason"] == "stall"
+    assert "target" not in state.events
+
+
+async def test_header_match_with_unknown_refunds_does_not_increment_matched_count():
+    from tests.test_transaction_balance_report import evidence
+
+    state = State()
+    source, target, config, _, _ = evidence()
+    state.run.config_snapshot.update(config)
+    target["orders"][0]["header"].update(total="120.00", taxTotal="20.00")
+    await execute(state, source=source, target=target)
+    assert state.run.progress_json["matched"] == 0
+    assert state.run.progress_json["not_verified"] == 1
+
+
 @pytest.mark.asyncio
 async def test_reads_are_reserved_before_calls_and_missing_observation_is_durable():
     state = State()

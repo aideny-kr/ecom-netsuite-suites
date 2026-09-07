@@ -132,9 +132,9 @@ function RunContent({ id }: { id: string }) {
         </div>
       </header>
       <section className="space-y-3 rounded-xl border bg-muted/30 p-5">
-        <Status>{runState(run.status, run.termination_reason)}</Status>
+        <Status>{run.continuation_run_id ? "Continuing" : runState(run.status, run.termination_reason)}</Status>
         <p className="text-[13px] text-muted-foreground">
-          {run.status === "pending"
+          {run.continuation_run_id ? "This part saved its findings. The investigation continues from its saved position in the next part." : run.status === "pending"
             ? "This investigation is durably queued and waiting for a worker."
             : run.status === "running"
               ? "Provider reads are in progress. Findings appear as evidence is saved."
@@ -143,6 +143,8 @@ function RunContent({ id }: { id: string }) {
                 : "This run stopped before completing its scope. A stopped run does not mean every order was examined. Review saved findings and start a new investigation when ready."}{" "}
           Approval and execution are tracked separately.
         </p>
+        {run.continuation_run_id && <Link className="inline-block text-[13px] font-medium text-primary underline" href={`/transaction-operations/runs/${encodeURIComponent(run.continuation_run_id)}`}>Follow continuing investigation</Link>}
+        {run.continuation_blocked && <p className="text-[13px] text-muted-foreground">Automatic continuation stopped because a limit or access check was reached. Saved findings remain available.</p>}
       </section>
       <div className="grid gap-4 md:grid-cols-3">
         <div className={cardClass}>
@@ -151,7 +153,7 @@ function RunContent({ id }: { id: string }) {
             {count("processed")}
           </p>
           <p className="mt-2 text-[13px] text-muted-foreground">
-            {count("matched")} matched · {count("needs_review")} need review
+            {count("matched")} matched · {count("needs_review")} need review · {count("not_verified")} not verified
           </p>
         </div>
         <div className={cardClass}>

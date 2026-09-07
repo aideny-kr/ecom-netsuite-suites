@@ -24,7 +24,21 @@ def transaction_ops_run(tenant_id: str, run_id: str):
         tenant, run = uuid.UUID(tenant_id), uuid.UUID(run_id)
         async with worker_async_session() as db:
             await set_tenant_context(db, str(tenant))
-            return await run_investigation(db, tenant, run)
+            result = await run_investigation(db, tenant, run)
+            child = None
+            if result.get("termination_reason") == "budget":
+                from app.services.transaction_ops.continuation import continue_budget_run
+
+                child = await continue_budget_run(db, tenant, run)
+            if child is not None:
+                from app.services.transaction_ops.scheduler import _dispatch
+
+                result["continuation_run_id"] = str(child.id)
+                stats = {"dispatched": 0, "dispatch_failed": 0}
+                if child.status == "pending":
+                    await _dispatch(tenant, child.id, stats)
+                result.update(stats)
+            return result
 
     try:
         return asyncio.run(execute())

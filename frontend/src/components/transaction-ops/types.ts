@@ -4,7 +4,8 @@ export interface TransactionConfig {
   tenant_id: string;
   name: string;
   config_key: string;
-  source_step_id: string;
+  source_step_id: string | null;
+  source_connection_id?: string | null;
   netsuite_connection_id: string;
   netsuite_account_id: string;
   subsidiary_id: string;
@@ -34,6 +35,8 @@ export interface TransactionRun {
   progress_json: JsonObject;
   created_at: string;
   finished_at: string | null;
+  continuation_run_id?: string | null;
+  continuation_blocked?: string | null;
 }
 export interface TransactionProposal {
   id: string;

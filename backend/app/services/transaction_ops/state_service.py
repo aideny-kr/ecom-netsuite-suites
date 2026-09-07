@@ -278,7 +278,17 @@ async def control_config(db, tenant_id, config_id, request: ConfigControl, *, ac
     return row
 
 
-async def create_run(db, tenant_id, config_id, request: RunCreate, *, actor=None, now=None, resume_from_run_id=None):
+async def create_run(
+    db,
+    tenant_id,
+    config_id,
+    request: RunCreate,
+    *,
+    actor=None,
+    now=None,
+    resume_from_run_id=None,
+    automatic_continuation=False,
+):
     now = _clock(now)
     config = await get_config(db, tenant_id, config_id, lock=True)
     if not config.enabled:
@@ -313,6 +323,23 @@ async def create_run(db, tenant_id, config_id, request: RunCreate, *, actor=None
         ):
             raise StateError("invalid_run_continuation")
         initial_progress = _bounded_json(previous.progress_json)
+        for field in list(initial_progress):
+            if field.startswith("continuation_"):
+                initial_progress.pop(field)
+        if automatic_continuation:
+            from app.services.transaction_ops.continuation import next_metadata
+
+            metadata = next_metadata(previous, now)
+            if (
+                previous.termination_reason != "budget"
+                or request.origin != previous.origin
+                or request.evaluation_key
+                != f"continue:{metadata['continuation_root_id']}:{metadata['continuation_part']}"
+            ):
+                raise StateError("invalid_run_continuation")
+            initial_progress.update(metadata)
+    elif automatic_continuation:
+        raise StateError("invalid_run_continuation")
     row = TransactionRun(
         tenant_id=tenant_id,
         config_id=config.id,

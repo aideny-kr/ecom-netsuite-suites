@@ -63,8 +63,9 @@ async def investigate_order(order_id: UUID, request: OrderInvestigation, user: R
 @router.post("/reconcile", response_model=list[RunOut], status_code=202)
 async def reconcile_source(request: SourceReconciliation, user: Reader, db: Database):
     try:
-        scope = RunCreate(evaluation_key=str(request.evaluation_key),
-                          window_start=request.window_start, window_end=request.window_end)
+        scope = RunCreate(
+            evaluation_key=str(request.evaluation_key), window_start=request.window_start, window_end=request.window_end
+        )
         return await order_actions.reconcile_source(db, user, request.source_connection_id, scope)
     except service.StateError as exc:
         raise _http_error(exc) from None
@@ -121,7 +122,19 @@ async def list_runs(
 @router.get("/runs/{run_id}", response_model=RunOut)
 async def get_run(run_id: UUID, user: Reader, db: Database):
     try:
-        return await service.get_run(db, user.tenant_id, run_id)
+        run = await service.get_run(db, user.tenant_id, run_id)
+        result = RunOut.model_validate(run)
+        if run.termination_reason == "budget":
+            from app.services.transaction_ops.continuation import continuation_result
+
+            child, blocked = await continuation_result(db, user.tenant_id, run_id)
+            result = result.model_copy(
+                update={
+                    "continuation_run_id": child.id if child else None,
+                    "continuation_blocked": blocked.get("reason") if blocked else None,
+                }
+            )
+        return result
     except service.StateError as exc:
         raise _http_error(exc) from None
 

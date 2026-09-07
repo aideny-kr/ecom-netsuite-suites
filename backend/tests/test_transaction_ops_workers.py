@@ -61,6 +61,28 @@ def test_collector_passes_aware_utc_time_to_scheduler(monkeypatch):
     assert args[0] is db and isinstance(args[1], datetime) and args[1].utcoffset().total_seconds() == 0
 
 
+def test_budget_worker_publishes_only_the_durable_continuation(monkeypatch):
+    db = object()
+    tenant, parent, child = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+
+    @asynccontextmanager
+    async def session():
+        yield db
+
+    runner = AsyncMock(return_value={"status": "finished", "termination_reason": "budget"})
+    resume = AsyncMock(return_value=SimpleNamespace(id=child, status="pending"))
+    dispatch = AsyncMock()
+    monkeypatch.setattr(mod, "worker_async_session", session)
+    monkeypatch.setattr(mod, "set_tenant_context", AsyncMock())
+    monkeypatch.setitem(sys.modules, "app.services.transaction_ops.runner", SimpleNamespace(run_investigation=runner))
+    monkeypatch.setitem(sys.modules, "app.services.transaction_ops.continuation", SimpleNamespace(continue_budget_run=resume))
+    monkeypatch.setitem(sys.modules, "app.services.transaction_ops.scheduler", SimpleNamespace(_dispatch=dispatch))
+    result = mod.transaction_ops_run.run(str(tenant), str(parent))
+    resume.assert_awaited_once_with(db, tenant, parent)
+    assert dispatch.call_args.args[:2] == (tenant, child)
+    assert result["continuation_run_id"] == str(child)
+
+
 @pytest.mark.parametrize("task", ["run", "scheduler"])
 def test_worker_failure_text_never_contains_upstream_details(monkeypatch, task):
     @asynccontextmanager
