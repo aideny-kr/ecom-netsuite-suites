@@ -43,6 +43,7 @@ celery_app.conf.include = [
     "app.workers.tasks.oracle_skill_reseed",
     "app.workers.tasks.proactive_token_refresh",
     "app.workers.tasks.shopify_sync",
+    "app.workers.tasks.solidus_sync",
     "app.workers.tasks.stripe_health_check",
     "app.workers.tasks.stripe_sync",
     "app.workers.tasks.stripe_sync_all",

@@ -261,16 +261,17 @@ async def sync_solidus_orders(db, tenant_id, connection_id, *, now=None, max_pag
     now = now or datetime.now(timezone.utc)
     if now.utcoffset() is None or type(max_pages) is not int or not 1 <= max_pages <= MAX_PAGES:
         raise SolidusImportError("invalid_import_budget")
-    records, calls = 0, 0
+    records, calls, pages_read = 0, 0, 0
     try:
         async with asyncio.timeout(DEADLINE_SECONDS):
             for page_index in range(max_pages):
                 result = await _sync_page(db, tenant_id, connection_id, now, resuming=page_index == 0)
                 records += result["records_synced"]
                 calls += result["api_calls"]
+                pages_read += 1
                 if result["termination_reason"] != "budget":
                     break
-        return {**result, "records_synced": records, "api_calls": calls}
+        return {**result, "records_synced": records, "api_calls": calls, "pages_read": pages_read}
     except TimeoutError:
         await db.rollback()
         return {
@@ -279,6 +280,7 @@ async def sync_solidus_orders(db, tenant_id, connection_id, *, now=None, max_pag
             "complete": False,
             "records_synced": records,
             "api_calls": calls,
+            "pages_read": pages_read,
         }
     except SourceReadError as exc:
         await db.rollback()
