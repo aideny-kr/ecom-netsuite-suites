@@ -1,25 +1,137 @@
 "use client";
 
 /**
- * Task 3 — a MINIMAL shell for the account-wide Scripts view (spec §3.3):
- * the "Celigo › Scripts" crumb, the "Scripts" heading, and the three query
- * states (`queryState()`, `lib/query-state.ts` — a pending query is never
- * rendered as empty, an errored one never as loading or a confident "0
- * scripts"). Everything else the mockup shows for this page — the five
- * stat tiles, the search/filter chips, the list|detail split, the
- * not-synced/no-scripts/no-match empty states — is Task 4's job; this
- * exists only so `celigo-surface.tsx`'s new "Flow map | Scripts" toggle has
- * a real destination to mount instead of nothing.
+ * Task 4 — the account-wide Scripts view (spec §3.3): the "Celigo ›
+ * Scripts" crumb, five stat tiles wired to the `filter=` URL param, the
+ * list|detail split as a `react-resizable-panels` group (percent strings —
+ * see `celigo-flow-page.tsx`'s docstring on why: v4.6.4 parses a bare
+ * number as PIXELS), and every query/empty state (`queryState()`): a
+ * pending query is never rendered as empty, an errored one never as
+ * loading or a confident "0 scripts", and the "not synced yet" state
+ * (spec §3.3's exact copy) renders instead of a zeroed-out page.
  *
- * Read-only surface, same as every other Celigo page: nothing here runs,
- * edits, deploys, or pushes anything to Celigo.
+ * The detail pane is Task 5's job — this page renders a placeholder for it
+ * so the split (and the `family=` selection driving it) has a real second
+ * pane to size against, without pre-empting Task 5's own component.
+ *
+ * Every `go.scripts(...)` call here re-states the WHOLE current scripts
+ * param set (`scriptsBase`) before overriding just the one field that
+ * changed — `go.scripts` REPLACES rather than merges (see
+ * `celigo-route.ts`'s docstring), so a tile click that only means to
+ * change `filter` must not silently drop the current `family`/`q`/`kind`.
  */
 
-import { useCeligoScriptFamilies } from "@/hooks/use-celigo-flows";
+import {
+  Panel,
+  Group as PanelGroup,
+  Separator as PanelResizeHandle,
+} from "react-resizable-panels";
+import {
+  useCeligoScriptFamilies,
+  type CeligoScriptFamilyTotals,
+} from "@/hooks/use-celigo-flows";
 import { queryState } from "@/lib/query-state";
+import { cn } from "@/lib/utils";
 import { ErrorNotice } from "../shared";
-import { useCeligoRoute } from "../celigo-route";
+import { useCeligoRoute, type CeligoRoute, type ScriptsFilter } from "../celigo-route";
 import { CeligoBreadcrumb } from "../celigo-breadcrumb";
+import { CeligoScriptsList } from "./celigo-scripts-list";
+
+const LIST_DEFAULT_SIZE = "34%";
+const LIST_MIN_SIZE = "24%";
+
+/** Everything `go.scripts` needs to re-state the CURRENT scripts view
+ * unchanged, so a caller can spread this and override only the one field
+ * it means to change (spec §3.1: `go.scripts` replaces the whole param
+ * set, it never merges). Only this file builds this object — every
+ * `go.scripts` call below goes through it, so "what survives a tile
+ * click / a list filter change" is one decision, not one made per call
+ * site that can drift. */
+function scriptsBase(route: Pick<CeligoRoute, "familyKey" | "copyId" | "scriptsIntegrationId" | "scriptsFilter" | "scriptsKind" | "q" | "compare">) {
+  return {
+    family: route.familyKey,
+    copy: route.copyId,
+    in: route.scriptsIntegrationId,
+    filter: route.scriptsFilter,
+    kind: route.scriptsKind,
+    q: route.q,
+    compare: route.compare,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Stat tiles
+// ---------------------------------------------------------------------------
+
+function StatTiles({
+  totals,
+  activeFilter,
+  onFilter,
+}: {
+  totals: CeligoScriptFamilyTotals;
+  activeFilter: ScriptsFilter;
+  onFilter: (filter: ScriptsFilter) => void;
+}): JSX.Element {
+  const tiles: { filter: ScriptsFilter; label: string; value: number; sub: string }[] = [
+    { filter: "all", label: "Scripts", value: totals.scripts, sub: `${totals.families} families` },
+    {
+      filter: "attached",
+      label: "Attached",
+      value: totals.attached_families,
+      sub: `${totals.sites} sites · ${totals.flows_with_sites} of ${totals.flows_total} flows`,
+    },
+    {
+      filter: "unattached",
+      label: "Unattached",
+      value: totals.unattached_families,
+      sub: "families, no production site",
+    },
+    {
+      filter: "diverged",
+      label: "Diverged",
+      value: totals.diverged_families,
+      sub: "families whose copies differ",
+    },
+    {
+      filter: "errors",
+      label: "Sites with open errors",
+      value: totals.sites_with_open_errors,
+      sub: `of ${totals.sites} sites`,
+    },
+  ];
+  return (
+    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5" data-testid="celigo-scripts-tiles">
+      {tiles.map((t) => (
+        <button
+          key={t.filter}
+          type="button"
+          aria-pressed={activeFilter === t.filter}
+          onClick={() => onFilter(t.filter)}
+          className={cn(
+            "flex flex-col items-start gap-0.5 rounded-lg border bg-card px-3 py-2 text-left",
+            activeFilter === t.filter && "border-accent bg-accent/10",
+            t.filter === "diverged" && t.value > 0 && "border-l-2 border-l-amber-500",
+          )}
+        >
+          <span className="text-[10.5px] uppercase tracking-wide text-muted-foreground">{t.label}</span>
+          <span
+            className={cn(
+              "text-[18px] font-semibold tabular-nums",
+              t.filter === "diverged" && t.value > 0 && "text-amber-700 dark:text-amber-400",
+            )}
+          >
+            {t.value}
+          </span>
+          <span className="text-[11px] text-muted-foreground">{t.sub}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// The page
+// ---------------------------------------------------------------------------
 
 export function CeligoScriptsPage(): JSX.Element {
   const route = useCeligoRoute();
@@ -31,7 +143,12 @@ export function CeligoScriptsPage(): JSX.Element {
     body = (
       <>
         <span className="sr-only">Loading scripts…</span>
-        <div aria-hidden className="h-24 w-full animate-pulse rounded-lg bg-muted" />
+        <div aria-hidden className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+          {Array.from({ length: 5 }).map((_, i) => (
+            <div key={i} className="h-16 animate-pulse rounded-lg bg-muted" />
+          ))}
+        </div>
+        <div aria-hidden className="min-h-[320px] flex-1 animate-pulse rounded-lg bg-muted" />
       </>
     );
   } else if (state === "error") {
@@ -41,10 +158,65 @@ export function CeligoScriptsPage(): JSX.Element {
         onRetry={() => familiesQuery.refetch()}
       />
     );
+  } else {
+    const data = familiesQuery.data!;
+    if (data.synced_at === null) {
+      // Spec §3.3's exact copy: a connection that has never completed a
+      // sync shows NOTHING built off zeroed totals — a "0 scripts" here
+      // would be a confident claim this data cannot back.
+      body = (
+        <div className="flex flex-1 items-center justify-center p-8 text-center text-[13px] text-muted-foreground">
+          Scripts have not been synced yet. Run the Celigo sync from Settings, then come back.
+        </div>
+      );
+    } else if (data.totals.families === 0) {
+      body = (
+        <div className="flex flex-1 items-center justify-center p-8 text-center text-[13px] text-muted-foreground">
+          No production scripts found.
+        </div>
+      );
+    } else {
+      const base = scriptsBase(route);
+      body = (
+        <>
+          <StatTiles
+            totals={data.totals}
+            activeFilter={route.scriptsFilter}
+            onFilter={(filter) => route.go.scripts({ ...base, filter })}
+          />
+          <div className="flex flex-1 min-h-0" data-testid="celigo-scripts-split">
+            <PanelGroup id="celigo-scripts-v1" orientation="horizontal" className="flex h-full w-full">
+              {/* Percent-string sizes — see this file's top docstring. */}
+              <Panel id="celigo-scripts-list-pane" defaultSize={LIST_DEFAULT_SIZE} minSize={LIST_MIN_SIZE}>
+                <CeligoScriptsList
+                  families={data.families}
+                  totals={data.totals}
+                  selectedKey={route.familyKey}
+                  onSelect={(family) => route.go.scripts({ ...base, family, copy: null })}
+                  filter={route.scriptsFilter}
+                  kind={route.scriptsKind}
+                  q={route.q}
+                  integrationId={route.scriptsIntegrationId}
+                  onFilterChange={(filter) => route.go.scripts({ ...base, filter })}
+                  onKindChange={(kind) => route.go.scripts({ ...base, kind })}
+                  onQueryChange={(q) => route.go.scripts({ ...base, q })}
+                  onIntegrationChange={(in_) => route.go.scripts({ ...base, in: in_ })}
+                />
+              </Panel>
+              <PanelResizeHandle className="w-px bg-border" />
+              <Panel id="celigo-scripts-detail-pane" className="flex-1">
+                <div className="flex h-full items-center justify-center p-6 text-center text-[13px] text-muted-foreground">
+                  {route.familyKey
+                    ? "Family detail view lands in the next slice."
+                    : "Select a family on the left to see its source, versions, and where it's used."}
+                </div>
+              </Panel>
+            </PanelGroup>
+          </div>
+        </>
+      );
+    }
   }
-  // `state === "success"` renders no placeholder body of its own here —
-  // Task 4 replaces this whole branch with the tiles/list/detail surface.
-  // (`familiesQuery.data` is available to it via the same hook call above.)
 
   return (
     <div data-testid="celigo-scripts-page" className="flex flex-1 min-h-0 flex-col">
