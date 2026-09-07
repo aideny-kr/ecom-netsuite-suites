@@ -105,6 +105,7 @@ async def test_exact_lookup_projects_financial_fields_without_pii(context):
     assert result["api_calls"] == 4
     assert requests[0].method == "POST" and requests[1].method == "GET"
     assert requests[0].url.params["limit"] == "2"
+
     query = json.loads(requests[0].content)["q"]
     assert "t.tranid = 'R123456789'" in query
     assert "t.type = 'SalesOrd'" in query
@@ -117,6 +118,18 @@ async def test_exact_lookup_projects_financial_fields_without_pii(context):
     assert "SECRET" not in str(result) and "PII" not in str(result)
     assert "description" not in result["orders"][0]["lines"][0]
     assert reader.set_tenant_context.await_count == 2
+
+
+async def test_header_evidence_survives_incomplete_lines_without_enabling_corrections(context):
+    result, _ = await read(context, [lookup(), record(item={"links": []})])
+    assert result["orders"][0]["header_complete"] is True
+    assert result["orders"][0]["complete"] is False
+    assert result["complete"] is False
+
+
+async def test_changed_record_identity_cannot_prove_header_amounts(context):
+    result, _ = await read(context, [lookup(), record(tranId="R999999999")])
+    assert result["orders"][0]["header_complete"] is False
 
 
 async def test_uses_explicit_tenant_and_active_connection_predicates(context):

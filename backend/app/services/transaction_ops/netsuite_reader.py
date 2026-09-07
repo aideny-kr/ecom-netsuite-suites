@@ -331,6 +331,7 @@ class _Reader:
             version = header.get("lastModifiedDate")
             if not isinstance(version, str) or not version:
                 problems.append("missing_version")
+            header_complete = not problems
             lines = _sublist(record, "item", "lines", LINE_FIELDS, problems)
             tax = _sublist(record, "taxDetails", "tax_details", TAX_FIELDS, problems)
             metadata = await self.currency(currency_id) if currency_id else None
@@ -348,6 +349,7 @@ class _Reader:
                     "currency_metadata": metadata,
                     "periods": period,
                     "version": version,
+                    "header_complete": header_complete,
                     "complete": not problems,
                     "completeness_errors": problems,
                 }

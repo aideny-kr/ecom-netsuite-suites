@@ -17,12 +17,14 @@ from app.schemas.transaction_runs import ProgressUpdate, _bounded_json
 from app.services import feature_flag_service
 from app.services.transaction_ops import state_service
 from app.services.transaction_ops.comparison import compare_transactions
+from app.services.transaction_ops.header_report import build_header_report
 from app.services.transaction_ops.normalization import (
     TransactionMapping,
     _time,
     normalize_framework_order,
     normalize_netsuite_order,
 )
+from app.services.transaction_ops.order_reconciliation import reconcile_order
 
 
 async def enabled(db, tenant_id):
@@ -104,7 +106,20 @@ def _page_progress(page, progress, params):
     progress["pending_refs"], progress["next_page"] = refs, next_page
 
 
-def build_report(source_evidence, target_evidence, config, mapping, *, now):
+def build_report(source_evidence, target_evidence, config, mapping, *, now, refunds=None):
+    account = config["netsuite_account_id"].replace("_", "-").lower()
+    scope = target_evidence.get("scope") or {}
+    if scope.get("account_id") != account or scope.get("subsidiary_id") != config["subsidiary_id"]:
+        raise ValueError("target_scope_mismatch")
+    try:
+        report = _build_detailed_report(source_evidence, target_evidence, config, mapping, now=now)
+    except ValueError:
+        report = build_header_report(source_evidence, target_evidence, config, mapping, now=now)
+    report["balance"] = reconcile_order(source_evidence, target_evidence, config, refunds=refunds)
+    return report
+
+
+def _build_detailed_report(source_evidence, target_evidence, config, mapping, *, now):
     source = normalize_framework_order(
         source_evidence, mapping=mapping, account_id="frame.work", subsidiary_id=config["subsidiary_id"]
     )
@@ -191,6 +206,7 @@ def limit_report(report, *, now):
             "lookup": lookup.model_dump(mode="json"),
             "comparison": compare_transactions(source, targets, lookup, now=now).model_dump(mode="json"),
             "evidence_limits": limits,
+            "balance": report.get("balance"),
             "source_provenance": report.get("source_provenance", {}),
             "netsuite_provenance": {
                 key: report.get("netsuite_provenance", {}).get(key) for key in ("scope", "observed_at")

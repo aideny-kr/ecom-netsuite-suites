@@ -117,6 +117,15 @@ class TransactionMapping(EvidenceModel):
         return value
 
 
+def source_entity_key(order):
+    value = order.get("business_entity")
+    if "business_entity" in order and value is None:
+        return "legacy"
+    if isinstance(value, dict):
+        value = value.get("id")
+    return str(value) if value is not None and value != "legacy" else None
+
+
 def _money(obj, key):
     value = obj.get(key)
     return None if value is None else _decimal(value)
@@ -359,17 +368,7 @@ def _normalize_framework(evidence, *, mapping, account_id, subsidiary_id):
     if order.get("requires_review") is not False:
         status = "unknown"
     currency = order.get("currency")
-    business_entity = order.get("business_entity")
-    if isinstance(business_entity, dict):
-        business_entity = business_entity.get("id")
-    entity_key = (
-        "legacy"
-        if "business_entity" in order and order["business_entity"] is None
-        else str(business_entity)
-        if business_entity is not None and business_entity != "legacy"
-        else None
-    )
-    mapped_subsidiary = mapping.business_entity_subsidiaries.get(entity_key)
+    mapped_subsidiary = mapping.business_entity_subsidiaries.get(source_entity_key(order))
     return TransactionSnapshot(
         system="framework",
         account_id=account_id,
