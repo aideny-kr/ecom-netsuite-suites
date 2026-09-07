@@ -358,6 +358,34 @@ class TestFamilyKeyAndVersionLetters:
         assert detail.versions[0].holds_original is True
 
 
+class TestVersionLettersComputedOnce:
+    async def test_get_script_family_computes_letters_exactly_once(self, db: AsyncSession, monkeypatch):
+        """Review finding (brief item 4): `get_script_family` computed
+        `letters` once at the top AND `_summarize_family` recomputed them
+        again internally from the SAME `members` list -- wasted work with no
+        difference in output. Counts calls to `assign_version_letters` (as
+        seen through `script_families`'s own module-level name, the one
+        every internal call site actually resolves through) to pin "exactly
+        once per request", not just "same answer either way"."""
+        sf = _import_module()
+        tenant_id, conn_id = await _basic_tenant_conn(db)
+        await _seed_script(db, tenant_id, conn_id, celigo_id="s1", name="fam", content="a")
+        await db.flush()
+
+        calls: list[object] = []
+        original = sf.assign_version_letters
+
+        def _counting(members):
+            calls.append(members)
+            return original(members)
+
+        monkeypatch.setattr(sf, "assign_version_letters", _counting)
+
+        await sf.get_script_family(db, tenant_id=tenant_id, connection_id=conn_id, dedup_key="s1")
+
+        assert len(calls) == 1
+
+
 class TestNameRule:
     async def test_name_is_the_originals_when_original_is_in_production(self, db: AsyncSession):
         sf = _import_module()

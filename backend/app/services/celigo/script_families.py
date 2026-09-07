@@ -473,9 +473,8 @@ def _summarize_family(
     site_rows: list[_SiteRow],
     open_error_counts: dict[uuid.UUID, int],
     sizes_by_id: dict[uuid.UUID, int | None],
+    letters: dict[str, str],
 ) -> ScriptFamilySummary:
-    letters = assign_version_letters(members)
-
     site_types = {row.attachment.site_type or "unknown" for row in site_rows}
     kind = _kind_from_site_types(site_types)
     function_name = _pick_mode([row.attachment.function_name for row in site_rows])
@@ -640,7 +639,10 @@ async def list_script_families(
     for dedup_key, members in by_family.items():
         family_celigo_ids = {m.celigo_id for m in members}
         family_site_rows = [row for cid in family_celigo_ids for row in sites_by_celigo_id.get(cid, [])]
-        summaries.append(_summarize_family(dedup_key, members, family_site_rows, open_error_counts, sizes_by_id))
+        letters = assign_version_letters(members)
+        summaries.append(
+            _summarize_family(dedup_key, members, family_site_rows, open_error_counts, sizes_by_id, letters)
+        )
 
     name_counts = Counter(s.name for s in summaries)
     summaries = [replace(s, other_families_with_name=name_counts[s.name] - 1) for s in summaries]
@@ -700,7 +702,7 @@ async def get_script_family(
     open_error_counts = await _fetch_open_error_counts(db, tenant_id=tenant_id, flow_step_ids=flow_step_ids)
 
     letters = assign_version_letters(members)
-    summary = _summarize_family(dedup_key, members, site_rows, open_error_counts, sizes_by_id)
+    summary = _summarize_family(dedup_key, members, site_rows, open_error_counts, sizes_by_id, letters)
     name_counts = Counter(_family_name(other_members) for other_members in by_family_light.values())
     summary = replace(summary, other_families_with_name=name_counts[summary.name] - 1)
 
