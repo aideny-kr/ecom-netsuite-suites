@@ -20,12 +20,11 @@
  * already called straight off the route hook elsewhere in this surface
  * (`celigo-flow-page.tsx`) rather than passed down as callbacks.
  *
- * `go.flow(id, integrationId)` is the ONLY navigation the where-used row's
- * "↗" (and the header's "Open in flow map") use — its shipped signature
- * (Task 3) takes no step/site payload, so this pane can name the target
- * FLOW precisely but not pre-select a step/script on arrival; landing on
- * the flow itself (rather than nothing) is the honest scope of what that
- * helper can do today.
+ * `go.flow(id, integrationId, site)` is the ONLY navigation the where-used
+ * row's "↗" (and the header's "Open in flow map") use — `go.flow`'s third
+ * argument (fix round 1, Task 5 finding) carries the site's own
+ * step/script/site triple through, so both land on the exact attachment
+ * per spec §3.3, not just the flow.
  */
 
 import { useEffect, useState } from "react";
@@ -391,13 +390,17 @@ export function CeligoScriptsDetail({ dedupKey }: { dedupKey: string }): JSX.Ele
   }
 
   function onOpenSite(site: CeligoScriptFamilySite) {
-    route.go.flow(site.flow_id, site.integration_id ?? undefined);
+    route.go.flow(site.flow_id, site.integration_id ?? undefined, {
+      stepId: site.flow_step_id,
+      scriptId: site.script_id,
+      jsonPath: site.json_path,
+    });
   }
 
   function onOpenInFlowMap() {
     const first = sites[0];
     if (!first) return;
-    route.go.flow(first.flow_id, first.integration_id ?? undefined);
+    onOpenSite(first);
   }
 
   function onCopySource() {

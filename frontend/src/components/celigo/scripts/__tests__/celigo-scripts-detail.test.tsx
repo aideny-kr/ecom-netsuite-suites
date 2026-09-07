@@ -467,12 +467,19 @@ describe("CeligoScriptsDetail — where used", () => {
     expect(within(routerRow).getByText("—")).toBeInTheDocument();
   });
 
-  it("the ↗ control navigates with the site's flow and integration", () => {
+  it("the ↗ control navigates with the site's flow, step, script and site", () => {
+    // Fix round 1, Task 5 finding: spec §3.3's `↗` = `go.flow(flow_id, {
+    // step, script, site })` -- landing on the flow alone left the reader
+    // to re-find the exact attachment by hand.
     mocks.family.mockReturnValue(resolved(FAMILY_A));
     wrap("fam-a");
     const row = screen.getByText("New Sales Order to NetSuite").closest("tr")!;
     fireEvent.click(within(row).getByRole("button", { name: /open.*flow map/i }));
-    expect(routeMocks.go.flow).toHaveBeenCalledWith("flow-1", "int-1");
+    expect(routeMocks.go.flow).toHaveBeenCalledWith("flow-1", "int-1", {
+      stepId: "step-1",
+      scriptId: "member-c",
+      jsonPath: "66738c3d…e46.hooks.preMap",
+    });
   });
 
   it("shows 8 rows by default, with a Show all control for the rest", () => {
@@ -490,6 +497,20 @@ describe("CeligoScriptsDetail — Open in flow map / Copy source", () => {
     mocks.family.mockReturnValue(resolved(FAMILY_C));
     wrap("fam-c");
     expect(screen.getByRole("button", { name: /open in flow map/i })).toBeDisabled();
+  });
+
+  it("Open in flow map navigates with the first site's flow, step, script and site", () => {
+    // Fix round 1, Task 5 finding: same navigation gap as the where-used
+    // `↗`, for the header button (spec §3.3: "first site's flow + step +
+    // site").
+    mocks.family.mockReturnValue(resolved(FAMILY_A));
+    wrap("fam-a");
+    fireEvent.click(screen.getByRole("button", { name: /open in flow map/i }));
+    expect(routeMocks.go.flow).toHaveBeenCalledWith("flow-1", "int-1", {
+      stepId: "step-1",
+      scriptId: "member-c",
+      jsonPath: "66738c3d…e46.hooks.preMap",
+    });
   });
 
   it("copy source writes the shown version's content to the clipboard", () => {

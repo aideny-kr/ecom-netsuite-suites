@@ -84,6 +84,31 @@ describe("useCeligoRoute is the only writer", () => {
     expect(nav.push).toHaveBeenLastCalledWith("/workspace?surface=celigo&integration=iB&flow=f2");
   });
 
+  // Fix round 1, Task 5 finding. The Scripts view's where-used "↗" (spec
+  // §3.3) must land on the flow with the exact step/script/site pre-selected
+  // -- not just the flow itself -- so `go.flow` takes an optional third
+  // argument carrying that triple through to the URL, same fields `go.step`/
+  // `go.script` already write for a same-page selection.
+  it("go.flow's optional third argument carries step/script/site through to the URL", () => {
+    nav.params = new URLSearchParams("surface=celigo");
+    const { result } = renderHook(() => useCeligoRoute());
+
+    act(() =>
+      result.current.go.flow("f3", "iC", { stepId: "s1", scriptId: "x1", jsonPath: "a.hooks.preMap" }),
+    );
+    expect(nav.push).toHaveBeenLastCalledWith(
+      "/workspace?surface=celigo&integration=iC&flow=f3&step=s1&script=x1&site=a.hooks.preMap",
+    );
+  });
+
+  it("go.flow's site is dropped without a scriptId, same rule as go.script", () => {
+    nav.params = new URLSearchParams("surface=celigo");
+    const { result } = renderHook(() => useCeligoRoute());
+
+    act(() => result.current.go.flow("f3", "iC", { stepId: "s1", jsonPath: "a.hooks.preMap" }));
+    expect(nav.push).toHaveBeenLastCalledWith("/workspace?surface=celigo&integration=iC&flow=f3&step=s1");
+  });
+
   // Codex fix wave, item 25. One script is routinely attached at several
   // SITES on the same step (a preMap and a postMap, or two clones of one
   // family), and `flow_step_id` cannot tell them apart — so the drawer named

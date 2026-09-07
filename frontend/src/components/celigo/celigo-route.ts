@@ -231,7 +231,19 @@ export function useCeligoRoute(): CeligoRoute & {
      * the current one opened a flow under an integration that does not
      * contain it (wrong breadcrumb, wrong sibling list). Omit it only where
      * the flow is known to belong to the page already on screen. */
-    flow(id: string, integrationId?: string | null): void;
+    /** `site`, added for the Scripts view's where-used "↗" (spec §3.3),
+     * carries the flow's own step/script/site triple through to the new
+     * page in one push — the same fields `go.step`/`go.script` write for a
+     * same-page selection, so a caller that already knows exactly which
+     * attachment it wants (not just which flow) can land on it directly
+     * instead of only naming the flow. `jsonPath` is dropped without a
+     * `scriptId`, same rule as `go.script`: a site only means anything
+     * alongside the script it belongs to. */
+    flow(
+      id: string,
+      integrationId?: string | null,
+      site?: { stepId?: string | null; scriptId?: string | null; jsonPath?: string | null },
+    ): void;
     step(stepId: string | null): void;
     /** `site` is the clicked attachment's own `json_path` — WHICH of a
      * script's several attachment sites is open (see `CeligoRoute.scriptSite`).
@@ -340,7 +352,11 @@ export function useCeligoRoute(): CeligoRoute & {
   const view = useCallback((next: CeligoView) => replaceSelection({ view: next }), [replaceSelection]);
 
   const flow = useCallback(
-    (id: string, integrationId?: string | null) => {
+    (
+      id: string,
+      integrationId?: string | null,
+      site?: { stepId?: string | null; scriptId?: string | null; jsonPath?: string | null },
+    ) => {
       const other = otherParams(searchParams, ["file", "workspace"]);
       // An explicitly-passed integration wins over the current page's: the
       // caller knows which integration owns THIS flow, and the page on
@@ -353,6 +369,9 @@ export function useCeligoRoute(): CeligoRoute & {
           surface: "celigo",
           ...(owner ? { integration: owner } : {}),
           flow: id,
+          ...(site?.stepId ? { step: site.stepId } : {}),
+          ...(site?.scriptId ? { script: site.scriptId } : {}),
+          ...(site?.scriptId && site?.jsonPath ? { site: site.jsonPath } : {}),
         }),
       );
     },
