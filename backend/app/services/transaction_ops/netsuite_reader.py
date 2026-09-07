@@ -12,6 +12,7 @@ import asyncio
 import json
 import re
 import uuid
+from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 from decimal import Decimal, DecimalException
 from typing import Any
@@ -216,7 +217,12 @@ def _sublist(record: dict, key: str, label: str, fields: frozenset[str], problem
 
 
 class _Reader:
-    def __init__(self, client: httpx.AsyncClient, base: str, token: str):
+    def __init__(self, client: httpx.AsyncClient, base: str, token: str, *, max_api_calls=None):
+        if max_api_calls is None:
+            max_api_calls = MAX_API_CALLS
+        if type(max_api_calls) is not int or not 1 <= max_api_calls <= 32:
+            raise NetSuiteEvidenceError("invalid_read_budget")
+        self.max_api_calls = max_api_calls
         self.client, self.base = client, base
         self.headers = {"Authorization": f"Bearer {token}", "Prefer": "transient"}
         self.calls = 0
@@ -224,7 +230,7 @@ class _Reader:
         self.periods: dict[str, dict] = {}
 
     async def request(self, method: str, path: str, *, params=None, body=None) -> dict:
-        if self.calls >= MAX_API_CALLS:
+        if self.calls >= self.max_api_calls:
             raise NetSuiteEvidenceError("api_call_budget")
         self.calls += 1
         try:
@@ -369,36 +375,15 @@ class _Reader:
         }
 
 
-async def read_netsuite_order(
-    db: AsyncSession,
-    tenant_id,
-    connection_id,
-    account_id: str,
-    subsidiary_id: str,
-    order_reference: str,
-    reference_field: str,
-    *,
-    client: httpx.AsyncClient | None = None,
-) -> dict:
-    """Return explicit provider evidence for an exact reference, at most two records.
-
-    `reference_field` must come from the configured integration mapping, never a
-    guessed custom field. Missing/duplicate/cross-subsidiary matches stay visible.
-    Read completeness is distinct from permission to mutate a closed/billed order.
-    """
+@asynccontextmanager
+async def authenticated_reader(db, tenant_id, connection_id, account_id, *, client=None, max_api_calls=None):
+    """Share selected-connection authorization across fixed native read services."""
     tenant, connection_uuid = _uuid(tenant_id, "tenant"), _uuid(connection_id, "connection")
     account = _account(account_id)
-    if not _id(subsidiary_id):
-        raise NetSuiteEvidenceError("invalid_subsidiary")
-    if not isinstance(reference_field, str) or not _IDENTIFIER.fullmatch(reference_field):
-        raise NetSuiteEvidenceError("invalid_reference_field")
-    if (
-        not isinstance(order_reference, str)
-        or not order_reference
-        or len(order_reference) > 255
-        or any(ord(c) < 32 for c in order_reference)
-    ):
-        raise NetSuiteEvidenceError("invalid_order_reference")
+    if max_api_calls is None:
+        max_api_calls = MAX_API_CALLS
+    if type(max_api_calls) is not int or not 1 <= max_api_calls <= 32:
+        raise NetSuiteEvidenceError("invalid_read_budget")
     await set_tenant_context(db, str(tenant))
     connection = (
         await db.execute(
@@ -437,19 +422,49 @@ async def read_netsuite_order(
         raise NetSuiteEvidenceError("authentication_failed")
     base = f"https://{account}.suitetalk.api.netsuite.com/services/rest"
 
-    async def run(http_client):
-        worker = _Reader(http_client, base, token)
-        return await worker.read(
-            order_reference=order_reference, reference_field=reference_field, subsidiary_id=str(subsidiary_id)
-        )
+    if client is not None:
+        yield _Reader(client, base, token, max_api_calls=max_api_calls)
+    else:
+        async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=False) as owned:
+            yield _Reader(owned, base, token, max_api_calls=max_api_calls)
 
+
+async def read_netsuite_order(
+    db: AsyncSession,
+    tenant_id,
+    connection_id,
+    account_id: str,
+    subsidiary_id: str,
+    order_reference: str,
+    reference_field: str,
+    *,
+    client: httpx.AsyncClient | None = None,
+) -> dict:
+    """Return explicit provider evidence for an exact reference, at most two records.
+
+    `reference_field` must come from the configured integration mapping, never a
+    guessed custom field. Missing/duplicate/cross-subsidiary matches stay visible.
+    Read completeness is distinct from permission to mutate a closed/billed order.
+    """
+    tenant, connection_uuid = _uuid(tenant_id, "tenant"), _uuid(connection_id, "connection")
+    account = _account(account_id)
+    if not _id(subsidiary_id):
+        raise NetSuiteEvidenceError("invalid_subsidiary")
+    if not isinstance(reference_field, str) or not _IDENTIFIER.fullmatch(reference_field):
+        raise NetSuiteEvidenceError("invalid_reference_field")
+    if (
+        not isinstance(order_reference, str)
+        or not order_reference
+        or len(order_reference) > 255
+        or any(ord(c) < 32 for c in order_reference)
+    ):
+        raise NetSuiteEvidenceError("invalid_order_reference")
     try:
         async with asyncio.timeout(READ_TIMEOUT_SECONDS):
-            if client is not None:
-                result = await run(client)
-            else:
-                async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=False) as owned_client:
-                    result = await run(owned_client)
+            async with authenticated_reader(db, tenant, connection_uuid, account, client=client) as worker:
+                result = await worker.read(
+                    order_reference=order_reference, reference_field=reference_field, subsidiary_id=str(subsidiary_id)
+                )
     except TimeoutError:
         raise NetSuiteEvidenceError("read_timeout") from None
     result["scope"] = {

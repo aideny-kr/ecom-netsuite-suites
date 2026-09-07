@@ -10,6 +10,7 @@ from collections import Counter
 from datetime import datetime
 from decimal import Context, Decimal, DivisionByZero, InvalidOperation, Overflow, localcontext
 from typing import Annotated, Literal
+from uuid import UUID
 
 from pydantic import Field, field_validator, model_validator
 
@@ -97,6 +98,7 @@ class NetSuiteLegacyTaxMapping(EvidenceModel):
 
 
 class TransactionMapping(EvidenceModel):
+    solidus_refund_step_id: UUID | None = None
     action_mode: Literal["detect_only", "propose_actions"] = "detect_only"
     line_identity_mode: Literal["source_line_id", "inventory_units"] = "source_line_id"
     netsuite_create: NetSuiteCreateMapping | None = None

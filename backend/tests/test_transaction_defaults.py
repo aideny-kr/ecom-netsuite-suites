@@ -87,6 +87,25 @@ async def test_bootstrap_cannot_use_another_tenants_source(db, admin_user, admin
         await defaults.ensure_framework_configs(db, admin_user[0].tenant_id, source.id, actor=admin_user[0])
 
 
+async def test_refund_defaults_bind_only_the_verified_tenant_owned_database_source(
+    db, admin_user, admin_user_b, monkeypatch
+):
+    from app.models.celigo import CeligoFlowStep
+    from tests.test_transaction_ops_state_db import seed_config
+
+    user, _ = admin_user
+    seed = await seed_config(db, user.tenant_id, user)
+    step = await db.get(CeligoFlowStep, seed.source_step_id)
+    step.adaptor_type = "RDBMSExport"
+    monkeypatch.setattr(defaults, "FRAMEWORK_REFUND_STEP_ID", step.id)
+    await db.flush()
+    assert await defaults.refund_source_id(db, user.tenant_id) == str(step.id)
+    assert await defaults.refund_source_id(db, admin_user_b[0].tenant_id) is None
+    source, _ = await connections(db, user.tenant_id)
+    configs = await defaults.ensure_framework_configs(db, user.tenant_id, source.id, actor=user)
+    assert all(row.mapping_json["solidus_refund_step_id"] == str(step.id) for row in configs)
+
+
 async def test_bootstrap_rechecks_actor_permissions(db, readonly_user):
     user, _ = readonly_user
     source, _ = await connections(db, user.tenant_id)

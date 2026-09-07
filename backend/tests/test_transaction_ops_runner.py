@@ -192,6 +192,46 @@ async def test_header_match_with_unknown_refunds_does_not_increment_matched_coun
     assert state.run.progress_json["not_verified"] == 1
 
 
+@pytest.mark.parametrize("mode", ["match", "difference", "unavailable", "budget"])
+async def test_runner_collects_refunds_with_reserved_reads_and_preserves_partial_evidence(mode):
+    from tests.test_transaction_balance_report import evidence
+
+    state = State(budget=15 if mode == "budget" else 1000)
+    source, target, config, _, _ = evidence()
+    state.run.config_snapshot.update(config)
+    state.run.config_snapshot["mapping_json"]["solidus_refund_step_id"] = str(uuid4())
+    target["orders"][0]["header"].update(total="120.00", taxTotal="20.00")
+    refund = {"order_reference": REF, "currency": "USD", "complete": True, "amount": "100.00"}
+    source_refunds = AsyncMock(return_value=refund)
+    native_refunds = AsyncMock(return_value={**refund, "amount": "99.00" if mode == "difference" else "100.00"})
+    if mode == "unavailable":
+        source_refunds.side_effect = ValueError("private upstream information")
+    await run_investigation(
+        None,
+        state.tenant,
+        state.run_id,
+        _state=state,
+        _clock=lambda: NOW,
+        _enabled=AsyncMock(return_value=True),
+        _source_reader=AsyncMock(return_value=source),
+        _target_reader=AsyncMock(return_value=target),
+        _source_refunds_reader=source_refunds,
+        _target_refunds_reader=native_refunds,
+    )
+    report = state.reports[REF]
+    assert (
+        report["balance"]["status"]
+        == {"match": "matched", "difference": "difference", "unavailable": "incomplete", "budget": "incomplete"}[mode]
+    )
+    assert "private upstream" not in str(report)
+    if mode == "budget":
+        assert state.run.termination_reason == "budget"
+        native_refunds.assert_not_awaited()
+    else:
+        assert ("reserve", 27, 0) in state.events
+        native_refunds.assert_awaited_once()
+
+
 @pytest.mark.asyncio
 async def test_reads_are_reserved_before_calls_and_missing_observation_is_durable():
     state = State()

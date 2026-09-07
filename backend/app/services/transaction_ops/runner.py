@@ -237,6 +237,8 @@ async def run_investigation(
     *,
     _state=None,
     _source_reader=None,
+    _source_refunds_reader=None,
+    _target_refunds_reader=None,
     _target_reader=None,
     _page_reader=None,
     _guard_reader=None,
@@ -248,12 +250,14 @@ async def run_investigation(
     from app.services.transaction_ops.celigo_actions import MAX_READ_CALLS, read_celigo_error_evidence
     from app.services.transaction_ops.netsuite_create import CreateInputError, prepare_create_input
     from app.services.transaction_ops.netsuite_reader import read_netsuite_order
+    from app.services.transaction_ops.netsuite_refunds import MAX_REFUND_CALLS, read_netsuite_refunds
     from app.services.transaction_ops.netsuite_transport import (
         MAX_GUARD_READ_CALLS,
         read_create_preview,
         read_guard_snapshot,
     )
     from app.services.transaction_ops.planner import PlanningError, plan_proposal
+    from app.services.transaction_ops.refund_reader import read_solidus_refunds
     from app.services.transaction_ops.source_reader import read_framework_order, read_framework_orders_page
 
     state, clock = _state or state_service, _clock or (lambda: datetime.now(timezone.utc))
@@ -368,6 +372,45 @@ async def run_investigation(
                 )
             )
             report = limit_report(build_report(source, targets, config, mapping, now=clock()), now=clock())
+            if mapping.solidus_refund_step_id:
+                # Preserve known amounts before extra reads. An exhausted refund
+                # budget must not discard the already-collected order evidence.
+                await state.record_finding(db, tenant_id, run_id, reference, report, lease_token=token, now=clock())
+                refunds = {}
+                if not await reserve(2):
+                    return await finish("budget")
+                try:
+                    refunds["source"] = await bounded_read(
+                        (_source_refunds_reader or read_solidus_refunds)(
+                            db, tenant_id, mapping.solidus_refund_step_id, reference
+                        )
+                    )
+                except (state_service.StateError, FeatureRevokedError):
+                    raise
+                except Exception:
+                    refunds["source"] = {"complete": False, "reason": "source_refunds_unavailable"}
+                if len(targets.get("orders") or []) == 1 and targets["orders"][0].get("header_complete") is True:
+                    if not await reserve(MAX_REFUND_CALLS + 3):
+                        return await finish("budget")
+                    try:
+                        refunds["target"] = await bounded_read(
+                            (_target_refunds_reader or read_netsuite_refunds)(
+                                db,
+                                tenant_id,
+                                UUID(config["netsuite_connection_id"]),
+                                config["netsuite_account_id"],
+                                config["subsidiary_id"],
+                                reference,
+                                targets,
+                            )
+                        )
+                    except (state_service.StateError, FeatureRevokedError):
+                        raise
+                    except Exception:
+                        refunds["target"] = {"complete": False, "reason": "target_refunds_unavailable"}
+                report["balance"] = reconcile_order(source, targets, config, refunds=refunds)
+                report["refund_evidence"] = refunds
+                report = limit_report(report, now=clock())
             if report["order_reference"] != reference:
                 raise ValueError("source_reference_mismatch")
             action = report["comparison"]["recommended_action"]

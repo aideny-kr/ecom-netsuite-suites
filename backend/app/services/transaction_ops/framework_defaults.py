@@ -6,11 +6,14 @@ These mappings apply only to the selected Framework account, never another tenan
 arbitrary NetSuite account. Existing operator configuration and pauses take priority.
 """
 
+from uuid import UUID
+
 from cryptography.fernet import InvalidToken
 from sqlalchemy import select
 
 from app.core.database import set_tenant_context
 from app.core.encryption import decrypt_credentials
+from app.models.celigo import CeligoFlowStep
 from app.models.connection import ACTIVE_CONNECTION_STATUSES, Connection
 from app.models.transaction_ops import TransactionConfig
 from app.schemas.transaction_runs import ConfigCreate
@@ -20,8 +23,28 @@ from app.services.transaction_ops.netsuite_reader import _account
 from app.services.transaction_ops.source_reader import _FRAMEWORK_BASE
 
 FRAMEWORK_ACCOUNT = "6738075"
+FRAMEWORK_REFUND_STEP_ID = UUID("223baf64-490d-4e5f-a1ef-08419d556163")
 ENTITY_SUBSIDIARIES = {"Framework Inc": "1", "Framework BV": "2", "Framework AU": "4", "Framework UK": "5"}
 _MINOR_UNITS = {"USD": 2, "CAD": 2, "EUR": 2, "GBP": 2, "AUD": 2, "JPY": 0, "TWD": 2, "CHF": 2, "SGD": 2, "NZD": 2}
+
+
+async def refund_source_id(db, tenant_id):
+    # This verified binding only applies when that saved database source belongs
+    # to this tenant. Its SQL/hooks are never executed by the refund collector.
+    identifier = await db.scalar(
+        select(CeligoFlowStep.id)
+        .join(Connection, Connection.id == CeligoFlowStep.celigo_connection_id)
+        .where(
+            CeligoFlowStep.id == FRAMEWORK_REFUND_STEP_ID,
+            CeligoFlowStep.tenant_id == tenant_id,
+            CeligoFlowStep.role == "generator",
+            CeligoFlowStep.adaptor_type == "RDBMSExport",
+            Connection.tenant_id == tenant_id,
+            Connection.provider == "celigo",
+            Connection.status.in_(ACTIVE_CONNECTION_STATUSES),
+        )
+    )
+    return str(identifier) if identifier else None
 
 
 async def ensure_framework_configs(db, tenant_id, source_connection_id, *, actor):
@@ -61,6 +84,7 @@ async def ensure_framework_configs(db, tenant_id, source_connection_id, *, actor
     if len(targets) != 1:
         raise state_service.StateError("framework_destination_unavailable", 422)
     target = targets[0]
+    refund_step = await refund_source_id(db, tenant_id)
     existing = (
         await db.scalars(
             select(TransactionConfig)
@@ -91,6 +115,7 @@ async def ensure_framework_configs(db, tenant_id, source_connection_id, *, actor
                 "business_entity_subsidiaries": {entity: subsidiary},
                 "currency_minor_units": _MINOR_UNITS,
                 "action_mode": "propose_actions",
+                "solidus_refund_step_id": refund_step,
             },
             schedule_enabled=True,
             interval_minutes=1440,

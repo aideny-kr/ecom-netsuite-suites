@@ -32,6 +32,19 @@ def lookup(items=None, **overrides):
     return {"items": items, "count": len(items), "totalResults": len(items), "hasMore": False, **overrides}
 
 
+async def test_shared_authenticated_reader_preserves_tenant_and_account_guards(context):
+    db, connection = context
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={}))) as client:
+        async with reader.authenticated_reader(
+            db, TENANT, CONNECTION, ACCOUNT, client=client, max_api_calls=24
+        ) as native:
+            assert native.max_api_calls == 24
+        connection.tenant_id = uuid.uuid4()
+        with pytest.raises(reader.NetSuiteEvidenceError, match="invalid_connection"):
+            async with reader.authenticated_reader(db, TENANT, CONNECTION, ACCOUNT, client=client):
+                pytest.fail("Cross-tenant credentials became available")
+
+
 def record(**overrides):
     return {
         "id": "100",
