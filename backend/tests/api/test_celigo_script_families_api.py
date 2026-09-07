@@ -22,7 +22,8 @@ import uuid
 
 import pytest
 
-from tests.api.test_celigo_flows_api import _seed_world
+from app.models.celigo import CeligoFlow, CeligoIntegration, CeligoScript, CeligoScriptAttachment
+from tests.api.test_celigo_flows_api import _make_connection, _seed_world
 from tests.conftest import enable_feature_flag
 
 
@@ -30,6 +31,66 @@ from tests.conftest import enable_feature_flag
 async def _celigo_flag_enabled(db, admin_user):
     user, _ = admin_user
     await enable_feature_flag(db, user.tenant_id, "celigo")
+
+
+async def _seed_family_with_fixed_celigo_id(db, tenant_id, *, celigo_id: str, name: str, content: str) -> dict:
+    """A minimal one-script, one-site family under a NEW connection for
+    *tenant_id*, with the script's OWN `celigo_id` (and therefore
+    `dedup_key`, since no `_sourceId` is set) pinned to *celigo_id* --
+    unlike `_seed_world` (which generates a random suffix per call, so two
+    calls can never collide), this lets two different tenants share the
+    exact same dedup_key on purpose, for `test_tenant_isolation` below."""
+    conn_id = await _make_connection(db, tenant_id)
+    suffix = uuid.uuid4().hex[:8]
+
+    integration = CeligoIntegration(
+        tenant_id=tenant_id,
+        celigo_connection_id=conn_id,
+        celigo_id=f"int_{suffix}",
+        name=f"{name} Integration",
+        sandbox=False,
+        raw_json={},
+    )
+    db.add(integration)
+    await db.flush()
+
+    flow = CeligoFlow(
+        tenant_id=tenant_id,
+        celigo_connection_id=conn_id,
+        integration_id=integration.id,
+        celigo_id=f"flow_{suffix}",
+        name=f"{name} Flow",
+        disabled=False,
+        raw_json={},
+    )
+    db.add(flow)
+    await db.flush()
+
+    script = CeligoScript(
+        tenant_id=tenant_id,
+        celigo_connection_id=conn_id,
+        celigo_id=celigo_id,
+        name=name,
+        content=content,
+    )
+    db.add(script)
+    await db.flush()
+
+    attachment = CeligoScriptAttachment(
+        tenant_id=tenant_id,
+        celigo_connection_id=conn_id,
+        flow_id=flow.id,
+        flow_step_id=None,
+        script_id=script.id,
+        script_celigo_id=script.celigo_id,
+        function_name="transform",
+        json_path="transform.script",
+        site_type="transform",
+    )
+    db.add(attachment)
+    await db.flush()
+
+    return {"connection_id": conn_id, "integration": integration, "flow": flow, "script": script}
 
 
 def _walk_keys(obj):
@@ -158,12 +219,51 @@ class TestGetScriptFamily:
         assert body["sites"][0]["flow_id"] == str(world["flow"].id)
 
     async def test_tenant_isolation(self, client, admin_user, admin_user_b, db):
+        """Review finding (brief item 5c): the previous version seeded two
+        DIFFERENT dedup_keys (via `_seed_world`'s own random per-call
+        suffix) for tenant A and tenant B -- so even a query missing a
+        tenant filter entirely would only ever find ONE tenant's row for
+        that dedup_key, and the test could not have caught a PARTIAL-filter
+        bug (e.g. one sub-query scoped by tenant_id, another not). Seeding
+        the SAME celigo_id/dedup_key in both tenants means a leak in ANY of
+        the family queries has the other tenant's row sitting right there to
+        leak into the response."""
         user_a, headers_a = admin_user
         user_b, headers_b = admin_user_b
         await enable_feature_flag(db, user_b.tenant_id, "celigo")
 
-        world_a = await _seed_world(db, user_a.tenant_id)
-        await _seed_world(db, user_b.tenant_id)
+        shared_dedup_key = f"shared_{uuid.uuid4().hex[:8]}"
+        world_a = await _seed_family_with_fixed_celigo_id(
+            db, user_a.tenant_id, celigo_id=shared_dedup_key, name="Tenant A Script", content="tenant a body"
+        )
+        await _seed_family_with_fixed_celigo_id(
+            db, user_b.tenant_id, celigo_id=shared_dedup_key, name="Tenant B Script", content="tenant b body"
+        )
+        await db.flush()
 
-        r = await client.get(f"/api/v1/celigo/scripts/families/{world_a['script'].celigo_id}", headers=headers_b)
-        assert r.status_code == 404, "tenant B must not see tenant A's script family"
+        list_resp = await client.get("/api/v1/celigo/scripts/families", headers=headers_a)
+        assert list_resp.status_code == 200, list_resp.text
+        families = list_resp.json()["families"]
+        assert len(families) == 1, "tenant A's list must not contain tenant B's identically-keyed family"
+        assert families[0]["dedup_key"] == shared_dedup_key
+        assert families[0]["name"] == "Tenant A Script"
+        assert families[0]["copies_count"] == 1
+        assert families[0]["sites_count"] == 1
+        assert families[0]["other_families_with_name"] == 0, "tenant B's identically-named family must not count"
+
+        detail_resp = await client.get(f"/api/v1/celigo/scripts/families/{shared_dedup_key}", headers=headers_a)
+        assert detail_resp.status_code == 200, detail_resp.text
+        detail = detail_resp.json()
+        assert detail["summary"]["name"] == "Tenant A Script"
+        assert len(detail["members"]) == 1
+        assert detail["members"][0]["content"] == "tenant a body"
+        assert len(detail["sites"]) == 1
+        assert detail["sites"][0]["flow_id"] == str(world_a["flow"].id)
+
+        # Symmetrically, tenant B must see only its own -- not tenant A's.
+        detail_resp_b = await client.get(f"/api/v1/celigo/scripts/families/{shared_dedup_key}", headers=headers_b)
+        assert detail_resp_b.status_code == 200, detail_resp_b.text
+        detail_b = detail_resp_b.json()
+        assert detail_b["summary"]["name"] == "Tenant B Script"
+        assert len(detail_b["members"]) == 1
+        assert detail_b["members"][0]["content"] == "tenant b body"
