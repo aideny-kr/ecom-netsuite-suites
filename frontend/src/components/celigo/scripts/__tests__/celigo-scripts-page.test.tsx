@@ -11,9 +11,10 @@ import type { CeligoScriptFamiliesList, CeligoScriptFamilySummary } from "@/hook
 // search/keyboard rules are `celigo-scripts-list.test.tsx`'s job), and the
 // three query/empty states (`queryState()` pending/error, "not synced yet").
 
-const mocks = vi.hoisted(() => ({ families: vi.fn() }));
+const mocks = vi.hoisted(() => ({ families: vi.fn(), syncStatus: vi.fn() }));
 vi.mock("@/hooks/use-celigo-flows", () => ({
   useCeligoScriptFamilies: () => mocks.families(),
+  useCeligoSyncStatus: () => mocks.syncStatus(),
 }));
 
 const routeMocks = vi.hoisted(() => ({
@@ -128,6 +129,13 @@ beforeEach(() => {
     scriptsIntegrationId: null,
     copyId: null,
   });
+  // Fix round 1, finding 1: every test above set only `mocks.families` and
+  // left `useCeligoSyncStatus()` unmocked, which is why the crumb's own
+  // "synced N ago" fact (spec §3.3) was never asserted anywhere in this
+  // file. Defaulted to a resolved, recent sync so tests that don't care
+  // about sync-status states aren't forced to stub it themselves.
+  mocks.syncStatus.mockReset();
+  mocks.syncStatus.mockReturnValue(resolved({ last_synced_at: "2026-09-06T11:30:00Z" }));
 });
 
 describe("CeligoScriptsPage — shell (query states, crumb)", () => {
@@ -136,6 +144,34 @@ describe("CeligoScriptsPage — shell (query states, crumb)", () => {
     wrap(<CeligoScriptsPage />);
     expect(screen.getByText("Celigo")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Scripts" })).toBeInTheDocument();
+  });
+
+  // Fix round 1, finding 1: spec §3.3 requires the crumb row to carry
+  // "synced-ago from sync status" — every sibling Celigo page renders this
+  // off its OWN `useCeligoSyncStatus()` call, gated through `queryState()`
+  // (never inferred from `lastSyncedAt` alone, same discipline as
+  // `celigo-integrations-page.tsx`'s `SyncPill`), so it must show up here
+  // too, independent of the families query's own `synced_at` (which only
+  // gates the "not synced yet" empty state below).
+  it("renders a synced-ago indicator sourced from the sync-status query", () => {
+    mocks.families.mockReturnValue(resolved(SYNCED_LIST));
+    mocks.syncStatus.mockReturnValue(resolved({ last_synced_at: "2026-09-06T11:30:00Z" }));
+    wrap(<CeligoScriptsPage />);
+    expect(screen.getByText(/synced.*ago/i)).toBeInTheDocument();
+  });
+
+  it("shows a checking-status indicator while the sync-status query is pending, never a bare dash", () => {
+    mocks.families.mockReturnValue(resolved(SYNCED_LIST));
+    mocks.syncStatus.mockReturnValue(pending());
+    wrap(<CeligoScriptsPage />);
+    expect(screen.getByText(/checking sync status/i)).toBeInTheDocument();
+  });
+
+  it("shows a sync-status-unavailable indicator when the sync-status query errors", () => {
+    mocks.families.mockReturnValue(resolved(SYNCED_LIST));
+    mocks.syncStatus.mockReturnValue(errored());
+    wrap(<CeligoScriptsPage />);
+    expect(screen.getByText(/sync status unavailable/i)).toBeInTheDocument();
   });
 
   it("pending renders a loading skeleton, never an empty one or a confident zero", () => {

@@ -28,11 +28,12 @@ import {
 } from "react-resizable-panels";
 import {
   useCeligoScriptFamilies,
+  useCeligoSyncStatus,
   type CeligoScriptFamilyTotals,
 } from "@/hooks/use-celigo-flows";
-import { queryState } from "@/lib/query-state";
+import { queryState, type QueryState } from "@/lib/query-state";
 import { cn } from "@/lib/utils";
-import { ErrorNotice } from "../shared";
+import { ErrorNotice, Pill, formatRelativeTime } from "../shared";
 import { useCeligoRoute, type CeligoRoute, type ScriptsFilter } from "../celigo-route";
 import { CeligoBreadcrumb } from "../celigo-breadcrumb";
 import { CeligoScriptsList } from "./celigo-scripts-list";
@@ -130,6 +131,58 @@ function StatTiles({
 }
 
 // ---------------------------------------------------------------------------
+// Sync-status pill
+// ---------------------------------------------------------------------------
+
+/** Fix round 1, finding 1: spec §3.3 requires the crumb row to carry
+ * "synced-ago from sync status" — every sibling Celigo page fetches its own
+ * `useCeligoSyncStatus()` and shows this. Deliberately reproduced here
+ * (mirroring `celigo-integrations-page.tsx`'s `SyncPill`) rather than
+ * imported: that component isn't exported, and this page's own
+ * `familiesQuery.data.synced_at` already answers a DIFFERENT question (has
+ * THIS families payload ever synced at all — it gates the big "not synced
+ * yet" empty state below) from the account-wide sync status this pill
+ * reports, so the two must stay visibly separate rather than share one
+ * component whose prop shadows which question it's answering.
+ * Takes the sync-status QUERY'S OWN `queryState`, not just the timestamp —
+ * a `null` here means two different things ("confirmed never synced" vs.
+ * "don't know yet, the fetch hasn't resolved") and must never collapse to
+ * the same bare "—". */
+function ScriptsSyncPill({ state, lastSyncedAt }: { state: QueryState; lastSyncedAt: string | null }): JSX.Element {
+  if (state === "pending") {
+    return (
+      <Pill tone="mute" dot="hollow">
+        <span className="animate-pulse">checking sync status…</span>
+      </Pill>
+    );
+  }
+  if (state === "error") {
+    return (
+      <Pill tone="crit" dot="solid">
+        sync status unavailable
+      </Pill>
+    );
+  }
+  if (!lastSyncedAt) {
+    return (
+      <Pill tone="mute" dot="hollow">
+        —
+      </Pill>
+    );
+  }
+  const then = new Date(lastSyncedAt);
+  const staleMs = Date.now() - then.getTime();
+  const stale = staleMs > 2 * 60 * 60 * 1000;
+  const hh = String(then.getUTCHours()).padStart(2, "0");
+  const mm = String(then.getUTCMinutes()).padStart(2, "0");
+  return (
+    <Pill tone={stale ? "warn" : "ok"} dot="solid">
+      synced {formatRelativeTime(lastSyncedAt)} · {hh}:{mm} UTC
+    </Pill>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // The page
 // ---------------------------------------------------------------------------
 
@@ -137,6 +190,14 @@ export function CeligoScriptsPage(): JSX.Element {
   const route = useCeligoRoute();
   const familiesQuery = useCeligoScriptFamilies();
   const state = queryState(familiesQuery);
+  // Fix round 1, finding 1 — the crumb's own "synced-ago" fact (spec §3.3),
+  // independent of `familiesQuery.data.synced_at`'s different question
+  // below. Called unconditionally, alongside every other hook here, before
+  // any state branch — see `celigo-integrations-page.tsx`'s docstring on
+  // why an early return before a hook is the bug to avoid reintroducing.
+  const syncStatusQuery = useCeligoSyncStatus();
+  const syncStatusState = queryState(syncStatusQuery);
+  const lastSyncedAt = syncStatusState === "success" ? syncStatusQuery.data?.last_synced_at ?? null : null;
 
   let body: JSX.Element | null = null;
   if (state === "pending") {
@@ -224,7 +285,10 @@ export function CeligoScriptsPage(): JSX.Element {
         items={[{ label: "Celigo", onClick: () => route.go.integrations() }, { label: "Scripts" }]}
       />
       <div className="flex flex-1 min-h-0 flex-col gap-3 overflow-auto p-4">
-        <h3 className="text-[20px] font-semibold tracking-tight">Scripts</h3>
+        <div className="flex flex-wrap items-center gap-2.5">
+          <h3 className="text-[20px] font-semibold tracking-tight">Scripts</h3>
+          <ScriptsSyncPill state={syncStatusState} lastSyncedAt={lastSyncedAt} />
+        </div>
         {body}
       </div>
     </div>
