@@ -13,7 +13,6 @@ import {
   Database,
   Settings,
   Table2,
-  ChevronDown,
   ChevronsLeft,
   LogOut,
   ChevronsUpDown,
@@ -83,9 +82,6 @@ export function Sidebar({ collapsed = false, onToggle }: { collapsed?: boolean; 
   const { hasPermission } = usePermissions();
   const { theme, setTheme, resolvedTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
-  const [tablesExpanded, setTablesExpanded] = useState(
-    pathname.startsWith("/tables"),
-  );
 
   useEffect(() => {
     setMounted(true);
@@ -214,52 +210,23 @@ export function Sidebar({ collapsed = false, onToggle }: { collapsed?: boolean; 
 
         <div className="pt-4">
           <p className="mb-2 px-3 text-[10px] font-semibold uppercase tracking-widest text-[hsl(var(--sidebar-muted))]">
-            Data
+            Transactions
           </p>
-          <button
-            onClick={() => setTablesExpanded(!tablesExpanded)}
-            className={cn(
-              "group flex w-full items-center gap-3 px-4 py-2.5 text-[13px] font-medium tracking-wide uppercase transition-all duration-150",
-              pathname.startsWith("/tables")
-                ? "bg-[hsl(var(--sidebar-hover))] text-[hsl(var(--sidebar-active))] border-l-4 border-[hsl(var(--sidebar-active))]"
-                : "text-[hsl(var(--sidebar-foreground))] hover:bg-[hsl(var(--sidebar-hover))/0.5] hover:text-[hsl(var(--sidebar-active))/0.7]",
-            )}
-          >
-            <Table2 className={cn("h-4 w-4", pathname.startsWith("/tables") ? "text-[hsl(var(--sidebar-active))]" : "text-[hsl(var(--sidebar-muted))] group-hover:text-[hsl(var(--sidebar-active))/0.7]")} />
-            Tables
-            <ChevronDown
-              className={cn(
-                "ml-auto h-3.5 w-3.5 text-[hsl(var(--sidebar-muted))] transition-transform duration-200",
-                !tablesExpanded && "-rotate-90",
-              )}
-            />
-          </button>
-          <div
-            className={cn(
-              "overflow-hidden transition-all duration-200",
-              tablesExpanded ? "max-h-[500px] opacity-100" : "max-h-0 opacity-0",
-            )}
-          >
-            <div className="ml-5 space-y-0.5 border-l border-[hsl(var(--sidebar-border))] py-1 pl-3">
-              {CANONICAL_TABLES.map((table) => {
-                const href = `/tables/${table.name}`;
-                const isActive = pathname === href;
-                return (
-                  <Link
-                    key={table.name}
-                    href={href}
-                    className={cn(
-                      "block px-3 py-1.5 text-[12px] tracking-wide uppercase transition-all duration-150",
-                      isActive
-                        ? "font-medium text-[hsl(var(--sidebar-active))]"
-                        : "text-[hsl(var(--sidebar-foreground))] hover:text-[hsl(var(--sidebar-active))/0.7]",
-                    )}
-                  >
-                    {table.label}
-                  </Link>
-                );
-              })}
-            </div>
+          <div className="space-y-0.5">
+            {CANONICAL_TABLES.map((table) => {
+              const href = `/tables/${table.name}`;
+              const isActive = pathname === href;
+              return (
+                <Link key={table.name} href={href} className={cn(
+                  "flex items-center gap-3 px-4 py-2 text-[13px] transition-colors",
+                  isActive ? "bg-[hsl(var(--sidebar-hover))] font-medium text-[hsl(var(--sidebar-active))]"
+                    : "text-[hsl(var(--sidebar-foreground))] hover:bg-[hsl(var(--sidebar-hover))]",
+                )}>
+                  <Table2 className="h-4 w-4 text-[hsl(var(--sidebar-muted))]" />
+                  {table.label}
+                </Link>
+              );
+            })}
           </div>
         </div>
       </nav>

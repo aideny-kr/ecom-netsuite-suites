@@ -1,10 +1,12 @@
 import csv
 import io
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import defer
 
 from app.models.canonical import (
     Dispute,
@@ -40,9 +42,16 @@ _SEARCH_FIELDS = {
 }
 
 
-def _predicates(model, tenant_id: UUID, filters, search):
+def _predicates(model, tenant_id: UUID, filters, search, date_from=None, date_to=None):
     # Explicit isolation is required even when a DB owner/bypass role runs the API.
     predicates = [model.tenant_id == tenant_id]
+    if date_from or date_to:
+        if model is not Order or (date_from and date_to and date_from >= date_to):
+            raise ValueError("Invalid date bounds")
+        if date_from:
+            predicates.append(Order.source_created_at >= date_from)
+        if date_to:
+            predicates.append(Order.source_created_at < date_to)
     for key, value in (filters or {}).items():
         if key in model.__table__.columns and value is not None:
             predicates.append(getattr(model, key) == value)
@@ -76,12 +85,14 @@ async def query_table(
     *,
     tenant_id: UUID,
     search: str | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
 ) -> dict:
     """Generic paginated query for canonical tables."""
     model = get_model_for_table(table_name)
 
-    predicates = _predicates(model, tenant_id, filters, search)
-    query = select(model).where(*predicates)
+    predicates = _predicates(model, tenant_id, filters, search, date_from, date_to)
+    query = select(model).options(defer(model.raw_data)).where(*predicates)
     count_query = select(func.count()).select_from(model).where(*predicates)
     if sort_by and (sort_by not in model.__table__.columns or sort_by == "raw_data"):
         raise ValueError("Invalid sort column")
@@ -117,13 +128,15 @@ async def export_table_csv(
     *,
     tenant_id: UUID,
     search: str | None = None,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
 ) -> str:
     """Export a canonical table to CSV string."""
     model = get_model_for_table(table_name)
     columns = [c for c in model.__table__.columns if c.name != "raw_data"]
     query = (
         select(*columns)
-        .where(*_predicates(model, tenant_id, filters, search))
+        .where(*_predicates(model, tenant_id, filters, search, date_from, date_to))
         .order_by(model.created_at.desc(), model.id.asc())
     )
 
