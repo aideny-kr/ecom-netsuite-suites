@@ -87,8 +87,11 @@ prefixed name and the SuiteQL dialect rules from the skill pack at
 
 Environment contract (ADR-008 + /goal #3)
 -----------------------------------------
-``ANTHROPIC_API_KEY``        — required for live runs; the sidecar refuses to
-                               run without it.
+``ANTHROPIC_API_KEY``        — optional BYOK key. Live runs need *some*
+                               credential: this env var, OR a signed-in Claude
+                               Code OAuth credential resolved from the macOS
+                               Keychain (ADR-008/009). The sidecar refuses only
+                               when none resolves.
 ``SUITE_STUDIO_MODEL_DEFAULT`` — default agent's model, defaults to
                                ``claude-sonnet-4-6``.
 ``SUITE_STUDIO_MODEL_PLAN``    — plan-mode agent's model, defaults to
@@ -300,6 +303,12 @@ def build_agent(role: str = "default") -> Any:
         provider="anthropic",
         base_url=_ANTHROPIC_BASE_URL,
         model=model,
+        # Suppress AIAgent's progress chatter — including the
+        # "🔑 Using token: sk-ant-o...XXXX" line, which would otherwise print a
+        # partial OAuth/Max-subscription token to stderr and into the Electron
+        # main-process logs (sidecar.ts forwards sidecar stderr). Typed events
+        # already flow via _emit; agent chatter is noise here.
+        quiet_mode=True,
     )
 
 
@@ -319,6 +328,43 @@ def build_agents() -> Dict[str, Any]:
         "default": build_agent("default"),
         "plan": build_agent("plan"),
     }
+
+
+def _has_resolvable_anthropic_credential() -> bool:
+    """True when an Anthropic credential is *present* for the agent to use.
+
+    Deliberately a cheap, side-effect-free **presence** check — NOT a full
+    ``resolve_anthropic_token()`` call. The latter, for an *expired* Claude Code
+    OAuth credential, performs a blocking network refresh (two endpoints, up to
+    ~20s) and rewrites ``~/.claude/.credentials.json``. Running that here — purely
+    to get a bool, on the first-query hot path, with ``AIAgent`` construction then
+    resolving the same token *again* — would freeze the Electron renderer for up
+    to ~20s and risk double-rotating the refresh token. So this gate only
+    confirms a credential *exists*; the real (refreshing) resolution happens once,
+    inside agent construction.
+
+    Sources, all read-only:
+      - a non-empty env token/key (``ANTHROPIC_API_KEY`` / ``ANTHROPIC_TOKEN`` /
+        ``CLAUDE_CODE_OAUTH_TOKEN``), ``.strip()``-ed to match how the real
+        resolver treats whitespace-only values (anthropic_adapter resolves them
+        as empty);
+      - a Claude Code OAuth credential present in the macOS Keychain or
+        ``~/.claude/.credentials.json`` — ``read_claude_code_credentials`` reads
+        but never refreshes/writes — the Max-subscription path (ADR-008/009).
+
+    Presence (even if expired) is enough: ``AIAgent`` refreshes on construction.
+    The sidecar refuses only when NOTHING is present.
+    """
+    for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
+        if os.environ.get(var, "").strip():
+            return True
+    try:
+        from agent.anthropic_adapter import read_claude_code_credentials
+
+        return bool(read_claude_code_credentials())
+    except Exception as exc:  # never let credential probing crash the sidecar
+        print(f"[sidecar] credential presence probe failed: {exc}", file=sys.stderr)
+        return False
 
 
 def _extract_response_text(result: Any) -> str:
@@ -413,7 +459,8 @@ def serve_json_protocol(stdin: Any = None, stdout: Any = None) -> None:
       agent all surface as ``{"error": ...}`` on stdout and the loop
       keeps serving. The loop exits cleanly on EOF (parent closed
       stdin).
-    - Missing ``ANTHROPIC_API_KEY`` surfaces as an error JSON on the
+    - No resolvable credential (neither ``ANTHROPIC_API_KEY`` nor a Claude
+      Code Keychain credential) surfaces as an error JSON on the
       first ``run`` query rather than crashing the process — that way
       the Electron renderer can show the misconfiguration to the user
       without the parent process having to inspect exit codes.
@@ -443,10 +490,11 @@ def serve_json_protocol(stdin: Any = None, stdout: Any = None) -> None:
         nonlocal agent
         if agent is not None:
             return agent
-        if not os.environ.get("ANTHROPIC_API_KEY"):
+        if not _has_resolvable_anthropic_credential():
             raise RuntimeError(
-                "ANTHROPIC_API_KEY not set — refusing to construct agent. "
-                "Set the env var in the shell that launches Electron."
+                "No Anthropic credential resolved — refusing to construct agent. "
+                "Sign in to Claude Code (its macOS Keychain credential is used "
+                "automatically) or set ANTHROPIC_API_KEY."
             )
         org = os.environ.get("SUITE_STUDIO_ORG", "default")
         ensure_connection_template(org=org)
@@ -524,10 +572,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         serve_json_protocol()
         return 0
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    if not _has_resolvable_anthropic_credential():
         print(
-            "ANTHROPIC_API_KEY not set — refusing to run the smoke test.\n"
-            "Set the env var to your Anthropic BYOK key and re-run.",
+            "No Anthropic credential resolved — refusing to run the smoke test.\n"
+            "Sign in to Claude Code (its macOS Keychain credential is used "
+            "automatically) or set ANTHROPIC_API_KEY to a BYOK key, then re-run.",
             file=sys.stderr,
         )
         return 2
