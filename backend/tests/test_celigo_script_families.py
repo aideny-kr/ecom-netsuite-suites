@@ -784,6 +784,39 @@ class TestTotalsReconcileWithTheList:
         assert result.totals.flows_total == 2
         assert result.totals.flows_with_sites == 1
 
+    async def test_integrations_with_sites_counts_distinct_integrations_connection_wide(self, db: AsyncSession):
+        """`totals.integrations_with_sites` must be the number of distinct integrations
+        that have at least one site ACROSS THE WHOLE CONNECTION -- not summed/scoped
+        per family. Two families attached under the same integration (via different
+        flows) must not double-count that integration, and a third family under a
+        different integration must add exactly one more."""
+        sf = _import_module()
+        tenant_id, conn_id = await _basic_tenant_conn(db)
+        int_a = await _seed_integration(db, tenant_id, conn_id, celigo_id="int_a", name="Integration A")
+        int_b = await _seed_integration(db, tenant_id, conn_id, celigo_id="int_b", name="Integration B")
+        flow_a1 = await _seed_flow(db, tenant_id, conn_id, int_a, celigo_id="flow_a1", name="Flow A1")
+        flow_a2 = await _seed_flow(db, tenant_id, conn_id, int_a, celigo_id="flow_a2", name="Flow A2")
+        flow_b1 = await _seed_flow(db, tenant_id, conn_id, int_b, celigo_id="flow_b1", name="Flow B1")
+
+        s1 = await _seed_script(db, tenant_id, conn_id, celigo_id="s1", name="family_one", content="a")
+        s2 = await _seed_script(db, tenant_id, conn_id, celigo_id="s2", name="family_two", content="b")
+        s3 = await _seed_script(db, tenant_id, conn_id, celigo_id="s3", name="family_three", content="c")
+        # Family 1 and family 2 both sit under int_a (via two different flows) --
+        # a per-family union would still count int_a twice; the connection-wide
+        # count must collapse it to one.
+        await _seed_attachment(db, tenant_id, conn_id, flow_a1, script_celigo_id="s1", script_id=s1, json_path="p1")
+        await _seed_attachment(db, tenant_id, conn_id, flow_a2, script_celigo_id="s2", script_id=s2, json_path="p2")
+        # Family 3 sits under the distinct int_b.
+        await _seed_attachment(db, tenant_id, conn_id, flow_b1, script_celigo_id="s3", script_id=s3, json_path="p3")
+        await db.flush()
+
+        result = await sf.list_script_families(db, tenant_id=tenant_id, connection_id=conn_id)
+
+        assert result.totals.integrations_with_sites == 2
+        distinct_integration_ids = set.union(*(set(f.integration_ids) for f in result.families))
+        assert distinct_integration_ids == {int_a, int_b}
+        assert result.totals.integrations_with_sites == len(distinct_integration_ids)
+
 
 class TestSortOrder:
     async def test_families_sorted_by_sites_desc_copies_desc_name_asc_dedupkey_asc(self, db: AsyncSession):
