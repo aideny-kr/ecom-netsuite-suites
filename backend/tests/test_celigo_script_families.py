@@ -571,12 +571,19 @@ class TestKind:
 
 
 class TestFunctionNameMode:
-    async def test_mode_ties_broken_alphabetically(self, db: AsyncSession):
+    async def test_mode_is_not_the_alphabetically_smallest_name(self, db: AsyncSession):
+        """Review finding (brief item 5b): the previous version of this test
+        used `"run"` (mode, count 2) vs `"validate"` (count 1) -- but "run" <
+        "validate" alphabetically too, so a bug that picked the
+        alphabetically-smallest name UNCONDITIONALLY (ignoring counts) would
+        still have passed. `preMap` (count 2) vs `filter` (count 1) pins the
+        real rule: `filter` sorts first alphabetically but must lose to
+        `preMap`'s higher count."""
         sf = _import_module()
         tenant_id, conn_id = await _basic_tenant_conn(db)
         integration_id = await _seed_integration(db, tenant_id, conn_id, celigo_id="int_1")
         flow_id = await _seed_flow(db, tenant_id, conn_id, integration_id, celigo_id="flow_1")
-        script_id = await _seed_script(db, tenant_id, conn_id, celigo_id="s1", name="fnmode", content="a")
+        script_id = await _seed_script(db, tenant_id, conn_id, celigo_id="s1", name="fnmode_notalpha", content="a")
         await _seed_attachment(
             db,
             tenant_id,
@@ -584,7 +591,7 @@ class TestFunctionNameMode:
             flow_id,
             script_celigo_id="s1",
             script_id=script_id,
-            function_name="run",
+            function_name="preMap",
             json_path="p1",
         )
         await _seed_attachment(
@@ -594,7 +601,7 @@ class TestFunctionNameMode:
             flow_id,
             script_celigo_id="s1",
             script_id=script_id,
-            function_name="run",
+            function_name="preMap",
             json_path="p2",
         )
         await _seed_attachment(
@@ -604,14 +611,14 @@ class TestFunctionNameMode:
             flow_id,
             script_celigo_id="s1",
             script_id=script_id,
-            function_name="validate",
+            function_name="filter",
             json_path="p3",
         )
         await db.flush()
 
         result = await sf.list_script_families(db, tenant_id=tenant_id, connection_id=conn_id)
 
-        assert result.families[0].function_name == "run"
+        assert result.families[0].function_name == "preMap"
 
     async def test_true_tie_breaks_alphabetically(self, db: AsyncSession):
         sf = _import_module()
