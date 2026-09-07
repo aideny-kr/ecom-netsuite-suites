@@ -1,5 +1,5 @@
 import { render, screen, fireEvent } from "@testing-library/react";
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import type { CeligoScriptFamilySummary, CeligoScriptFamilyTotals } from "@/hooks/use-celigo-flows";
 
 // `CeligoScriptsList` calls `useCeligoIntegrations()` itself (to resolve the
@@ -244,13 +244,59 @@ describe("CeligoScriptsList", () => {
     expect(screen.queryByText(/0 families with this name/i)).not.toBeInTheDocument();
   });
 
-  it("typing in the search box calls onQueryChange with the typed text", () => {
-    const onQueryChange = vi.fn();
-    render(<CeligoScriptsList {...baseProps({ onQueryChange })} />);
-    fireEvent.change(screen.getByPlaceholderText("Search scripts, functions, flows"), {
-      target: { value: "sales order" },
+  // Fix round 1, finding 2: `go.scripts` (the only thing `onQueryChange`
+  // reaches — see `celigo-scripts-page.tsx`) PUSHES a history entry every
+  // call (spec §3.1/§3.2's design: it's the one page-level destination for
+  // the whole Scripts view, same category as `go.integration`/`go.flow`).
+  // Calling it on every keystroke floods history — N characters typed means
+  // N Back-presses to leave the page. The fix lives here, not in the
+  // route: the input keeps its own local value (so typing stays instant)
+  // and debounces the call out to the URL.
+  describe("search box debounce", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
     });
-    expect(onQueryChange).toHaveBeenCalledWith("sales order");
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("updates the visible input value immediately on every keystroke", () => {
+      render(<CeligoScriptsList {...baseProps()} />);
+      const input = screen.getByPlaceholderText("Search scripts, functions, flows") as HTMLInputElement;
+      fireEvent.change(input, { target: { value: "sales order" } });
+      expect(input.value).toBe("sales order");
+    });
+
+    it("does not call onQueryChange until the debounce window elapses", () => {
+      const onQueryChange = vi.fn();
+      render(<CeligoScriptsList {...baseProps({ onQueryChange })} />);
+      fireEvent.change(screen.getByPlaceholderText("Search scripts, functions, flows"), {
+        target: { value: "sales order" },
+      });
+      expect(onQueryChange).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(300);
+      expect(onQueryChange).toHaveBeenCalledWith("sales order");
+    });
+
+    it("collapses rapid keystrokes into exactly one onQueryChange call, not one per character", () => {
+      const onQueryChange = vi.fn();
+      render(<CeligoScriptsList {...baseProps({ onQueryChange })} />);
+      const el = screen.getByPlaceholderText("Search scripts, functions, flows");
+      for (const value of ["s", "sa", "sal", "sale", "sales"]) {
+        fireEvent.change(el, { target: { value } });
+      }
+      vi.advanceTimersByTime(300);
+      expect(onQueryChange).toHaveBeenCalledTimes(1);
+      expect(onQueryChange).toHaveBeenCalledWith("sales");
+    });
+
+    it("resyncs the visible value when the q prop changes externally (e.g. a chip clearing it elsewhere)", () => {
+      const { rerender } = render(<CeligoScriptsList {...baseProps({ q: "old query" })} />);
+      const input = screen.getByPlaceholderText("Search scripts, functions, flows") as HTMLInputElement;
+      expect(input.value).toBe("old query");
+      rerender(<CeligoScriptsList {...baseProps({ q: "" })} />);
+      expect(input.value).toBe("");
+    });
   });
 
   it("clicking a filter chip calls onFilterChange with that filter", () => {

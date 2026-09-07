@@ -150,6 +150,17 @@ const KIND_OPTIONS: { value: ScriptsKind | ""; label: string }[] = [
 // Component
 // ---------------------------------------------------------------------------
 
+/** Milliseconds the search box waits after the last keystroke before
+ * pushing `q` out to the URL (fix round 1, finding 2). `onQueryChange`
+ * reaches `route.go.scripts(...)`, and `go.scripts` PUSHES a history entry
+ * on every call (spec §3.1/§3.2: it's the one page-level destination for
+ * the whole Scripts view — see `celigo-route.ts`'s docstring). Calling it
+ * per keystroke floods history (typing "sales order" pushes 11 entries;
+ * Back then steps through them one character at a time instead of leaving
+ * the page). Debouncing here — rather than changing `go.scripts` to
+ * `replace` — keeps Task 3's routing contract untouched. */
+const SEARCH_DEBOUNCE_MS = 300;
+
 export function CeligoScriptsList({
   families,
   totals,
@@ -178,6 +189,34 @@ export function CeligoScriptsList({
   onIntegrationChange: (integrationId: string | null) => void;
 }): JSX.Element {
   const integrationsQuery = useCeligoIntegrations();
+
+  // Local, debounced echo of `q` (fix round 1, finding 2) — see
+  // `SEARCH_DEBOUNCE_MS`'s docstring above. `localQuery` is what the input
+  // shows (so typing feels instant, no per-keystroke re-render round trip
+  // through the URL); `onQueryChange` fires only after the debounce window,
+  // and only when the typed value still differs from the current `q` prop
+  // (so a value that arrives back around — the URL round-trip after the
+  // debounced call itself resolves — doesn't fire a second, redundant one).
+  const [localQuery, setLocalQuery] = useState(q);
+  useEffect(() => {
+    // `q` changed from OUTSIDE this input (a chip/filter reset, a pasted
+    // link, Back/Forward) — resync the visible value to match. Comparing
+    // against `localQuery` first would miss the very case this exists for:
+    // the URL changed while the user wasn't typing.
+    setLocalQuery(q);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [q]);
+  useEffect(() => {
+    if (localQuery === q) return;
+    const handle = setTimeout(() => onQueryChange(localQuery), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(handle);
+    // Intentionally NOT depending on `q`/`onQueryChange`: this timer is keyed
+    // off `localQuery` alone (one pending call per distinct typed value,
+    // reset by the cleanup above on every subsequent keystroke) — including
+    // them would restart the timer on the URL's own round-trip echo instead
+    // of only on a new keystroke.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [localQuery]);
 
   const integrationNameById = useMemo(() => {
     const map = new Map<string, string>();
@@ -247,8 +286,8 @@ export function CeligoScriptsList({
           <Search aria-hidden className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
           <input
             type="text"
-            value={q}
-            onChange={(e) => onQueryChange(e.target.value)}
+            value={localQuery}
+            onChange={(e) => setLocalQuery(e.target.value)}
             placeholder="Search scripts, functions, flows"
             className="w-full min-w-0 bg-transparent text-foreground outline-none placeholder:text-muted-foreground"
           />
