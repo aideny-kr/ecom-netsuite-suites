@@ -67,6 +67,8 @@ def _connector_to_response(c) -> McpConnectorResponse:
         is_enabled=c.is_enabled,
         encryption_key_version=c.encryption_key_version,
         metadata_json=c.metadata_json,
+        error_reason=c.error_reason,
+        last_health_check_at=c.last_health_check_at,
         created_at=c.created_at,
         created_by=str(c.created_by) if c.created_by else None,
     )
@@ -786,22 +788,7 @@ async def create_mcp_connector(
             status_code=422, detail="Invalid MCP settings. Check the public HTTPS URL and authentication."
         ) from None
 
-    # Auto-discover tools from the newly connected MCP server
-    try:
-        from app.services.mcp_client_service import discover_tools
-
-        tools = await discover_tools(connector, db)
-        connector.discovered_tools = tools
-        connector.status = "active"
-        connector.error_reason = None
-        await db.flush()
-    except Exception:
-        connector.status = "error"
-        connector.error_reason = "Tool discovery failed. Check the server URL and credential."
-        logger.warning(
-            "mcp_connector.create.tool_discovery_failed",
-            connector_id=str(connector.id),
-        )
+    await mcp_connector_service.test_mcp_connector(db, connector.id, user.tenant_id)
 
     await audit_service.log_event(
         db=db,

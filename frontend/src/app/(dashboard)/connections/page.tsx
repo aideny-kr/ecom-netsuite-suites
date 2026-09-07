@@ -51,7 +51,10 @@ function ConnectionsContent() {
     setTesting(item.id);
     try {
       const result = await (item.kind === "api" ? testApi.mutateAsync(item.id) : testMcp.mutateAsync(item.id));
-      toast({ title: result.status === "ok" ? "Read access verified" : "Connection needs attention", description: result.message, variant: result.status === "ok" ? "default" : "destructive" });
+      const title = result.status === "ok" ? "Connection verified"
+        : result.status === "partial" ? "Verification incomplete"
+        : result.status === "unsupported" ? "Test unavailable" : "Connection needs attention";
+      toast({ title, description: result.message, variant: ["ok", "partial", "unsupported"].includes(result.status) ? "default" : "destructive" });
     } catch (error) {
       toast({ title: "Could not test connection", description: error instanceof Error ? error.message : "Try again", variant: "destructive" });
     } finally { setTesting(null); }

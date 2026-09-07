@@ -65,3 +65,14 @@ it("shows a retry when a list fails", () => {
   expect(screen.getByRole("alert")).toHaveTextContent("could not be loaded");
   expect(screen.getByRole("button", { name: "Reload connections" })).toBeVisible();
 });
+it.each([
+  ["ok", "Connection verified", "default"],
+  ["partial", "Verification incomplete", "default"],
+  ["unsupported", "Test unavailable", "default"],
+  ["error", "Connection needs attention", "destructive"],
+])("reports %s test results accurately", async (status, title, variant) => {
+  mocks.test.mockResolvedValue({ status, message: "Provider verification detail" });
+  render(<ConnectionsPage />);
+  fireEvent.click(screen.getAllByRole("button", { name: "Test" })[0]);
+  await waitFor(() => expect(mocks.toast).toHaveBeenCalledWith({ title, variant, description: "Provider verification detail" }));
+});

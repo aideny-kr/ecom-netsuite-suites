@@ -1,10 +1,12 @@
+import asyncio
 import uuid
+from datetime import datetime, timezone
 
 import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.encryption import encrypt_credentials, get_current_key_version
+from app.core.encryption import decrypt_credentials, encrypt_credentials, get_current_key_version
 from app.models.mcp_connector import McpConnector
 from app.services.celigo.client import mcp_server_url
 
@@ -241,18 +243,38 @@ async def get_active_connectors_for_tenant(db: AsyncSession, tenant_id: uuid.UUI
 async def test_mcp_connector(db: AsyncSession, connector_id: uuid.UUID, tenant_id: uuid.UUID) -> dict:
     """Test an MCP connector by connecting and discovering tools."""
     connector = await get_mcp_connector(db, connector_id, tenant_id)
-    if not connector or connector.status == "revoked":
+    if not connector or connector.status in ("revoked", "superseded"):
         return {
             "connector_id": str(connector_id),
             "status": "error",
             "message": "Connector not found",
         }
 
+    if connector.provider in ("bigquery", "google_sheets"):
+        from app.services.connection_verification import check_google, failure_message
+
+        try:
+            async with asyncio.timeout(45):
+                result = await check_google(
+                    connector.provider,
+                    decrypt_credentials(connector.encrypted_credentials),
+                    connector.metadata_json or {},
+                )
+        except Exception as exc:
+            name = "BigQuery" if connector.provider == "bigquery" else "Google Sheets"
+            result = {"status": "error", "message": failure_message(name, exc)}
+        connector.status = "error" if result["status"] == "error" else "active"
+        connector.error_reason = result["message"] if result["status"] == "error" else None
+        connector.last_health_check_at = datetime.now(timezone.utc)
+        await db.flush()
+        return {"connector_id": str(connector.id), **result}
+
     try:
         from app.services.mcp_client_service import discover_tools
 
         tools = await discover_tools(connector, db)
         connector.discovered_tools = tools
+        connector.last_health_check_at = datetime.now(timezone.utc)
         connector.status = "active"
         connector.error_reason = None
         await db.flush()
@@ -264,6 +286,7 @@ async def test_mcp_connector(db: AsyncSession, connector_id: uuid.UUID, tenant_i
             "discovered_tools": tools,
         }
     except Exception:
+        connector.last_health_check_at = datetime.now(timezone.utc)
         connector.status = "error"
         connector.error_reason = "Tool discovery failed. Check the server URL and credential."
         await db.flush()
