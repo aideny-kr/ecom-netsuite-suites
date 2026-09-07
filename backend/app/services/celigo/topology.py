@@ -103,6 +103,20 @@ class ScriptFamilyFact:
     content_diverged: bool
 
 
+def _spreadsheet_column(n: int) -> str:
+    """0-based index -> spreadsheet-column-style letters: 0->A, 25->Z,
+    26->AA, 27->AB, ... 51->AZ, 52->BA, ... Bijective base-26 (there is no
+    digit for zero), so this never wraps or produces a non-letter character
+    the way `chr(ord("A") + n)` does past the 26th value (n=26 would yield
+    `"["`, not a letter at all)."""
+    n += 1
+    letters = ""
+    while n > 0:
+        n, remainder = divmod(n - 1, 26)
+        letters = chr(ord("A") + remainder) + letters
+    return letters
+
+
 def assign_version_letters(members: list[CeligoScript]) -> dict[str, str]:
     """Map each distinct `content_hash` among *members* (one already-grouped
     clone family) to a version letter (A, B, C...), ordered by first
@@ -137,7 +151,7 @@ def assign_version_letters(members: list[CeligoScript]) -> dict[str, str]:
         if existing is None or key < existing:
             best_key_by_hash[s.content_hash] = key
     ordered_hashes = sorted(best_key_by_hash, key=lambda h: best_key_by_hash[h])
-    return {content_hash: chr(ord("A") + i) for i, content_hash in enumerate(ordered_hashes)}
+    return {content_hash: _spreadsheet_column(i) for i, content_hash in enumerate(ordered_hashes)}
 
 
 def script_family_facts(scripts: list[CeligoScript]) -> dict[uuid.UUID, ScriptFamilyFact]:

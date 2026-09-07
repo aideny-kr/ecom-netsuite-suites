@@ -5,7 +5,7 @@ module exists as the one place that reads a flow's declared router/branch
 shape and a script's clone-family state."""
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.models.celigo import CeligoScript
 from app.services.celigo.topology import (
@@ -161,6 +161,74 @@ def test_assign_version_letters_ties_on_first_seen_broken_by_member_id_not_hash(
     letters = assign_version_letters([zzzz_member, aaaa_member])
 
     assert letters == {"zzzz_hash": "A", "aaaa_hash": "B"}
+
+    # Order-independence: the docstring claims the result is "independent of
+    # row-insertion order" -- this reverses the input list and checks the
+    # SAME letters come back, which the test never actually verified before
+    # this review finding (it only ever passed members in one fixed order).
+    letters_reversed = assign_version_letters([aaaa_member, zzzz_member])
+    assert letters_reversed == letters
+
+
+def _spreadsheet_column(n: int) -> str:
+    """The expected letter for 0-based index *n*, computed independently of
+    `assign_version_letters` itself (bijective base-26: 0->A, 25->Z,
+    26->AA, 27->AB, ... 51->AZ, 52->BA, ...) -- used below as the oracle,
+    not copy-pasted from the implementation under test."""
+    n += 1
+    letters = ""
+    while n > 0:
+        n, remainder = divmod(n - 1, 26)
+        letters = chr(ord("A") + remainder) + letters
+    return letters
+
+
+def _scripts_with_n_distinct_hashes(n: int) -> list[CeligoScript]:
+    """*n* members of one family, each carrying a distinct `content_hash`
+    and a strictly increasing `celigo_last_modified` -- so hash `i` is
+    first-seen at position `i` and must be assigned letter `i` (0-based, in
+    spreadsheet order)."""
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    return [
+        CeligoScript(
+            id=uuid.uuid4(),
+            tenant_id=uuid.uuid4(),
+            celigo_connection_id=uuid.uuid4(),
+            celigo_id=str(uuid.uuid4()),
+            name="fam",
+            dedup_key="k",
+            content_hash=f"h{i:04d}",
+            content=f"content-{i}",
+            celigo_last_modified=base + timedelta(minutes=i),
+        )
+        for i in range(n)
+    ]
+
+
+def test_assign_version_letters_goes_past_z_spreadsheet_style_with_27_hashes():
+    """Review finding (brief item 3): `chr(ord("A") + i)` breaks past the
+    26th hash (`chr(ord("A") + 26)` is `"["`, not a letter at all). 27
+    distinct hashes must produce A..Z then AA, spreadsheet-column style."""
+    members = _scripts_with_n_distinct_hashes(27)
+
+    letters = assign_version_letters(members)
+
+    assert letters["h0000"] == "A"
+    assert letters["h0025"] == "Z"
+    assert letters["h0026"] == "AA"
+    assert letters == {f"h{i:04d}": _spreadsheet_column(i) for i in range(27)}
+
+
+def test_assign_version_letters_goes_past_z_spreadsheet_style_with_53_hashes():
+    members = _scripts_with_n_distinct_hashes(53)
+
+    letters = assign_version_letters(members)
+
+    assert letters["h0025"] == "Z"
+    assert letters["h0026"] == "AA"
+    assert letters["h0051"] == "AZ"
+    assert letters["h0052"] == "BA"
+    assert letters == {f"h{i:04d}": _spreadsheet_column(i) for i in range(53)}
 
 
 def test_adaptor_family_groups_case_insensitively_netsuite_first():
