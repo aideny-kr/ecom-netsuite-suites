@@ -14,13 +14,34 @@
  * the Facts tab (no `tab` arg; `celigo-flow-page.tsx` defaults it), a chip
  * click jumps straight to the tab that chip's own data lives on. Nothing
  * here runs, edits, retries, or syncs anything.
+ *
+ * Task 6 — the hook chip also carries a ⌥/Alt (or ⌘/Meta) click straight to
+ * the account-wide Scripts view for that script's own clone family (spec
+ * §3.4 entry points), a plain click keeping its existing meaning above.
+ * Only the hook chip can resolve a script id at all (`chips.ts`'s
+ * `hooksChip` is the one chip backed by a real `CeligoAttachment`; every
+ * other slot is synthetic, sourced from `filter_json`/`mapping_json`) — a
+ * modifier click on any other chip, or a hook chip with nothing configured,
+ * simply falls through to the plain-click behavior.
+ *
+ * No field on `CeligoAttachment` carries the family's `dedup_key` (only
+ * `script_id`/`script_celigo_id` — see `use-celigo-flows.ts`; `dedup_key`
+ * is a DB-computed fact of the SCRIPT row itself, `COALESCE(source_id,
+ * celigo_id)`, unrelated to which celigo_id got attached here), so this
+ * resolves it the same way the drawer already does: `useCeligoScript`,
+ * enabled only once a modifier-click names a script id, then `go.scripts`
+ * once that resolves. No new backend/hook surface for this — both already
+ * exist for the drawer's own "Scripts view ↗" link (Task 6, same task).
  */
 
+import { useEffect, useState } from "react";
 import type { CeligoFlowStep } from "@/hooks/use-celigo-flows";
+import { useCeligoScript } from "@/hooks/use-celigo-flows";
 import type { LayoutNode } from "./layout";
 import type { InspectorTab } from "./celigo-step-inspector";
 import { affordanceChips, type Chip } from "./chips";
 import { ADAPTOR_NOT_SYNCED, adaptorFamily, fallbackStepTitle } from "./shared";
+import { useCeligoRoute } from "./celigo-route";
 import { cn } from "@/lib/utils";
 
 const APP_GLYPH: Record<string, string> = {
@@ -117,7 +138,22 @@ const SLOT_TONE: Record<Chip["slot"], ChipTone> = {
   response_mapping: "mp",
 };
 
-function ChipButton({ chip, onClick }: { chip: Chip; onClick: () => void }): JSX.Element {
+function ChipButton({
+  chip,
+  scriptId,
+  onClick,
+  onOpenScriptsView,
+}: {
+  chip: Chip;
+  /** This chip's own script row id (the hook chip's `attachmentId` cross-
+   * referenced against `step.attachments`, below) — `null` for every other
+   * chip slot, and for a hook chip with nothing configured. Only a
+   * non-null id can be resolved to a family, so only then does a modifier
+   * click mean anything different from a plain one. */
+  scriptId: string | null;
+  onClick: () => void;
+  onOpenScriptsView: (scriptId: string) => void;
+}): JSX.Element {
   const tone = chip.state === "configured" ? SLOT_TONE[chip.slot] : chip.state;
   const isHook = chip.slot === "hooks" && chip.state === "configured";
   const versionBadge = isHook && chip.copiesCount && chip.copiesCount > 1 ? `${chip.versionLetter ?? "?"}/${chip.versionsCount ?? "?"}` : "×1";
@@ -126,6 +162,10 @@ function ChipButton({ chip, onClick }: { chip: Chip; onClick: () => void }): JSX
       type="button"
       onClick={(e) => {
         e.stopPropagation();
+        if (scriptId && (e.altKey || e.metaKey)) {
+          onOpenScriptsView(scriptId);
+          return;
+        }
         onClick();
       }}
       className={cn(
@@ -181,6 +221,20 @@ export function StepBubble({
   const chips = affordanceChips(step);
   const footer = footerText(step);
   const hasError = step.error_count > 0;
+
+  // Task 6 -- a modifier-click on the hook chip names a script id here;
+  // `useCeligoScript` (enabled only while this is non-null, same rule as
+  // the drawer's own query) then resolves its family, and the effect below
+  // navigates once that arrives and resets to null so a second click on a
+  // DIFFERENT chip re-triggers the same flow.
+  const route = useCeligoRoute();
+  const [scriptsViewTarget, setScriptsViewTarget] = useState<string | null>(null);
+  const scriptsViewQuery = useCeligoScript(scriptsViewTarget ?? undefined);
+  useEffect(() => {
+    if (!scriptsViewTarget || !scriptsViewQuery.data) return;
+    route.go.scripts({ family: scriptsViewQuery.data.dedup_key, copy: scriptsViewTarget });
+    setScriptsViewTarget(null);
+  }, [scriptsViewTarget, scriptsViewQuery.data, route]);
 
   return (
     <div
@@ -243,9 +297,25 @@ export function StepBubble({
       </div>
       <div className="truncate font-mono text-[10px] text-muted-foreground">{factLine(step)}</div>
       <div className="mt-px flex flex-wrap gap-[3px]">
-        {chips.map((chip) => (
-          <ChipButton key={chip.slot} chip={chip} onClick={() => onSelect(step.id, tabForChip(chip.slot))} />
-        ))}
+        {chips.map((chip) => {
+          // Only the hook slot is ever backed by a real attachment
+          // (`chips.ts`'s `hooksChip`, sourced from `step.attachments[0]`)
+          // -- every other slot is synthetic, so it never resolves a
+          // script id no matter what `chip.attachmentId` might (not) hold.
+          const scriptId =
+            chip.slot === "hooks"
+              ? step.attachments.find((a) => a.id === chip.attachmentId)?.script_id ?? null
+              : null;
+          return (
+            <ChipButton
+              key={chip.slot}
+              chip={chip}
+              scriptId={scriptId}
+              onClick={() => onSelect(step.id, tabForChip(chip.slot))}
+              onOpenScriptsView={setScriptsViewTarget}
+            />
+          );
+        })}
       </div>
       <div className={cn("mt-auto truncate text-[9.5px] text-muted-foreground", footer.amber && "text-amber-600 dark:text-amber-400")}>
         {footer.text}

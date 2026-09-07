@@ -38,20 +38,31 @@ interface DiffViewerProps {
   original: string;
   modified: string;
   filePath: string;
+  /** Renders left/right panes side by side (Monaco's `renderSideBySide`)
+   * when true (the default, today's only behaviour), or a single inline
+   * pane when false — the Celigo Scripts detail pane's compare mode
+   * "Side by side / Inline" toggle (spec §3.3). */
+  sideBySide?: boolean;
+  /** Overrides the language Monaco derives from `filePath`'s extension.
+   * A customer script has no real file path to extract one from (it's a
+   * clone family's synthetic name), so the caller states the language
+   * directly instead of this component guessing "plaintext" off a
+   * path with no extension. */
+  language?: string;
 }
 
-export function DiffViewer({ original, modified, filePath }: DiffViewerProps) {
-  const language = getLanguageFromPath(filePath);
+export function DiffViewer({ original, modified, filePath, sideBySide = true, language }: DiffViewerProps) {
+  const resolvedLanguage = language ?? getLanguageFromPath(filePath);
 
   return (
     <MonacoDiffEditor
       height="100%"
-      language={language}
+      language={resolvedLanguage}
       original={original}
       modified={modified}
       options={{
         readOnly: true,
-        renderSideBySide: true,
+        renderSideBySide: sideBySide,
         minimap: { enabled: false },
       }}
       theme="vs-dark"

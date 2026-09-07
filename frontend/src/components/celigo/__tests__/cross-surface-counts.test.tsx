@@ -31,6 +31,7 @@ const mocks = vi.hoisted(() => ({
   integrationChanges: vi.fn(),
   flowErrors: vi.fn(),
   script: vi.fn(),
+  scriptFamilies: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-celigo-flows", () => ({
@@ -41,6 +42,10 @@ vi.mock("@/hooks/use-celigo-flows", () => ({
   useCeligoIntegrationChanges: () => mocks.integrationChanges(),
   useCeligoFlowErrors: () => mocks.flowErrors(),
   useCeligoScript: (scriptId: string | undefined) => mocks.script(scriptId),
+  // Task 6 — `CeligoIntegrationPage`'s Scripts tab now fetches the
+  // account-wide families list too; this test never exercises that tab, so
+  // an empty, always-resolved list is enough to let the page mount.
+  useCeligoScriptFamilies: () => mocks.scriptFamilies(),
 }));
 
 const routeMocks = vi.hoisted(() => ({
@@ -57,6 +62,7 @@ const routeMocks = vi.hoisted(() => ({
     flow: vi.fn(),
     step: vi.fn(),
     script: vi.fn(),
+    scripts: vi.fn(),
   },
 }));
 
@@ -233,6 +239,24 @@ beforeEach(() => {
   mocks.integrationChanges.mockReset().mockReturnValue(resolved([]));
   mocks.flowErrors.mockReset().mockReturnValue(resolved(FLOW_ERRORS));
   mocks.script.mockReset().mockReturnValue(pending());
+  mocks.scriptFamilies.mockReset().mockReturnValue(
+    resolved({
+      totals: {
+        scripts: 0,
+        families: 0,
+        attached_families: 0,
+        unattached_families: 0,
+        diverged_families: 0,
+        sites: 0,
+        flows_with_sites: 0,
+        flows_total: 0,
+        integrations_with_sites: 0,
+        sites_with_open_errors: 0,
+      },
+      families: [],
+      synced_at: null,
+    }),
+  );
 
   routeMocks.view = "tiles";
   routeMocks.integrationId = INTEGRATION_ID;
@@ -246,6 +270,7 @@ beforeEach(() => {
   routeMocks.go.flow.mockReset();
   routeMocks.go.step.mockReset();
   routeMocks.go.script.mockReset();
+  routeMocks.go.scripts.mockReset();
 });
 
 afterEach(() => {

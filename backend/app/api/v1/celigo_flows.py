@@ -85,8 +85,8 @@ from app.models.celigo import (
     celigo_script_is_production,
 )
 from app.models.user import User
-from app.services.celigo import read_queries
-from app.services.celigo.read_queries import _join_production_integration
+from app.services.celigo import read_queries, script_families
+from app.services.celigo.read_queries import _get_celigo_connection, _join_production_integration
 from app.services.celigo.repository import list_logical_scripts
 
 router = APIRouter(prefix="/celigo", tags=["celigo"])
@@ -656,6 +656,228 @@ async def get_flow_detail(
     if detail is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Flow not found")
     return _flow_detail_out(detail)
+
+
+# ---------------------------------------------------------------------------
+# GET /celigo/scripts/families, GET /celigo/scripts/families/{dedup_key}
+#
+# Task 2 (Scripts view design, spec §2.4) -- account-wide clone-family view
+# over `app.services.celigo.script_families` (Task 1). DECLARED BEFORE
+# `GET /scripts/{script_id}` below: FastAPI/Starlette matches routes in
+# registration order, and `/scripts/families` (two path segments) would
+# otherwise be swallowed by `/scripts/{script_id}` trying to parse "families"
+# as a UUID. `/scripts/families/{dedup_key}` (three segments) never
+# collides with `/scripts/{script_id}` (two) regardless of order, but is
+# declared alongside its sibling route for the same reason, per the spec.
+#
+# Both routes resolve the tenant's Celigo connection the same way
+# `read_queries` does (`_get_celigo_connection`) rather than taking it as a
+# path/query param -- `script_families.list_script_families` /
+# `get_script_family` both take a caller-resolved `connection_id` by design
+# (Task 1's docstring), leaving connection resolution / 404 / the
+# no-connection-means-empty rule to this API layer, same division of labor
+# as every other route in this file.
+# ---------------------------------------------------------------------------
+
+
+class CeligoScriptFamilyTotalsOut(BaseModel):
+    scripts: int
+    families: int
+    attached_families: int
+    unattached_families: int
+    diverged_families: int
+    sites: int
+    flows_with_sites: int
+    flows_total: int
+    integrations_with_sites: int
+    sites_with_open_errors: int
+
+
+class CeligoScriptFamilySummaryOut(BaseModel):
+    """Mirrors `script_families.ScriptFamilySummary` field-for-field --
+    deliberately NO `content`/`content_hash` field: the LIST response never
+    carries script content (spec §5 N2 boundary; see
+    `test_celigo_script_families_api.py`'s JSON-walk test)."""
+
+    dedup_key: str
+    name: str
+    kind: str
+    function_name: str | None
+    copies_count: int
+    versions_count: int
+    content_diverged: bool
+    original_present: bool
+    sites_count: int
+    flows_count: int
+    integrations_count: int
+    integration_ids: list[str]
+    flow_names: list[str]
+    sites_with_open_errors: int
+    sites_unchecked: int
+    first_modified: datetime | None
+    last_modified: datetime | None
+    max_size_bytes: int | None
+    other_families_with_name: int
+
+
+class CeligoScriptFamiliesOut(BaseModel):
+    totals: CeligoScriptFamilyTotalsOut
+    families: list[CeligoScriptFamilySummaryOut]
+    synced_at: datetime | None
+
+
+class CeligoScriptFamilyMemberOut(BaseModel):
+    """Mirrors `script_families.ScriptFamilyMember`. Unlike the summary
+    above, `content` IS present here -- the DETAIL response is the human-only
+    surface script content is allowed to reach (spec §5)."""
+
+    script_id: str
+    celigo_id: str
+    name: str
+    is_original: bool
+    version_letter: str | None
+    content_hash: str | None
+    size_bytes: int | None
+    celigo_last_modified: datetime | None
+    sites_count: int
+    flows_count: int
+    content: str | None
+
+
+class CeligoScriptFamilyVersionOut(BaseModel):
+    letter: str
+    content_hash: str
+    copies_count: int
+    sites_count: int
+    first_seen: datetime | None
+    size_bytes: int | None
+    holds_original: bool
+
+
+class CeligoScriptFamilySiteOut(BaseModel):
+    attachment_id: str
+    script_id: str | None
+    script_celigo_id: str
+    version_letter: str | None
+    integration_id: str | None
+    integration_name: str | None
+    flow_id: str
+    flow_name: str
+    flow_disabled: bool | None
+    flow_step_id: str | None
+    step_reference_name: str | None
+    step_role: str | None
+    step_adaptor_type: str | None
+    step_record_type: str | None
+    step_operation: str | None
+    json_path: str
+    function_name: str | None
+    site_type: str
+    open_error_count: int | None
+    errors_checked_at: datetime | None
+
+
+class CeligoScriptFamilyOut(BaseModel):
+    summary: CeligoScriptFamilySummaryOut
+    members: list[CeligoScriptFamilyMemberOut]
+    versions: list[CeligoScriptFamilyVersionOut]
+    sites: list[CeligoScriptFamilySiteOut]
+
+
+_EMPTY_SCRIPT_FAMILY_TOTALS = CeligoScriptFamilyTotalsOut(
+    scripts=0,
+    families=0,
+    attached_families=0,
+    unattached_families=0,
+    diverged_families=0,
+    sites=0,
+    flows_with_sites=0,
+    flows_total=0,
+    integrations_with_sites=0,
+    sites_with_open_errors=0,
+)
+
+
+def _script_family_totals_out(t: script_families.ScriptFamilyTotals) -> CeligoScriptFamilyTotalsOut:
+    return CeligoScriptFamilyTotalsOut(**dataclasses.asdict(t))
+
+
+def _script_family_summary_out(s: script_families.ScriptFamilySummary) -> CeligoScriptFamilySummaryOut:
+    data = dataclasses.asdict(s)
+    data["integration_ids"] = [str(i) for i in data["integration_ids"]]
+    return CeligoScriptFamilySummaryOut(**data)
+
+
+def _script_family_member_out(m: script_families.ScriptFamilyMember) -> CeligoScriptFamilyMemberOut:
+    data = dataclasses.asdict(m)
+    data["script_id"] = str(data["script_id"])
+    return CeligoScriptFamilyMemberOut(**data)
+
+
+def _script_family_version_out(v: script_families.ScriptFamilyVersion) -> CeligoScriptFamilyVersionOut:
+    return CeligoScriptFamilyVersionOut(**dataclasses.asdict(v))
+
+
+def _script_family_site_out(s: script_families.ScriptFamilySite) -> CeligoScriptFamilySiteOut:
+    data = dataclasses.asdict(s)
+    data["attachment_id"] = str(data["attachment_id"])
+    data["script_id"] = str(data["script_id"]) if data["script_id"] is not None else None
+    data["integration_id"] = str(data["integration_id"]) if data["integration_id"] is not None else None
+    data["flow_id"] = str(data["flow_id"])
+    data["flow_step_id"] = str(data["flow_step_id"]) if data["flow_step_id"] is not None else None
+    return CeligoScriptFamilySiteOut(**data)
+
+
+@router.get("/scripts/families", response_model=CeligoScriptFamiliesOut)
+async def list_script_families(
+    user: Annotated[User, Depends(require_permission("connections.view"))],
+    _flag: Annotated[User, Depends(require_feature("celigo"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """The account-wide Scripts view's list -- every production clone family
+    under the tenant's active Celigo connection, collapsed and summarised by
+    `script_families.list_script_families`. No connection -> an honest empty
+    list with zeroed totals and `synced_at: null`, never a 500 (spec §2.4)."""
+    connection = await _get_celigo_connection(db, user.tenant_id)
+    if connection is None:
+        return CeligoScriptFamiliesOut(totals=_EMPTY_SCRIPT_FAMILY_TOTALS, families=[], synced_at=None)
+
+    result = await script_families.list_script_families(db, tenant_id=user.tenant_id, connection_id=connection.id)
+    return CeligoScriptFamiliesOut(
+        totals=_script_family_totals_out(result.totals),
+        families=[_script_family_summary_out(f) for f in result.families],
+        synced_at=result.synced_at,
+    )
+
+
+@router.get("/scripts/families/{dedup_key}", response_model=CeligoScriptFamilyOut)
+async def get_script_family(
+    dedup_key: str,
+    user: Annotated[User, Depends(require_permission("connections.view"))],
+    _flag: Annotated[User, Depends(require_feature("celigo"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """One clone family's members/versions/where-used sites, `content`
+    included per member -- this is the N2 human-only surface (spec §5). No
+    connection, or a `dedup_key` this connection has never seen among its
+    PRODUCTION scripts, both read as the same 404 (never distinguished, so a
+    caller can't use the message to probe which connections exist)."""
+    connection = await _get_celigo_connection(db, user.tenant_id)
+    if connection is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Script family not found")
+
+    detail = await script_families.get_script_family(
+        db, tenant_id=user.tenant_id, connection_id=connection.id, dedup_key=dedup_key
+    )
+    if detail is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Script family not found")
+
+    return CeligoScriptFamilyOut(
+        summary=_script_family_summary_out(detail.summary),
+        members=[_script_family_member_out(m) for m in detail.members],
+        versions=[_script_family_version_out(v) for v in detail.versions],
+        sites=[_script_family_site_out(s) for s in detail.sites],
+    )
 
 
 # ---------------------------------------------------------------------------

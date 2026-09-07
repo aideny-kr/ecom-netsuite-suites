@@ -4,7 +4,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 const nav = vi.hoisted(() => ({ push: vi.fn(), replace: vi.fn(), params: new URLSearchParams() }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: nav.push, replace: nav.replace }), useSearchParams: () => nav.params, usePathname: () => "/workspace" }));
 
-import { readCeligoRoute, useCeligoRoute } from "../celigo-route";
+import { readCeligoRoute, useCeligoRoute, isScriptsView } from "../celigo-route";
 
 beforeEach(() => { nav.push.mockReset(); nav.replace.mockReset(); nav.params = new URLSearchParams(); });
 
@@ -84,6 +84,31 @@ describe("useCeligoRoute is the only writer", () => {
     expect(nav.push).toHaveBeenLastCalledWith("/workspace?surface=celigo&integration=iB&flow=f2");
   });
 
+  // Fix round 1, Task 5 finding. The Scripts view's where-used "↗" (spec
+  // §3.3) must land on the flow with the exact step/script/site pre-selected
+  // -- not just the flow itself -- so `go.flow` takes an optional third
+  // argument carrying that triple through to the URL, same fields `go.step`/
+  // `go.script` already write for a same-page selection.
+  it("go.flow's optional third argument carries step/script/site through to the URL", () => {
+    nav.params = new URLSearchParams("surface=celigo");
+    const { result } = renderHook(() => useCeligoRoute());
+
+    act(() =>
+      result.current.go.flow("f3", "iC", { stepId: "s1", scriptId: "x1", jsonPath: "a.hooks.preMap" }),
+    );
+    expect(nav.push).toHaveBeenLastCalledWith(
+      "/workspace?surface=celigo&integration=iC&flow=f3&step=s1&script=x1&site=a.hooks.preMap",
+    );
+  });
+
+  it("go.flow's site is dropped without a scriptId, same rule as go.script", () => {
+    nav.params = new URLSearchParams("surface=celigo");
+    const { result } = renderHook(() => useCeligoRoute());
+
+    act(() => result.current.go.flow("f3", "iC", { stepId: "s1", jsonPath: "a.hooks.preMap" }));
+    expect(nav.push).toHaveBeenLastCalledWith("/workspace?surface=celigo&integration=iC&flow=f3&step=s1");
+  });
+
   // Codex fix wave, item 25. One script is routinely attached at several
   // SITES on the same step (a preMap and a postMap, or two clones of one
   // family), and `flow_step_id` cannot tell them apart — so the drawer named
@@ -121,5 +146,120 @@ describe("useCeligoRoute is the only writer", () => {
     expect(nav.replace).toHaveBeenLastCalledWith(
       "/workspace?surface=celigo&integration=i1&tab=errors&flow=f1&step=s1&script=x1&site=a.hooks.preMap",
     );
+  });
+});
+
+// Task 3 (Scripts view route params, spec §3.1). `family`/`copy`/`compare`/
+// `filter`/`kind`/`q`/`in`, plus `isScriptsView` — the one place that tells
+// the account-wide Scripts view (`?tab=scripts` with no `integration`) apart
+// from the integration page's OWN Scripts tab (`?integration=X&tab=scripts`).
+describe("Scripts view route params", () => {
+  it("readCeligoRoute decodes every new param, defaulting the invalid ones", () => {
+    const route = readCeligoRoute(
+      new URLSearchParams("surface=celigo&tab=scripts&family=fam1&copy=cp1&compare=A..D&filter=diverged&kind=hook&q=sales&in=int1"),
+    );
+    expect(route).toMatchObject({
+      familyKey: "fam1",
+      copyId: "cp1",
+      compare: { left: "A", right: "D" },
+      scriptsFilter: "diverged",
+      scriptsKind: "hook",
+      scriptsIntegrationId: "int1",
+      q: "sales",
+    });
+  });
+
+  it("defaults: no params → all/null/null/''", () => {
+    const route = readCeligoRoute(new URLSearchParams("surface=celigo&tab=scripts"));
+    expect(route).toMatchObject({
+      familyKey: null,
+      copyId: null,
+      compare: null,
+      scriptsFilter: "all",
+      scriptsKind: null,
+      scriptsIntegrationId: null,
+      q: "",
+    });
+  });
+
+  it("invalid filter/kind/compare fall back instead of throwing", () => {
+    const route = readCeligoRoute(new URLSearchParams("surface=celigo&filter=bogus&kind=bogus&compare=bogus"));
+    expect(route.scriptsFilter).toBe("all");
+    expect(route.scriptsKind).toBeNull();
+    expect(route.compare).toBeNull();
+
+    // malformed compare shapes: no separator, empty side either way
+    expect(readCeligoRoute(new URLSearchParams("compare=A")).compare).toBeNull();
+    expect(readCeligoRoute(new URLSearchParams("compare=..D")).compare).toBeNull();
+    expect(readCeligoRoute(new URLSearchParams("compare=A..")).compare).toBeNull();
+  });
+
+  it("isScriptsView: tab=scripts with no integration/flow is the Scripts view; with an integration it is NOT", () => {
+    expect(isScriptsView(readCeligoRoute(new URLSearchParams("surface=celigo&tab=scripts")))).toBe(true);
+    expect(
+      isScriptsView(readCeligoRoute(new URLSearchParams("surface=celigo&integration=i1&tab=scripts"))),
+    ).toBe(false);
+    expect(
+      isScriptsView(readCeligoRoute(new URLSearchParams("surface=celigo&flow=f1&tab=scripts"))),
+    ).toBe(false);
+    expect(isScriptsView(readCeligoRoute(new URLSearchParams("surface=celigo")))).toBe(false);
+  });
+
+  it("go.scripts round-trips every param through the URL and never writes `integration`", () => {
+    nav.params = new URLSearchParams("surface=celigo&integration=iA&flow=f1&step=s1&script=x1&site=a.b");
+    const { result } = renderHook(() => useCeligoRoute());
+
+    act(() =>
+      result.current.go.scripts({
+        family: "fam1",
+        copy: "cp1",
+        compare: { left: "A", right: "D" },
+        filter: "diverged",
+        kind: "hook",
+        q: "sales order",
+        in: "int1",
+      }),
+    );
+    const url = nav.push.mock.calls.at(-1)![0] as string;
+    expect(url).not.toMatch(/[?&]integration=/);
+    expect(url).not.toMatch(/[?&]flow=/);
+    expect(url).not.toMatch(/[?&]step=/);
+    expect(url).not.toMatch(/[?&]script=/);
+    expect(url).not.toMatch(/[?&]site=/);
+
+    const [, qs] = url.split("?");
+    const roundTripped = readCeligoRoute(new URLSearchParams(qs));
+    expect(roundTripped).toMatchObject({
+      tab: "scripts",
+      familyKey: "fam1",
+      copyId: "cp1",
+      compare: { left: "A", right: "D" },
+      scriptsFilter: "diverged",
+      scriptsKind: "hook",
+      q: "sales order",
+      scriptsIntegrationId: "int1",
+    });
+    expect(isScriptsView(roundTripped)).toBe(true);
+  });
+
+  it("go.scripts({ in }) sets the integration FILTER, never the `integration` page param", () => {
+    nav.params = new URLSearchParams("");
+    const { result } = renderHook(() => useCeligoRoute());
+    act(() => result.current.go.scripts({ in: "int1" }));
+    expect(nav.push).toHaveBeenLastCalledWith("/workspace?surface=celigo&tab=scripts&in=int1");
+  });
+
+  it("go.scripts with no options lands on the plain Scripts view", () => {
+    nav.params = new URLSearchParams("surface=celigo&integration=iA&tab=flows");
+    const { result } = renderHook(() => useCeligoRoute());
+    act(() => result.current.go.scripts());
+    expect(nav.push).toHaveBeenLastCalledWith("/workspace?surface=celigo&tab=scripts");
+  });
+
+  it("go.scripts drops the default filter (\"all\") and a null kind/compare from the URL", () => {
+    nav.params = new URLSearchParams("");
+    const { result } = renderHook(() => useCeligoRoute());
+    act(() => result.current.go.scripts({ family: "fam1", filter: "all", kind: null, compare: null }));
+    expect(nav.push).toHaveBeenLastCalledWith("/workspace?surface=celigo&tab=scripts&family=fam1");
   });
 });
