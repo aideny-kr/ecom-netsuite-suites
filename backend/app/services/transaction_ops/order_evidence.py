@@ -21,11 +21,22 @@ def latest_order_evidence(tenant_id):
     )
     status = Finding.report_json["balance"]["status"].astext
     return (
-        select(func.jsonb_build_object(
-            "finding_id", Finding.id, "run_id", Finding.run_id, "checked_at", Finding.created_at,
-            "status", case((stale, "not_verified"), (status.in_(BALANCE_STATUSES), status), else_="not_verified"),
-            "stale", case((stale, True), else_=False), "balance", Finding.report_json["balance"],
-        ))
+        select(
+            func.jsonb_build_object(
+                "finding_id",
+                Finding.id,
+                "run_id",
+                Finding.run_id,
+                "checked_at",
+                Finding.created_at,
+                "status",
+                case((stale, "not_verified"), (status.in_(BALANCE_STATUSES), status), else_="not_verified"),
+                "stale",
+                case((stale, True), else_=False),
+                "balance",
+                Finding.report_json["balance"],
+            )
+        )
         .join(Run, (Run.id == Finding.run_id) & (Run.tenant_id == tenant_id))
         .where(
             Finding.tenant_id == tenant_id,

@@ -75,7 +75,9 @@ def test_budget_worker_publishes_only_the_durable_continuation(monkeypatch):
     monkeypatch.setattr(mod, "worker_async_session", session)
     monkeypatch.setattr(mod, "set_tenant_context", AsyncMock())
     monkeypatch.setitem(sys.modules, "app.services.transaction_ops.runner", SimpleNamespace(run_investigation=runner))
-    monkeypatch.setitem(sys.modules, "app.services.transaction_ops.continuation", SimpleNamespace(continue_budget_run=resume))
+    monkeypatch.setitem(
+        sys.modules, "app.services.transaction_ops.continuation", SimpleNamespace(continue_budget_run=resume)
+    )
     monkeypatch.setitem(sys.modules, "app.services.transaction_ops.scheduler", SimpleNamespace(_dispatch=dispatch))
     result = mod.transaction_ops_run.run(str(tenant), str(parent))
     resume.assert_awaited_once_with(db, tenant, parent)

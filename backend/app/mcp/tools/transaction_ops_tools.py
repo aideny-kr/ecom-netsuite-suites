@@ -91,19 +91,32 @@ def _finding_rows(findings):
         differences = comparison.get("differences", [])
         if not isinstance(differences, (list, tuple)):
             raise _ToolError("invalid_stored_evidence")
-        details = differences or [{}]
+        balance = report.get("balance") or {}
+        amounts = balance.get("amounts") if isinstance(balance, dict) else None
+        if amounts is not None and not isinstance(amounts, dict):
+            raise _ToolError("invalid_stored_evidence")
+        if amounts:
+            target_currency = _text(balance.get("target_currency"))
+            if target_currency and target_currency != currency:
+                prefix[2] = f"source: {currency}; target: {target_currency}"
+            details = [{"field": key, **(amounts.get(key) or {})} for key in ("order_total", "tax", "refunds")]
+        else:
+            details = differences or [{}]
         for difference in details:
             if not isinstance(difference, dict):
                 raise _ToolError("invalid_stored_evidence")
             if len(rows) >= _MAX_ROWS:
                 truncated = True
                 break
-            if differences:
+            if differences or amounts:
                 values = [_text(difference.get(key)) for key in ("field", "source", "target", "delta")]
-                if any(value is None for value in values):
+                if values[0] is None or any(
+                    value is None and (not amounts or difference.get(key) is not None)
+                    for key, value in zip(("source", "target", "delta"), values[1:])
+                ):
                     raise _ToolError("invalid_stored_evidence")
                 try:
-                    if any(not Decimal(value).is_finite() for value in values[1:]):
+                    if any(not Decimal(value).is_finite() for value in values[1:] if value is not None):
                         raise _ToolError("invalid_stored_evidence")
                 except DecimalException:
                     raise _ToolError("invalid_stored_evidence") from None
@@ -113,6 +126,23 @@ def _finding_rows(findings):
         if truncated:
             break
     return rows, truncated
+
+
+def _finding_summary(finding):
+    report = finding.report_json
+    balance, comparison = report.get("balance") or {}, report.get("comparison") or {}
+    return {
+        "order_reference": _text(report.get("order_reference")),
+        "reconciliation_status": _text(balance.get("status")),
+        "reason": _text(balance.get("reason")),
+        "missing_metrics": [
+            key for key in ("order_total", "tax", "refunds") if key in balance.get("missing_metrics", [])
+        ],
+        "recommended_action": _text(comparison.get("recommended_action")),
+        "repair_findings": [
+            _text(item.get("code")) for item in comparison.get("findings", [])[:10] if isinstance(item, dict)
+        ],
+    }
 
 
 async def _execute(operation, params, context):
@@ -134,6 +164,10 @@ async def _execute(operation, params, context):
                         "schedule_enabled": config.schedule_enabled,
                         "subsidiary_id": config.subsidiary_id,
                         "record_type": config.record_type,
+                        "source_connection_id": str(config.source_connection_id)
+                        if getattr(config, "source_connection_id", None)
+                        else None,
+                        "netsuite_account_id": _text(getattr(config, "netsuite_account_id", None)),
                     }
                     for config in configs[:100]
                 ],
@@ -179,16 +213,34 @@ async def _execute(operation, params, context):
             await state.list_findings(db, tenant_id, run_id, offset=_MAX_FINDINGS, limit=1)
         )
         rows, capped = _finding_rows(findings)
+        proposals = await state.list_proposals(db, tenant_id, run_id=run_id, limit=51)
+        child, blocked = None, None
+        if run.termination_reason == "budget":
+            from app.services.transaction_ops.continuation import continuation_result
+
+            child, blocked = await continuation_result(db, tenant_id, run_id)
         return {
             "success": True,
             "run_id": str(run.id),
             "status": run.status,
             "termination_reason": run.termination_reason,
+            "continuation_run_id": str(child.id) if child else None,
+            "continuation_blocked": blocked,
             "review_url": f"/transaction-operations/runs/{run.id}",
+            "findings": [_finding_summary(finding) for finding in findings[:50]],
+            "proposals": [
+                {
+                    "id": str(proposal.id),
+                    "order_reference": proposal.order_reference,
+                    "action": proposal.action,
+                    "status": proposal.status,
+                }
+                for proposal in proposals[:50]
+            ],
             "columns": ["order_reference", "recommended_action", "currency", "field", "source", "target", "delta"],
             "rows": rows,
             "row_count": len(rows),
-            "truncated": bool(more or capped),
+            "truncated": bool(more or capped or len(findings) > 50 or len(proposals) > 50),
             "query": "",
             "suppress_llm_value": True,
             "source_kind": "transaction_ops",

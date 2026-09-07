@@ -113,6 +113,7 @@ export function ComparisonEvidence({ report }: { report: JsonObject }) {
     typeof comparison.currency === "string" ? comparison.currency : null;
   return (
     <div className="space-y-4">
+      <BalanceEvidence balance={objectValue(report.balance)} />
       <TaxEvidenceNotice evidence={report} />
       {reasons.length > 0 && (
         <ul className="space-y-2 text-[13px]">
@@ -173,6 +174,64 @@ export function ComparisonEvidence({ report }: { report: JsonObject }) {
         Amounts and differences are server-computed exact strings in transaction
         currency. Currencies are never combined. Unknown evidence is not treated
         as zero.
+      </p>
+    </div>
+  );
+}
+function BalanceEvidence({ balance }: { balance: JsonObject }) {
+  const amounts = objectValue(balance.amounts);
+  if (!Object.keys(amounts).length) return null;
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-[13px] tabular-nums">
+        <caption className="py-2 text-left font-medium">
+          Order reconciliation ·{" "}
+          {String(balance.currency || "Currency unknown")}
+        </caption>
+        <thead>
+          <tr className="border-b text-right text-muted-foreground">
+            <th className="py-3 pr-4 text-left font-medium">Amount</th>
+            <th className="p-3 font-medium">Solidus</th>
+            <th className="p-3 font-medium">
+              NetSuite
+              {balance.target_currency &&
+              balance.target_currency !== balance.currency
+                ? ` · ${balance.target_currency}`
+                : ""}
+            </th>
+            <th className="p-3 font-medium">Difference (source − target)</th>
+          </tr>
+        </thead>
+        <tbody>
+          {[
+            ["order_total", "Order total"],
+            ["tax", "VAT / tax"],
+            ["refunds", "Completed refunds"],
+          ].map(([key, label]) => {
+            const metric = objectValue(amounts[key]);
+            return (
+              <tr key={key} className="border-b last:border-0">
+                <th scope="row" className="py-3 pr-4 text-left font-medium">
+                  {label}
+                </th>
+                {["source", "target", "delta"].map((side) => (
+                  <td
+                    key={side}
+                    className="p-3 text-right font-mono whitespace-nowrap"
+                  >
+                    {typeof metric[side] === "string"
+                      ? (metric[side] as string)
+                      : "Unknown"}
+                  </td>
+                ))}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <p className="mt-2 text-[13px] text-muted-foreground">
+        Gross includes tax. Completed refunds are compared separately. Repair
+        eligibility also requires the supporting record details.
       </p>
     </div>
   );

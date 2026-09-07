@@ -26,6 +26,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { transactionColumns } from "./columns";
 import { transactionAmount, transactionDate } from "./format";
+import { investigationChatLink } from "@/components/transaction-ops/agent-link";
 
 type Metric = {
   source: string | null;
@@ -124,6 +125,12 @@ export function OrdersPage() {
       c.metadata_json?.api_profile === "framework_sync",
   );
   const source = sources.find((c) => c.id === sourceId) || sources[0];
+  const sourceIdentity = useRef({ id: source?.id, version: 0 });
+  if (sourceIdentity.current.id !== source?.id)
+    sourceIdentity.current = {
+      id: source?.id,
+      version: sourceIdentity.current.version + 1,
+    };
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
   const [sorting, setSorting] = useState<SortingState>([
@@ -184,11 +191,13 @@ export function OrdersPage() {
       }),
   });
   const reconcile = useMutation({
-    mutationFn: () => {
-      if (reconciliationRequest.current?.source_connection_id !== source!.id) {
+    mutationFn: (request: { sourceId: string; version: number }) => {
+      if (
+        reconciliationRequest.current?.source_connection_id !== request.sourceId
+      ) {
         const end = new Date();
         reconciliationRequest.current = {
-          source_connection_id: source!.id,
+          source_connection_id: request.sourceId,
           evaluation_key: crypto.randomUUID(),
           window_start: new Date(end.getTime() - 86400000).toISOString(),
           window_end: end.toISOString(),
@@ -199,8 +208,12 @@ export function OrdersPage() {
         reconciliationRequest.current,
       );
     },
-    onSuccess: (result) => {
-      if (!mounted.current) return;
+    onSuccess: (result, request) => {
+      if (
+        !mounted.current ||
+        request.version !== sourceIdentity.current.version
+      )
+        return;
       setRuns(result);
       reconciliationRequest.current = undefined;
       client.invalidateQueries({
@@ -209,7 +222,13 @@ export function OrdersPage() {
     },
   });
   const investigate = useMutation({
-    mutationFn: (order: Order) => {
+    mutationFn: ({
+      order,
+    }: {
+      order: Order;
+      chat: boolean;
+      version: number;
+    }) => {
       if (!requestKeys.current.has(order.id))
         requestKeys.current.set(order.id, crypto.randomUUID());
       return apiClient.post<Run>(
@@ -217,13 +236,16 @@ export function OrdersPage() {
         { evaluation_key: requestKeys.current.get(order.id) },
       );
     },
-    onSuccess: (run) => {
-      if (mounted.current)
+    onSuccess: (run, request) => {
+      if (mounted.current && request.version === sourceIdentity.current.version)
         router.push(
-          `/transaction-operations/runs/${encodeURIComponent(run.id)}`,
+          request.chat
+            ? investigationChatLink(run.id)
+            : `/transaction-operations/runs/${encodeURIComponent(run.id)}`,
         );
     },
   });
+  const resetInvestigation = investigate.reset;
   const columns = useMemo<ColumnDef<Record<string, unknown>, unknown>[]>(() => {
     const base = transactionColumns("orders").filter((c) => c.id !== "status");
     base[0] = {
@@ -235,7 +257,7 @@ export function OrdersPage() {
           className="font-medium text-primary hover:underline"
           aria-label={`Open order ${row.original.order_number}`}
           onClick={() => {
-            investigate.reset();
+            resetInvestigation();
             setSelected(row.original as Order);
           }}
         >
@@ -272,7 +294,7 @@ export function OrdersPage() {
         ),
       },
     ];
-  }, []); // Cell actions only use stable state setters; evidence comes from each row.
+  }, [resetInvestigation]);
   const sourceConfigs =
     configs.data?.filter((c) => c.source_connection_id === source?.id) || [];
   const daily =
@@ -314,7 +336,12 @@ export function OrdersPage() {
               reconcile.isPending ||
               source.status !== "active"
             }
-            onClick={() => reconcile.mutate()}
+            onClick={() =>
+              reconcile.mutate({
+                sourceId: source!.id,
+                version: sourceIdentity.current.version,
+              })
+            }
           >
             <SearchCheck className="mr-2 h-4 w-4" />
             {reconcile.isPending ? "Starting…" : "Reconcile now"}
@@ -334,6 +361,7 @@ export function OrdersPage() {
               setRuns([]);
               refresh.reset();
               reconcile.reset();
+              investigate.reset();
             }}
           >
             {sources.map((c) => (
@@ -383,7 +411,8 @@ export function OrdersPage() {
                     : "Daily checks start with your first reconciliation"}
               </p>
               <p className="mt-1">
-                Reconcile now checks orders updated in the last 24 hours.
+                Checks orders and refunds changed in the last 24 hours. Open any
+                order to investigate it on demand.
               </p>
             </div>
           </div>
@@ -657,11 +686,30 @@ export function OrdersPage() {
                 <div className="mt-4 flex flex-wrap gap-3">
                   <Button
                     disabled={!access.allowed || investigate.isPending}
-                    onClick={() => investigate.mutate(selected)}
+                    onClick={() =>
+                      investigate.mutate({
+                        order: selected,
+                        chat: false,
+                        version: sourceIdentity.current.version,
+                      })
+                    }
                   >
                     {investigate.isPending
                       ? "Starting investigation…"
                       : "Investigate order"}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    disabled={!access.allowed || investigate.isPending}
+                    onClick={() =>
+                      investigate.mutate({
+                        order: selected,
+                        chat: true,
+                        version: sourceIdentity.current.version,
+                      })
+                    }
+                  >
+                    Work with agent
                   </Button>
                   {selected.reconciliation?.run_id && (
                     <Button asChild variant="outline">

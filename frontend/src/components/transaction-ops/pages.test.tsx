@@ -89,24 +89,46 @@ beforeEach(() => {
   mocks.findingsError = null;
 });
 it("links a finished part to the continuing investigation", () => {
-  mocks.run = { id: "run", config_snapshot: config, params_json: {}, status: "finished", termination_reason: "budget",
-    progress_json: { processed: 10, matched: 0, needs_review: 2, not_verified: 8 },
-    continuation_run_id: "next-run", api_calls_used: 100, max_api_calls: 100, orders_used: 10, max_orders: 20 };
+  mocks.run = {
+    id: "run",
+    config_snapshot: config,
+    params_json: {},
+    status: "finished",
+    termination_reason: "budget",
+    progress_json: {
+      processed: 10,
+      matched: 0,
+      needs_review: 2,
+      not_verified: 8,
+    },
+    continuation_run_id: "next-run",
+    api_calls_used: 100,
+    max_api_calls: 100,
+    orders_used: 10,
+    max_orders: 20,
+  };
   render(<TransactionRunPage id="run" />);
-  expect(screen.getByRole("link", { name: "Follow continuing investigation" })).toHaveAttribute("href", "/transaction-operations/runs/next-run");
+  expect(
+    screen.getByRole("link", { name: "Follow continuing investigation" }),
+  ).toHaveAttribute("href", "/transaction-operations/runs/next-run");
   expect(screen.getByText(/8 not verified/)).toBeInTheDocument();
 });
 describe("transaction operations pages", () => {
-  it("links administrators to the explicit setup form", () => {
+  it("links administrators to Transactions without exposing setup", () => {
     mocks.manage = true;
     render(<TransactionOperationsPage />);
     expect(
-      screen.getByRole("link", { name: "Configure a new scope" }),
-    ).toHaveAttribute("href", "/transaction-operations/setup");
+      screen.getByRole("link", { name: "Open Transactions" }),
+    ).toHaveAttribute("href", "/tables/orders");
+    expect(
+      screen.queryByRole("link", { name: "Configure a new scope" }),
+    ).not.toBeInTheDocument();
   });
   it("has an honest administrator setup empty state and Connections link", () => {
     render(<TransactionOperationsPage />);
-    expect(screen.getByText(/administrator.*configure/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/applied automatically in the backend/i),
+    ).toBeInTheDocument();
     expect(
       screen.getByRole("link", { name: "Open Connections" }),
     ).toHaveAttribute("href", "/connections");

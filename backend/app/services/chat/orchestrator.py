@@ -820,17 +820,9 @@ def _intercept_tool_result(
             return None, None, invalid
         event = {key: parsed[key] for key in ("columns", "rows", "row_count", "truncated", "query") if key in parsed}
         event.update(suppress_llm_value=True, source_kind="transaction_ops")
-        condensed = json.dumps(
-            {
-                "success": True,
-                "run_id": parsed.get("run_id"),
-                "status": parsed.get("status"),
-                "review_url": parsed.get("review_url"),
-                "termination_reason": parsed.get("termination_reason"),
-                "note": "Investigation evidence is displayed in the table. Do not restate or recompute its amounts. "
-                "Human decisions are made on the linked review page.",
-            }
-        )
+        from app.services.transaction_ops.chat_evidence import condense_status
+
+        condensed = condense_status(parsed)
         condensed = _stamp_result_id(condensed, event, result_id)
         return "data_table", event, condensed
 

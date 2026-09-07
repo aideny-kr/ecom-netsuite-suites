@@ -2,6 +2,7 @@ import React from "react";
 import { beforeEach, expect, it, vi } from "vitest";
 import {
   fireEvent,
+  act,
   render,
   screen,
   waitFor,
@@ -15,6 +16,7 @@ const state = vi.hoisted(() => ({
   push: vi.fn(),
   table: vi.fn(),
   fail: false,
+  extraSource: false,
 }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: state.push }) }));
 vi.mock("@/lib/api-client", () => ({
@@ -36,6 +38,17 @@ vi.mock("@/hooks/use-connections", () => ({
         status: "active",
         metadata_json: { api_profile: "framework_sync" },
       },
+      ...(state.extraSource
+        ? [
+            {
+              id: "solidus-2",
+              provider: "solidus",
+              label: "Second source",
+              status: "active",
+              metadata_json: { api_profile: "framework_sync" },
+            },
+          ]
+        : []),
     ],
   }),
 }));
@@ -90,6 +103,7 @@ vi.mock("@/hooks/use-table-data", () => ({
 beforeEach(() => {
   vi.clearAllMocks();
   state.fail = false;
+  state.extraSource = false;
   vi.mocked(apiClient.get).mockResolvedValue({
     status: "never_synced",
     records_imported: 0,
@@ -154,4 +168,46 @@ it("shows a failed table request rather than an empty data message", () => {
   expect(
     screen.queryByText("Your orders will appear here"),
   ).not.toBeInTheDocument();
+});
+
+it("opens a fresh agent conversation grounded in the saved order investigation", async () => {
+  show();
+  fireEvent.click(
+    screen.getByRole("button", { name: "Open order R100120031" }),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Work with agent" }));
+  await waitFor(() => expect(state.push).toHaveBeenCalled());
+  const url = new URL(state.push.mock.calls[0][0], "https://example.test");
+  expect(url.pathname).toBe("/chat");
+  expect(url.searchParams.get("new_session")).toBe("true");
+  expect(url.searchParams.get("compose")).toContain("investigation-1");
+  expect(url.searchParams.get("compose")).toContain("approval");
+});
+
+it("ignores a reconcile response after the user switches sources", async () => {
+  state.extraSource = true;
+  let resolve!: (value: unknown) => void;
+  vi.mocked(apiClient.post).mockImplementationOnce(
+    () =>
+      new Promise((done) => {
+        resolve = done;
+      }),
+  );
+  show();
+  fireEvent.click(screen.getByRole("button", { name: "Reconcile now" }));
+  await waitFor(() => expect(apiClient.post).toHaveBeenCalled());
+  fireEvent.change(screen.getByLabelText("Order source"), {
+    target: { value: "solidus-2" },
+  });
+  await act(async () => {
+    resolve([
+      { id: "old-source-run", config_snapshot: { name: "Old source" } },
+    ]);
+  });
+  await waitFor(() =>
+    expect(
+      screen.queryByRole("link", { name: /Old source/ }),
+    ).not.toBeInTheDocument(),
+  );
+  expect(state.push).not.toHaveBeenCalled();
 });

@@ -521,6 +521,10 @@ def _suppress_metric_value_for_llm(result_str: str) -> str:
     except (json.JSONDecodeError, TypeError):
         return result_str
     if is_suppressed_metric_payload(parsed):
+        if parsed.get("source_kind") == "transaction_ops":
+            from app.services.transaction_ops.chat_evidence import condense_status
+
+            return condense_status(parsed)
         return condense_metric_for_llm(parsed)
     return result_str
 

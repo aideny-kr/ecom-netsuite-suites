@@ -51,6 +51,7 @@ def state(monkeypatch):
         create_run=AsyncMock(return_value=SimpleNamespace(id=RUN, status="pending")),
         get_run=AsyncMock(return_value=SimpleNamespace(id=RUN, status="finished", termination_reason="done")),
         list_findings=AsyncMock(return_value=[]),
+        list_proposals=AsyncMock(return_value=[]),
     )
 
     class Request:

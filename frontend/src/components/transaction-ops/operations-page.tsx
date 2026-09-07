@@ -89,17 +89,12 @@ function OperationsContent() {
           Transaction operations
         </h1>
         <p className="mt-2 max-w-3xl text-muted-foreground">
-          Investigate order differences in a configured account and subsidiary.
-          Review the evidence and exact proposed changes before approving an
-          action.
+          Investigate order differences and track their resolution. Review the
+          evidence and exact proposed changes before approving an action.
         </p>
-        {canManage && (
-          <Button asChild variant="outline" className="mt-4">
-            <Link href="/transaction-operations/setup">
-              Configure a new scope
-            </Link>
-          </Button>
-        )}
+        <Button asChild variant="outline" className="mt-4">
+          <Link href="/tables/orders">Open Transactions</Link>
+        </Button>
       </header>
       {configs.isLoading ? (
         <p role="status">Loading configured scopes…</p>
@@ -111,12 +106,12 @@ function OperationsContent() {
         <section className={`${cardClass} space-y-4`}>
           <Search className="h-6 w-6 text-muted-foreground" />
           <h2 className="text-lg font-semibold">
-            Set up a transaction scope first
+            Start with your transactions
           </h2>
           <p className="max-w-2xl text-muted-foreground">
-            An administrator must configure a verified Framework source and
-            NetSuite account, subsidiary, record type, and transaction mappings
-            before investigations can run.
+            Open Transactions to refresh your connected orders or start a
+            reconciliation. Verified connection settings are applied
+            automatically in the backend.
           </p>
           <Button asChild variant="outline">
             <Link href="/connections">Open Connections</Link>
@@ -133,13 +128,13 @@ function OperationsContent() {
                 Start an investigation
               </h2>
               <p className="mt-1 text-[13px] text-muted-foreground">
-                The run is saved before it is queued. Every external read counts
-                against its fixed budget.
+                Choose an order or date range. Review any proposed correction
+                before it can run.
               </p>
             </div>
             <form onSubmit={submit} className="space-y-5">
               <label className="block space-y-2 text-[13px]">
-                Configured scope
+                Business entity
                 <select
                   className={inputClass}
                   value={config.id}
@@ -164,12 +159,10 @@ function OperationsContent() {
                   <p>{config.record_type}</p>
                 </div>
                 <div>
-                  <span className="text-muted-foreground">Run limits</span>
+                  <span className="text-muted-foreground">Resolution</span>
                   <p className="mt-1">
-                    {config.max_orders} orders · {config.max_api_calls} API
-                    calls
+                    Your approval is required before any sync or correction.
                   </p>
-                  <p>{config.deadline_seconds} seconds maximum</p>
                 </div>
                 <div>
                   <span className="text-muted-foreground">Schedule</span>

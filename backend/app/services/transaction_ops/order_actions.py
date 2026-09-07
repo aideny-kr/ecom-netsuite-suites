@@ -12,8 +12,9 @@ from app.services.transaction_ops.normalization import source_entity_key
 
 async def source_configs(db, user, source_id):
     await state_service._human(db, user.tenant_id, user, "recon.run")
-    configs = [row for row in await state_service.list_configs(db, user.tenant_id)
-               if row.source_connection_id == source_id]
+    configs = [
+        row for row in await state_service.list_configs(db, user.tenant_id) if row.source_connection_id == source_id
+    ]
     if not configs:
         configs = await ensure_framework_configs(db, user.tenant_id, source_id, actor=user)
     return configs
@@ -29,13 +30,19 @@ async def investigate_order(db, user, order_id, evaluation_key):
         raise state_service.StateError("order_source_unavailable", 422)
     entity = source_entity_key((order.raw_data or {}).get("order") or {})
     configs = await source_configs(db, user, order.source_connection_id)
-    scopes = [row for row in configs
-              if (row.mapping_json.get("business_entity_subsidiaries") or {}).get(entity) == row.subsidiary_id]
+    scopes = [
+        row
+        for row in configs
+        if (row.mapping_json.get("business_entity_subsidiaries") or {}).get(entity) == row.subsidiary_id
+    ]
     if len(scopes) != 1:
         raise state_service.StateError("order_scope_unavailable", 422)
     return await state_service.create_run(
-        db, user.tenant_id, scopes[0].id,
-        RunCreate(evaluation_key=str(evaluation_key), order_references=(order.order_number,)), actor=user,
+        db,
+        user.tenant_id,
+        scopes[0].id,
+        RunCreate(evaluation_key=str(evaluation_key), order_references=(order.order_number,)),
+        actor=user,
     )
 
 
