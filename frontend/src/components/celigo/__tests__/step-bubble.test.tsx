@@ -1,7 +1,40 @@
-import { render, screen, within, fireEvent } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { render, screen, within, fireEvent, waitFor } from "@testing-library/react";
+import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { CeligoAttachment, CeligoFlowStep } from "@/hooks/use-celigo-flows";
+import { resolved, pending } from "./query-fixtures";
+
+// Task 6 -- the hook chip's ⌥/Alt (or ⌘/Meta) click jumps to the Scripts
+// view for that script's own family (spec §3.4 entry points). No field on
+// `CeligoAttachment` carries the family's `dedup_key` (only `script_id`/
+// `script_celigo_id` -- see `use-celigo-flows.ts`), so `StepBubble` resolves
+// it itself via the SAME `useCeligoScript` query the drawer already uses
+// (enabled only once a modifier-click names a script id), then navigates
+// via `go.scripts`. Mocked here the same way `celigo-script-drawer.test.tsx`
+// mocks both modules.
+const mocks = vi.hoisted(() => ({ script: vi.fn() }));
+vi.mock("@/hooks/use-celigo-flows", () => ({
+  useCeligoScript: (scriptId: string | undefined) => mocks.script(scriptId),
+}));
+
+const routeMocks = vi.hoisted(() => ({ go: { scripts: vi.fn() } }));
+vi.mock("../celigo-route", () => ({
+  useCeligoRoute: () => ({ go: routeMocks.go }),
+}));
+
 import { StepBubble } from "../step-bubble";
+
+function wrap(ui: React.ReactElement) {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(<QueryClientProvider client={qc}>{ui}</QueryClientProvider>);
+}
+
+beforeEach(() => {
+  // No script id has been clicked yet on most tests -- `enabled: false`
+  // in the real hook, a harmless `pending()` here.
+  mocks.script.mockReset().mockReturnValue(pending());
+  routeMocks.go.scripts.mockReset();
+});
 
 // Task 15 — one flow-step bubble on the canvas (mockup screen 3's `.bubble`).
 // `node` only needs the geometry StepBubble actually reads.
@@ -55,7 +88,7 @@ function makeStep(overrides: Partial<CeligoFlowStep> = {}): CeligoFlowStep {
 
 function renderBubble(step: CeligoFlowStep, extra: Partial<Parameters<typeof StepBubble>[0]> = {}) {
   const onSelect = vi.fn();
-  render(
+  wrap(
     <StepBubble step={step} node={NODE} selected={extra.selected ?? false} paused={extra.paused ?? false} onSelect={extra.onSelect ?? onSelect} />,
   );
   return { onSelect: extra.onSelect ?? onSelect };
@@ -173,6 +206,96 @@ describe("StepBubble — affordance chips", () => {
     expect(within(bubble).getByText("preSavePage")).toBeInTheDocument();
     expect(within(bubble).getByText("×1")).toBeInTheDocument();
     expect(bubble.querySelector('[title="copies of this script differ"]')).not.toBeInTheDocument();
+  });
+});
+
+describe("StepBubble — chip modifier-click opens the Scripts view (Task 6)", () => {
+  function stepWithHook(overrides: Partial<CeligoAttachment> = {}): CeligoFlowStep {
+    return makeStep({
+      id: "s1",
+      kind: "destination",
+      role: "processor",
+      adaptor_type: "NetSuiteDistributedImport",
+      attachments: [
+        makeAttachment({
+          id: "att-9",
+          script_id: "script-9",
+          function_name: "preMap",
+          ...overrides,
+        }),
+      ],
+    });
+  }
+
+  it("Alt-click on a configured hook chip navigates to the Scripts view once the family resolves, and does not select the step", async () => {
+    mocks.script.mockImplementation((scriptId: string | undefined) =>
+      scriptId === "script-9" ? resolved({ dedup_key: "dk-9" }) : pending(),
+    );
+    const onSelect = vi.fn();
+    renderBubble(stepWithHook(), { onSelect });
+    const bubble = screen.getByTestId("step-bubble-s1");
+
+    fireEvent.click(within(bubble).getByText("preMap"), { altKey: true });
+
+    await waitFor(() =>
+      expect(routeMocks.go.scripts).toHaveBeenCalledWith({ family: "dk-9", copy: "script-9" }),
+    );
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it("Meta (⌘) click behaves the same as Alt", async () => {
+    mocks.script.mockImplementation((scriptId: string | undefined) =>
+      scriptId === "script-9" ? resolved({ dedup_key: "dk-9" }) : pending(),
+    );
+    const onSelect = vi.fn();
+    renderBubble(stepWithHook(), { onSelect });
+    const bubble = screen.getByTestId("step-bubble-s1");
+
+    fireEvent.click(within(bubble).getByText("preMap"), { metaKey: true });
+
+    await waitFor(() =>
+      expect(routeMocks.go.scripts).toHaveBeenCalledWith({ family: "dk-9", copy: "script-9" }),
+    );
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it("a plain click on the hook chip is unchanged: it still selects the step at the scripts tab, and never navigates", () => {
+    const onSelect = vi.fn();
+    renderBubble(stepWithHook(), { onSelect });
+    const bubble = screen.getByTestId("step-bubble-s1");
+
+    fireEvent.click(within(bubble).getByText("preMap"));
+
+    expect(onSelect).toHaveBeenCalledWith("s1", "scripts");
+    expect(routeMocks.go.scripts).not.toHaveBeenCalled();
+  });
+
+  it("a modifier-click on a chip with nothing to resolve (no hooks) falls back to the plain-click behavior", () => {
+    const onSelect = vi.fn();
+    renderBubble(
+      makeStep({ id: "s1", kind: "destination", role: "processor", adaptor_type: "NetSuiteDistributedImport" }),
+      { onSelect },
+    );
+    const bubble = screen.getByTestId("step-bubble-s1");
+
+    fireEvent.click(within(bubble).getByText("no hooks"), { altKey: true });
+
+    expect(onSelect).toHaveBeenCalledWith("s1", "scripts");
+    expect(routeMocks.go.scripts).not.toHaveBeenCalled();
+  });
+
+  it("a modifier-click on a non-hook chip (e.g. a filter) also falls back to the plain-click behavior", () => {
+    const onSelect = vi.fn();
+    renderBubble(
+      makeStep({ id: "s1", kind: "destination", role: "processor", adaptor_type: "NetSuiteDistributedImport" }),
+      { onSelect },
+    );
+    const bubble = screen.getByTestId("step-bubble-s1");
+
+    fireEvent.click(within(bubble).getByText("no input filter"), { altKey: true });
+
+    expect(onSelect).toHaveBeenCalledWith("s1", "filter");
+    expect(routeMocks.go.scripts).not.toHaveBeenCalled();
   });
 });
 

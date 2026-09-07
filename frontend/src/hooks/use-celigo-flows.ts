@@ -327,6 +327,154 @@ export function useCeligoScript(scriptId: string | undefined) {
 }
 
 // ---------------------------------------------------------------------------
+// Task 3 -- account-wide Scripts view (spec §2.2/§2.4/§3.3), mirroring
+// `backend/app/services/celigo/script_families.py`'s frozen dataclasses via
+// `backend/app/api/v1/celigo_flows.py`'s Out models field-for-field
+// (uuid fields coerced to `string` server-side, same as every other Celigo
+// type in this file). This is a DIFFERENT clone-family view from
+// `CeligoScript` above: that one is a single script plus its family's
+// attachment sites (the drawer, `GET /celigo/scripts/{id}`); these are the
+// account-wide LIST (every family, `GET /celigo/scripts/families`, no
+// `content`/`content_hash` -- the N2 boundary, spec §5) and one family's
+// full DETAIL (`GET /celigo/scripts/families/{dedup_key}`, `content` per
+// member -- the only other place, besides the drawer, script content is
+// allowed to reach the browser).
+// ---------------------------------------------------------------------------
+
+/** `ScriptFamilySummary.kind`'s closed vocabulary (spec §2.2) -- a single
+ * site_type -> that kind; several disagreeing site_types on one family ->
+ * `"mixed"`; no sites at all -> `"unattached"`. Exported so callers that key
+ * off every kind (`family-row.tsx`'s `KIND_BADGE`,
+ * `celigo-scripts-list.tsx`'s `GROUP_TITLE`) get an exhaustiveness check
+ * from tsc instead of a bare `string` that silently accepts a typo or an
+ * enum value the backend hasn't sent yet. */
+export type CeligoScriptFamilyKind = "hook" | "transform" | "filter" | "router" | "mixed" | "unattached";
+
+export interface CeligoScriptFamilyTotals {
+  scripts: number;
+  families: number;
+  attached_families: number;
+  unattached_families: number;
+  diverged_families: number;
+  sites: number;
+  flows_with_sites: number;
+  flows_total: number;
+  integrations_with_sites: number;
+  sites_with_open_errors: number;
+}
+
+/** The LIST row (`CeligoScriptFamilySummaryOut`) -- deliberately no
+ * `content`/`content_hash` field; see this module's docstring above. */
+export interface CeligoScriptFamilySummary {
+  dedup_key: string;
+  name: string;
+  kind: CeligoScriptFamilyKind;
+  function_name: string | null;
+  copies_count: number;
+  versions_count: number;
+  content_diverged: boolean;
+  original_present: boolean;
+  sites_count: number;
+  flows_count: number;
+  integrations_count: number;
+  integration_ids: string[];
+  flow_names: string[];
+  sites_with_open_errors: number;
+  sites_unchecked: number;
+  first_modified: string | null;
+  last_modified: string | null;
+  max_size_bytes: number | null;
+  other_families_with_name: number;
+}
+
+export interface CeligoScriptFamiliesList {
+  totals: CeligoScriptFamilyTotals;
+  families: CeligoScriptFamilySummary[];
+  /** Last successful flow-map sync (`read_queries.sync_status`), `null` =
+   * never -- same "not known yet, never a confident zero" rule as
+   * `CeligoIntegration.errors_checked_at` elsewhere in this file. */
+  synced_at: string | null;
+}
+
+/** One family member (`CeligoScriptFamilyMemberOut`) -- the DETAIL response
+ * only; `content` IS present here (see this module's docstring above). */
+export interface CeligoScriptFamilyMember {
+  script_id: string;
+  celigo_id: string;
+  name: string;
+  is_original: boolean;
+  version_letter: string | null;
+  content_hash: string | null;
+  size_bytes: number | null;
+  celigo_last_modified: string | null;
+  sites_count: number;
+  flows_count: number;
+  content: string | null;
+}
+
+export interface CeligoScriptFamilyVersion {
+  letter: string;
+  content_hash: string;
+  copies_count: number;
+  sites_count: number;
+  first_seen: string | null;
+  size_bytes: number | null;
+  holds_original: boolean;
+}
+
+/** One where-used row (`CeligoScriptFamilySiteOut`). `open_error_count`
+ * is `null` for router-level sites (no owning step); `errors_checked_at`
+ * is the flow's own honesty stamp (spec §1 item 8) -- `null` means "never
+ * checked", not "checked, zero found". */
+export interface CeligoScriptFamilySite {
+  attachment_id: string;
+  script_id: string | null;
+  script_celigo_id: string;
+  version_letter: string | null;
+  integration_id: string | null;
+  integration_name: string | null;
+  flow_id: string;
+  flow_name: string;
+  flow_disabled: boolean | null;
+  flow_step_id: string | null;
+  step_reference_name: string | null;
+  step_role: string | null;
+  step_adaptor_type: string | null;
+  step_record_type: string | null;
+  step_operation: string | null;
+  json_path: string;
+  function_name: string | null;
+  site_type: string;
+  open_error_count: number | null;
+  errors_checked_at: string | null;
+}
+
+export interface CeligoScriptFamilyDetail {
+  summary: CeligoScriptFamilySummary;
+  members: CeligoScriptFamilyMember[];
+  versions: CeligoScriptFamilyVersion[];
+  sites: CeligoScriptFamilySite[];
+}
+
+export function useCeligoScriptFamilies() {
+  return useQuery<CeligoScriptFamiliesList>({
+    queryKey: ["celigo", "script-families"],
+    queryFn: () => apiClient.get<CeligoScriptFamiliesList>("/api/v1/celigo/scripts/families"),
+  });
+}
+
+export function useCeligoScriptFamily(dedupKey: string | null) {
+  return useQuery<CeligoScriptFamilyDetail>({
+    queryKey: ["celigo", "script-family", dedupKey],
+    queryFn: () =>
+      apiClient.get<CeligoScriptFamilyDetail>(
+        `/api/v1/celigo/scripts/families/${encodeURIComponent(dedupKey ?? "")}`,
+      ),
+    enabled: !!dedupKey,
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Task 4 -- grouped flow errors (`CeligoFlowErrorGroupOut`/`CeligoFlowErrorsOut`
 // in celigo_flows.py), mirrored field-for-field. `CeligoErrorSignature`/
 // `CeligoError` mirror `CeligoErrorSignatureOut`/`CeligoErrorOut` the same way.

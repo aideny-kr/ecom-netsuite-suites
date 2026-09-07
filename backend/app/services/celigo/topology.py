@@ -11,6 +11,8 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
+from openpyxl.utils import get_column_letter
+
 from app.models.celigo import CeligoScript
 
 
@@ -103,6 +105,56 @@ class ScriptFamilyFact:
     content_diverged: bool
 
 
+def _spreadsheet_column(n: int) -> str:
+    """0-based index -> spreadsheet-column-style letters: 0->A, 25->Z,
+    26->AA, 27->AB, ... 51->AZ, 52->BA, ... Bijective base-26 (there is no
+    digit for zero), so this never wraps or produces a non-letter character
+    the way `chr(ord("A") + n)` does past the 26th value (n=26 would yield
+    `"["`, not a letter at all). Delegates to `openpyxl.utils.get_column_
+    letter` (already a project dependency, 1-based) rather than hand-rolling
+    the same bijective-base-26 algorithm a second time -- verified identical
+    output for every index 0..701 (A..ZZ) before this delegation replaced
+    the hand-rolled loop."""
+    return get_column_letter(n + 1)
+
+
+def assign_version_letters(members: list[CeligoScript]) -> dict[str, str]:
+    """Map each distinct `content_hash` among *members* (one already-grouped
+    clone family) to a version letter (A, B, C...), ordered by first
+    appearance: the earliest `celigo_last_modified` across that hash's own
+    members. A member with `content_hash is None` never contributes a hash
+    and therefore never gets a letter or creates a version -- absence of
+    content is not version zero.
+
+    Byte-identical to the pre-extraction inline algorithm this replaces:
+    ties on first-seen timestamp (including two members with no timestamp
+    at all) are broken by the tied member's own row id (`str(s.id)`), NOT
+    by the content-hash string -- two distinct hashes racing to the same
+    earliest timestamp are ordered by whichever member reached it first by
+    id, exactly as `sorted(members, key=(modified is None, modified,
+    str(id)))` + first-occurrence-wins would have picked. This keeps the
+    order deterministic and independent of row-insertion order (a row id is
+    stable, just like a hash), while matching the original tie-break rather
+    than a superficially-similar one.
+
+    Shared by `script_family_facts` below (whose own single-copy-family
+    special case is layered ON TOP of this, not baked into it) and by
+    `app.services.celigo.script_families` (which uses the letters exactly as
+    returned here, including for a single-copy family -- the Scripts view
+    always shows a version card for a family with content, unlike the flow
+    map's inline chip)."""
+    best_key_by_hash: dict[str, tuple] = {}
+    for s in members:
+        if s.content_hash is None:
+            continue
+        key = (s.celigo_last_modified is None, s.celigo_last_modified, str(s.id))
+        existing = best_key_by_hash.get(s.content_hash)
+        if existing is None or key < existing:
+            best_key_by_hash[s.content_hash] = key
+    ordered_hashes = sorted(best_key_by_hash, key=lambda h: best_key_by_hash[h])
+    return {content_hash: _spreadsheet_column(i) for i, content_hash in enumerate(ordered_hashes)}
+
+
 def script_family_facts(scripts: list[CeligoScript]) -> dict[uuid.UUID, ScriptFamilyFact]:
     """Per script row: how many copies its clone family (`dedup_key`) has, how many
     differing versions (distinct content_hash), and which version letter THIS row
@@ -113,11 +165,7 @@ def script_family_facts(scripts: list[CeligoScript]) -> dict[uuid.UUID, ScriptFa
         by_family.setdefault(s.dedup_key, []).append(s)
     facts: dict[uuid.UUID, ScriptFamilyFact] = {}
     for members in by_family.values():
-        ordered = sorted(members, key=lambda s: (s.celigo_last_modified is None, s.celigo_last_modified, str(s.id)))
-        letters: dict[str, str] = {}
-        for s in ordered:
-            if s.content_hash is not None and s.content_hash not in letters:
-                letters[s.content_hash] = chr(ord("A") + len(letters))
+        letters = assign_version_letters(members)
         versions = max(len(letters), 1)
         for s in members:
             letter = letters.get(s.content_hash) if len(members) > 1 and s.content_hash is not None else None

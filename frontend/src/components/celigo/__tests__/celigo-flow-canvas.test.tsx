@@ -1,7 +1,23 @@
 import { render, screen, within, fireEvent } from "@testing-library/react";
 import { describe, expect, it, vi, beforeAll, afterAll } from "vitest";
 import type { CeligoAttachment, CeligoFlowDetail, CeligoFlowStep, CeligoRouter } from "@/hooks/use-celigo-flows";
+import { pending } from "./query-fixtures";
 import { computeLayout } from "../layout";
+
+// Task 6 — `StepBubble` (rendered inside this canvas) now resolves the
+// modifier-click's target family via `useCeligoScript` and navigates via
+// `useCeligoRoute().go.scripts` (see `step-bubble.tsx`'s own docstring) —
+// neither call is exercised by this file's own tests, but both need a
+// mock so mounting the canvas doesn't reach a real (unmounted-in-jsdom)
+// Next router or a real network call.
+vi.mock("@/hooks/use-celigo-flows", () => ({
+  useCeligoScript: () => pending(),
+}));
+
+vi.mock("../celigo-route", () => ({
+  useCeligoRoute: () => ({ go: { scripts: vi.fn() } }),
+}));
+
 import { CeligoFlowCanvas, FIT_FLOOR } from "../celigo-flow-canvas";
 
 // Task 15 — the real canvas (mockup screen 3): bubbles, router nodes,

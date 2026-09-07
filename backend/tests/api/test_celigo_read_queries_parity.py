@@ -26,7 +26,10 @@ from __future__ import annotations
 
 import ast
 import json
+import subprocess
+import sys
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -200,3 +203,204 @@ class TestNoScriptContentSelected:
                 ):
                     offenders.append(f"select(...) at line {node.lineno} projects CeligoScript.{arg.attr}")
         assert offenders == [], offenders
+
+
+def _imports_script_families(source: str) -> bool:
+    """True if *source* has any `import ...script_families` or
+    `from ... import script_families` statement, by AST -- a string match
+    would also flag a docstring merely mentioning the module name (this file
+    does, in several places)."""
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(alias.name.rsplit(".", 1)[-1] == "script_families" for alias in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            if node.module is not None and node.module.rsplit(".", 1)[-1] == "script_families":
+                return True
+            if any(alias.name == "script_families" for alias in node.names):
+                return True
+    return False
+
+
+_PROBE_PROGRAM = """
+import importlib
+import json
+import pkgutil
+import sys
+
+
+def main():
+    config = json.load(sys.stdin)
+    blocked = config["blocked_module"]
+    direct_imports = config.get("direct_imports", [])
+    walk_roots = config.get("walk_roots", [])
+    n2_message = f"N2: {blocked} is not importable from chat/MCP surfaces"
+
+    class _BlockingFinder:
+        def find_spec(self, fullname, path, target=None):
+            if fullname == blocked:
+                raise ImportError(n2_message)
+            return None
+
+    sys.meta_path.insert(0, _BlockingFinder())
+
+    n2_hits = []
+    failures = []
+
+    def safe_import(name):
+        try:
+            importlib.import_module(name)
+        except ImportError as exc:
+            if str(exc) == n2_message:
+                n2_hits.append((name, str(exc)))
+            else:
+                failures.append((name, repr(exc)))
+        except Exception as exc:  # noqa: BLE001 -- any import-time failure is reportable, not silent
+            failures.append((name, repr(exc)))
+
+    for name in direct_imports:
+        safe_import(name)
+
+    for root in walk_roots:
+        try:
+            pkg = importlib.import_module(root)
+        except ImportError as exc:
+            if str(exc) == n2_message:
+                n2_hits.append((root, str(exc)))
+            else:
+                failures.append((root, repr(exc)))
+            continue
+        except Exception as exc:
+            failures.append((root, repr(exc)))
+            continue
+        for info in pkgutil.walk_packages(pkg.__path__, prefix=root + "."):
+            safe_import(info.name)
+
+    if n2_hits:
+        print("N2_HIT")
+        for name, msg in n2_hits:
+            print(f"{name}: {msg}")
+        sys.exit(1)
+    if failures:
+        print("UNRELATED_IMPORT_FAILURES")
+        for name, msg in failures:
+            print(f"{name}: {msg}")
+        sys.exit(2)
+    print("OK")
+    sys.exit(0)
+
+
+main()
+"""
+
+
+def _run_import_guard_probe(*, config: dict, cwd: Path) -> subprocess.CompletedProcess:
+    """Runs `_PROBE_PROGRAM` in a fresh subprocess (real import machinery,
+    not an AST walk) with *config* (`blocked_module` / `direct_imports` /
+    `walk_roots`) piped in as JSON on stdin. `cwd` controls what `import ...`
+    resolves against inside the subprocess -- `python -c` puts `""` first on
+    `sys.path`, which Python treats as the current working directory."""
+    return subprocess.run(
+        [sys.executable, "-c", _PROBE_PROGRAM],
+        input=json.dumps(config),
+        capture_output=True,
+        text=True,
+        cwd=str(cwd),
+    )
+
+
+class TestScriptFamiliesNeverImportedByChatSurfaces:
+    """N2 import guard (Task 2 brief / spec §5): `script_families.py`'s
+    DETAIL dataclasses carry script `content` -- it is reachable only from
+    `app/api/v1/celigo_flows.py`'s two families routes, a human-only
+    surface. If `read_queries.py`, the celigo flow-map MCP tool, or any
+    module under `services/chat/` ever imported it, a future refactor could
+    thread script content into an LLM tool result with no review gate
+    catching it -- so the import itself is the failure this guard pins, a
+    build failure rather than a comment nobody reads."""
+
+    def test_read_queries_does_not_import_script_families(self):
+        import inspect
+
+        assert not _imports_script_families(inspect.getsource(read_queries))
+
+    def test_celigo_flow_map_mcp_tool_does_not_import_script_families(self):
+        import inspect
+
+        from app.mcp.tools import celigo_flow_map
+
+        assert not _imports_script_families(inspect.getsource(celigo_flow_map))
+
+    def test_no_module_under_services_chat_imports_script_families(self):
+        import app.services.chat as chat_pkg
+
+        chat_dir = Path(chat_pkg.__file__).parent
+        offenders = [
+            str(py_file.relative_to(chat_dir))
+            for py_file in chat_dir.rglob("*.py")
+            if _imports_script_families(py_file.read_text())
+        ]
+        assert offenders == [], offenders
+
+    def test_chat_and_mcp_surfaces_cannot_import_script_families_at_runtime(self):
+        """The three tests above only catch a DIRECT import written in one
+        of the root files themselves. This test uses Python's REAL import
+        machinery instead of a hand-rolled AST walk (a prior version of this
+        guard had holes: `import a.b.c` never visited `a/__init__.py` or
+        `a/b/__init__.py`, so a leak hidden in a parent package's `__init__`
+        escaped it, and a bare `import app` crashed it outright) --
+        `script_families.py`'s own module docstring explains why the runtime
+        approach is the correct mechanism. A `sys.meta_path` finder blocks
+        `app.services.celigo.script_families` itself, then EVERY module
+        under `app/services/chat/` and `app/mcp/` is actually imported
+        (discovered via `pkgutil.walk_packages`, each one individually
+        `importlib.import_module`-ed) -- if any import chain ever reaches
+        the blocked module, Python's own import system raises, no matter how
+        indirect the path. An unrelated import failure (a real bug, nothing
+        to do with this guard) is collected and reported as a test failure
+        too, never silently skipped -- see `_PROBE_PROGRAM`."""
+        backend_dir = Path(__file__).resolve().parents[2]  # backend/tests/api/ -> backend/
+        config = {
+            "blocked_module": "app.services.celigo.script_families",
+            "direct_imports": ["app.services.celigo.read_queries"],
+            "walk_roots": ["app.services.chat", "app.mcp"],
+        }
+
+        result = _run_import_guard_probe(config=config, cwd=backend_dir)
+
+        assert result.returncode == 0, (
+            "N2 import guard violated, or a chat/MCP module failed to import for an unrelated reason "
+            f"(returncode={result.returncode}):\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+
+    def test_import_guard_probe_mechanism_detects_a_real_leak(self, tmp_path):
+        """Red proof for the mechanism above, not for the app code: a tiny
+        synthetic package with a leak hidden in a parent package's
+        `__init__` (exactly the shape the old hand-rolled walker missed) is
+        built under `tmp_path` -- `fakepkg/sub/__init__.py` reaches the
+        blocked `fakepkg/leak.py` only via `from .. import leak`, a sibling
+        reached THROUGH the parent package, never a direct `import
+        fakepkg.leak`. The probe must still catch it and report the N2
+        message, proving the mechanism can actually fail, not just always
+        pass."""
+        pkg_dir = tmp_path / "fakepkg"
+        pkg_dir.mkdir()
+        (pkg_dir / "__init__.py").write_text("")
+        (pkg_dir / "leak.py").write_text("VALUE = 1\n")
+        sub_dir = pkg_dir / "sub"
+        sub_dir.mkdir()
+        (sub_dir / "__init__.py").write_text("from .. import leak  # noqa: F401\n")
+
+        config = {
+            "blocked_module": "fakepkg.leak",
+            "direct_imports": [],
+            "walk_roots": ["fakepkg"],
+        }
+
+        result = _run_import_guard_probe(config=config, cwd=tmp_path)
+
+        assert result.returncode != 0, (
+            f"probe failed to detect the synthetic leak:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+        assert "N2: fakepkg.leak is not importable" in result.stdout

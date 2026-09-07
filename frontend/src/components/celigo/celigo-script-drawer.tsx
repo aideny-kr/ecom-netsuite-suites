@@ -69,6 +69,7 @@ import { Dialog, DialogPortal, DialogOverlay } from "@/components/ui/dialog";
 import { useCeligoScript } from "@/hooks/use-celigo-flows";
 import { queryState } from "@/lib/query-state";
 import { CeligoScriptViewerBody } from "@/components/settings/celigo-script-viewer";
+import { useCeligoRoute } from "./celigo-route";
 import { ErrorNotice } from "./shared";
 import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -145,6 +146,7 @@ export function CeligoScriptDrawer({
   currentJsonPath?: string | null;
 }): JSX.Element {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const route = useCeligoRoute();
 
   const dragStateRef = useRef<{ pointerId: number; startX: number; startWidth: number } | null>(null);
   const [width, setWidth] = useState<number>(readStoredDrawerWidth);
@@ -356,6 +358,16 @@ export function CeligoScriptDrawer({
                 currentStepId={currentStepId}
                 currentJsonPath={currentJsonPath}
                 layout="fill"
+                onOpenScriptsView={() => {
+                  // Task 6 — the drawer's own hand-off into the account-wide
+                  // Scripts view (spec §3.4): the family is this script's
+                  // OWN dedup_key, and `copy` selects this exact member's
+                  // version on arrival — then the drawer closes, since the
+                  // Scripts view is a full destination, not a companion
+                  // panel to keep open alongside.
+                  route.go.scripts({ family: script.dedup_key, copy: script.id });
+                  onClose();
+                }}
               />
             </div>
           )}

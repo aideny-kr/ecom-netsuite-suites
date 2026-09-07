@@ -1,5 +1,5 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { render, screen, fireEvent } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 
 // Task 10 — script viewer (mockup screen 04) presentational body.
 //
@@ -248,5 +248,27 @@ describe("CeligoScriptViewerBody — untrusted content", () => {
   it("shows the 'no source recorded' placeholder when content is an empty string, not a blank code block", () => {
     render(<CeligoScriptViewerBody script={{ ...baseScript, content: "" }} />);
     expect(document.body.textContent).toContain("// No source recorded for this script.");
+  });
+});
+
+// Task 6 -- the drawer's inert "Scripts view ↗" label finally goes
+// somewhere (spec §3.4 entry points). The settings dialog (this file's
+// OTHER caller, via `CeligoScriptViewerDialog`'s successor) supplies no
+// `onOpenScriptsView` and must keep the exact inert text -- it has no
+// Scripts view to link to; only `CeligoScriptDrawer` (Task 6, its own test
+// file) supplies the prop.
+describe("CeligoScriptViewerBody — Scripts view entry point (Task 6)", () => {
+  it("renders inert text, not a button, when onOpenScriptsView is absent", () => {
+    render(<CeligoScriptViewerBody script={baseScript} />);
+    expect(screen.getByText("Scripts view ↗")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Scripts view ↗" })).not.toBeInTheDocument();
+  });
+
+  it("renders a real button and calls onOpenScriptsView when the prop is supplied", () => {
+    const onOpenScriptsView = vi.fn();
+    render(<CeligoScriptViewerBody script={baseScript} onOpenScriptsView={onOpenScriptsView} />);
+    const button = screen.getByRole("button", { name: "Scripts view ↗" });
+    fireEvent.click(button);
+    expect(onOpenScriptsView).toHaveBeenCalledTimes(1);
   });
 });
