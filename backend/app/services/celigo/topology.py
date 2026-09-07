@@ -11,6 +11,8 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
+from openpyxl.utils import get_column_letter
+
 from app.models.celigo import CeligoScript
 
 
@@ -108,13 +110,12 @@ def _spreadsheet_column(n: int) -> str:
     26->AA, 27->AB, ... 51->AZ, 52->BA, ... Bijective base-26 (there is no
     digit for zero), so this never wraps or produces a non-letter character
     the way `chr(ord("A") + n)` does past the 26th value (n=26 would yield
-    `"["`, not a letter at all)."""
-    n += 1
-    letters = ""
-    while n > 0:
-        n, remainder = divmod(n - 1, 26)
-        letters = chr(ord("A") + remainder) + letters
-    return letters
+    `"["`, not a letter at all). Delegates to `openpyxl.utils.get_column_
+    letter` (already a project dependency, 1-based) rather than hand-rolling
+    the same bijective-base-26 algorithm a second time -- verified identical
+    output for every index 0..701 (A..ZZ) before this delegation replaced
+    the hand-rolled loop."""
+    return get_column_letter(n + 1)
 
 
 def assign_version_letters(members: list[CeligoScript]) -> dict[str, str]:

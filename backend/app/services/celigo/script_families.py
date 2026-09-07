@@ -287,31 +287,32 @@ def _group_scripts(scripts: list[CeligoScript]) -> dict[str, list[CeligoScript]]
 
 
 async def _fetch_production_scripts(
-    db: AsyncSession, *, tenant_id: uuid.UUID, connection_id: uuid.UUID, load_content: bool
+    db: AsyncSession, *, tenant_id: uuid.UUID, connection_id: uuid.UUID
 ) -> list[tuple[CeligoScript, int | None]]:
     """Every production script under *connection_id*, paired with its
     content's byte length computed IN SQL (`octet_length`, never Python's
     `len(content.encode("utf-8"))`) so a caller always has `size_bytes`
     without ever touching `.content`.
 
-    `load_content=False` (`list_script_families`'s own path, and
-    `get_script_family`'s account-wide grouping/name scan) applies
-    `load_only` over every OTHER column this module needs -- `.content` is
-    left deferred/unloaded on the returned rows, so nothing downstream may
-    read it without triggering its own extra per-row SELECT (the N+1 this
-    guards against). `load_content=True` loads the row in full; only
-    `get_script_family` uses it, and only via `_fetch_scripts_by_celigo_id`
-    below, scoped to the one family being requested -- this function itself
-    is never called with `load_content=True` account-wide.
+    Always a LIGHT scan: `load_only` over every OTHER column this module
+    needs -- `.content` is left deferred/unloaded on the returned rows, so
+    nothing downstream may read it without triggering its own extra per-row
+    SELECT (the N+1 this guards against). Used by BOTH `list_script_
+    families`'s own path and `get_script_family`'s account-wide
+    grouping/name scan -- neither ever needs `.content` from this call.
+    `get_script_family`'s scoped, full-content fetch for the ONE requested
+    family goes through the separate `_fetch_scripts_by_celigo_id` below,
+    never through this function.
     """
     size_expr = func.octet_length(CeligoScript.content).label("size_bytes")
-    stmt = select(CeligoScript, size_expr).where(
-        CeligoScript.tenant_id == tenant_id,
-        CeligoScript.celigo_connection_id == connection_id,
-        celigo_script_is_production(),
-    )
-    if not load_content:
-        stmt = stmt.options(
+    stmt = (
+        select(CeligoScript, size_expr)
+        .where(
+            CeligoScript.tenant_id == tenant_id,
+            CeligoScript.celigo_connection_id == connection_id,
+            celigo_script_is_production(),
+        )
+        .options(
             load_only(
                 CeligoScript.id,
                 CeligoScript.celigo_id,
@@ -322,6 +323,7 @@ async def _fetch_production_scripts(
                 CeligoScript.sandbox,
             )
         )
+    )
     rows = (await db.execute(stmt)).all()
     return [(script, size_bytes) for script, size_bytes in rows]
 
@@ -661,7 +663,7 @@ def _index_sites_by_celigo_id(site_rows: list[_SiteRow]) -> dict[str, list[_Site
 async def list_script_families(
     db: AsyncSession, *, tenant_id: uuid.UUID, connection_id: uuid.UUID
 ) -> ScriptFamiliesList:
-    rows = await _fetch_production_scripts(db, tenant_id=tenant_id, connection_id=connection_id, load_content=False)
+    rows = await _fetch_production_scripts(db, tenant_id=tenant_id, connection_id=connection_id)
     scripts = [script for script, _ in rows]
     sizes_by_id = {script.id: size_bytes for script, size_bytes in rows}
     by_family = _group_scripts(scripts)
@@ -715,9 +717,7 @@ async def get_script_family(
     # families to find the target's own members AND every OTHER family's
     # name -- `other_families_with_name` is computed from names alone, so
     # this pass never needs content.
-    light_rows = await _fetch_production_scripts(
-        db, tenant_id=tenant_id, connection_id=connection_id, load_content=False
-    )
+    light_rows = await _fetch_production_scripts(db, tenant_id=tenant_id, connection_id=connection_id)
     light_scripts = [script for script, _ in light_rows]
     by_family_light = _group_scripts(light_scripts)
     light_members = by_family_light.get(dedup_key)

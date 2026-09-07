@@ -958,11 +958,14 @@ class TestListPathNeverLoadsContent:
     """Review finding (Task 2 round 1, brief item 1): `_fetch_production_scripts`
     used to SELECT full `CeligoScript` rows (content included) for every
     production script on BOTH endpoints, even though the list endpoint's own
-    `ScriptFamilySummary` never carries `content`. `load_content=False` (the
-    list endpoint's own path) must leave `.content` unloaded on the returned
-    rows -- checking `inspect(script).unloaded` proves the SELECT itself
-    never touched the column, a stronger claim than `TestListHasNoContentOrHash`
-    (which only checks the OUTPUT shape, not what was actually SELECTed)."""
+    `ScriptFamilySummary` never carries `content`. It is now always a light
+    scan (the `load_content` parameter was later removed as dead -- nothing
+    ever called it with content loaded; `get_script_family`'s own scoped
+    content fetch goes through the separate `_fetch_scripts_by_celigo_id`)
+    and must leave `.content` unloaded on the returned rows -- checking
+    `inspect(script).unloaded` proves the SELECT itself never touched the
+    column, a stronger claim than `TestListHasNoContentOrHash` (which only
+    checks the OUTPUT shape, not what was actually SELECTed)."""
 
     async def test_list_path_leaves_content_unloaded(self, db: AsyncSession):
         sf = _import_module()
@@ -971,7 +974,7 @@ class TestListPathNeverLoadsContent:
         await db.flush()
         db.expire_all()  # forget the full-row cache the seeding insert left behind
 
-        rows = await sf._fetch_production_scripts(db, tenant_id=tenant_id, connection_id=conn_id, load_content=False)
+        rows = await sf._fetch_production_scripts(db, tenant_id=tenant_id, connection_id=conn_id)
 
         assert len(rows) == 1
         script, size_bytes = rows[0]
