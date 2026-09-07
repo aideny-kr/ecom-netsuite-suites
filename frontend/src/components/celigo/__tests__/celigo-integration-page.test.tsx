@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, fireEvent, within } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import type { CeligoIntegration, CeligoFlowSummary } from "@/hooks/use-celigo-flows";
+import type { CeligoIntegration, CeligoFlowSummary, CeligoScriptFamilySummary } from "@/hooks/use-celigo-flows";
 import { resolved, pending, errored } from "./query-fixtures";
 
 // Task 12 — the integration page (mockup screen 2): header, tabs, grouped
@@ -9,6 +9,11 @@ import { resolved, pending, errored } from "./query-fixtures";
 // per-step errors drawer. Mocks the hooks module (Task 10's established
 // pattern) and the route module (Task 10's `routeMocks` pattern, one level
 // up: the route hook itself is stubbed, not next/navigation).
+//
+// Task 6 — the Scripts tab (spec §3.4 entry points) now lists this
+// integration's own clone families instead of saying "ships separately",
+// so this file's hooks mock also stubs `useCeligoScriptFamilies` and its
+// route mock's `go` gains `scripts`.
 
 const mocks = vi.hoisted(() => ({
   integrations: vi.fn(),
@@ -16,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   syncStatus: vi.fn(),
   changes: vi.fn(),
   flowErrors: vi.fn(),
+  scriptFamilies: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-celigo-flows", () => ({
@@ -24,6 +30,7 @@ vi.mock("@/hooks/use-celigo-flows", () => ({
   useCeligoSyncStatus: () => mocks.syncStatus(),
   useCeligoIntegrationChanges: () => mocks.changes(),
   useCeligoFlowErrors: () => mocks.flowErrors(),
+  useCeligoScriptFamilies: () => mocks.scriptFamilies(),
 }));
 
 const routeMocks = vi.hoisted(() => ({
@@ -38,6 +45,7 @@ const routeMocks = vi.hoisted(() => ({
     flow: vi.fn(),
     step: vi.fn(),
     script: vi.fn(),
+    scripts: vi.fn(),
   },
 }));
 
@@ -150,6 +158,24 @@ beforeEach(() => {
   mocks.syncStatus.mockReset().mockReturnValue(resolved({ last_synced_at: SYNCED_AT }));
   mocks.changes.mockReset().mockReturnValue(resolved([]));
   mocks.flowErrors.mockReset().mockReturnValue(pending());
+  mocks.scriptFamilies.mockReset().mockReturnValue(
+    resolved({
+      totals: {
+        scripts: 0,
+        families: 0,
+        attached_families: 0,
+        unattached_families: 0,
+        diverged_families: 0,
+        sites: 0,
+        flows_with_sites: 0,
+        flows_total: 0,
+        integrations_with_sites: 0,
+        sites_with_open_errors: 0,
+      },
+      families: [],
+      synced_at: null,
+    }),
+  );
   routeMocks.integrationId = "int-1";
   routeMocks.tab = "flows";
   routeMocks.go.files.mockReset();
@@ -160,6 +186,7 @@ beforeEach(() => {
   routeMocks.go.flow.mockReset();
   routeMocks.go.step.mockReset();
   routeMocks.go.script.mockReset();
+  routeMocks.go.scripts.mockReset();
 });
 
 afterEach(() => {
@@ -623,21 +650,164 @@ describe("Changes tab", () => {
 // Scripts tab
 // ---------------------------------------------------------------------------
 
+// Task 6 -- the Scripts tab lists THIS integration's own clone families
+// (client-side filter of the account-wide list by `integration_ids`),
+// reusing `FamilyRow` in its `compact` form, plus a link out to the full
+// Scripts view pre-filtered to this integration (spec §3.4 entry points).
+// "ships separately" is gone -- there is a real destination now.
+function makeFamily(overrides: Partial<CeligoScriptFamilySummary> = {}): CeligoScriptFamilySummary {
+  return {
+    dedup_key: "d1",
+    name: "inventory_sync_filter",
+    kind: "filter",
+    function_name: null,
+    copies_count: 1,
+    versions_count: 1,
+    content_diverged: false,
+    original_present: true,
+    sites_count: 1,
+    flows_count: 1,
+    integrations_count: 1,
+    integration_ids: ["int-1"],
+    flow_names: [],
+    sites_with_open_errors: 0,
+    sites_unchecked: 0,
+    first_modified: null,
+    last_modified: null,
+    max_size_bytes: null,
+    other_families_with_name: 0,
+    ...overrides,
+  };
+}
+
 describe("Scripts tab", () => {
   beforeEach(() => {
     routeMocks.tab = "scripts";
   });
 
-  it("renders the summary sentence, plus only the flows with script_count > 0", () => {
-    setup([
-      makeFlow({ id: "f1", name: "Has Scripts", script_count: 2 }),
-      makeFlow({ id: "f2", name: "No Scripts", script_count: 0 }),
-    ]);
-    expect(
-      screen.getByText("2 scripts across 2 flows · the Scripts view ships separately"),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Has Scripts")).toBeInTheDocument();
-    expect(screen.queryByText("No Scripts")).not.toBeInTheDocument();
+  it("lists only families with a site in THIS integration, with a count of families and sites", () => {
+    mocks.scriptFamilies.mockReturnValue(
+      resolved({
+        totals: {
+          scripts: 0,
+          families: 0,
+          attached_families: 0,
+          unattached_families: 0,
+          diverged_families: 0,
+          sites: 0,
+          flows_with_sites: 0,
+          flows_total: 0,
+          integrations_with_sites: 0,
+          sites_with_open_errors: 0,
+        },
+        families: [
+          makeFamily({ dedup_key: "d1", name: "In This Integration", integration_ids: ["int-1"], sites_count: 3 }),
+          makeFamily({ dedup_key: "d2", name: "Elsewhere Only", integration_ids: ["int-2"], sites_count: 5 }),
+        ],
+        synced_at: null,
+      }),
+    );
+    setup([]);
+    expect(screen.getByText("1 family · 3 sites here")).toBeInTheDocument();
+    expect(screen.getByText("In This Integration")).toBeInTheDocument();
+    expect(screen.queryByText("Elsewhere Only")).not.toBeInTheDocument();
+  });
+
+  it("pluralises the summary sentence for more than one family", () => {
+    mocks.scriptFamilies.mockReturnValue(
+      resolved({
+        totals: {
+          scripts: 0,
+          families: 0,
+          attached_families: 0,
+          unattached_families: 0,
+          diverged_families: 0,
+          sites: 0,
+          flows_with_sites: 0,
+          flows_total: 0,
+          integrations_with_sites: 0,
+          sites_with_open_errors: 0,
+        },
+        families: [
+          makeFamily({ dedup_key: "d1", integration_ids: ["int-1"], sites_count: 2 }),
+          makeFamily({ dedup_key: "d2", integration_ids: ["int-1"], sites_count: 1 }),
+        ],
+        synced_at: null,
+      }),
+    );
+    setup([]);
+    expect(screen.getByText("2 families · 3 sites here")).toBeInTheDocument();
+  });
+
+  it("shows an empty state when no family has a site in this integration", () => {
+    mocks.scriptFamilies.mockReturnValue(
+      resolved({
+        totals: {
+          scripts: 0,
+          families: 0,
+          attached_families: 0,
+          unattached_families: 0,
+          diverged_families: 0,
+          sites: 0,
+          flows_with_sites: 0,
+          flows_total: 0,
+          integrations_with_sites: 0,
+          sites_with_open_errors: 0,
+        },
+        families: [makeFamily({ dedup_key: "d2", integration_ids: ["int-2"] })],
+        synced_at: null,
+      }),
+    );
+    setup([]);
+    expect(screen.getByText("0 families · 0 sites here")).toBeInTheDocument();
+    expect(screen.getByText("No scripts recorded for this integration.")).toBeInTheDocument();
+  });
+
+  it('the "Open in Scripts view" link navigates with in=<integrationId> and no family/integration param', () => {
+    setup([]);
+    fireEvent.click(screen.getByText("Open in Scripts view, filtered to this integration ↗"));
+    expect(routeMocks.go.scripts).toHaveBeenCalledWith({ in: "int-1" });
+    expect(routeMocks.go.scripts).toHaveBeenCalledTimes(1);
+  });
+
+  it("clicking a family row navigates to that family, still filtered to this integration", () => {
+    mocks.scriptFamilies.mockReturnValue(
+      resolved({
+        totals: {
+          scripts: 0,
+          families: 0,
+          attached_families: 0,
+          unattached_families: 0,
+          diverged_families: 0,
+          sites: 0,
+          flows_with_sites: 0,
+          flows_total: 0,
+          integrations_with_sites: 0,
+          sites_with_open_errors: 0,
+        },
+        families: [makeFamily({ dedup_key: "d1", name: "In This Integration", integration_ids: ["int-1"] })],
+        synced_at: null,
+      }),
+    );
+    setup([]);
+    fireEvent.click(screen.getByText("In This Integration"));
+    expect(routeMocks.go.scripts).toHaveBeenCalledWith({ family: "d1", in: "int-1" });
+  });
+
+  it("shows a skeleton, not an empty/loaded body, while the families query is pending", () => {
+    mocks.scriptFamilies.mockReturnValue(pending());
+    setup([]);
+    expect(screen.queryByText(/couldn.?t load/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/families ·/i)).not.toBeInTheDocument();
+  });
+
+  it("shows an error notice with a working retry when the families query fails", () => {
+    const refetch = vi.fn();
+    mocks.scriptFamilies.mockReturnValue(errored(refetch));
+    setup([]);
+    expect(screen.getByText(/couldn.?t load scripts/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /retry/i }));
+    expect(refetch).toHaveBeenCalled();
   });
 });
 

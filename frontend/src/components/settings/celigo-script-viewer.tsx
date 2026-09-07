@@ -177,6 +177,7 @@ export function CeligoScriptViewerBody({
   currentStepId,
   currentJsonPath,
   layout = "dialog",
+  onOpenScriptsView,
 }: {
   script: CeligoScript;
   currentStepId?: string | null;
@@ -188,6 +189,15 @@ export function CeligoScriptViewerBody({
    * since moved) falls through to the step, then to the first site. */
   currentJsonPath?: string | null;
   layout?: "dialog" | "fill";
+  /** Task 6 — the Scripts view now exists (`celigo-route.ts`'s `go.scripts`,
+   * `components/celigo/scripts/`), so "Scripts view ↗" can finally be a real
+   * affordance -- but only for a caller that actually has somewhere to send
+   * it. `CeligoScriptDrawer` supplies this (navigates via `go.scripts({
+   * family: script.dedup_key, copy: script.id })` and closes itself); the
+   * settings dialog (this file's other caller) supplies nothing, and the
+   * label stays inert text -- never a button/link implying an affordance
+   * this surface can't back. */
+  onOpenScriptsView?: () => void;
 }): JSX.Element {
   const fill = layout === "fill";
   const copyGroups = groupSitesByCopy(script.used_by);
@@ -232,15 +242,24 @@ export function CeligoScriptViewerBody({
       </div>
 
       {/* "Scripts view" -- the full clone family (every site, every copy,
-          the diff) lives in the integration page's Scripts tab
-          (`celigo-integration-page.tsx`'s `ScriptsTab`), which today only
-          says "the Scripts view ships separately" -- there is no built,
-          navigable destination for this link yet (no task in this plan
-          builds one; out of scope per the plan's Deferred table). Rendered
-          as inert text, not a button or anchor, so this surface never
-          implies an affordance it can't back. */}
+          the diff) lives in the account-wide Scripts view
+          (`components/celigo/scripts/celigo-scripts-page.tsx`). A real
+          `<button>` only when a caller supplies `onOpenScriptsView` (see
+          that prop's docstring above); otherwise the exact same inert text
+          as before, since this surface still has no destination to promise
+          on its own. */}
       <div className={cn("flex items-center justify-end border-b pb-2", fill && "shrink-0")}>
-        <span className="text-[12px] font-medium text-muted-foreground">Scripts view ↗</span>
+        {onOpenScriptsView ? (
+          <button
+            type="button"
+            onClick={onOpenScriptsView}
+            className="text-[12px] font-medium text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+          >
+            Scripts view ↗
+          </button>
+        ) : (
+          <span className="text-[12px] font-medium text-muted-foreground">Scripts view ↗</span>
+        )}
       </div>
 
       {/* Fix 2 (celigo flow sizing UI): in `layout="fill"` this wrapper is

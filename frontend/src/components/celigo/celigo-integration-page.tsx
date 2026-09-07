@@ -22,11 +22,13 @@ import {
   useCeligoSyncStatus,
   useCeligoIntegrationChanges,
   useCeligoFlowErrors,
+  useCeligoScriptFamilies,
   type CeligoIntegration,
   type CeligoFlowSummary,
   type CeligoRecordWrite,
   type CeligoConfigChange,
   type CeligoJson,
+  type CeligoScriptFamilySummary,
 } from "@/hooks/use-celigo-flows";
 import { queryState, type QueryState } from "@/lib/query-state";
 import { cn } from "@/lib/utils";
@@ -34,12 +36,14 @@ import { parseSchedule, stallState, type ParsedSchedule } from "./schedule";
 import { ErrorNotice, ErrorPill, Medallions, Pill, SchedulePill, formatRelativeTime } from "./shared";
 import { useCeligoRoute, type CeligoTab } from "./celigo-route";
 import { CeligoBreadcrumb } from "./celigo-breadcrumb";
+import { FamilyRow } from "./scripts/family-row";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 
 const NO_FLOWS: CeligoFlowSummary[] = [];
 const NO_CHANGES: CeligoConfigChange[] = [];
+const NO_FAMILIES: CeligoScriptFamilySummary[] = [];
 
 // ---------------------------------------------------------------------------
 // Pure helpers — exported for tests, so "how a flow groups" and "what the
@@ -443,24 +447,83 @@ function FlowsTable({
   );
 }
 
-function ScriptsTab({ flows }: { flows: CeligoFlowSummary[] }): JSX.Element {
-  const scriptsTotal = flows.reduce((sum, f) => sum + f.script_count, 0);
-  const withScripts = flows.filter((f) => f.script_count > 0);
+/** Task 6 -- which of the account-wide list's families have at least one
+ * site IN this integration. A client-side filter (spec §3.4), not a
+ * separate endpoint: `CeligoScriptFamilySummary.integration_ids` already
+ * carries exactly this fact for every family, so a second network round
+ * trip would buy nothing a filter here doesn't already have. Exported for
+ * the same reason `topologyGlyph`/`groupFlows` are: a stable, independently
+ * testable seam between "which families belong here" and "how the tab
+ * renders that". */
+export function familiesForIntegration(
+  families: CeligoScriptFamilySummary[],
+  integrationId: string,
+): CeligoScriptFamilySummary[] {
+  return families.filter((f) => f.integration_ids.includes(integrationId));
+}
+
+function ScriptsTab({
+  integrationId,
+  families,
+  state,
+  onRetry,
+}: {
+  integrationId: string;
+  families: CeligoScriptFamilySummary[];
+  state: QueryState;
+  onRetry: () => void;
+}): JSX.Element {
+  const route = useCeligoRoute();
+
+  if (state === "pending") return <FlowsTableSkeleton />;
+  if (state === "error") {
+    return <ErrorNotice message="Couldn't load scripts." onRetry={onRetry} />;
+  }
+
+  const scoped = familiesForIntegration(families, integrationId);
+  // A rough "how much of this integration is scripted" count, not a claim
+  // that every one of these sites belongs ONLY to this integration -- a
+  // family spanning integrations (spec §1 item 1: "4 families span
+  // integrations") contributes its FULL `sites_count`, sites elsewhere
+  // included, because the account-wide list carries no per-integration
+  // site count to sum instead. Good enough for an at-a-glance tab; the
+  // full where-used breakdown lives in the Scripts view itself.
+  const sitesHere = scoped.reduce((sum, f) => sum + f.sites_count, 0);
+
   return (
-    <div className="flex flex-col gap-2 text-[13px]">
-      <p className="text-muted-foreground">
-        {scriptsTotal} script{scriptsTotal === 1 ? "" : "s"} across {flows.length} flow
-        {flows.length === 1 ? "" : "s"} · the Scripts view ships separately
-      </p>
-      {withScripts.length > 0 && (
-        <ul className="flex flex-col gap-1">
-          {withScripts.map((f) => (
-            <li key={f.id} className="flex items-center justify-between rounded-lg border px-2.5 py-1.5">
-              <span>{f.name}</span>
-              <ScriptsCell flow={f} />
-            </li>
+    <div className="flex flex-col gap-2.5 text-[13px]">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-muted-foreground">
+          {scoped.length} famil{scoped.length === 1 ? "y" : "ies"} · {sitesHere} site
+          {sitesHere === 1 ? "" : "s"} here
+        </p>
+        <button
+          type="button"
+          className="font-medium text-foreground underline"
+          // Deliberately NOT `go.integration(id, "scripts")` -- this link
+          // leaves the integration page entirely for the account-wide
+          // Scripts view, pre-filtered via `in=`, never `integration=`
+          // (which already means THIS tab; see `go.scripts`'s own
+          // docstring in celigo-route.ts).
+          onClick={() => route.go.scripts({ in: integrationId })}
+        >
+          Open in Scripts view, filtered to this integration ↗
+        </button>
+      </div>
+      {scoped.length === 0 ? (
+        <p className="text-muted-foreground">No scripts recorded for this integration.</p>
+      ) : (
+        <div className="overflow-hidden rounded-lg border">
+          {scoped.map((family) => (
+            <FamilyRow
+              key={family.dedup_key}
+              family={family}
+              compact
+              selected={false}
+              onSelect={(dedupKey) => route.go.scripts({ family: dedupKey, in: integrationId })}
+            />
           ))}
-        </ul>
+        </div>
       )}
     </div>
   );
@@ -646,18 +709,25 @@ export function CeligoIntegrationPage(): JSX.Element {
   const flowsQuery = useCeligoIntegrationFlows(integrationId ?? undefined);
   const syncStatusQuery = useCeligoSyncStatus();
   const changesQuery = useCeligoIntegrationChanges(integrationId ?? undefined);
+  // Account-wide, not integration-scoped -- the Scripts tab filters it
+  // client-side (`familiesForIntegration`, below) the same way the drawer's
+  // used-by table and `celigo-scripts-list.tsx`'s `Integration: any` select
+  // both key off `integration_ids` rather than a per-integration endpoint.
+  const scriptFamiliesQuery = useCeligoScriptFamilies();
   const [errorsDrawer, setErrorsDrawer] = useState<{ flowId: string; flowName: string } | null>(null);
 
   const integrationsState = queryState(integrationsQuery);
   const flowsState = queryState(flowsQuery);
   const syncStatusState = queryState(syncStatusQuery);
   const changesState = queryState(changesQuery);
+  const scriptFamiliesState = queryState(scriptFamiliesQuery);
 
   const lastSyncedAt = syncStatusState === "success" ? syncStatusQuery.data?.last_synced_at ?? null : null;
   const integration =
     integrationsState === "success" ? integrationsQuery.data!.find((i) => i.id === integrationId) : undefined;
   const flows = flowsQuery.data ?? NO_FLOWS;
   const changes = changesQuery.data ?? NO_CHANGES;
+  const scriptFamilies = scriptFamiliesQuery.data?.families ?? NO_FAMILIES;
 
   const scriptsTotal = useMemo(() => flows.reduce((sum, f) => sum + f.script_count, 0), [flows]);
   const errorFlows = useMemo(() => flows.filter((f) => f.error_count > 0), [flows]);
@@ -731,13 +801,12 @@ export function CeligoIntegrationPage(): JSX.Element {
             )}
           </TabsContent>
           <TabsContent value="scripts">
-            {flowsState === "pending" ? (
-              <FlowsTableSkeleton />
-            ) : flowsState === "error" ? (
-              <ErrorNotice message="Couldn't load flows." onRetry={() => flowsQuery.refetch()} />
-            ) : (
-              <ScriptsTab flows={flows} />
-            )}
+            <ScriptsTab
+              integrationId={integration.id}
+              families={scriptFamilies}
+              state={scriptFamiliesState}
+              onRetry={() => scriptFamiliesQuery.refetch()}
+            />
           </TabsContent>
           <TabsContent value="errors">
             {flowsLoading ? (

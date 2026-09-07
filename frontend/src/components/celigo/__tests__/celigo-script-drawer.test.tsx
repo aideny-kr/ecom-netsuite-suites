@@ -16,6 +16,17 @@ vi.mock("@/hooks/use-celigo-flows", () => ({
   useCeligoScript: (scriptId: string | undefined) => mocks.script(scriptId),
 }));
 
+// Task 6 -- the drawer's own "Scripts view ↗" entry point navigates via
+// `go.scripts`. Only `go.scripts` is exercised here; every other test in
+// this file never touches the route module.
+const routeMocks = vi.hoisted(() => ({
+  go: { scripts: vi.fn() },
+}));
+
+vi.mock("../celigo-route", () => ({
+  useCeligoRoute: () => ({ go: routeMocks.go }),
+}));
+
 import { CeligoScriptDrawer } from "../celigo-script-drawer";
 
 function wrap(ui: React.ReactElement) {
@@ -82,6 +93,7 @@ const DRAWER_WIDTH_KEY = "celigo.scriptDrawerWidth";
 
 beforeEach(() => {
   mocks.script.mockReset();
+  routeMocks.go.scripts.mockReset();
   window.localStorage.removeItem(DRAWER_WIDTH_KEY);
 });
 
@@ -179,6 +191,19 @@ describe("CeligoScriptDrawer — loaded, as a right-panel drawer over the inspec
     expect(screen.getByText("e5f6a7b8….hooks.preMap")).toBeInTheDocument();
     expect(screen.queryByText("9c8d7e6f….hooks.preMap")).not.toBeInTheDocument();
     expect(screen.getByText(/6 further cop/i)).toBeInTheDocument();
+  });
+});
+
+describe("CeligoScriptDrawer — Scripts view entry point (Task 6)", () => {
+  it("navigates to the Scripts view for this family/copy and closes, on click", () => {
+    mocks.script.mockReturnValue(resolved(SCRIPT));
+    const onClose = vi.fn();
+    wrap(<CeligoScriptDrawer scriptId="scr-1" onClose={onClose} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Scripts view ↗" }));
+
+    expect(routeMocks.go.scripts).toHaveBeenCalledWith({ family: SCRIPT.dedup_key, copy: SCRIPT.id });
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 });
 
