@@ -482,6 +482,7 @@ def _coerce_assistant_content(
     persisted_output: dict | None,
     *,
     tool_calls: list[dict] | None = None,
+    error: str | None = None,
 ) -> str:
     """Decide what string to persist as ``ChatMessage.content``.
 
@@ -499,6 +500,15 @@ def _coerce_assistant_content(
       final text. Use the spiral-specific wording so the user doesn't read
       this as "I don't remember anything we just discussed".
     """
+    if error:
+        if "credit balance is too low" in error.lower() or "insufficient_quota" in error.lower():
+            notice = (
+                "The configured AI provider has insufficient API credit. Add credit or select a funded provider "
+                "in AI provider settings, then retry."
+            )
+        else:
+            notice = "The agent could not complete this request. Please retry or check your AI provider settings."
+        return f"{final_text}\n\n{notice}" if final_text else notice
     if isinstance(persisted_output, dict) and persisted_output.get("type") == "clarification":
         return ""
     if _is_pricing_task_output(persisted_output):
@@ -4031,6 +4041,9 @@ async def run_chat_turn(
                             final_text,
                             _persisted_output,
                             tool_calls=coord_result_tool_calls,
+                            error=(agent_result.error or "agent_failed")
+                            if agent_result is not None and not agent_result.success
+                            else None,
                         ),
                         tool_calls=coord_result_tool_calls if coord_result_tool_calls else None,
                         citations=citations if citations else None,
