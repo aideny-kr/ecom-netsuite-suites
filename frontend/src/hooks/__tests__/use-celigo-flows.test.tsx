@@ -16,6 +16,8 @@ import {
   useCeligoAllFlows,
   useCeligoFlowDetail,
   useCeligoSyncStatus,
+  useCeligoScriptFamilies,
+  useCeligoScriptFamily,
 } from "@/hooks/use-celigo-flows";
 
 function makeWrapper(qc: QueryClient) {
@@ -107,4 +109,49 @@ it("useCeligoSyncStatus fetches GET /api/v1/celigo/sync-status under ['celigo','
   await waitFor(() => expect(result.current.isSuccess).toBe(true));
   expect(api.get).toHaveBeenCalledWith("/api/v1/celigo/sync-status");
   expect(qc.getQueryState(["celigo", "sync-status"])).toBeDefined();
+});
+
+// Task 3 (Scripts view route params + hooks, spec §3.3) -- over Task 2's
+// GET /api/v1/celigo/scripts/families[/{dedup_key}].
+it("useCeligoScriptFamilies fetches GET /api/v1/celigo/scripts/families under ['celigo','script-families']", async () => {
+  api.get.mockResolvedValueOnce({
+    totals: {
+      scripts: 0,
+      families: 0,
+      attached_families: 0,
+      unattached_families: 0,
+      diverged_families: 0,
+      sites: 0,
+      flows_with_sites: 0,
+      flows_total: 0,
+      integrations_with_sites: 0,
+      sites_with_open_errors: 0,
+    },
+    families: [],
+    synced_at: null,
+  });
+  const qc = new QueryClient(qcOpts);
+  const { result } = renderHook(() => useCeligoScriptFamilies(), { wrapper: makeWrapper(qc) });
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(api.get).toHaveBeenCalledWith("/api/v1/celigo/scripts/families");
+  expect(qc.getQueryState(["celigo", "script-families"])).toBeDefined();
+});
+
+it("useCeligoScriptFamily fetches one family's detail by dedup_key", async () => {
+  api.get.mockResolvedValueOnce({
+    summary: { dedup_key: "fam1", name: "synthetic_family", kind: "hook" },
+    members: [],
+    versions: [],
+    sites: [],
+  });
+  const qc = new QueryClient(qcOpts);
+  const { result } = renderHook(() => useCeligoScriptFamily("fam1"), { wrapper: makeWrapper(qc) });
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(api.get).toHaveBeenCalledWith("/api/v1/celigo/scripts/families/fam1");
+});
+
+it("useCeligoScriptFamily never calls the API when no dedup_key is given", () => {
+  const qc = new QueryClient(qcOpts);
+  renderHook(() => useCeligoScriptFamily(null), { wrapper: makeWrapper(qc) });
+  expect(api.get).not.toHaveBeenCalled();
 });
