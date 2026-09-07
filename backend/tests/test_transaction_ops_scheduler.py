@@ -362,7 +362,7 @@ async def test_real_recovery_includes_expired_deadlines_and_excludes_live_leases
         conf.id,
         RunCreate(evaluation_key="expired", order_references=["R123456789"]),
         actor=actor,
-        now=now - timedelta(hours=2),
+        now=now - timedelta(hours=25),
     )
     stale = await state.create_run(
         db,

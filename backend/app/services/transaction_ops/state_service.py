@@ -50,6 +50,7 @@ from app.services.feature_flag_service import get_all_flags
 from app.services.transaction_ops.normalization import TransactionMapping
 
 _LEASE = timedelta(seconds=180)
+_RUN_QUEUE_AGE = timedelta(days=1)
 _EVIDENCE_AGE = timedelta(minutes=15)
 _OPERATION_CALLS = 96
 _OPERATION_TIME = timedelta(seconds=300)
@@ -386,13 +387,43 @@ def _lease(row, token, now):
         raise StateError("run_lease_lost")
 
 
+def _first_claim_deadline(row, now):
+    """One execution budget after queueing, bounded by the original work's age."""
+    seconds = (row.config_snapshot or {}).get("deadline_seconds")
+    if type(seconds) is not int or not 30 <= seconds <= 3600:
+        return row.deadline_at  # Legacy/malformed snapshots cannot acquire extra time.
+    duration = timedelta(seconds=seconds)
+    queued_at = row.deadline_at - duration
+    hard_deadline = queued_at + _RUN_QUEUE_AGE
+    started = (row.progress_json or {}).get("continuation_started_at")
+    if started is not None:
+        try:
+            started = datetime.fromisoformat(started)
+            if started.utcoffset() is None or started > now:
+                return None
+        except (TypeError, ValueError):
+            return None
+        hard_deadline = min(hard_deadline, started + _RUN_QUEUE_AGE)
+    if now < queued_at or now >= hard_deadline:
+        return None
+    return min(now + duration, hard_deadline)
+
+
 async def claim_run(db, tenant_id, run_id, *, now=None):
     now = _clock(now)
     row = await get_run(db, tenant_id, run_id, lock=True)
     if row.status == "finished":
         await _commit(db, tenant_id)
         return None
-    if now >= row.deadline_at:
+    deadline = row.deadline_at
+    if (
+        row.status == "pending"
+        and row.origin in {"manual", "chat", "schedule"}
+        and row.lease_token is None
+        and row.api_calls_used == row.orders_used == 0
+    ):
+        deadline = _first_claim_deadline(row, now)
+    if deadline is None or now >= deadline:
         _finish(row, "budget", now)
         await _commit(db, tenant_id)
         return None
@@ -400,10 +431,11 @@ async def claim_run(db, tenant_id, run_id, *, now=None):
         await _commit(db, tenant_id)
         return None
     config = await get_config(db, tenant_id, row.config_id)
-    if not config.enabled:
+    if not config.enabled or (row.origin == "schedule" and not config.schedule_enabled):
         _finish(row, "stall", now)
         await _commit(db, tenant_id)
         return None
+    row.deadline_at = deadline
     row.status, row.lease_token = "running", uuid.uuid4()
     row.lease_until = min(row.deadline_at, now + _LEASE)
     await _commit(db, tenant_id)
