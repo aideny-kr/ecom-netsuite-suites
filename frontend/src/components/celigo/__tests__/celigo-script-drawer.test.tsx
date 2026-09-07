@@ -195,7 +195,13 @@ describe("CeligoScriptDrawer — loaded, as a right-panel drawer over the inspec
 });
 
 describe("CeligoScriptDrawer — Scripts view entry point (Task 6)", () => {
-  it("navigates to the Scripts view for this family/copy and closes, on click", () => {
+  it("navigates to the Scripts view for this family/copy on click, and does NOT also call onClose", () => {
+    // Live on staging (2026-09-07) the link went nowhere: the handler called
+    // `go.scripts(...)` and then `onClose()`, and `onClose` on the flow page
+    // is itself a navigation (`go.script(null)` → back to the flow URL) that
+    // overrode the first push. The Scripts view is a full destination: the
+    // route change unmounts the flow page and the drawer with it, so the
+    // handler must navigate ONLY — never close-by-navigating afterwards.
     mocks.script.mockReturnValue(resolved(SCRIPT));
     const onClose = vi.fn();
     wrap(<CeligoScriptDrawer scriptId="scr-1" onClose={onClose} />);
@@ -203,7 +209,7 @@ describe("CeligoScriptDrawer — Scripts view entry point (Task 6)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Scripts view ↗" }));
 
     expect(routeMocks.go.scripts).toHaveBeenCalledWith({ family: SCRIPT.dedup_key, copy: SCRIPT.id });
-    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onClose).not.toHaveBeenCalled();
   });
 });
 

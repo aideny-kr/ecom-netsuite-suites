@@ -362,11 +362,14 @@ export function CeligoScriptDrawer({
                   // Task 6 — the drawer's own hand-off into the account-wide
                   // Scripts view (spec §3.4): the family is this script's
                   // OWN dedup_key, and `copy` selects this exact member's
-                  // version on arrival — then the drawer closes, since the
-                  // Scripts view is a full destination, not a companion
-                  // panel to keep open alongside.
+                  // version on arrival. Navigate ONLY: the Scripts view is a
+                  // full destination, so the route change unmounts the flow
+                  // page and this drawer with it. Do NOT call `onClose()`
+                  // here — on the flow page it is itself a navigation
+                  // (`go.script(null)`, back to the flow URL) and it won the
+                  // race against `go.scripts` live on staging, leaving the
+                  // viewer on the flow with the drawer shut and nothing else.
                   route.go.scripts({ family: script.dedup_key, copy: script.id });
-                  onClose();
                 }}
               />
             </div>
