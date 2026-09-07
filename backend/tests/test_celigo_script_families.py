@@ -357,6 +357,39 @@ class TestFamilyKeyAndVersionLetters:
         assert detail.members[0].version_letter == "A"
         assert detail.versions[0].holds_original is True
 
+    async def test_version_letters_go_past_z_spreadsheet_style_with_27_distinct_versions(self, db: AsyncSession):
+        """Review finding (Task 2 round 2, brief item 2): `_build_versions`
+        re-sorted `letters.items()` by the LETTER STRING itself
+        (`sorted(..., key=lambda kv: kv[1])`), which orders "AA" before "B"
+        alphabetically -- a real family with more than 26 diverged versions
+        came back with its `versions` list out of order even though
+        `assign_version_letters` assigned the letters correctly. 27 distinct
+        content hashes, each first-seen a day apart, must produce a
+        `versions` list in the real VERSION order: A, B, ..., Z, AA."""
+        sf = _import_module()
+        tenant_id, conn_id = await _basic_tenant_conn(db)
+        await _seed_script(
+            db, tenant_id, conn_id, celigo_id="v0", name="fam", content="content-0", last_modified=_ts(1)
+        )
+        for i in range(1, 27):
+            await _seed_script(
+                db,
+                tenant_id,
+                conn_id,
+                celigo_id=f"v{i}",
+                name="fam",
+                content=f"content-{i}",
+                source_id="v0",
+                last_modified=_ts(i + 1),
+            )
+        await db.flush()
+
+        detail = await sf.get_script_family(db, tenant_id=tenant_id, connection_id=conn_id, dedup_key="v0")
+
+        expected_letters = [chr(ord("A") + i) for i in range(26)] + ["AA"]
+        assert [v.letter for v in detail.versions] == expected_letters
+        assert detail.summary.versions_count == 27
+
 
 class TestVersionLettersComputedOnce:
     async def test_get_script_family_computes_letters_exactly_once(self, db: AsyncSession, monkeypatch):

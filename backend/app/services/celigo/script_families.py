@@ -569,7 +569,14 @@ def _build_versions(
             by_hash[m.content_hash].append(m)
 
     versions: list[ScriptFamilyVersion] = []
-    for content_hash, letter in sorted(letters.items(), key=lambda kv: kv[1]):
+    # `letters` is a dict comprehension built from `enumerate(ordered_hashes)`
+    # inside `assign_version_letters` (topology.py) -- Python dicts preserve
+    # insertion order, so iterating it directly already yields A, B, ..., Z,
+    # AA, ... in real version order. Re-sorting by the LETTER STRING (the
+    # prior code) orders "AA" before "B" alphabetically, which is wrong past
+    # the 26th version -- see test_version_letters_go_past_z_spreadsheet_
+    # style_with_27_distinct_versions.
+    for content_hash, letter in letters.items():
         group = by_hash[content_hash]
         sites_count = sum(len(sites_by_celigo_id.get(m.celigo_id, [])) for m in group)
         timestamps = [m.celigo_last_modified for m in group if m.celigo_last_modified is not None]
