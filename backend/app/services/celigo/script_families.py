@@ -4,22 +4,26 @@ Spec: `docs/superpowers/specs/2026-09-06-celigo-scripts-view-design.md` §2.
 A NEW module, separate from `read_queries.py` (which the AST guard keeps
 content-free -- `test_celigo_read_queries_parity.py::TestNoScriptContentSelected`).
 
-Guarded against ever reaching a chat/MCP surface by a TRANSITIVE import scan
-(`test_celigo_read_queries_parity.py::TestScriptFamiliesNeverImportedByChatSurfaces
-::test_no_transitively_reachable_app_module_imports_script_families`):
-starting from every module under `app/services/chat/`, every module under
-`app/mcp/`, and this package's own `read_queries.py`, the guard AST-walks
-each module's `Import`/`ImportFrom` statements (resolving relative imports
-the way Python itself does), follows every `app.*` import it finds into
-that module's own source file, and repeats -- stopping only at a name that
-isn't itself an `app.*` module. If that closure ever contains
-`app.services.celigo.script_families`, the guard fails, a build failure
-rather than a comment nobody reads. (Three narrower direct-import checks in
-the same class cover the same three root sets for a quicker, more
-localized failure message; the transitive scan is what actually enforces
-the invariant for an indirect import chain.) This module IS where script
-content is allowed to reach the API (the detail's members), because it
-serves a human-only surface, never a chat tool.
+Guarded against ever reaching a chat/MCP surface by TWO layers
+(`test_celigo_read_queries_parity.py::TestScriptFamiliesNeverImportedByChatSurfaces`):
+three narrow direct-import AST scans (fast, exact for `read_queries.py`, the
+celigo flow-map MCP tool, and every file under `services/chat/`), plus
+`test_chat_and_mcp_surfaces_cannot_import_script_families_at_runtime`, which
+enforces the invariant with Python's REAL import machinery instead of a
+hand-rolled transitive AST walker -- an earlier version of that walker had
+holes (`import a.b.c` never visited `a/__init__.py` or `a/b/__init__.py`, so
+a leak hidden in a parent package's `__init__` escaped it; a bare `import
+app` crashed it outright). The runtime test installs a `sys.meta_path`
+finder that raises for `fullname == "app.services.celigo.script_families"`,
+then actually imports `read_queries.py` and every module under
+`app/services/chat/` and `app/mcp/` (discovered via `pkgutil.walk_packages`)
+-- if any import chain, however indirect, ever reaches this module, Python's
+own import system raises, no exceptions swallowed. A `TYPE_CHECKING`-guarded
+import gets no special case: it never executes at runtime, so the runtime
+guard correctly never sees it -- that absence IS the right semantics, not a
+gap. This module IS where script content is allowed to reach the API (the
+detail's members), because it serves a human-only surface, never a chat
+tool.
 
 Reuses `celigo_script_is_production()` (production-only, same rule
 `repository.list_logical_scripts` uses) and the family grouping key

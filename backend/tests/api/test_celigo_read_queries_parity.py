@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import ast
 import json
+import subprocess
+import sys
 import uuid
 from pathlib import Path
 
@@ -221,100 +223,91 @@ def _imports_script_families(source: str) -> bool:
     return False
 
 
-def _app_root() -> Path:
-    import app as app_pkg
-
-    return Path(app_pkg.__file__).parent
-
-
-def _dotted_from_path(path: Path) -> str:
-    """A file under `_app_root()`'s PARENT -> its dotted `app.*` module
-    name (`.../app/services/celigo/script_families.py` ->
-    `"app.services.celigo.script_families"`; an `__init__.py` maps to its
-    own package name, dropping the `__init__` segment)."""
-    rel = path.relative_to(_app_root().parent)
-    parts = list(rel.with_suffix("").parts)
-    if parts[-1] == "__init__":
-        parts = parts[:-1]
-    return ".".join(parts)
+_PROBE_PROGRAM = """
+import importlib
+import json
+import pkgutil
+import sys
 
 
-def _module_file(dotted: str) -> Path | None:
-    """Resolve an `app.*` dotted module name to its source file by pure path
-    arithmetic (no import) -- `None` if it isn't a file this walk can parse
-    (e.g. a name that turned out to be an attribute, not a submodule)."""
-    rel = Path(*dotted.split(".")[1:])  # drop the leading "app" segment
-    plain = _app_root() / rel.with_suffix(".py")
-    if plain.is_file():
-        return plain
-    package_init = _app_root() / rel / "__init__.py"
-    if package_init.is_file():
-        return package_init
-    return None
+def main():
+    config = json.load(sys.stdin)
+    blocked = config["blocked_module"]
+    direct_imports = config.get("direct_imports", [])
+    walk_roots = config.get("walk_roots", [])
+    n2_message = f"N2: {blocked} is not importable from chat/MCP surfaces"
 
+    class _BlockingFinder:
+        def find_spec(self, fullname, path, target=None):
+            if fullname == blocked:
+                raise ImportError(n2_message)
+            return None
 
-def _package_of(dotted: str, is_package: bool) -> str:
-    """The package a module belongs to, Python's own relative-import rule:
-    a package's `__init__.py` sees its OWN dotted name as its package (so
-    `.sibling` from inside it resolves to a child of itself); a plain
-    module's package is its dotted name with the last segment dropped."""
-    if is_package:
-        return dotted
-    return dotted.rsplit(".", 1)[0] if "." in dotted else ""
+    sys.meta_path.insert(0, _BlockingFinder())
 
+    n2_hits = []
+    failures = []
 
-def _resolve_relative_import(current_dotted: str, is_package: bool, level: int, module: str | None) -> str | None:
-    """Absolute dotted name a relative `from . import x` / `from .x import y`
-    resolves to, from inside *current_dotted* -- `level=1` is "this same
-    package" (climbs zero), each extra level climbs one more package up."""
-    pkg = _package_of(current_dotted, is_package)
-    parts = pkg.split(".") if pkg else []
-    climbed = parts[: len(parts) - (level - 1)] if level >= 1 else parts
-    if module:
-        climbed = climbed + module.split(".")
-    return ".".join(climbed) if climbed else None
+    def safe_import(name):
+        try:
+            importlib.import_module(name)
+        except ImportError as exc:
+            if str(exc) == n2_message:
+                n2_hits.append((name, str(exc)))
+            else:
+                failures.append((name, repr(exc)))
+        except Exception as exc:  # noqa: BLE001 -- any import-time failure is reportable, not silent
+            failures.append((name, repr(exc)))
 
+    for name in direct_imports:
+        safe_import(name)
 
-def _reachable_app_modules(root_dotted_names: set[str]) -> set[str]:
-    """BFS closure of `app.*` imports reachable from *root_dotted_names*,
-    following `Import`/`ImportFrom` statements (relative imports resolved
-    the way Python itself resolves them) into each discovered module's own
-    file and repeating. `from pkg import submodule` (no dotted submodule
-    name written out in `node.module`) is followed into `pkg.submodule`
-    whenever that submodule actually exists as a file -- exactly how `from
-    app.services.celigo import script_families` reaches
-    `app.services.celigo.script_families` even though the import statement
-    itself never spells that path out. A name that isn't itself an `app.*`
-    module (stdlib/third-party) is a leaf: this never recurses into it."""
-    visited: set[str] = set()
-    queue: list[str] = list(root_dotted_names)
-    while queue:
-        dotted = queue.pop()
-        if dotted in visited:
+    for root in walk_roots:
+        try:
+            pkg = importlib.import_module(root)
+        except ImportError as exc:
+            if str(exc) == n2_message:
+                n2_hits.append((root, str(exc)))
+            else:
+                failures.append((root, repr(exc)))
             continue
-        visited.add(dotted)
-        path = _module_file(dotted)
-        if path is None:
+        except Exception as exc:
+            failures.append((root, repr(exc)))
             continue
-        is_package = path.name == "__init__.py"
-        tree = ast.parse(path.read_text())
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    if alias.name == "app" or alias.name.startswith("app."):
-                        queue.append(alias.name)
-            elif isinstance(node, ast.ImportFrom):
-                resolved = (
-                    _resolve_relative_import(dotted, is_package, node.level, node.module) if node.level else node.module
-                )
-                if resolved is None or not (resolved == "app" or resolved.startswith("app.")):
-                    continue
-                queue.append(resolved)
-                for alias in node.names:
-                    candidate = f"{resolved}.{alias.name}"
-                    if _module_file(candidate) is not None:
-                        queue.append(candidate)
-    return visited
+        for info in pkgutil.walk_packages(pkg.__path__, prefix=root + "."):
+            safe_import(info.name)
+
+    if n2_hits:
+        print("N2_HIT")
+        for name, msg in n2_hits:
+            print(f"{name}: {msg}")
+        sys.exit(1)
+    if failures:
+        print("UNRELATED_IMPORT_FAILURES")
+        for name, msg in failures:
+            print(f"{name}: {msg}")
+        sys.exit(2)
+    print("OK")
+    sys.exit(0)
+
+
+main()
+"""
+
+
+def _run_import_guard_probe(*, config: dict, cwd: Path) -> subprocess.CompletedProcess:
+    """Runs `_PROBE_PROGRAM` in a fresh subprocess (real import machinery,
+    not an AST walk) with *config* (`blocked_module` / `direct_imports` /
+    `walk_roots`) piped in as JSON on stdin. `cwd` controls what `import ...`
+    resolves against inside the subprocess -- `python -c` puts `""` first on
+    `sys.path`, which Python treats as the current working directory."""
+    return subprocess.run(
+        [sys.executable, "-c", _PROBE_PROGRAM],
+        input=json.dumps(config),
+        capture_output=True,
+        text=True,
+        cwd=str(cwd),
+    )
 
 
 class TestScriptFamiliesNeverImportedByChatSurfaces:
@@ -350,23 +343,64 @@ class TestScriptFamiliesNeverImportedByChatSurfaces:
         ]
         assert offenders == [], offenders
 
-    def test_no_transitively_reachable_app_module_imports_script_families(self):
+    def test_chat_and_mcp_surfaces_cannot_import_script_families_at_runtime(self):
         """The three tests above only catch a DIRECT import written in one
-        of the root files themselves. This walks the real import graph: if
-        `services/chat/foo.py` imports `some/other/app/module.py` (outside
-        `services/chat`), and THAT module imports `script_families`, none of
-        the direct-scan tests above would ever see it -- this one will,
-        because it keeps following `app.*` imports transitively rather than
-        stopping at the first hop."""
-        import app.mcp as mcp_pkg
-        import app.services.chat as chat_pkg
+        of the root files themselves. This test uses Python's REAL import
+        machinery instead of a hand-rolled AST walk (a prior version of this
+        guard had holes: `import a.b.c` never visited `a/__init__.py` or
+        `a/b/__init__.py`, so a leak hidden in a parent package's `__init__`
+        escaped it, and a bare `import app` crashed it outright) --
+        `script_families.py`'s own module docstring explains why the runtime
+        approach is the correct mechanism. A `sys.meta_path` finder blocks
+        `app.services.celigo.script_families` itself, then EVERY module
+        under `app/services/chat/` and `app/mcp/` is actually imported
+        (discovered via `pkgutil.walk_packages`, each one individually
+        `importlib.import_module`-ed) -- if any import chain ever reaches
+        the blocked module, Python's own import system raises, no matter how
+        indirect the path. An unrelated import failure (a real bug, nothing
+        to do with this guard) is collected and reported as a test failure
+        too, never silently skipped -- see `_PROBE_PROGRAM`."""
+        backend_dir = Path(__file__).resolve().parents[2]  # backend/tests/api/ -> backend/
+        config = {
+            "blocked_module": "app.services.celigo.script_families",
+            "direct_imports": ["app.services.celigo.read_queries"],
+            "walk_roots": ["app.services.chat", "app.mcp"],
+        }
 
-        roots = {"app.services.celigo.read_queries"}
-        for pkg in (chat_pkg, mcp_pkg):
-            pkg_dir = Path(pkg.__file__).parent
-            for py_file in pkg_dir.rglob("*.py"):
-                roots.add(_dotted_from_path(py_file))
+        result = _run_import_guard_probe(config=config, cwd=backend_dir)
 
-        reachable = _reachable_app_modules(roots)
+        assert result.returncode == 0, (
+            "N2 import guard violated, or a chat/MCP module failed to import for an unrelated reason "
+            f"(returncode={result.returncode}):\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
 
-        assert "app.services.celigo.script_families" not in reachable
+    def test_import_guard_probe_mechanism_detects_a_real_leak(self, tmp_path):
+        """Red proof for the mechanism above, not for the app code: a tiny
+        synthetic package with a leak hidden in a parent package's
+        `__init__` (exactly the shape the old hand-rolled walker missed) is
+        built under `tmp_path` -- `fakepkg/sub/__init__.py` reaches the
+        blocked `fakepkg/leak.py` only via `from .. import leak`, a sibling
+        reached THROUGH the parent package, never a direct `import
+        fakepkg.leak`. The probe must still catch it and report the N2
+        message, proving the mechanism can actually fail, not just always
+        pass."""
+        pkg_dir = tmp_path / "fakepkg"
+        pkg_dir.mkdir()
+        (pkg_dir / "__init__.py").write_text("")
+        (pkg_dir / "leak.py").write_text("VALUE = 1\n")
+        sub_dir = pkg_dir / "sub"
+        sub_dir.mkdir()
+        (sub_dir / "__init__.py").write_text("from .. import leak  # noqa: F401\n")
+
+        config = {
+            "blocked_module": "fakepkg.leak",
+            "direct_imports": [],
+            "walk_roots": ["fakepkg"],
+        }
+
+        result = _run_import_guard_probe(config=config, cwd=tmp_path)
+
+        assert result.returncode != 0, (
+            f"probe failed to detect the synthetic leak:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+        assert "N2: fakepkg.leak is not importable" in result.stdout
