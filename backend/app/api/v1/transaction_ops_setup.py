@@ -15,7 +15,10 @@ from app.core.database import set_tenant_context
 from app.core.dependencies import require_feature
 from app.models.celigo import CeligoFlow, CeligoFlowStep, CeligoIntegration
 from app.models.connection import ACTIVE_CONNECTION_STATUSES, Connection
+from app.schemas.transaction_runs import ConfigOut
 from app.services import audit_service
+from app.services.transaction_ops.framework_defaults import ensure_framework_configs
+from app.services.transaction_ops.state_service import StateError
 from app.workers.tasks import celigo_flow_map_sync as source_refresh
 
 router = APIRouter(
@@ -62,6 +65,19 @@ class SourceRefreshStatus(BaseModel):
     already_running: bool = False
     poll_after_seconds: int = 3
     error_code: Literal["refresh_failed"] | None = None
+
+
+class DefaultsRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    source_connection_id: UUID
+
+
+@router.post("/defaults", response_model=list[ConfigOut])
+async def prepare_defaults(request: DefaultsRequest, user: Manager, db: Database):
+    try:
+        return await ensure_framework_configs(db, user.tenant_id, request.source_connection_id, actor=user)
+    except StateError as exc:
+        raise HTTPException(status_code=exc.http_status, detail={"code": exc.code}) from None
 
 
 def _refresh_response(row: dict) -> SourceRefreshStatus:
