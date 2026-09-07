@@ -3,6 +3,20 @@ import { render, screen, within } from "@testing-library/react";
 import { expect, it } from "vitest";
 import { ComparisonEvidence } from "./evidence";
 
+it("explains why a safe proposal cannot yet be prepared", () => {
+  render(
+    <ComparisonEvidence
+      report={{
+        automation: { status: "blocked", code: "create_mapping_unproven" },
+      }}
+    />,
+  );
+  expect(
+    screen.getByText("A solution needs more evidence"),
+  ).toBeInTheDocument();
+  expect(screen.getByText(/backend mapping.*verified/i)).toBeInTheDocument();
+});
+
 it("shows independently verified balances even when detailed repair evidence is incomplete", () => {
   render(
     <ComparisonEvidence

@@ -6,6 +6,7 @@ from sqlalchemy import select
 from app.models.transaction_ops import TransactionOperation
 from app.schemas.transaction_runs import RunCreate
 from app.services.transaction_ops import state_service as state
+from app.services.transaction_ops.netsuite_actions import NetSuiteActionError
 from app.services.transaction_ops.runner import run_investigation
 from tests.conftest import enable_feature_flag
 from tests.test_transaction_ops_planner import planning_case
@@ -63,12 +64,19 @@ async def test_runner_persists_a_pending_human_proposal_and_does_not_execute(db,
     assert findings[0].report_json["automation"]["proposal_id"] == str(proposals[0].id)
 
 
-async def test_guard_failure_preserves_amount_findings_and_explains_no_proposal(db, planning_run):
+@pytest.mark.parametrize(
+    "error,code",
+    [
+        (RuntimeError("private provider token"), "action_evidence_unavailable"),
+        (NetSuiteActionError("guard_connection_unavailable"), "guard_connection_unavailable"),
+    ],
+)
+async def test_guard_failure_preserves_amount_findings_and_explains_no_proposal(db, planning_run, error, code):
     actor, case, config, run = planning_run
-    result = await run_case(db, planning_run, AsyncMock(side_effect=RuntimeError("private provider token")))
+    result = await run_case(db, planning_run, AsyncMock(side_effect=error))
     assert result["termination_reason"] == "done"
     assert not await state.list_proposals(db, actor.tenant_id, run_id=run.id)
     report = (await state.list_findings(db, actor.tenant_id, run.id))[0].report_json
     assert report["comparison"]["differences"]
-    assert report["automation"] == {"status": "blocked", "code": "action_evidence_unavailable"}
+    assert report["automation"] == {"status": "blocked", "code": code}
     assert "private provider" not in str(report)

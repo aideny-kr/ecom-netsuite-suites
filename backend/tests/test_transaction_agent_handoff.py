@@ -14,6 +14,7 @@ async def test_status_retains_balance_and_supported_solution_context_for_agent(c
             report_json={
                 "order_reference": ORDER,
                 "comparison": {"currency": "USD", "recommended_action": "gather_evidence", "differences": []},
+                "automation": {"status": "blocked", "code": "create_mapping_unproven"},
                 "balance": {
                     "status": "incomplete",
                     "currency": "USD",
@@ -45,6 +46,7 @@ async def test_status_retains_balance_and_supported_solution_context_for_agent(c
     assert len(result["rows"]) == 3
     assert result["rows"][2][-3:] == ["0.00", None, None]
     assert result["findings"][0]["missing_metrics"] == ["refunds"]
+    assert result["findings"][0]["resolution_blocker"] == "create_mapping_unproven"
     assert result["proposals"][0]["action"] == "correct_amounts"
     assert "private" not in json.dumps(result)
 

@@ -102,6 +102,16 @@ export function TaxEvidenceNotice({ evidence }: { evidence: JsonObject }) {
   );
 }
 export function ComparisonEvidence({ report }: { report: JsonObject }) {
+  const automation = objectValue(report.automation);
+  const blocker = typeof automation.code === "string" ? automation.code : "";
+  const resolutionReasons: Record<string, string> = {
+    create_mapping_unproven:
+      "The backend mapping for creating this order has not been verified.",
+    guard_connection_unavailable:
+      "The NetSuite connection needs its conditional write guard configured before a safe change can be proposed.",
+    action_evidence_unavailable:
+      "The connected system could not provide the evidence required for a safe change. Review its connection and backend repair settings.",
+  };
   const comparison = objectValue(report.comparison);
   const reasons = Array.isArray(comparison.findings)
     ? comparison.findings.map(objectValue)
@@ -114,6 +124,15 @@ export function ComparisonEvidence({ report }: { report: JsonObject }) {
   return (
     <div className="space-y-4">
       <BalanceEvidence balance={objectValue(report.balance)} />
+      {automation.status === "blocked" && (
+        <div className="rounded-lg border bg-amber-50 p-4 text-[13px] dark:bg-amber-950/30">
+          <p className="font-medium">A solution needs more evidence</p>
+          <p className="mt-2">
+            {resolutionReasons[blocker] ||
+              `A safe proposal could not be prepared: ${blocker.replaceAll("_", " ") || "required evidence unavailable"}.`}
+          </p>
+        </div>
+      )}
       <TaxEvidenceNotice evidence={report} />
       {reasons.length > 0 && (
         <ul className="space-y-2 text-[13px]">

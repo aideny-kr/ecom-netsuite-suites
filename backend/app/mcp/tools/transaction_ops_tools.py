@@ -131,6 +131,7 @@ def _finding_rows(findings):
 def _finding_summary(finding):
     report = finding.report_json
     balance, comparison = report.get("balance") or {}, report.get("comparison") or {}
+    automation = report.get("automation") or {}
     return {
         "order_reference": _text(report.get("order_reference")),
         "reconciliation_status": _text(balance.get("status")),
@@ -139,6 +140,8 @@ def _finding_summary(finding):
             key for key in ("order_total", "tax", "refunds") if key in balance.get("missing_metrics", [])
         ],
         "recommended_action": _text(comparison.get("recommended_action")),
+        "resolution_status": _text(automation.get("status")),
+        "resolution_blocker": _text(automation.get("code")),
         "repair_findings": [
             _text(item.get("code")) for item in comparison.get("findings", [])[:10] if isinstance(item, dict)
         ],

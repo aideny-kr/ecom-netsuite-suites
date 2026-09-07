@@ -255,6 +255,7 @@ async def run_investigation(
 ):
     from app.services.ingestion.solidus_sync import save_observed_order
     from app.services.transaction_ops.celigo_actions import MAX_READ_CALLS, read_celigo_error_evidence
+    from app.services.transaction_ops.netsuite_actions import NetSuiteActionError
     from app.services.transaction_ops.netsuite_create import CreateInputError, prepare_create_input
     from app.services.transaction_ops.netsuite_reader import read_netsuite_order
     from app.services.transaction_ops.netsuite_refunds import MAX_REFUND_CALLS, read_netsuite_refunds
@@ -515,7 +516,7 @@ async def run_investigation(
                     )
                     proposal = await state.propose(db, tenant_id, run_id, request, lease_token=token, now=clock())
                     report = {**report, "automation": {"status": proposal.status, "proposal_id": str(proposal.id)}}
-                except (PlanningError, CreateInputError) as exc:
+                except (PlanningError, CreateInputError, NetSuiteActionError) as exc:
                     report = {**report, "automation": {"status": "blocked", "code": str(exc)}}
                 except (state_service.StateError, FeatureRevokedError):
                     raise
