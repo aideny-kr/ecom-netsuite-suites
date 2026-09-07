@@ -244,6 +244,15 @@ describe("CeligoScriptsList", () => {
     expect(screen.queryByText(/0 families with this name/i)).not.toBeInTheDocument();
   });
 
+  it('singularises "1 family with this name" (a pair sharing a name is the common case)', () => {
+    // Backend computes other_families_with_name = name_counts[name] - 1, so
+    // any TWO families sharing a name yield exactly 1 for both.
+    const pair = family({ dedup_key: "fam-pair", name: "paired_script", other_families_with_name: 1 });
+    render(<CeligoScriptsList {...baseProps({ families: [pair], totals: { ...TOTALS, families: 1 } })} />);
+    expect(screen.getByText(/1 family with this name/i)).toBeInTheDocument();
+    expect(screen.queryByText(/1 families with this name/i)).not.toBeInTheDocument();
+  });
+
   // Fix round 1, finding 2: `go.scripts` (the only thing `onQueryChange`
   // reaches — see `celigo-scripts-page.tsx`) PUSHES a history entry every
   // call (spec §3.1/§3.2's design: it's the one page-level destination for

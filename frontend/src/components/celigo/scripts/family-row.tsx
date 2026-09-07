@@ -110,7 +110,7 @@ export function FamilyRow({
       </span>
       {family.other_families_with_name > 0 && (
         <span className="shrink-0 whitespace-nowrap text-[11px] text-muted-foreground">
-          {family.other_families_with_name} families with this name
+          {family.other_families_with_name} famil{family.other_families_with_name === 1 ? "y" : "ies"} with this name
         </span>
       )}
       <CopiesPill family={family} />
