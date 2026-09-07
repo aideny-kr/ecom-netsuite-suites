@@ -2,7 +2,7 @@ import uuid
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import Date, DateTime, ForeignKey, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Date, DateTime, ForeignKey, Index, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -22,7 +22,10 @@ class CanonicalMixin(TimestampMixin):
 
 class Order(Base, UUIDPrimaryKeyMixin, CanonicalMixin):
     __tablename__ = "orders"
-    __table_args__ = (UniqueConstraint("tenant_id", "dedupe_key", name="uq_orders_dedupe"),)
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "dedupe_key", name="uq_orders_dedupe"),
+        Index("ix_orders_tenant_source_date", "tenant_id", "source_created_at"),
+    )
 
     order_number: Mapped[str] = mapped_column(String(255), nullable=False)
     customer_email: Mapped[str | None] = mapped_column(String(255), nullable=True)

@@ -302,6 +302,8 @@ async def read_framework_orders_page(
     *,
     client: httpx.AsyncClient | None = None,
     source_connection_id: uuid.UUID | None = None,
+    after_id: int | None = None,
+    updated_before: datetime | None = None,
 ) -> dict:
     """One bounded page. Only a single-page window can be complete in one call.
 
@@ -317,11 +319,22 @@ async def read_framework_orders_page(
         or updated_since.utcoffset() is None
     ):
         raise SourceReadError("invalid_page_request", 422)
+    if after_id is not None and (type(after_id) is not int or not 0 <= after_id < 10**30 or page != 1):
+        raise SourceReadError("invalid_page_request", 422)
+    if updated_before is not None and (
+        not isinstance(updated_before, datetime) or updated_before.utcoffset() is None or updated_before < updated_since
+    ):
+        raise SourceReadError("invalid_page_request", 422)
     since = updated_since.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
     uri = (
         f"sync/orders?q[updated_at_gteq]={quote(since, safe='')}&q[completed_at_not_null]=1"
         f"&page={page}&per_page={page_size}&q[s]=id"
     )
+    if after_id is not None:
+        uri += f"&q[id_gt]={after_id}"
+    if updated_before is not None:
+        until = updated_before.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        uri += f"&q[updated_at_lteq]={quote(until, safe='')}"
     envelope, provenance = await _preview(
         db, tenant_id, step_id, uri, client=client, source_connection_id=source_connection_id
     )
@@ -347,17 +360,30 @@ async def read_framework_orders_page(
         if not isinstance(reference, str) or not _ORDER_REFERENCE.fullmatch(reference) or reference in references:
             raise SourceReadError("incomplete_page")
         _check_envelope(order)
+        if after_id is not None:
+            identity = str(order.get("id", ""))
+            if not identity.isascii() or not identity.isdigit() or len(identity) > 30 or int(identity) <= after_id:
+                raise SourceReadError("incomplete_page")
+        if updated_before is not None:
+            try:
+                updated = datetime.fromisoformat(order["updated_at"].replace("Z", "+00:00"))
+                if updated.utcoffset() is None or not updated_since <= updated <= updated_before:
+                    raise ValueError
+            except (KeyError, ValueError, TypeError, AttributeError):
+                raise SourceReadError("incomplete_page") from None
         references.add(reference)
     return {
         **provenance,
         "scope": "updated_orders",
         "updated_since": since,
+        **({"updated_before": until} if updated_before is not None else {}),
+        **({"after_id": after_id} if after_id is not None else {}),
         "orders": _project_orders(orders),
         "page": page,
         "page_size": page_size,
         "total_count": total,
         "pages": pages,
         "page_complete": True,
-        "window_complete": page == 1 and pages <= 1,
+        "window_complete": page == 1 and pages <= 1 and not after_id,
         "next_page": page + 1 if page < pages else None,
     }

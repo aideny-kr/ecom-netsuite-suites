@@ -70,7 +70,7 @@ def project_canonical_order(order, tenant_id, connection_id, observed_at):
         if (
             not isinstance(reference, str)
             or not _REFERENCE.fullmatch(reference)
-            or len(reference) > 255
+            or len(reference) > 100
             or not re.fullmatch(r"[0-9]{1,50}", source_id)
             or not isinstance(currency, str)
             or not re.fullmatch(r"[A-Z]{3}", currency)
@@ -88,6 +88,10 @@ def project_canonical_order(order, tenant_id, connection_id, observed_at):
         entity = order.get("business_entity")
         if isinstance(entity, dict) and str(entity.get("id", "")).isdigit():
             header["business_entity"] = {"id": str(entity["id"])}
+        elif isinstance(entity, str) and 0 < len(entity) <= 100:
+            header["business_entity"] = entity
+        elif "business_entity" in order and entity is None:
+            header["business_entity"] = None
         return {
             "tenant_id": tenant_id,
             "dedupe_key": f"solidus:{connection_id}:{source_id}",
@@ -118,11 +122,12 @@ def _new_scan(state, now):
         "since": since.isoformat(),
         "started_at": now.isoformat(),
         "next_page": 1,
+        "seen": 0,
     }
 
 
 async def _restart_scan(db, connection_id, state, calls):
-    state.update(next_page=1)
+    state.update(next_page=1, seen=0)
     for key in ("total", "last_reference", "last_source_id"):
         state.pop(key, None)
     await save_cursor_async(db, connection_id, CURSOR_TYPE, json.dumps(state, separators=(",", ":")))
@@ -136,7 +141,7 @@ async def _restart_scan(db, connection_id, state, calls):
     }
 
 
-async def _sync_page(db, tenant_id, connection_id, now, *, resuming):
+async def _sync_page(db, tenant_id, connection_id, now):
     await set_tenant_context(db, tenant_id)
     # Lock the selected connection for this page only. Competing refreshes cannot
     # overwrite cursors. SKIP LOCKED returns a bounded, explicit busy outcome.
@@ -184,38 +189,26 @@ async def _sync_page(db, tenant_id, connection_id, now, *, resuming):
     if not state.get("next_page"):
         state = _new_scan(state, now)
     page = state["next_page"]
-    # Re-read the preceding boundary on resume; movement cannot silently skip a page.
+    # A fixed upper watermark plus source-ID keyset avoids offset shifts. Updates
+    # after this watermark are picked up by the next overlapping refresh.
     evidence = await read_framework_orders_page(
         db,
         tenant_id,
         None,
         _time(state["since"]),
-        page=page - 1 if resuming and page > 1 else page,
+        page=1,
         source_connection_id=connection_id,
+        after_id=int(state.get("last_source_id", "0")),
+        updated_before=_time(state["started_at"]),
     )
     calls = 1
-    if resuming and page > 1:
-        references = [row["number"] for row in evidence["orders"]]
-        if evidence["total_count"] != state["total"] or not references or references[-1] != state["last_reference"]:
-            return await _restart_scan(db, connection_id, state, calls)
-        evidence = await read_framework_orders_page(
-            db,
-            tenant_id,
-            None,
-            _time(state["since"]),
-            page=page,
-            source_connection_id=connection_id,
-        )
-        calls += 1
-    if page > 1 and evidence["total_count"] != state["total"]:
-        return await _restart_scan(db, connection_id, state, calls)
     observed = _time(evidence["read_at"])
     rows = [project_canonical_order(order, tenant_id, connection_id, observed) for order in evidence["orders"]]
     identities = [int(row["source_id"]) for row in rows]
     previous = int(state.get("last_source_id", "0")) if page > 1 else 0
     if identities != sorted(set(identities)) or (identities and identities[0] <= previous):
         return await _restart_scan(db, connection_id, state, calls)
-    if any(row["source_updated_at"] < _time(state["since"]) for row in rows):
+    if any(not _time(state["since"]) <= row["source_updated_at"] <= _time(state["started_at"]) for row in rows):
         raise SolidusImportError("source_window_mismatch")
     for row in rows:
         statement = insert(Order).values(**row)
@@ -225,10 +218,10 @@ async def _sync_page(db, tenant_id, connection_id, now, *, resuming):
                 set_={key: statement.excluded[key] for key in row if key not in {"tenant_id", "dedupe_key"}},
             )
         )
-    next_page = evidence["next_page"]
-    state.update(next_page=next_page, total=evidence["total_count"])
+    next_page = page + 1 if evidence["next_page"] is not None else None
+    seen = state.get("seen", 0)
+    state.update(next_page=next_page, total=seen + evidence["total_count"], seen=seen + len(rows))
     if rows:
-        state["last_reference"] = rows[-1]["order_number"]
         state["last_source_id"] = rows[-1]["source_id"]
     if next_page is None:
         state.update(watermark=state["started_at"], completed_at=observed.isoformat())
@@ -252,7 +245,7 @@ async def _sync_page(db, tenant_id, connection_id, now, *, resuming):
         "api_calls": calls,
         "coverage_since": state["since"],
         "next_page": next_page,
-        "source_total": evidence["total_count"],
+        "source_total": state["total"],
     }
 
 
@@ -264,8 +257,8 @@ async def sync_solidus_orders(db, tenant_id, connection_id, *, now=None, max_pag
     records, calls, pages_read = 0, 0, 0
     try:
         async with asyncio.timeout(DEADLINE_SECONDS):
-            for page_index in range(max_pages):
-                result = await _sync_page(db, tenant_id, connection_id, now, resuming=page_index == 0)
+            for _ in range(max_pages):
+                result = await _sync_page(db, tenant_id, connection_id, now)
                 records += result["records_synced"]
                 calls += result["api_calls"]
                 pages_read += 1

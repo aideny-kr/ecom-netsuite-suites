@@ -86,6 +86,16 @@ def test_conflicting_tax_evidence_stays_unknown():
     assert row["tax_amount"] is None
 
 
+def test_scalar_source_entity_is_preserved_for_verified_subsidiary_routing():
+    row = sync.project_canonical_order(source_order(business_entity="Framework BV"), uuid.uuid4(), uuid.uuid4(), NOW)
+    assert row["raw_data"]["order"]["business_entity"] == "Framework BV"
+
+
+def test_oversized_reference_cannot_overflow_a_durable_cursor():
+    with pytest.raises(sync.SolidusImportError):
+        sync.project_canonical_order(source_order(number="R100120031-" + "A" * 240), uuid.uuid4(), uuid.uuid4(), NOW)
+
+
 async def connection(db, tenant_id, **changes):
     row = Connection(
         tenant_id=tenant_id,
@@ -105,15 +115,16 @@ def fake_pages(monkeypatch, orders, *, page_size=20):
 
     async def read(db, tenant_id, step_id, updated_since, page=1, **kwargs):
         calls.append({"page": page, "since": updated_since, "tenant": tenant_id, **kwargs})
+        eligible = [row for row in orders if int(row["id"]) > kwargs.get("after_id", 0)]
         offset = (page - 1) * page_size
         return {
             "source": "framework",
             "read_at": NOW.isoformat(),
             "page_complete": True,
             "page": page,
-            "total_count": len(orders),
-            "orders": orders[offset : offset + page_size],
-            "next_page": page + 1 if offset + page_size < len(orders) else None,
+            "total_count": len(eligible),
+            "orders": eligible[offset : offset + page_size],
+            "next_page": page + 1 if offset + page_size < len(eligible) else None,
         }
 
     monkeypatch.setattr(sync, "read_framework_orders_page", read)
@@ -150,7 +161,7 @@ async def test_budgeted_import_resumes_without_claiming_complete(db, admin_user,
     assert len((await db.scalars(select(Order).where(Order.tenant_id == user.tenant_id))).all()) == 21
 
 
-async def test_changed_page_count_restarts_without_advancing_watermark(db, admin_user, monkeypatch):
+async def test_changing_population_does_not_restart_or_skip_unread_ids(db, admin_user, monkeypatch):
     user, _ = admin_user
     conn = await connection(db, user.tenant_id)
     orders = [source_order(f"R10012{i:004}") for i in range(21)]
@@ -158,9 +169,8 @@ async def test_changed_page_count_restarts_without_advancing_watermark(db, admin
     await sync.sync_solidus_orders(db, user.tenant_id, conn.id, now=NOW, max_pages=1)
     orders.append(source_order("R999999999"))
     result = await sync.sync_solidus_orders(db, user.tenant_id, conn.id, now=NOW)
-    assert result["termination_reason"] == "stall" and result["reason"] == "source_window_changed"
-    cursor = await db.scalar(select(CursorState).where(CursorState.connection_id == conn.id))
-    assert '"next_page":1' in cursor.cursor_value and '"watermark"' not in cursor.cursor_value
+    assert result["termination_reason"] == "done"
+    assert len((await db.scalars(select(Order).where(Order.tenant_id == user.tenant_id))).all()) == 22
 
 
 async def test_other_tenant_cannot_import_even_when_database_role_bypasses_rls(
@@ -200,6 +210,13 @@ async def test_duplicate_source_identity_across_pages_does_not_complete_scan(db,
     conn = await connection(db, user.tenant_id)
     orders = [source_order(f"R10012{i:004}") for i in range(20)]
     fake_pages(monkeypatch, [*orders, orders[-1]])
+    original = sync.read_framework_orders_page
+
+    async def ignores_cursor(*args, **kwargs):
+        kwargs.pop("after_id", None)
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(sync, "read_framework_orders_page", ignores_cursor)
     result = await sync.sync_solidus_orders(db, user.tenant_id, conn.id, now=NOW)
     assert result["termination_reason"] == "stall" and result["complete"] is False
     assert result["reason"] == "source_window_changed"
@@ -225,7 +242,7 @@ async def test_failed_later_page_keeps_committed_records_and_resume_cursor(db, a
     original = sync.read_framework_orders_page
 
     async def read(*args, **kwargs):
-        if kwargs["page"] == 2:
+        if kwargs.get("after_id", 0) > 0:
             raise sync.SourceReadError("source_timeout")
         return await original(*args, **kwargs)
 

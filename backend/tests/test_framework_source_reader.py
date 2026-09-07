@@ -2,7 +2,7 @@
 
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -125,6 +125,45 @@ async def test_page_proves_only_its_own_completeness(source):
     assert body["http"]["relativeURI"] == (
         "sync/orders?q[updated_at_gteq]=2026-09-01T00%3A00%3A00Z&q[completed_at_not_null]=1&page=1&per_page=2&q[s]=id"
     )
+
+
+async def test_keyset_read_binds_upper_watermark_and_validates_returned_ids(source):
+    requests = []
+    until = SINCE + timedelta(days=1)
+    orders = [
+        {"id": 11, "number": ORDER, "currency": "USD", "updated_at": SINCE.isoformat()},
+        {"id": 12, "number": "R123456780", "currency": "USD", "updated_at": SINCE.isoformat()},
+    ]
+    async with httpx.AsyncClient(
+        transport=transport(
+            [
+                live_connection(),
+                page_preview(orders=orders, pages=1, total=2),
+            ],
+            requests,
+        )
+    ) as client:
+        result = await read_framework_orders_page(
+            source,
+            TENANT,
+            STEP,
+            SINCE,
+            page_size=2,
+            client=client,
+            after_id=10,
+            updated_before=until,
+        )
+    uri = json.loads(requests[1].content)["http"]["relativeURI"]
+    assert "q[id_gt]=10" in uri and "q[updated_at_lteq]=" in uri
+    assert result["next_page"] is None
+    assert result["window_complete"] is False  # a final suffix is not a whole-window proof
+
+
+async def test_ignored_keyset_filter_cannot_be_accepted_as_new_data(source):
+    requests = []
+    async with httpx.AsyncClient(transport=transport([live_connection(), page_preview()], requests)) as client:
+        with pytest.raises(SourceReadError, match="incomplete_page"):
+            await read_framework_orders_page(source, TENANT, STEP, SINCE, page_size=2, client=client, after_id=10)
 
 
 async def test_exact_decimal_projection_drops_raw_and_customer_objects(source):
