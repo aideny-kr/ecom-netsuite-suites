@@ -1,8 +1,8 @@
 import uuid
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import Date, ForeignKey, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import Date, DateTime, ForeignKey, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -27,11 +27,16 @@ class Order(Base, UUIDPrimaryKeyMixin, CanonicalMixin):
     order_number: Mapped[str] = mapped_column(String(255), nullable=False)
     customer_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
-    total_amount: Mapped[Decimal] = mapped_column(Numeric(15, 2), nullable=False)
-    subtotal: Mapped[Decimal] = mapped_column(Numeric(15, 2), nullable=False)
-    tax_amount: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=0, nullable=False)
-    discount_amount: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=0, nullable=False)
+    total_amount: Mapped[Decimal] = mapped_column(Numeric(24, 6), nullable=False)
+    subtotal: Mapped[Decimal | None] = mapped_column(Numeric(24, 6), nullable=True)
+    tax_amount: Mapped[Decimal | None] = mapped_column(Numeric(24, 6), nullable=True)
+    discount_amount: Mapped[Decimal | None] = mapped_column(Numeric(24, 6), nullable=True)
     status: Mapped[str] = mapped_column(String(50), nullable=False)
+    source_connection_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("connections.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    source_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    source_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class Payment(Base, UUIDPrimaryKeyMixin, CanonicalMixin):

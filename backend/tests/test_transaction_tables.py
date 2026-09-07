@@ -36,7 +36,7 @@ async def test_order_search_filters_rows_and_total(client, db, admin_user):
     assert response.status_code == 200
     assert response.json()["total"] == 1
     assert [row["order_number"] for row in response.json()["items"]] == ["R100120031"]
-    assert response.json()["items"][0]["total_amount"] == "1724.00"
+    assert response.json()["items"][0]["total_amount"] == "1724.000000"
 
 
 @pytest.mark.parametrize("search", ["%", "_", "no-such-order"])
