@@ -570,6 +570,23 @@ class TestKind:
         assert result.families[0].kind == "mixed"
 
 
+class TestDeclaredKindsMatchesGraphSiteTypes:
+    def test_declared_kinds_equals_graphs_site_type_values(self):
+        """Brief item 7: `graph.py::_SITE_TYPE_BY_PATH_SEGMENT`'s VALUES
+        (hook, transform, filter, router) are the same closed set this
+        module's own `_DECLARED_KINDS` declares -- `graph.py` doesn't export
+        a public name for that value set (its map is private, and `graph.py`
+        is out of scope for this fix), so `_DECLARED_KINDS` stays a local
+        constant. This test is the documented fallback's tripwire: if either
+        set ever changes without the other, this fails instead of the two
+        silently drifting apart."""
+        from app.services.celigo import graph
+
+        sf = _import_module()
+
+        assert sf._DECLARED_KINDS == set(graph._SITE_TYPE_BY_PATH_SEGMENT.values())
+
+
 class TestFunctionNameMode:
     async def test_mode_is_not_the_alphabetically_smallest_name(self, db: AsyncSession):
         """Review finding (brief item 5b): the previous version of this test
