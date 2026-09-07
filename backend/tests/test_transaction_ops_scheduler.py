@@ -49,6 +49,7 @@ def dependencies(monkeypatch):
     monkeypatch.setattr(mod.feature_flag_service, "list_tenants_with_flags", AsyncMock(return_value=[TENANT]))
     monkeypatch.setattr(mod, "_recovery_ids", AsyncMock(return_value=[]))
     monkeypatch.setattr(mod, "_candidate_ids", AsyncMock(return_value=[]))
+    monkeypatch.setattr(mod, "_refresh_sources", AsyncMock(return_value=0))
     monkeypatch.setattr(mod, "_schedule_history", AsyncMock(return_value=(False, None)))
     monkeypatch.setattr(mod.celery_app, "send_task", Mock())
     return state

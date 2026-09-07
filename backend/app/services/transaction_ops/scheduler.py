@@ -11,6 +11,7 @@ from sqlalchemy.orm import aliased
 from app.core.database import set_tenant_context
 from app.models.audit import AuditEvent
 from app.services import feature_flag_service
+from app.services.ingestion.solidus_dispatch import refresh_due_sources as _refresh_sources
 from app.workers.celery_app import celery_app
 
 _SCAN_LIMIT = 200
@@ -207,6 +208,8 @@ async def collect_due_runs(db, now: datetime) -> dict:
     now = now.astimezone(timezone.utc)
     state, request_type, _, _ = _dependencies()
     stats = {
+        "source_refreshes": 0,
+        "source_refresh_failed": 0,
         "tenants": 0,
         "created": 0,
         "recovered": 0,
@@ -232,6 +235,11 @@ async def collect_due_runs(db, now: datetime) -> dict:
                 tenants = tenants[offset:] + tenants[:offset]
             for tenant_id in tenants:
                 stats["tenants"] += 1
+                try:
+                    stats["source_refreshes"] += await _refresh_sources(db, tenant_id, now)
+                except Exception:
+                    await db.rollback()
+                    stats["source_refresh_failed"] += 1
                 try:
                     recover = await _recovery_ids(db, tenant_id, now)
                     stats["truncated"] |= len(recover) > _SCAN_LIMIT

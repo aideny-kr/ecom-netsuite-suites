@@ -36,8 +36,7 @@ def _count(value):
     return int(value)
 
 
-async def read_solidus_refunds(db, tenant_id, step_id, order_reference, *, client=None):
-    query = _refund_query(order_reference)
+async def _read_rows(db, tenant_id, step_id, query, limit, *, client=None):
     step, connection, token, region = await source._load_source(db, tenant_id, step_id)
     if step.adaptor_type != "RDBMSExport":
         raise source.SourceReadError("unsupported_refund_source", 422)
@@ -61,7 +60,7 @@ async def read_solidus_refunds(db, tenant_id, step_id, order_reference, *, clien
                     "name": "Order refund reconciliation read",
                     "_connectionId": step.connection_celigo_id,
                     "type": "test",
-                    "test": {"limit": 2},
+                    "test": {"limit": limit},
                     "rdbms": {"query": query},
                 },
             )
@@ -72,33 +71,89 @@ async def read_solidus_refunds(db, tenant_id, step_id, order_reference, *, clien
             for stage in stages:
                 source._check_envelope(stage, nullable_errors=True)
             data = result.get("data")
-            if not isinstance(data, list) or len(data) != 1 or not isinstance(data[0], dict):
-                raise source.SourceReadError("refund_order_identity_unproven")
-            row = data[0]
-            source._check_envelope(row)
-            if row.get("order_reference") != order_reference or not re.fullmatch(r"[A-Z]{3}", str(row.get("currency"))):
-                raise source.SourceReadError("refund_order_identity_unproven")
-            count, pending = _count(row.get("refund_count")), _count(row.get("pending_count"))
-            try:
-                amount = _decimal(row.get("amount"))
-            except ValueError:
-                raise source.SourceReadError("invalid_refund_evidence") from None
-            if pending > count or amount < 0 or (count == 0 and amount != 0):
+            if not isinstance(data, list) or len(data) > limit or any(not isinstance(row, dict) for row in data):
                 raise source.SourceReadError("invalid_refund_evidence")
-            return {
-                "source": "solidus_postgresql",
-                "order_reference": order_reference,
-                "currency": row["currency"],
-                "complete": pending == 0,
-                "amount": str(amount) if pending == 0 else None,
-                "refund_count": count,
-                "unconfirmed_count": pending,
-                "source_step_id": str(step.id),
-                "connection_id": str(connection.id),
-                "observed_at": datetime.now(timezone.utc).isoformat(),
-            }
+            for row in data:
+                source._check_envelope(row)
+            return data, step, connection
     except (httpx.HTTPError, TimeoutError):
         raise source.SourceReadError("refund_source_unavailable") from None
     finally:
         if owned:
             await http.aclose()
+
+
+async def read_solidus_refunds(db, tenant_id, step_id, order_reference, *, client=None):
+    data, step, connection = await _read_rows(db, tenant_id, step_id, _refund_query(order_reference), 2, client=client)
+    if len(data) != 1:
+        raise source.SourceReadError("refund_order_identity_unproven")
+    row = data[0]
+    if row.get("order_reference") != order_reference or not re.fullmatch(r"[A-Z]{3}", str(row.get("currency"))):
+        raise source.SourceReadError("refund_order_identity_unproven")
+    count, pending = _count(row.get("refund_count")), _count(row.get("pending_count"))
+    try:
+        amount = _decimal(row.get("amount"))
+    except ValueError:
+        raise source.SourceReadError("invalid_refund_evidence") from None
+    if pending > count or amount < 0 or (count == 0 and amount != 0):
+        raise source.SourceReadError("invalid_refund_evidence")
+    return {
+        "source": "solidus_postgresql",
+        "order_reference": order_reference,
+        "currency": row["currency"],
+        "complete": pending == 0,
+        "amount": str(amount) if pending == 0 else None,
+        "refund_count": count,
+        "unconfirmed_count": pending,
+        "source_step_id": str(step.id),
+        "connection_id": str(connection.id),
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def read_refund_order_page(db, tenant_id, step_id, since, until, *, after_id=0, client=None):
+    if (
+        not isinstance(since, datetime)
+        or not isinstance(until, datetime)
+        or since.utcoffset() is None
+        or until.utcoffset() is None
+        or not 0 < (until - since).total_seconds() <= 31 * 86400
+        or type(after_id) is not int
+        or not 0 <= after_id < 10**30
+    ):
+        raise source.SourceReadError("invalid_refund_window", 422)
+    lower, upper = since.astimezone(timezone.utc).isoformat(), until.astimezone(timezone.utc).isoformat()
+    query = (
+        "SELECT o.id::text AS id, o.number, (MAX(r.updated_at) AT TIME ZONE 'UTC')::text AS changed_at "
+        "FROM spree_refunds r JOIN spree_payments p ON p.id=r.payment_id "
+        "JOIN spree_orders o ON o.id=p.order_id "
+        f"WHERE r.updated_at >= ('{lower}'::timestamptz AT TIME ZONE 'UTC') "
+        f"AND r.updated_at <= ('{upper}'::timestamptz AT TIME ZONE 'UTC') "
+        f"AND o.id > {after_id} GROUP BY o.id,o.number ORDER BY o.id LIMIT 101"
+    )
+    rows, _, _ = await _read_rows(db, tenant_id, step_id, query, 101, client=client)
+    previous, references = after_id, set()
+    for row in rows:
+        identifier = str(row.get("id", ""))
+        if (
+            not re.fullmatch(r"[0-9]{1,30}", identifier)
+            or int(identifier) <= previous
+            or not isinstance(row.get("number"), str)
+            or not _REFERENCE.fullmatch(row["number"])
+            or row["number"] in references
+        ):
+            raise source.SourceReadError("refund_page_identity_unproven")
+        try:
+            changed = datetime.fromisoformat(row["changed_at"].replace("Z", "+00:00"))
+            if changed.utcoffset() is None or not since <= changed <= until:
+                raise ValueError
+        except (ValueError, TypeError, AttributeError, KeyError):
+            raise source.SourceReadError("refund_page_window_unproven") from None
+        previous = int(identifier)
+        references.add(row["number"])
+    selected = rows[:100]
+    return {
+        "page_complete": True,
+        "orders": [{"id": str(row["id"]), "number": row["number"]} for row in selected],
+        "next_after_id": int(selected[-1]["id"]) if len(rows) > 100 else None,
+    }

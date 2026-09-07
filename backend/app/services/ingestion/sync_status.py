@@ -48,6 +48,7 @@ async def solidus_sync_status(db, tenant_id, connection_id):
         )
         .order_by(
             AuditEvent.payload["requested_at"].astext.desc().nullslast(),
+            (AuditEvent.action == "sync.trigger_failed").desc(),
             AuditEvent.timestamp.desc(),
             AuditEvent.id.desc(),
         )

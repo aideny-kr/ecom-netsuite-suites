@@ -517,6 +517,30 @@ async def record_finding(db, tenant_id, run_id, order_reference, report_json, *,
     return row
 
 
+async def unseen_references(db, tenant_id, run_id, references):
+    run = await get_run(db, tenant_id, run_id)
+    root = uuid.UUID((run.progress_json or {}).get("continuation_root_id") or str(run.id))
+    seen = set(
+        (
+            await db.scalars(
+                select(TransactionFinding.order_reference)
+                .join(
+                    TransactionRun,
+                    (TransactionRun.id == TransactionFinding.run_id) & (TransactionRun.tenant_id == tenant_id),
+                )
+                .where(
+                    TransactionFinding.tenant_id == tenant_id,
+                    TransactionFinding.order_reference.in_(references),
+                    TransactionRun.config_id == run.config_id,
+                    (TransactionRun.id == root)
+                    | (TransactionRun.progress_json["continuation_root_id"].astext == str(root)),
+                )
+            )
+        ).all()
+    )
+    return [reference for reference in references if reference not in seen]
+
+
 async def list_findings(db, tenant_id, run_id, *, offset=0, limit=100):
     await get_run(db, tenant_id, run_id)
     query = (

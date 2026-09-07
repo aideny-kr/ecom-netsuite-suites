@@ -1,11 +1,9 @@
 import uuid
-from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from starlette.concurrency import run_in_threadpool
 
 from app.core.database import get_db
 from app.core.dependencies import require_permission
@@ -90,61 +88,16 @@ async def trigger_sync(
 
 
 async def _trigger_solidus(db, user, connection):
-    from kombu.exceptions import OperationalError
-
-    from app.workers.celery_app import celery_app
+    from app.services.ingestion.solidus_dispatch import queue_refresh
 
     if (connection.metadata_json or {}).get("api_profile") != "framework_sync":
         raise HTTPException(status_code=422, detail="Order import requires the Framework Sync API profile.")
-    current = await solidus_sync_status(db, user.tenant_id, connection.id)
-    if current["status"] in {"queued", "running"}:
-        return {"job_id": current["job_id"], "status": current["status"], "already_running": True}
-    task_id = str(uuid.uuid4())
-    tenant_id, connection_id, actor_id = user.tenant_id, connection.id, user.id
-    await audit_service.log_event(
-        db=db,
-        tenant_id=tenant_id,
-        category="sync",
-        action="sync.trigger",
-        actor_id=actor_id,
-        resource_type="connection",
-        resource_id=str(connection_id),
-        payload={"provider": "solidus", "task_id": task_id, "requested_at": datetime.now(timezone.utc).isoformat()},
-    )
-    # Persist the request before queueing. Concurrent clicks see the reservation;
-    # a fast worker never sees an uncommitted connection-row lock.
-    await db.commit()
-    try:
-        await run_in_threadpool(
-            celery_app.send_task,
-            "tasks.solidus_sync",
-            task_id=task_id,
-            queue="sync",
-            kwargs={
-                "tenant_id": str(tenant_id),
-                "connection_id": str(connection_id),
-                "refresh_request_id": task_id,
-                "correlation_id": task_id,
-            },
-        )
-    except (OperationalError, OSError):
-        from app.core.database import set_tenant_context
-
-        await set_tenant_context(db, tenant_id)
-        await audit_service.log_event(
-            db=db,
-            tenant_id=tenant_id,
-            category="sync",
-            action="sync.trigger_failed",
-            actor_id=actor_id,
-            resource_type="connection",
-            resource_id=str(connection_id),
-            status="error",
-            payload={"provider": "solidus", "task_id": task_id, "requested_at": datetime.now(timezone.utc).isoformat()},
-        )
-        await db.commit()
-        raise HTTPException(status_code=503, detail="The refresh queue is unavailable. Please retry.") from None
-    return {"job_id": task_id, "status": "queued", "already_running": False}
+    result = await queue_refresh(db, user.tenant_id, connection.id, actor_id=user.id)
+    if result["status"] == "unavailable":
+        raise HTTPException(status_code=409, detail="Test or reconnect this connection before refreshing data.")
+    if result["status"] == "failed":
+        raise HTTPException(status_code=503, detail="The refresh queue is unavailable. Please retry.")
+    return result
 
 
 @router.get("/{connection_id}/sync-status")

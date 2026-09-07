@@ -68,6 +68,10 @@ def _initial_progress(run):
         "not_verified": 0,
         "skipped_after_window": 0,
         "outside_scope": 0,
+        "refund_scan_count": 0,
+        "refund_after_id": 0,
+        "refund_scan_complete": False,
+        "phase": "orders",
         "scan_mode": "keyset" if run.config_snapshot.get("source_connection_id") else "offset",
     }
 
@@ -239,6 +243,7 @@ async def run_investigation(
     _source_reader=None,
     _source_refunds_reader=None,
     _target_refunds_reader=None,
+    _refund_page_reader=None,
     _target_reader=None,
     _page_reader=None,
     _guard_reader=None,
@@ -257,7 +262,7 @@ async def run_investigation(
         read_guard_snapshot,
     )
     from app.services.transaction_ops.planner import PlanningError, plan_proposal
-    from app.services.transaction_ops.refund_reader import read_solidus_refunds
+    from app.services.transaction_ops.refund_reader import read_refund_order_page, read_solidus_refunds
     from app.services.transaction_ops.source_reader import read_framework_order, read_framework_orders_page
 
     state, clock = _state or state_service, _clock or (lambda: datetime.now(timezone.utc))
@@ -319,6 +324,44 @@ async def run_investigation(
                 return await finish("stall")
             if not progress["pending_refs"]:
                 if progress["scan_complete"]:
+                    if (
+                        mapping.solidus_refund_step_id
+                        and run.params_json.get("window_start")
+                        and not progress.get("refund_scan_complete")
+                    ):
+                        if not await reserve(2):
+                            return await finish("budget")
+                        refund_page = await bounded_read(
+                            (_refund_page_reader or read_refund_order_page)(
+                                db,
+                                tenant_id,
+                                mapping.solidus_refund_step_id,
+                                _time(run.params_json["window_start"]),
+                                _time(run.params_json["window_end"]),
+                                after_id=progress.get("refund_after_id", 0),
+                            )
+                        )
+                        cursor = refund_page.get("next_after_id")
+                        rows = refund_page.get("orders")
+                        if (
+                            refund_page.get("page_complete") is not True
+                            or not isinstance(rows, list)
+                            or len(rows) > 100
+                            or (
+                                cursor is not None
+                                and (type(cursor) is not int or cursor <= progress.get("refund_after_id", 0))
+                            )
+                        ):
+                            raise ScanChangedError("refund_cursor_unproven")
+                        progress["pending_refs"] = await state.unseen_references(
+                            db, tenant_id, run_id, [row["number"] for row in rows]
+                        )
+                        progress["refund_scan_count"] = progress.get("refund_scan_count", 0) + len(rows)
+                        progress["phase"] = "refunds"
+                        progress["refund_scan_complete"] = cursor is None
+                        progress["refund_after_id"] = cursor or progress.get("refund_after_id", 0)
+                        await save()
+                        continue
                     return await finish("done")
                 keyset = progress.get("scan_mode") == "keyset"
                 if progress["next_page"] is not None and not keyset:
@@ -357,6 +400,11 @@ async def run_investigation(
             if len(orders) != 1 or orders[0].get("number") != reference:
                 raise ValueError("source_reference_mismatch")
             if mapping.business_entity_subsidiaries.get(source_entity_key(orders[0])) != config["subsidiary_id"]:
+                if progress.get("phase") == "refunds":
+                    progress["outside_scope"] = progress.get("outside_scope", 0) + 1
+                    progress["pending_refs"] = progress["pending_refs"][1:]
+                    await save()
+                    continue
                 raise SourceScopeError
             if not await reserve(10):  # At most7 data reads plus ordinary OAuth token maintenance.
                 return await finish("budget")
