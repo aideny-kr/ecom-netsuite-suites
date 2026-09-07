@@ -103,6 +103,35 @@ class ScriptFamilyFact:
     content_diverged: bool
 
 
+def assign_version_letters(members: list[CeligoScript]) -> dict[str, str]:
+    """Map each distinct `content_hash` among *members* (one already-grouped
+    clone family) to a version letter (A, B, C...), ordered by first
+    appearance: the earliest `celigo_last_modified` across that hash's own
+    members, ties broken by the hash string itself for a deterministic
+    order independent of row-insertion order. A member with `content_hash is
+    None` never contributes a hash and therefore never gets a letter or
+    creates a version -- absence of content is not version zero.
+
+    Shared by `script_family_facts` below (whose own single-copy-family
+    special case is layered ON TOP of this, not baked into it) and by
+    `app.services.celigo.script_families` (which uses the letters exactly as
+    returned here, including for a single-copy family -- the Scripts view
+    always shows a version card for a family with content, unlike the flow
+    map's inline chip)."""
+    timestamps_by_hash: dict[str, list] = {}
+    for s in members:
+        if s.content_hash is None:
+            continue
+        timestamps_by_hash.setdefault(s.content_hash, [])
+        if s.celigo_last_modified is not None:
+            timestamps_by_hash[s.content_hash].append(s.celigo_last_modified)
+    first_seen: dict[str, object] = {
+        content_hash: (min(seen) if seen else None) for content_hash, seen in timestamps_by_hash.items()
+    }
+    ordered_hashes = sorted(first_seen, key=lambda h: (first_seen[h] is None, first_seen[h], h))
+    return {content_hash: chr(ord("A") + i) for i, content_hash in enumerate(ordered_hashes)}
+
+
 def script_family_facts(scripts: list[CeligoScript]) -> dict[uuid.UUID, ScriptFamilyFact]:
     """Per script row: how many copies its clone family (`dedup_key`) has, how many
     differing versions (distinct content_hash), and which version letter THIS row
@@ -113,11 +142,7 @@ def script_family_facts(scripts: list[CeligoScript]) -> dict[uuid.UUID, ScriptFa
         by_family.setdefault(s.dedup_key, []).append(s)
     facts: dict[uuid.UUID, ScriptFamilyFact] = {}
     for members in by_family.values():
-        ordered = sorted(members, key=lambda s: (s.celigo_last_modified is None, s.celigo_last_modified, str(s.id)))
-        letters: dict[str, str] = {}
-        for s in ordered:
-            if s.content_hash is not None and s.content_hash not in letters:
-                letters[s.content_hash] = chr(ord("A") + len(letters))
+        letters = assign_version_letters(members)
         versions = max(len(letters), 1)
         for s in members:
             letter = letters.get(s.content_hash) if len(members) > 1 and s.content_hash is not None else None
