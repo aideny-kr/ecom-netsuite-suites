@@ -10,9 +10,11 @@
  * loading or a confident "0 scripts", and the "not synced yet" state
  * (spec §3.3's exact copy) renders instead of a zeroed-out page.
  *
- * The detail pane is Task 5's job — this page renders a placeholder for it
- * so the split (and the `family=` selection driving it) has a real second
- * pane to size against, without pre-empting Task 5's own component.
+ * Task 5 — the detail pane (`celigo-scripts-detail.tsx`) mounts here once a
+ * family is actually selected (`route.familyKey`); with none selected the
+ * split's second pane still needs something real to size against, so this
+ * page renders the "select a family" prompt in its place rather than an
+ * empty panel.
  *
  * Every `go.scripts(...)` call here re-states the WHOLE current scripts
  * param set (`scriptsBase`) before overriding just the one field that
@@ -37,6 +39,7 @@ import { ErrorNotice, Pill, formatRelativeTime } from "../shared";
 import { useCeligoRoute, type CeligoRoute, type ScriptsFilter } from "../celigo-route";
 import { CeligoBreadcrumb } from "../celigo-breadcrumb";
 import { CeligoScriptsList } from "./celigo-scripts-list";
+import { CeligoScriptsDetail } from "./celigo-scripts-detail";
 
 const LIST_DEFAULT_SIZE = "34%";
 const LIST_MIN_SIZE = "24%";
@@ -266,11 +269,13 @@ export function CeligoScriptsPage(): JSX.Element {
               </Panel>
               <PanelResizeHandle className="w-px bg-border" />
               <Panel id="celigo-scripts-detail-pane" className="flex-1">
-                <div className="flex h-full items-center justify-center p-6 text-center text-[13px] text-muted-foreground">
-                  {route.familyKey
-                    ? "Family detail view lands in the next slice."
-                    : "Select a family on the left to see its source, versions, and where it's used."}
-                </div>
+                {route.familyKey ? (
+                  <CeligoScriptsDetail dedupKey={route.familyKey} />
+                ) : (
+                  <div className="flex h-full items-center justify-center p-6 text-center text-[13px] text-muted-foreground">
+                    Select a family on the left to see its source, versions, and where it&apos;s used.
+                  </div>
+                )}
               </Panel>
             </PanelGroup>
           </div>

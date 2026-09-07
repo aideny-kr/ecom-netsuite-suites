@@ -51,6 +51,20 @@ vi.mock("../celigo-scripts-list", () => ({
   },
 }));
 
+// Task 5 — the detail pane is its own, separately-tested component
+// (`celigo-scripts-detail.test.tsx`); stubbed here the same way the list
+// pane is, so this file only asserts WHICH dedup key the page hands it,
+// not the detail pane's own rendering (which also calls
+// `useCeligoScriptFamily`, a hook this file's `@/hooks/use-celigo-flows`
+// mock above deliberately doesn't provide).
+const detailMocks = vi.hoisted(() => ({ render: vi.fn() }));
+vi.mock("../celigo-scripts-detail", () => ({
+  CeligoScriptsDetail: (props: Record<string, unknown>) => {
+    detailMocks.render(props);
+    return <div data-testid="stub-scripts-detail" />;
+  },
+}));
+
 import { CeligoScriptsPage } from "../celigo-scripts-page";
 
 function wrap(ui: React.ReactElement) {
@@ -121,6 +135,7 @@ beforeEach(() => {
   routeMocks.go.integrations.mockReset();
   routeMocks.go.scripts.mockReset();
   listMocks.render.mockReset();
+  detailMocks.render.mockReset();
   Object.assign(routeMocks, {
     familyKey: null,
     scriptsFilter: "all",
@@ -256,6 +271,23 @@ describe("CeligoScriptsPage — list pane wiring", () => {
     const onSelect = listMocks.render.mock.calls[0][0].onSelect as (key: string) => void;
     onSelect("fam-1");
     expect(routeMocks.go.scripts).toHaveBeenCalledWith(expect.objectContaining({ family: "fam-1", copy: null }));
+  });
+});
+
+describe("CeligoScriptsPage — detail pane wiring", () => {
+  it("mounts the detail pane with the selected family's dedup key", () => {
+    mocks.families.mockReturnValue(resolved(SYNCED_LIST));
+    Object.assign(routeMocks, { familyKey: "fam-1" });
+    wrap(<CeligoScriptsPage />);
+    expect(screen.getByTestId("stub-scripts-detail")).toBeInTheDocument();
+    expect(detailMocks.render).toHaveBeenCalledWith(expect.objectContaining({ dedupKey: "fam-1" }));
+  });
+
+  it("prompts to select a family instead of mounting the detail pane when none is selected", () => {
+    mocks.families.mockReturnValue(resolved(SYNCED_LIST));
+    wrap(<CeligoScriptsPage />);
+    expect(screen.queryByTestId("stub-scripts-detail")).not.toBeInTheDocument();
+    expect(screen.getByText(/select a family/i)).toBeInTheDocument();
   });
 });
 
