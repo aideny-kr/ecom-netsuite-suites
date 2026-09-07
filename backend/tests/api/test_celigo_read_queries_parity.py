@@ -221,6 +221,102 @@ def _imports_script_families(source: str) -> bool:
     return False
 
 
+def _app_root() -> Path:
+    import app as app_pkg
+
+    return Path(app_pkg.__file__).parent
+
+
+def _dotted_from_path(path: Path) -> str:
+    """A file under `_app_root()`'s PARENT -> its dotted `app.*` module
+    name (`.../app/services/celigo/script_families.py` ->
+    `"app.services.celigo.script_families"`; an `__init__.py` maps to its
+    own package name, dropping the `__init__` segment)."""
+    rel = path.relative_to(_app_root().parent)
+    parts = list(rel.with_suffix("").parts)
+    if parts[-1] == "__init__":
+        parts = parts[:-1]
+    return ".".join(parts)
+
+
+def _module_file(dotted: str) -> Path | None:
+    """Resolve an `app.*` dotted module name to its source file by pure path
+    arithmetic (no import) -- `None` if it isn't a file this walk can parse
+    (e.g. a name that turned out to be an attribute, not a submodule)."""
+    rel = Path(*dotted.split(".")[1:])  # drop the leading "app" segment
+    plain = _app_root() / rel.with_suffix(".py")
+    if plain.is_file():
+        return plain
+    package_init = _app_root() / rel / "__init__.py"
+    if package_init.is_file():
+        return package_init
+    return None
+
+
+def _package_of(dotted: str, is_package: bool) -> str:
+    """The package a module belongs to, Python's own relative-import rule:
+    a package's `__init__.py` sees its OWN dotted name as its package (so
+    `.sibling` from inside it resolves to a child of itself); a plain
+    module's package is its dotted name with the last segment dropped."""
+    if is_package:
+        return dotted
+    return dotted.rsplit(".", 1)[0] if "." in dotted else ""
+
+
+def _resolve_relative_import(current_dotted: str, is_package: bool, level: int, module: str | None) -> str | None:
+    """Absolute dotted name a relative `from . import x` / `from .x import y`
+    resolves to, from inside *current_dotted* -- `level=1` is "this same
+    package" (climbs zero), each extra level climbs one more package up."""
+    pkg = _package_of(current_dotted, is_package)
+    parts = pkg.split(".") if pkg else []
+    climbed = parts[: len(parts) - (level - 1)] if level >= 1 else parts
+    if module:
+        climbed = climbed + module.split(".")
+    return ".".join(climbed) if climbed else None
+
+
+def _reachable_app_modules(root_dotted_names: set[str]) -> set[str]:
+    """BFS closure of `app.*` imports reachable from *root_dotted_names*,
+    following `Import`/`ImportFrom` statements (relative imports resolved
+    the way Python itself resolves them) into each discovered module's own
+    file and repeating. `from pkg import submodule` (no dotted submodule
+    name written out in `node.module`) is followed into `pkg.submodule`
+    whenever that submodule actually exists as a file -- exactly how `from
+    app.services.celigo import script_families` reaches
+    `app.services.celigo.script_families` even though the import statement
+    itself never spells that path out. A name that isn't itself an `app.*`
+    module (stdlib/third-party) is a leaf: this never recurses into it."""
+    visited: set[str] = set()
+    queue: list[str] = list(root_dotted_names)
+    while queue:
+        dotted = queue.pop()
+        if dotted in visited:
+            continue
+        visited.add(dotted)
+        path = _module_file(dotted)
+        if path is None:
+            continue
+        is_package = path.name == "__init__.py"
+        tree = ast.parse(path.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "app" or alias.name.startswith("app."):
+                        queue.append(alias.name)
+            elif isinstance(node, ast.ImportFrom):
+                resolved = (
+                    _resolve_relative_import(dotted, is_package, node.level, node.module) if node.level else node.module
+                )
+                if resolved is None or not (resolved == "app" or resolved.startswith("app.")):
+                    continue
+                queue.append(resolved)
+                for alias in node.names:
+                    candidate = f"{resolved}.{alias.name}"
+                    if _module_file(candidate) is not None:
+                        queue.append(candidate)
+    return visited
+
+
 class TestScriptFamiliesNeverImportedByChatSurfaces:
     """N2 import guard (Task 2 brief / spec §5): `script_families.py`'s
     DETAIL dataclasses carry script `content` -- it is reachable only from
@@ -253,3 +349,24 @@ class TestScriptFamiliesNeverImportedByChatSurfaces:
             if _imports_script_families(py_file.read_text())
         ]
         assert offenders == [], offenders
+
+    def test_no_transitively_reachable_app_module_imports_script_families(self):
+        """The three tests above only catch a DIRECT import written in one
+        of the root files themselves. This walks the real import graph: if
+        `services/chat/foo.py` imports `some/other/app/module.py` (outside
+        `services/chat`), and THAT module imports `script_families`, none of
+        the direct-scan tests above would ever see it -- this one will,
+        because it keeps following `app.*` imports transitively rather than
+        stopping at the first hop."""
+        import app.mcp as mcp_pkg
+        import app.services.chat as chat_pkg
+
+        roots = {"app.services.celigo.read_queries"}
+        for pkg in (chat_pkg, mcp_pkg):
+            pkg_dir = Path(pkg.__file__).parent
+            for py_file in pkg_dir.rglob("*.py"):
+                roots.add(_dotted_from_path(py_file))
+
+        reachable = _reachable_app_modules(roots)
+
+        assert "app.services.celigo.script_families" not in reachable
