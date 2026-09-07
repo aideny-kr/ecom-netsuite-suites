@@ -1,148 +1,95 @@
 "use client";
 
-import Link from "next/link";
-import { useConnections, useDeleteConnection } from "@/hooks/use-connections";
+import { useState } from "react";
+import { useConnections, useDeleteConnection, useTestConnection } from "@/hooks/use-connections";
+import { useMcpConnectors, useDeleteMcpConnector, useTestMcpConnector } from "@/hooks/use-mcp-connectors";
+import { usePermissions } from "@/hooks/use-permissions";
+import { useFeature } from "@/hooks/use-features";
+import { useAuth } from "@/providers/auth-provider";
 import { AddConnectionDialog } from "@/components/add-connection-dialog";
+import { AddMcpConnectorDialog } from "@/components/add-mcp-connector-dialog";
+import CeligoConnectorCard from "@/components/settings/celigo-connector-card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
-import { Trash2, Plug, ShoppingBag, CreditCard, FileSpreadsheet } from "lucide-react";
+import { Trash2, Plug, FlaskConical } from "lucide-react";
 
-const providerMeta: Record<string, { icon: typeof Plug; color: string; bg: string }> = {
-  shopify: { icon: ShoppingBag, color: "text-green-600", bg: "bg-green-50" },
-  stripe: { icon: CreditCard, color: "text-violet-600", bg: "bg-violet-50" },
-  netsuite: { icon: FileSpreadsheet, color: "text-blue-600", bg: "bg-blue-50" },
-};
+interface ConnectorCard {
+  id: string; label: string; provider: string; status: string;
+  kind: "api" | "mcp"; detail?: string; error?: string | null;
+}
 
 export default function ConnectionsPage() {
-  const { data: connections, isLoading } = useConnections();
-  const deleteConnection = useDeleteConnection();
-  const { toast } = useToast();
+  const { user } = useAuth();
+  return <ConnectionsContent key={user?.tenant_id} />;
+}
 
-  async function handleDelete(id: string) {
+function ConnectionsContent() {
+  const connections = useConnections(), mcp = useMcpConnectors();
+  const removeApi = useDeleteConnection(), removeMcp = useDeleteMcpConnector();
+  const testApi = useTestConnection(), testMcp = useTestMcpConnector();
+  const { hasPermission } = usePermissions();
+  const showCeligo = useFeature("celigo");
+  const { toast } = useToast();
+  const [deleting, setDeleting] = useState<ConnectorCard | null>(null);
+  const [testing, setTesting] = useState<string | null>(null);
+  const canManage = hasPermission("connections.manage");
+  const removing = removeApi.isPending || removeMcp.isPending;
+  const cards: ConnectorCard[] = [
+    ...(connections.data || []).filter((item) => item.status !== "revoked" && item.provider !== "celigo").map((item) => ({
+      id: item.id, label: item.label, provider: item.provider, status: item.status, kind: "api" as const,
+      detail: typeof item.metadata_json?.base_url === "string" ? item.metadata_json.base_url : undefined, error: item.error_reason,
+    })),
+    ...(mcp.data || []).filter((item) => item.status !== "revoked" && item.provider !== "celigo_mcp").map((item) => ({
+      id: item.id, label: item.label, provider: item.provider === "custom" ? "Custom MCP" : item.provider.replaceAll("_", " "), status: item.status, kind: "mcp" as const,
+      detail: `${item.discovered_tools?.length || 0} tools · ${item.server_url}`, error: item.error_reason,
+    })),
+  ];
+  async function test(item: ConnectorCard) {
+    setTesting(item.id);
     try {
-      await deleteConnection.mutateAsync(id);
+      const result = await (item.kind === "api" ? testApi.mutateAsync(item.id) : testMcp.mutateAsync(item.id));
+      toast({ title: result.status === "ok" ? "Read access verified" : "Connection needs attention", description: result.message, variant: result.status === "ok" ? "default" : "destructive" });
+    } catch (error) {
+      toast({ title: "Could not test connection", description: error instanceof Error ? error.message : "Try again", variant: "destructive" });
+    } finally { setTesting(null); }
+  }
+  async function remove() {
+    if (!deleting) return;
+    try {
+      await (deleting.kind === "api" ? removeApi.mutateAsync(deleting.id) : removeMcp.mutateAsync(deleting.id));
+      setDeleting(null);
       toast({ title: "Connection deleted" });
-    } catch (err) {
-      toast({
-        title: "Failed to delete connection",
-        description: err instanceof Error ? err.message : "Unknown error",
-        variant: "destructive",
-      });
+    } catch (error) {
+      toast({ title: "Could not delete connection", description: error instanceof Error ? error.message : "Try again", variant: "destructive" });
     }
   }
-
   return (
     <div className="space-y-6 animate-fade-in">
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-2xl font-semibold tracking-tight">Connections</h2>
-          <p className="mt-1 text-[15px] text-muted-foreground">
-            Manage your platform integrations
-          </p>
-        </div>
-        <AddConnectionDialog />
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div><h2 className="text-2xl font-semibold tracking-tight">Connections</h2><p className="mt-1 text-[15px] text-muted-foreground">Connect your stores, APIs, and MCP tools.</p></div>
+        {canManage && <div className="flex flex-wrap gap-2"><AddConnectionDialog /><AddMcpConnectorDialog /></div>}
       </div>
-
-      {isLoading ? (
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {[1, 2, 3].map((i) => (
-            <Skeleton key={i} className="h-[140px] rounded-xl" />
-          ))}
-        </div>
-      ) : !connections?.length ? (
-        <div className="flex flex-col items-center justify-center rounded-xl border border-dashed bg-card py-16">
-          <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-muted">
-            <Plug className="h-6 w-6 text-muted-foreground" />
-          </div>
-          <p className="mt-4 text-[15px] font-medium text-foreground">
-            No connections yet
-          </p>
-          <p className="mt-1 mb-5 text-[13px] text-muted-foreground">
-            Add your first integration to get started.
-          </p>
-          <AddConnectionDialog />
-        </div>
-      ) : (
-        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {connections.map((conn) => {
-            const meta = providerMeta[conn.provider] || {
-              icon: Plug,
-              color: "text-muted-foreground",
-              bg: "bg-muted",
-            };
-            const ProviderIcon = meta.icon;
-
-            return (
-              <div
-                key={conn.id}
-                className="group rounded-xl border bg-card p-5 shadow-soft transition-all duration-200 hover:shadow-soft-md"
-              >
-                <div className="flex items-start justify-between">
-                  <div className="flex items-center gap-3">
-                    <div
-                      className={`flex h-10 w-10 items-center justify-center rounded-lg ${meta.bg}`}
-                    >
-                      <ProviderIcon className={`h-5 w-5 ${meta.color}`} />
-                    </div>
-                    <div>
-                      <p className="text-[15px] font-semibold text-foreground">
-                        {conn.label}
-                      </p>
-                      <p className="text-[13px] capitalize text-muted-foreground">
-                        {conn.provider}
-                      </p>
-                    </div>
-                  </div>
-                  <Badge
-                    variant={
-                      conn.status === "active"
-                        ? "default"
-                        : conn.status === "error"
-                          ? "destructive"
-                          : "secondary"
-                    }
-                    className="text-[11px]"
-                  >
-                    {conn.status}
-                  </Badge>
-                </div>
-                {conn.status === "error" && conn.error_reason && (
-                  <p className="mt-3 text-[13px] text-destructive">
-                    {conn.error_reason}
-                  </p>
-                )}
-                <div className="mt-4 flex items-center justify-between border-t pt-3">
-                  <p className="text-[12px] text-muted-foreground">
-                    {conn.last_sync_at
-                      ? `Last sync: ${new Date(conn.last_sync_at).toLocaleString()}`
-                      : "Never synced"}
-                  </p>
-                  {conn.provider === "celigo" ? (
-                    <Link
-                      href="/settings"
-                      className="text-[12px] font-medium text-muted-foreground opacity-0 transition-opacity hover:text-foreground hover:underline group-hover:opacity-100"
-                    >
-                      Manage in Settings
-                    </Link>
-                  ) : (
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8 opacity-0 transition-opacity group-hover:opacity-100"
-                      onClick={() => handleDelete(conn.id)}
-                      disabled={deleteConnection.isPending}
-                    >
-                      <Trash2 className="h-4 w-4 text-muted-foreground hover:text-destructive" />
-                    </Button>
-                  )}
-                </div>
-              </div>
-            );
-          })}
+      {!canManage && <p className="text-[13px] text-muted-foreground">You can view connections. A connection manager can add, test, or delete them.</p>}
+      {(connections.isError || mcp.isError) && <div role="alert" className="rounded-lg border p-4 text-[13px]">Some connections could not be loaded. <Button variant="outline" size="sm" onClick={() => { void connections.refetch(); void mcp.refetch(); }}>Reload connections</Button></div>}
+      {connections.isLoading || mcp.isLoading ? <Skeleton className="h-40 rounded-xl" /> : (
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {cards.map((item) => <article key={`${item.kind}:${item.id}`} className="min-w-0 space-y-4 rounded-xl border bg-card p-5 shadow-soft">
+            <div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="break-words text-[15px] font-semibold">{item.label}</p><p className="text-[13px] capitalize text-muted-foreground">{item.provider === "api" ? "Custom API" : item.provider}</p></div><Badge variant={item.status === "error" ? "destructive" : item.status === "active" || item.status === "healthy" ? "default" : "secondary"}>{item.status}</Badge></div>
+            {item.detail && <p className="break-all text-[13px] text-muted-foreground">{item.detail}</p>}
+            {item.status === "error" && item.error && <p className="text-[13px] text-destructive">{item.error}</p>}
+            {canManage && <div className="flex flex-wrap gap-2 border-t pt-3">
+              <Button variant="outline" size="sm" onClick={() => void test(item)} disabled={testing !== null || removing}><FlaskConical className="mr-2 h-4 w-4" />{testing === item.id ? "Testing…" : "Test"}</Button>
+              <Button variant="ghost" size="sm" onClick={() => setDeleting(item)} disabled={removing || testing !== null} aria-label={`Delete ${item.label}`}><Trash2 className="mr-2 h-4 w-4" />Delete</Button>
+            </div>}
+          </article>)}
         </div>
       )}
+      {!connections.isLoading && !mcp.isLoading && !connections.isError && !mcp.isError && !cards.length && <div className="rounded-xl border border-dashed p-8 text-center"><Plug className="mx-auto mb-3 h-6 w-6 text-muted-foreground" /><p className="text-[15px]">No API or MCP connections yet</p><p className="mt-2 text-[13px] text-muted-foreground">Add Solidus, another platform, a custom API, or an MCP server above.</p></div>}
+      {showCeligo && <CeligoConnectorCard />}
+      <Dialog open={!!deleting} onOpenChange={(open) => { if (!open && !removing) setDeleting(null); }}><DialogContent><DialogHeader><DialogTitle>Delete {deleting?.label}?</DialogTitle><DialogDescription>This stops future access through this connection. Saved investigation and audit records are retained. Scopes using it will need a new connection.</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" disabled={removing} onClick={() => setDeleting(null)}>Cancel</Button><Button variant="destructive" disabled={removing} onClick={() => void remove()}>{removing ? "Deleting…" : "Delete connection"}</Button></DialogFooter></DialogContent></Dialog>
     </div>
   );
 }

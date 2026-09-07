@@ -51,7 +51,8 @@ class InputModel(BaseModel):
 
 class ConfigCreate(InputModel):
     name: Identifier
-    source_step_id: UUID
+    source_step_id: UUID | None = None
+    source_connection_id: UUID | None = None
     netsuite_connection_id: UUID
     netsuite_account_id: Identifier
     subsidiary_id: Identifier
@@ -63,6 +64,12 @@ class ConfigCreate(InputModel):
     max_api_calls: int = Field(default=100, ge=1, le=2000, strict=True)
     max_orders: int = Field(default=100, ge=1, le=10000, strict=True)
     deadline_seconds: int = Field(default=900, ge=30, le=3600, strict=True)
+
+    @model_validator(mode="after")
+    def single_source(self):
+        if (self.source_step_id is None) == (self.source_connection_id is None):
+            raise ValueError("Choose one Celigo source or direct Solidus connection")
+        return self
 
 
 class ConfigControl(InputModel):
@@ -135,7 +142,8 @@ class ConfigOut(OutputModel):
     tenant_id: UUID
     config_key: str
     name: str
-    source_step_id: UUID
+    source_step_id: UUID | None
+    source_connection_id: UUID | None = None
     netsuite_connection_id: UUID
     netsuite_account_id: str
     subsidiary_id: str

@@ -58,12 +58,15 @@ cursor.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 
+import redis
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.database import set_tenant_context, worker_async_session
 from app.core.encryption import decrypt_credentials
 from app.models.connection import Connection
@@ -72,6 +75,114 @@ from app.workers.base_task import InstrumentedTask
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
+
+# A queued task must claim its reservation before five minutes. Once claimed,
+# the lease exceeds this task's 2100-second hard limit, including shutdown.
+# Every entry point shares the same lease; Redis failure never permits a run.
+REFRESH_QUEUE_SECONDS = 300
+REFRESH_RUNNING_SECONDS = 2400
+_REFRESH_HISTORY_SECONDS = 86400
+_REFRESH_SCRIPT = """
+local current_raw = redis.call('GET', KEYS[1])
+local current = current_raw and cjson.decode(current_raw) or nil
+local mode, request_id, connection_id = ARGV[1], ARGV[2], ARGV[3]
+local row = {request_id=request_id, connection_id=connection_id, status='queued'}
+if mode == 'reserve' then
+    if current then return {current_raw, 'existing'} end
+elseif mode == 'claim_reserved' then
+    if not current or current.request_id ~= request_id or current.status ~= 'queued' then return nil end
+    row.status = 'running'
+elseif mode == 'claim_manual' then
+    if current or redis.call('EXISTS', KEYS[2]) == 1 then return nil end
+    row.status = 'running'
+elseif mode == 'finish' or mode == 'cancel' then
+    if not current or current.request_id ~= request_id then return nil end
+    if mode == 'cancel' and current.status ~= 'queued' then return nil end
+    row.status = ARGV[6]
+    redis.call('SET', KEYS[2], cjson.encode(row), 'EX', ARGV[5])
+    redis.call('DEL', KEYS[1])
+    return {cjson.encode(row), 'finished'}
+elseif mode == 'read' then
+    local raw = redis.call('GET', KEYS[2])
+    if not raw then return nil end
+    row = cjson.decode(raw)
+    if (row.status == 'queued' or row.status == 'running') and
+       (not current or current.request_id ~= request_id) then row.status = 'failed' end
+    return {cjson.encode(row), 'read'}
+else
+    return redis.error_reply('unknown refresh transition')
+end
+local raw = cjson.encode(row)
+redis.call('SET', KEYS[1], raw, 'EX', ARGV[4])
+redis.call('SET', KEYS[2], raw, 'EX', ARGV[5])
+return {raw, 'new'}
+"""
+
+
+def _refresh_store():
+    return redis.Redis.from_url(
+        settings.REDIS_URL,
+        decode_responses=True,
+        socket_connect_timeout=2,
+        socket_timeout=2,
+    )
+
+
+def _lease_key(tenant_id: str, connection_id: str) -> str:
+    return f"celigo-source-refresh:{uuid.UUID(tenant_id)}:connection:{uuid.UUID(connection_id)}"
+
+
+def _status_key(tenant_id: str, request_id: str) -> str:
+    return f"celigo-source-refresh:{uuid.UUID(tenant_id)}:request:{uuid.UUID(request_id)}"
+
+
+def _refresh_transition(tenant_id, connection_id, request_id, mode, *, succeeded=False):
+    with _refresh_store() as store:
+        result = store.eval(
+            _REFRESH_SCRIPT,
+            2,
+            _lease_key(tenant_id, connection_id),
+            _status_key(tenant_id, request_id),
+            mode,
+            request_id,
+            connection_id,
+            REFRESH_QUEUE_SECONDS if mode == "reserve" else REFRESH_RUNNING_SECONDS,
+            _REFRESH_HISTORY_SECONDS,
+            "completed" if succeeded else "failed",
+        )
+    if result is None:
+        return None
+    row = json.loads(result[0])
+    row["already_running"] = result[1] == "existing"
+    return row
+
+
+def reserve_refresh(tenant_id: str, connection_id: str) -> dict:
+    return _refresh_transition(tenant_id, connection_id, str(uuid.uuid4()), "reserve")
+
+
+def claim_refresh(tenant_id: str, connection_id: str, request_id: str, *, reserved: bool) -> bool:
+    mode = "claim_reserved" if reserved else "claim_manual"
+    return _refresh_transition(tenant_id, connection_id, request_id, mode) is not None
+
+
+def finish_refresh(tenant_id: str, connection_id: str, request_id: str, *, succeeded: bool) -> None:
+    _refresh_transition(tenant_id, connection_id, request_id, "finish", succeeded=succeeded)
+
+
+def cancel_refresh(tenant_id: str, connection_id: str, request_id: str) -> None:
+    # A broker can report failure after delivery. Cancel only a queued request;
+    # an already-running worker retains ownership until it finishes or times out.
+    _refresh_transition(tenant_id, connection_id, request_id, "cancel")
+
+
+def read_refresh(tenant_id: str, request_id: str) -> dict | None:
+    with _refresh_store() as store:
+        raw = store.get(_status_key(tenant_id, request_id))
+    if raw is None:
+        return None
+    connection_id = json.loads(raw)["connection_id"]
+    return _refresh_transition(tenant_id, connection_id, request_id, "read")
 
 
 class CeligoSyncFailedError(RuntimeError):
@@ -92,18 +203,27 @@ class CeligoSyncFailedError(RuntimeError):
     soft_time_limit=1800,
     time_limit=2100,
 )
-def celigo_flow_map_sync(self, tenant_id: str, connection_id: str, **kwargs):
+def celigo_flow_map_sync(self, tenant_id: str, connection_id: str, setup_refresh_id: str | None = None, **kwargs):
     """Sync one tenant's Celigo flow map (integrations/flows/steps/scripts/
     errors) and record config drift. See module docstring for the
     freshness-cursor / Beat-schedule posture."""
+    request_id = setup_refresh_id or self.request.id or str(uuid.uuid4())
+    if not claim_refresh(tenant_id, connection_id, request_id, reserved=setup_refresh_id is not None):
+        return {"skipped": True, "reason": "refresh_already_running_or_expired"}
     loop = asyncio.new_event_loop()
+    succeeded = False
     try:
-        return loop.run_until_complete(_execute(tenant_id, connection_id))
+        result = loop.run_until_complete(
+            _execute(tenant_id, connection_id, require_setup_features=setup_refresh_id is not None)
+        )
+        succeeded = True
+        return result
     finally:
         loop.close()
+        finish_refresh(tenant_id, connection_id, request_id, succeeded=succeeded)
 
 
-async def _execute(tenant_id: str, connection_id: str) -> dict:
+async def _execute(tenant_id: str, connection_id: str, *, require_setup_features: bool = False) -> dict:
     from dataclasses import asdict
     from datetime import datetime, timezone
 
@@ -111,6 +231,12 @@ async def _execute(tenant_id: str, connection_id: str) -> dict:
 
     async with worker_async_session() as session:
         await set_tenant_context(session, tenant_id)
+        if require_setup_features:
+            from app.services.feature_flag_service import is_enabled
+
+            for flag in ("celigo", "reconciliation"):
+                if not await is_enabled(session, uuid.UUID(tenant_id), flag):
+                    raise CeligoSyncFailedError("Source refresh is disabled for this tenant")
 
         # Scoped by id + tenant_id + provider, excluding only `revoked` --
         # mirrors connector_status.py's `_get_celigo_connection` (the one

@@ -2374,7 +2374,23 @@ async def run_chat_turn(
                 _repair_decision = None
                 _repair_root_id: str | None = None
                 _repair_current_attempt = 0
-                if _exec_succeeded:
+                if _mutation_type == "execute":
+                    # Arbitrary connectors do not share NetSuite's record schema
+                    # or repair semantics. Preserve successful data for the user
+                    # and subsequent agent turns; failures require a fresh request.
+                    from app.services.chat.write_confirmation_service import format_external_result
+
+                    _updated_so["status"] = "approved" if _exec_succeeded else _write_outcome
+                    if _exec_succeeded:
+                        _confirm_content = format_external_result(_exec_result)
+                    else:
+                        _updated_so["error"] = _exec_error or "The connected service did not confirm success."
+                        _confirm_content = (
+                            "The connected service did not confirm success. Check its current state before retrying."
+                            if _write_outcome == "indeterminate"
+                            else "The connected service reported a failed request."
+                        )
+                elif _exec_succeeded:
                     _updated_so["status"] = "approved"
                 elif not may_enter_repair_loop(_write_outcome):
                     # TERMINAL, and deliberately NOT "failed" — calling this a

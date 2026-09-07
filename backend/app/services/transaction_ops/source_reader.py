@@ -157,7 +157,44 @@ async def _load_source(db: AsyncSession, tenant_id: uuid.UUID, step_id: uuid.UUI
     return step, connection, token, region
 
 
-async def _preview(db, tenant_id, step_id, relative_uri, *, client):
+async def _direct_read(db, tenant_id, connection_id, relative_uri, *, client):
+    from app.services.http_connector_service import ConnectorReadError, read_json, validate_credentials
+
+    connection = (
+        await db.execute(
+            select(Connection).where(
+                Connection.id == connection_id,
+                Connection.tenant_id == tenant_id,
+                Connection.provider == "solidus",
+                Connection.status.in_(ACTIVE_CONNECTION_STATUSES),
+            )
+        )
+    ).scalar_one_or_none()
+    if connection is None:
+        raise SourceReadError("source_not_found", 404)
+    try:
+        credentials = validate_credentials("solidus", decrypt_credentials(connection.encrypted_credentials))
+        if credentials.get("api_profile") != "framework_sync" or credentials["base_url"] != _FRAMEWORK_BASE:
+            raise SourceReadError("unsupported_source", 422)
+        body = await read_json(credentials, relative_uri, client=client)
+    except (InvalidToken, ValueError, TypeError, AttributeError):
+        raise SourceReadError("source_credentials_unavailable") from None
+    except ConnectorReadError as exc:
+        raise SourceReadError("source_" + exc.code, 429 if exc.code == "rate_limited" else 502) from None
+    _check_envelope(body)
+    return body, {
+        "source": "framework",
+        "source_transport": "solidus_direct",
+        "connection_id": str(connection.id),
+        "read_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def _preview(db, tenant_id, step_id, relative_uri, *, client, source_connection_id=None):
+    if source_connection_id is not None:
+        if step_id is not None:
+            raise SourceReadError("ambiguous_source", 422)
+        return await _direct_read(db, tenant_id, source_connection_id, relative_uri, client=client)
     step, connection, token, region = await _load_source(db, tenant_id, step_id)
     owns_client = client is None
     http = client or httpx.AsyncClient(timeout=_HTTP_TIMEOUT, follow_redirects=False)
@@ -224,6 +261,7 @@ async def read_framework_order(
     *,
     client: httpx.AsyncClient | None = None,
     include_sync_data: bool = False,
+    source_connection_id: uuid.UUID | None = None,
 ) -> dict:
     """Read one exact order; a missing/error response never proves absence."""
     if (
@@ -234,7 +272,14 @@ async def read_framework_order(
         raise SourceReadError("invalid_order_reference", 422)
     # The sync detail endpoint includes business entity and review holds as
     # well as lines/addresses. The storefront detail endpoint omits routing.
-    order, provenance = await _preview(db, tenant_id, step_id, f"sync/orders/{order_reference}", client=client)
+    order, provenance = await _preview(
+        db,
+        tenant_id,
+        step_id,
+        f"sync/orders/{order_reference}",
+        client=client,
+        source_connection_id=source_connection_id,
+    )
     if order.get("number") != order_reference:
         raise SourceReadError("order_identity_mismatch")
     return {
@@ -256,6 +301,7 @@ async def read_framework_orders_page(
     page_size: int = 20,
     *,
     client: httpx.AsyncClient | None = None,
+    source_connection_id: uuid.UUID | None = None,
 ) -> dict:
     """One bounded page. Only a single-page window can be complete in one call.
 
@@ -276,7 +322,9 @@ async def read_framework_orders_page(
         f"sync/orders?q[updated_at_gteq]={quote(since, safe='')}&q[completed_at_not_null]=1"
         f"&page={page}&per_page={page_size}&q[s]=id"
     )
-    envelope, provenance = await _preview(db, tenant_id, step_id, uri, client=client)
+    envelope, provenance = await _preview(
+        db, tenant_id, step_id, uri, client=client, source_connection_id=source_connection_id
+    )
     orders = envelope.get("orders")
     values = {key: envelope.get(key) for key in ("current_page", "pages", "per_page", "total_count", "count")}
     if any(type(value) is not int or value < 0 for value in values.values()) or not isinstance(orders, list):

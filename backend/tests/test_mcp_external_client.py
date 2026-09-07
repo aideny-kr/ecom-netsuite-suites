@@ -20,6 +20,7 @@ from app.services.mcp_client_service import (
 
 @dataclass
 class FakeConnector:
+    provider: str = "custom"
     server_url: str = "https://example.com/mcp/v1"
     auth_type: str = "none"
     encrypted_credentials: str | None = None

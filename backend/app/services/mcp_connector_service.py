@@ -41,6 +41,28 @@ async def create_mcp_connector(
     """
     if provider == "celigo_mcp":
         server_url = mcp_server_url(region)
+    if provider in ("custom", "shopify_mcp", "stripe_mcp", "netsuite_mcp"):
+        from app.services.http_connector_service import validate_auth
+        from app.services.public_http import validate_endpoint
+
+        server_url = validate_endpoint(server_url)
+        if provider == "netsuite_mcp":
+            import re
+            from urllib.parse import urlsplit
+
+            endpoint = urlsplit(server_url)
+            if (
+                not re.fullmatch(r"[a-z0-9][a-z0-9-]*\.suitetalk\.api\.netsuite\.com", endpoint.hostname or "")
+                or endpoint.path != "/services/mcp/v1/all"
+            ):
+                raise ValueError("Use the NetSuite account's hosted MCP endpoint")
+        if auth_type != "oauth2":
+            credential = credentials or {}
+            validate_auth(
+                auth_type,
+                credential.get("access_token") or credential.get("token") or credential.get("api_key"),
+                credential.get("header_name") or "X-API-Key",
+            )
     encrypted = encrypt_credentials(credentials) if credentials else None
     connector = McpConnector(
         tenant_id=tenant_id,
@@ -130,7 +152,9 @@ async def update_connector_tokens(
 async def list_mcp_connectors(db: AsyncSession, tenant_id: uuid.UUID) -> list[McpConnector]:
     """List all MCP connectors for a tenant."""
     result = await db.execute(
-        select(McpConnector).where(McpConnector.tenant_id == tenant_id).order_by(McpConnector.created_at.desc())
+        select(McpConnector)
+        .where(McpConnector.tenant_id == tenant_id, McpConnector.status != "revoked")
+        .order_by(McpConnector.created_at.desc())
     )
     return list(result.scalars().all())
 
@@ -151,6 +175,10 @@ async def delete_mcp_connector(db: AsyncSession, connector_id: uuid.UUID, tenant
     connector = await get_mcp_connector(db, connector_id, tenant_id)
     if not connector:
         return False
+    if connector.provider == "celigo_mcp":
+        from app.services.celigo_write_guard import CeligoManagedElsewhereError
+
+        raise CeligoManagedElsewhereError("Manage Celigo through its connection card")
     connector.status = "revoked"
     connector.is_enabled = False
     await db.flush()
@@ -213,7 +241,7 @@ async def get_active_connectors_for_tenant(db: AsyncSession, tenant_id: uuid.UUI
 async def test_mcp_connector(db: AsyncSession, connector_id: uuid.UUID, tenant_id: uuid.UUID) -> dict:
     """Test an MCP connector by connecting and discovering tools."""
     connector = await get_mcp_connector(db, connector_id, tenant_id)
-    if not connector:
+    if not connector or connector.status == "revoked":
         return {
             "connector_id": str(connector_id),
             "status": "error",
@@ -225,6 +253,8 @@ async def test_mcp_connector(db: AsyncSession, connector_id: uuid.UUID, tenant_i
 
         tools = await discover_tools(connector, db)
         connector.discovered_tools = tools
+        connector.status = "active"
+        connector.error_reason = None
         await db.flush()
 
         return {
@@ -233,14 +263,16 @@ async def test_mcp_connector(db: AsyncSession, connector_id: uuid.UUID, tenant_i
             "message": f"Connected successfully. Discovered {len(tools)} tools.",
             "discovered_tools": tools,
         }
-    except Exception as exc:
+    except Exception:
+        connector.status = "error"
+        connector.error_reason = "Tool discovery failed. Check the server URL and credential."
+        await db.flush()
         logger.warning(
             "mcp_connector.test_failed",
             connector_id=str(connector_id),
-            error=str(exc),
         )
         return {
             "connector_id": str(connector.id),
             "status": "error",
-            "message": f"Connection test failed: {exc}",
+            "message": connector.error_reason,
         }

@@ -420,3 +420,14 @@ async def test_persisted_log_flags_a_card_shown_after_repair_is_exhausted():
     # required" (which is indistinguishable from a clean first attempt).
     assert "validation_failed_before_confirmation" in card_entry
     assert "subsidiary" in card_entry["validation_failed_before_confirmation"]
+
+
+@pytest.fixture(autouse=True)
+def _netsuite_classification_boundary(monkeypatch):
+    """These write-flow units use NetSuite; connector identity is tested separately."""
+    from app.services.chat.mutation_guard import classify_mutation
+
+    monkeypatch.setattr(
+        "app.services.chat.mutation_guard.classify_connector_mutation",
+        AsyncMock(side_effect=lambda tool_name, *_: classify_mutation(tool_name)),
+    )

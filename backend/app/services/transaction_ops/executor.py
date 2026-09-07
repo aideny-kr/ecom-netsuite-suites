@@ -146,6 +146,11 @@ async def execute_proposal(db, tenant_id, proposal_id, *, _clock=None):
             config.source_step_id,
             proposal.order_reference,
             **({"include_sync_data": True} if mapping.line_identity_mode == "inventory_units" else {}),
+            **(
+                {"source_connection_id": config.source_connection_id}
+                if getattr(config, "source_connection_id", None)
+                else {}
+            ),
         )
         targets = await read(
             10,

@@ -854,7 +854,7 @@ export interface EditableSlot {
 
 export interface WriteConfirmationData {
   type: "write_confirmation";
-  mutation_type: "create" | "update" | "delete" | "upsert";
+  mutation_type: "create" | "update" | "delete" | "upsert" | "execute";
   record_type: string;
   record_id: string | null;
   proposed_fields: Record<string, unknown>;

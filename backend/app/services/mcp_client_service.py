@@ -10,6 +10,7 @@ import json
 import time
 from typing import TYPE_CHECKING
 
+import httpx
 import structlog
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
@@ -23,6 +24,25 @@ if TYPE_CHECKING:
     from app.models.mcp_connector import McpConnector
 
 logger = structlog.get_logger()
+
+
+def _transport_options(connector):
+    if connector.provider not in ("custom", "shopify_mcp", "stripe_mcp", "netsuite_mcp"):
+        return {}
+    from app.services.public_http import PublicHTTPTransport
+
+    def client_factory(headers=None, timeout=None, auth=None):
+        return httpx.AsyncClient(
+            headers=headers,
+            timeout=timeout or 30,
+            auth=auth,
+            transport=PublicHTTPTransport(connector.server_url),
+            follow_redirects=False,
+            trust_env=False,
+        )
+
+    return {"httpx_client_factory": client_factory}
+
 
 # One ceiling for every tool. There used to be two tiers — 60s for four named
 # read tools, 15s for everything else — which handed every irreversible WRITE
@@ -160,7 +180,7 @@ async def _build_headers(connector: McpConnector, db: AsyncSession | None = None
             headers["Authorization"] = f"Bearer {token}"
     elif connector.auth_type == "api_key":
         api_key = credentials.get("api_key", "")
-        header_name = credentials.get("header_name", "X-API-Key")
+        header_name = credentials.get("header_name") or "X-API-Key"
         if api_key:
             headers[header_name] = api_key
 
@@ -173,10 +193,13 @@ async def discover_tools(connector: McpConnector, db: AsyncSession | None = None
 
     result = None
     try:
-        async with streamablehttp_client(url=connector.server_url, headers=headers) as (
-            read_stream,
-            write_stream,
-            _get_session_id,
+        async with (
+            asyncio.timeout(30),
+            streamablehttp_client(url=connector.server_url, headers=headers, **_transport_options(connector)) as (
+                read_stream,
+                write_stream,
+                _get_session_id,
+            ),
         ):
             async with ClientSession(read_stream, write_stream) as session:
                 await session.initialize()
@@ -254,7 +277,9 @@ async def call_external_mcp_tool(
     result = None
 
     try:
-        async with streamablehttp_client(url=connector.server_url, headers=headers) as (
+        async with streamablehttp_client(
+            url=connector.server_url, headers=headers, **_transport_options(connector)
+        ) as (
             read_stream,
             write_stream,
             _get_session_id,

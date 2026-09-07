@@ -1733,9 +1733,9 @@ class BaseSpecialistAgent(abc.ABC):
                     # ── End Plan Mode clarify intercept ──
 
                     # ── Mutation intercept: HITL write confirmation ──
-                    from app.services.chat.mutation_guard import classify_mutation
+                    from app.services.chat.mutation_guard import classify_connector_mutation
 
-                    mutation_type = classify_mutation(block.name)
+                    mutation_type = await classify_connector_mutation(block.name, db, self.tenant_id)
                     if mutation_type is not None:
                         record_type = block.input.get("recordType", "unknown")
 
@@ -1748,7 +1748,7 @@ class BaseSpecialistAgent(abc.ABC):
                         # server-executed fetch (slot_option_sources.py),
                         # resolved below once validation/the repair loop have
                         # decided this attempt is the one shown as a card.
-                        _ask_user_hint = block.input.pop("ask_user", None)
+                        _ask_user_hint = block.input.pop("ask_user", None) if mutation_type != "execute" else None
 
                         # Is this write headed for NetSuite at all? Everything
                         # the agentic write loop adds below — the investigation
@@ -1768,7 +1768,15 @@ class BaseSpecialistAgent(abc.ABC):
                         )
 
                         _parsed_write = _parse_write_tool_name(block.name)
-                        _is_netsuite_write = bool(_parsed_write and _parsed_write[1].startswith("ns_"))
+                        _is_netsuite_write = bool(
+                            mutation_type != "execute" and _parsed_write and _parsed_write[1].startswith("ns_")
+                        )
+                        if mutation_type == "execute" and _parsed_write:
+                            record_type = f"external tool {_parsed_write[1]}"
+                        elif mutation_type == "execute":
+                            from app.services.chat.http_connector_tools import describe_target
+
+                            record_type = await describe_target(block.name, db, self.tenant_id)
 
                         # ── Investigation gate (requirement A) — mechanism,
                         # not prompt (the write profile's metadata-first

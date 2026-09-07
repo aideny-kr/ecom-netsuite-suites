@@ -273,6 +273,10 @@ async def run_investigation(
         if not await (_enabled or enabled)(db, tenant_id):
             return await finish("stall")
         config = run.config_snapshot
+        source_step_id = UUID(config["source_step_id"]) if config.get("source_step_id") else None
+        direct_source = (
+            {"source_connection_id": UUID(config["source_connection_id"])} if config.get("source_connection_id") else {}
+        )
         mapping = TransactionMapping.model_validate(config["mapping_json"])
         await save()
         while True:
@@ -290,10 +294,11 @@ async def run_investigation(
                     page_reader(
                         db,
                         tenant_id,
-                        UUID(config["source_step_id"]),
+                        source_step_id,
                         _time(run.params_json["window_start"]),
                         page=progress["page"],
                         page_size=20,
+                        **direct_source,
                     )
                 )
                 _page_progress(page, progress, run.params_json)
@@ -304,7 +309,7 @@ async def run_investigation(
                 return await finish("budget")
             source_options = {"include_sync_data": True} if mapping.line_identity_mode == "inventory_units" else {}
             source = await bounded_read(
-                source_reader(db, tenant_id, UUID(config["source_step_id"]), reference, **source_options)
+                source_reader(db, tenant_id, source_step_id, reference, **source_options, **direct_source)
             )
             if not await reserve(10):  # At most7 data reads plus ordinary OAuth token maintenance.
                 return await finish("budget")

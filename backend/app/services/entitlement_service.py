@@ -73,6 +73,7 @@ async def check_entitlement(
             select(func.count(Connection.id)).where(
                 Connection.tenant_id == tenant_id,
                 Connection.provider != "netsuite",
+                Connection.status != "revoked",
             )
         )
         current_count = count_result.scalar() or 0
@@ -151,6 +152,7 @@ async def get_usage_summary(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
         select(func.count(Connection.id)).where(
             Connection.tenant_id == tenant_id,
             Connection.provider != "netsuite",
+            Connection.status != "revoked",
         )
     )
     connections = conn_result.scalar() or 0

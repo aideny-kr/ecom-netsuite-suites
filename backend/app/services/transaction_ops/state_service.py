@@ -172,6 +172,20 @@ async def _human(db, tenant_id, actor, permission):
 async def _check_bindings(db, tenant_id, request):
     # These are local ownership/lifecycle checks. The root runner independently
     # validates live Framework/Celigo/provider configuration before any read/write.
+    if request.source_connection_id is not None:
+        source = (
+            await db.execute(
+                select(Connection.id).where(
+                    Connection.id == request.source_connection_id,
+                    Connection.tenant_id == tenant_id,
+                    Connection.provider == "solidus",
+                    Connection.status.in_(ACTIVE_CONNECTION_STATUSES),
+                    Connection.metadata_json["api_profile"].as_string() == "framework_sync",
+                )
+            )
+        ).scalar_one_or_none()
+        if source is None:
+            raise StateError("source_unavailable", 422)
     for step_id in filter(None, (request.source_step_id, request.target_step_id)):
         query = (
             select(CeligoFlowStep.id)

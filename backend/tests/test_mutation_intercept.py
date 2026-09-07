@@ -376,6 +376,11 @@ class TestMutationPrefetchGuardSkipsNonNetSuite:
             # already-bound caller-side name) is the one that must be patched
             # to observe whether it was reached.
             patch("app.services.chat.tools.execute_tool_call", tools_execute_mock),
+            patch(
+                "app.services.mcp_connector_service.get_mcp_connector",
+                new_callable=AsyncMock,
+                return_value=MagicMock(provider="celigo_mcp"),
+            ),
         ):
             events = []
             async for event in BaseSpecialistAgent.run_streaming(

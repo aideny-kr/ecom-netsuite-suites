@@ -74,6 +74,11 @@ async def reconcile_operation_run(db, tenant_id, run_id, *, _clock=None):
                 read_framework_order,
                 config.source_step_id,
                 proposal.order_reference,
+                **(
+                    {"source_connection_id": config.source_connection_id}
+                    if getattr(config, "source_connection_id", None)
+                    else {}
+                ),
                 orders=0 if run.orders_used else 1,
                 **({"include_sync_data": True} if mapping.line_identity_mode == "inventory_units" else {}),
             )

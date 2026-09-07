@@ -770,16 +770,21 @@ async def create_mcp_connector(
     user: Annotated[User, Depends(require_permission("connections.manage"))],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    connector = await mcp_connector_service.create_mcp_connector(
-        db=db,
-        tenant_id=user.tenant_id,
-        provider=request.provider,
-        label=request.label,
-        server_url=request.server_url,
-        auth_type=request.auth_type,
-        credentials=request.credentials,
-        created_by=user.id,
-    )
+    try:
+        connector = await mcp_connector_service.create_mcp_connector(
+            db=db,
+            tenant_id=user.tenant_id,
+            provider=request.provider,
+            label=request.label,
+            server_url=request.server_url,
+            auth_type=request.auth_type,
+            credentials=request.credentials,
+            created_by=user.id,
+        )
+    except ValueError:
+        raise HTTPException(
+            status_code=422, detail="Invalid MCP settings. Check the public HTTPS URL and authentication."
+        ) from None
 
     # Auto-discover tools from the newly connected MCP server
     try:
@@ -787,12 +792,15 @@ async def create_mcp_connector(
 
         tools = await discover_tools(connector, db)
         connector.discovered_tools = tools
+        connector.status = "active"
+        connector.error_reason = None
         await db.flush()
     except Exception:
+        connector.status = "error"
+        connector.error_reason = "Tool discovery failed. Check the server URL and credential."
         logger.warning(
             "mcp_connector.create.tool_discovery_failed",
             connector_id=str(connector.id),
-            exc_info=True,
         )
 
     await audit_service.log_event(
@@ -817,7 +825,12 @@ async def delete_mcp_connector(
     user: Annotated[User, Depends(require_permission("connections.manage"))],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    deleted = await mcp_connector_service.delete_mcp_connector(db, connector_id, user.tenant_id)
+    from app.services.celigo_write_guard import CeligoManagedElsewhereError
+
+    try:
+        deleted = await mcp_connector_service.delete_mcp_connector(db, connector_id, user.tenant_id)
+    except CeligoManagedElsewhereError:
+        raise HTTPException(status_code=400, detail="Manage Celigo through its connection card") from None
     if not deleted:
         raise HTTPException(status_code=404, detail="MCP connector not found")
 

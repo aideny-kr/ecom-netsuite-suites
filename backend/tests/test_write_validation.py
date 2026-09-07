@@ -835,3 +835,14 @@ class TestTheCardDescribesWhatWillExecute:
         assert payload is not None
         assert "ask_user" not in json.dumps(payload.tool_input)
         assert "ask_user" not in json.dumps(payload.proposed_lines)
+
+
+@pytest.fixture(autouse=True)
+def _netsuite_classification_boundary(monkeypatch):
+    """These write-flow units use NetSuite; connector identity is tested separately."""
+    from app.services.chat.mutation_guard import classify_mutation
+
+    monkeypatch.setattr(
+        "app.services.chat.mutation_guard.classify_connector_mutation",
+        AsyncMock(side_effect=lambda tool_name, *_: classify_mutation(tool_name)),
+    )

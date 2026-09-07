@@ -43,7 +43,12 @@ async def test_setup_lists_independent_pages_and_projects_only_safe_metadata():
     connection = {"id": uuid4(), "label": "NS sandbox", "account_id": "EXAMPLE_SB1", "status": "active"}
     db = SimpleNamespace(
         execute=AsyncMock(
-            side_effect=[_result([source, {**source, "id": uuid4()}]), _result([target]), _result([connection])]
+            side_effect=[
+                _result([source, {**source, "id": uuid4()}]),
+                _result([target]),
+                _result([connection]),
+                _result([]),
+            ]
         )
     )
     response = await list_setup_options(SimpleNamespace(tenant_id=tenant), db, offset=0, limit=1)
@@ -60,7 +65,7 @@ async def test_setup_lists_independent_pages_and_projects_only_safe_metadata():
 def test_catalog_queries_confine_every_join_and_apply_independent_bounds():
     tenant = uuid4()
     queries = _option_queries(tenant, offset=100, limit=100)
-    assert len(queries) == 3
+    assert len(queries) == 4
     for query in queries:
         compiled = query.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True})
         sql = str(compiled)
@@ -82,6 +87,6 @@ def test_catalog_queries_confine_every_join_and_apply_independent_bounds():
 @pytest.mark.asyncio
 async def test_missing_account_metadata_remains_unknown():
     connection = {"id": uuid4(), "label": "Older connection", "account_id": None, "status": "healthy"}
-    db = SimpleNamespace(execute=AsyncMock(side_effect=[_result([]), _result([]), _result([connection])]))
+    db = SimpleNamespace(execute=AsyncMock(side_effect=[_result([]), _result([]), _result([connection]), _result([])]))
     response = await list_setup_options(SimpleNamespace(tenant_id=uuid4()), db, offset=0, limit=100)
     assert response.netsuite_connections[0].account_id is None

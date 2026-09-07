@@ -3,16 +3,19 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import type { Connection } from "@/lib/types";
+import { useAuth } from "@/providers/auth-provider";
 
 export function useConnections() {
+  const { user } = useAuth();
   return useQuery<Connection[]>({
-    queryKey: ["connections"],
+    queryKey: ["connections", user?.tenant_id],
+    enabled: !!user?.tenant_id,
     queryFn: () => apiClient.get<Connection[]>("/api/v1/connections"),
   });
 }
 
 interface CreateConnectionPayload {
-  provider: "shopify" | "stripe" | "netsuite";
+  provider: "shopify" | "stripe" | "netsuite" | "solidus" | "api";
   label: string;
   credentials: Record<string, string>;
 }

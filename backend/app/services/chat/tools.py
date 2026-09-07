@@ -321,6 +321,13 @@ async def build_all_tool_definitions(
     except Exception:
         logger.warning("Failed to fetch external MCP connectors for tools", exc_info=True)
 
+    from app.services.chat.http_connector_tools import build_definitions as build_http_definitions
+
+    try:
+        tools.extend(await build_http_definitions(db, tenant_id))
+    except Exception:
+        logger.warning("Failed to fetch HTTP connection tools")
+
     from app.mcp.tools.result_reference_tool import TOOL_DEFINITION as _REF_RESULT_TOOL
 
     tools.append(dict(_REF_RESULT_TOOL))
@@ -421,6 +428,16 @@ async def execute_tool_call(
             conversation_id=session_id or "",
             message_id=tool_input.get("message_id"),
         )
+
+    from app.services.chat.http_connector_tools import execute as execute_http
+    from app.services.chat.http_connector_tools import parse_name as parse_http_name
+
+    http_connection_id = parse_http_name(tool_name)
+    if http_connection_id is not None:
+        result = await execute_http(
+            http_connection_id, tool_input, tenant_id, actor_id, db, human_approved=human_approved
+        )
+        return json.dumps(result, default=str)
 
     # Check if it's an external tool
     ext_parsed = parse_external_tool_name(tool_name)
@@ -529,6 +546,13 @@ async def _execute_external_tool(
         connector = await get_mcp_connector(db, connector_id, tenant_id)
         if not connector or not connector.is_enabled:
             return {"error": f"Connector '{connector_id}' not found or disabled"}
+
+        if connector.provider in ("custom", "shopify_mcp", "stripe_mcp") and not human_approved:
+            return {
+                "error": "Custom MCP tools require human approval of the exact call before execution.",
+                "hitl_required": True,
+                "instruction": "Show a confirmation card for this call. Do not retry automatically.",
+            }
 
         # Layer 2 of 2 — the dispatcher is the choke point. execute_tool_call has
         # several callers and only one consults classify_mutation, so filtering

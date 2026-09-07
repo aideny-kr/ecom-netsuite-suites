@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.encryption import decrypt_credentials, encrypt_credentials, get_current_key_version
 from app.models.connection import Connection
 from app.services.celigo_write_guard import CeligoManagedElsewhereError
+from app.services.http_connector_service import HTTP_PROVIDERS, public_metadata, validate_credentials, verify_connection
 
 logger = structlog.get_logger()
 
@@ -30,12 +31,16 @@ async def create_connection(
     created_by: uuid.UUID | None = None,
 ) -> Connection:
     """Create a new connection with encrypted credentials."""
+    if provider in HTTP_PROVIDERS:
+        credentials = validate_credentials(provider, credentials)
     encrypted = encrypt_credentials(credentials)
     connection = Connection(
         tenant_id=tenant_id,
         provider=provider,
         label=label,
-        status="active",
+        status="pending" if provider in HTTP_PROVIDERS else "active",
+        auth_type=credentials["auth_type"] if provider in HTTP_PROVIDERS else "oauth2",
+        metadata_json=public_metadata(credentials) if provider in HTTP_PROVIDERS else None,
         encrypted_credentials=encrypted,
         encryption_key_version=get_current_key_version(),
         created_by=created_by,
@@ -56,7 +61,9 @@ async def get_connection(db: AsyncSession, connection_id: uuid.UUID, tenant_id: 
 async def list_connections(db: AsyncSession, tenant_id: uuid.UUID) -> list[Connection]:
     """List connections for a tenant (no secrets exposed)."""
     result = await db.execute(
-        select(Connection).where(Connection.tenant_id == tenant_id).order_by(Connection.created_at.desc())
+        select(Connection)
+        .where(Connection.tenant_id == tenant_id, Connection.status != "revoked")
+        .order_by(Connection.created_at.desc())
     )
     return list(result.scalars().all())
 
@@ -103,17 +110,19 @@ async def test_connection(db: AsyncSession, connection_id: uuid.UUID, tenant_id:
         select(Connection).where(Connection.id == connection_id, Connection.tenant_id == tenant_id)
     )
     connection = result.scalar_one_or_none()
-    if not connection:
+    if not connection or connection.status == "revoked":
         return {"connection_id": str(connection_id), "status": "error", "message": "Connection not found"}
+
+    if connection.provider in HTTP_PROVIDERS:
+        return await verify_connection(db, connection)
 
     if connection.provider == "netsuite":
         return await _test_netsuite_connection(db, connection)
 
-    # Other providers: stub for now
     return {
         "connection_id": str(connection_id),
-        "status": "ok",
-        "message": f"{connection.provider} connection test passed",
+        "status": "unsupported",
+        "message": "Use this provider's dedicated setup to verify read access",
     }
 
 

@@ -4,15 +4,19 @@ from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel
+import redis
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import and_, select
+from starlette.concurrency import run_in_threadpool
 
 from app.api.v1.transaction_ops import Database, Manager
 from app.core.database import set_tenant_context
 from app.core.dependencies import require_feature
 from app.models.celigo import CeligoFlow, CeligoFlowStep, CeligoIntegration
 from app.models.connection import ACTIVE_CONNECTION_STATUSES, Connection
+from app.services import audit_service
+from app.workers.tasks import celigo_flow_map_sync as source_refresh
 
 router = APIRouter(
     prefix="/transaction-ops/setup",
@@ -48,6 +52,99 @@ class SetupOptions(BaseModel):
     source_has_more: bool
     target_has_more: bool
     connection_has_more: bool
+    solidus_connections: list[ConnectionOption] = Field(default_factory=list)
+    solidus_has_more: bool = False
+
+
+class SourceRefreshStatus(BaseModel):
+    request_id: UUID
+    status: Literal["queued", "running", "completed", "failed"]
+    already_running: bool = False
+    poll_after_seconds: int = 3
+    error_code: Literal["refresh_failed"] | None = None
+
+
+def _refresh_response(row: dict) -> SourceRefreshStatus:
+    return SourceRefreshStatus(
+        request_id=row["request_id"],
+        status=row["status"],
+        already_running=row["already_running"],
+        error_code="refresh_failed" if row["status"] == "failed" else None,
+    )
+
+
+@router.post("/refresh-sources", response_model=SourceRefreshStatus, status_code=202)
+async def refresh_sources(user: Manager, db: Database):
+    """Refresh one tenant's existing Celigo mirror; no credential or order writes."""
+    await set_tenant_context(db, str(user.tenant_id))
+    connection_ids = (
+        (
+            await db.execute(
+                select(Connection.id)
+                .where(
+                    Connection.tenant_id == user.tenant_id,
+                    Connection.provider == "celigo",
+                    Connection.status.in_(ACTIVE_CONNECTION_STATUSES),
+                )
+                .order_by(Connection.id)
+                .limit(2)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not connection_ids:
+        raise HTTPException(status_code=409, detail={"code": "celigo_connection_required"})
+    if len(connection_ids) != 1:
+        raise HTTPException(status_code=409, detail={"code": "multiple_celigo_connections"})
+    tenant_id, connection_id = str(user.tenant_id), str(connection_ids[0])
+    try:
+        row = await run_in_threadpool(source_refresh.reserve_refresh, tenant_id, connection_id)
+    except redis.RedisError:
+        raise HTTPException(status_code=503, detail={"code": "source_refresh_unavailable"}) from None
+    if row["already_running"]:
+        return _refresh_response(row)
+    try:
+        await audit_service.log_event(
+            db=db,
+            tenant_id=user.tenant_id,
+            category="transaction_ops",
+            action="transaction_ops.sources.refresh_requested",
+            actor_id=user.id,
+            resource_type="connection",
+            resource_id=connection_id,
+            correlation_id=row["request_id"],
+        )
+        await db.commit()
+        await run_in_threadpool(
+            source_refresh.celery_app.send_task,
+            "tasks.celigo_flow_map_sync",
+            kwargs={"tenant_id": tenant_id, "connection_id": connection_id, "setup_refresh_id": row["request_id"]},
+            queue="sync",
+            task_id=row["request_id"],
+            expires=source_refresh.REFRESH_QUEUE_SECONDS,
+        )
+    except Exception:
+        # Dispatch may have reached the broker before an error. Owner-checked
+        # cancellation makes a delayed queued delivery unable to start afterward.
+        await db.rollback()
+        try:
+            await run_in_threadpool(source_refresh.cancel_refresh, tenant_id, connection_id, row["request_id"])
+        except redis.RedisError:
+            pass  # Remains reserved until its bounded lease expires; fail closed.
+        raise HTTPException(status_code=503, detail={"code": "source_refresh_unavailable"}) from None
+    return _refresh_response(row)
+
+
+@router.get("/refresh-sources/{request_id}", response_model=SourceRefreshStatus)
+async def get_source_refresh(request_id: UUID, user: Manager):
+    try:
+        row = await run_in_threadpool(source_refresh.read_refresh, str(user.tenant_id), str(request_id))
+    except redis.RedisError:
+        raise HTTPException(status_code=503, detail={"code": "source_refresh_unavailable"}) from None
+    if row is None:
+        raise HTTPException(status_code=404, detail={"code": "source_refresh_not_found"})
+    return _refresh_response(row)
 
 
 def _option_queries(tenant_id, *, offset, limit):
@@ -115,7 +212,24 @@ def _option_queries(tenant_id, *, offset, limit):
         .offset(offset)
         .limit(limit + 1)
     )
-    return source, target, connections
+    solidus = (
+        select(
+            Connection.id,
+            Connection.label,
+            Connection.metadata_json["account_id"].as_string().label("account_id"),
+            Connection.status,
+        )
+        .where(
+            Connection.tenant_id == tenant_id,
+            Connection.provider == "solidus",
+            Connection.status.in_(ACTIVE_CONNECTION_STATUSES),
+            Connection.metadata_json["api_profile"].as_string() == "framework_sync",
+        )
+        .order_by(Connection.label, Connection.id)
+        .offset(offset)
+        .limit(limit + 1)
+    )
+    return source, target, connections, solidus
 
 
 @router.get("/options", response_model=SetupOptions)
@@ -137,4 +251,6 @@ async def list_setup_options(
         source_has_more=len(pages[0]) > limit,
         target_has_more=len(pages[1]) > limit,
         connection_has_more=len(pages[2]) > limit,
+        solidus_connections=pages[3][:limit],
+        solidus_has_more=len(pages[3]) > limit,
     )

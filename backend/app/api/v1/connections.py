@@ -191,21 +191,32 @@ async def create_connection(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     # Check entitlement
-    allowed = await entitlement_service.check_entitlement(db, user.tenant_id, "connections")
+    allowed = await entitlement_service.check_entitlement(
+        db, user.tenant_id, "connections:netsuite" if request.provider == "netsuite" else "connections"
+    )
     if not allowed:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Connection limit reached for your plan",
         )
 
-    connection = await connection_service.create_connection(
-        db=db,
-        tenant_id=user.tenant_id,
-        provider=request.provider,
-        label=request.label,
-        credentials=request.credentials,
-        created_by=user.id,
-    )
+    try:
+        connection = await connection_service.create_connection(
+            db=db,
+            tenant_id=user.tenant_id,
+            provider=request.provider,
+            label=request.label,
+            credentials=request.credentials,
+            created_by=user.id,
+        )
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail="Invalid connection settings. Check the public HTTPS URL, authentication and read endpoint.",
+        ) from None
+
+    if request.provider in ("solidus", "api"):
+        await connection_service.test_connection(db, connection.id, user.tenant_id)
 
     await audit_service.log_event(
         db=db,

@@ -30,6 +30,14 @@ from app.services.chat.write_validator import EditableSlot, ValidationResult
 # ---------------------------------------------------------------------------
 
 
+def format_external_result(result: Any) -> str:
+    """Keep approved connector data visible and available in later chat history."""
+    rendered = json.dumps(result, ensure_ascii=True, indent=2, default=str)
+    if len(rendered) > 20000:
+        return "The request completed. Its result is too large to display here; request a smaller page or add a filter."
+    return f"The request completed. Returned data:\n\n```json\n{rendered}\n```"
+
+
 class WriteConfirmationPayload(BaseModel):
     """Describes a pending AI-initiated write operation awaiting human approval.
 
@@ -38,7 +46,7 @@ class WriteConfirmationPayload(BaseModel):
     """
 
     type: Literal["write_confirmation"] = "write_confirmation"
-    mutation_type: Literal["create", "update", "delete", "upsert"]
+    mutation_type: Literal["create", "update", "delete", "upsert", "execute"]
     record_type: str
     record_id: str | None = None
     proposed_fields: dict[str, Any]
@@ -220,6 +228,22 @@ def build_confirmation_payload(
         server-stamped by the caller from orchestrator-held repair context,
         never read from *tool_input*. See ``WriteConfirmationPayload``.
     """
+    if mutation_type == "execute":
+        # Custom tools have arbitrary schemas. Display and sign their complete
+        # input; do not coerce it into NetSuite fields or infer read-only safety.
+        payload_json = _build_payload_json(tool_name, tool_input, [])
+        return WriteConfirmationPayload(
+            mutation_type="execute",
+            record_type=record_type,
+            proposed_fields=tool_input,
+            proposed_lines=[],
+            tool_name=tool_name,
+            tool_input=tool_input,
+            confirmation_token=generate_confirmation_token(session_id, payload_json),
+            editable_slots=[],
+            unvalidated=True,
+        )
+
     if not is_record_type_allowed(record_type):
         return None
 

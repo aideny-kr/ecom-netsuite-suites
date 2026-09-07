@@ -30,6 +30,9 @@ class TransactionConfig(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         UniqueConstraint("tenant_id", "config_key"),
         CheckConstraint("NOT schedule_enabled OR enabled", name="ck_tx_config_schedule"),
         CheckConstraint(
+            "(source_step_id IS NOT NULL) <> (source_connection_id IS NOT NULL)", name="ck_tx_config_source"
+        ),
+        CheckConstraint(
             "max_api_calls BETWEEN 1 AND 2000 AND max_orders BETWEEN 1 AND 10000", name="ck_tx_config_budget"
         ),
         CheckConstraint(
@@ -39,7 +42,8 @@ class TransactionConfig(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), index=True)
     config_key: Mapped[str] = mapped_column(String(64))
     name: Mapped[str] = mapped_column(String(255))
-    source_step_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("celigo_flow_steps.id"))
+    source_step_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("celigo_flow_steps.id"))
+    source_connection_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("connections.id"))
     netsuite_connection_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("connections.id"))
     netsuite_account_id: Mapped[str] = mapped_column(String(255))
     subsidiary_id: Mapped[str] = mapped_column(String(255))
