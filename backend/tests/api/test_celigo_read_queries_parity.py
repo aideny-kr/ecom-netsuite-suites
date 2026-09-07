@@ -27,6 +27,7 @@ from __future__ import annotations
 import ast
 import json
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -199,4 +200,56 @@ class TestNoScriptContentSelected:
                     and arg.value.id == "CeligoScript"
                 ):
                     offenders.append(f"select(...) at line {node.lineno} projects CeligoScript.{arg.attr}")
+        assert offenders == [], offenders
+
+
+def _imports_script_families(source: str) -> bool:
+    """True if *source* has any `import ...script_families` or
+    `from ... import script_families` statement, by AST -- a string match
+    would also flag a docstring merely mentioning the module name (this file
+    does, in several places)."""
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(alias.name.rsplit(".", 1)[-1] == "script_families" for alias in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            if node.module is not None and node.module.rsplit(".", 1)[-1] == "script_families":
+                return True
+            if any(alias.name == "script_families" for alias in node.names):
+                return True
+    return False
+
+
+class TestScriptFamiliesNeverImportedByChatSurfaces:
+    """N2 import guard (Task 2 brief / spec §5): `script_families.py`'s
+    DETAIL dataclasses carry script `content` -- it is reachable only from
+    `app/api/v1/celigo_flows.py`'s two families routes, a human-only
+    surface. If `read_queries.py`, the celigo flow-map MCP tool, or any
+    module under `services/chat/` ever imported it, a future refactor could
+    thread script content into an LLM tool result with no review gate
+    catching it -- so the import itself is the failure this guard pins, a
+    build failure rather than a comment nobody reads."""
+
+    def test_read_queries_does_not_import_script_families(self):
+        import inspect
+
+        assert not _imports_script_families(inspect.getsource(read_queries))
+
+    def test_celigo_flow_map_mcp_tool_does_not_import_script_families(self):
+        import inspect
+
+        from app.mcp.tools import celigo_flow_map
+
+        assert not _imports_script_families(inspect.getsource(celigo_flow_map))
+
+    def test_no_module_under_services_chat_imports_script_families(self):
+        import app.services.chat as chat_pkg
+
+        chat_dir = Path(chat_pkg.__file__).parent
+        offenders = [
+            str(py_file.relative_to(chat_dir))
+            for py_file in chat_dir.rglob("*.py")
+            if _imports_script_families(py_file.read_text())
+        ]
         assert offenders == [], offenders
