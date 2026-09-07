@@ -333,15 +333,30 @@ async def _fetch_scripts_by_celigo_id(
     the same way `_fetch_production_scripts` does, for exactly *celigo_ids*
     -- `get_script_family`'s OWN family, never account-wide. Still
     production-only as defense in depth, even though *celigo_ids* is always
-    already derived from a production-only scan by the caller."""
+    already derived from a production-only scan by the caller.
+
+    `.execution_options(populate_existing=True)`: the light scan that ran
+    just before this (same session) already put these rows in the identity
+    map with `.content` deferred but every OTHER column loaded. Without
+    `populate_existing`, SQLAlchemy's default identity-map merge only fills
+    in the now-loaded `.content` and leaves already-loaded columns (like
+    `content_hash`) at the FIRST query's values -- so if a sync commits new
+    content between the two SELECTs, `content_hash` and `content` could
+    come from two different writes. `populate_existing` forces every column
+    to be re-read from THIS query's row, so both always come from the same
+    read."""
     if not celigo_ids:
         return []
     size_expr = func.octet_length(CeligoScript.content).label("size_bytes")
-    stmt = select(CeligoScript, size_expr).where(
-        CeligoScript.tenant_id == tenant_id,
-        CeligoScript.celigo_connection_id == connection_id,
-        CeligoScript.celigo_id.in_(celigo_ids),
-        celigo_script_is_production(),
+    stmt = (
+        select(CeligoScript, size_expr)
+        .execution_options(populate_existing=True)
+        .where(
+            CeligoScript.tenant_id == tenant_id,
+            CeligoScript.celigo_connection_id == connection_id,
+            CeligoScript.celigo_id.in_(celigo_ids),
+            celigo_script_is_production(),
+        )
     )
     rows = (await db.execute(stmt)).all()
     return [(script, size_bytes) for script, size_bytes in rows]
@@ -714,6 +729,12 @@ async def get_script_family(
     member_rows = await _fetch_scripts_by_celigo_id(
         db, tenant_id=tenant_id, connection_id=connection_id, celigo_ids=family_celigo_ids
     )
+    if not member_rows:
+        # The light scan saw this family, but every one of its members is
+        # gone by the time the scoped content fetch runs (deleted between
+        # the two SELECTs) -- a 404, not a ScriptFamilyDetail built around
+        # zero members.
+        return None
     members = [script for script, _ in member_rows]
     sizes_by_id = {script.id: size_bytes for script, size_bytes in member_rows}
     scripts_by_id = {s.id: s for s in members}

@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.celigo.repository import (
     FlowStepInput,
+    _content_hash,
     mark_flow_errors_checked,
     mark_flow_errors_purged,
     mark_flow_errors_resolved,
@@ -1018,6 +1019,72 @@ class TestListPathNeverLoadsContent:
 
         assert detail.members[0].content == "a" * 10
         assert detail.summary.other_families_with_name == 1
+
+
+class TestTwoPhaseFetchConsistency:
+    """Review finding (Task 2 round 2, brief item 3): the light scan and the
+    scoped content fetch run as two SELECTs in one session. `_fetch_scripts_
+    by_celigo_id`'s ORM objects are already in the session's identity map
+    from the light scan (content-deferred, but `content_hash`/`name`/etc.
+    already LOADED) -- without `populate_existing=True`, SQLAlchemy's
+    default identity-map merge only fills in previously-unloaded attributes
+    from a re-fetch, so it fills in the now-loaded `.content` but keeps the
+    FIRST query's stale `content_hash` if a sync committed new content
+    between the two SELECTs."""
+
+    async def test_content_and_content_hash_come_from_the_same_read_even_if_a_sync_lands_between_the_two_fetches(
+        self, db: AsyncSession, monkeypatch
+    ):
+        sf = _import_module()
+        tenant_id, conn_id = await _basic_tenant_conn(db)
+        await _seed_script(db, tenant_id, conn_id, celigo_id="s1", name="fam", content="old body")
+        await db.flush()
+
+        original_light_scan = sf._fetch_production_scripts
+
+        async def _light_scan_then_concurrent_sync_write(*args, **kwargs):
+            rows = await original_light_scan(*args, **kwargs)
+            # Simulates a sync committing new content for this same script
+            # right after the light scan's SELECT, before the second,
+            # scoped content fetch runs.
+            await db.execute(
+                text("UPDATE celigo_scripts SET content = :c, content_hash = :h WHERE celigo_id = 's1'").bindparams(
+                    c="new body", h=_content_hash("new body")
+                )
+            )
+            await db.flush()
+            return rows
+
+        monkeypatch.setattr(sf, "_fetch_production_scripts", _light_scan_then_concurrent_sync_write)
+
+        detail = await sf.get_script_family(db, tenant_id=tenant_id, connection_id=conn_id, dedup_key="s1")
+
+        assert detail is not None
+        member = detail.members[0]
+        assert member.content == "new body"
+        # The hashing helper the sync itself uses -- content_hash must
+        # match the SAME read as content, never a stale identity-map copy.
+        assert member.content_hash == _content_hash("new body")
+
+    async def test_second_fetch_returning_no_rows_is_a_404_not_an_empty_family(self, db: AsyncSession, monkeypatch):
+        """If every member of the target family vanishes between the light
+        scan and the scoped content fetch (deleted mid-request), the light
+        scan still "saw" the family -- `get_script_family` must return None
+        (404) rather than building a `ScriptFamilyDetail` around zero
+        members."""
+        sf = _import_module()
+        tenant_id, conn_id = await _basic_tenant_conn(db)
+        await _seed_script(db, tenant_id, conn_id, celigo_id="s1", name="fam", content="body")
+        await db.flush()
+
+        async def _empty(*args, **kwargs):
+            return []
+
+        monkeypatch.setattr(sf, "_fetch_scripts_by_celigo_id", _empty)
+
+        detail = await sf.get_script_family(db, tenant_id=tenant_id, connection_id=conn_id, dedup_key="s1")
+
+        assert detail is None
 
 
 class TestDetailMembersCarryContentAndAreOrdered:
