@@ -244,6 +244,7 @@ async def run_investigation(
     _source_refunds_reader=None,
     _target_refunds_reader=None,
     _refund_page_reader=None,
+    _order_mirror=None,
     _target_reader=None,
     _page_reader=None,
     _guard_reader=None,
@@ -252,6 +253,7 @@ async def run_investigation(
     _enabled=None,
     _clock=None,
 ):
+    from app.services.ingestion.solidus_sync import save_observed_order
     from app.services.transaction_ops.celigo_actions import MAX_READ_CALLS, read_celigo_error_evidence
     from app.services.transaction_ops.netsuite_create import CreateInputError, prepare_create_input
     from app.services.transaction_ops.netsuite_reader import read_netsuite_order
@@ -406,6 +408,10 @@ async def run_investigation(
                     await save()
                     continue
                 raise SourceScopeError
+            if direct_source:
+                await (_order_mirror or save_observed_order)(
+                    db, tenant_id, direct_source["source_connection_id"], orders[0], _time(source["read_at"])
+                )
             if not await reserve(10):  # At most7 data reads plus ordinary OAuth token maintenance.
                 return await finish("budget")
             targets = await bounded_read(

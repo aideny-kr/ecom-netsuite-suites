@@ -145,6 +145,7 @@ async def execute(state, source=None, target=None, page=None, enabled=True):
         _source_reader=read_source,
         _target_reader=read_target,
         _page_reader=page,
+        _order_mirror=AsyncMock(),
         _enabled=AsyncMock(return_value=enabled),
         _clock=lambda: NOW,
     )

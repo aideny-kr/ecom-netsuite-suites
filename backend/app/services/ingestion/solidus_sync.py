@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, DecimalException
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import DBAPIError
 
@@ -114,6 +114,62 @@ def project_canonical_order(order, tenant_id, connection_id, observed_at):
         raise SolidusImportError("invalid_source_order") from None
 
 
+async def _upsert_order(db, row):
+    statement = insert(Order).values(**row)
+    await db.execute(
+        statement.on_conflict_do_update(
+            constraint="uq_orders_dedupe",
+            set_={key: statement.excluded[key] for key in row if key not in {"tenant_id", "dedupe_key"}},
+            where=and_(
+                Order.tenant_id == row["tenant_id"],
+                Order.source_connection_id == row["source_connection_id"],
+                or_(
+                    Order.source_updated_at.is_(None),
+                    Order.source_updated_at < statement.excluded.source_updated_at,
+                    and_(
+                        Order.source_updated_at == statement.excluded.source_updated_at,
+                        Order.updated_at <= statement.excluded.updated_at,
+                    ),
+                ),
+            ),
+        )
+    )
+
+
+async def save_observed_order(db, tenant_id, connection_id, order, observed_at):
+    """Mirror an exact investigation read, including older refunded orders."""
+    row = project_canonical_order(order, tenant_id, connection_id, observed_at)
+    await set_tenant_context(db, tenant_id)
+    connection = await db.scalar(
+        select(Connection.id)
+        .join(Tenant, Tenant.id == Connection.tenant_id)
+        .where(
+            Connection.id == connection_id,
+            Connection.tenant_id == tenant_id,
+            Connection.provider == "solidus",
+            Connection.status.in_(ACTIVE_CONNECTION_STATUSES),
+            Connection.metadata_json["api_profile"].astext == "framework_sync",
+            Tenant.is_active.is_(True),
+        )
+        .with_for_update(of=Connection)
+    )
+    if connection is None:
+        raise SolidusImportError("source_unavailable")
+    await _upsert_order(db, row)
+    await audit_service.log_event(
+        db=db,
+        tenant_id=tenant_id,
+        category="ingestion",
+        action="solidus.order.observed",
+        actor_type="system",
+        resource_type="connection",
+        resource_id=str(connection_id),
+        payload={"order_reference": row["order_number"], "source_updated_at": row["source_updated_at"].isoformat()},
+    )
+    # Release the connection lock before any subsequent remote investigation reads.
+    await db.commit()
+
+
 def _new_scan(state, now):
     watermark = state.get("watermark")
     since = _time(watermark) - timedelta(hours=1) if watermark else now - timedelta(days=INITIAL_LOOKBACK_DAYS)
@@ -211,13 +267,7 @@ async def _sync_page(db, tenant_id, connection_id, now):
     if any(not _time(state["since"]) <= row["source_updated_at"] <= _time(state["started_at"]) for row in rows):
         raise SolidusImportError("source_window_mismatch")
     for row in rows:
-        statement = insert(Order).values(**row)
-        await db.execute(
-            statement.on_conflict_do_update(
-                constraint="uq_orders_dedupe",
-                set_={key: statement.excluded[key] for key in row if key not in {"tenant_id", "dedupe_key"}},
-            )
-        )
+        await _upsert_order(db, row)
     next_page = page + 1 if evidence["next_page"] is not None else None
     seen = state.get("seen", 0)
     state.update(next_page=next_page, total=seen + evidence["total_count"], seen=seen + len(rows))
