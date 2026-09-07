@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.services.celigo.repository import (
     FlowStepInput,
     mark_flow_errors_checked,
+    mark_flow_errors_purged,
     mark_flow_errors_resolved,
     upsert_flow,
     upsert_flow_error,
@@ -661,6 +662,11 @@ class TestOpenErrorRollup:
         await _seed_error(db, tenant_id, conn_id, celigo_id="err_open", flow_id=flow_id, flow_step_id=step_id)
         await _seed_error(db, tenant_id, conn_id, celigo_id="err_resolved", flow_id=flow_id, flow_step_id=step_id)
         await mark_flow_errors_resolved(db, tenant_id=tenant_id, connection_id=conn_id, celigo_ids=["err_resolved"])
+        # Purged-but-UNRESOLVED (Celigo's ~30-day window caught it before this
+        # app ever saw it resolve) -- the other half of spec §2.2's predicate,
+        # `resolved_at IS NULL AND purged_at IS NULL`. Only `purged_at` is set.
+        await _seed_error(db, tenant_id, conn_id, celigo_id="err_purged", flow_id=flow_id, flow_step_id=step_id)
+        await mark_flow_errors_purged(db, tenant_id=tenant_id, connection_id=conn_id, celigo_ids=["err_purged"])
         await db.flush()
 
         detail = await sf.get_script_family(db, tenant_id=tenant_id, connection_id=conn_id, dedup_key="s1")
