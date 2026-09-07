@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, DecimalException
 from uuid import UUID
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import DBAPIError
 
@@ -151,7 +151,7 @@ async def save_observed_order(db, tenant_id, connection_id, order, observed_at):
             Connection.metadata_json["api_profile"].astext == "framework_sync",
             Tenant.is_active.is_(True),
         )
-        .with_for_update(of=Connection)
+        .with_for_update(of=Connection, read=True)
     )
     if connection is None:
         raise SolidusImportError("source_unavailable")
@@ -199,8 +199,21 @@ async def _restart_scan(db, connection_id, state, calls):
 
 async def _sync_page(db, tenant_id, connection_id, now):
     await set_tenant_context(db, tenant_id)
-    # Lock the selected connection for this page only. Competing refreshes cannot
-    # overwrite cursors. SKIP LOCKED returns a bounded, explicit busy outcome.
+    # Serialize import cursors independently of connection availability checks.
+    # Shared connection locks still block revocation, but allow investigations to
+    # mirror unrelated orders while a bulk page is being read.
+    acquired = await db.scalar(
+        select(func.pg_try_advisory_xact_lock(func.hashtextextended(f"solidus_orders:{tenant_id}:{connection_id}", 0)))
+    )
+    if not acquired:
+        await db.rollback()
+        return {
+            "termination_reason": "stall",
+            "reason": "refresh_in_progress",
+            "complete": False,
+            "records_synced": 0,
+            "api_calls": 0,
+        }
     connection = await db.scalar(
         select(Connection)
         .join(Tenant, Tenant.id == Connection.tenant_id)
@@ -211,7 +224,7 @@ async def _sync_page(db, tenant_id, connection_id, now):
             Connection.status.in_(ACTIVE_CONNECTION_STATUSES),
             Tenant.is_active.is_(True),
         )
-        .with_for_update(of=Connection, skip_locked=True)
+        .with_for_update(of=Connection, read=True, skip_locked=True)
     )
     if connection is None:
         exists = await db.scalar(
