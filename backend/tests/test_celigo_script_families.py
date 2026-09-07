@@ -500,6 +500,46 @@ class TestKind:
         assert result.totals.unattached_families == 1
         assert result.totals.attached_families == 0
 
+    async def test_unrecognized_site_type_stays_inside_the_closed_kind_enum(self, db: AsyncSession):
+        """Review finding (Task 1 round 1): `graph.py::_classify_site_type` is
+        a documented, live-observed source of the literal string `"unknown"`
+        (any `_scriptId` found outside a hooks/filter/transform/routers path
+        segment), and `site_type IS NULL` maps to the same string via the
+        `or "unknown"` fallback. `kind` is a closed enum (spec §2.2:
+        hook|transform|filter|router|mixed|unattached) -- neither "unknown"
+        nor any other unrecognized value may leak through as-is."""
+        sf = _import_module()
+        valid_kinds = {"hook", "transform", "filter", "router", "mixed", "unattached"}
+        tenant_id, conn_id = await _basic_tenant_conn(db)
+        integration_id = await _seed_integration(db, tenant_id, conn_id, celigo_id="int_1")
+        flow_id = await _seed_flow(db, tenant_id, conn_id, integration_id, celigo_id="flow_1")
+        script_id = await _seed_script(db, tenant_id, conn_id, celigo_id="s1", name="unknown_kind", content="a")
+        await self._seed_site(db, tenant_id, conn_id, integration_id, flow_id, script_id, "s1", site_type="unknown")
+        await db.flush()
+
+        result = await sf.list_script_families(db, tenant_id=tenant_id, connection_id=conn_id)
+
+        assert result.families[0].kind in valid_kinds
+        assert result.families[0].kind == "mixed"
+
+    async def test_null_site_type_stays_inside_the_closed_kind_enum(self, db: AsyncSession):
+        """Same rule, NULL `site_type` column value -- also folds to
+        `"unknown"` via `_kind_from_site_types`'s own `or "unknown"`, so it
+        must land in the same enum-safe bucket, not leak through."""
+        sf = _import_module()
+        valid_kinds = {"hook", "transform", "filter", "router", "mixed", "unattached"}
+        tenant_id, conn_id = await _basic_tenant_conn(db)
+        integration_id = await _seed_integration(db, tenant_id, conn_id, celigo_id="int_1")
+        flow_id = await _seed_flow(db, tenant_id, conn_id, integration_id, celigo_id="flow_1")
+        script_id = await _seed_script(db, tenant_id, conn_id, celigo_id="s1", name="null_kind", content="a")
+        await self._seed_site(db, tenant_id, conn_id, integration_id, flow_id, script_id, "s1", site_type=None)
+        await db.flush()
+
+        result = await sf.list_script_families(db, tenant_id=tenant_id, connection_id=conn_id)
+
+        assert result.families[0].kind in valid_kinds
+        assert result.families[0].kind == "mixed"
+
 
 class TestFunctionNameMode:
     async def test_mode_ties_broken_alphabetically(self, db: AsyncSession):

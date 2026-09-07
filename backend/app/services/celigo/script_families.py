@@ -220,11 +220,25 @@ def _pick_mode(values: list[str]) -> str | None:
     return sorted(v for v, c in counts.items() if c == top)[0]
 
 
+_DECLARED_KINDS = frozenset({"hook", "transform", "filter", "router"})
+
+
 def _kind_from_site_types(site_types: set[str]) -> str:
+    """`kind` is a closed enum (spec §2.2): hook | transform | filter |
+    router | mixed | unattached. `site_types` here is the raw
+    `attachment.site_type` values (already `"unknown"`-filled for a NULL
+    column by the caller) -- `graph.py::_classify_site_type` documents
+    `"unknown"` as a real, live-observed value for any `_scriptId` found
+    outside a recognized path segment, so it is NOT one of the four
+    declared per-site kinds and must never leak through as-is. A family
+    whose sites are entirely (or partly) `"unknown"` reads as `mixed`: its
+    sites don't agree on one declared kind, which is exactly what `mixed`
+    already means for a family that spans several declared kinds."""
     if not site_types:
         return "unattached"
     if len(site_types) == 1:
-        return next(iter(site_types))
+        only = next(iter(site_types))
+        return only if only in _DECLARED_KINDS else "mixed"
     return "mixed"
 
 

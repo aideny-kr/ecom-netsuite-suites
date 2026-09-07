@@ -107,10 +107,20 @@ def assign_version_letters(members: list[CeligoScript]) -> dict[str, str]:
     """Map each distinct `content_hash` among *members* (one already-grouped
     clone family) to a version letter (A, B, C...), ordered by first
     appearance: the earliest `celigo_last_modified` across that hash's own
-    members, ties broken by the hash string itself for a deterministic
-    order independent of row-insertion order. A member with `content_hash is
-    None` never contributes a hash and therefore never gets a letter or
-    creates a version -- absence of content is not version zero.
+    members. A member with `content_hash is None` never contributes a hash
+    and therefore never gets a letter or creates a version -- absence of
+    content is not version zero.
+
+    Byte-identical to the pre-extraction inline algorithm this replaces:
+    ties on first-seen timestamp (including two members with no timestamp
+    at all) are broken by the tied member's own row id (`str(s.id)`), NOT
+    by the content-hash string -- two distinct hashes racing to the same
+    earliest timestamp are ordered by whichever member reached it first by
+    id, exactly as `sorted(members, key=(modified is None, modified,
+    str(id)))` + first-occurrence-wins would have picked. This keeps the
+    order deterministic and independent of row-insertion order (a row id is
+    stable, just like a hash), while matching the original tie-break rather
+    than a superficially-similar one.
 
     Shared by `script_family_facts` below (whose own single-copy-family
     special case is layered ON TOP of this, not baked into it) and by
@@ -118,17 +128,15 @@ def assign_version_letters(members: list[CeligoScript]) -> dict[str, str]:
     returned here, including for a single-copy family -- the Scripts view
     always shows a version card for a family with content, unlike the flow
     map's inline chip)."""
-    timestamps_by_hash: dict[str, list] = {}
+    best_key_by_hash: dict[str, tuple] = {}
     for s in members:
         if s.content_hash is None:
             continue
-        timestamps_by_hash.setdefault(s.content_hash, [])
-        if s.celigo_last_modified is not None:
-            timestamps_by_hash[s.content_hash].append(s.celigo_last_modified)
-    first_seen: dict[str, object] = {
-        content_hash: (min(seen) if seen else None) for content_hash, seen in timestamps_by_hash.items()
-    }
-    ordered_hashes = sorted(first_seen, key=lambda h: (first_seen[h] is None, first_seen[h], h))
+        key = (s.celigo_last_modified is None, s.celigo_last_modified, str(s.id))
+        existing = best_key_by_hash.get(s.content_hash)
+        if existing is None or key < existing:
+            best_key_by_hash[s.content_hash] = key
+    ordered_hashes = sorted(best_key_by_hash, key=lambda h: best_key_by_hash[h])
     return {content_hash: chr(ord("A") + i) for i, content_hash in enumerate(ordered_hashes)}
 
 

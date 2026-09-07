@@ -8,7 +8,14 @@ import uuid
 from datetime import datetime, timezone
 
 from app.models.celigo import CeligoScript
-from app.services.celigo.topology import adaptor_family, count_rules, project_routers, script_family_facts, step_kind
+from app.services.celigo.topology import (
+    adaptor_family,
+    assign_version_letters,
+    count_rules,
+    project_routers,
+    script_family_facts,
+    step_kind,
+)
 
 MULTI_SUB_RAW = {
     "routers": [
@@ -98,9 +105,9 @@ def test_project_routers_tolerates_missing_or_malformed():
     ]
 
 
-def _script(dedup_key, content_hash, content, modified):
+def _script(dedup_key, content_hash, content, modified, *, id=None):
     return CeligoScript(
-        id=uuid.uuid4(),
+        id=id if id is not None else uuid.uuid4(),
         tenant_id=uuid.uuid4(),
         celigo_connection_id=uuid.uuid4(),
         celigo_id=str(uuid.uuid4()),
@@ -133,6 +140,27 @@ def test_script_family_facts_single_copy_has_no_letter_and_is_not_diverged():
     s = _script("solo", "h", "x", 1)
     f = script_family_facts([s])[s.id]
     assert (f.copies_count, f.versions_count, f.version_letter, f.content_diverged) == (1, 1, None, False)
+
+
+def test_assign_version_letters_ties_on_first_seen_broken_by_member_id_not_hash():
+    """Review finding (Task 1 round 1): the extracted `assign_version_letters`
+    must be byte-identical to the pre-extraction inline algorithm it replaced
+    -- which broke a tie between two DISTINCT content hashes sharing the same
+    earliest `celigo_last_modified` by the member's own row id (`str(s.id)`),
+    never by the hash string. Two members here share `modified=1`; their ids
+    are chosen so the hash-string order ("aaaa_hash" < "zzzz_hash") would
+    pick the OPPOSITE winner from the id order, so this pins the real rule
+    rather than one that happens to agree with both orderings."""
+    lower_id = uuid.UUID("00000000-0000-0000-0000-000000000001")
+    higher_id = uuid.UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
+    # zzzz_hash's member has the LOWER id, so id-order picks zzzz_hash first --
+    # the opposite of hash-string order, which would pick aaaa_hash first.
+    zzzz_member = _script("k", "zzzz_hash", "a" * 10, 1, id=lower_id)
+    aaaa_member = _script("k", "aaaa_hash", "b" * 10, 1, id=higher_id)
+
+    letters = assign_version_letters([zzzz_member, aaaa_member])
+
+    assert letters == {"zzzz_hash": "A", "aaaa_hash": "B"}
 
 
 def test_adaptor_family_groups_case_insensitively_netsuite_first():
