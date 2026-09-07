@@ -206,10 +206,20 @@ def _earliest_member(members: list[CeligoScript]) -> CeligoScript:
     return min(members, key=lambda s: (s.celigo_last_modified is None, s.celigo_last_modified, s.celigo_id))
 
 
+def _is_original(script: CeligoScript) -> bool:
+    """True if *script* is the clone family's original, never a copy --
+    `dedup_key = COALESCE(source_id, celigo_id)` (a DB-generated column, see
+    `app/models/celigo.py`) means the original is the one row whose OWN
+    `celigo_id` equals the family's `dedup_key`; every clone's `dedup_key`
+    instead points back at the original's `celigo_id`. The ONE place this
+    predicate is written -- every other spot in this module calls it."""
+    return script.celigo_id == script.dedup_key
+
+
 def _family_name(members: list[CeligoScript]) -> str:
     """The original's name if it is present in production, else the
     earliest-modified member's (spec §1 item 4 / §2.2 name rule)."""
-    original = next((m for m in members if m.celigo_id == m.dedup_key), None)
+    original = next((m for m in members if _is_original(m)), None)
     if original is not None:
         return original.name
     return _earliest_member(members).name
@@ -480,9 +490,8 @@ def _summarize_family(
     )
     sites_unchecked = sum(1 for row in site_rows if row.errors_checked_at is None)
 
-    original = next((m for m in members if m.celigo_id == m.dedup_key), None)
-    original_present = original is not None
-    name = original.name if original is not None else _earliest_member(members).name
+    original_present = any(_is_original(m) for m in members)
+    name = _family_name(members)
 
     versions_count = len(letters)
     modifieds = [m.celigo_last_modified for m in members if m.celigo_last_modified is not None]
@@ -522,7 +531,7 @@ def _build_member(
         script_id=script.id,
         celigo_id=script.celigo_id,
         name=script.name,
-        is_original=script.celigo_id == script.dedup_key,
+        is_original=_is_original(script),
         version_letter=letters.get(script.content_hash) if script.content_hash is not None else None,
         content_hash=script.content_hash,
         size_bytes=sizes_by_id.get(script.id),
@@ -558,7 +567,7 @@ def _build_versions(
                 sites_count=sites_count,
                 first_seen=min(timestamps) if timestamps else None,
                 size_bytes=size_bytes,
-                holds_original=any(m.celigo_id == m.dedup_key for m in group),
+                holds_original=any(_is_original(m) for m in group),
             )
         )
     return versions
