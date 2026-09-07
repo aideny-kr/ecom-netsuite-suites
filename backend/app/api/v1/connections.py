@@ -197,7 +197,7 @@ async def create_connection(
     if not allowed:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Connection limit reached for your plan",
+            detail="Connections are unavailable for this tenant",
         )
 
     try:

@@ -12,7 +12,7 @@ logger = structlog.get_logger()
 
 PLAN_LIMITS = {
     "free": {
-        "max_connections": 2,
+        "max_connections": -1,
         "max_schedules": 5,
         "max_exports_per_day": 10,
         "max_users": 20,
@@ -25,7 +25,7 @@ PLAN_LIMITS = {
         "policies": False,
     },
     "pro": {
-        "max_connections": 50,
+        "max_connections": -1,
         "max_schedules": 50,
         "max_exports_per_day": 1000,
         "max_users": 50,
@@ -67,23 +67,9 @@ async def check_entitlement(
 
     limits = PLAN_LIMITS.get(tenant.plan, PLAN_LIMITS["free"])
 
-    if feature == "connections":
-        # NetSuite is the core product — always allowed, doesn't count against limit
-        count_result = await db.execute(
-            select(func.count(Connection.id)).where(
-                Connection.tenant_id == tenant_id,
-                Connection.provider != "netsuite",
-                Connection.status != "revoked",
-            )
-        )
-        current_count = count_result.scalar() or 0
-        max_allowed = limits["max_connections"]
-        if max_allowed == -1:
-            return True
-        return current_count < max_allowed
-
-    if feature == "connections:netsuite":
-        # NetSuite is always allowed for active tenants
+    if feature in {"connections", "connections:netsuite"}:
+        # Connector counts are unlimited on every plan. Keep the active-tenant
+        # check above and the API's connection-management permission check.
         return True
 
     if feature == "schedules":

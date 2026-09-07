@@ -115,7 +115,7 @@ async def test_custom_mcp_failed_discovery_never_reports_active_or_leaks_excepti
     ]
 
 
-async def test_deleted_connections_release_plan_capacity_and_netsuite_is_exempt(client, db, admin_user, monkeypatch):
+async def test_multiple_connections_and_replacement_are_allowed_without_upgrade(client, db, admin_user, monkeypatch):
     from app.models.tenant import Tenant
 
     user, headers = admin_user
@@ -126,7 +126,7 @@ async def test_deleted_connections_release_plan_capacity_and_netsuite_is_exempt(
     first = await client.post("/api/v1/connections", headers=headers, json=payload())
     second = await client.post("/api/v1/connections", headers=headers, json=payload())
     assert first.status_code == second.status_code == 201
-    assert (await client.post("/api/v1/connections", headers=headers, json=payload())).status_code == 403
+    assert (await client.post("/api/v1/connections", headers=headers, json=payload())).status_code == 201
     assert (
         await client.post(
             "/api/v1/connections",
@@ -136,3 +136,48 @@ async def test_deleted_connections_release_plan_capacity_and_netsuite_is_exempt(
     ).status_code == 201
     assert (await client.delete(f"/api/v1/connections/{first.json()['id']}", headers=headers)).status_code == 204
     assert (await client.post("/api/v1/connections", headers=headers, json=payload())).status_code == 201
+
+
+@pytest.mark.parametrize("plan", ["free", "pro", "max", "legacy-plan"])
+@pytest.mark.parametrize("provider", ["solidus", "api", "custom_mcp"])
+async def test_connector_creation_above_all_former_limits(client, db, admin_user, monkeypatch, plan, provider):
+    from app.models.tenant import Tenant
+
+    user, headers = admin_user
+    tenant = await db.get(Tenant, user.tenant_id)
+    tenant.plan = plan
+    db.add_all(
+        [
+            Connection(
+                tenant_id=user.tenant_id,
+                provider="api",
+                label=f"Existing {index}",
+                status="active" if index % 2 else "error",
+                encrypted_credentials="unused-test-fixture",
+            )
+            for index in range(60)
+        ]
+    )
+    await db.flush()
+    monkeypatch.setattr("app.services.http_connector_service.read_json", AsyncMock(return_value={"orders": []}))
+    monkeypatch.setattr(
+        "app.services.mcp_client_service.discover_tools", AsyncMock(return_value=[{"name": "read_orders"}])
+    )
+    if provider == "custom_mcp":
+        response = await client.post(
+            "/api/v1/mcp-connectors",
+            headers=headers,
+            json={
+                "provider": "custom",
+                "label": "New MCP",
+                "server_url": "https://mcp.example/mcp",
+                "auth_type": "none",
+            },
+        )
+    else:
+        response = await client.post("/api/v1/connections", headers=headers, json=payload(provider))
+    assert response.status_code == 201, response.text
+    assert response.json()["status"] == "active"
+    plan_response = await client.get("/api/v1/tenants/me/plan", headers=headers)
+    assert plan_response.status_code == 200
+    assert plan_response.json()["limits"]["max_connections"] == -1
