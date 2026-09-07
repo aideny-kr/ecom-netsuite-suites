@@ -333,6 +333,21 @@ def test_inconsistent_source_is_not_copied_to_netsuite(changes):
     assert compare(source=snapshot(**changes)).recommended_action in {"human_review", "gather_evidence"}
 
 
+@pytest.mark.parametrize("missing", [True, False])
+def test_negative_source_total_requires_review_even_with_consistent_arithmetic(missing):
+    amounts = dict(
+        total="-16.00",
+        subtotal="284.00",
+        tax="0.00",
+        discount="300.00",
+        lines=[{"key": "sku-1", "quantity": "1", "net": "284.00", "tax": "0.00"}],
+        tax_details=[{"key": "zero", "basis": "284", "rate": "0", "amount": "0", "rounding": "half_up"}],
+    )
+    result = compare(source=snapshot(**amounts), records=[] if missing else [snapshot("netsuite", **amounts)])
+    assert result.recommended_action == "human_review"
+    assert "source_state_requires_review" in codes(result)
+
+
 def test_line_tax_must_reconcile_with_header_and_shipping_tax():
     bad = dict(lines=[{"key": "sku-1", "quantity": "1", "net": "100", "tax": "999"}])
     result = compare(source=snapshot(**bad), records=[snapshot("netsuite", **bad)])

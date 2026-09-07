@@ -59,7 +59,9 @@ def _money(value):
     if value is None:
         return None
     amount = _decimal(value, Decimal("1e18"))
-    if amount < 0 or amount != amount.quantize(Decimal("0.000001")):
+    # The mirror preserves signed source evidence; repair eligibility belongs to
+    # reconciliation. Rejecting a negative order would strand the entire cursor.
+    if amount != amount.quantize(Decimal("0.000001")):
         raise ValueError("Unsupported source amount")
     return amount
 

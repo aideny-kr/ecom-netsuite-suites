@@ -62,12 +62,25 @@ def test_tax_included_in_price_and_six_decimal_amounts_are_preserved():
     assert row["tax_amount"] == Decimal("20.123456")
 
 
+def test_negative_source_amounts_remain_exact_evidence():
+    row = sync.project_canonical_order(
+        source_order(total="-16.0", item_total="284.0", currency="CHF", additional_tax_total="0"),
+        uuid.uuid4(),
+        uuid.uuid4(),
+        NOW,
+    )
+    assert row["total_amount"] == Decimal("-16.0")
+    assert row["subtotal"] == Decimal("284.0")
+    assert row["tax_amount"] == Decimal("0")
+    assert row["raw_data"]["order"]["total"] == "-16.0"
+
+
 @pytest.mark.parametrize(
     "changes",
     [
         {"total": 12.3},
         {"total": "NaN"},
-        {"total": "-1"},
+        {"total": "-1000000000000000000"},
         {"total": "1.0000001"},
         {"total": "1E99999"},
         {"currency": "usd"},
@@ -159,6 +172,21 @@ async def test_budgeted_import_resumes_without_claiming_complete(db, admin_user,
     second = await sync.sync_solidus_orders(db, user.tenant_id, conn.id, now=NOW, max_pages=2)
     assert second["complete"] is True
     assert len((await db.scalars(select(Order).where(Order.tenant_id == user.tenant_id))).all()) == 21
+
+
+async def test_negative_order_does_not_block_remaining_import_pages(db, admin_user, monkeypatch):
+    user, _ = admin_user
+    conn = await connection(db, user.tenant_id)
+    orders = [source_order(f"R10012{i:004}") for i in range(21)]
+    orders[19].update(total="-16.0", item_total="284.0", currency="CHF", additional_tax_total="0")
+    fake_pages(monkeypatch, orders)
+    result = await sync.sync_solidus_orders(db, user.tenant_id, conn.id, now=NOW, max_pages=2)
+    rows = (await db.scalars(select(Order).where(Order.tenant_id == user.tenant_id))).all()
+    assert result["complete"] is True and result["records_synced"] == 21
+    assert len(rows) == 21
+    negative = next(row for row in rows if row.source_id == orders[19]["id"])
+    assert negative.total_amount == Decimal("-16.000000")
+    assert negative.currency == "CHF"
 
 
 async def test_changing_population_does_not_restart_or_skip_unread_ids(db, admin_user, monkeypatch):
