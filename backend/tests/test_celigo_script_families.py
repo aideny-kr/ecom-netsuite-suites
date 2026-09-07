@@ -19,7 +19,7 @@ import dataclasses
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.celigo.repository import (
@@ -866,6 +866,73 @@ class TestListHasNoContentOrHash:
         summary_dict = dataclasses.asdict(result.families[0])
         assert "content" not in summary_dict
         assert "content_hash" not in summary_dict
+
+
+class TestListPathNeverLoadsContent:
+    """Review finding (Task 2 round 1, brief item 1): `_fetch_production_scripts`
+    used to SELECT full `CeligoScript` rows (content included) for every
+    production script on BOTH endpoints, even though the list endpoint's own
+    `ScriptFamilySummary` never carries `content`. `load_content=False` (the
+    list endpoint's own path) must leave `.content` unloaded on the returned
+    rows -- checking `inspect(script).unloaded` proves the SELECT itself
+    never touched the column, a stronger claim than `TestListHasNoContentOrHash`
+    (which only checks the OUTPUT shape, not what was actually SELECTed)."""
+
+    async def test_list_path_leaves_content_unloaded(self, db: AsyncSession):
+        sf = _import_module()
+        tenant_id, conn_id = await _basic_tenant_conn(db)
+        await _seed_script(db, tenant_id, conn_id, celigo_id="s1", name="big", content="x" * 5000)
+        await db.flush()
+        db.expire_all()  # forget the full-row cache the seeding insert left behind
+
+        rows = await sf._fetch_production_scripts(db, tenant_id=tenant_id, connection_id=conn_id, load_content=False)
+
+        assert len(rows) == 1
+        script, size_bytes = rows[0]
+        assert "content" in inspect(script).unloaded
+        assert size_bytes == 5000
+
+    async def test_list_max_size_bytes_correct_without_loading_content(self, db: AsyncSession):
+        sf = _import_module()
+        tenant_id, conn_id = await _basic_tenant_conn(db)
+        await _seed_script(db, tenant_id, conn_id, celigo_id="s1", name="sized", content="y" * 42)
+        await db.flush()
+        db.expire_all()
+
+        result = await sf.list_script_families(db, tenant_id=tenant_id, connection_id=conn_id)
+
+        assert result.families[0].max_size_bytes == 42
+
+    async def test_detail_path_content_fetch_is_scoped_to_the_targets_family(self, db: AsyncSession):
+        """`get_script_family` must load `.content` ONLY for the requested
+        family's own members -- `_fetch_scripts_by_celigo_id` is the helper
+        that scopes that fetch, and must never pull in a sibling family's
+        script just because it shares the connection."""
+        sf = _import_module()
+        tenant_id, conn_id = await _basic_tenant_conn(db)
+        await _seed_script(db, tenant_id, conn_id, celigo_id="s1", name="family_one", content="a" * 10)
+        await _seed_script(db, tenant_id, conn_id, celigo_id="s2", name="family_two", content="b" * 20)
+        await db.flush()
+
+        rows = await sf._fetch_scripts_by_celigo_id(db, tenant_id=tenant_id, connection_id=conn_id, celigo_ids=["s1"])
+
+        assert [s.celigo_id for s, _ in rows] == ["s1"]
+        assert rows[0][0].content == "a" * 10
+
+    async def test_detail_endpoint_still_returns_correct_content_and_other_families_count(self, db: AsyncSession):
+        """End-to-end: the two-phase fetch (light scan for grouping/names,
+        then a scoped full-content fetch for the target family) must not
+        change `get_script_family`'s observable behaviour."""
+        sf = _import_module()
+        tenant_id, conn_id = await _basic_tenant_conn(db)
+        await _seed_script(db, tenant_id, conn_id, celigo_id="s1", name="dup_name", content="a" * 10)
+        await _seed_script(db, tenant_id, conn_id, celigo_id="s2", name="dup_name", content="b" * 20)
+        await db.flush()
+
+        detail = await sf.get_script_family(db, tenant_id=tenant_id, connection_id=conn_id, dedup_key="s1")
+
+        assert detail.members[0].content == "a" * 10
+        assert detail.summary.other_families_with_name == 1
 
 
 class TestDetailMembersCarryContentAndAreOrdered:

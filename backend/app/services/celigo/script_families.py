@@ -23,17 +23,26 @@ one-copy family (a family with content always has at least one version card)
 while the flow map's inline chip does not.
 
 Bounded query count (no N+1), per function:
-  * `get_script_family`: (1) every production script for the connection --
-    needed for BOTH the target family's own members and every OTHER family's
-    name, so `other_families_with_name` never needs a second families pass;
-    (2) one join across attachments/flows/integrations/steps, scoped to the
-    target family's own `celigo_id`s; (3) one open-error aggregate grouped by
+  * `get_script_family`: (1) a LIGHT scan of every production script for the
+    connection, `.content` never selected (`load_only`) -- needed for BOTH
+    grouping into families to find the target's own members, and every OTHER
+    family's name, so `other_families_with_name` is computed from names
+    alone and never needs a second full-content pass; (2) a FULL fetch
+    (content included), scoped to only the target family's own `celigo_id`s;
+    (3) one join across attachments/flows/integrations/steps, scoped to the
+    target family's own `celigo_id`s; (4) one open-error aggregate grouped by
     `flow_step_id`, scoped to the step ids the join actually returned.
-  * `list_script_families`: the same three, scoped to EVERY celigo_id/step_id
-    in the connection instead of one family, plus (4) one `cursor_states`
-    read for `synced_at` and (5) one flow-count read for `totals.flows_total`
-    (a production flow with zero script attachments never appears in the
-    join above, so it needs its own count to be counted at all).
+  * `list_script_families`: (1) the same light, content-free scan as above,
+    scoped to EVERY celigo_id in the connection (the list endpoint never
+    loads `.content` for anyone); (2) one join across attachments/flows/
+    integrations/steps, scoped to every celigo_id in the connection; (3) one
+    open-error aggregate grouped by `flow_step_id`; plus (4) one
+    `cursor_states` read for `synced_at` and (5) one flow-count read for
+    `totals.flows_total` (a production flow with zero script attachments
+    never appears in the join above, so it needs its own count to be counted
+    at all). A script's `size_bytes` is computed IN SQL (`octet_length`) in
+    the SAME query as the light scan, never a separate query and never by
+    touching `.content` in Python.
 """
 
 from __future__ import annotations
@@ -45,6 +54,7 @@ from datetime import datetime
 
 from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import load_only
 
 from app.models.celigo import (
     CeligoFlow,
@@ -190,10 +200,6 @@ class _SiteRow:
     step_reference_name: str | None
 
 
-def _size_bytes(content: str | None) -> int | None:
-    return len(content.encode("utf-8")) if content is not None else None
-
-
 def _earliest_member(members: list[CeligoScript]) -> CeligoScript:
     """Oldest by `celigo_last_modified` (None sorts last), ties by `celigo_id`
     -- same idiom as `topology.script_family_facts`'s own member ordering."""
@@ -255,16 +261,64 @@ def _group_scripts(scripts: list[CeligoScript]) -> dict[str, list[CeligoScript]]
 
 
 async def _fetch_production_scripts(
-    db: AsyncSession, *, tenant_id: uuid.UUID, connection_id: uuid.UUID
-) -> list[CeligoScript]:
-    result = await db.execute(
-        select(CeligoScript).where(
-            CeligoScript.tenant_id == tenant_id,
-            CeligoScript.celigo_connection_id == connection_id,
-            celigo_script_is_production(),
-        )
+    db: AsyncSession, *, tenant_id: uuid.UUID, connection_id: uuid.UUID, load_content: bool
+) -> list[tuple[CeligoScript, int | None]]:
+    """Every production script under *connection_id*, paired with its
+    content's byte length computed IN SQL (`octet_length`, never Python's
+    `len(content.encode("utf-8"))`) so a caller always has `size_bytes`
+    without ever touching `.content`.
+
+    `load_content=False` (`list_script_families`'s own path, and
+    `get_script_family`'s account-wide grouping/name scan) applies
+    `load_only` over every OTHER column this module needs -- `.content` is
+    left deferred/unloaded on the returned rows, so nothing downstream may
+    read it without triggering its own extra per-row SELECT (the N+1 this
+    guards against). `load_content=True` loads the row in full; only
+    `get_script_family` uses it, and only via `_fetch_scripts_by_celigo_id`
+    below, scoped to the one family being requested -- this function itself
+    is never called with `load_content=True` account-wide.
+    """
+    size_expr = func.octet_length(CeligoScript.content).label("size_bytes")
+    stmt = select(CeligoScript, size_expr).where(
+        CeligoScript.tenant_id == tenant_id,
+        CeligoScript.celigo_connection_id == connection_id,
+        celigo_script_is_production(),
     )
-    return list(result.scalars().all())
+    if not load_content:
+        stmt = stmt.options(
+            load_only(
+                CeligoScript.id,
+                CeligoScript.celigo_id,
+                CeligoScript.name,
+                CeligoScript.dedup_key,
+                CeligoScript.content_hash,
+                CeligoScript.celigo_last_modified,
+                CeligoScript.sandbox,
+            )
+        )
+    rows = (await db.execute(stmt)).all()
+    return [(script, size_bytes) for script, size_bytes in rows]
+
+
+async def _fetch_scripts_by_celigo_id(
+    db: AsyncSession, *, tenant_id: uuid.UUID, connection_id: uuid.UUID, celigo_ids: list[str]
+) -> list[tuple[CeligoScript, int | None]]:
+    """Full `CeligoScript` rows (content included), paired with `size_bytes`
+    the same way `_fetch_production_scripts` does, for exactly *celigo_ids*
+    -- `get_script_family`'s OWN family, never account-wide. Still
+    production-only as defense in depth, even though *celigo_ids* is always
+    already derived from a production-only scan by the caller."""
+    if not celigo_ids:
+        return []
+    size_expr = func.octet_length(CeligoScript.content).label("size_bytes")
+    stmt = select(CeligoScript, size_expr).where(
+        CeligoScript.tenant_id == tenant_id,
+        CeligoScript.celigo_connection_id == connection_id,
+        CeligoScript.celigo_id.in_(celigo_ids),
+        celigo_script_is_production(),
+    )
+    rows = (await db.execute(stmt)).all()
+    return [(script, size_bytes) for script, size_bytes in rows]
 
 
 async def _fetch_sites(
@@ -408,6 +462,7 @@ def _summarize_family(
     members: list[CeligoScript],
     site_rows: list[_SiteRow],
     open_error_counts: dict[uuid.UUID, int],
+    sizes_by_id: dict[uuid.UUID, int | None],
 ) -> ScriptFamilySummary:
     letters = assign_version_letters(members)
 
@@ -431,7 +486,7 @@ def _summarize_family(
 
     versions_count = len(letters)
     modifieds = [m.celigo_last_modified for m in members if m.celigo_last_modified is not None]
-    sizes = [_size_bytes(m.content) for m in members if m.content is not None]
+    sizes = [sizes_by_id[m.id] for m in members if sizes_by_id.get(m.id) is not None]
 
     return ScriptFamilySummary(
         dedup_key=dedup_key,
@@ -457,7 +512,10 @@ def _summarize_family(
 
 
 def _build_member(
-    script: CeligoScript, letters: dict[str, str], sites_for_script: list[_SiteRow]
+    script: CeligoScript,
+    letters: dict[str, str],
+    sites_for_script: list[_SiteRow],
+    sizes_by_id: dict[uuid.UUID, int | None],
 ) -> ScriptFamilyMember:
     flows = {row.attachment.flow_id for row in sites_for_script}
     return ScriptFamilyMember(
@@ -467,7 +525,7 @@ def _build_member(
         is_original=script.celigo_id == script.dedup_key,
         version_letter=letters.get(script.content_hash) if script.content_hash is not None else None,
         content_hash=script.content_hash,
-        size_bytes=_size_bytes(script.content),
+        size_bytes=sizes_by_id.get(script.id),
         celigo_last_modified=script.celigo_last_modified,
         sites_count=len(sites_for_script),
         flows_count=len(flows),
@@ -476,7 +534,10 @@ def _build_member(
 
 
 def _build_versions(
-    members: list[CeligoScript], letters: dict[str, str], sites_by_celigo_id: dict[str, list[_SiteRow]]
+    members: list[CeligoScript],
+    letters: dict[str, str],
+    sites_by_celigo_id: dict[str, list[_SiteRow]],
+    sizes_by_id: dict[uuid.UUID, int | None],
 ) -> list[ScriptFamilyVersion]:
     by_hash: dict[str, list[CeligoScript]] = defaultdict(list)
     for m in members:
@@ -488,7 +549,7 @@ def _build_versions(
         group = by_hash[content_hash]
         sites_count = sum(len(sites_by_celigo_id.get(m.celigo_id, [])) for m in group)
         timestamps = [m.celigo_last_modified for m in group if m.celigo_last_modified is not None]
-        size_bytes = next((_size_bytes(m.content) for m in group if m.content is not None), None)
+        size_bytes = next((sizes_by_id.get(m.id) for m in group if sizes_by_id.get(m.id) is not None), None)
         versions.append(
             ScriptFamilyVersion(
                 letter=letter,
@@ -554,7 +615,9 @@ def _index_sites_by_celigo_id(site_rows: list[_SiteRow]) -> dict[str, list[_Site
 async def list_script_families(
     db: AsyncSession, *, tenant_id: uuid.UUID, connection_id: uuid.UUID
 ) -> ScriptFamiliesList:
-    scripts = await _fetch_production_scripts(db, tenant_id=tenant_id, connection_id=connection_id)
+    rows = await _fetch_production_scripts(db, tenant_id=tenant_id, connection_id=connection_id, load_content=False)
+    scripts = [script for script, _ in rows]
+    sizes_by_id = {script.id: size_bytes for script, size_bytes in rows}
     by_family = _group_scripts(scripts)
 
     all_celigo_ids = [s.celigo_id for s in scripts]
@@ -568,7 +631,7 @@ async def list_script_families(
     for dedup_key, members in by_family.items():
         family_celigo_ids = {m.celigo_id for m in members}
         family_site_rows = [row for cid in family_celigo_ids for row in sites_by_celigo_id.get(cid, [])]
-        summaries.append(_summarize_family(dedup_key, members, family_site_rows, open_error_counts))
+        summaries.append(_summarize_family(dedup_key, members, family_site_rows, open_error_counts, sizes_by_id))
 
     name_counts = Counter(s.name for s in summaries)
     summaries = [replace(s, other_families_with_name=name_counts[s.name] - 1) for s in summaries]
@@ -599,14 +662,28 @@ async def list_script_families(
 async def get_script_family(
     db: AsyncSession, *, tenant_id: uuid.UUID, connection_id: uuid.UUID, dedup_key: str
 ) -> ScriptFamilyDetail | None:
-    scripts = await _fetch_production_scripts(db, tenant_id=tenant_id, connection_id=connection_id)
-    by_family = _group_scripts(scripts)
-    members = by_family.get(dedup_key)
-    if members is None:
+    # Light scan (no `.content`): groups every production script into
+    # families to find the target's own members AND every OTHER family's
+    # name -- `other_families_with_name` is computed from names alone, so
+    # this pass never needs content.
+    light_rows = await _fetch_production_scripts(
+        db, tenant_id=tenant_id, connection_id=connection_id, load_content=False
+    )
+    light_scripts = [script for script, _ in light_rows]
+    by_family_light = _group_scripts(light_scripts)
+    light_members = by_family_light.get(dedup_key)
+    if light_members is None:
         return None
 
-    scripts_by_id = {s.id: s for s in scripts}
-    family_celigo_ids = [m.celigo_id for m in members]
+    # Full content, scoped to ONLY the target family's own celigo_ids.
+    family_celigo_ids = [m.celigo_id for m in light_members]
+    member_rows = await _fetch_scripts_by_celigo_id(
+        db, tenant_id=tenant_id, connection_id=connection_id, celigo_ids=family_celigo_ids
+    )
+    members = [script for script, _ in member_rows]
+    sizes_by_id = {script.id: size_bytes for script, size_bytes in member_rows}
+    scripts_by_id = {s.id: s for s in members}
+
     site_rows = await _fetch_sites(db, tenant_id=tenant_id, connection_id=connection_id, celigo_ids=family_celigo_ids)
     sites_by_celigo_id = _index_sites_by_celigo_id(site_rows)
 
@@ -614,15 +691,15 @@ async def get_script_family(
     open_error_counts = await _fetch_open_error_counts(db, tenant_id=tenant_id, flow_step_ids=flow_step_ids)
 
     letters = assign_version_letters(members)
-    summary = _summarize_family(dedup_key, members, site_rows, open_error_counts)
-    name_counts = Counter(_family_name(other_members) for other_members in by_family.values())
+    summary = _summarize_family(dedup_key, members, site_rows, open_error_counts, sizes_by_id)
+    name_counts = Counter(_family_name(other_members) for other_members in by_family_light.values())
     summary = replace(summary, other_families_with_name=name_counts[summary.name] - 1)
 
     members_out = [
-        _build_member(m, letters, sites_by_celigo_id.get(m.celigo_id, []))
+        _build_member(m, letters, sites_by_celigo_id.get(m.celigo_id, []), sizes_by_id)
         for m in sorted(members, key=lambda s: (s.celigo_last_modified is None, s.celigo_last_modified, s.celigo_id))
     ]
-    versions_out = _build_versions(members, letters, sites_by_celigo_id)
+    versions_out = _build_versions(members, letters, sites_by_celigo_id, sizes_by_id)
     sites_out = sorted(
         (_build_site(row, scripts_by_id, letters, open_error_counts) for row in site_rows),
         key=lambda s: (s.integration_name or "", s.flow_name, s.json_path),
