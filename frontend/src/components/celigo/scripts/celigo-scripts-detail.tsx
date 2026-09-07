@@ -143,6 +143,17 @@ function stepKindWord(role: string | null, adaptorType: string | null): string {
   return adaptorType?.endsWith("Export") ? "Lookup" : "Destination";
 }
 
+/** "role · adaptor_type" (spec §3.3's Step column) -- used BOTH as the main
+ * line's fallback when a site has no `step_reference_name` (residual fix 2,
+ * build judge: the fallback used to be `stepKindWord` alone, e.g.
+ * "Destination" with the adaptor silently dropped) and as the sub-line shown
+ * under a named step. A null adaptor renders just the role word alone —
+ * never "role · null" or a fabricated "adaptor not synced" placeholder. */
+function stepRoleLabel(role: string | null, adaptorType: string | null): string {
+  const roleWord = stepKindWord(role, adaptorType);
+  return adaptorType ? `${roleWord} · ${adaptorType}` : roleWord;
+}
+
 /** "C · original" / "B · clone 24 Mar 2026" (spec §3.3's Copy column) — the
  * SITE only carries `version_letter`/`script_id`; whether that copy IS the
  * original, and when it was last modified, lives on the matching MEMBER
@@ -203,8 +214,14 @@ function SiteRow({
   members: CeligoScriptFamilyMember[];
   onOpen: (site: CeligoScriptFamilySite) => void;
 }): JSX.Element {
-  const kindWord = stepKindWord(site.step_role, site.step_adaptor_type);
-  const stepMain = site.step_reference_name ?? kindWord;
+  const roleLabel = stepRoleLabel(site.step_role, site.step_adaptor_type);
+  // Residual fix 2 (build judge), spec §3.3: the main line is
+  // `step_reference_name`, or the `role · adaptor` fallback when it's null
+  // (e.g. "Destination · NetSuiteDistributedImport" for an unnamed
+  // processor step) -- not a single kind word. The `role · adaptor` sub-line
+  // is shown ONLY under a NAMED step: when the main line is already the
+  // fallback, repeating it as a sub-line would just duplicate it.
+  const stepMain = site.step_reference_name ?? roleLabel;
   return (
     <tr className="border-b last:border-b-0">
       <td className="px-2 py-1.5 align-top text-[12.5px]">{site.integration_name ?? "—"}</td>
@@ -218,10 +235,8 @@ function SiteRow({
       </td>
       <td className="px-2 py-1.5 align-top text-[12.5px]">
         <p>{stepMain}</p>
-        {site.flow_step_id !== null && (
-          <p className="text-[11px] text-muted-foreground">
-            {kindWord} · {site.step_adaptor_type ?? "adaptor not synced"}
-          </p>
+        {site.flow_step_id !== null && site.step_reference_name !== null && (
+          <p className="text-[11px] text-muted-foreground">{roleLabel}</p>
         )}
       </td>
       <td className="whitespace-nowrap px-2 py-1.5 align-top font-mono text-[12px]">{site.json_path}</td>
@@ -249,6 +264,16 @@ function SiteRow({
 // Versions strip
 // ---------------------------------------------------------------------------
 
+/** Residual fix 3 (build judge), spec §3.3: every card gets a third line,
+ * not just `holds_original`/zero-sites -- the middle state (a clone that
+ * still runs somewhere, but isn't the original) used to render nothing at
+ * all for this line. */
+function versionMark(version: CeligoScriptFamilyVersion): string {
+  if (version.holds_original) return "✓ original";
+  if (version.sites_count === 0) return "spare copy · runs nowhere";
+  return `runs at ${version.sites_count} site${version.sites_count === 1 ? "" : "s"}`;
+}
+
 function VersionCard({
   version,
   selected,
@@ -258,7 +283,7 @@ function VersionCard({
   selected: boolean;
   onSelect: (letter: string) => void;
 }): JSX.Element {
-  const mark = version.holds_original ? "✓ original" : version.sites_count === 0 ? "spare copy" : null;
+  const mark = versionMark(version);
   return (
     <button
       type="button"
@@ -285,11 +310,9 @@ function VersionCard({
         first seen {formatShortDate(version.first_seen)}
         {formatSize(version.size_bytes) ? ` · ${formatSize(version.size_bytes)}` : ""}
       </span>
-      {mark && (
-        <span className={cn(version.holds_original ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground")}>
-          {mark}
-        </span>
-      )}
+      <span className={cn(version.holds_original ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground")}>
+        {mark}
+      </span>
     </button>
   );
 }

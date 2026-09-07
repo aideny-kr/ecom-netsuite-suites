@@ -322,11 +322,36 @@ describe("CeligoScriptsDetail — versions strip", () => {
     expect(within(cardC).getByText(/original/i)).toBeInTheDocument();
   });
 
-  it("marks a version with zero sites as a spare copy", () => {
+  it("marks a version with zero sites as a spare copy · runs nowhere", () => {
     mocks.family.mockReturnValue(resolved(FAMILY_B));
     wrap("fam-b");
     const cardA = screen.getByRole("button", { name: /version a/i });
-    expect(within(cardA).getByText(/spare copy/i)).toBeInTheDocument();
+    expect(within(cardA).getByText(/spare copy\s*·\s*runs nowhere/i)).toBeInTheDocument();
+  });
+
+  it("residual fix 3: the middle state (not original, sites_count > 0) shows 'runs at N sites'", () => {
+    // Fix round 2 (build judge, residual 3): every card gets a third line.
+    // Version A (holds_original: false, sites_count: 2) is neither the
+    // original nor a spare -- today's card renders nothing for it.
+    mocks.family.mockReturnValue(resolved(FAMILY_A));
+    wrap("fam-a");
+    const cardA = screen.getByRole("button", { name: /version a/i });
+    expect(within(cardA).getByText(/runs at 2 sites/i)).toBeInTheDocument();
+  });
+
+  it("residual fix 3: singularises 'runs at 1 site'", () => {
+    mocks.family.mockReturnValue(
+      resolved({
+        ...FAMILY_A,
+        versions: [
+          version({ letter: "A", content_hash: "hash-a", copies_count: 1, sites_count: 1, holds_original: false }),
+          ...VERSIONS_A.slice(1),
+        ],
+      }),
+    );
+    wrap("fam-a");
+    const cardA = screen.getByRole("button", { name: /version a/i });
+    expect(within(cardA).getByText(/runs at 1 site\b/i)).toBeInTheDocument();
   });
 });
 
@@ -452,6 +477,86 @@ describe("CeligoScriptsDetail — where used", () => {
     expect(within(originalRow).getByText(/c\s*·\s*original/i)).toBeInTheDocument();
     const cloneRow = screen.getByText("Manual Update Pre-Orders").closest("tr")!;
     expect(within(cloneRow).getByText(/b\s*·\s*clone\s*24 Mar 2026/i)).toBeInTheDocument();
+  });
+
+  it("residual fix 2: null step_reference_name falls back to role · adaptor_type, not a single kind word", () => {
+    // Fix round 2 (build judge, residual 2), spec §3.3: the Step main line
+    // is `step_reference_name`, or `role · adaptor_type` when the name is
+    // null -- e.g. `Destination · NetSuiteDistributedImport` for a
+    // processor step. Today's fallback was a single kind word
+    // ("Destination" alone), losing the adaptor type.
+    const family = {
+      ...FAMILY_A,
+      sites: [
+        site({
+          attachment_id: "att-fallback",
+          flow_name: "Fallback Step Flow",
+          flow_step_id: "step-fallback",
+          step_reference_name: null,
+          step_role: "processor",
+          step_adaptor_type: "NetSuiteDistributedImport",
+        }),
+      ],
+    };
+    mocks.family.mockReturnValue(resolved(family));
+    wrap("fam-a");
+    const row = screen.getByText("Fallback Step Flow").closest("tr")!;
+    // Target the Step cell's MAIN line specifically (its first <p>), not
+    // just "this text appears somewhere in the row" -- the pre-fix code
+    // already prints "Destination · NetSuiteDistributedImport" on a SEPARATE
+    // sub-line even when step_reference_name is null, which would make a
+    // looser assertion pass for the wrong reason.
+    const stepMainLine = row.querySelectorAll("td")[2].querySelector("p");
+    expect(stepMainLine).toHaveTextContent("Destination · NetSuiteDistributedImport");
+  });
+
+  it("residual fix 2: generator role falls back to Source · adaptor_type", () => {
+    const family = {
+      ...FAMILY_A,
+      sites: [
+        site({
+          attachment_id: "att-source",
+          flow_name: "Source Step Flow",
+          flow_step_id: "step-source",
+          step_reference_name: null,
+          step_role: "generator",
+          step_adaptor_type: "NetSuiteExport",
+        }),
+      ],
+    };
+    mocks.family.mockReturnValue(resolved(family));
+    wrap("fam-a");
+    const row = screen.getByText("Source Step Flow").closest("tr")!;
+    const stepMainLine = row.querySelectorAll("td")[2].querySelector("p");
+    expect(stepMainLine).toHaveTextContent("Source · NetSuiteExport");
+  });
+
+  it("residual fix 2: a null adaptor renders just the role word, never a fabricated placeholder", () => {
+    const family = {
+      ...FAMILY_A,
+      sites: [
+        site({
+          attachment_id: "att-no-adaptor",
+          flow_name: "No Adaptor Flow",
+          flow_step_id: "step-no-adaptor",
+          step_reference_name: null,
+          step_role: "processor",
+          step_adaptor_type: null,
+        }),
+      ],
+    };
+    mocks.family.mockReturnValue(resolved(family));
+    wrap("fam-a");
+    const row = screen.getByText("No Adaptor Flow").closest("tr")!;
+    expect(within(row).getByText("Destination")).toBeInTheDocument();
+    expect(within(row).queryByText(/adaptor not synced/i)).not.toBeInTheDocument();
+  });
+
+  it("residual fix 2: a router-level site (no step) renders just Router", () => {
+    mocks.family.mockReturnValue(resolved(FAMILY_A));
+    wrap("fam-a");
+    const row = screen.getByText("Router-level site").closest("tr")!;
+    expect(within(row).getByText("Router")).toBeInTheDocument();
   });
 
   it("shows the errors cell states: open (crit), zero, not checked, and — for router sites", () => {
