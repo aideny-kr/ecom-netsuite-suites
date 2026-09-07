@@ -24,6 +24,7 @@ async def get_table(
     status: str | None = None,
     currency: str | None = None,
     source: str | None = None,
+    search: str | None = Query(None, max_length=200),
 ):
     if table_name not in ALLOWED_TABLES:
         raise HTTPException(status_code=404, detail=f"Unknown table: {table_name}")
@@ -36,15 +37,20 @@ async def get_table(
     if source:
         filters["source"] = source
 
-    result = await query_table(
-        db=db,
-        table_name=table_name,
-        page=page,
-        page_size=page_size,
-        sort_by=sort_by,
-        sort_order=sort_order,
-        filters=filters,
-    )
+    try:
+        result = await query_table(
+            db=db,
+            table_name=table_name,
+            page=page,
+            page_size=page_size,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            filters=filters,
+            tenant_id=user.tenant_id,
+            search=search,
+        )
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid sort column") from None
 
     # Serialize items
     items = []
@@ -72,11 +78,19 @@ async def export_csv(
     table_name: str,
     user: Annotated[User, Depends(require_permission("exports.csv"))],
     db: Annotated[AsyncSession, Depends(get_db)],
+    status: str | None = None,
+    currency: str | None = None,
+    source: str | None = None,
+    search: str | None = Query(None, max_length=200),
 ):
     if table_name not in ALLOWED_TABLES:
         raise HTTPException(status_code=404, detail=f"Unknown table: {table_name}")
 
-    csv_content = await export_table_csv(db, table_name)
+    filters = {key: value for key, value in {"status": status, "currency": currency, "source": source}.items() if value}
+    try:
+        csv_content = await export_table_csv(db, table_name, filters, tenant_id=user.tenant_id, search=search)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
     return StreamingResponse(
         iter([csv_content]),
         media_type="text/csv",

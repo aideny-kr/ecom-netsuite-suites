@@ -1,8 +1,9 @@
 import csv
 import io
 from typing import Any
+from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.canonical import (
@@ -26,6 +27,36 @@ TABLE_MODEL_MAP = {
 }
 
 ALLOWED_TABLES = set(TABLE_MODEL_MAP.keys())
+MAX_EXPORT_ROWS = 10000
+
+_SEARCH_FIELDS = {
+    "orders": ("order_number", "source_id"),
+    "payments": ("source_id", "payment_method"),
+    "refunds": ("source_id", "reason"),
+    "payouts": ("source_id",),
+    "payout_lines": ("source_id", "description", "related_order_id"),
+    "disputes": ("source_id", "related_order_id", "reason"),
+    "netsuite_postings": ("netsuite_internal_id", "record_type", "account_name", "memo"),
+}
+
+
+def _predicates(model, tenant_id: UUID, filters, search):
+    # Explicit isolation is required even when a DB owner/bypass role runs the API.
+    predicates = [model.tenant_id == tenant_id]
+    for key, value in (filters or {}).items():
+        if key in model.__table__.columns and value is not None:
+            predicates.append(getattr(model, key) == value)
+    if search and search.strip():
+        literal = search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        predicates.append(
+            or_(
+                *(
+                    getattr(model, field).ilike(f"%{literal}%", escape="\\")
+                    for field in _SEARCH_FIELDS[model.__tablename__]
+                )
+            )
+        )
+    return predicates
 
 
 def get_model_for_table(table_name: str):
@@ -42,28 +73,20 @@ async def query_table(
     sort_by: str | None = None,
     sort_order: str = "desc",
     filters: dict[str, Any] | None = None,
+    *,
+    tenant_id: UUID,
+    search: str | None = None,
 ) -> dict:
     """Generic paginated query for canonical tables."""
     model = get_model_for_table(table_name)
 
-    # Base query
-    query = select(model)
-    count_query = select(func.count()).select_from(model)
-
-    # Apply filters
-    if filters:
-        for key, value in filters.items():
-            if hasattr(model, key) and value is not None:
-                column = getattr(model, key)
-                query = query.where(column == value)
-                count_query = count_query.where(column == value)
-
-    # Apply sorting
-    if sort_by and hasattr(model, sort_by):
-        column = getattr(model, sort_by)
-        query = query.order_by(column.desc() if sort_order == "desc" else column.asc())
-    else:
-        query = query.order_by(model.created_at.desc())
+    predicates = _predicates(model, tenant_id, filters, search)
+    query = select(model).where(*predicates)
+    count_query = select(func.count()).select_from(model).where(*predicates)
+    if sort_by and (sort_by not in model.__table__.columns or sort_by == "raw_data"):
+        raise ValueError("Invalid sort column")
+    column = getattr(model, sort_by or "created_at")
+    query = query.order_by(column.desc() if sort_order == "desc" else column.asc(), model.id.asc())
 
     # Count total
     total_result = await db.execute(count_query)
@@ -91,31 +114,28 @@ async def export_table_csv(
     db: AsyncSession,
     table_name: str,
     filters: dict[str, Any] | None = None,
+    *,
+    tenant_id: UUID,
+    search: str | None = None,
 ) -> str:
     """Export a canonical table to CSV string."""
     model = get_model_for_table(table_name)
-    query = select(model)
+    columns = [c for c in model.__table__.columns if c.name != "raw_data"]
+    query = (
+        select(*columns)
+        .where(*_predicates(model, tenant_id, filters, search))
+        .order_by(model.created_at.desc(), model.id.asc())
+    )
 
-    if filters:
-        for key, value in filters.items():
-            if hasattr(model, key) and value is not None:
-                query = query.where(getattr(model, key) == value)
-
-    query = query.limit(10000)  # Safety limit
+    # Fetch one extra row so an oversized financial export fails explicitly.
+    query = query.limit(MAX_EXPORT_ROWS + 1)
     result = await db.execute(query)
-    items = result.scalars().all()
-
-    if not items:
-        columns = [c.name for c in model.__table__.columns if c.name not in ("raw_data",)]
-        output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow(columns)
-        return output.getvalue()
-
-    columns = [c.name for c in model.__table__.columns if c.name not in ("raw_data",)]
+    items = result.all()
+    if len(items) > MAX_EXPORT_ROWS:
+        raise ValueError(f"Export exceeds {MAX_EXPORT_ROWS:,} rows. Please narrow your filters.")
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(columns)
+    writer.writerow([c.name for c in columns])
     for item in items:
-        writer.writerow([getattr(item, col, "") for col in columns])
+        writer.writerow(item)
     return output.getvalue()
