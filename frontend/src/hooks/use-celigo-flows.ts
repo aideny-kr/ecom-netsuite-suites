@@ -341,6 +341,15 @@ export function useCeligoScript(scriptId: string | undefined) {
 // allowed to reach the browser).
 // ---------------------------------------------------------------------------
 
+/** `ScriptFamilySummary.kind`'s closed vocabulary (spec §2.2) -- a single
+ * site_type -> that kind; several disagreeing site_types on one family ->
+ * `"mixed"`; no sites at all -> `"unattached"`. Exported so callers that key
+ * off every kind (`family-row.tsx`'s `KIND_BADGE`,
+ * `celigo-scripts-list.tsx`'s `GROUP_TITLE`) get an exhaustiveness check
+ * from tsc instead of a bare `string` that silently accepts a typo or an
+ * enum value the backend hasn't sent yet. */
+export type CeligoScriptFamilyKind = "hook" | "transform" | "filter" | "router" | "mixed" | "unattached";
+
 export interface CeligoScriptFamilyTotals {
   scripts: number;
   families: number;
@@ -359,8 +368,7 @@ export interface CeligoScriptFamilyTotals {
 export interface CeligoScriptFamilySummary {
   dedup_key: string;
   name: string;
-  /** 'hook' | 'transform' | 'filter' | 'router' | 'mixed' | 'unattached'. */
-  kind: string;
+  kind: CeligoScriptFamilyKind;
   function_name: string | null;
   copies_count: number;
   versions_count: number;

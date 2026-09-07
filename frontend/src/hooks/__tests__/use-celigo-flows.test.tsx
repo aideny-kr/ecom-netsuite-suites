@@ -1,6 +1,6 @@
 import { renderHook, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { beforeEach, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import type { ReactNode } from "react";
 
 // Task 9 — TanStack Query hooks over Task 8's read-only flow-map endpoints
@@ -18,7 +18,25 @@ import {
   useCeligoSyncStatus,
   useCeligoScriptFamilies,
   useCeligoScriptFamily,
+  type CeligoScriptFamilyKind,
+  type CeligoScriptFamilySummary,
 } from "@/hooks/use-celigo-flows";
+
+// Residual fix 1 (build judge) -- `CeligoScriptFamilySummary.kind` was typed
+// `string`, which let a typo (or a value the backend enum doesn't have)
+// through tsc silently. The backend's `kind` is a closed six-value enum
+// (spec §2.2) -- this type-level check locks the frontend field to the same
+// closed union (`CeligoScriptFamilyKind`), exported so callers (e.g.
+// `family-row.tsx`'s `KIND_BADGE` record) can key off it without re-typing
+// the six literals. A mismatch here fails `tsc --noEmit`, not `vitest run`.
+describe("CeligoScriptFamilySummary.kind — closed union (residual fix 1)", () => {
+  it("kind is exactly CeligoScriptFamilyKind, not a bare string", () => {
+    expectTypeOf<CeligoScriptFamilySummary["kind"]>().toEqualTypeOf<CeligoScriptFamilyKind>();
+    expectTypeOf<CeligoScriptFamilyKind>().toEqualTypeOf<
+      "hook" | "transform" | "filter" | "router" | "mixed" | "unattached"
+    >();
+  });
+});
 
 function makeWrapper(qc: QueryClient) {
   return function Wrapper({ children }: { children: ReactNode }) {
