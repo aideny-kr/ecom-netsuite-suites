@@ -17,6 +17,7 @@ from app.models.canonical import (
     PayoutLine,
     Refund,
 )
+from app.services.transaction_ops.order_evidence import latest_order_evidence, reconciliation_predicate
 
 TABLE_MODEL_MAP = {
     "orders": Order,
@@ -53,6 +54,10 @@ def _predicates(model, tenant_id: UUID, filters, search, date_from=None, date_to
         if date_to:
             predicates.append(Order.source_created_at < date_to)
     for key, value in (filters or {}).items():
+        if key == "reconciliation_status":
+            if model is not Order:
+                raise ValueError("Reconciliation filter is available for orders")
+            predicates.append(reconciliation_predicate(tenant_id, value))
         if key in model.__table__.columns and value is not None:
             predicates.append(getattr(model, key) == value)
     if search and search.strip():
@@ -93,6 +98,8 @@ async def query_table(
 
     predicates = _predicates(model, tenant_id, filters, search, date_from, date_to)
     query = select(model).options(defer(model.raw_data)).where(*predicates)
+    if model is Order:
+        query = query.add_columns(latest_order_evidence(tenant_id))
     count_query = select(func.count()).select_from(model).where(*predicates)
     if sort_by and (sort_by not in model.__table__.columns or sort_by == "raw_data"):
         raise ValueError("Invalid sort column")
@@ -108,7 +115,13 @@ async def query_table(
     query = query.offset(offset).limit(page_size)
 
     result = await db.execute(query)
-    items = result.scalars().all()
+    evidence = {}
+    if model is Order:
+        rows = result.all()
+        items = [row[0] for row in rows]
+        evidence = {str(row[0].id): row[1] or {"status": "not_verified", "balance": None} for row in rows}
+    else:
+        items = result.scalars().all()
 
     pages = (total + page_size - 1) // page_size if page_size > 0 else 0
 
@@ -118,6 +131,7 @@ async def query_table(
         "page": page,
         "page_size": page_size,
         "pages": pages,
+        "reconciliation": evidence,
     }
 
 

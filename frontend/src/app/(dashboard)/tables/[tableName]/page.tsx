@@ -12,6 +12,7 @@ import { RowDetailDrawer } from "@/components/row-detail-drawer";
 import { transactionColumns } from "@/components/transactions/columns";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/providers/auth-provider";
+import { OrdersPage } from "@/components/transactions/orders-page";
 
 export default function TablePage() {
   const params = useParams<{ tableName: string }>();
@@ -19,6 +20,7 @@ export default function TablePage() {
   const { user } = useAuth();
   const searchParams = useSearchParams();
   const payoutId = tableName === "payout_lines" ? searchParams.get("payout_id") : null;
+  if (tableName === "orders") return <OrdersPage key={user?.tenant_id} />;
   return <TableContent key={`${user?.tenant_id}:${tableName}:${payoutId}`} tableName={tableName} payoutId={payoutId} />;
 }
 

@@ -13,6 +13,7 @@ interface UseTableDataParams {
   sortOrder?: "asc" | "desc";
   search?: string;
   filters?: Record<string, string>;
+  refetchInterval?: number;
 }
 
 export function useTableData<T = Record<string, unknown>>({
@@ -23,6 +24,7 @@ export function useTableData<T = Record<string, unknown>>({
   sortOrder = "asc",
   search,
   filters = {},
+  refetchInterval,
 }: UseTableDataParams) {
   const { user } = useAuth();
   const params = new URLSearchParams(filters);
@@ -39,6 +41,7 @@ export function useTableData<T = Record<string, unknown>>({
   return useQuery<PaginatedResponse<T>>({
     queryKey: ["table", user?.tenant_id, tableName, page, pageSize, sortBy, sortOrder, search, filters],
     enabled: !!user?.tenant_id,
+    refetchInterval,
     queryFn: () =>
       apiClient.get<PaginatedResponse<T>>(
         `/api/v1/tables/${tableName}?${params.toString()}`,

@@ -8,6 +8,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import AwareDatetime, BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -23,6 +24,7 @@ from app.schemas.transaction_runs import (
     RunCreate,
     RunOut,
 )
+from app.services.transaction_ops import order_actions
 from app.services.transaction_ops import state_service as service
 
 router = APIRouter(
@@ -37,6 +39,37 @@ Manager = Annotated[User, Depends(require_permission("connections.manage"))]
 
 def _http_error(exc):
     return HTTPException(status_code=exc.http_status, detail={"code": exc.code})
+
+
+class OrderInvestigation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    evaluation_key: UUID
+
+
+class SourceReconciliation(OrderInvestigation):
+    source_connection_id: UUID
+    window_start: AwareDatetime
+    window_end: AwareDatetime
+
+
+@router.post("/orders/{order_id}/investigate", response_model=RunOut, status_code=202)
+async def investigate_order(order_id: UUID, request: OrderInvestigation, user: Reader, db: Database):
+    try:
+        return await order_actions.investigate_order(db, user, order_id, request.evaluation_key)
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
+@router.post("/reconcile", response_model=list[RunOut], status_code=202)
+async def reconcile_source(request: SourceReconciliation, user: Reader, db: Database):
+    try:
+        scope = RunCreate(evaluation_key=str(request.evaluation_key),
+                          window_start=request.window_start, window_end=request.window_end)
+        return await order_actions.reconcile_source(db, user, request.source_connection_id, scope)
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+    except ValueError:
+        raise HTTPException(status_code=422, detail={"code": "invalid_reconciliation_window"}) from None
 
 
 @router.get("/configs", response_model=list[ConfigOut])
