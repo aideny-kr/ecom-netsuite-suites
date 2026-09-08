@@ -23,6 +23,7 @@ from app.api.v1 import (
     jobs,
     learned_rules,
     mcp_connectors,
+    metabase_oauth,
     metrics,
     netsuite_api_logs,
     netsuite_auth,
@@ -64,6 +65,7 @@ api_router.include_router(agent_benchmarks.router)
 api_router.include_router(chat.router)
 api_router.include_router(chat_runs.router)
 api_router.include_router(mcp_connectors.router)
+api_router.include_router(metabase_oauth.router)
 api_router.include_router(sync.router)
 api_router.include_router(schedules.router)
 api_router.include_router(health.router)

@@ -78,6 +78,13 @@ async def create_mcp_connector(
         is_enabled=True,
         created_by=created_by,
     )
+    from app.services.metabase_oauth_service import is_metabase
+
+    if is_metabase(connector) and not encrypted:
+        connector.status = "error"
+        connector.is_enabled = False
+        connector.error_reason = "Authorization required. Use Connect with Metabase to sign in."
+        connector.metadata_json = {"oauth_provider": "metabase", "setup_state": "authorization_required"}
     db.add(connector)
     await db.flush()
     return connector
@@ -250,6 +257,15 @@ async def test_mcp_connector(db: AsyncSession, connector_id: uuid.UUID, tenant_i
             "message": "Connector not found",
         }
 
+    from app.services.metabase_oauth_service import is_metabase
+
+    if is_metabase(connector) and not connector.encrypted_credentials:
+        return {
+            "connector_id": str(connector.id),
+            "status": "error",
+            "message": "Authorization required. Use Connect with Metabase to sign in.",
+        }
+
     if connector.provider in ("bigquery", "google_sheets"):
         from app.services.connection_verification import check_google, failure_message
 
@@ -273,6 +289,9 @@ async def test_mcp_connector(db: AsyncSession, connector_id: uuid.UUID, tenant_i
         from app.services.mcp_client_service import discover_tools
 
         tools = await discover_tools(connector, db)
+        if is_metabase(connector) and (connector.metadata_json or {}).get("setup_state") == "verification_pending":
+            connector.is_enabled = True
+            connector.metadata_json = {**connector.metadata_json, "setup_state": "connected"}
         connector.discovered_tools = tools
         connector.last_health_check_at = datetime.now(timezone.utc)
         connector.status = "active"
@@ -288,7 +307,11 @@ async def test_mcp_connector(db: AsyncSession, connector_id: uuid.UUID, tenant_i
     except Exception:
         connector.last_health_check_at = datetime.now(timezone.utc)
         connector.status = "error"
-        connector.error_reason = "Tool discovery failed. Check the server URL and credential."
+        connector.error_reason = (
+            "Metabase tool discovery failed. Use Test to retry, or reconnect if authorization has expired."
+            if is_metabase(connector)
+            else "Tool discovery failed. Check the server URL and credential."
+        )
         await db.flush()
         logger.warning(
             "mcp_connector.test_failed",

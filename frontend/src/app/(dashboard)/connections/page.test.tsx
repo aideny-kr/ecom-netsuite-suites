@@ -3,7 +3,7 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import ConnectionsPage from "./page";
 
-const mocks = vi.hoisted(() => ({ manage: true, tenant: "a", remove: vi.fn(), removeMcp: vi.fn(), test: vi.fn(), toast: vi.fn(), fail: false }));
+const mocks = vi.hoisted(() => ({ metabase: false, manage: true, tenant: "a", remove: vi.fn(), removeMcp: vi.fn(), test: vi.fn(), toast: vi.fn(), fail: false }));
 vi.mock("@/providers/auth-provider", () => ({ useAuth: () => ({ user: { tenant_id: mocks.tenant } }) }));
 vi.mock("@/hooks/use-permissions", () => ({ usePermissions: () => ({ hasPermission: () => mocks.manage }) }));
 vi.mock("@/hooks/use-features", () => ({ useFeature: () => true }));
@@ -15,11 +15,12 @@ vi.mock("@/hooks/use-connections", () => ({
   useConnections: () => ({ isError: mocks.fail, refetch: vi.fn(), data: [{ id: "api", provider: "solidus", label: "Framework", status: "active" }, { id: "gone", provider: "api", label: "Removed API", status: "revoked" }, { id: "celigo", provider: "celigo", label: "Celigo duplicate", status: "active" }] }),
   useDeleteConnection: () => ({ mutateAsync: mocks.remove }), useTestConnection: () => ({ mutateAsync: mocks.test }),
 }));
+vi.mock("@/components/metabase-connect-button", () => ({ MetabaseConnectButton: () => <button>Connect with Metabase</button> }));
 vi.mock("@/hooks/use-mcp-connectors", () => ({
-  useMcpConnectors: () => ({ data: [{ id: "mcp", provider: "custom", label: "Warehouse MCP", status: "active", server_url: "https://mcp.example/", discovered_tools: [{ name: "orders" }] }] }),
+  useMcpConnectors: () => ({ data: [...(mocks.metabase ? [{ id: "metabase", provider: "custom", label: "Metabase", server_url: "https://analytics.example/api/metabase-mcp", auth_type: "oauth2", status: "error", metadata_json: { setup_state: "awaiting_oauth_support" }, error_reason: "OAuth support is pending" }] : []), { id: "mcp", provider: "custom", label: "Warehouse MCP", status: "active", server_url: "https://mcp.example/", discovered_tools: [{ name: "orders" }] }] }),
   useDeleteMcpConnector: () => ({ mutateAsync: mocks.removeMcp }), useTestMcpConnector: () => ({ mutateAsync: mocks.test }),
 }));
-beforeEach(() => { vi.clearAllMocks(); mocks.manage = true; mocks.tenant = "a"; mocks.fail = false; mocks.remove.mockResolvedValue(undefined); mocks.removeMcp.mockResolvedValue(undefined); });
+beforeEach(() => { vi.clearAllMocks(); mocks.metabase = false; mocks.manage = true; mocks.tenant = "a"; mocks.fail = false; mocks.remove.mockResolvedValue(undefined); mocks.removeMcp.mockResolvedValue(undefined); });
 it("shows API and MCP controls and removes each through its own endpoint", async () => {
   render(<ConnectionsPage />);
   expect(screen.getByText("Warehouse MCP")).toBeVisible();
@@ -75,4 +76,12 @@ it.each([
   render(<ConnectionsPage />);
   fireEvent.click(screen.getAllByRole("button", { name: "Test" })[0]);
   await waitFor(() => expect(mocks.toast).toHaveBeenCalledWith({ title, variant, description: "Provider verification detail" }));
+});
+
+it("offers Metabase sign-in on the pending OAuth card", () => {
+  mocks.metabase = true;
+  render(<ConnectionsPage />);
+  expect(screen.getByText("Authorization required")).toBeVisible();
+  expect(screen.getByRole("button", { name: "Connect with Metabase" })).toBeVisible();
+  expect(screen.queryByText(/support is pending/)).not.toBeInTheDocument();
 });

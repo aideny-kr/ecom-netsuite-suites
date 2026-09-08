@@ -83,6 +83,11 @@ async def _get_oauth2_token(connector: McpConnector, db: AsyncSession | None) ->
     Returns the access token string, or None if refresh fails.
     Updates the connector's encrypted_credentials in-place if a refresh occurs.
     """
+    from app.services.metabase_oauth_service import get_token, is_metabase
+
+    if is_metabase(connector):
+        return await get_token(connector, db)
+
     if not connector.encrypted_credentials:
         return None
 
@@ -165,9 +170,12 @@ async def _build_headers(connector: McpConnector, db: AsyncSession | None = None
     if connector.auth_type == "oauth2":
         token = await _get_oauth2_token(connector, db)
         if not token:
+            from app.services.metabase_oauth_service import is_metabase
+
+            provider_name = "Metabase" if is_metabase(connector) else "NetSuite"
             raise RuntimeError(
                 f"MCP connector {connector.id}: OAuth 2.0 token expired and refresh failed. "
-                "User must re-authorize the NetSuite connection."
+                f"User must re-authorize the {provider_name} connection."
             )
         headers["Authorization"] = f"Bearer {token}"
         return headers

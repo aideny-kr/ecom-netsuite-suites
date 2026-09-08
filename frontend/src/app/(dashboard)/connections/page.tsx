@@ -1,5 +1,6 @@
 "use client";
 
+import { MetabaseConnectButton } from "@/components/metabase-connect-button";
 import { useState } from "react";
 import { useConnections, useDeleteConnection, useTestConnection } from "@/hooks/use-connections";
 import { useMcpConnectors, useDeleteMcpConnector, useTestMcpConnector } from "@/hooks/use-mcp-connectors";
@@ -19,6 +20,7 @@ import { Trash2, Plug, FlaskConical } from "lucide-react";
 interface ConnectorCard {
   id: string; label: string; provider: string; status: string;
   kind: "api" | "mcp"; detail?: string; error?: string | null;
+  metabase?: boolean; authorizationRequired?: boolean; verificationPending?: boolean;
 }
 
 export default function ConnectionsPage() {
@@ -45,6 +47,9 @@ function ConnectionsContent() {
     ...(mcp.data || []).filter((item) => item.status !== "revoked" && item.provider !== "celigo_mcp").map((item) => ({
       id: item.id, label: item.label, provider: item.provider === "custom" ? "Custom MCP" : item.provider.replaceAll("_", " "), status: item.status, kind: "mcp" as const,
       detail: `${item.discovered_tools?.length || 0} tools · ${item.server_url}`, error: item.error_reason,
+      metabase: item.provider === "custom" && item.auth_type === "oauth2" && item.server_url.endsWith("/api/metabase-mcp"),
+      authorizationRequired: !["connected", "verification_pending"].includes(String(item.metadata_json?.setup_state)),
+      verificationPending: item.metadata_json?.setup_state === "verification_pending",
     })),
   ];
   async function test(item: ConnectorCard) {
@@ -80,11 +85,13 @@ function ConnectionsContent() {
       {connections.isLoading || mcp.isLoading ? <Skeleton className="h-40 rounded-xl" /> : (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {cards.map((item) => <article key={`${item.kind}:${item.id}`} className="min-w-0 space-y-4 rounded-xl border bg-card p-5 shadow-soft">
-            <div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="break-words text-[15px] font-semibold">{item.label}</p><p className="text-[13px] capitalize text-muted-foreground">{item.provider === "api" ? "Custom API" : item.provider}</p></div><Badge variant={item.status === "error" ? "destructive" : item.status === "active" || item.status === "healthy" ? "default" : "secondary"}>{item.status}</Badge></div>
+            <div className="flex items-start justify-between gap-3"><div className="min-w-0"><p className="break-words text-[15px] font-semibold">{item.label}</p><p className="text-[13px] capitalize text-muted-foreground">{item.provider === "api" ? "Custom API" : item.provider}</p></div><Badge variant={item.metabase && item.authorizationRequired ? "secondary" : item.status === "error" ? "destructive" : item.status === "active" || item.status === "healthy" ? "default" : "secondary"}>{item.metabase && item.authorizationRequired ? "Authorization required" : item.metabase && item.status === "active" ? "Connected" : item.status}</Badge></div>
             {item.detail && <p className="break-all text-[13px] text-muted-foreground">{item.detail}</p>}
-            {item.status === "error" && item.error && <p className="text-[13px] text-destructive">{item.error}</p>}
+            {item.metabase && item.authorizationRequired && <p className="text-[13px] text-muted-foreground">Sign in to Metabase to allow read access for investigations.</p>}
+            {item.status === "error" && item.error && !(item.metabase && item.authorizationRequired) && <p className="text-[13px] text-destructive">{item.error}</p>}
             {canManage && <div className="flex flex-wrap gap-2 border-t pt-3">
-              <Button variant="outline" size="sm" onClick={() => void test(item)} disabled={testing !== null || removing}><FlaskConical className="mr-2 h-4 w-4" />{testing === item.id ? "Testing…" : "Test"}</Button>
+              {item.metabase && <MetabaseConnectButton connectorId={item.id} reconnect={!item.authorizationRequired} disabled={removing || testing !== null} />}
+              {!(item.metabase && item.authorizationRequired) && <Button variant="outline" size="sm" onClick={() => void test(item)} disabled={testing !== null || removing}><FlaskConical className="mr-2 h-4 w-4" />{testing === item.id ? "Testing…" : "Test"}</Button>}
               <Button variant="ghost" size="sm" onClick={() => setDeleting(item)} disabled={removing || testing !== null} aria-label={`Delete ${item.label}`}><Trash2 className="mr-2 h-4 w-4" />Delete</Button>
             </div>}
           </article>)}
