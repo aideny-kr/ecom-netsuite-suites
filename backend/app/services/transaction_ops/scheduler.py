@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import String, and_, cast, exists, extract, func, literal, or_, select
+from sqlalchemy import DateTime, String, and_, cast, exists, extract, func, literal, or_, select
 from sqlalchemy.orm import aliased
 
 from app.core.database import set_tenant_context
@@ -36,7 +36,7 @@ def _bucket(now, interval_minutes):
 
 
 async def _recovery_ids(db, tenant_id, now):
-    _, _, _, run = _dependencies()
+    _, _, config, run = _dependencies()
     await set_tenant_context(db, str(tenant_id))
     child = aliased(run)
     has_child = exists(
@@ -52,6 +52,18 @@ async def _recovery_ids(db, tenant_id, now):
             AuditEvent.resource_id == cast(run.id, String),
         )
     )
+    has_review_child = exists(
+        select(child.id).where(
+            child.tenant_id == tenant_id,
+            child.config_id == run.config_id,
+            child.params_json["review"] == run.params_json["review"],
+            cast(child.params_json["window_start"].astext, DateTime(timezone=True))
+            == cast(run.params_json["window_end"].astext, DateTime(timezone=True)),
+        )
+    )
+    review_enabled = exists(
+        select(config.id).where(config.tenant_id == tenant_id, config.id == run.config_id, config.enabled.is_(True))
+    )
     query = (
         select(run.id)
         .where(
@@ -65,6 +77,18 @@ async def _recovery_ids(db, tenant_id, now):
                         run.lease_until <= now,
                         run.deadline_at <= now,
                     ),
+                ),
+                and_(
+                    run.status == "finished",
+                    run.termination_reason == "done",
+                    run.params_json["review"].astext.is_not(None),
+                    run.progress_json["scan_complete"].astext == "true",
+                    run.progress_json["refund_scan_complete"].astext == "true",
+                    cast(run.params_json["window_end"].astext, DateTime(timezone=True))
+                    < cast(run.params_json["review"]["end"].astext, DateTime(timezone=True)),
+                    ~has_review_child,
+                    ~blocked,
+                    review_enabled,
                 ),
                 and_(
                     run.status == "finished",

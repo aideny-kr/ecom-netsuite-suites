@@ -109,6 +109,8 @@ async def control_config(config_id: UUID, request: ConfigControl, user: Manager,
 async def create_run(config_id: UUID, request: RunCreate, user: Reader, db: Database):
     if request.origin == "schedule":
         raise HTTPException(status_code=422, detail={"code": "schedule_origin_is_worker_only"})
+    if request.review is not None:
+        raise HTTPException(status_code=422, detail={"code": "review_scope_is_server_owned"})
     try:
         return await service.create_run(db, user.tenant_id, config_id, request, actor=user)
     except service.StateError as exc:
@@ -230,5 +232,13 @@ async def case_observations(
 async def investigate_case(case_id: UUID, request: OrderInvestigation, user: Reader, db: Database):
     try:
         return await case_service.investigate_case(db, user.tenant_id, case_id, request.evaluation_key, actor=user)
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
+@router.get("/runs/{run_id}/review")
+async def review_status(run_id: UUID, user: Reader, db: Database):
+    try:
+        return await period_review.review_status(db, user.tenant_id, run_id)
     except service.StateError as exc:
         raise _http_error(exc) from None

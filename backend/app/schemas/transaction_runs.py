@@ -77,6 +77,18 @@ class ConfigControl(InputModel):
     schedule_enabled: bool
 
 
+class ReviewSpan(InputModel):
+    id: UUID
+    start: AwareDatetime
+    end: AwareDatetime
+
+    @model_validator(mode="after")
+    def bounded(self):
+        if not timedelta(0) < self.end - self.start <= timedelta(days=32):
+            raise ValueError("Review span exceeds one calendar month")
+        return self
+
+
 class RunCreate(InputModel):
     origin: Literal["chat", "manual", "schedule"] = "manual"
     evaluation_key: Identifier
@@ -84,9 +96,19 @@ class RunCreate(InputModel):
     window_start: AwareDatetime | None = None
     window_end: AwareDatetime | None = None
     window_basis: Literal["updated_at", "completed_at"] = "updated_at"
+    review: ReviewSpan | None = None
 
     @model_validator(mode="after")
     def exact_scope(self):
+        if self.review and (
+            self.order_references
+            or self.window_basis != "completed_at"
+            or self.window_start is None
+            or self.window_end is None
+            or not self.review.start <= self.window_start < self.window_end <= self.review.end
+            or self.window_end - self.window_start > timedelta(days=1)
+        ):
+            raise ValueError("Review work must be a bounded day within its fixed period")
         if self.order_references:
             if self.window_start is not None or self.window_end is not None or self.window_basis != "updated_at":
                 raise ValueError("Choose exact orders or a time window")

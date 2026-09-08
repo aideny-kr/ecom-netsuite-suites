@@ -58,7 +58,8 @@ async def test_review_queues_exact_calendar_cohort_and_idempotent_retry(client, 
     data = r.json()
     assert data["status"] == "pending"
     assert datetime.fromisoformat(data["params_json"]["window_start"]) == datetime(2026, 8, 1, 7, tzinfo=timezone.utc)
-    assert datetime.fromisoformat(data["params_json"]["window_end"]) == datetime(2026, 9, 1, 7, tzinfo=timezone.utc)
+    assert datetime.fromisoformat(data["params_json"]["window_end"]) == datetime(2026, 8, 2, 7, tzinfo=timezone.utc)
+    assert datetime.fromisoformat(data["params_json"]["review"]["end"]) == datetime(2026, 9, 1, 7, tzinfo=timezone.utc)
     assert data["params_json"]["window_basis"] == "completed_at"
     assert (await client.post(url, json=body, headers=headers)).json()["id"] == data["id"]
 
@@ -79,5 +80,22 @@ async def test_review_rejects_future_or_unbounded_or_caller_timezone(client, db,
         f"/api/v1/transaction-ops/configs/{c.id}/review",
         json={"evaluation_key": str(uuid4()), **changes},
         headers=headers,
+    )
+    assert response.status_code == 422, response.text
+
+
+async def test_ordinary_run_route_cannot_forge_period_coverage(client, db, admin_user, monkeypatch):
+    actor, headers = admin_user
+    c = await ready(db, actor, monkeypatch)
+    response = await client.post(
+        f"/api/v1/transaction-ops/configs/{c.id}/runs",
+        headers=headers,
+        json={
+            "evaluation_key": "forged-review",
+            "window_basis": "completed_at",
+            "window_start": "2026-08-15T00:00:00Z",
+            "window_end": "2026-08-16T00:00:00Z",
+            "review": {"id": str(uuid4()), "start": "2026-08-01T00:00:00Z", "end": "2026-09-01T00:00:00Z"},
+        },
     )
     assert response.status_code == 422, response.text

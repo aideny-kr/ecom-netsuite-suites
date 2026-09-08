@@ -30,6 +30,10 @@ def transaction_ops_run(tenant_id: str, run_id: str):
                 from app.services.transaction_ops.continuation import continue_budget_run
 
                 child = await continue_budget_run(db, tenant, run)
+            elif result.get("termination_reason") == "done":
+                from app.services.transaction_ops.period_review import continue_review
+
+                child = await continue_review(db, tenant, run)
             if child is not None:
                 from app.services.transaction_ops.scheduler import _dispatch
 

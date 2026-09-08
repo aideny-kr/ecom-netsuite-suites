@@ -113,7 +113,7 @@ async def test_default_window_work_key_is_compatible_with_existing_runs(db, admi
     config = await seed_config(db, actor.tenant_id, actor)
     request = RunCreate(evaluation_key="legacy-retry", order_references=["R000000001"])
     expected = state_service.business_digest(
-        {"config": config.config_key, "params": request.model_dump(exclude={"window_basis"})}
+        {"config": config.config_key, "params": request.model_dump(exclude={"window_basis", "review"})}
     )
     run = await state_service.create_run(db, actor.tenant_id, config.id, request, actor=actor)
     assert run.work_key == expected

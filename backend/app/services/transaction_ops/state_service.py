@@ -329,6 +329,10 @@ async def create_run(
         raise StateError("period_reader_unavailable", 422)
     # Preserve idempotency for requests made before calendar cohorts were added.
     excluded = {"window_basis"} if request.window_basis == "updated_at" else set()
+    if request.review is None:
+        excluded.add("review")
+    elif request.review.end > now:
+        raise StateError("review_period_not_closed", 422)
     params = request.model_dump(mode="json", exclude=excluded)
     key = business_digest({"config": config.config_key, "params": request.model_dump(exclude=excluded)})
     existing = (
