@@ -190,17 +190,18 @@ async def review_status(db, tenant_id, run_id):
 
 
 async def review_results(db, tenant_id, run_id, *, limit=25, offset=0, status=None, search=""):
-    """Latest evidence per order within one immutable review; never sum run counters."""
+    """Current evidence for one review's fixed cohort; never sum run counters."""
     from sqlalchemy import case, func
 
     from app.models.transaction_ops import TransactionFinding
+    from app.services.transaction_ops.review_evidence import current_review_evidence
 
     root = await state.get_run(db, tenant_id, run_id)
     if not root.params_json.get("review"):
         raise state.StateError("not_a_period_review", 422)
     span = ReviewSpan.model_validate(root.params_json["review"])
     f, r = TransactionFinding, TransactionRun
-    latest = (
+    cohort = (
         select(f.id, f.run_id, f.order_reference, f.report_json, f.updated_at)
         .join(r, (f.tenant_id == r.tenant_id) & (f.run_id == r.id))
         .where(
@@ -213,6 +214,7 @@ async def review_results(db, tenant_id, run_id, *, limit=25, offset=0, status=No
         .order_by(f.order_reference, f.updated_at.desc(), f.id.desc())
         .subquery()
     )
+    latest = current_review_evidence(cohort, tenant_id, root.config_snapshot)
     verdict = latest.c.report_json["balance"]["status"].astext
     category = case(
         (verdict == "matched", "matched"),
