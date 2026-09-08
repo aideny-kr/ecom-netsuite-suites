@@ -53,11 +53,15 @@ TOOL_REGISTRY = {
     },
     "transaction_ops.status": {
         "description": (
-            "Read investigation status and verified transaction differences. The evidence table renders automatically; "
+            "Read investigation status or a durable case and its recent history. "
+            "Provide exactly one run_id or case_id. The evidence table renders automatically; "
             "do not restate or recompute its amounts. Human decisions are made on the linked review page."
         ),
         "execute": transaction_ops_tools.execute_status,
-        "params_schema": {"run_id": {"type": "string", "required": True, "description": "Investigation run UUID"}},
+        "params_schema": {
+            "run_id": {"type": "string", "description": "Investigation run UUID; omit when case_id is supplied"},
+            "case_id": {"type": "string", "description": "Durable transaction case UUID; omit when run_id is supplied"},
+        },
     },
     "health": {
         "description": "Health check — returns server status and registered tool count",

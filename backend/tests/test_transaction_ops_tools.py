@@ -402,3 +402,26 @@ async def test_real_dispatch_rejects_foreign_run(db, admin_user, admin_user_b, m
     )
     assert result["error"] == "not_found"
     assert "rows" not in result
+
+
+async def test_status_can_read_a_case_with_bounded_history_and_exact_amounts(ctx, state, monkeypatch):
+    from app.services.transaction_ops import case_service
+    from tests.test_transaction_cases import NOW, report
+
+    identifier = uuid.uuid4()
+    evidence = report()
+    evidence["comparison"]["currency"] = "USD"
+    case = SimpleNamespace(
+        id=identifier, status="open", order_reference=ORDER, latest_report_json=evidence, last_observed_at=NOW
+    )
+    loader = AsyncMock(return_value=case)
+    monkeypatch.setattr(case_service, "get_case", loader)
+    monkeypatch.setattr(case_service, "list_observations", AsyncMock(return_value=[]))
+    result = await mod.execute_status({"case_id": str(identifier)}, context=ctx)
+    assert result["success"] is True, result
+    assert result["case_id"] == str(identifier) and result["row_count"] == 3
+    assert result["rows"][0][-3:] == ["100.00", "99.00", "1.00"]
+    assert result["suppress_llm_value"] is True
+    loader.assert_awaited_once_with(ctx["db"], TENANT, identifier)
+    bad = await mod.execute_status({"case_id": str(identifier), "run_id": str(RUN)}, context=ctx)
+    assert bad["error"] == "invalid_parameters"

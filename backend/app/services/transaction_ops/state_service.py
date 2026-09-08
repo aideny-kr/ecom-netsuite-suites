@@ -557,6 +557,11 @@ async def list_proposals(db, tenant_id, *, run_id=None, status=None, limit=100, 
 async def record_finding(db, tenant_id, run_id, order_reference, report_json, *, lease_token, now=None):
     now = _clock(now)
     request = FindingReport(order_reference=order_reference, report_json=report_json)
+    if request.report_json.get("order_reference", order_reference) != order_reference:
+        raise StateError("finding_order_mismatch", 422)
+    request = request.model_copy(
+        update={"report_json": {k: v for k, v in request.report_json.items() if k != "case_id"}}
+    )
     run = await get_run(db, tenant_id, run_id, lock=True)
     _lease(run, lease_token, now)
     row = (
@@ -575,6 +580,12 @@ async def record_finding(db, tenant_id, run_id, order_reference, report_json, *,
         row.report_json = request.report_json
     run.lease_until = min(run.deadline_at, now + _LEASE)
     await db.flush()
+    from app.services.transaction_ops.case_service import observe_finding
+
+    case = await observe_finding(db, tenant_id, run, row, now=now)
+    if case is not None:
+        row.report_json = {**row.report_json, "case_id": str(case.id)}
+        await db.flush()
     await _commit(db, tenant_id)
     return row
 

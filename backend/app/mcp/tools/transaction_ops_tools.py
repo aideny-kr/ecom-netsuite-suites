@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import uuid
 from decimal import Decimal, DecimalException
+from types import SimpleNamespace
 
 from sqlalchemy import select
 
@@ -18,7 +19,7 @@ from app.workers.celery_app import celery_app
 _PARAMS = {
     "configs": frozenset(),
     "run": frozenset({"config_id", "order_references", "window_start", "window_end"}),
-    "status": frozenset({"run_id"}),
+    "status": frozenset({"run_id", "case_id"}),
 }
 _MAX_FINDINGS = 100
 _MAX_ROWS = 500
@@ -134,6 +135,7 @@ def _finding_summary(finding):
     automation = report.get("automation") or {}
     return {
         "order_reference": _text(report.get("order_reference")),
+        "case_id": _text(report.get("case_id")),
         "reconciliation_status": _text(balance.get("status")),
         "reason": _text(balance.get("reason")),
         "missing_metrics": [
@@ -208,6 +210,38 @@ async def _execute(operation, params, context):
                 "status": run.status,
                 "dispatch_status": dispatch_status,
                 "review_url": f"/transaction-operations/runs/{run.id}",
+            }
+        if set(params) not in ({"run_id"}, {"case_id"}):
+            raise _ToolError("invalid_parameters")
+        if "case_id" in params:
+            from app.services.transaction_ops import case_service
+
+            case_id = uuid.UUID(str(params["case_id"]))
+            case = await case_service.get_case(db, tenant_id, case_id)
+            observations = await case_service.list_observations(db, tenant_id, case_id, limit=6)
+            finding = SimpleNamespace(report_json=case.latest_report_json)
+            rows, capped = _finding_rows([finding])
+            return {
+                "success": True,
+                "case_id": str(case.id),
+                "status": case.status,
+                "last_observed_at": case.last_observed_at.isoformat(),
+                "findings": [_finding_summary(finding)],
+                "history": [
+                    {
+                        "run_id": str(item.run_id),
+                        "observed_at": item.observed_at.isoformat(),
+                        "reconciliation_status": _text((item.report_json.get("balance") or {}).get("status")),
+                    }
+                    for item in observations[:5]
+                ],
+                "columns": ["order_reference", "recommended_action", "currency", "field", "source", "target", "delta"],
+                "rows": rows,
+                "row_count": len(rows),
+                "truncated": capped or len(observations) > 5,
+                "query": "",
+                "suppress_llm_value": True,
+                "source_kind": "transaction_ops",
             }
         run_id = uuid.UUID(str(params.get("run_id")))
         run = await state.get_run(db, tenant_id, run_id)

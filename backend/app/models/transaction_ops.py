@@ -200,3 +200,35 @@ class TransactionFinding(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
     order_reference: Mapped[str] = mapped_column(String(100))
     report_json: Mapped[dict] = mapped_column(JSONB)
+
+
+class TransactionCase(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    __tablename__ = "transaction_cases"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "id"),
+        UniqueConstraint("tenant_id", "case_key"),
+        CheckConstraint("status IN ('open','reconciled')", name="ck_transaction_case_status"),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), index=True)
+    case_key: Mapped[str] = mapped_column(String(64))
+    order_reference: Mapped[str] = mapped_column(String(100))
+    scope_json: Mapped[dict] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(String(20), default="open")
+    first_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    latest_report_json: Mapped[dict] = mapped_column(JSONB)
+
+
+class TransactionCaseObservation(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+    __tablename__ = "transaction_case_observations"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "observation_key"),
+        ForeignKeyConstraint(["tenant_id", "case_id"], ["transaction_cases.tenant_id", "transaction_cases.id"]),
+        ForeignKeyConstraint(["tenant_id", "run_id"], ["transaction_ops_runs.tenant_id", "transaction_ops_runs.id"]),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), index=True)
+    case_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    observation_key: Mapped[str] = mapped_column(String(64))
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    report_json: Mapped[dict] = mapped_column(JSONB)

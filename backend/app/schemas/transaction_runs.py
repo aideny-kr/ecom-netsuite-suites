@@ -255,3 +255,21 @@ class ClaimedOperation(InputModel):
     target_record_id: str | None
     before_json: BoundedJSON
     after_json: BoundedJSON
+
+
+class CaseOut(OutputModel):
+    id: UUID
+    order_reference: str
+    scope_json: dict
+    status: Literal["open", "reconciled"]
+    first_observed_at: datetime
+    last_observed_at: datetime
+    latest_report_json: dict
+
+
+class CaseObservationOut(OutputModel):
+    id: UUID
+    case_id: UUID
+    run_id: UUID
+    observed_at: datetime
+    report_json: dict

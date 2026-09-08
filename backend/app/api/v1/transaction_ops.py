@@ -4,7 +4,7 @@ Run creation is durable queueing only. Provider execution/worker registration
 belongs to the runner; no request body can provide an approval actor.
 """
 
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -15,6 +15,8 @@ from app.core.database import get_db
 from app.core.dependencies import require_feature, require_permission
 from app.models.user import User
 from app.schemas.transaction_runs import (
+    CaseObservationOut,
+    CaseOut,
     ConfigControl,
     ConfigCreate,
     ConfigOut,
@@ -24,7 +26,7 @@ from app.schemas.transaction_runs import (
     RunCreate,
     RunOut,
 )
-from app.services.transaction_ops import order_actions, period_review
+from app.services.transaction_ops import case_service, order_actions, period_review
 from app.services.transaction_ops import state_service as service
 from app.services.transaction_ops.period_review import PeriodReview
 
@@ -187,5 +189,46 @@ async def decide_proposal(proposal_id: UUID, request: ProposalDecision, user: Re
     # write tool is registered for chat/LLM or unattended workers.
     try:
         return await service.decide_proposal(db, user.tenant_id, proposal_id, request, actor=user)
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
+@router.get("/cases", response_model=list[CaseOut])
+async def list_cases(
+    user: Reader,
+    db: Database,
+    status: Literal["open", "reconciled"] | None = None,
+    limit: Annotated[int, Query(ge=1, le=100)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+):
+    return await case_service.list_cases(db, user.tenant_id, status=status, limit=limit, offset=offset)
+
+
+@router.get("/cases/{case_id}", response_model=CaseOut)
+async def get_case(case_id: UUID, user: Reader, db: Database):
+    try:
+        return await case_service.get_case(db, user.tenant_id, case_id)
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
+@router.get("/cases/{case_id}/observations", response_model=list[CaseObservationOut])
+async def case_observations(
+    case_id: UUID,
+    user: Reader,
+    db: Database,
+    limit: Annotated[int, Query(ge=1, le=100)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+):
+    try:
+        return await case_service.list_observations(db, user.tenant_id, case_id, limit=limit, offset=offset)
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
+@router.post("/cases/{case_id}/investigate", response_model=RunOut, status_code=202)
+async def investigate_case(case_id: UUID, request: OrderInvestigation, user: Reader, db: Database):
+    try:
+        return await case_service.investigate_case(db, user.tenant_id, case_id, request.evaluation_key, actor=user)
     except service.StateError as exc:
         raise _http_error(exc) from None
