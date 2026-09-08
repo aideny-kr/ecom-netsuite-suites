@@ -202,3 +202,27 @@ async def test_refund_split_between_credit_and_other_document_does_not_prove_ful
     )
     assert result["amount"] == Decimal("578.38")
     assert result["tax_adjustments"] == []
+
+
+async def test_standard_allowance_credit_preserves_its_native_zero_tax_effect():
+    reader = CreditReader()
+    reader.requests[0]["reason_id"] = "3"
+    reader.credit["item"]["items"][0].update(item={"id": "81"}, account={"id": "91"})
+    result = await collect_refunds(
+        reader, "1", "1", "1", order_reference=REFERENCE, adjustment_profile=reader_profile()
+    )
+    assert result["tax_adjustments"][0]["kind"] == "credit_memo"
+    assert result["tax_adjustments"][0]["tax_amount"] == "0"
+    assert result["tax_adjustments"][0]["amount"] == "578.38"
+
+
+def test_standard_credit_explains_total_without_inventing_a_tax_reversal():
+    s, t, c, r = balance_case()
+    proof = r["target"]["tax_adjustments"][0]
+    proof.update(kind="credit_memo", reason_id="3", tax_amount="0", item_accounts={"81": "91"})
+    result = reconcile_order(s, t, c, refunds=r)
+    assert result["amounts"]["order_total"]["delta"] == "0.00"
+    assert result["amounts"]["tax"]["delta"] == "-20.00"
+    assert result["status"] == "difference"
+    s["orders"][0]["included_tax_total"] = "20"
+    assert reconcile_order(s, t, c, refunds=r)["status"] == "matched"

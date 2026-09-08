@@ -45,7 +45,14 @@ class CustomReader(Reader):
         query = kwargs.get("body", {}).get("q", "")
         if "customrecord_fw_refund_requests" in query:
             self.calls += 1
-            reverse = "r.custrecord_refreq_cm_link IN (" in query
+            reverse = any(
+                field in query
+                for field in (
+                    "r.custrecord_refreq_cm_link IN (",
+                    "r.custrecord_refreq_cust_dep_link IN (",
+                    "r.custrecord_refreq_refund_link IN (",
+                )
+            )
             rows = self.conflicts if reverse and self.conflicts is not None else self.requests
             complete = self.reverse_complete if reverse else self.request_complete
             return {"items": deepcopy(rows), "count": len(rows), "totalResults": len(rows), "hasMore": not complete}
@@ -212,4 +219,58 @@ async def test_no_custom_record_permission_never_falls_back_to_proving_zero():
 
     reader.request = request
     with pytest.raises(ValueError, match="native_permission_denied"):
+        await collect_refunds(reader, "1", "1", "1", order_reference=REFERENCE)
+
+
+def standalone_deposit_reader():
+    reader = CustomReader()
+    reader.edges = [edge("3", "5", "CustDep", "DepAppl"), edge("4", "5", "CustRfnd", "DepAppl")]
+    reader.record["apply"]["items"][0]["doc"]["id"] = "5"
+    reader.requests[0].update(
+        credit_id=None,
+        deposit_id="3",
+        deposit_type="CustDep",
+        deposit_currency="1",
+        deposit_subsidiary="1",
+        deposit_posting="T",
+        deposit_voided="F",
+        deposit_customer="99",
+        order_customer="99",
+    )
+    return reader
+
+
+async def test_custom_deposit_link_proves_refund_without_a_standard_sales_order_edge():
+    result = await collect_refunds(standalone_deposit_reader(), "1", "1", "1", order_reference=REFERENCE)
+    assert result["amount"] == Decimal("578.38")
+    assert result["request_links"][0]["deposit_id"] == "3"
+    assert result["request_links"][0]["stage"] == "refund_verified"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("deposit_customer", "98"),
+        ("order_customer", None),
+        ("deposit_currency", "2"),
+        ("deposit_subsidiary", "2"),
+        ("deposit_posting", "F"),
+        ("deposit_voided", "T"),
+        ("deposit_type", "CustCred"),
+    ],
+)
+async def test_deposit_custom_link_requires_native_customer_scope_and_posting(field, value):
+    reader = standalone_deposit_reader()
+    reader.requests[0][field] = value
+    with pytest.raises(ValueError):
+        await collect_refunds(reader, "1", "1", "1", order_reference=REFERENCE)
+
+
+async def test_other_order_claiming_the_same_custom_deposit_vetoes_ownership():
+    reader = standalone_deposit_reader()
+    reader.conflicts = [
+        *reader.requests,
+        {**reader.requests[0], "id": "21", "name": "31", "order_id": "999", "order_reference": "R999999999"},
+    ]
+    with pytest.raises(ValueError):
         await collect_refunds(reader, "1", "1", "1", order_reference=REFERENCE)

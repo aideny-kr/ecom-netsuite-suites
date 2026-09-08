@@ -30,7 +30,8 @@ async def read_tax_adjustments(request, links, profile, order_id, subsidiary_id,
         raise ValueError("adjustment_profile_scope_mismatch")
     proofs = []
     for link in links:
-        if link["reason_id"] not in profile.tax_reversal_reason_ids:
+        tax_reversal = link["reason_id"] in profile.tax_reversal_reason_ids
+        if not link["credit_memo_id"] and not tax_reversal:
             continue
         if link["stage"] != "refund_verified" or not link["credit_memo_id"]:
             return []
@@ -41,6 +42,7 @@ async def read_tax_adjustments(request, links, profile, order_id, subsidiary_id,
                 "GET", f"/record/v1/creditmemo/{link['credit_memo_id']}", params={"expandSubResources": "true"}
             )
             amount = _decimal(link["amount"])
+            native_tax = _decimal(record.get("taxTotal"))
             if (
                 record["id"] != link["credit_memo_id"]
                 or record["currency"]["id"] != currency_id
@@ -49,7 +51,10 @@ async def read_tax_adjustments(request, links, profile, order_id, subsidiary_id,
                 or _decimal(record["total"]) != amount
                 or _decimal(record["applied"]) != amount
                 or _decimal(record["unapplied"]) != 0
-                or _decimal(record["taxTotal"]) != 0
+                or native_tax is None
+                or native_tax < 0
+                or native_tax > amount
+                or (tax_reversal and native_tax != 0)
             ):
                 return []
             problems = []
@@ -72,28 +77,38 @@ async def read_tax_adjustments(request, links, profile, order_id, subsidiary_id,
             )
             if problems or not lines:
                 return []
-            total, seen, items = Decimal(0), set(), {}
+            total, line_taxes, seen, items = Decimal(0), Decimal(0), set(), {}
             for line in lines:
                 item, account = line["item"]["id"], line["account"]["id"]
                 value = _decimal(line["amount"])
+                line_tax = _decimal(line["tax1Amt"])
+                gross = _decimal(line["grossAmt"])
                 if (
                     line["line"] in seen
-                    or line["itemType"]["id"] != "NonInvtPart"
-                    or profile.tax_item_accounts.get(item) != account
+                    or line["itemType"]["id"] not in {"NonInvtPart", "InvtPart", "Service"}
+                    or (
+                        tax_reversal
+                        and (line["itemType"]["id"] != "NonInvtPart" or profile.tax_item_accounts.get(item) != account)
+                    )
+                    or (not tax_reversal and item in profile.tax_item_accounts)
                     or value is None
                     or value <= 0
-                    or _decimal(line["grossAmt"]) != value
-                    or _decimal(line["tax1Amt"]) != 0
+                    or line_tax is None
+                    or line_tax < 0
+                    or gross != value + line_tax
+                    or (tax_reversal and line_tax != 0)
                 ):
                     return []
                 seen.add(line["line"])
                 items[item] = account
-                total += value
-            if total != amount:
+                total += gross
+                line_taxes += line_tax
+            if total != amount or line_taxes != native_tax:
                 return []
             proofs.append(
                 {
-                    "kind": "tax_reversal",
+                    "kind": "tax_reversal" if tax_reversal else "credit_memo",
+                    "tax_amount": str(amount if tax_reversal else native_tax),
                     "request_id": link["request_id"],
                     "source_refund_id": link["source_refund_id"],
                     "payment_number": link["payment_number"],
@@ -142,16 +157,25 @@ def verified_tax_adjustments(refunds, config, order_id, reference, currency, amo
         for proof in proofs:
             event = events[proof["source_refund_id"]]
             amount = amount_parser(proof["amount"])
+            tax_reversal = proof["kind"] == "tax_reversal"
+            tax_amount = amount_parser(proof.get("tax_amount", proof["amount"] if tax_reversal else None))
             if (
-                proof["kind"] != "tax_reversal"
+                proof["kind"] not in {"tax_reversal", "credit_memo"}
                 or proof["order_record_id"] != order_id
-                or proof["reason_id"] not in profile.tax_reversal_reason_ids
+                or (proof["reason_id"] in profile.tax_reversal_reason_ids) != tax_reversal
                 or not proof["item_accounts"]
-                or any(profile.tax_item_accounts.get(k) != v for k, v in proof["item_accounts"].items())
+                or (
+                    tax_reversal
+                    and any(profile.tax_item_accounts.get(k) != v for k, v in proof["item_accounts"].items())
+                )
+                or (not tax_reversal and any(k in profile.tax_item_accounts for k in proof["item_accounts"]))
                 or proof["payment_number"] != event["payment_number"]
                 or not event["payment_number"]
                 or amount is None
                 or amount <= 0
+                or tax_amount is None
+                or not 0 <= tax_amount <= amount
+                or (tax_reversal and tax_amount != amount)
                 or amount != amount_parser(event["amount"])
             ):
                 return []

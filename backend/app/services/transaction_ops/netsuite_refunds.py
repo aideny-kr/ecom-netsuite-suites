@@ -145,7 +145,7 @@ async def collect_refunds(reader, order_id, subsidiary_id, currency_id, *, order
     # Custom ownership is additive. Standard upstream links are still traversed
     # and can veto a conflicting/shared credit; application proof stays native.
     frontier, visited, reachable = {order_id, *nodes}, set(), {order_id, *nodes}
-    edges = {(order_id, credit, "SalesOrd", "CustCred") for credit in nodes}
+    edges = {(order_id, identifier, "SalesOrd", node["type"]) for identifier, node in nodes.items()}
     allocations = defaultdict(set)
     cash_refunds = set()
     for _ in range(MAX_DEPTH):

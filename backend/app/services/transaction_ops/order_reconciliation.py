@@ -126,7 +126,8 @@ def _reconcile(source_evidence, target_evidence, config, refunds):
     )
     if credits:
         adjustment = sum((_amount(c["amount"], precision) for c in credits), Decimal(0))
-        for key in ("order_total", "tax"):
+        tax_adjustment = sum((_amount(c.get("tax_amount", c["amount"]), precision) for c in credits), Decimal(0))
+        for key, adjustment in (("order_total", adjustment), ("tax", tax_adjustment)):
             left, right = values[key]
             if left is not None and right is not None and left != right and right >= adjustment:
                 values[key] = (left, right - adjustment)
