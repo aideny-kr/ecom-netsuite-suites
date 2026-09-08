@@ -144,6 +144,7 @@ def _replica_page_progress(page, progress, params, config):
     ):
         raise ScanChangedError("incomplete_replica_page")
     references = []
+    unscoped = []
     basis = params.get("window_basis", "updated_at")
     entities = config["mapping_json"].get("business_entity_subsidiaries") or {}
     for order in orders:
@@ -157,7 +158,10 @@ def _replica_page_progress(page, progress, params, config):
         if not _time(params["window_start"]) <= observed < _time(params["window_end"]):
             raise ScanChangedError("source_window_unproven")
         progress["last_source_id"] = identifier
-        if entities.get(source_entity_key(order)) == config["subsidiary_id"]:
+        if order.get("business_entity") is None:
+            references.append(order["number"])
+            unscoped.append(order["number"])
+        elif entities.get(source_entity_key(order)) == config["subsidiary_id"]:
             references.append(order["number"])
         else:
             progress["outside_scope"] = progress.get("outside_scope", 0) + 1
@@ -167,6 +171,7 @@ def _replica_page_progress(page, progress, params, config):
     progress["expected_total"] = progress["scan_count"] if complete else None
     progress["scan_complete"] = complete
     progress["pending_refs"] = references
+    progress["unscoped_replica_refs"] = unscoped
 
 
 def build_report(source_evidence, target_evidence, config, mapping, *, now, refunds=None):
@@ -409,9 +414,18 @@ async def run_investigation(
                             )
                         ):
                             raise ScanChangedError("refund_cursor_unproven")
-                        progress["pending_refs"] = await state.unseen_references(
-                            db, tenant_id, run_id, [row["number"] for row in rows]
-                        )
+                        references = []
+                        for row in rows:
+                            if (
+                                mapping.metabase_replica
+                                and row.get("business_entity") is not None
+                                and mapping.business_entity_subsidiaries.get(source_entity_key(row))
+                                != config["subsidiary_id"]
+                            ):
+                                progress["outside_scope"] = progress.get("outside_scope", 0) + 1
+                            else:
+                                references.append(row["number"])
+                        progress["pending_refs"] = await state.unseen_references(db, tenant_id, run_id, references)
                         progress["refund_scan_count"] = progress.get("refund_scan_count", 0) + len(rows)
                         progress["phase"] = "refunds"
                         progress["refund_scan_complete"] = cursor is None
@@ -494,6 +508,11 @@ async def run_investigation(
                             after_id=progress["last_source_id"],
                             page_size=20,
                             basis=run.params_json.get("window_basis", "updated_at"),
+                            entity_keys=tuple(
+                                key
+                                for key, subsidiary in mapping.business_entity_subsidiaries.items()
+                                if subsidiary == config["subsidiary_id"]
+                            ),
                             now=clock(),
                         )
                     )
@@ -537,7 +556,11 @@ async def run_investigation(
             if len(orders) != 1 or orders[0].get("number") != reference:
                 raise ValueError("source_reference_mismatch")
             if mapping.business_entity_subsidiaries.get(source_entity_key(orders[0])) != config["subsidiary_id"]:
-                if progress.get("phase") == "refunds":
+                if progress.get("phase") == "refunds" or (
+                    mapping.metabase_replica
+                    and progress.get("phase") != "destination"
+                    and reference in progress.get("unscoped_replica_refs", [])
+                ):
                     progress["outside_scope"] = progress.get("outside_scope", 0) + 1
                     progress["pending_refs"] = progress["pending_refs"][1:]
                     await save()

@@ -267,3 +267,41 @@ async def test_binding_pins_endpoint_even_if_saved_connector_is_repointed(db, ad
     binding = reader.ReplicaBinding.model_validate({**BINDING, "connector_id": str(connector.id)})
     with pytest.raises(reader.ReplicaReadError, match="unavailable"):
         await reader._connector(db, actor.tenant_id, binding)
+
+
+@pytest.mark.asyncio
+async def test_period_page_filters_entity_in_database_and_checks_returned_scope(transport):
+    from datetime import timedelta
+
+    row = order_row()
+    transport[1].return_value = result(reader.ORDER_FIELDS, [[row[f] for f in reader.ORDER_FIELDS]])
+    page = await reader.read_order_page(
+        None, uuid4(), BINDING, NOW - timedelta(days=1), NOW, entity_keys=("Framework Inc",), now=NOW
+    )
+    assert len(page["orders"]) == 1
+    filters = transport[1].call_args.args[2]["query"]["stages"][0]["filters"]
+    assert [
+        "=",
+        {},
+        ["field", {}, ["Solidus (Reporting Copy)", "public", "spree_orders", "business_entity"]],
+        "Framework Inc",
+    ] in filters[-1][2:]
+    with pytest.raises(reader.ReplicaReadError, match="replica_entity_mismatch"):
+        await reader.read_order_page(
+            None, uuid4(), BINDING, NOW - timedelta(days=1), NOW, entity_keys=("Framework UK",), now=NOW
+        )
+
+
+@pytest.mark.asyncio
+async def test_null_replica_entity_is_retained_for_canonical_api_scope_check(transport):
+    from datetime import timedelta
+
+    row = order_row()
+    row["business_entity"] = None
+    transport[1].return_value = result(reader.ORDER_FIELDS, [[row[f] for f in reader.ORDER_FIELDS]])
+    page = await reader.read_order_page(
+        None, uuid4(), BINDING, NOW - timedelta(days=1), NOW, entity_keys=("Framework Inc",), now=NOW
+    )
+    assert len(page["orders"]) == 1
+    filters = transport[1].call_args.args[2]["query"]["stages"][0]["filters"]
+    assert "is-null" in str(filters) and "Framework Inc" in str(filters)

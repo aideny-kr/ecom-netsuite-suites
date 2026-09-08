@@ -166,6 +166,11 @@ async def review_status(db, tenant_id, run_id):
         "period_end": span.model_dump(mode="json")["end"],
         "completed_until": completed_until.isoformat().replace("+00:00", "Z"),
         "complete": complete,
+        # A finished scan is neither a replica watermark nor an accounting sign-off.
+        "completion_basis": "scan_coverage",
+        "comparison_basis": "current_evidence_for_period_cohort",
+        "source_freshness": "unverified",
+        "financial_status": "not_certified",
         "status": "complete" if complete else "running" if active else "needs_attention",
         "completed_slices": completed_slices,
         "run_count": len(runs[:512]),

@@ -258,7 +258,7 @@ async def read_order(db, tenant_id, binding, reference, *, now=None):
 
 
 async def read_order_page(
-    db, tenant_id, binding, start, end, *, after_id=0, page_size=20, basis="updated_at", now=None
+    db, tenant_id, binding, start, end, *, after_id=0, page_size=20, basis="updated_at", entity_keys=None, now=None
 ):
     start, end = _window(start, end)
     if (
@@ -274,22 +274,31 @@ async def read_order_page(
     def field(name):
         return _field(binding, "orders", name)
 
-    rows = await _rows(
-        db,
-        tenant_id,
-        binding,
-        "orders",
-        [
-            [">", {}, field("id"), after_id],
-            [">=", {}, field(basis), start],
-            ["<", {}, field(basis), end],
-            ["not-null", {}, field("completed_at")],
-        ],
-        page_size + 1,
-        now=now,
-    )
+    filters = [
+        [">", {}, field("id"), after_id],
+        [">=", {}, field(basis), start],
+        ["<", {}, field(basis), end],
+        ["not-null", {}, field("completed_at")],
+    ]
+    if entity_keys is not None:
+        if (
+            not isinstance(entity_keys, (tuple, list))
+            or not 1 <= len(entity_keys) <= 20
+            or any(not isinstance(key, str) or not 1 <= len(key) <= 255 for key in entity_keys)
+        ):
+            raise ReplicaReadError("invalid_replica_entity_scope")
+        # Historical replica rows can omit the entity even when the API has it.
+        # Retain those candidates for the authoritative API scope check.
+        predicates = [["is-null", {}, field("business_entity")]] + [
+            ["=", {}, field("business_entity"), key] for key in entity_keys if key != "legacy"
+        ]
+        filters.append(predicates[0] if len(predicates) == 1 else ["or", {}, *predicates])
+    rows = await _rows(db, tenant_id, binding, "orders", filters, page_size + 1, now=now)
     orders = [_order(row) for row in rows]
     for row in orders:
+        entity = row["business_entity"]
+        if entity_keys is not None and entity is not None and entity not in entity_keys:
+            raise ReplicaReadError("replica_entity_mismatch")
         observed = datetime.fromisoformat(row[basis]).replace(tzinfo=None)
         if (
             row["id"] <= after_id

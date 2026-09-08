@@ -85,6 +85,10 @@ async def test_whole_month_closes_only_after_every_day_and_last_day_stops(db, ad
         child = await period_review.continue_review(db, actor.tenant_id, run.id)
         if day == 30:
             assert child is None and summary["status"] == "complete"
+            assert summary["completion_basis"] == "scan_coverage"
+            assert summary["comparison_basis"] == "current_evidence_for_period_cohort"
+            assert summary["source_freshness"] == "unverified"
+            assert summary["financial_status"] == "not_certified"
         else:
             assert child is not None
             run = child

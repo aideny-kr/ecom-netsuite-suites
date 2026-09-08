@@ -28,9 +28,14 @@ def test_mapping_accepts_explicit_pinned_replica_contract():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("refund_only", [False, True])
-async def test_replica_order_or_old_refund_scan_uses_full_api_evidence(monkeypatch, refund_only):
+@pytest.mark.parametrize("missing_entity", [False, True])
+async def test_replica_order_or_old_refund_scan_uses_full_api_evidence(monkeypatch, refund_only, missing_entity):
     state = configured()
     full = source_order()
+    full["orders"][0]["business_entity"] = "Framework Inc"
+    state.run.config_snapshot["mapping_json"]["business_entity_subsidiaries"] = {
+        "Framework Inc": state.run.config_snapshot["subsidiary_id"]
+    }
     full["orders"][0]["completed_at"] = (NOW - timedelta(days=100)).isoformat()
     headers = [
         {
@@ -39,6 +44,8 @@ async def test_replica_order_or_old_refund_scan_uses_full_api_evidence(monkeypat
             if k in ("id", "number", "updated_at", "completed_at", "business_entity")
         }
     ]
+    if missing_entity:
+        headers[0]["business_entity"] = None
     pages = AsyncMock(
         return_value={
             "orders": [] if refund_only else headers,
@@ -186,3 +193,55 @@ async def test_destination_only_change_rechecks_an_old_source_order(monkeypatch)
     assert state.run.progress_json["destination_scan_count"] == 1
     canonical.assert_awaited_once()
     native.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_replica_refund_headers_avoid_api_reads_for_another_entity(monkeypatch):
+    state = configured()
+    empty = {"orders": [], "page_complete": True, "scan_complete": True, "next_after_id": None}
+    monkeypatch.setattr(metabase_reader, "read_order_page", AsyncMock(return_value=empty))
+    monkeypatch.setattr(
+        metabase_reader,
+        "read_changed_refund_orders",
+        AsyncMock(return_value={**empty, "orders": [{"id": 1, "number": REF, "business_entity": "another-entity"}]}),
+    )
+    source = AsyncMock(side_effect=AssertionError("Do not fetch a known different entity"))
+    result = await runner.run_investigation(
+        None,
+        state.tenant,
+        state.run_id,
+        _state=state,
+        _clock=lambda: NOW,
+        _enabled=AsyncMock(return_value=True),
+        _source_reader=source,
+    )
+    assert result["termination_reason"] == "done" and result["processed"] == 0
+    assert state.run.progress_json["outside_scope"] == 1
+    source.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unknown_replica_entity_uses_api_then_skips_other_scope(monkeypatch):
+    state = configured()
+    full = source_order()
+    full["orders"][0]["business_entity"] = "another-entity"
+    row = {**full["orders"][0], "business_entity": None}
+    empty = {"orders": [], "page_complete": True, "scan_complete": True, "next_after_id": None}
+    monkeypatch.setattr(metabase_reader, "read_order_page", AsyncMock(return_value={**empty, "orders": [row]}))
+    monkeypatch.setattr(metabase_reader, "read_changed_refund_orders", AsyncMock(return_value=empty))
+    source = AsyncMock(return_value=full)
+    target = AsyncMock(side_effect=AssertionError("Outside scope"))
+    result = await runner.run_investigation(
+        None,
+        state.tenant,
+        state.run_id,
+        _state=state,
+        _clock=lambda: NOW,
+        _enabled=AsyncMock(return_value=True),
+        _source_reader=source,
+        _target_reader=target,
+    )
+    assert result["termination_reason"] == "done" and result["processed"] == 0
+    assert state.run.progress_json["outside_scope"] == 1
+    source.assert_awaited_once()
+    target.assert_not_awaited()
