@@ -187,3 +187,93 @@ async def review_status(db, tenant_id, run_id):
             for (start, end), run in sorted(slices.items())
         ],
     }
+
+
+async def review_results(db, tenant_id, run_id, *, limit=25, offset=0, status=None, search=""):
+    """Latest evidence per order within one immutable review; never sum run counters."""
+    from sqlalchemy import case, func
+
+    from app.models.transaction_ops import TransactionFinding
+
+    root = await state.get_run(db, tenant_id, run_id)
+    if not root.params_json.get("review"):
+        raise state.StateError("not_a_period_review", 422)
+    span = ReviewSpan.model_validate(root.params_json["review"])
+    f, r = TransactionFinding, TransactionRun
+    latest = (
+        select(f.id, f.run_id, f.order_reference, f.report_json, f.updated_at)
+        .join(r, (f.tenant_id == r.tenant_id) & (f.run_id == r.id))
+        .where(
+            f.tenant_id == tenant_id,
+            r.tenant_id == tenant_id,
+            r.config_id == root.config_id,
+            r.params_json["review"] == span.model_dump(mode="json"),
+        )
+        .distinct(f.order_reference)
+        .order_by(f.order_reference, f.updated_at.desc(), f.id.desc())
+        .subquery()
+    )
+    verdict = latest.c.report_json["balance"]["status"].astext
+    category = case(
+        (verdict == "matched", "matched"),
+        (
+            verdict.in_(["difference", "mismatch", "missing_in_netsuite", "ambiguous", "currency_mismatch"]),
+            "needs_review",
+        ),
+        else_="not_verified",
+    )
+    counts = (
+        (
+            await db.execute(
+                select(
+                    func.count().label("checked"),
+                    *[
+                        func.count().filter(category == name).label(name)
+                        for name in ("matched", "needs_review", "not_verified")
+                    ],
+                ).select_from(latest)
+            )
+        )
+        .mappings()
+        .one()
+    )
+    query = select(latest)
+    if status:
+        if status not in ("matched", "needs_review", "not_verified"):
+            raise state.StateError("invalid_result_status", 422)
+        query = query.where(category == status)
+    if search:
+        query = query.where(latest.c.order_reference.contains(search, autoescape=True))
+    total = await db.scalar(select(func.count()).select_from(query.subquery()))
+    rows = (
+        (
+            await db.execute(
+                query.order_by(latest.c.order_reference).limit(min(100, max(1, limit))).offset(max(0, offset))
+            )
+        )
+        .mappings()
+        .all()
+    )
+    items = []
+    for row in rows:
+        report = row["report_json"]
+        items.append(
+            {
+                "id": str(row["id"]),
+                "run_id": str(row["run_id"]),
+                "order_reference": row["order_reference"],
+                "observed_at": row["updated_at"].isoformat(),
+                "balance": report.get("balance"),
+                "case_id": report.get("case_id"),
+                "action": (report.get("comparison") or {}).get("recommended_action"),
+                "automation": report.get("automation"),
+            }
+        )
+    return {
+        "items": items,
+        "total": total,
+        "has_next": offset + len(items) < total,
+        "summary": dict(counts),
+        "scope": "period_orders_and_refund_activity",
+        "review_id": str(span.id),
+    }

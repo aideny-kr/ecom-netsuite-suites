@@ -206,3 +206,46 @@ async def investigate_case(db, tenant_id, case_id, evaluation_key, *, actor):
         RunCreate(evaluation_key=str(evaluation_key), order_references=[case.order_reference]),
         actor=actor,
     )
+
+
+async def investigate_cases(db, tenant_id, case_ids, evaluation_key, *, actor):
+    """Bulk read/proposal work only. Ownership is checked before the first queued run."""
+    from app.schemas.transaction_runs import RunCreate
+    from app.services.transaction_ops import state_service as state
+
+    await state._human(db, tenant_id, actor, "recon.run")
+    if not 1 <= len(case_ids) <= 50 or len(set(case_ids)) != len(case_ids):
+        raise state.StateError("invalid_case_selection", 422)
+    selected = [await get_case(db, tenant_id, identifier) for identifier in case_ids]
+    configs = await state.list_configs(db, tenant_id)
+    groups, blocked = {}, []
+    for case in selected:
+        matching = []
+        for config in configs:
+            scope = {
+                key: str(getattr(config, key)) if getattr(config, key) is not None else None for key in case.scope_json
+            }
+            scope["netsuite_account_id"] = scope["netsuite_account_id"].replace("_", "-").lower()
+            if scope == case.scope_json and config.enabled:
+                matching.append(config)
+        if len(matching) != 1:
+            blocked.append({"case_id": case.id, "code": "case_scope_unavailable"})
+        else:
+            groups.setdefault(matching[0].id, []).append(case)
+    runs = []
+    for config_id, cases in groups.items():
+        try:
+            run = await state.create_run(
+                db,
+                tenant_id,
+                config_id,
+                RunCreate(
+                    evaluation_key=f"cases:{evaluation_key}:{config_id}",
+                    order_references=[c.order_reference for c in cases],
+                ),
+                actor=actor,
+            )
+            runs.append({"id": run.id, "config_id": config_id, "case_ids": [c.id for c in cases]})
+        except state.StateError as exc:
+            blocked.extend({"case_id": c.id, "code": exc.code} for c in cases)
+    return {"runs": runs, "blocked": blocked}

@@ -8,7 +8,7 @@ from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import AwareDatetime, BaseModel, ConfigDict
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -240,5 +240,37 @@ async def investigate_case(case_id: UUID, request: OrderInvestigation, user: Rea
 async def review_status(run_id: UUID, user: Reader, db: Database):
     try:
         return await period_review.review_status(db, user.tenant_id, run_id)
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
+@router.get("/runs/{run_id}/review/findings")
+async def review_findings(
+    run_id: UUID,
+    user: Reader,
+    db: Database,
+    limit: Annotated[int, Query(ge=1, le=100)] = 25,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    status: Literal["matched", "needs_review", "not_verified"] | None = None,
+    search: Annotated[str, Query(max_length=100)] = "",
+):
+    try:
+        return await period_review.review_results(
+            db, user.tenant_id, run_id, limit=limit, offset=offset, status=status, search=search
+        )
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
+class CaseBatchInvestigation(OrderInvestigation):
+    case_ids: tuple[UUID, ...] = Field(min_length=1, max_length=50)
+
+
+@router.post("/cases/investigate", status_code=202)
+async def investigate_cases(request: CaseBatchInvestigation, user: Reader, db: Database):
+    try:
+        return await case_service.investigate_cases(
+            db, user.tenant_id, request.case_ids, request.evaluation_key, actor=user
+        )
     except service.StateError as exc:
         raise _http_error(exc) from None
