@@ -90,6 +90,25 @@ async def test_keyset_page_uses_sentinel_not_metabase_2000_row_exhaustion(transp
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["total", "additional_tax_total", "included_tax_total"])
+async def test_signed_order_amount_is_preserved_without_poisoning_the_scan_page(transport, field):
+    rows = [order_row(id=i) for i in range(1, 22)]
+    rows[3][field] = Decimal("-16.000001")
+    transport[1].return_value = result(reader.ORDER_FIELDS, [[r[f] for f in reader.ORDER_FIELDS] for r in rows])
+    page = await reader.read_order_page(AsyncMock(), uuid4(), BINDING, NOW.replace(day=7, hour=0), NOW, now=NOW)
+    assert len(page["orders"]) == 20
+    assert page["orders"][3][field] == "-16.000001"
+    assert page["orders"][3]["number"] == "R000000004"
+    assert page["next_after_id"] == 20 and page["scan_complete"] is False
+
+
+@pytest.mark.parametrize("amount", ["-0.01", Decimal("-16")])
+def test_refund_amount_validation_still_rejects_negative_values(amount):
+    with pytest.raises(reader.ReplicaReadError, match="invalid_replica_amount"):
+        reader._money(amount)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "overrides",
     [

@@ -98,12 +98,17 @@ def _id(value):
     raise ReplicaReadError("invalid_replica_identity")
 
 
-def _money(value):
+def _money(value, *, signed=False):
     if type(value) not in (str, int, Decimal):
         raise ReplicaReadError("inexact_replica_amount")
     try:
         amount = Decimal(value)
-        if not amount.is_finite() or amount < 0 or amount.as_tuple().exponent < -6 or amount.adjusted() > 30:
+        if (
+            not amount.is_finite()
+            or (amount < 0 and not signed)
+            or amount.as_tuple().exponent < -6
+            or amount.adjusted() > 30
+        ):
             raise ValueError()
         return format(amount, "f")
     except (ValueError, ArithmeticError):
@@ -225,7 +230,10 @@ def _order(row):
     return {
         **row,
         "id": _id(row["id"]),
-        **{key: _money(row[key]) for key in ("total", "additional_tax_total", "included_tax_total")},
+        # Scan evidence must retain negative order/adjustment values rather than
+        # abort the whole cohort. Reconciliation and repair validation decide
+        # whether such an order is supported; payments/refunds remain unsigned.
+        **{key: _money(row[key], signed=True) for key in ("total", "additional_tax_total", "included_tax_total")},
         "updated_at": _source_time(row["updated_at"]),
         "completed_at": _source_time(row["completed_at"]) if row["completed_at"] else None,
     }

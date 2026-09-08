@@ -26,6 +26,7 @@ import {
 import type { TransactionRun } from "../transaction-ops/types";
 import { BulkProposals } from "./bulk-proposals";
 import { OrdersPage } from "./orders-page";
+import { configForRun } from "./review-scope";
 import {
   useReviewRuns,
   usePeriodData,
@@ -94,6 +95,7 @@ function Workspace() {
     };
   }, []);
   const scopes = (configs.data || []).filter((c) => !entity || c.id === entity);
+  const currentConfig = (run: TransactionRun) => configForRun(configs.data || [], run);
   const startScopes = scopes.filter((c) => c.enabled);
   const reviewRuns = useMemo(
     () => (runs.data || []).filter((r) => typeof span(r).id === "string"),
@@ -101,17 +103,17 @@ function Workspace() {
   );
   const candidates = [...pinned, ...reviewRuns];
   const pinnedSelection = pinned.filter(
-    (r) => !entity || r.config_id === entity,
+    (r) => !entity || (currentConfig(r)?.id || r.config_id) === entity,
   );
   const anchor =
     pinnedSelection[0] ||
-    candidates.find((r) => scopes.some((c) => c.id === r.config_id));
+    candidates.find((r) => scopes.some((c) => c.id === currentConfig(r)?.id));
   const selectedRuns = pinnedSelection.length
     ? pinnedSelection
     : scopes.flatMap((c) => {
         const found = candidates.find(
           (r) =>
-            r.config_id === c.id &&
+            currentConfig(r)?.id === c.id &&
             span(r).start === (anchor && span(anchor).start) &&
             span(r).end === (anchor && span(anchor).end),
         );
@@ -140,7 +142,7 @@ function Workspace() {
   const rows = data.results.flatMap((q, index) =>
     (q.error ? [] : q.data?.items || []).map((row) => ({
       ...row,
-      configId: selectedRuns[index].config_id,
+      configId: currentConfig(selectedRuns[index])?.id || selectedRuns[index].config_id,
     })),
   );
   const failure =
@@ -339,8 +341,7 @@ function Workspace() {
           {data.coverage.map((q, i) => (
             <span key={selectedRuns[i].id}>
               {
-                configs.data?.find((c) => c.id === selectedRuns[i].config_id)
-                  ?.name
+                currentConfig(selectedRuns[i])?.name || "Historical scope"
               }
               :{" "}
               {q.error
@@ -662,13 +663,12 @@ function Workspace() {
               </thead>
               <tbody>
                 {(runs.data || [])
-                  .filter((r) => !entity || r.config_id === entity)
+                  .filter((r) => !entity || (currentConfig(r)?.id || r.config_id) === entity)
                   .map((r) => (
                     <tr key={r.id} className="border-b">
                       <td className="p-4">{dateLabel(r.created_at)}</td>
                       <td className="p-4">
-                        {configs.data?.find((c) => c.id === r.config_id)
-                          ?.name || "Historical scope"}
+                        {currentConfig(r)?.name || "Historical scope"}
                       </td>
                       <td className="p-4">
                         {runState(r.status, r.termination_reason)}
@@ -684,7 +684,7 @@ function Workspace() {
                           <button
                             className="text-primary underline"
                             onClick={() => {
-                              setEntity(r.config_id);
+                              setEntity(currentConfig(r)?.id || r.config_id);
                               setPinned([r]);
                               setOffset(0);
                               setTab("Orders");

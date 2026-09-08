@@ -61,6 +61,15 @@ def test_order_total_tax_and_refunds_all_agree():
     assert all(row["delta"] == "0.00" for row in result["amounts"].values())
 
 
+def test_negative_source_order_remains_unverified_instead_of_becoming_a_match():
+    source, target, config, refunds = evidence()
+    source["orders"][0]["total"] = "-16.00"
+    target["orders"][0]["header"]["total"] = "-16.00"
+    result = reconcile_order(source, target, config, refunds=refunds)
+    assert result["status"] == "incomplete"
+    assert result["missing_metrics"]
+
+
 def test_unverified_target_provider_cannot_prove_a_match():
     source, target, config, refunds = evidence()
     target["provider"] = "model_guess"

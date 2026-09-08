@@ -187,6 +187,40 @@ it("can open a historical period whose scope has since been replaced", async () 
   fireEvent.click(await screen.findByRole("button", { name: "View period" }));
   expect(await screen.findByText("R123456789")).toBeInTheDocument();
 });
+
+it("keeps a revised entity's existing period visible with its current entity name", async () => {
+  const original = vi.mocked(apiClient.get).getMockImplementation()!;
+  const config = mocks.configs[0];
+  const scope = {
+    source_connection_id: "source-a",
+    source_step_id: null,
+    netsuite_account_id: "ACCOUNT_SB1",
+    subsidiary_id: "2",
+    record_type: "salesOrder",
+  };
+  mocks.configs[0] = { ...config, ...scope };
+  vi.mocked(apiClient.get).mockImplementation(async (path: string) =>
+    path.includes("/runs?")
+      ? ([{
+          ...run,
+          tenant_id: "tenant-a",
+          config_id: "retired-scope",
+          config_snapshot: { ...scope, netsuite_account_id: "account-sb1" },
+        }] as never)
+      : original(path),
+  );
+  try {
+    mount();
+    expect(await screen.findByText("R123456789")).toBeInTheDocument();
+    expect(screen.getByTestId("stat-checked")).toHaveTextContent("8");
+    expect(screen.getByText(/Framework Inc · USD/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Review entity"), { target: { value: "scope-a" } });
+    expect(await screen.findByText("R123456789")).toBeInTheDocument();
+    expect(apiClient.get).toHaveBeenCalledWith(expect.stringContaining(`/runs/${run.id}/review/findings`));
+  } finally {
+    mocks.configs[0] = config;
+  }
+});
 it("preserves source-order browsing when reconciliation access is unavailable", () => {
   mocks.allowed = false;
   mount();
