@@ -30,7 +30,9 @@ from app.services.transaction_ops.inventory_identity import (
     source_inventory,
     unique_ownership,
 )
+from app.services.transaction_ops.metabase_reader import ReplicaBinding
 from app.services.transaction_ops.netsuite_reader import _account
+from app.services.transaction_ops.periods import ReconciliationPolicy
 
 
 class SourceTaxRule(EvidenceModel):
@@ -98,6 +100,8 @@ class NetSuiteLegacyTaxMapping(EvidenceModel):
 
 
 class TransactionMapping(EvidenceModel):
+    metabase_replica: ReplicaBinding | None = None
+    reconciliation_policy: ReconciliationPolicy | None = None
     solidus_refund_step_id: UUID | None = None
     action_mode: Literal["detect_only", "propose_actions"] = "detect_only"
     line_identity_mode: Literal["source_line_id", "inventory_units"] = "source_line_id"

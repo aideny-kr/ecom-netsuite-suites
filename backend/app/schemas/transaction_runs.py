@@ -83,11 +83,12 @@ class RunCreate(InputModel):
     order_references: tuple[str, ...] = Field(default=(), max_length=200)
     window_start: AwareDatetime | None = None
     window_end: AwareDatetime | None = None
+    window_basis: Literal["updated_at", "completed_at"] = "updated_at"
 
     @model_validator(mode="after")
     def exact_scope(self):
         if self.order_references:
-            if self.window_start is not None or self.window_end is not None:
+            if self.window_start is not None or self.window_end is not None or self.window_basis != "updated_at":
                 raise ValueError("Choose exact orders or a time window")
             if any(len(ref) > 100 or not _REFERENCE.fullmatch(ref) for ref in self.order_references):
                 raise ValueError("Full Framework order references are required")
@@ -95,9 +96,11 @@ class RunCreate(InputModel):
         elif (
             self.window_start is None
             or self.window_end is None
-            or not timedelta(0) < self.window_end - self.window_start <= timedelta(days=31)
+            or not timedelta(0)
+            < self.window_end - self.window_start
+            <= timedelta(days=32 if self.window_basis == "completed_at" else 31)
         ):
-            raise ValueError("An ordered window of at most 31 days is required")
+            raise ValueError("An ordered window of at most 31 days (32 for calendar periods) is required")
         return self
 
 
@@ -141,6 +144,7 @@ class ConfigOut(OutputModel):
     id: UUID
     tenant_id: UUID
     config_key: str
+    supersedes_config_id: UUID | None = None
     name: str
     source_step_id: UUID | None
     source_connection_id: UUID | None = None

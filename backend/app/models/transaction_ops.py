@@ -28,6 +28,13 @@ class TransactionConfig(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("tenant_id", "id"),
         UniqueConstraint("tenant_id", "config_key"),
+        UniqueConstraint("tenant_id", "supersedes_config_id", name="uq_tx_config_revision"),
+        ForeignKeyConstraint(
+            ["tenant_id", "supersedes_config_id"],
+            ["transaction_ops_configs.tenant_id", "transaction_ops_configs.id"],
+            name="fk_tx_config_revision",
+        ),
+        CheckConstraint("supersedes_config_id IS NULL OR supersedes_config_id <> id", name="ck_tx_config_revision"),
         CheckConstraint("NOT schedule_enabled OR enabled", name="ck_tx_config_schedule"),
         CheckConstraint(
             "(source_step_id IS NOT NULL) <> (source_connection_id IS NOT NULL)", name="ck_tx_config_source"
@@ -41,6 +48,7 @@ class TransactionConfig(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), index=True)
     config_key: Mapped[str] = mapped_column(String(64))
+    supersedes_config_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     name: Mapped[str] = mapped_column(String(255))
     source_step_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("celigo_flow_steps.id"))
     source_connection_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("connections.id"))

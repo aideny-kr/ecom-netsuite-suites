@@ -420,3 +420,25 @@ async def test_real_queries_do_not_recover_tenant_missing_one_flag(db, admin_use
     result = await mod.collect_due_runs(db, datetime.now(timezone.utc))
     assert result["tenants"] == result["recovered"] == 1, result
     assert publish.call_args.kwargs["kwargs"]["tenant_id"] == str(actor.tenant_id)
+
+
+async def test_calendar_policy_continues_completed_backlog_in_current_bucket(dependencies):
+    conf = config()
+    conf.mapping_json = {"reconciliation_policy": {"timezone_name": "America/Los_Angeles"}}
+    dependencies.get_config.return_value = conf
+    mod._candidate_ids.return_value = [conf.id]
+    previous = SimpleNamespace(
+        id=uuid4(),
+        created_at=NOW,
+        termination_reason="done",
+        params_json={
+            "evaluation_key": mod._bucket(NOW, conf.interval_minutes),
+            "window_start": (NOW - timedelta(days=11)).isoformat(),
+            "window_end": (NOW - timedelta(days=10)).isoformat(),
+        },
+    )
+    mod._schedule_history.return_value = (False, previous)
+    dependencies.create_run.return_value = SimpleNamespace(id=uuid4(), status="pending")
+    stats = await mod.collect_due_runs(AsyncMock(), NOW)
+    assert stats["created"] == 1
+    assert dependencies.create_run.call_args.args[3].window_end == NOW - timedelta(days=9)

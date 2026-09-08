@@ -72,7 +72,13 @@ def _initial_progress(run):
         "refund_after_id": 0,
         "refund_scan_complete": False,
         "phase": "orders",
-        "scan_mode": "keyset" if run.config_snapshot.get("source_connection_id") else "offset",
+        "scan_mode": (
+            "metabase"
+            if (run.config_snapshot.get("mapping_json") or {}).get("metabase_replica")
+            else "keyset"
+            if run.config_snapshot.get("source_connection_id")
+            else "offset"
+        ),
     }
 
 
@@ -123,6 +129,44 @@ def _page_progress(page, progress, params, config=None):
             raise ScanChangedError("source_scan_incomplete")
         progress["scan_complete"] = True
     progress["pending_refs"], progress["next_page"] = refs, next_page
+
+
+def _replica_page_progress(page, progress, params, config):
+    orders = page.get("orders")
+    complete, cursor = page.get("scan_complete"), page.get("next_after_id")
+    if (
+        page.get("page_complete") is not True
+        or not isinstance(orders, list)
+        or len(orders) > 20
+        or type(complete) is not bool
+        or (complete and cursor is not None)
+        or (not complete and (not orders or type(cursor) is not int))
+    ):
+        raise ScanChangedError("incomplete_replica_page")
+    references = []
+    basis = params.get("window_basis", "updated_at")
+    entities = config["mapping_json"].get("business_entity_subsidiaries") or {}
+    for order in orders:
+        identifier = order.get("id")
+        if isinstance(identifier, bool) or not isinstance(identifier, (str, int)) or not str(identifier).isdigit():
+            raise ScanChangedError("invalid_page_identity")
+        identifier = int(identifier)
+        observed = _time(order.get(basis))
+        if identifier <= progress["last_source_id"] or observed is None:
+            raise ScanChangedError("source_ordering_changed")
+        if not _time(params["window_start"]) <= observed < _time(params["window_end"]):
+            raise ScanChangedError("source_window_unproven")
+        progress["last_source_id"] = identifier
+        if entities.get(source_entity_key(order)) == config["subsidiary_id"]:
+            references.append(order["number"])
+        else:
+            progress["outside_scope"] = progress.get("outside_scope", 0) + 1
+    if not complete and cursor != progress["last_source_id"]:
+        raise ScanChangedError("invalid_replica_cursor")
+    progress["scan_count"] += len(orders)
+    progress["expected_total"] = progress["scan_count"] if complete else None
+    progress["scan_complete"] = complete
+    progress["pending_refs"] = references
 
 
 def build_report(source_evidence, target_evidence, config, mapping, *, now, refunds=None):
@@ -254,6 +298,7 @@ async def run_investigation(
     _clock=None,
 ):
     from app.services.ingestion.solidus_sync import save_observed_order
+    from app.services.transaction_ops import metabase_reader
     from app.services.transaction_ops.celigo_actions import MAX_READ_CALLS, read_celigo_error_evidence
     from app.services.transaction_ops.netsuite_actions import NetSuiteActionError
     from app.services.transaction_ops.netsuite_create import CreateInputError, prepare_create_input
@@ -328,20 +373,26 @@ async def run_investigation(
             if not progress["pending_refs"]:
                 if progress["scan_complete"]:
                     if (
-                        mapping.solidus_refund_step_id
+                        (mapping.solidus_refund_step_id or mapping.metabase_replica)
                         and run.params_json.get("window_start")
                         and not progress.get("refund_scan_complete")
                     ):
-                        if not await reserve(2):
+                        if not await reserve(18 if mapping.metabase_replica else 2):
                             return await finish("budget")
+                        refund_scan = (
+                            metabase_reader.read_changed_refund_orders
+                            if mapping.metabase_replica
+                            else _refund_page_reader or read_refund_order_page
+                        )
                         refund_page = await bounded_read(
-                            (_refund_page_reader or read_refund_order_page)(
+                            refund_scan(
                                 db,
                                 tenant_id,
-                                mapping.solidus_refund_step_id,
+                                mapping.metabase_replica or mapping.solidus_refund_step_id,
                                 _time(run.params_json["window_start"]),
                                 _time(run.params_json["window_end"]),
                                 after_id=progress.get("refund_after_id", 0),
+                                **({"now": clock()} if mapping.metabase_replica else {}),
                             )
                         )
                         cursor = refund_page.get("next_after_id")
@@ -366,6 +417,25 @@ async def run_investigation(
                         await save()
                         continue
                     return await finish("done")
+                if mapping.metabase_replica:
+                    if not await reserve(6):
+                        return await finish("budget")
+                    page = await bounded_read(
+                        metabase_reader.read_order_page(
+                            db,
+                            tenant_id,
+                            mapping.metabase_replica,
+                            _time(run.params_json["window_start"]),
+                            _time(run.params_json["window_end"]),
+                            after_id=progress["last_source_id"],
+                            page_size=20,
+                            basis=run.params_json.get("window_basis", "updated_at"),
+                            now=clock(),
+                        )
+                    )
+                    _replica_page_progress(page, progress, run.params_json, config)
+                    await save()
+                    continue
                 keyset = progress.get("scan_mode") == "keyset"
                 if progress["next_page"] is not None and not keyset:
                     progress["page"] = progress["next_page"]

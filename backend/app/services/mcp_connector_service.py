@@ -1,6 +1,6 @@
 import asyncio
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import structlog
 from sqlalchemy import select
@@ -298,17 +298,36 @@ async def test_mcp_connector(db: AsyncSession, connector_id: uuid.UUID, tenant_i
         connector.error_reason = None
         await db.flush()
 
+        message = f"Connected successfully. Discovered {len(tools)} tools."
+        replica = (connector.metadata_json or {}).get("transaction_replica")
+        if is_metabase(connector) and replica:
+            from app.services.transaction_ops import metabase_reader
+
+            binding = metabase_reader.ReplicaBinding.model_validate(replica)
+            if binding.connector_id != connector.id or binding.server_url != connector.server_url:
+                raise ValueError("Replica binding does not match this connection")
+            now = datetime.now(timezone.utc)
+            await metabase_reader.read_order_page(
+                db,
+                tenant_id,
+                binding.model_dump(mode="json"),
+                now - timedelta(days=1),
+                now,
+                page_size=1,
+                now=now,
+            )
+            message = "Connected successfully. Transaction replica access verified."
         return {
             "connector_id": str(connector.id),
             "status": "ok",
-            "message": f"Connected successfully. Discovered {len(tools)} tools.",
+            "message": message,
             "discovered_tools": tools,
         }
     except Exception:
         connector.last_health_check_at = datetime.now(timezone.utc)
         connector.status = "error"
         connector.error_reason = (
-            "Metabase tool discovery failed. Use Test to retry, or reconnect if authorization has expired."
+            "Metabase connection verification failed. Use Test to retry, or reconnect if authorization has expired."
             if is_metabase(connector)
             else "Tool discovery failed. Check the server URL and credential."
         )

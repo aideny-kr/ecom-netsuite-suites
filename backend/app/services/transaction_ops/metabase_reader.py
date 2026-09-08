@@ -11,14 +11,16 @@ import re
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Literal
+from urllib.parse import urlsplit
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
 
 from app.models.mcp_connector import McpConnector
 from app.services.mcp_client_service import call_external_mcp_tool
 from app.services.metabase_oauth_service import is_metabase
+from app.services.public_http import validate_endpoint
 
 ORDER_FIELDS = (
     "id",
@@ -60,6 +62,7 @@ class ReplicaReadError(ValueError):
 class ReplicaBinding(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     connector_id: UUID
+    server_url: str
     database_id: int = Field(gt=0, strict=True)
     database_name: str = Field(min_length=1, max_length=200)
     schema_name: str = Field(min_length=1, max_length=100)
@@ -70,6 +73,14 @@ class ReplicaBinding(BaseModel):
     # Metabase may label a naive PostgreSQL timestamp with its report timezone
     # without changing the stored wall value. Do not convert that label to UTC.
     timestamp_storage: Literal["utc_naive"]
+
+    @field_validator("server_url")
+    @classmethod
+    def valid_endpoint(cls, value):
+        value = validate_endpoint(value)
+        if urlsplit(value).path != "/api/metabase-mcp":
+            raise ValueError("Expected a Metabase MCP endpoint")
+        return value
 
 
 def _binding(value):
@@ -114,7 +125,7 @@ def _window(start, end):
         or not isinstance(end, datetime)
         or start.utcoffset() is None
         or end.utcoffset() is None
-        or not timedelta(0) < end - start <= timedelta(days=31)
+        or not timedelta(0) < end - start <= timedelta(days=32)
     ):
         raise ReplicaReadError("invalid_replica_window")
     return [value.astimezone(timezone.utc).replace(tzinfo=None).isoformat() for value in (start, end)]
@@ -133,7 +144,12 @@ async def _connector(db, tenant_id, binding):
             McpConnector.is_enabled.is_(True),
         )
     )
-    if not connector or not is_metabase(connector) or not connector.encrypted_credentials:
+    if (
+        not connector
+        or not is_metabase(connector)
+        or connector.server_url != binding.server_url
+        or not connector.encrypted_credentials
+    ):
         raise ReplicaReadError("replica_connection_unavailable")
     return connector
 
@@ -414,3 +430,44 @@ async def read_refund_page(db, tenant_id, binding, start, end, *, after_id=0, no
         "scan_complete": not more,
         "next_after_id": refunds[99]["id"] if more else None,
     }
+
+
+async def _by_ids(db, tenant_id, binding, table, identifiers, now):
+    identifiers = sorted({_id(value) for value in identifiers})
+    if not 1 <= len(identifiers) <= 100:
+        raise ReplicaReadError("invalid_lineage_scope")
+    rows = await _rows(
+        db,
+        tenant_id,
+        binding,
+        table,
+        [
+            ["=", {}, _field(binding, table, "id"), *identifiers],
+        ],
+        len(identifiers) + 1,
+        now=now,
+    )
+    if {_id(row["id"]) for row in rows} != set(identifiers):
+        raise ReplicaReadError("replica_lineage_incomplete")
+    return rows
+
+
+async def read_changed_refund_orders(db, tenant_id, binding, start, end, *, after_id=0, now=None):
+    """One refund page + at most two parent reads, with complete ID ownership."""
+    binding, now = _binding(binding), now or datetime.now(timezone.utc)
+    page = await read_refund_page(db, tenant_id, binding, start, end, after_id=after_id, now=now)
+    if not page["refunds"]:
+        return {**page, "orders": []}
+    payments = await _by_ids(db, tenant_id, binding, "payments", [row["payment_id"] for row in page["refunds"]], now)
+    orders = [
+        _order(row)
+        for row in await _by_ids(db, tenant_id, binding, "orders", [row["order_id"] for row in payments], now)
+    ]
+    by_order = {row["id"]: row for row in orders}
+    by_payment = {_id(row["id"]): by_order[_id(row["order_id"])] for row in payments}
+    for refund in page["refunds"]:
+        parent = by_payment[refund["payment_id"]]
+        refund["order_id"] = parent["id"]
+        refund["order_reference"] = parent["number"]
+        refund["currency"] = parent["currency"]
+    return {**page, "orders": orders}

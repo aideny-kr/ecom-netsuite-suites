@@ -171,6 +171,14 @@ async def _human(db, tenant_id, actor, permission):
 
 
 async def _check_bindings(db, tenant_id, request):
+    replica = TransactionMapping.model_validate(request.mapping_json).metabase_replica
+    if replica:
+        from app.services.transaction_ops.metabase_reader import ReplicaReadError, _connector
+
+        try:
+            await _connector(db, tenant_id, replica)
+        except ReplicaReadError:
+            raise StateError("replica_unavailable", 422) from None
     # These are local ownership/lifecycle checks. The root runner independently
     # validates live Framework/Celigo/provider configuration before any read/write.
     if request.source_connection_id is not None:
@@ -229,9 +237,21 @@ async def get_config(db, tenant_id, config_id, *, lock=False):
     return await _one(db, tenant_id, TransactionConfig, config_id, lock=lock)
 
 
+def current_config_clause():
+    successor = aliased(TransactionConfig)
+    return (
+        ~select(successor.id)
+        .where(
+            successor.tenant_id == TransactionConfig.tenant_id,
+            successor.supersedes_config_id == TransactionConfig.id,
+        )
+        .exists()
+    )
+
+
 async def list_configs(db, tenant_id, *, scheduled_only=False):
     await set_tenant_context(db, str(tenant_id))
-    query = select(TransactionConfig).where(TransactionConfig.tenant_id == tenant_id)
+    query = select(TransactionConfig).where(TransactionConfig.tenant_id == tenant_id, current_config_clause())
     if scheduled_only:
         query = query.where(TransactionConfig.enabled.is_(True), TransactionConfig.schedule_enabled.is_(True))
     return list((await db.execute(query.order_by(TransactionConfig.created_at).limit(200))).scalars())
@@ -271,6 +291,12 @@ async def create_config(db: AsyncSession, tenant_id, request: ConfigCreate, *, a
 async def control_config(db, tenant_id, config_id, request: ConfigControl, *, actor):
     row = await get_config(db, tenant_id, config_id, lock=True)
     await _human(db, tenant_id, actor, "connections.manage")
+    if request.enabled and await db.scalar(
+        select(TransactionConfig.id).where(
+            TransactionConfig.tenant_id == tenant_id, TransactionConfig.supersedes_config_id == row.id
+        )
+    ):
+        raise StateError("config_superseded", 409)
     if request.schedule_enabled and not request.enabled:
         raise StateError("disabled_config_cannot_schedule", 422)
     row.enabled, row.schedule_enabled = request.enabled, request.schedule_enabled
@@ -299,8 +325,12 @@ async def create_run(
             raise StateError("schedule_disabled")
     else:
         await _human(db, tenant_id, actor, "recon.run")
-    params = request.model_dump(mode="json")
-    key = business_digest({"config": config.config_key, "params": request.model_dump()})
+    if request.window_basis == "completed_at" and not (config.mapping_json or {}).get("metabase_replica"):
+        raise StateError("period_reader_unavailable", 422)
+    # Preserve idempotency for requests made before calendar cohorts were added.
+    excluded = {"window_basis"} if request.window_basis == "updated_at" else set()
+    params = request.model_dump(mode="json", exclude=excluded)
+    key = business_digest({"config": config.config_key, "params": request.model_dump(exclude=excluded)})
     existing = (
         await db.execute(
             select(TransactionRun).where(

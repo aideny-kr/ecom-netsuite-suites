@@ -112,7 +112,11 @@ async def _candidate_ids(db, tenant_id, now):
             config.enabled.is_(True),
             config.schedule_enabled.is_(True),
             ~active,
-            or_(latest.c.latest_at.is_(None), extract("epoch", latest.c.latest_at) < bucket_epoch),
+            or_(
+                latest.c.latest_at.is_(None),
+                extract("epoch", latest.c.latest_at) < bucket_epoch,
+                config.mapping_json["reconciliation_policy"].astext.is_not(None),
+            ),
         )
         .order_by(latest.c.latest_at.asc().nullsfirst(), config.created_at, config.id)
         .limit(_SCAN_LIMIT + 1)
@@ -149,6 +153,18 @@ def _scope(config, latest, now):
         scope = {key: params.get(key) for key in ("window_start", "window_end")}
         scope["order_references"] = params.get("order_references", [])
         return scope, latest.id if latest.termination_reason in {"budget", "stall"} else None, None
+    policy_value = (getattr(config, "mapping_json", None) or {}).get("reconciliation_policy")
+    if policy_value:
+        from app.services.transaction_ops.periods import ReconciliationPolicy, scheduled_window
+
+        try:
+            last_end = datetime.fromisoformat(latest.params_json["window_end"]) if latest else None
+            window = scheduled_window(ReconciliationPolicy.model_validate(policy_value), now, last_end)
+        except (ValueError, TypeError, KeyError):
+            return None, None, "invalid_reconciliation_policy"
+        if window is None:
+            return None, None, "waiting_for_daily_cutoff"
+        return {"window_start": window[0], "window_end": window[1]}, None, None
     start = now - timedelta(minutes=config.interval_minutes)
     if latest:
         end = latest.params_json.get("window_end")
@@ -265,11 +281,25 @@ async def collect_due_runs(db, now: datetime) -> dict:
                             latest.params_json.get("evaluation_key") == key
                             or _bucket(latest.created_at, config.interval_minutes) >= key
                         )
-                        if not config.enabled or not config.schedule_enabled or active or already_due:
+                        policy_catchup = (
+                            (getattr(config, "mapping_json", None) or {}).get("reconciliation_policy")
+                            and latest is not None
+                            and latest.termination_reason == "done"
+                        )
+                        if (
+                            not config.enabled
+                            or not config.schedule_enabled
+                            or active
+                            or (already_due and not policy_catchup)
+                        ):
                             stats["skipped"] += 1
                             await db.commit()
                             continue
                         scope, resume_id, reason = _scope(config, latest, now)
+                        if reason == "waiting_for_daily_cutoff":
+                            stats["skipped"] += 1
+                            await db.commit()
+                            continue
                         if reason:
                             stats["stalled"].append(
                                 {"tenant_id": str(tenant_id), "config_id": str(config_id), "reason": reason}

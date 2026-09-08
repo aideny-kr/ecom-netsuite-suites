@@ -13,6 +13,7 @@ NOW = datetime(2026, 9, 8, 6, tzinfo=timezone.utc)
 BINDING = {
     "connector_id": str(uuid4()),
     "timestamp_storage": "utc_naive",
+    "server_url": "https://analytics.example/api/metabase-mcp",
     "database_id": 2,
     "database_name": "Solidus (Reporting Copy)",
     "schema_name": "public",
@@ -214,3 +215,55 @@ async def test_refund_change_scan_includes_old_order_activity_and_sentinel(trans
     assert data["scan_complete"] is False
     filters = transport[1].call_args.args[2]["query"]["stages"][0]["filters"]
     assert "updated_at" in str(filters) and "completed_at" not in str(filters)
+
+
+@pytest.mark.asyncio
+async def test_refund_activity_resolves_only_owned_payment_and_order_lineage(transport):
+    refund = [7, 8, Decimal("100.01"), "rf7", "2026-01-01T00:00:00Z", "2026-09-07T01:00:00Z", None, 1]
+    payment = [8, 9, "completed", "2026-01-01T00:00:00Z", "2026-09-07T01:00:00Z"]
+    order = order_row(id=9)
+    transport[1].side_effect = [
+        result(reader.REFUND_FIELDS, [refund], "refunds"),
+        result(reader.PAYMENT_FIELDS, [payment], "payments"),
+        result(reader.ORDER_FIELDS, [[order[f] for f in reader.ORDER_FIELDS]]),
+    ]
+    page = await reader.read_changed_refund_orders(
+        AsyncMock(), uuid4(), BINDING, NOW.replace(day=7, hour=0), NOW, now=NOW
+    )
+    assert page["orders"][0]["number"] == "R000000009"
+    assert page["refunds"][0]["order_reference"] == "R000000009"
+    assert page["next_after_id"] is None
+    assert transport[1].await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_missing_refund_parent_never_advances_a_complete_window(transport):
+    refund = [7, 8, Decimal("100.01"), "rf7", "2026-01-01T00:00:00Z", "2026-09-07T01:00:00Z", None, 1]
+    transport[1].side_effect = [
+        result(reader.REFUND_FIELDS, [refund], "refunds"),
+        result(reader.PAYMENT_FIELDS, [], "payments"),
+    ]
+    with pytest.raises(reader.ReplicaReadError, match="lineage"):
+        await reader.read_changed_refund_orders(AsyncMock(), uuid4(), BINDING, NOW.replace(day=7, hour=0), NOW, now=NOW)
+
+
+@pytest.mark.asyncio
+async def test_binding_pins_endpoint_even_if_saved_connector_is_repointed(db, admin_user):
+    from app.models.mcp_connector import McpConnector
+
+    actor = admin_user[0]
+    connector = McpConnector(
+        tenant_id=actor.tenant_id,
+        provider="custom",
+        label="Replica",
+        server_url="https://replacement.example/api/metabase-mcp",
+        auth_type="oauth2",
+        status="active",
+        is_enabled=True,
+        encrypted_credentials="opaque",
+    )
+    db.add(connector)
+    await db.flush()
+    binding = reader.ReplicaBinding.model_validate({**BINDING, "connector_id": str(connector.id)})
+    with pytest.raises(reader.ReplicaReadError, match="unavailable"):
+        await reader._connector(db, actor.tenant_id, binding)

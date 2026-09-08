@@ -92,6 +92,7 @@ async def ensure_framework_configs(db, tenant_id, source_connection_id, *, actor
                 TransactionConfig.tenant_id == tenant_id,
                 TransactionConfig.source_connection_id == source.id,
                 TransactionConfig.netsuite_connection_id == target.id,
+                state_service.current_config_clause(),
             )
             .order_by(TransactionConfig.created_at)
         )

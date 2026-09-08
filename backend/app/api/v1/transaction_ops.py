@@ -24,8 +24,9 @@ from app.schemas.transaction_runs import (
     RunCreate,
     RunOut,
 )
-from app.services.transaction_ops import order_actions
+from app.services.transaction_ops import order_actions, period_review
 from app.services.transaction_ops import state_service as service
+from app.services.transaction_ops.period_review import PeriodReview
 
 router = APIRouter(
     prefix="/transaction-ops",
@@ -108,6 +109,14 @@ async def create_run(config_id: UUID, request: RunCreate, user: Reader, db: Data
         raise HTTPException(status_code=422, detail={"code": "schedule_origin_is_worker_only"})
     try:
         return await service.create_run(db, user.tenant_id, config_id, request, actor=user)
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
+@router.post("/configs/{config_id}/review", response_model=RunOut, status_code=202)
+async def review_period(config_id: UUID, request: PeriodReview, user: Reader, db: Database):
+    try:
+        return await period_review.create_review(db, user.tenant_id, config_id, request, actor=user)
     except service.StateError as exc:
         raise _http_error(exc) from None
 
