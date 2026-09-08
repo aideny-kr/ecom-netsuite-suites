@@ -38,7 +38,9 @@ def utc_now():
 
 async def create_review(db, tenant_id, config_id, request, *, actor):
     await state._human(db, tenant_id, actor, "recon.run")
-    config = await state.get_config(db, tenant_id, config_id)
+    config = await state.get_config(db, tenant_id, config_id, lock=True)
+    if not config.enabled:
+        raise state.StateError("config_disabled")
     try:
         mapping = TransactionMapping.model_validate(config.mapping_json)
         policy = mapping.reconciliation_policy or ReconciliationPolicy()
@@ -48,6 +50,52 @@ async def create_review(db, tenant_id, config_id, request, *, actor):
     except ValueError:
         raise state.StateError("invalid_review_period", 422) from None
     span = ReviewSpan(id=request.evaluation_key, start=scope["window_start"], end=scope["window_end"])
+    contract = span.model_dump(mode="json")
+    same_period = select(TransactionRun).where(
+        TransactionRun.tenant_id == tenant_id,
+        TransactionRun.config_id == config_id,
+        TransactionRun.params_json["review"]["start"].astext == contract["start"],
+        TransactionRun.params_json["review"]["end"].astext == contract["end"],
+    )
+    # A retried HTTP request must return the same attempt even after it finishes.
+    existing = await db.scalar(
+        same_period.where(TransactionRun.params_json["evaluation_key"].astext == str(request.evaluation_key)).limit(1)
+    )
+    if existing:
+        await state._commit(db, tenant_id)
+        return existing
+    previous = await db.scalar(
+        same_period.order_by(TransactionRun.created_at.desc(), TransactionRun.id.desc()).limit(1)
+    )
+    summary = None
+    if previous:
+        summary = await review_status(db, tenant_id, previous.id)
+        previous = await state.get_run(db, tenant_id, UUID(summary["current_run_id"]))
+    if previous and previous.status in ("pending", "running"):
+        raise state.StateError("review_already_running")
+    if previous and previous.status == "finished" and previous.termination_reason in ("error", "budget", "stall"):
+        active = await db.scalar(
+            select(TransactionRun.id)
+            .where(
+                TransactionRun.tenant_id == tenant_id,
+                TransactionRun.config_id == config_id,
+                TransactionRun.status.in_(("pending", "running")),
+            )
+            .limit(1)
+        )
+        if active:
+            raise state.StateError("review_already_running")
+        if summary["run_count"] >= 512:
+            raise state.StateError("review_history_limit")
+        return await state.create_run(
+            db,
+            tenant_id,
+            config_id,
+            RunCreate(**{**previous.params_json, "origin": "manual", "evaluation_key": str(request.evaluation_key)}),
+            actor=actor,
+            resume_from_run_id=previous.id,
+            human_retry=True,
+        )
     scope["window_end"] = min(span.end, span.start + timedelta(days=1))
     return await state.create_run(
         db,
@@ -120,6 +168,10 @@ async def continue_review(db, tenant_id, run_id):
     return await state.create_run(db, tenant_id, config.id, request, actor=actor)
 
 
+def _slice_rank(run):
+    return (run.progress_json.get("review_attempt", 0), run.progress_json.get("continuation_part", 1))
+
+
 async def review_status(db, tenant_id, run_id):
     root = await state.get_run(db, tenant_id, run_id)
     if not root.params_json.get("review"):
@@ -146,8 +198,7 @@ async def review_status(db, tenant_id, run_id):
         params = run.params_json
         key = (datetime.fromisoformat(params["window_start"]), datetime.fromisoformat(params["window_end"]))
         previous = slices.get(key)
-        part = run.progress_json.get("continuation_part", 1)
-        if previous is None or part > previous.progress_json.get("continuation_part", 1):
+        if previous is None or _slice_rank(run) > _slice_rank(previous):
             slices[key] = run
     completed_until = span.start
     completed_slices = 0
@@ -175,7 +226,7 @@ async def review_status(db, tenant_id, run_id):
         "completed_slices": completed_slices,
         "run_count": len(runs[:512]),
         "truncated": len(runs) > 512,
-        "current_run_id": str(active.id) if active else str(runs[-1].id),
+        "current_run_id": str(active.id) if active else str(slices[max(slices)].id),
         "slices": [
             {
                 "start": start.isoformat(),

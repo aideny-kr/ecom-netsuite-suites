@@ -315,8 +315,13 @@ async def create_run(
     now=None,
     resume_from_run_id=None,
     automatic_continuation=False,
+    human_retry=False,
 ):
     now = _clock(now)
+    if human_retry and (
+        request.origin != "manual" or automatic_continuation or not request.review or resume_from_run_id is None
+    ):
+        raise StateError("invalid_run_continuation")
     config = await get_config(db, tenant_id, config_id, lock=True)
     if not config.enabled:
         raise StateError("config_disabled")
@@ -353,7 +358,8 @@ async def create_run(
         new_scope = {k: v for k, v in params.items() if k not in {"evaluation_key", "origin"}}
         if (
             previous.config_id != config.id
-            or previous.termination_reason not in {"budget", "stall"}
+            or previous.status != "finished"
+            or previous.termination_reason not in ({"budget", "stall", "error"} if human_retry else {"budget", "stall"})
             or previous_scope != new_scope
         ):
             raise StateError("invalid_run_continuation")
@@ -361,6 +367,26 @@ async def create_run(
         for field in list(initial_progress):
             if field.startswith("continuation_"):
                 initial_progress.pop(field)
+        if human_retry:
+            attempt = initial_progress.get("review_attempt", 0)
+            if type(attempt) is not int or not 0 <= attempt < 512:
+                raise StateError("invalid_run_continuation")
+            initial_progress.update(
+                review_attempt=attempt + 1,
+                continuation_of=str(previous.id),
+                # Cumulative evidence survives, but it is not new productivity
+                # that can authorize an unattended continuation of this retry.
+                continuation_baseline={
+                    key: initial_progress.get(key, 0)
+                    for key in (
+                        "processed",
+                        "scan_count",
+                        "refund_scan_count",
+                        "outside_scope",
+                        "destination_scan_count",
+                    )
+                },
+            )
         if automatic_continuation:
             from app.services.transaction_ops.continuation import next_metadata
 
@@ -388,6 +414,8 @@ async def create_run(
         initiated_by=actor.id if actor else None,
         progress_json=initial_progress,
     )
+    if human_retry:
+        row.created_at = now
     db.add(row)
     await db.flush()
     await _audit(db, tenant_id, "run.create", row, actor)
