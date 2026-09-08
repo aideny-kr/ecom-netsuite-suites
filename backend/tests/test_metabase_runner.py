@@ -148,3 +148,41 @@ async def test_config_snapshot_preserves_owned_replica_binding(db, admin_user):
         db, actor.tenant_id, config.id, RunCreate(evaluation_key="replica", order_references=[REF]), actor=actor
     )
     assert run.config_snapshot["mapping_json"]["metabase_replica"] == mapping["metabase_replica"]
+
+
+@pytest.mark.asyncio
+async def test_destination_only_change_rechecks_an_old_source_order(monkeypatch):
+    state = configured()
+    state.run.config_snapshot["mapping_json"]["reconciliation_policy"] = {}
+    empty = {"orders": [], "page_complete": True, "scan_complete": True, "next_after_id": None}
+    monkeypatch.setattr(metabase_reader, "read_order_page", AsyncMock(return_value=empty))
+    monkeypatch.setattr(metabase_reader, "read_changed_refund_orders", AsyncMock(return_value=empty))
+    native = AsyncMock(
+        return_value={
+            **empty,
+            "orders": [{"id": 500, "number": REF, "updated_at": (NOW - timedelta(minutes=30)).isoformat()}],
+        }
+    )
+    old_source = source_order()
+    old_source["orders"][0]["updated_at"] = (NOW - timedelta(days=90)).isoformat()
+    canonical = AsyncMock(return_value=old_source)
+    result = await runner.run_investigation(
+        None,
+        state.tenant,
+        state.run_id,
+        _state=state,
+        _clock=lambda: NOW,
+        _enabled=AsyncMock(return_value=True),
+        _source_reader=canonical,
+        _target_reader=AsyncMock(return_value=missing_target()),
+        _source_refunds_reader=AsyncMock(
+            return_value={"complete": True, "order_reference": REF, "currency": "USD", "amount": "0"}
+        ),
+        _order_mirror=AsyncMock(),
+        _destination_page_reader=native,
+    )
+    assert result["termination_reason"] == "done" and result["processed"] == 1
+    assert state.run.progress_json["destination_scan_complete"] is True
+    assert state.run.progress_json["destination_scan_count"] == 1
+    canonical.assert_awaited_once()
+    native.assert_awaited_once()

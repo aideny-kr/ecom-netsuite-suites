@@ -54,7 +54,13 @@ def next_metadata(previous, now):
         raise ValueError("cycle_expired")
     baseline = progress.get("continuation_baseline") or {}
     counts = {key: progress.get(key, 0) for key in ("processed", "scan_count")}
-    counts.update({key: progress[key] for key in ("refund_scan_count", "outside_scope") if key in progress})
+    counts.update(
+        {
+            key: progress[key]
+            for key in ("refund_scan_count", "outside_scope", "destination_scan_count")
+            if key in progress
+        }
+    )
     if not any(counts[key] > baseline.get(key, 0) for key in counts) or progress.get("restart_scan"):
         raise ValueError("no_progress")
     return {

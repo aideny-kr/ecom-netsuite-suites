@@ -213,3 +213,25 @@ async def test_finding_cannot_attach_another_order_or_caller_case_id(db, admin_u
     body["case_id"] = str(uuid4())
     finding = await observe(db, actor, config, body, NOW)
     assert finding.report_json["case_id"] != body["case_id"]
+
+
+@pytest.mark.asyncio
+async def test_intermediate_refund_collection_does_not_open_an_exception(db, admin_user):
+    actor = admin_user[0]
+    config = await seed_config(db, actor.tenant_id, actor)
+    run = await state.create_run(
+        db,
+        actor.tenant_id,
+        config.id,
+        RunCreate(evaluation_key="collecting", order_references=[REF]),
+        actor=actor,
+        now=NOW,
+    )
+    token = await state.claim_run(db, actor.tenant_id, run.id, now=NOW)
+    body = report("incomplete")
+    body["balance"]["missing_metrics"] = ["refunds"]
+    await state.record_finding(db, actor.tenant_id, run.id, REF, body, lease_token=token, now=NOW, final=False)
+    assert not await case_service.list_cases(db, actor.tenant_id)
+    assert len(await state.list_findings(db, actor.tenant_id, run.id)) == 1
+    await state.record_finding(db, actor.tenant_id, run.id, REF, report("matched"), lease_token=token, now=NOW)
+    assert not await case_service.list_cases(db, actor.tenant_id)

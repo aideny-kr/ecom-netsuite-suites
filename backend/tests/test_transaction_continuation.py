@@ -100,3 +100,21 @@ async def test_run_api_links_to_its_continuation_without_changing_terminal_evide
     assert response.status_code == 200
     assert response.json()["continuation_run_id"] == str(child.id)
     assert "continuation_run_id" not in response.json()["progress_json"]
+
+
+def test_destination_cursor_progress_allows_bounded_continuation():
+    from types import SimpleNamespace
+
+    now = datetime.now(timezone.utc)
+    prior = SimpleNamespace(
+        id=uuid4(),
+        created_at=now,
+        progress_json={
+            "processed": 5,
+            "scan_count": 20,
+            "destination_scan_count": 40,
+            "continuation_baseline": {"processed": 5, "scan_count": 20, "destination_scan_count": 20},
+        },
+    )
+    metadata = continuation.next_metadata(prior, now)
+    assert metadata["continuation_baseline"]["destination_scan_count"] == 40

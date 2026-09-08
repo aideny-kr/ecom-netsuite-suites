@@ -98,6 +98,7 @@ async def _recovery_ids(db, tenant_id, now):
                     or_(
                         run.progress_json["processed"].astext.notin_(("0", "")),
                         run.progress_json["scan_count"].astext.notin_(("0", "")),
+                        run.progress_json["destination_scan_count"].astext.notin_(("0", "")),
                     ),
                     ~has_child,
                     ~blocked,

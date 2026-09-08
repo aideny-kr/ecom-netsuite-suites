@@ -558,7 +558,7 @@ async def list_proposals(db, tenant_id, *, run_id=None, status=None, limit=100, 
     )
 
 
-async def record_finding(db, tenant_id, run_id, order_reference, report_json, *, lease_token, now=None):
+async def record_finding(db, tenant_id, run_id, order_reference, report_json, *, lease_token, now=None, final=True):
     now = _clock(now)
     request = FindingReport(order_reference=order_reference, report_json=report_json)
     if request.report_json.get("order_reference", order_reference) != order_reference:
@@ -586,7 +586,7 @@ async def record_finding(db, tenant_id, run_id, order_reference, report_json, *,
     await db.flush()
     from app.services.transaction_ops.case_service import observe_finding
 
-    case = await observe_finding(db, tenant_id, run, row, now=now)
+    case = await observe_finding(db, tenant_id, run, row, now=now) if final else None
     if case is not None:
         row.report_json = {**row.report_json, "case_id": str(case.id)}
         await db.flush()

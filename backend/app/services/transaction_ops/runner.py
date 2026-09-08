@@ -289,6 +289,7 @@ async def run_investigation(
     _target_refunds_reader=None,
     _refund_page_reader=None,
     _order_mirror=None,
+    _destination_page_reader=None,
     _target_reader=None,
     _page_reader=None,
     _guard_reader=None,
@@ -301,6 +302,7 @@ async def run_investigation(
     from app.services.transaction_ops import metabase_reader
     from app.services.transaction_ops.celigo_actions import MAX_READ_CALLS, read_celigo_error_evidence
     from app.services.transaction_ops.netsuite_actions import NetSuiteActionError
+    from app.services.transaction_ops.netsuite_changes import read_changed_orders
     from app.services.transaction_ops.netsuite_create import CreateInputError, prepare_create_input
     from app.services.transaction_ops.netsuite_reader import read_netsuite_order
     from app.services.transaction_ops.netsuite_refunds import MAX_REFUND_CALLS, read_netsuite_refunds
@@ -416,6 +418,68 @@ async def run_investigation(
                         progress["refund_after_id"] = cursor or progress.get("refund_after_id", 0)
                         await save()
                         continue
+                    if (
+                        mapping.metabase_replica
+                        and mapping.reconciliation_policy is not None
+                        and run.params_json.get("window_start")
+                        and run.params_json.get("window_basis", "updated_at") == "updated_at"
+                        and not progress.get("destination_scan_complete")
+                    ):
+                        if not await reserve(4):
+                            return await finish("budget")
+                        page = await bounded_read(
+                            (_destination_page_reader or read_changed_orders)(
+                                db,
+                                tenant_id,
+                                UUID(config["netsuite_connection_id"]),
+                                config["netsuite_account_id"],
+                                config["subsidiary_id"],
+                                mapping.reference_field,
+                                _time(run.params_json["window_start"]),
+                                _time(run.params_json["window_end"]),
+                                after_id=progress.get("destination_after_id", 0),
+                                page_size=20,
+                            )
+                        )
+                        rows, cursor, complete = (
+                            page.get("orders"),
+                            page.get("next_after_id"),
+                            page.get("scan_complete"),
+                        )
+                        if (
+                            page.get("page_complete") is not True
+                            or not isinstance(rows, list)
+                            or len(rows) > 20
+                            or type(complete) is not bool
+                            or (complete and cursor is not None)
+                            or (not complete and (not rows or type(cursor) is not int))
+                        ):
+                            raise ScanChangedError("destination_page_incomplete")
+                        last = progress.get("destination_after_id", 0)
+                        for row in rows:
+                            identifier = row.get("id")
+                            modified = _time(row.get("updated_at"))
+                            if (
+                                type(identifier) is not int
+                                or identifier <= last
+                                or modified is None
+                                or not _time(run.params_json["window_start"])
+                                <= modified
+                                < _time(run.params_json["window_end"])
+                            ):
+                                raise ScanChangedError("destination_cursor_unproven")
+                            last = identifier
+                        if not complete and cursor != last:
+                            raise ScanChangedError("destination_cursor_unproven")
+                        progress["pending_refs"] = await state.unseen_references(
+                            db, tenant_id, run_id, list(dict.fromkeys(row["number"] for row in rows))
+                        )
+                        progress["destination_after_id"] = last
+                        progress["destination_scan_count"] = progress.get("destination_scan_count", 0) + len(rows)
+                        progress["destination_scan_complete"] = complete
+                        progress["phase"] = "destination"
+                        await save()
+                        continue
                     return await finish("done")
                 if mapping.metabase_replica:
                     if not await reserve(6):
@@ -478,7 +542,8 @@ async def run_investigation(
                     progress["pending_refs"] = progress["pending_refs"][1:]
                     await save()
                     continue
-                raise SourceScopeError
+                if progress.get("phase") != "destination":
+                    raise SourceScopeError
             if direct_source:
                 await (_order_mirror or save_observed_order)(
                     db, tenant_id, direct_source["source_connection_id"], orders[0], _time(source["read_at"])
@@ -500,7 +565,10 @@ async def run_investigation(
             if mapping.solidus_refund_step_id:
                 # Preserve known amounts before extra reads. An exhausted refund
                 # budget must not discard the already-collected order evidence.
-                await state.record_finding(db, tenant_id, run_id, reference, report, lease_token=token, now=clock())
+                # Collection checkpoints do not create or resolve exception cases.
+                await state.record_finding(
+                    db, tenant_id, run_id, reference, report, lease_token=token, now=clock(), final=False
+                )
                 refunds = {}
                 if not await reserve(2):
                     return await finish("budget")
