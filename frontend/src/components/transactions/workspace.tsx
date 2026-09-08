@@ -53,6 +53,8 @@ function span(run: TransactionRun) {
 }
 export function TransactionWorkspace() {
   const access = useTransactionAccess();
+  if (!access.allowed && !access.loading && !access.error)
+    return <OrdersPage key={access.tenantId} />;
   return (
     <TransactionAccessBoundary>
       <Workspace key={access.tenantId} />

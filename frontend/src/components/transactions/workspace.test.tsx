@@ -187,3 +187,9 @@ it("can open a historical period whose scope has since been replaced", async () 
   fireEvent.click(await screen.findByRole("button", { name: "View period" }));
   expect(await screen.findByText("R123456789")).toBeInTheDocument();
 });
+it("preserves source-order browsing when reconciliation access is unavailable", () => {
+  mocks.allowed = false;
+  mount();
+  expect(screen.getByText("Imported source orders")).toBeInTheDocument();
+  expect(apiClient.get).not.toHaveBeenCalled();
+});
