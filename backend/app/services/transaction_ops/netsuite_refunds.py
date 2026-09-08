@@ -8,6 +8,7 @@ from decimal import Decimal
 
 from app.schemas.transaction_ops import _decimal
 from app.services.transaction_ops.netsuite_reader import _account, _collection, _id, _sublist, authenticated_reader
+from app.services.transaction_ops.netsuite_refund_requests import read_request_links, verify_request_allocations
 
 MAX_REFUND_CALLS = 24
 MAX_DOCUMENTS = 100
@@ -67,7 +68,9 @@ async def read_netsuite_refunds(
         async with authenticated_reader(
             db, tenant_id, connection_id, account, client=client, max_api_calls=MAX_REFUND_CALLS
         ) as reader:
-            result = await collect_refunds(reader, order["record_id"], subsidiary_id, currency_id)
+            result = await collect_refunds(
+                reader, order["record_id"], subsidiary_id, currency_id, order_reference=order_reference
+            )
             return {
                 **result,
                 "amount": str(result["amount"]),
@@ -107,7 +110,7 @@ def _positive(value):
     return amount
 
 
-async def collect_refunds(reader, order_id, subsidiary_id, currency_id):
+async def collect_refunds(reader, order_id, subsidiary_id, currency_id, *, order_reference):
     if any(_id(value) is None for value in (order_id, subsidiary_id, currency_id)):
         raise ValueError("invalid_refund_scope")
     calls = 0
@@ -119,8 +122,13 @@ async def collect_refunds(reader, order_id, subsidiary_id, currency_id):
         calls += 1
         return await reader.request(*args, **kwargs)
 
-    frontier, visited, reachable = {order_id}, set(), {order_id}
-    nodes, edges = {}, set()
+    nodes, request_links, recheck_links = await read_request_links(
+        request, order_id, subsidiary_id, currency_id, order_reference
+    )
+    # Custom ownership is additive. Standard upstream links are still traversed
+    # and can veto a conflicting/shared credit; application proof stays native.
+    frontier, visited, reachable = {order_id, *nodes}, set(), {order_id, *nodes}
+    edges = {(order_id, credit, "SalesOrd", "CustCred") for credit in nodes}
     allocations = defaultdict(set)
     cash_refunds = set()
     for _ in range(MAX_DEPTH):
@@ -178,7 +186,7 @@ async def collect_refunds(reader, order_id, subsidiary_id, currency_id):
     if any(not documents <= owned for documents in allocations.values()) or not cash_refunds <= owned:
         raise ValueError("refund_allocation_ambiguous")
 
-    total, included = Decimal(0), []
+    total, included, amounts = Decimal(0), [], {}
     for identifier in sorted(set(allocations) | cash_refunds, key=int):
         metadata = nodes[identifier]
         if metadata["voided"] == "T":
@@ -219,4 +227,7 @@ async def collect_refunds(reader, order_id, subsidiary_id, currency_id):
             amount = this_order
         total += amount
         included.append(identifier)
-    return {"amount": total, "refund_count": len(included), "record_ids": included}
+        amounts[identifier] = amount
+    await recheck_links()
+    verify_request_allocations(request_links, allocations, amounts)
+    return {"amount": total, "refund_count": len(included), "record_ids": included, "request_links": request_links}

@@ -51,6 +51,8 @@ class Reader:
         if method == "GET":
             return deepcopy(self.record)
         assert path == "/query/v1/suiteql" and kwargs["params"]["limit"] <= 201
+        if "customrecord_fw_refund_requests" in kwargs["body"]["q"]:
+            return {"items": [], "count": 0, "totalResults": 0, "hasMore": False}
         frontier = set(re.search(r"l.previousdoc IN \(([^)]+)\)", kwargs["body"]["q"])[1].split(","))
         rows = [row for row in self.edges if row["previousdoc"] in frontier or row["nextdoc"] in frontier]
         return {"items": deepcopy(rows), "count": len(rows), "totalResults": len(rows), "hasMore": not self.complete}
@@ -58,7 +60,7 @@ class Reader:
 
 async def test_deposit_refund_uses_reverse_payment_link_and_only_this_orders_applied_amount():
     reader = Reader()
-    result = await collect_refunds(reader, "1", "1", "1")
+    result = await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
     assert result["amount"] == Decimal("100.00") and result["refund_count"] == 1
     assert result["record_ids"] == ["4"]
     assert reader.calls <= 24
@@ -67,7 +69,7 @@ async def test_deposit_refund_uses_reverse_payment_link_and_only_this_orders_app
 async def test_complete_empty_related_graph_proves_zero():
     reader = Reader()
     reader.edges = []
-    assert (await collect_refunds(reader, "1", "1", "1"))["amount"] == 0
+    assert (await collect_refunds(reader, "1", "1", "1", order_reference="R123456789"))["amount"] == 0
 
 
 @pytest.mark.parametrize(
@@ -88,13 +90,13 @@ async def test_incomplete_or_ambiguous_allocations_never_prove_a_refund_amount(f
     else:
         reader.record["apply"]["items"].append(deepcopy(reader.record["apply"]["items"][0]))
     with pytest.raises(ValueError):
-        await collect_refunds(reader, "1", "1", "1")
+        await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
 
 
 async def test_voided_refund_does_not_count_as_returned_funds_in_netsuite():
     reader = Reader()
     reader.edges[-1]["previousvoided"] = "T"
-    assert (await collect_refunds(reader, "1", "1", "1"))["amount"] == 0
+    assert (await collect_refunds(reader, "1", "1", "1", order_reference="R123456789"))["amount"] == 0
 
 
 async def test_credit_refunds_use_the_same_exact_allocation_and_shared_invoices_are_unknown():
@@ -104,10 +106,10 @@ async def test_credit_refunds_use_the_same_exact_allocation_and_shared_invoices_
         edge("2", "3", "CustInvc", "CustCred"),
         edge("4", "3", "CustRfnd", "CustCred"),
     ]
-    assert (await collect_refunds(reader, "1", "1", "1"))["amount"] == Decimal("100.00")
+    assert (await collect_refunds(reader, "1", "1", "1", order_reference="R123456789"))["amount"] == Decimal("100.00")
     reader.edges.append(edge("900", "2", "SalesOrd", "CustInvc"))
     with pytest.raises(ValueError):
-        await collect_refunds(reader, "1", "1", "1")
+        await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
 
 
 async def test_many_refunds_stop_within_the_native_read_budget():
@@ -125,7 +127,7 @@ async def test_many_refunds_stop_within_the_native_read_budget():
 
     reader.request = request
     with pytest.raises(ValueError, match="budget"):
-        await collect_refunds(reader, "1", "1", "1")
+        await collect_refunds(reader, "1", "1", "1", order_reference="R123456789")
     assert reader.calls <= MAX_REFUND_CALLS
 
 
