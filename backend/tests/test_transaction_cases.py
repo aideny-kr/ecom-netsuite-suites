@@ -235,3 +235,23 @@ async def test_intermediate_refund_collection_does_not_open_an_exception(db, adm
     assert len(await state.list_findings(db, actor.tenant_id, run.id)) == 1
     await state.record_finding(db, actor.tenant_id, run.id, REF, report("matched"), lease_token=token, now=NOW)
     assert not await case_service.list_cases(db, actor.tenant_id)
+
+
+@pytest.mark.parametrize("limits", [None, {"code": "detailed_evidence_unavailable"}, {"code": "evidence_size_limit"}])
+def test_proven_financial_match_clears_case_without_granting_write_readiness(limits):
+    evidence = report("matched")
+    evidence["comparison"] = {
+        "recommended_action": "gather_evidence",
+        "findings": [{"code": "tax_detail_incomplete"}],
+        "differences": [{"field": "tax", "source": "2", "target": "0"}],
+    }
+    if limits:
+        evidence["evidence_limits"] = limits
+    assert case_service._cleared(evidence, NOW)
+    assert evidence["comparison"]["recommended_action"] == "gather_evidence"
+
+
+def test_unknown_coverage_limit_cannot_close_financial_case():
+    evidence = report("matched")
+    evidence["evidence_limits"] = {"code": "refund_page_incomplete"}
+    assert not case_service._cleared(evidence, NOW)

@@ -14,20 +14,17 @@ from app.models.transaction_ops import TransactionCase, TransactionCaseObservati
 def _cleared(report, now):
     try:
         balance = report["balance"]
-        comparison = report["comparison"]
-        # Matched closed/refunded records need no monetary repair. Preserve the
-        # separate write-readiness verdict; reconciliation never grants a write.
-        state_only = (
-            comparison["recommended_action"] == "human_review"
-            and comparison["findings"]
-            and all(f["code"] == "record_state_requires_review" for f in comparison["findings"])
-            and not comparison.get("differences")
-        )
+        # Financial matching is independent of repair readiness. Detail-only
+        # limits and write restrictions remain in the report and planner.
+        limits = report.get("evidence_limits")
+        detail_only = isinstance(limits, dict) and limits.get("code") in {
+            "detailed_evidence_unavailable",
+            "evidence_size_limit",
+        }
         if (
             balance["status"] != "matched"
             or balance["missing_metrics"]
-            or report.get("evidence_limits")
-            or (not state_only and (comparison["recommended_action"] != "no_action" or comparison["findings"]))
+            or (limits and not detail_only)
             or len(report["targets"]) != 1
             or report["lookup"].get("complete") is not True
             or report["lookup"].get("authoritative") is not True

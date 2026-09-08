@@ -10,6 +10,7 @@ from decimal import Decimal, DecimalException, localcontext
 from app.schemas.transaction_ops import _decimal
 from app.services.transaction_ops.netsuite_reader import _account
 from app.services.transaction_ops.normalization import source_entity_key
+from app.services.transaction_ops.service_order_reconciliation import service_order_offset
 
 _METRICS = ("order_total", "tax", "refunds")
 
@@ -113,6 +114,18 @@ def _reconcile(source_evidence, target_evidence, config, refunds):
             _refund(refunds.get("target"), reference, currency, precision),
         ),
     }
+    offset = service_order_offset(source, header, tax, precision)
+    if offset:
+        result["adjustments"] = [offset]
+        result["original_amounts"] = {
+            key: {
+                "source": f"{left:.{precision}f}" if left is not None else None,
+                "target": f"{right:.{precision}f}" if right is not None else None,
+                "delta": f"{left - right:.{precision}f}" if left is not None and right is not None else None,
+            }
+            for key, (left, right) in values.items()
+        }
+        values["tax"] = (Decimal(0), values["tax"][1])
     missing, differences = [], []
     for key, (left, right) in values.items():
         delta = left - right if left is not None and right is not None else None
@@ -131,5 +144,5 @@ def _reconcile(source_evidence, target_evidence, config, refunds):
     elif missing:
         result.update(status="incomplete", reason="amount_evidence_unavailable")
     else:
-        result.update(status="matched", reason="all_amounts_agree")
+        result.update(status="matched", reason="verified_adjustments_agree" if offset else "all_amounts_agree")
     return result
