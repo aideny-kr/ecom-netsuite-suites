@@ -239,6 +239,8 @@ async def call_external_mcp_tool(
     tool_name: str,
     tool_params: dict | None = None,
     db: AsyncSession | None = None,
+    *,
+    parse_decimal: bool = False,
 ) -> dict:
     """Call a tool on an external MCP server and return the parsed result."""
 
@@ -378,6 +380,10 @@ async def call_external_mcp_tool(
 
     raw_text = text_parts[0]
     try:
+        if parse_decimal:
+            from decimal import Decimal
+
+            return json.loads(raw_text, parse_float=Decimal)
         return json.loads(raw_text)
     except json.JSONDecodeError:
         return {"result": raw_text}
