@@ -65,23 +65,31 @@ def service_order_offset(source, header, tax, precision):
             or included > shipping
         ):
             return None
-        if items <= 0 or shipping < 0 or money(source["adjustment_total"]) != -items - shipping:
+        if items < 0 or shipping < 0 or money(source["adjustment_total"]) != -items - shipping:
             return None
-        if len(source["adjustments"]) != 1:
+        offsets = source["adjustments"]
+        if not isinstance(offsets, list) or not 1 <= len(offsets) <= 100:
             return None
-        rma = source["adjustments"][0]
-        if (
-            rma["finalized"] is not True
-            or rma.get("eligible") is False
-            or rma["source_type"] is not None
-            or rma["adjustable_type"] != "Spree::Order"
-            or rma["adjustable_id"] != source["id"]
-            or not isinstance(rma["id"], str)
-            or not rma["id"].isdigit()
-            or money(rma["amount"]) != -(items + shipping + additional)
-        ):
+        seen, line_ids, shipment_ids = set(), set(), set()
+        offset_total = Decimal(0)
+        for offset in offsets:
+            amount = money(offset["amount"])
+            if (
+                offset["finalized"] is not True
+                or offset.get("eligible") is False
+                or offset["source_type"] is not None
+                or offset["adjustable_type"] != "Spree::Order"
+                or offset["adjustable_id"] != source["id"]
+                or not isinstance(offset["id"], str)
+                or not offset["id"].isdigit()
+                or offset["id"] in seen
+                or amount >= 0
+            ):
+                return None
+            seen.add(offset["id"])
+            offset_total += amount
+        if offset_total != -(items + shipping + additional):
             return None
-        seen, line_ids, shipment_ids = {rma["id"]}, set(), set()
         line_total = shipping_total = shipping_tax = Decimal(0)
         if not source["line_items"] or not source["shipments"]:
             return None
@@ -121,8 +129,9 @@ def service_order_offset(source, header, tax, precision):
             return None
         return {
             "kind": "service_order_full_offset",
-            "source_adjustment_id": rma["id"],
-            "source_adjustment_amount": f"{money(rma['amount']):.{precision}f}",
+            "source_adjustment_id": offsets[0]["id"] if len(offsets) == 1 else None,
+            "source_adjustment_ids": [offset["id"] for offset in offsets],
+            "source_adjustment_amount": f"{offset_total:.{precision}f}",
             "source_shipping_tax_offset": f"{tax:.{precision}f}",
             "target_record_id": header["id"],
             "target_discount_item_id": header["discountItem"]["id"],

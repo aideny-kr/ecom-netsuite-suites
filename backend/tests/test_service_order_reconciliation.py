@@ -169,3 +169,27 @@ def test_full_manual_service_offset_is_proven_by_amounts_not_a_free_text_label()
     result = reconcile_order(source, target, config, refunds=refunds)
     assert result["status"] == "matched"
     assert "Manual service adjustment" not in str(result)
+
+
+def test_free_replacement_items_with_fully_offset_shipping_tax_match():
+    source, target, config, refunds = service_evidence()
+    s = source["orders"][0]
+    s.update(item_total="0", adjustment_total="-10")
+    s["line_items"][0].update(price="0", total="0")
+    s["adjustments"][0]["amount"] = "-12"
+    target["orders"][0]["header"].update(subtotal="0", discountTotal="0")
+    assert reconcile_order(source, target, config, refunds=refunds)["status"] == "matched"
+
+
+def test_multiple_finalized_manual_offsets_must_sum_to_the_full_service_charge():
+    source, target, config, refunds = service_evidence()
+    a = source["orders"][0]["adjustments"]
+    a[0]["amount"] = "-90"
+    a.append({**a[0], "id": "24", "amount": "-2"})
+    result = reconcile_order(source, target, config, refunds=refunds)
+    assert result["status"] == "matched"
+    assert result["adjustments"][0]["source_adjustment_ids"] == ["21", "24"]
+    a[1]["amount"] = "-1"
+    assert reconcile_order(source, target, config, refunds=refunds)["status"] == "difference"
+    a[1].update(amount="-2", finalized=False)
+    assert reconcile_order(source, target, config, refunds=refunds)["status"] == "difference"
