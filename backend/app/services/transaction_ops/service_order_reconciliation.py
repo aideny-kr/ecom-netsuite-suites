@@ -28,7 +28,7 @@ def service_order_offset(source, header, tax, precision):
                 or entry["source_type"] != "Spree::TaxRate"
                 or entry["finalized"] is not True
                 or entry.get("eligible") is False
-                or entry.get("included") is True
+                or ("included" in entry and entry["included"] is not (included > 0))
             ):
                 raise ValueError("unproven_service_tax")
             seen.add(identifier)
@@ -46,7 +46,6 @@ def service_order_offset(source, header, tax, precision):
                 money(source[key]) != 0
                 for key in (
                     "total",
-                    "included_tax_total",
                     "payment_total",
                     "deposit_amount",
                     "total_applicable_store_credit",
@@ -57,21 +56,29 @@ def service_order_offset(source, header, tax, precision):
         ):
             return None
         items, shipping = money(source["item_total"]), money(source["ship_total"])
+        included, additional = money(source["included_tax_total"]), money(source["additional_tax_total"])
+        if (
+            included < 0
+            or additional < 0
+            or included + additional != tax
+            or (included and additional)
+            or included > shipping
+        ):
+            return None
         if items <= 0 or shipping < 0 or money(source["adjustment_total"]) != -items - shipping:
             return None
         if len(source["adjustments"]) != 1:
             return None
         rma = source["adjustments"][0]
         if (
-            rma["label"] != "RMA"
-            or rma["finalized"] is not True
+            rma["finalized"] is not True
             or rma.get("eligible") is False
             or rma["source_type"] is not None
             or rma["adjustable_type"] != "Spree::Order"
             or rma["adjustable_id"] != source["id"]
             or not isinstance(rma["id"], str)
             or not rma["id"].isdigit()
-            or money(rma["amount"]) != -(items + shipping + tax)
+            or money(rma["amount"]) != -(items + shipping + additional)
         ):
             return None
         seen, line_ids, shipment_ids = {rma["id"]}, set(), set()
@@ -113,14 +120,14 @@ def service_order_offset(source, header, tax, precision):
         ):
             return None
         return {
-            "kind": "service_order_rma_offset",
+            "kind": "service_order_full_offset",
             "source_adjustment_id": rma["id"],
             "source_adjustment_amount": f"{money(rma['amount']):.{precision}f}",
             "source_shipping_tax_offset": f"{tax:.{precision}f}",
             "target_record_id": header["id"],
             "target_discount_item_id": header["discountItem"]["id"],
             "target_discount_amount": f"{-items:.{precision}f}",
-            "explanation": "The finalized RMA offsets all items, shipping and shipping tax; "
+            "explanation": "The finalized service adjustment offsets all items, shipping and shipping tax; "
             "NetSuite has a full item discount, free shipping and zero tax.",
         }
     except (KeyError, TypeError, ValueError, DecimalException):

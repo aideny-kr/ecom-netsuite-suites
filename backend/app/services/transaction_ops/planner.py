@@ -51,6 +51,9 @@ def plan_proposal(report, targets, config, *, now, guard=None, celigo=None, crea
         "source_fingerprint": source_fingerprint(report["source"]),
     }
     if comparison.recommended_action == "propose_amount_correction":
+        balance = report.get("balance") or {}
+        if balance.get("status") == "matched" and balance.get("adjustments"):
+            raise PlanningError("amounts_already_reconcile")
         if len(targets["orders"]) != 1 or not guard or guard.get("actions_enabled") is not True:
             raise PlanningError("guard_unavailable")
         if not timedelta(0) <= now - _time(guard["observed_at"]) < timedelta(minutes=15):

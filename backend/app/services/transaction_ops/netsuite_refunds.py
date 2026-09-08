@@ -9,6 +9,7 @@ from decimal import Decimal
 from app.schemas.transaction_ops import _decimal
 from app.services.transaction_ops.netsuite_reader import _account, _collection, _id, _sublist, authenticated_reader
 from app.services.transaction_ops.netsuite_refund_requests import read_request_links, verify_request_allocations
+from app.services.transaction_ops.refund_adjustments import RefundAdjustmentProfile, read_tax_adjustments
 
 MAX_REFUND_CALLS = 24
 MAX_DOCUMENTS = 100
@@ -33,9 +34,20 @@ def _dict(value):
 
 
 async def read_netsuite_refunds(
-    db, tenant_id, connection_id, account_id, subsidiary_id, order_reference, target_evidence, *, client=None
+    db,
+    tenant_id,
+    connection_id,
+    account_id,
+    subsidiary_id,
+    order_reference,
+    target_evidence,
+    *,
+    client=None,
+    adjustment_profile=None,
 ):
     account = _account(account_id)
+    if adjustment_profile and RefundAdjustmentProfile.model_validate(adjustment_profile).account_id != account:
+        raise ValueError("adjustment_profile_scope_mismatch")
     evidence = _dict(target_evidence)
     scope = _dict(evidence.get("scope"))
     lookup = _dict(evidence.get("lookup"))
@@ -69,7 +81,12 @@ async def read_netsuite_refunds(
             db, tenant_id, connection_id, account, client=client, max_api_calls=MAX_REFUND_CALLS
         ) as reader:
             result = await collect_refunds(
-                reader, order["record_id"], subsidiary_id, currency_id, order_reference=order_reference
+                reader,
+                order["record_id"],
+                subsidiary_id,
+                currency_id,
+                order_reference=order_reference,
+                adjustment_profile=adjustment_profile,
             )
             return {
                 **result,
@@ -110,7 +127,7 @@ def _positive(value):
     return amount
 
 
-async def collect_refunds(reader, order_id, subsidiary_id, currency_id, *, order_reference):
+async def collect_refunds(reader, order_id, subsidiary_id, currency_id, *, order_reference, adjustment_profile=None):
     if any(_id(value) is None for value in (order_id, subsidiary_id, currency_id)):
         raise ValueError("invalid_refund_scope")
     calls = 0
@@ -228,6 +245,26 @@ async def collect_refunds(reader, order_id, subsidiary_id, currency_id, *, order
         total += amount
         included.append(identifier)
         amounts[identifier] = amount
-    await recheck_links()
     verify_request_allocations(request_links, allocations, amounts)
-    return {"amount": total, "refund_count": len(included), "record_ids": included, "request_links": request_links}
+    adjustments = (
+        await read_tax_adjustments(
+            request,
+            request_links,
+            adjustment_profile,
+            order_id,
+            subsidiary_id,
+            currency_id,
+            order_reference,
+            allocations,
+        )
+        if adjustment_profile
+        else []
+    )
+    await recheck_links()
+    return {
+        "amount": total,
+        "refund_count": len(included),
+        "record_ids": included,
+        "request_links": request_links,
+        "tax_adjustments": adjustments,
+    }

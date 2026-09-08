@@ -10,6 +10,7 @@ from decimal import Decimal, DecimalException, localcontext
 from app.schemas.transaction_ops import _decimal
 from app.services.transaction_ops.netsuite_reader import _account
 from app.services.transaction_ops.normalization import source_entity_key
+from app.services.transaction_ops.refund_adjustments import verified_tax_adjustments
 from app.services.transaction_ops.service_order_reconciliation import service_order_offset
 
 _METRICS = ("order_total", "tax", "refunds")
@@ -114,18 +115,33 @@ def _reconcile(source_evidence, target_evidence, config, refunds):
             _refund(refunds.get("target"), reference, currency, precision),
         ),
     }
+    original_values = dict(values)
+    adjustments = []
     offset = service_order_offset(source, header, tax, precision)
     if offset:
-        result["adjustments"] = [offset]
+        adjustments.append(offset)
+        values["tax"] = (Decimal(0), values["tax"][1])
+    credits = verified_tax_adjustments(
+        refunds, config, header.get("id"), reference, currency, lambda v: _amount(v, precision)
+    )
+    if credits:
+        adjustment = sum((_amount(c["amount"], precision) for c in credits), Decimal(0))
+        for key in ("order_total", "tax"):
+            left, right = values[key]
+            if left is not None and right is not None and left != right and right >= adjustment:
+                values[key] = (left, right - adjustment)
+        if values != original_values:
+            adjustments.extend(credits)
+    if adjustments:
+        result["adjustments"] = adjustments
         result["original_amounts"] = {
             key: {
                 "source": f"{left:.{precision}f}" if left is not None else None,
                 "target": f"{right:.{precision}f}" if right is not None else None,
                 "delta": f"{left - right:.{precision}f}" if left is not None and right is not None else None,
             }
-            for key, (left, right) in values.items()
+            for key, (left, right) in original_values.items()
         }
-        values["tax"] = (Decimal(0), values["tax"][1])
     missing, differences = [], []
     for key, (left, right) in values.items():
         delta = left - right if left is not None and right is not None else None
@@ -144,5 +160,5 @@ def _reconcile(source_evidence, target_evidence, config, refunds):
     elif missing:
         result.update(status="incomplete", reason="amount_evidence_unavailable")
     else:
-        result.update(status="matched", reason="verified_adjustments_agree" if offset else "all_amounts_agree")
+        result.update(status="matched", reason="verified_adjustments_agree" if adjustments else "all_amounts_agree")
     return result

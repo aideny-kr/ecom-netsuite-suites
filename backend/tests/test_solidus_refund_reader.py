@@ -112,3 +112,44 @@ async def test_malformed_database_metadata_fails_with_a_safe_code(context, shape
 async def test_reference_cannot_inject_sql(context):
     with pytest.raises(SourceReadError):
         await refund_reader.read_solidus_refunds(AsyncMock(), context[0], context[1], "R123456789' OR 1=1")
+
+
+async def test_complete_refund_events_prove_source_identity_and_payment_number(context):
+    events = [{"id": "41", "payment_number": "PAY123", "amount": "50.25"}]
+    result, requests = await perform(
+        context,
+        {
+            "order_reference": "R123456789",
+            "currency": "GBP",
+            "refund_count": "1",
+            "pending_count": "0",
+            "amount": "50.25",
+            "events": events,
+        },
+    )
+    assert result["events_complete"] is True and result["events"] == events
+    assert "p.number" in json.loads(requests[1].content)["rdbms"]["query"]
+
+
+@pytest.mark.parametrize(
+    "events",
+    [
+        [{"id": "41", "payment_number": "PAY123", "amount": "49"}],
+        [{"id": "41", "payment_number": "PAY123", "amount": "50.25"}] * 2,
+        None,
+    ],
+)
+async def test_unproven_event_detail_does_not_invent_refund_identity(context, events):
+    result, _ = await perform(
+        context,
+        {
+            "order_reference": "R123456789",
+            "currency": "GBP",
+            "refund_count": "1",
+            "pending_count": "0",
+            "amount": "50.25",
+            "events": events,
+        },
+    )
+    assert result["complete"] is True and result["amount"] == "50.25"
+    assert result["events_complete"] is False and result["events"] == []

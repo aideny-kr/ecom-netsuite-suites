@@ -33,6 +33,7 @@ from app.services.transaction_ops.inventory_identity import (
 from app.services.transaction_ops.metabase_reader import ReplicaBinding
 from app.services.transaction_ops.netsuite_reader import _account
 from app.services.transaction_ops.periods import ReconciliationPolicy
+from app.services.transaction_ops.refund_adjustments import RefundAdjustmentProfile
 
 
 class SourceTaxRule(EvidenceModel):
@@ -100,6 +101,7 @@ class NetSuiteLegacyTaxMapping(EvidenceModel):
 
 
 class TransactionMapping(EvidenceModel):
+    refund_adjustments: RefundAdjustmentProfile | None = None
     metabase_replica: ReplicaBinding | None = None
     reconciliation_policy: ReconciliationPolicy | None = None
     solidus_refund_step_id: UUID | None = None

@@ -618,6 +618,11 @@ async def run_investigation(
                                 config["subsidiary_id"],
                                 reference,
                                 targets,
+                                **(
+                                    {"adjustment_profile": mapping.refund_adjustments.model_dump(mode="json")}
+                                    if mapping.refund_adjustments
+                                    else {}
+                                ),
                             )
                         )
                     except (state_service.StateError, FeatureRevokedError):

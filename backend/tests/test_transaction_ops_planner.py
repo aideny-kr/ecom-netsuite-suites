@@ -236,3 +236,10 @@ def test_source_fingerprint_ignores_decimal_scale_and_equivalent_timezones():
         datetime.fromisoformat(original["updated_at"]).astimezone(timezone(timedelta(hours=-7))).isoformat()
     )
     assert planner.source_fingerprint(changed) == planner.source_fingerprint(original)
+
+
+def test_verified_adjustment_match_cannot_propose_restoring_the_original_amount():
+    case = planning_case()
+    case.report["balance"] = {"status": "matched", "adjustments": [{"kind": "tax_reversal"}]}
+    with pytest.raises(planner.PlanningError, match="amounts_already_reconcile"):
+        planner.plan_proposal(case.report, case.targets, case.config, now=case.now, guard=case.guard)

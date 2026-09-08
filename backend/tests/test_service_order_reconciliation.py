@@ -94,7 +94,7 @@ def test_fully_offset_service_shipping_tax_matches_with_original_evidence():
     assert result["amounts"]["tax"] == {"source": "0.00", "target": "0.00", "delta": "0.00"}
     assert result["original_amounts"]["tax"] == {"source": "2.00", "target": "0.00", "delta": "2.00"}
     proof = result["adjustments"][0]
-    assert proof["kind"] == "service_order_rma_offset"
+    assert proof["kind"] == "service_order_full_offset"
     assert proof["source_adjustment_id"] == "21"
     assert proof["source_adjustment_amount"] == "-92.00"
     assert (source, target, refunds) == before
@@ -109,7 +109,7 @@ def test_fully_offset_service_shipping_tax_matches_with_original_evidence():
         lambda s, t, r: s["adjustments"][0].update(finalized=False),
         lambda s, t, r: s["adjustments"][0].update(eligible=False),
         lambda s, t, r: s["adjustments"][0].update(adjustable_id="999"),
-        lambda s, t, r: s["adjustments"][0].update(label="Promotion"),
+        lambda s, t, r: s["adjustments"][0].update(label="Promotion", source_type="Spree::PromotionAction"),
         lambda s, t, r: s["adjustments"].append(deepcopy(s["adjustments"][0])),
         lambda s, t, r: s.update(adjustment_total="-89"),
         lambda s, t, r: s.update(total_applicable_store_credit="2"),
@@ -142,3 +142,30 @@ def test_service_adjustment_cannot_hide_missing_or_mismatched_refunds():
     assert reconcile_order(source, target, config, refunds=refunds)["status"] == "incomplete"
     refunds["target"].update(complete=True, amount="1")
     assert reconcile_order(source, target, config, refunds=refunds)["status"] == "difference"
+
+
+def test_shipping_vat_already_in_price_is_offset_once_by_service_rma():
+    source, target, config, refunds = service_evidence()
+    source["orders"][0].update(included_tax_total="2", additional_tax_total="0")
+    source["orders"][0]["adjustments"][0]["amount"] = "-90"
+    result = reconcile_order(source, target, config, refunds=refunds)
+    assert result["status"] == "matched"
+    assert result["amounts"]["tax"]["source"] == "0.00"
+    assert result["original_amounts"]["tax"]["source"] == "2.00"
+
+
+def test_inclusive_tax_cannot_exceed_the_shipping_price():
+    source, target, config, refunds = service_evidence()
+    source["orders"][0].update(included_tax_total="12", additional_tax_total="0", tax_total="12")
+    source["orders"][0]["adjustments"][0]["amount"] = "-90"
+    source["orders"][0]["shipments"][0]["adjustments"][0]["amount"] = "12"
+    target["orders"][0]["header"]["custbody_fw_solidus_tax_amount"] = "12"
+    assert reconcile_order(source, target, config, refunds=refunds)["status"] == "difference"
+
+
+def test_full_manual_service_offset_is_proven_by_amounts_not_a_free_text_label():
+    source, target, config, refunds = service_evidence()
+    source["orders"][0]["adjustments"][0]["label"] = "Manual service adjustment"
+    result = reconcile_order(source, target, config, refunds=refunds)
+    assert result["status"] == "matched"
+    assert "Manual service adjustment" not in str(result)
