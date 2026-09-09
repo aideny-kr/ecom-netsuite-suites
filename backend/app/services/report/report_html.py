@@ -8,12 +8,7 @@ from html import escape
 
 from app.services.report.inventory_aging import (
     AgingReport,
-    Highlight,
-    KpiCard,
-    LocationSummary,
     Provenance,
-    TopItem,
-    WatchItem,
     share_pct,
 )
 
@@ -1404,11 +1399,11 @@ def _ia_short_date(d: date) -> str:
     return f"{d.day} {d.strftime('%b')}"
 
 
-def _ia_watch_html(items: tuple[WatchItem, ...]) -> str:
+def _ia_watch_html(items: list[dict]) -> str:
     if not items:
         return ""
     chips = "".join(
-        f'<span class="ia-chip {_IA_DOT_CLASS.get(w.dot, "")}"><span class="dot"></span>{escape(w.text)}</span>'
+        f'<span class="ia-chip {_IA_DOT_CLASS.get(w["dot"], "")}"><span class="dot"></span>{escape(w["text"])}</span>'
         for w in items
     )
     return (
@@ -1418,11 +1413,15 @@ def _ia_watch_html(items: tuple[WatchItem, ...]) -> str:
     )
 
 
-def _ia_sparkline_svg(values: tuple[Decimal, ...]) -> str:
+def _ia_sparkline_svg(values: list[str] | tuple[Decimal, ...]) -> str:
     """A KPI-card sparkline (mock: 200x34 viewBox, polyline + emphasised endpoint dot).
     ``None``/an empty/single-point series (e.g. the aged>180 card — Task 1's r_trend has
     no 180+ series, see KpiCard.sparkline's own docstring) renders nothing, same
-    "needs >=2 points" rule as the financial_statement renderer's `_fs_sparkline_svg`."""
+    "needs >=2 points" rule as the financial_statement renderer's `_fs_sparkline_svg`.
+    Gate fix #4: ``float(v)`` already accepts either a real ``Decimal`` or its
+    decimal-literal string form identically — no ``Decimal(...)`` reconstruction is
+    needed here, unlike the money/percent-formatting call sites elsewhere in this
+    module that do arithmetic/``.quantize()``."""
     if not values or len(values) < 2:
         return ""
     floats = [float(v) for v in values]
@@ -1440,61 +1439,74 @@ def _ia_sparkline_svg(values: tuple[Decimal, ...]) -> str:
     )
 
 
-def _ia_kpi_delta_html(kpi: KpiCard) -> str:
+def _ia_kpi_delta_html(kpi: dict) -> str:
     """Render-fidelity fix: the "vs prior week" / "vs {prior %}" label lives INSIDE
     the same `<b>` element as the delta, not as a sibling text node in the
     surrounding `.d` flex div — `.d` is `display: flex; flex-wrap: wrap`, and at the
     report's real width that was splitting the delta and its label onto two lines.
     One element means flexbox has nothing left to wrap between (see the matching
-    `.ia-kpis .kpi .d` font-size step-down in `_IA_CSS`, just below this function)."""
-    cls = "fav" if kpi.favourable else "unf"
-    arrow = "▲" if kpi.delta >= 0 else "▼"
-    if kpi.delta_pct is not None:
-        main = f"{arrow} {_ia_signed_abbrev_money(kpi.delta)} · {_ia_signed_pct(kpi.delta_pct)} vs prior week"
+    `.ia-kpis .kpi .d` font-size step-down in `_IA_CSS`, just below this function).
+
+    Gate fix #4: `kpi` is the JSON-safe dict form (decimal-literal strings) — every
+    field this function does arithmetic/comparison on is reconstructed via
+    ``Decimal(...)`` before use; a field only ever interpolated verbatim (never here)
+    would not need it, since ``str(Decimal(s)) == s`` for a string ``json_safe``
+    itself produced."""
+    cls = "fav" if kpi["favourable"] else "unf"
+    delta = Decimal(kpi["delta"])
+    arrow = "▲" if delta >= 0 else "▼"
+    if kpi["delta_pct"] is not None:
+        main = f"{arrow} {_ia_signed_abbrev_money(delta)} · {_ia_signed_pct(Decimal(kpi['delta_pct']))} vs prior week"
         return f'<div class="d"><b class="{cls}">{main}</b></div>'
     # The aged-share card (KpiCard.delta_pct is None): the mock shows a point delta
     # plus "vs {prior %}" rather than "vs prior week" — reconstruct the prior share
     # from value/delta rather than adding a field Task 1's AgingReport doesn't carry.
-    prior_value = kpi.value - kpi.delta
-    main = f"{arrow} {_ia_pts(kpi.delta)} pts vs {_ia_pct(prior_value)}"
+    prior_value = Decimal(kpi["value"]) - delta
+    main = f"{arrow} {_ia_pts(delta)} pts vs {_ia_pct(prior_value)}"
     return f'<div class="d"><b class="{cls}">{main}</b></div>'
 
 
-def _ia_kpi_html(kpi: KpiCard) -> str:
-    value_str = f"{kpi.value}%" if kpi.key == "aged_share" else _ia_abbrev_money(kpi.value)
-    spark = _ia_sparkline_svg(kpi.sparkline)
+def _ia_kpi_html(kpi: dict) -> str:
+    value = Decimal(kpi["value"])
+    value_str = f"{value}%" if kpi["key"] == "aged_share" else _ia_abbrev_money(value)
+    spark = _ia_sparkline_svg(kpi["sparkline"])
     return (
-        f'<div class="kpi"><div class="l">{escape(kpi.label)}</div>'
+        f'<div class="kpi"><div class="l">{escape(kpi["label"])}</div>'
         f'<div class="v tnum">{escape(value_str)}</div>{_ia_kpi_delta_html(kpi)}'
-        f'<div class="s">{escape(kpi.sub_detail)}</div>{spark}</div>'
+        f'<div class="s">{escape(kpi["sub_detail"])}</div>{spark}</div>'
     )
 
 
-def _ia_kpi_cards_html(kpis: tuple[KpiCard, ...]) -> str:
+def _ia_kpi_cards_html(kpis: list[dict]) -> str:
     if not kpis:
         return ""
     return f'<div class="ia-kpis">{"".join(_ia_kpi_html(k) for k in kpis)}</div>'
 
 
-def _ia_trend_chart_html(report: AgingReport) -> str:
+def _ia_trend_chart_html(report: dict) -> str:
     """One polyline per location (spec §A1 "trend chart ... line, aged share % per
     location, same scale, endpoint labels, legend"). Assumes every location's trend
     series shares the same weekly dates (true for any real recipe — one `r_trend`
     query, same `trend_weeks` param, per §A7) — the x-axis is read off whichever
     location has the most points so a genuinely ragged fixture still renders (never
     crashes), even though its labels then only line up exactly for the aligned
-    locations."""
-    locations = [loc.location for loc in report.locations]
-    series = [(loc, report.trend.get(loc, ())) for loc in locations]
+    locations.
+
+    Gate fix #4: ``report`` is the JSON-safe dict form of ``AgingReport`` — a
+    ``TrendPoint``'s ``d`` is an ISO date string (parsed back via
+    ``date.fromisoformat`` for ``_ia_short_date``) and ``pct_90p`` a decimal-literal
+    string (``float()`` accepts it directly, same as a real ``Decimal``)."""
+    locations = [loc["location"] for loc in report["locations"]]
+    series = [(loc, report["trend"].get(loc, ())) for loc in locations]
     axis_source = max((pts for _loc, pts in series), key=len, default=())
     if len(axis_source) < 2:
         return ""
-    date_labels = [_ia_short_date(tp.d) for tp in axis_source]
+    date_labels = [_ia_short_date(date.fromisoformat(tp["d"])) for tp in axis_source]
 
     plot_w = _IA_TREND_W - _IA_TREND_PAD_L - _IA_TREND_PAD_R
     plot_h = _IA_TREND_H - _IA_TREND_PAD_T - _IA_TREND_PAD_B
     y_top, y_bottom = _IA_TREND_PAD_T, _IA_TREND_PAD_T + plot_h
-    all_pcts = [float(tp.pct_90p) for _loc, pts in series for tp in pts]
+    all_pcts = [float(tp["pct_90p"]) for _loc, pts in series for tp in pts]
     raw_max = max([*all_pcts, 0.0])
     axis_max = max(10.0, math.ceil((raw_max or 1.0) / 5.0) * 5.0)
 
@@ -1529,18 +1541,18 @@ def _ia_trend_chart_html(report: AgingReport) -> str:
         color = _IA_PALETTE[i % len(_IA_PALETTE)]
         dashed = i >= 2
         step = plot_w / max(len(pts) - 1, 1)
-        coords = [(_IA_TREND_PAD_L + j * step, y_of(float(tp.pct_90p))) for j, tp in enumerate(pts)]
+        coords = [(_IA_TREND_PAD_L + j * step, y_of(float(tp["pct_90p"]))) for j, tp in enumerate(pts)]
         path = " ".join(f"{x:.1f},{y:.1f}" for x, y in coords)
         dash_attr = ' stroke-dasharray="6 4"' if dashed else ""
         series_parts.append(f'<polyline fill="none" stroke="{color}" stroke-width="2.5"{dash_attr} points="{path}"/>')
         ex, ey = coords[-1]
         last = pts[-1]
-        tip = f"{loc_name} {_ia_short_date(last.d)}: {last.pct_90p}%"
+        tip = f"{loc_name} {_ia_short_date(date.fromisoformat(last['d']))}: {last['pct_90p']}%"
         endpoint_parts.append(
             f'<circle cx="{ex:.1f}" cy="{ey:.1f}" r="4" fill="{color}"><title>{escape(tip)}</title></circle>'
         )
         label_parts.append(
-            f'<text x="{ex + 6:.1f}" y="{ey + 4:.1f}" fill="{color}" font-weight="700">{last.pct_90p}%</text>'
+            f'<text x="{ex + 6:.1f}" y="{ey + 4:.1f}" fill="{color}" font-weight="700">{last["pct_90p"]}%</text>'
         )
         dash_note = " (dashed)" if dashed else ""
         legend_items.append(f'<span><i style="background:{color}"></i>{escape(loc_name)}{dash_note}</span>')
@@ -1565,26 +1577,28 @@ def _ia_trend_chart_html(report: AgingReport) -> str:
     )
 
 
-def _ia_variance_row_html(loc: LocationSummary, row_cls: str = "") -> str:
-    delta_cls = "fav" if loc.delta_value >= 0 else "unf"
-    pts_cls = "fav" if loc.aged90_share_delta_pts <= 0 else "unf"
+def _ia_variance_row_html(loc: dict, row_cls: str = "") -> str:
+    delta_value = Decimal(loc["delta_value"])
+    aged90_share_delta_pts = Decimal(loc["aged90_share_delta_pts"])
+    delta_cls = "fav" if delta_value >= 0 else "unf"
+    pts_cls = "fav" if aged90_share_delta_pts <= 0 else "unf"
     cells = (
-        f'<td class="lbl">{escape(loc.location)}</td>'
-        f"<td>{_ia_money(loc.on_hand_value)}</td>"
-        f"<td>{_ia_money(loc.prior_value)}</td>"
-        f'<td class="{delta_cls}">{_ia_money(loc.delta_value)}</td>'
-        f'<td class="{delta_cls}">{_ia_pct(loc.delta_pct)}</td>'
-        f"<td>{_ia_money(loc.aged90_value)}</td>"
-        f"<td>{loc.aged90_share_pct}%</td>"
-        f'<td class="{pts_cls}">{_ia_pts(loc.aged90_share_delta_pts)}</td>'
+        f'<td class="lbl">{escape(loc["location"])}</td>'
+        f"<td>{_ia_money(Decimal(loc['on_hand_value']))}</td>"
+        f"<td>{_ia_money(Decimal(loc['prior_value']))}</td>"
+        f'<td class="{delta_cls}">{_ia_money(delta_value)}</td>'
+        f'<td class="{delta_cls}">{_ia_pct(Decimal(loc["delta_pct"]))}</td>'
+        f"<td>{_ia_money(Decimal(loc['aged90_value']))}</td>"
+        f"<td>{loc['aged90_share_pct']}%</td>"
+        f'<td class="{pts_cls}">{_ia_pts(aged90_share_delta_pts)}</td>'
     )
     cls_attr = f' class="{row_cls}"' if row_cls else ""
     return f"<tr{cls_attr}>{cells}</tr>"
 
 
-def _ia_variance_table_html(report: AgingReport) -> str:
-    rows = "".join(_ia_variance_row_html(loc) for loc in report.locations)
-    rows += _ia_variance_row_html(report.all_locations, "total")
+def _ia_variance_table_html(report: dict) -> str:
+    rows = "".join(_ia_variance_row_html(loc) for loc in report["locations"])
+    rows += _ia_variance_row_html(report["all_locations"], "total")
     return (
         '<div class="tblcard"><h3>By location <span>· this week vs prior week</span></h3>'
         '<table class="tnum"><thead><tr><th>Location</th><th>On-hand $</th><th>Prior wk</th>'
@@ -1595,7 +1609,7 @@ def _ia_variance_table_html(report: AgingReport) -> str:
     )
 
 
-def _ia_mid_row_html(report: AgingReport) -> str:
+def _ia_mid_row_html(report: dict) -> str:
     """The mock's 2-column ``.mid`` layout (review finding — major): the trend chart
     and the "By location" variance table render side-by-side, not as two independent
     full-width stacked cards. ``.ia-mid`` collapses to a single column under 900px,
@@ -1608,19 +1622,19 @@ def _ia_mid_row_html(report: AgingReport) -> str:
     return f'<div class="ia-section"><div class="ia-mid">{chart_html}{variance_html}</div></div>'
 
 
-def _ia_bucket_row_html(bucket: str, locations: tuple[LocationSummary, ...]) -> str:
+def _ia_bucket_row_html(bucket: str, locations: list[dict]) -> str:
     swatch = f'<span class="bar" style="background:{_IA_BUCKET_SWATCH[bucket]}"></span>'
     cells = f'<td class="lbl">{swatch}{_IA_BUCKET_LABEL[bucket]} days</td>'
     for loc in locations:
-        br = next(b for b in loc.buckets if b.bucket == bucket)
+        br = next(b for b in loc["buckets"] if b["bucket"] == bucket)
         cells += (
-            f'<td>{_ia_money(br.value)}</td><td class="pct">{br.pct_of_location}%</td>'
-            f"<td>{br.units:,}</td><td>{br.skus}</td>"
+            f'<td>{_ia_money(Decimal(br["value"]))}</td><td class="pct">{br["pct_of_location"]}%</td>'
+            f"<td>{br['units']:,}</td><td>{br['skus']}</td>"
         )
     return f"<tr>{cells}</tr>"
 
 
-def _ia_bucket_subtotal_row_html(label: str, row_cls: str, locations: tuple[LocationSummary, ...], values_fn) -> str:
+def _ia_bucket_subtotal_row_html(label: str, row_cls: str, locations: list[dict], values_fn) -> str:
     cells = f'<td class="lbl">{label}</td>'
     for loc in locations:
         value, pct, units, skus = values_fn(loc)
@@ -1628,13 +1642,14 @@ def _ia_bucket_subtotal_row_html(label: str, row_cls: str, locations: tuple[Loca
     return f'<tr class="{row_cls}">{cells}</tr>'
 
 
-def _ia_bucket_table_html(report: AgingReport) -> str:
-    locations = report.locations
+def _ia_bucket_table_html(report: dict) -> str:
+    locations = report["locations"]
     if not locations:
         return ""
     header = "<th>Bucket</th>" + "<th>Value $</th><th>% of location</th><th>Units</th><th>SKUs</th>" * len(locations)
     group = '<td class="lbl"></td>' + "".join(
-        f'<td colspan="4" style="text-align:center">{escape(loc.location)} · {_ia_abbrev_money(loc.on_hand_value)}</td>'
+        f'<td colspan="4" style="text-align:center">{escape(loc["location"])} · '
+        f"{_ia_abbrev_money(Decimal(loc['on_hand_value']))}</td>"
         for loc in locations
     )
     rows = [f'<tr class="group">{group}</tr>']
@@ -1646,10 +1661,10 @@ def _ia_bucket_table_html(report: AgingReport) -> str:
             "sub",
             locations,
             lambda loc: (
-                loc.on_hand_value - loc.aged90_value,
-                share_pct(loc.on_hand_value - loc.aged90_value, loc.on_hand_value),
-                loc.units - loc.aged90_units,
-                loc.skus - loc.aged90_skus,
+                Decimal(loc["on_hand_value"]) - Decimal(loc["aged90_value"]),
+                share_pct(Decimal(loc["on_hand_value"]) - Decimal(loc["aged90_value"]), Decimal(loc["on_hand_value"])),
+                loc["units"] - loc["aged90_units"],
+                loc["skus"] - loc["aged90_skus"],
             ),
         )
     )
@@ -1660,12 +1675,20 @@ def _ia_bucket_table_html(report: AgingReport) -> str:
             "Aged (&gt; 90 days)",
             "sub",
             locations,
-            lambda loc: (loc.aged90_value, loc.aged90_share_pct, loc.aged90_units, loc.aged90_skus),
+            lambda loc: (
+                Decimal(loc["aged90_value"]),
+                loc["aged90_share_pct"],
+                loc["aged90_units"],
+                loc["aged90_skus"],
+            ),
         )
     )
     rows.append(
         _ia_bucket_subtotal_row_html(
-            "On hand", "total", locations, lambda loc: (loc.on_hand_value, Decimal("100"), loc.units, loc.skus)
+            "On hand",
+            "total",
+            locations,
+            lambda loc: (Decimal(loc["on_hand_value"]), Decimal("100"), loc["units"], loc["skus"]),
         )
     )
     return (
@@ -1676,16 +1699,16 @@ def _ia_bucket_table_html(report: AgingReport) -> str:
     )
 
 
-def _ia_top_item_row_html(it: TopItem, loc: LocationSummary) -> str:
-    pct = share_pct(it.value, loc.aged90_value)
+def _ia_top_item_row_html(it: dict, loc: dict) -> str:
+    pct = share_pct(Decimal(it["value"]), Decimal(loc["aged90_value"]))
     return (
-        f'<tr><td class="lbl mono">{escape(it.sku)}</td><td class="desc">{escape(it.item_desc)}</td>'
-        f"<td>{escape(it.category)}</td><td>{it.units:,}</td><td>{_ia_money(it.value)}</td>"
-        f'<td>{it.days}</td><td class="pct">{pct}%</td></tr>'
+        f'<tr><td class="lbl mono">{escape(it["sku"])}</td><td class="desc">{escape(it["item_desc"])}</td>'
+        f"<td>{escape(it['category'])}</td><td>{it['units']:,}</td><td>{_ia_money(Decimal(it['value']))}</td>"
+        f'<td>{it["days"]}</td><td class="pct">{pct}%</td></tr>'
     )
 
 
-def _ia_top_positions_html(report: AgingReport) -> str:
+def _ia_top_positions_html(report: dict) -> str:
     """The top-5 table draws from ``top_items`` (capped); the collapsible "All N"
     details block draws from ``aged_items`` — the UNBOUNDED per-location list — so
     N is always the TRUE aged-SKU count and the details block is never byte-
@@ -1695,21 +1718,21 @@ def _ia_top_positions_html(report: AgingReport) -> str:
     top_rows: list[str] = []
     all_rows: list[str] = []
     total_aged = 0
-    for loc in report.locations:
-        items = report.top_items.get(loc.location, ())
+    for loc in report["locations"]:
+        items = report["top_items"].get(loc["location"], ())
         top_rows.append(
-            f'<tr class="group"><td class="lbl" colspan="7">{escape(loc.location)} · aged '
-            f"{_ia_dollar_money(loc.aged90_value)} · top 5 = {loc.top5_share_pct}%</td></tr>"
+            f'<tr class="group"><td class="lbl" colspan="7">{escape(loc["location"])} · aged '
+            f"{_ia_dollar_money(Decimal(loc['aged90_value']))} · top 5 = {loc['top5_share_pct']}%</td></tr>"
         )
         for it in items:
             top_rows.append(_ia_top_item_row_html(it, loc))
 
-    for loc in report.locations:
-        aged_items = report.aged_items.get(loc.location, ())
+    for loc in report["locations"]:
+        aged_items = report["aged_items"].get(loc["location"], ())
         total_aged += len(aged_items)
         all_rows.append(
-            f'<tr class="group"><td class="lbl" colspan="7">{escape(loc.location)} · aged '
-            f"{_ia_dollar_money(loc.aged90_value)} · {len(aged_items)} SKUs</td></tr>"
+            f'<tr class="group"><td class="lbl" colspan="7">{escape(loc["location"])} · aged '
+            f"{_ia_dollar_money(Decimal(loc['aged90_value']))} · {len(aged_items)} SKUs</td></tr>"
         )
         for it in aged_items:
             all_rows.append(_ia_top_item_row_html(it, loc))
@@ -1729,10 +1752,10 @@ def _ia_top_positions_html(report: AgingReport) -> str:
     )
 
 
-def _ia_highlights_html(highlights: tuple[Highlight, ...]) -> str:
+def _ia_highlights_html(highlights: list[dict]) -> str:
     if not highlights:
         return ""
-    items = "".join(f"<li>{escape(h.text)}</li>" for h in highlights)
+    items = "".join(f"<li>{escape(h['text'])}</li>" for h in highlights)
     return (
         '<div class="ia-section"><h2>Highlights '
         "<span>· driver attribution, largest movers first, threshold-gated</span></h2>"
@@ -1740,11 +1763,12 @@ def _ia_highlights_html(highlights: tuple[Highlight, ...]) -> str:
     )
 
 
-def _ia_narrative_html(narrative) -> str:
+def _ia_narrative_html(narrative: dict) -> str:
     return (
         '<div class="ia-section"><h2>Narrative '
         "<span>· deterministic template · every figure tool-computed</span></h2>"
-        f'<div class="narr"><p>{escape(narrative.paragraph_1)}</p><p>{escape(narrative.paragraph_2)}</p></div></div>'
+        f'<div class="narr"><p>{escape(narrative["paragraph_1"])}</p>'
+        f"<p>{escape(narrative['paragraph_2'])}</p></div></div>"
     )
 
 
@@ -1803,7 +1827,7 @@ def _ia_bytes_human(n: int) -> str:
     return f"{v:.1f} TB"  # pragma: no cover — no realistic single-query scan reaches PB
 
 
-def _ia_provenance_html(prov: Provenance) -> str:
+def _ia_provenance_html(prov: dict) -> str:
     """The mock's labelled "Sources & method" grid (render-polish brief item 6):
     rows Source / Snapshots used / Age (full width) / Queries / Integrity, each a
     bold-labelled ``<div>`` cell, rendered inside THIS module's own ``.ia-section``
@@ -1812,24 +1836,28 @@ def _ia_provenance_html(prov: Provenance) -> str:
     ``Provenance`` fields Task 1's ``compute()`` already produces (source /
     snapshots_used / age_definition / query_count / executed_at / bytes_scanned /
     integrity_checks) — no new data invented for this row layout, per the brief's
-    "keep the existing provenance data behind it"."""
-    table = escape(prov.source.strip("`"))
+    "keep the existing provenance data behind it".
+
+    Gate fix #4: ``prov`` is the JSON-safe dict form — ``snapshots_used``'s values
+    are already ISO date STRINGS (json_safe's tuple branch), so they're used
+    verbatim rather than re-parsed through ``date.fromisoformat``."""
+    table = escape(prov["source"].strip("`"))
     snaps = "; ".join(
-        f"{escape(loc)}: {first.isoformat()}–{last.isoformat()} ({count} snapshots)"
-        for loc, (first, last, count) in sorted(prov.snapshots_used.items())
+        f"{escape(loc)}: {first}–{last} ({count} snapshots)"
+        for loc, (first, last, count) in sorted(prov["snapshots_used"].items())
     )
-    age = escape(prov.age_definition)
-    queries = f'{prov.query_count} · <span class="mono">bigquery_sql</span>'
-    if prov.executed_at:
-        queries += f" · executed {_fmt_stamp(prov.executed_at)}"
-    if prov.bytes_scanned is not None:
-        queries += f" · {escape(_ia_bytes_human(prov.bytes_scanned))} scanned"
+    age = escape(prov["age_definition"])
+    queries = f'{prov["query_count"]} · <span class="mono">bigquery_sql</span>'
+    if prov["executed_at"]:
+        queries += f" · executed {_fmt_stamp(prov['executed_at'])}"
+    if prov["bytes_scanned"] is not None:
+        queries += f" · {escape(_ia_bytes_human(prov['bytes_scanned']))} scanned"
     # Each entry in `integrity_checks` already carries its own terminal period (see
     # INTEGRITY_CHECKS in inventory_aging.py) -- join with a single space, not "; ",
     # or the trailing period + separator collide into a stray ".;" (render-fidelity
     # fix: the joined cell used to read "...on-hand value.; The all-locations row...
     # re-query.; no model generated a figure.").
-    integrity = escape(" ".join(prov.integrity_checks))
+    integrity = escape(" ".join(prov["integrity_checks"]))
     integrity = f"{integrity} no model generated a figure." if integrity else "No model generated a figure."
     rows = (
         f'<div><b>Source</b> BigQuery <span class="mono">{table}</span></div>'
@@ -1937,17 +1965,34 @@ def build_inventory_aging_sections(report: AgingReport, *, composed_at: str | No
     inventory_aging block (see `has_inventory_aging` there): the two would
     otherwise render the SAME heading twice for the production compose/refresh
     call sites, which still build and pass `build_inventory_aging_provenance`'s
-    list unchanged."""
+    list unchanged.
+
+    Gate fix #4 (one representation for the rendered model): every `_ia_*_html`
+    renderer reads dict form ONLY — this is the SINGLE conversion point
+    (``inventory_aging.json_safe``, called exactly once, here) that turns the live
+    `AgingReport` dataclass tree into the same JSON-safe dict shape a report's
+    persisted `spec_json` already carries (see `report_service.spec_json_safe`,
+    which applies the identical conversion before a compose/refresh commits). A
+    caller that instead re-renders straight off an already-persisted, JSON-round-
+    tripped `spec_json` (e.g. `scripts/backfill_report_html.py`) therefore produces
+    BYTE-IDENTICAL HTML to this fresh-compute path — there is no second "the
+    renderers expect a live dataclass" representation left to disagree with it.
+    `build_inventory_aging_head` is the one exception: it already returns a plain
+    JSON-safe dict (see its own docstring), so it's still called against the live
+    `report` directly rather than the converted copy — redundant, not wrong."""
+    from app.services.report.inventory_aging import json_safe as ia_json_safe
+
+    report_dict = ia_json_safe(report)
     return [
         {"type": "report_head", "model": build_inventory_aging_head(report, composed_at=composed_at)},
-        {"type": "watch_items", "model": report.watch_items},
-        {"type": "kpi_cards", "model": report.kpis},
-        {"type": "mid_row", "model": report},
-        {"type": "bucket_table", "model": report},
-        {"type": "top_positions", "model": report},
-        {"type": "highlights", "model": report.highlights},
-        {"type": "narrative", "model": report.narrative},
-        {"type": "provenance_grid", "model": report.provenance},
+        {"type": "watch_items", "model": report_dict["watch_items"]},
+        {"type": "kpi_cards", "model": report_dict["kpis"]},
+        {"type": "mid_row", "model": report_dict},
+        {"type": "bucket_table", "model": report_dict},
+        {"type": "top_positions", "model": report_dict},
+        {"type": "highlights", "model": report_dict["highlights"]},
+        {"type": "narrative", "model": report_dict["narrative"]},
+        {"type": "provenance_grid", "model": report_dict["provenance"]},
     ]
 
 

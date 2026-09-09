@@ -21,6 +21,7 @@ pre-computed "model" seam ``financial_statement`` sections use (see
 
 from __future__ import annotations
 
+import json
 from datetime import date, timedelta
 
 import pytest
@@ -162,6 +163,20 @@ def spec(report):
 @pytest.fixture
 def html(spec):
     return render_report_html(spec)
+
+
+# ---------------------------------------------------------------------------
+# Gate fix #4 -- one representation for the rendered model. The renderers used to
+# read dataclass attributes off `model`, but the persisted spec_json (what
+# scripts/backfill_report_html.py re-renders from) carries the JSON-safe dict form
+# once it round-trips through JSONB/json.dumps. Rendering from that stored form
+# must produce byte-identical HTML to rendering straight off compute().
+# ---------------------------------------------------------------------------
+def test_render_from_json_round_tripped_stored_spec_matches_fresh_compute(spec, html):
+    from app.services.report.report_service import spec_json_safe
+
+    stored = json.loads(json.dumps(spec_json_safe(spec)))
+    assert render_report_html(stored) == html
 
 
 # ---------------------------------------------------------------------------

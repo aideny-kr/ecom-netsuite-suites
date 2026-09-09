@@ -936,6 +936,26 @@ async def test_refresh_delegates_to_the_inventory_aging_playbook_rebuild_hook(db
     assert updated.spec_json["sections"][0]["type"] == "report_head"
 
 
+async def test_refresh_inventory_aging_rerenders_identically_from_its_own_stored_spec(db, monkeypatch):
+    """Gate fix #4: the refresh path persists spec_json already run through
+    spec_json_safe -- proving THAT stored form (post a real JSON round trip, exactly
+    what scripts/backfill_report_html.py would load and re-render) renders back to
+    the SAME frozen rendered_html the refresh just published. One representation for
+    the rendered model means the refresh's own output is safe to re-render later."""
+    from app.services.report.report_html import render_report_html
+    from tests.report.test_inventory_aging import _full_fixture
+
+    payloads, params = _full_fixture()
+    _title, recipe = build_playbook_recipe("inventory_aging", params)
+    tenant, user, report = await _seed_report(db, recipe=recipe, html="<html>v1</html>")
+    _patch_bigquery_executor(monkeypatch, recipe, payloads)
+
+    updated = await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
+
+    stored = json.loads(json.dumps(updated.spec_json))
+    assert render_report_html(stored) == updated.rendered_html
+
+
 async def test_refresh_inventory_aging_dispatches_exactly_the_four_recipe_sources_with_max_rows(db, monkeypatch):
     """Requirement 5 (cost guard): a refresh must run ONLY the recipe's own
     sources, each with its stored max_rows — never more, never fewer."""

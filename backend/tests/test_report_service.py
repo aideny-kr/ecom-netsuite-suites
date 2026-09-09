@@ -629,14 +629,17 @@ async def test_compose_report_rejects_financial_statement_section():
     db.add.assert_not_called()  # never even constructed a Report row
 
 
-def test_spec_json_safe_converts_inventory_aging_sections_decimal_and_date():
-    """Refresh-support follow-up: build_inventory_aging_sections' sections carry
-    raw Decimal/date/dataclass ``model`` values (report.watch_items, etc, straight
-    off inventory_aging.compute()) -- spec_json_safe must sanitize THOSE too, not
-    just financial_statement's, or persisting spec_json for a headlessly-composed/
-    refreshed inventory_aging report crashes JSONB serialization outright (a bug
-    this exact regression caught: TypeError: Object of type WatchItem is not JSON
-    serializable)."""
+def test_spec_json_safe_is_idempotent_over_inventory_aging_sections_already_json_safe():
+    """Gate fix #4 (one representation for the rendered model): build_inventory_aging_sections
+    now performs the ONE conversion (inventory_aging.json_safe) itself, at its own
+    boundary, so a section's ``model`` is JSON-safe dict form (WatchItem -> plain
+    dict, Decimal -> decimal-literal string, date -> ISO string) from the moment the
+    spec is built -- never a live dataclass/Decimal/date tree left for
+    spec_json_safe to sanitize separately (that WAS the bug this exact regression
+    used to catch: ``TypeError: Object of type WatchItem is not JSON serializable``
+    on persist, and the two-representation split the renderers had to straddle).
+    spec_json_safe's inventory_aging branch is therefore idempotent over it: still
+    produces JSON-dumpable output, and never changes its content."""
     from tests.report.test_inventory_aging import _full_fixture
 
     payloads, params = _full_fixture()
@@ -646,8 +649,13 @@ def test_spec_json_safe_converts_inventory_aging_sections_decimal_and_date():
     sections = build_inventory_aging_sections(report, composed_at="2026-09-08T13:05:00+00:00")
     spec = {"title": "Inventory Aging — Week of 8 Sep 2026", "sections": sections}
 
+    # Already JSON-safe straight out of build_inventory_aging_sections -- plain dict
+    # form, not the live WatchItem dataclass -- and already JSON-dumpable on its own.
+    assert json.dumps(spec)
+    assert isinstance(spec["sections"][1]["model"], list)
+    assert spec["sections"][1]["model"][0]["dot"] in ("red", "green", "amber", "grey")
+
     safe = spec_json_safe(spec)
 
-    assert json.dumps(safe)  # the actual JSONB-safety proof
-    # the LIVE spec is untouched (render_report_html needs the real Decimals)
-    assert spec["sections"][1]["model"] == report.watch_items
+    assert json.dumps(safe)  # still JSONB-safe
+    assert safe["sections"][1]["model"] == spec["sections"][1]["model"]  # idempotent, unchanged
