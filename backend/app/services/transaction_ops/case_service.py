@@ -121,8 +121,23 @@ async def observe_finding(db, tenant_id, run, finding, *, now):
         .on_conflict_do_nothing(index_elements=["tenant_id", "observation_key"])
         .returning(TransactionCaseObservation.id)
     )
-    if result.scalar_one_or_none() is None:
+    observation_id = result.scalar_one_or_none()
+    if observation_id is None:
         return case
+    await _audit(
+        db,
+        tenant_id,
+        "case.evaluated",
+        case,
+        payload={
+            "run_id": str(run.id),
+            "observation_id": str(observation_id),
+            "reconciliation_verified": cleared,
+            "observed_at": now.isoformat(),
+            "verification_scope": "order_total_tax_refunds",
+            "became_current": now >= case.last_observed_at,
+        },
+    )
     if now >= case.last_observed_at:
         prior = case.status
         case.status = "reconciled" if cleared else "open"

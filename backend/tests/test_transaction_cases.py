@@ -255,3 +255,36 @@ def test_unknown_coverage_limit_cannot_close_financial_case():
     evidence = report("matched")
     evidence["evidence_limits"] = {"code": "refund_page_incomplete"}
     assert not case_service._cleared(evidence, NOW)
+
+
+@pytest.mark.asyncio
+async def test_every_case_evaluation_is_audited_and_penny_difference_stays_open(db, admin_user):
+    from sqlalchemy import select
+
+    from app.models.audit import AuditEvent
+
+    actor = admin_user[0]
+    config = await seed_config(db, actor.tenant_id, actor)
+    penny = report("matched")
+    penny["balance"]["amounts"]["tax"] = {"source": "0.55", "target": "0.56", "delta": "-0.01"}
+    first = await observe(db, actor, config, penny, NOW)
+    case = (await case_service.list_cases(db, actor.tenant_id))[0]
+    assert case.status == "open"
+    await observe(db, actor, config, penny, NOW + timedelta(seconds=1))
+    await observe(db, actor, config, report("matched"), NOW + timedelta(seconds=2))
+    events = list(
+        await db.scalars(
+            select(AuditEvent).where(
+                AuditEvent.tenant_id == actor.tenant_id,
+                AuditEvent.resource_id == str(case.id),
+                AuditEvent.action == "transaction_ops.case.evaluated",
+            )
+        )
+    )
+    assert len(events) == 3
+    by_run = {event.payload["run_id"]: event for event in events}
+    assert by_run[str(first.run_id)].payload["reconciliation_verified"] is False
+    assert sum(event.payload["reconciliation_verified"] is True for event in events) == 1
+    observations = await case_service.list_observations(db, actor.tenant_id, case.id)
+    assert {event.payload["observation_id"] for event in events} == {str(row.id) for row in observations}
+    assert all(event.actor_type == "system" for event in events)

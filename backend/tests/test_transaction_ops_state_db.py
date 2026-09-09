@@ -479,6 +479,59 @@ async def test_approval_actor_comes_from_current_human_and_is_audited(db, setup_
         )
 
 
+async def test_operation_audit_links_exact_proposal_and_human_decision(db, setup_state):
+    from app.models.audit import AuditEvent
+
+    actor, config, run = setup_state
+    proposal = await new_proposal(db, actor, run)
+    await state.decide_proposal(
+        db,
+        actor.tenant_id,
+        proposal.id,
+        ProposalDecision(decision="approve", evidence_fingerprint="a" * 64, note="Reviewed exact changes"),
+        actor=actor,
+    )
+    claim = await state.claim_approved_operation(
+        db, actor.tenant_id, proposal.id, expected_evidence_fingerprint="a" * 64
+    )
+    await state.complete_operation(
+        db,
+        actor.tenant_id,
+        claim.operation_id,
+        outcome="verified",
+        result_json={"code": "independently_verified", "verification": {"source_unchanged": True}},
+    )
+    events = list(
+        await db.scalars(
+            select(AuditEvent).where(
+                AuditEvent.tenant_id == actor.tenant_id,
+                AuditEvent.resource_id.in_([str(proposal.id), str(claim.operation_id)]),
+            )
+        )
+    )
+    by_action = {event.action: event for event in events}
+    created = by_action["transaction_ops.proposal.create"]
+    assert created.payload["run_id"] == str(run.id)
+    assert created.payload["config_id"] == str(config.id)
+    assert created.payload["proposal_id"] == str(proposal.id)
+    approved = by_action["transaction_ops.approve"]
+    assert approved.actor_id == actor.id
+    assert approved.payload["decided_by"] == str(actor.id)
+    assert approved.payload["decided_at"] == proposal.decided_at.isoformat()
+    for name in ("operation.attempt", "operation.complete"):
+        event = by_action[f"transaction_ops.{name}"]
+        assert event.actor_type == "system" and event.actor_id is None
+        assert event.payload["proposal_id"] == str(proposal.id)
+        assert event.payload["operation_id"] == str(claim.operation_id)
+    completed = by_action["transaction_ops.operation.complete"]
+    assert completed.payload["approved_by"] == str(actor.id)
+    assert completed.payload["approved_at"] == proposal.decided_at.isoformat()
+    assert completed.payload["evidence_fingerprint"] == proposal.evidence_fingerprint
+    assert completed.payload["outcome"] == "verified"
+    # Verifying the approved write is not proof of full financial reconciliation.
+    assert completed.payload["settlement_status"] == "not_evaluated"
+
+
 @pytest.mark.parametrize(
     "mapping", [{"reference_field": "tranid"}, {"reference_field": "tranid", "action_mode": "detect_only"}]
 )

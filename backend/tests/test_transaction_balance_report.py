@@ -74,6 +74,30 @@ def test_known_order_and_tax_differences_remain_visible_without_repair_eligibili
     assert report["source"]["lines_complete"] is False
 
 
+@pytest.mark.parametrize("metric", ["order_total", "tax", "refunds"])
+@pytest.mark.parametrize("direction", [-1, 1])
+def test_one_cent_is_a_real_difference_in_each_financial_dimension(metric, direction):
+    from decimal import Decimal
+
+    source, target, config, mapping, now = evidence()
+    target["orders"][0]["header"].update(total="120.00", taxTotal="20.00")
+    refunds = {
+        side: {"order_reference": "R100000001", "currency": "USD", "amount": "1.00", "complete": True}
+        for side in ("source", "target")
+    }
+    delta = Decimal(direction) / 100
+    if metric == "refunds":
+        refunds["target"]["amount"] = str(Decimal("1.00") - delta)
+    else:
+        field = "total" if metric == "order_total" else "taxTotal"
+        header = target["orders"][0]["header"]
+        header[field] = str(Decimal(header[field]) - delta)
+    result = build_report(source, target, config, mapping, now=now, refunds=refunds)["balance"]
+    assert result["status"] == "difference"
+    assert result["amounts"][metric]["delta"] == f"{delta:.2f}"
+    assert result["missing_metrics"] == []
+
+
 def test_matching_headers_do_not_turn_unknown_refunds_into_a_match():
     source, target, config, mapping, now = evidence()
     target["orders"][0]["header"].update(total="120.00", taxTotal="20.00")

@@ -120,6 +120,21 @@ async def _commit(db, tenant_id):
 
 
 async def _audit(db, tenant_id, action, row, actor=None, payload=None):
+    # Keep exact evidence and changes in their immutable database records. Every
+    # event carries durable links; request correlation alone does not span jobs.
+    links = {}
+    for key in ("config_id", "run_id", "proposal_id"):
+        value = getattr(row, key, None)
+        if value is not None:
+            links[key] = str(value)
+    if isinstance(row, TransactionRun):
+        links["run_id"] = str(row.id)
+    elif isinstance(row, TransactionProposal):
+        links.update(proposal_id=str(row.id), evidence_fingerprint=row.evidence_fingerprint)
+        if row.decided_by is not None:
+            links.update(decided_by=str(row.decided_by), decided_at=row.decided_at.isoformat())
+    elif isinstance(row, TransactionOperation):
+        links["operation_id"] = str(row.id)
     await audit_service.log_event(
         db,
         tenant_id,
@@ -129,7 +144,7 @@ async def _audit(db, tenant_id, action, row, actor=None, payload=None):
         actor_type="user" if actor else "system",
         resource_type=row.__tablename__,
         resource_id=str(row.id),
-        payload=payload,
+        payload={**(payload or {}), **links},
     )
 
 
@@ -896,7 +911,25 @@ async def complete_operation(db, tenant_id, operation_id, *, outcome, result_jso
         **evidence,
         "termination_reason": {"verified": "done", "unknown": "stall", "failed": "error"}[outcome],
     }
-    await _audit(db, tenant_id, "operation.complete", row, payload={"outcome": outcome})
+    proposal = await get_proposal(db, tenant_id, row.proposal_id)
+    await _audit(
+        db,
+        tenant_id,
+        "operation.complete",
+        row,
+        payload={
+            "outcome": outcome,
+            "code": evidence.get("code"),
+            "run_id": str(proposal.run_id),
+            "config_id": str(proposal.config_id),
+            "approved_by": str(proposal.decided_by),
+            "approved_at": proposal.decided_at.isoformat(),
+            "evidence_fingerprint": proposal.evidence_fingerprint,
+            # The result verifies the approved operation. A separate fresh case
+            # observation must establish agreement on gross, tax and refunds.
+            "settlement_status": "not_evaluated",
+        },
+    )
     await _commit(db, tenant_id)
     return row
 
