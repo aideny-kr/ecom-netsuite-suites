@@ -206,7 +206,7 @@ def _source(report_type: str, period: str) -> dict:
     }
 
 
-# Task 2 (Slice 1, backend/app/services/report/report_html.py): the eight section
+# Task 2 (Slice 1, backend/app/services/report/report_html.py): the seven section
 # TYPES report_html.py's `_section_html` now knows how to render for this playbook --
 # `build_inventory_aging_sections`' names there are final, this list is their single
 # source of truth on the recipe side. Every section still references ALL FOUR sources
@@ -215,12 +215,14 @@ def _source(report_type: str, period: str) -> dict:
 # four payloads and slicing the resulting AgingReport per section -- still a LATER
 # Slice-1 task, same as before this list had eight entries instead of one) needs every
 # section to know it depends on the full set, not just the source that happens to name
-# it in a comment.
+# it in a comment. `mid_row` (review finding -- major) replaces the separate
+# `trend_chart`/`variance_table` entries: the mock renders those two cards
+# side-by-side in one 2-column row, not as two independent full-width sections --
+# see `build_inventory_aging_sections`'s docstring.
 _INVENTORY_AGING_SECTION_TYPES: tuple[str, ...] = (
     "watch_items",
     "kpi_cards",
-    "trend_chart",
-    "variance_table",
+    "mid_row",
     "bucket_table",
     "top_positions",
     "highlights",

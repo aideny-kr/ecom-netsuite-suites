@@ -321,6 +321,22 @@ def test_full_aged_list_details_block_carries_every_aged_sku_when_top5_truncates
 
 
 # ---------------------------------------------------------------------------
+# Review finding (major): the mock's 2-column .mid layout (trend chart + "By
+# location" variance table side-by-side) must be reproduced, not two
+# independent full-width stacked cards.
+# ---------------------------------------------------------------------------
+def test_trend_chart_and_variance_table_render_in_a_two_column_row(html):
+    assert 'class="ia-mid"' in html
+    mid_idx = html.index('class="ia-mid"')
+    chart_idx = html.index("Aged share of on-hand value, by location")
+    variance_idx = html.index("By location")
+    buckets_idx = html.index("Aging buckets by location")
+    # Both cards render inside the .ia-mid wrapper, in mock order, before the
+    # next (unrelated) section begins.
+    assert mid_idx < chart_idx < variance_idx < buckets_idx
+
+
+# ---------------------------------------------------------------------------
 # Negative deltas render in parentheses (design rule #9)
 # ---------------------------------------------------------------------------
 def test_negative_delta_value_renders_in_parentheses(html, report):

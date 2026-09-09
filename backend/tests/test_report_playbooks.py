@@ -60,17 +60,18 @@ def test_build_playbook_recipe_for_inventory_aging_uses_bigquery_sources():
         assert source["tool"] == "bigquery_sql"
         assert source["connection_id"] is None
     # Task 2 (Slice 1): the ONE "inventory_aging" placeholder section Task 1 left here
-    # is now the eight section TYPES report_html.py actually knows how to render
+    # is now the seven section TYPES report_html.py actually knows how to render
     # (report_html.build_inventory_aging_sections' names, final per that task's
     # interfaces note) -- each still referencing all four sources (result_ids) and the
     # same params, since the render wiring that turns them into `model`-bearing
     # sections (a later task, same as before) computes ONE AgingReport from all four
-    # and slices it per section, not per-source.
+    # and slices it per section, not per-source. `mid_row` (fix round 1 -- review
+    # finding, major) replaces the separate trend_chart/variance_table entries: the
+    # mock renders those two cards side-by-side in one 2-column row.
     expected_types = [
         "watch_items",
         "kpi_cards",
-        "trend_chart",
-        "variance_table",
+        "mid_row",
         "bucket_table",
         "top_positions",
         "highlights",

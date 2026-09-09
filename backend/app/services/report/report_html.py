@@ -307,6 +307,8 @@ _IA_CSS = """
 .ia-kpis .kpi .d b.fav { color: var(--ia-fav); } .ia-kpis .kpi .d b.unf { color: var(--ia-unf); }
 .ia-kpis .kpi .s { font-size: 11px; color: var(--ia-muted); }
 .ia-kpis .kpi svg { width: 100%; height: 34px; margin-top: 4px; color: #444; display: block; }
+.ia-mid { display: grid; grid-template-columns: 1fr 1.2fr; gap: 18px; align-items: start; }
+@media (max-width: 900px) { .ia-mid { grid-template-columns: 1fr; } }
 .chart, .tblcard { border: 2px solid var(--border); background: var(--card); padding: 10px 12px 8px;
   box-shadow: 3px 3px 0 var(--border); margin: 14px 0; overflow-x: auto; }
 .chart h3, .tblcard h3 { margin: 0 0 6px; font-size: 12px; font-weight: 800; letter-spacing: .02em; }
@@ -524,6 +526,9 @@ def _section_html(s: dict) -> str:
     if t == "variance_table":
         model = s.get("model")
         return _ia_variance_table_html(model) if model is not None else ""
+    if t == "mid_row":
+        model = s.get("model")
+        return _ia_mid_row_html(model) if model is not None else ""
     if t == "bucket_table":
         model = s.get("model")
         return _ia_bucket_table_html(model) if model is not None else ""
@@ -1531,6 +1536,19 @@ def _ia_variance_table_html(report: AgingReport) -> str:
     )
 
 
+def _ia_mid_row_html(report: AgingReport) -> str:
+    """The mock's 2-column ``.mid`` layout (review finding — major): the trend chart
+    and the "By location" variance table render side-by-side, not as two independent
+    full-width stacked cards. ``.ia-mid`` collapses to a single column under 900px,
+    same responsive rule as the mock's own ``.mid`` (and the same pattern
+    ``_FS_CSS``'s ``.fs-mid`` already uses for the financial_statement renderer)."""
+    chart_html = _ia_trend_chart_html(report)
+    variance_html = _ia_variance_table_html(report)
+    if not chart_html and not variance_html:
+        return ""
+    return f'<div class="ia-section"><div class="ia-mid">{chart_html}{variance_html}</div></div>'
+
+
 def _ia_bucket_row_html(bucket: str, locations: tuple[LocationSummary, ...]) -> str:
     swatch = f'<span class="bar" style="background:{_IA_BUCKET_SWATCH[bucket]}"></span>'
     cells = f'<td class="lbl">{swatch}{bucket} days</td>'
@@ -1721,7 +1739,16 @@ def build_inventory_aging_provenance(prov: Provenance) -> list[dict]:
 # inventory_aging section pays nothing for this CSS, and stays byte-identical to before
 # this task).
 _IA_SECTION_TYPES = frozenset(
-    {"watch_items", "kpi_cards", "trend_chart", "variance_table", "bucket_table", "top_positions", "highlights"}
+    {
+        "watch_items",
+        "kpi_cards",
+        "trend_chart",
+        "variance_table",
+        "mid_row",
+        "bucket_table",
+        "top_positions",
+        "highlights",
+    }
 )
 
 
@@ -1734,12 +1761,18 @@ def build_inventory_aging_sections(report: AgingReport) -> list[dict]:
     narrative section (this function's own inventory_aging narrative) is what
     distinguishes it from a plain `markdown` one; `_section_html` branches on which key
     is present, so every existing `{"type": "narrative", "markdown": ...}` caller is
-    completely unaffected (see `_section_html`'s comment there)."""
+    completely unaffected (see `_section_html`'s comment there).
+
+    ``mid_row`` (review finding — major) replaces what used to be two independent
+    `trend_chart` + `variance_table` sections: the mock renders those two cards
+    side-by-side in one 2-column row (`.mid`), not as separate full-width stacked
+    cards, so `_ia_mid_row_html` renders both from a single `model` (the whole
+    report — each card only needs its own slice, same as the standalone
+    `trend_chart`/`variance_table` types those two renderer functions still serve)."""
     return [
         {"type": "watch_items", "model": report.watch_items},
         {"type": "kpi_cards", "model": report.kpis},
-        {"type": "trend_chart", "model": report},
-        {"type": "variance_table", "model": report},
+        {"type": "mid_row", "model": report},
         {"type": "bucket_table", "model": report},
         {"type": "top_positions", "model": report},
         {"type": "highlights", "model": report.highlights},
