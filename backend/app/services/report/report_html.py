@@ -2,9 +2,20 @@ from __future__ import annotations
 
 import math
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
 from html import escape
+
+from app.services.report.inventory_aging import (
+    AgingReport,
+    Highlight,
+    KpiCard,
+    LocationSummary,
+    Provenance,
+    TopItem,
+    WatchItem,
+    share_pct,
+)
 
 # A string we will coerce to a currency amount: optional sign, US thousands-grouping
 # (1,234,567) OR a plain integer part (no leading zeros — "0042" is a code, not $42),
@@ -257,6 +268,96 @@ table.fs-stmt:has(input.fs-sec-4:not(:checked)) tr.fs-of-4 { display:none; }
 }
 """
 
+# Task 2 (Slice 1) — the inventory_aging section types' CSS. A SEPARATE constant,
+# concatenated in via plain string `+` exactly like `_FS_CSS` above (never through the
+# `%`-formatted `_CSS` pipeline) — same reason: byte-stability for every report that
+# carries no inventory_aging section, and no %% doubling burden for the several literal
+# `%` values below (`width:100%`, `height:34px` etc. — none needs escaping here).
+# Namespaced `.ia-*`/scoped-to-`.chart`/`.tblcard` throughout so nothing here collides
+# with `_CSS`'s generic `table`/`th`/`td` rules or `_FS_CSS`'s `.fs-*` ones — the mock's
+# own paper/cream aesthetic is a deliberately different design language from the
+# generic "notebook" stylesheet, so it gets its own color tokens rather than reusing
+# `_FS_CSS`'s `--fs-good`/`--fs-bad` (which would be undefined on a report with
+# inventory_aging sections but no financial_statement one).
+_IA_CSS = """
+:root {
+  --ia-fav: #1B7A3E; --ia-unf: #B4232C; --ia-warn: #9A6400;
+  --ia-line-soft: #D9D2C3; --ia-muted: #8E8B84; --ia-paper-2: #F4F1E9;
+  --ia-b1: #E7E1D3; --ia-b2: #CFC7B4; --ia-b3: #AFA48C; --ia-b4: #6E6552; --ia-b5: #2B2722;
+}
+.ia-section { margin: 26px 0; }
+.ia-section h2 { font-size: 12px; letter-spacing: .12em; text-transform: uppercase;
+  margin: 0 0 12px; font-weight: 800; display: flex; align-items: baseline; gap: 10px; }
+.ia-section h2 span { font-weight: 500; letter-spacing: 0; text-transform: none;
+  color: var(--ia-muted); font-size: 12px; }
+.ia-watch { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+.ia-chip { display: inline-flex; align-items: center; gap: 7px; border: 2px solid var(--border);
+  background: var(--card); padding: 4px 10px; font-size: 12px; box-shadow: 3px 3px 0 var(--border); }
+.ia-chip .dot { width: 8px; height: 8px; border-radius: 999px; background: var(--ia-muted); flex: none; }
+.ia-chip.unf .dot { background: var(--ia-unf); }
+.ia-chip.fav .dot { background: var(--ia-fav); }
+.ia-chip.warn .dot { background: var(--ia-warn); }
+.ia-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 14px 0 4px; }
+.ia-kpis .kpi { border: 2px solid var(--border); background: var(--card); padding: 10px 12px 8px;
+  box-shadow: 3px 3px 0 var(--border); display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ia-kpis .kpi .l { font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--ia-muted);
+  font-weight: 600; }
+.ia-kpis .kpi .v { font-size: 26px; font-weight: 800; letter-spacing: -.02em; line-height: 1.15; }
+.ia-kpis .kpi .d { font-size: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+.ia-kpis .kpi .d b.fav { color: var(--ia-fav); } .ia-kpis .kpi .d b.unf { color: var(--ia-unf); }
+.ia-kpis .kpi .s { font-size: 11px; color: var(--ia-muted); }
+.ia-kpis .kpi svg { width: 100%; height: 34px; margin-top: 4px; color: #444; display: block; }
+.chart, .tblcard { border: 2px solid var(--border); background: var(--card); padding: 10px 12px 8px;
+  box-shadow: 3px 3px 0 var(--border); margin: 14px 0; overflow-x: auto; }
+.chart h3, .tblcard h3 { margin: 0 0 6px; font-size: 12px; font-weight: 800; letter-spacing: .02em; }
+.chart h3 span, .tblcard h3 span { font-weight: 500; color: var(--ia-muted); }
+.chart svg { width: 100%; height: 232px; display: block; }
+.chart .ia-grid line { stroke: var(--ia-line-soft); stroke-width: 1; }
+.chart .ia-grid text, .chart .ia-xaxis text { fill: var(--ia-muted); font-size: 10px; font-family: inherit; }
+.legend { display: flex; gap: 14px; font-size: 11.5px; color: var(--ia-muted); margin-top: 6px; flex-wrap: wrap; }
+.legend i { display: inline-block; width: 18px; height: 3px; vertical-align: middle; margin-right: 6px; }
+.legend .muted { color: var(--ia-muted); }
+.tblcard table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.tblcard th { text-align: right; font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--ia-muted); font-weight: 600; padding: 6px 8px; border: none; border-bottom: 2px solid var(--border);
+  white-space: nowrap; background: transparent; }
+.tblcard th:first-child, .tblcard td:first-child { text-align: left; }
+.tblcard td { padding: 6px 8px; border: none; border-bottom: 1px solid var(--ia-line-soft);
+  text-align: right; white-space: nowrap; }
+.tblcard td.lbl { text-align: left; }
+.tblcard tr.sub td { font-weight: 700; border-top: 2px solid var(--border); background: var(--ia-paper-2); }
+.tblcard tr.total td { font-weight: 800; border-top: 3px solid var(--border);
+  border-bottom: 3px double var(--border); font-size: 13px; }
+.tblcard tr.group td { text-align: left; font-weight: 800; font-size: 11px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--ia-muted); background: var(--ia-paper-2); padding-top: 9px; }
+.tblcard td .bar { display: inline-block; width: 18px; height: 9px; vertical-align: middle;
+  margin-right: 6px; border: 1px solid var(--border); }
+.tblcard td.pct { color: var(--ia-muted); }
+.tblcard .fav { color: var(--ia-fav); } .tblcard .unf { color: var(--ia-unf); }
+.tblcard .desc { text-align: left !important; white-space: normal !important; min-width: 220px; max-width: 360px; }
+.tblcard .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+.tblcard .muted { color: var(--ia-muted); font-size: 11px; margin-top: 8px; }
+.ia-section details { margin-top: 10px; }
+.ia-section summary { cursor: default; font-size: 12px; font-weight: 700; color: var(--accent-ink); list-style: none; }
+.ia-section summary::before { content: "▸ "; }
+.narr { border-left: 4px solid var(--accent); padding: 4px 0 4px 14px; max-width: 84ch; }
+.narr p { margin: 0 0 8px; }
+.hl { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 8px 22px;
+  margin: 0; padding: 0; list-style: none; }
+.hl li { font-size: 13px; padding-left: 14px; position: relative; }
+.hl li::before { content: ""; position: absolute; left: 0; top: .55em; width: 7px; height: 7px;
+  background: var(--ink); }
+/* Print (design rule #15): a bare <details> (no `open` attribute) collapses its content
+   natively in every browser -- board packs need the FULL aged list on paper regardless
+   of the on-screen collapse state (spec §A4 "the appendix (full aged list) is appended
+   as its own pages"), so print forces every inventory_aging <details> block open. */
+@media print {
+  .ia-section details:not([open]) > * { display: block !important; }
+  .ia-section summary { display: none !important; }
+  .chart, .tblcard { overflow-x: visible; box-shadow: none; break-inside: avoid; }
+}
+"""
+
 
 def fmt_amount(value) -> str:
     """Accounting-style format for a CURRENCY cell: thousands separators, 2 decimals
@@ -406,7 +507,31 @@ def _section_html(s: dict) -> str:
         lvl = min(max(int(s.get("level", 2)), 1), 3)
         return f"<h{lvl}>{escape(str(s.get('text', '')))}</h{lvl}>"
     if t == "narrative":
+        # Task 2 (Slice 1): a `model` key (an inventory_aging `Narrative`) means THIS
+        # is the bespoke inventory_aging narrative card; every existing caller passes
+        # `markdown` and never `model`, so that path is completely untouched — byte-
+        # identical to before this branch existed.
+        if "model" in s:
+            return _ia_narrative_html(s["model"])
         return f'<div class="nb-card svg-wrap">{_md_block(str(s.get("markdown", "")))}</div>'
+    if t == "watch_items":
+        return _ia_watch_html(s.get("model") or ())
+    if t == "kpi_cards":
+        return _ia_kpi_cards_html(s.get("model") or ())
+    if t == "trend_chart":
+        model = s.get("model")
+        return _ia_trend_chart_html(model) if model is not None else ""
+    if t == "variance_table":
+        model = s.get("model")
+        return _ia_variance_table_html(model) if model is not None else ""
+    if t == "bucket_table":
+        model = s.get("model")
+        return _ia_bucket_table_html(model) if model is not None else ""
+    if t == "top_positions":
+        model = s.get("model")
+        return _ia_top_positions_html(model) if model is not None else ""
+    if t == "highlights":
+        return _ia_highlights_html(s.get("model") or ())
     if t == "metric_headline":
         foot = ""
         if s.get("definition_version") is not None:
@@ -1118,6 +1243,496 @@ def _financial_statement_html(model: dict) -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# Task 2 (Slice 1) — inventory_aging section renderers.
+#
+# Consumes ONLY `AgingReport` (Task 1, backend/app/services/report/inventory_aging.py)
+# or a slice of it — mirrors the `financial_statement` section's "model" seam
+# (a render-ready value already sitting on the section dict, see
+# `_financial_statement_html`'s docstring above) rather than inventing a new contract.
+# `build_inventory_aging_sections` below is that seam's producer: it turns a computed
+# AgingReport into the section list `render_report_html` already knows how to join.
+#
+# Wiring THIS module's section types into a live compose/refresh path (calling
+# `inventory_aging.compute()` on real tool payloads and feeding the result to
+# `build_inventory_aging_sections`) is a LATER Slice-1 task, same as Task 1's own
+# docstring says about `report_service.assemble_spec` — this only has to render
+# whatever AgingReport it's given, correctly and matching the mock, which is what
+# every test in `tests/report/test_inventory_aging_render.py` checks. The AgingReport
+# object flows through `model` UNSERIALIZED (a live dataclass instance, not a JSON-safe
+# dict) — a deliberate, documented simplification: a recipe-JSON round trip isn't this
+# task's concern until that later wiring task exists.
+#
+# Unlike `financial_statement` (whose statement_builder pre-formats every displayed
+# string), Task 1's `compute()` deliberately leaves KPI/table figures as raw `Decimal`
+# (only WatchItem.text/Highlight.text/Narrative are pre-formatted prose) — so this
+# module owns its OWN money/percent/points formatting, matching the mock's conventions
+# (design rule #9): whole dollars with thousands grouping and parentheses for negative
+# in TABLE cells (`_ia_money`/`_ia_pct`), abbreviated ($22.70M/$867.8K) in KPI cards
+# (`_ia_abbrev_money`), and a signed typographic-minus form for point deltas
+# (`_ia_pts`, reusing the `_MINUS` glyph the financial_statement renderer already
+# defines above).
+# ---------------------------------------------------------------------------
+
+_IA_DOT_CLASS = {"red": "unf", "green": "fav", "amber": "warn", "grey": ""}
+
+# One color per location, cycled if there are ever more than 5 (the mock's own palette:
+# --b5 near-black, --accent orange, --b3 tan, then two more --b* steps). The MOCK
+# dashes its third series (Panurgy) purely because a 3rd solid line on a light "b3" tan
+# was hard to tell from the gridlines at a glance — every series from the third onward
+# gets the same dashed treatment here, not just literally the third.
+_IA_PALETTE: tuple[str, ...] = ("#2B2722", "#E0641F", "#AFA48C", "#6E6552", "#CFC7B4")
+_IA_BUCKET_SWATCH = {
+    "0-30": "var(--ia-b1)",
+    "31-60": "var(--ia-b2)",
+    "61-90": "var(--ia-b3)",
+    "91-180": "var(--ia-b4)",
+    "180+": "var(--ia-b5)",
+}
+
+_IA_SPARK_W, _IA_SPARK_H = 200.0, 34.0
+_IA_TREND_W, _IA_TREND_H = 600.0, 232.0
+_IA_TREND_PAD_L, _IA_TREND_PAD_R, _IA_TREND_PAD_T, _IA_TREND_PAD_B = 52.0, 60.0, 20.0, 26.0
+
+_IA_TOP_HEADER = (
+    '<tr><th>SKU</th><th class="desc" style="text-align:left">Item</th><th>Category</th>'
+    "<th>Units</th><th>Value $</th><th>Days since restock</th><th>% of location aged</th></tr>"
+)
+
+
+def _ia_money(value: Decimal) -> str:
+    """Whole-dollar TABLE-cell string: thousands-grouped, no decimals, parentheses for
+    negative (design rule #9) — ``Decimal('1380661') -> '1,380,661'``,
+    ``Decimal('-542687') -> '(542,687)'``."""
+    q = value.quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    return f"({abs(q):,})" if q < 0 else f"{q:,}"
+
+
+def _ia_pct(value: Decimal) -> str:
+    """1dp percent, parentheses for negative — ``'7.3%'``, ``'(24.7%)'``."""
+    return f"({abs(value)}%)" if value < 0 else f"{value}%"
+
+
+def _ia_signed_pct(value: Decimal) -> str:
+    sign = "+" if value >= 0 else _MINUS
+    return f"{sign}{abs(value)}%"
+
+
+def _ia_pts(value: Decimal) -> str:
+    """Signed point delta, typographic minus (matches the mock's Δ pts column /
+    KPI-card sub-line) — ``'+6.0'``, ``'−3.7'``."""
+    sign = "+" if value >= 0 else _MINUS
+    return f"{sign}{abs(value)}"
+
+
+def _ia_abbrev_money(value: Decimal) -> str:
+    """Abbreviated $ for KPI cards / bucket-table group headers (unsigned) —
+    ``'$22.70M'`` / ``'$867.8K'`` / ``'$500'``."""
+    v = abs(value)
+    sign = "-" if value < 0 else ""
+    if v >= Decimal("1000000"):
+        return f"{sign}${(v / Decimal('1000000')):.2f}M"
+    if v >= Decimal("1000"):
+        return f"{sign}${(v / Decimal('1000')):.1f}K"
+    return f"{sign}${v:,.0f}"
+
+
+def _ia_signed_abbrev_money(value: Decimal) -> str:
+    sign = "+" if value >= 0 else _MINUS
+    return f"{sign}{_ia_abbrev_money(abs(value))}"
+
+
+def _ia_short_date(d: date) -> str:
+    return f"{d.day} {d.strftime('%b')}"
+
+
+def _ia_watch_html(items: tuple[WatchItem, ...]) -> str:
+    if not items:
+        return ""
+    chips = "".join(
+        f'<span class="ia-chip {_IA_DOT_CLASS.get(w.dot, "")}"><span class="dot"></span>{escape(w.text)}</span>'
+        for w in items
+    )
+    return (
+        '<div class="ia-section"><h2>Watch items '
+        "<span>computed · materiality-gated at $50K or 1 pt of share</span></h2>"
+        f'<div class="ia-watch">{chips}</div></div>'
+    )
+
+
+def _ia_sparkline_svg(values: tuple[Decimal, ...]) -> str:
+    """A KPI-card sparkline (mock: 200x34 viewBox, polyline + emphasised endpoint dot).
+    ``None``/an empty/single-point series (e.g. the aged>180 card — Task 1's r_trend has
+    no 180+ series, see KpiCard.sparkline's own docstring) renders nothing, same
+    "needs >=2 points" rule as the financial_statement renderer's `_fs_sparkline_svg`."""
+    if not values or len(values) < 2:
+        return ""
+    floats = [float(v) for v in values]
+    vmin, vmax = min(floats), max(floats)
+    span = (vmax - vmin) or 1.0
+    x0, x1, y0, y1 = 4.0, _IA_SPARK_W - 4.0, 4.0, _IA_SPARK_H - 4.0
+    step = (x1 - x0) / (len(floats) - 1)
+    pts = [(x0 + i * step, y1 - ((v - vmin) / span) * (y1 - y0)) for i, v in enumerate(floats)]
+    path = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+    ex, ey = pts[-1]
+    return (
+        f'<svg viewBox="0 0 {_IA_SPARK_W:.0f} {_IA_SPARK_H:.0f}" preserveAspectRatio="none" aria-hidden="true">'
+        f'<polyline fill="none" stroke="currentColor" stroke-width="1.5" points="{path}"/>'
+        f'<circle cx="{ex:.1f}" cy="{ey:.1f}" r="2.5" fill="currentColor"/></svg>'
+    )
+
+
+def _ia_kpi_delta_html(kpi: KpiCard) -> str:
+    cls = "fav" if kpi.favourable else "unf"
+    arrow = "▲" if kpi.delta >= 0 else "▼"
+    if kpi.delta_pct is not None:
+        main = f"{arrow} {_ia_signed_abbrev_money(kpi.delta)} · {_ia_signed_pct(kpi.delta_pct)}"
+        return f'<div class="d"><b class="{cls}">{main}</b> vs prior week</div>'
+    # The aged-share card (KpiCard.delta_pct is None): the mock shows a point delta
+    # plus "vs {prior %}" rather than "vs prior week" — reconstruct the prior share
+    # from value/delta rather than adding a field Task 1's AgingReport doesn't carry.
+    prior_value = kpi.value - kpi.delta
+    main = f"{arrow} {_ia_pts(kpi.delta)} pts"
+    return f'<div class="d"><b class="{cls}">{main}</b> vs {_ia_pct(prior_value)}</div>'
+
+
+def _ia_kpi_html(kpi: KpiCard) -> str:
+    value_str = f"{kpi.value}%" if kpi.key == "aged_share" else _ia_abbrev_money(kpi.value)
+    spark = _ia_sparkline_svg(kpi.sparkline)
+    return (
+        f'<div class="kpi"><div class="l">{escape(kpi.label)}</div>'
+        f'<div class="v tnum">{escape(value_str)}</div>{_ia_kpi_delta_html(kpi)}'
+        f'<div class="s">{escape(kpi.sub_detail)}</div>{spark}</div>'
+    )
+
+
+def _ia_kpi_cards_html(kpis: tuple[KpiCard, ...]) -> str:
+    if not kpis:
+        return ""
+    return f'<div class="ia-kpis">{"".join(_ia_kpi_html(k) for k in kpis)}</div>'
+
+
+def _ia_trend_chart_html(report: AgingReport) -> str:
+    """One polyline per location (spec §A1 "trend chart ... line, aged share % per
+    location, same scale, endpoint labels, legend"). Assumes every location's trend
+    series shares the same weekly dates (true for any real recipe — one `r_trend`
+    query, same `trend_weeks` param, per §A7) — the x-axis is read off whichever
+    location has the most points so a genuinely ragged fixture still renders (never
+    crashes), even though its labels then only line up exactly for the aligned
+    locations."""
+    locations = [loc.location for loc in report.locations]
+    series = [(loc, report.trend.get(loc, ())) for loc in locations]
+    axis_source = max((pts for _loc, pts in series), key=len, default=())
+    if len(axis_source) < 2:
+        return ""
+    date_labels = [_ia_short_date(tp.d) for tp in axis_source]
+
+    plot_w = _IA_TREND_W - _IA_TREND_PAD_L - _IA_TREND_PAD_R
+    plot_h = _IA_TREND_H - _IA_TREND_PAD_T - _IA_TREND_PAD_B
+    y_top, y_bottom = _IA_TREND_PAD_T, _IA_TREND_PAD_T + plot_h
+    all_pcts = [float(tp.pct_90p) for _loc, pts in series for tp in pts]
+    raw_max = max([*all_pcts, 0.0])
+    axis_max = max(10.0, math.ceil((raw_max or 1.0) / 5.0) * 5.0)
+
+    def y_of(pct: float) -> float:
+        return y_bottom - (pct / axis_max) * plot_h
+
+    grid_parts = []
+    for i in range(5):
+        frac = i / 4
+        y = y_top + frac * plot_h
+        label_val = axis_max * (1 - frac)
+        grid_parts.append(
+            f'<line x1="{_IA_TREND_PAD_L:.0f}" y1="{y:.1f}" x2="{_IA_TREND_W - _IA_TREND_PAD_R:.0f}" y2="{y:.1f}"/>'
+        )
+        grid_parts.append(
+            f'<text x="{_IA_TREND_PAD_L - 6:.0f}" y="{y + 4:.1f}" text-anchor="end">{label_val:.1f}%</text>'
+        )
+
+    x_label_parts = []
+    x_step = plot_w / max(len(axis_source) - 1, 1)
+    for i, label in enumerate(date_labels):
+        x = _IA_TREND_PAD_L + i * x_step
+        x_label_parts.append(f'<text x="{x:.1f}" y="{_IA_TREND_H - 6:.0f}" text-anchor="middle">{escape(label)}</text>')
+
+    series_parts: list[str] = []
+    endpoint_parts: list[str] = []
+    label_parts: list[str] = []
+    legend_items: list[str] = []
+    for i, (loc_name, pts) in enumerate(series):
+        if len(pts) < 2:
+            continue
+        color = _IA_PALETTE[i % len(_IA_PALETTE)]
+        dashed = i >= 2
+        step = plot_w / max(len(pts) - 1, 1)
+        coords = [(_IA_TREND_PAD_L + j * step, y_of(float(tp.pct_90p))) for j, tp in enumerate(pts)]
+        path = " ".join(f"{x:.1f},{y:.1f}" for x, y in coords)
+        dash_attr = ' stroke-dasharray="6 4"' if dashed else ""
+        series_parts.append(f'<polyline fill="none" stroke="{color}" stroke-width="2.5"{dash_attr} points="{path}"/>')
+        ex, ey = coords[-1]
+        last = pts[-1]
+        tip = f"{loc_name} {_ia_short_date(last.d)}: {last.pct_90p}%"
+        endpoint_parts.append(
+            f'<circle cx="{ex:.1f}" cy="{ey:.1f}" r="4" fill="{color}"><title>{escape(tip)}</title></circle>'
+        )
+        label_parts.append(
+            f'<text x="{ex + 6:.1f}" y="{ey + 4:.1f}" fill="{color}" font-weight="700">{last.pct_90p}%</text>'
+        )
+        dash_note = " (dashed)" if dashed else ""
+        legend_items.append(f'<span><i style="background:{color}"></i>{escape(loc_name)}{dash_note}</span>')
+
+    svg = (
+        f'<svg viewBox="0 0 {_IA_TREND_W:.0f} {_IA_TREND_H:.0f}" role="img" '
+        'aria-label="Line chart: percent of on-hand value older than 90 days per location over time">'
+        f'<g class="ia-grid">{"".join(grid_parts)}</g>'
+        f"{''.join(series_parts)}<g>{''.join(endpoint_parts)}</g>"
+        f'<g font-size="11" font-weight="700">{"".join(label_parts)}</g>'
+        f'<g class="ia-xaxis">{"".join(x_label_parts)}</g></svg>'
+    )
+    legend = (
+        f'<div class="legend">{"".join(legend_items)}'
+        '<span class="muted">Same scale for every location · endpoint = this snapshot</span></div>'
+    )
+    span_txt = f"{date_labels[0]} – {date_labels[-1]}" if date_labels else ""
+    return (
+        '<div class="chart"><h3>Aged share of on-hand value, by location '
+        f"<span>· % of value older than 90 days · weekly, {escape(span_txt)}</span></h3>"
+        f"{svg}{legend}</div>"
+    )
+
+
+def _ia_variance_row_html(loc: LocationSummary, row_cls: str = "") -> str:
+    delta_cls = "fav" if loc.delta_value >= 0 else "unf"
+    pts_cls = "fav" if loc.aged90_share_delta_pts <= 0 else "unf"
+    cells = (
+        f'<td class="lbl">{escape(loc.location)}</td>'
+        f"<td>{_ia_money(loc.on_hand_value)}</td>"
+        f"<td>{_ia_money(loc.prior_value)}</td>"
+        f'<td class="{delta_cls}">{_ia_money(loc.delta_value)}</td>'
+        f'<td class="{delta_cls}">{_ia_pct(loc.delta_pct)}</td>'
+        f"<td>{_ia_money(loc.aged90_value)}</td>"
+        f"<td>{loc.aged90_share_pct}%</td>"
+        f'<td class="{pts_cls}">{_ia_pts(loc.aged90_share_delta_pts)}</td>'
+    )
+    cls_attr = f' class="{row_cls}"' if row_cls else ""
+    return f"<tr{cls_attr}>{cells}</tr>"
+
+
+def _ia_variance_table_html(report: AgingReport) -> str:
+    rows = "".join(_ia_variance_row_html(loc) for loc in report.locations)
+    rows += _ia_variance_row_html(report.all_locations, "total")
+    return (
+        '<div class="tblcard"><h3>By location <span>· this week vs prior week</span></h3>'
+        '<table class="tnum"><thead><tr><th>Location</th><th>On-hand $</th><th>Prior wk</th>'
+        "<th>Δ $</th><th>Δ %</th><th>Aged &gt;90 $</th><th>Share</th><th>Δ pts</th>"
+        f"</tr></thead><tbody>{rows}</tbody></table>"
+        '<div class="muted">Share = aged &gt;90-day value ÷ on-hand value. Green/red mark '
+        "favourable/unfavourable movement only; a lower aged share is favourable.</div></div>"
+    )
+
+
+def _ia_bucket_row_html(bucket: str, locations: tuple[LocationSummary, ...]) -> str:
+    swatch = f'<span class="bar" style="background:{_IA_BUCKET_SWATCH[bucket]}"></span>'
+    cells = f'<td class="lbl">{swatch}{bucket} days</td>'
+    for loc in locations:
+        br = next(b for b in loc.buckets if b.bucket == bucket)
+        cells += (
+            f'<td>{_ia_money(br.value)}</td><td class="pct">{br.pct_of_location}%</td>'
+            f"<td>{br.units:,}</td><td>{br.skus}</td>"
+        )
+    return f"<tr>{cells}</tr>"
+
+
+def _ia_bucket_subtotal_row_html(label: str, row_cls: str, locations: tuple[LocationSummary, ...], values_fn) -> str:
+    cells = f'<td class="lbl">{label}</td>'
+    for loc in locations:
+        value, pct, units, skus = values_fn(loc)
+        cells += f'<td>{_ia_money(value)}</td><td class="pct">{pct}%</td><td>{units:,}</td><td>{skus}</td>'
+    return f'<tr class="{row_cls}">{cells}</tr>'
+
+
+def _ia_bucket_table_html(report: AgingReport) -> str:
+    locations = report.locations
+    if not locations:
+        return ""
+    header = "<th>Bucket</th>" + "<th>Value $</th><th>% of location</th><th>Units</th><th>SKUs</th>" * len(locations)
+    group = '<td class="lbl"></td>' + "".join(
+        f'<td colspan="4" style="text-align:center">{escape(loc.location)} · {_ia_abbrev_money(loc.on_hand_value)}</td>'
+        for loc in locations
+    )
+    rows = [f'<tr class="group">{group}</tr>']
+    for bucket in ("0-30", "31-60", "61-90"):
+        rows.append(_ia_bucket_row_html(bucket, locations))
+    rows.append(
+        _ia_bucket_subtotal_row_html(
+            "Current (≤ 90 days)",
+            "sub",
+            locations,
+            lambda loc: (
+                loc.on_hand_value - loc.aged90_value,
+                share_pct(loc.on_hand_value - loc.aged90_value, loc.on_hand_value),
+                loc.units - loc.aged90_units,
+                loc.skus - loc.aged90_skus,
+            ),
+        )
+    )
+    for bucket in ("91-180", "180+"):
+        rows.append(_ia_bucket_row_html(bucket, locations))
+    rows.append(
+        _ia_bucket_subtotal_row_html(
+            "Aged (&gt; 90 days)",
+            "sub",
+            locations,
+            lambda loc: (loc.aged90_value, loc.aged90_share_pct, loc.aged90_units, loc.aged90_skus),
+        )
+    )
+    rows.append(
+        _ia_bucket_subtotal_row_html(
+            "On hand", "total", locations, lambda loc: (loc.on_hand_value, Decimal("100"), loc.units, loc.skus)
+        )
+    )
+    return (
+        '<div class="ia-section"><h2>Aging buckets by location '
+        "<span>· days since last restock · value, units, SKUs · nothing truncated</span></h2>"
+        f'<div class="tblcard"><table class="tnum"><thead><tr>{header}</tr></thead>'
+        f"<tbody>{''.join(rows)}</tbody></table></div></div>"
+    )
+
+
+def _ia_top_item_row_html(it: TopItem, loc: LocationSummary) -> str:
+    pct = share_pct(it.value, loc.aged90_value)
+    return (
+        f'<tr><td class="lbl mono">{escape(it.sku)}</td><td class="desc">{escape(it.item_desc)}</td>'
+        f"<td>{escape(it.category)}</td><td>{it.units:,}</td><td>{_ia_money(it.value)}</td>"
+        f'<td>{it.days}</td><td class="pct">{pct}%</td></tr>'
+    )
+
+
+def _ia_top_positions_html(report: AgingReport) -> str:
+    top_rows: list[str] = []
+    all_rows: list[str] = []
+    total_aged = 0
+    for loc in report.locations:
+        items = report.top_items.get(loc.location, ())
+        total_aged += len(items)
+        top_rows.append(
+            f'<tr class="group"><td class="lbl" colspan="7">{escape(loc.location)} · aged '
+            f"{_ia_money(loc.aged90_value)} · top 5 = {loc.top5_share_pct}%</td></tr>"
+        )
+        for it in items:
+            row = _ia_top_item_row_html(it, loc)
+            top_rows.append(row)
+            all_rows.append(row)
+    details = (
+        f"<details><summary>All {total_aged} aged SKUs (collapsed here; the Excel file "
+        "carries every SKU)</summary>"
+        f'<div class="tblcard"><table class="tnum"><thead>{_IA_TOP_HEADER}</thead>'
+        f"<tbody>{''.join(all_rows)}</tbody></table></div></details>"
+    )
+    return (
+        '<div class="ia-section"><h2>Largest aged positions '
+        "<span>· top 5 per location by value, older than 90 days · the Excel file "
+        "carries every SKU</span></h2>"
+        f'<div class="tblcard"><table class="tnum"><thead>{_IA_TOP_HEADER}</thead>'
+        f"<tbody>{''.join(top_rows)}</tbody></table>{details}</div></div>"
+    )
+
+
+def _ia_highlights_html(highlights: tuple[Highlight, ...]) -> str:
+    if not highlights:
+        return ""
+    items = "".join(f"<li>{escape(h.text)}</li>" for h in highlights)
+    return (
+        '<div class="ia-section"><h2>Highlights '
+        "<span>· driver attribution, largest movers first, threshold-gated</span></h2>"
+        f'<ul class="hl">{items}</ul></div>'
+    )
+
+
+def _ia_narrative_html(narrative) -> str:
+    return (
+        '<div class="ia-section"><h2>Narrative '
+        "<span>· deterministic template · every figure tool-computed</span></h2>"
+        f'<div class="narr"><p>{escape(narrative.paragraph_1)}</p><p>{escape(narrative.paragraph_2)}</p></div></div>'
+    )
+
+
+def build_inventory_aging_provenance(prov: Provenance) -> list[dict]:
+    """Provenance entries for inventory_aging's "Sources & method" block (spec §A1) —
+    reuses the EXISTING generic `_provenance_html` renderer (its `<strong>Sources &amp;
+    method</strong>` heading already matches the mock verbatim) rather than a bespoke
+    grid, per "reuse existing renderers where they exist". `executed_at`/`bytes_scanned`
+    are `None` on a pure `compute()` result (Task 1's own docstring: filled in by the
+    live compose/refresh wiring, a later task) — rendered as an honestly-empty stamp
+    rather than a fabricated one."""
+    executed_at = prov.executed_at or ""
+    entries = [
+        {
+            "result_id": "r_items",
+            "label": "BigQuery inventory snapshot",
+            "detail": f"{prov.source} · {prov.age_definition}",
+            "executed_at": executed_at,
+            "resolved": True,
+        }
+    ]
+    snaps = ", ".join(
+        f"{loc}: {first.isoformat()}–{last.isoformat()} ({count} snapshots)"
+        for loc, (first, last, count) in sorted(prov.snapshots_used.items())
+    )
+    if snaps:
+        entries.append(
+            {
+                "result_id": "r_meta",
+                "label": "Snapshots used",
+                "detail": snaps,
+                "executed_at": executed_at,
+                "resolved": True,
+            }
+        )
+    entries.append(
+        {
+            "result_id": "r_prior/r_trend",
+            "label": f"{prov.query_count} bigquery_sql queries",
+            "detail": "; ".join(prov.integrity_checks),
+            "executed_at": executed_at,
+            "resolved": True,
+        }
+    )
+    return entries
+
+
+# The set of section `type`s this module owns in `_section_html` — used by
+# `render_report_html` to decide whether `_IA_CSS` needs to ship (same additive +
+# conditional pattern as `_FS_CSS`/`has_financial_statement` above: a report with no
+# inventory_aging section pays nothing for this CSS, and stays byte-identical to before
+# this task).
+_IA_SECTION_TYPES = frozenset(
+    {"watch_items", "kpi_cards", "trend_chart", "variance_table", "bucket_table", "top_positions", "highlights"}
+)
+
+
+def build_inventory_aging_sections(report: AgingReport) -> list[dict]:
+    """Turn a computed `AgingReport` (Task 1) into the section list `render_report_html`
+    already knows how to join — one dict per section type, `model` holding exactly the
+    slice of `report` that type's renderer needs (see the `_section_html` branches
+    below). The `narrative` type deliberately reuses the EXISTING generic "narrative"
+    section (markdown -> `_md_block`) for the two paragraphs — a `model` key on a
+    narrative section (this function's own inventory_aging narrative) is what
+    distinguishes it from a plain `markdown` one; `_section_html` branches on which key
+    is present, so every existing `{"type": "narrative", "markdown": ...}` caller is
+    completely unaffected (see `_section_html`'s comment there)."""
+    return [
+        {"type": "watch_items", "model": report.watch_items},
+        {"type": "kpi_cards", "model": report.kpis},
+        {"type": "trend_chart", "model": report},
+        {"type": "variance_table", "model": report},
+        {"type": "bucket_table", "model": report},
+        {"type": "top_positions", "model": report},
+        {"type": "highlights", "model": report.highlights},
+        {"type": "narrative", "model": report.narrative},
+    ]
+
+
 def render_report_html(
     spec: dict,
     accent_hsl: str = "240 6% 10%",
@@ -1155,6 +1770,17 @@ def render_report_html(
     has_financial_statement = any(sec.get("type") == "financial_statement" for sec in spec.get("sections", []))
     if has_financial_statement:
         css += _FS_CSS
+    # Task 2 (Slice 1) — same additive + conditional pattern: a report with no
+    # inventory_aging section pays nothing for _IA_CSS. The bespoke inventory_aging
+    # "narrative" section (see _section_html) reuses the SHARED "narrative" type name,
+    # so it's detected by `model` presence rather than by type alone (a plain markdown
+    # narrative section must never pull this CSS in).
+    has_inventory_aging = any(
+        sec.get("type") in _IA_SECTION_TYPES or (sec.get("type") == "narrative" and "model" in sec)
+        for sec in spec.get("sections", [])
+    )
+    if has_inventory_aging:
+        css += _IA_CSS
     # EYEBALL-GATE FIX (F1, round 3): statement pages get a wider canvas (.report--wide,
     # a MODIFIER class, never a change to the shared .report default) — see the .fs-mid
     # comment in _FS_CSS. Scoped to specs that actually carry a financial_statement

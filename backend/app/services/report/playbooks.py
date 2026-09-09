@@ -206,12 +206,36 @@ def _source(report_type: str, period: str) -> dict:
     }
 
 
+# Task 2 (Slice 1, backend/app/services/report/report_html.py): the eight section
+# TYPES report_html.py's `_section_html` now knows how to render for this playbook --
+# `build_inventory_aging_sections`' names there are final, this list is their single
+# source of truth on the recipe side. Every section still references ALL FOUR sources
+# (result_ids) and the same params: the render wiring that turns a resolved recipe's
+# sections into `model`-bearing ones (calling `inventory_aging.compute()` once on the
+# four payloads and slicing the resulting AgingReport per section -- still a LATER
+# Slice-1 task, same as before this list had eight entries instead of one) needs every
+# section to know it depends on the full set, not just the source that happens to name
+# it in a comment.
+_INVENTORY_AGING_SECTION_TYPES: tuple[str, ...] = (
+    "watch_items",
+    "kpi_cards",
+    "trend_chart",
+    "variance_table",
+    "bucket_table",
+    "top_positions",
+    "highlights",
+    "narrative",
+)
+
+
 def _build_inventory_aging_recipe(params: dict) -> tuple[str, dict]:
     """``inventory_aging``'s own recipe shape: four ``bigquery_sql`` sources (Task 1's
-    ``inventory_aging.build_sources``), one ``inventory_aging`` section referencing all
-    of them. Wiring that section type into ``assemble_spec``/the renderer is a later
-    Slice-1 task -- this only has to produce the recipe the refresh engine can store
-    and (once that wiring lands) replay unchanged, exactly like every other recipe here."""
+    ``inventory_aging.build_sources``), one section per
+    ``_INVENTORY_AGING_SECTION_TYPES`` entry, each referencing all four sources. Wiring
+    those section types into ``assemble_spec``/the renderer (turning each into a
+    ``model``-bearing section from one computed ``AgingReport``) is a later Slice-1
+    task -- this only has to produce the recipe the refresh engine can store and (once
+    that wiring lands) replay unchanged, exactly like every other recipe here."""
     from app.services.report.inventory_aging import RESULT_IDS, build_sources
 
     sources = build_sources(params)
@@ -220,10 +244,11 @@ def _build_inventory_aging_recipe(params: dict) -> tuple[str, dict]:
         "captured_at": datetime.now(timezone.utc).isoformat(),
         "sections": [
             {
-                "type": "inventory_aging",
+                "type": section_type,
                 "result_ids": list(RESULT_IDS),
                 "params": params,
             }
+            for section_type in _INVENTORY_AGING_SECTION_TYPES
         ],
         "sources": sources,
     }
@@ -418,7 +443,8 @@ async def compose_playbook_report(
     # but only a `financial_statement`-shaped recipe (`sections[0]["period"]`
     # below) can be composed by the rest of this function. A playbook whose
     # recipe uses a different section shape (e.g. inventory_aging's four
-    # bigquery_sql sources feeding one `inventory_aging` section, which has no
+    # bigquery_sql sources feeding its own watch_items/kpi_cards/.../narrative
+    # sections -- see _INVENTORY_AGING_SECTION_TYPES -- none of which has a
     # "period" key) must fail CLEANLY here, before any tool dispatch, rather
     # than let the next line's KeyError propagate as an unhandled 500 to a real
     # user who picked a now-visible-but-not-yet-composable catalog entry.

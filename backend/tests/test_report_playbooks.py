@@ -59,13 +59,27 @@ def test_build_playbook_recipe_for_inventory_aging_uses_bigquery_sources():
     for source in recipe["sources"].values():
         assert source["tool"] == "bigquery_sql"
         assert source["connection_id"] is None
-    assert recipe["sections"] == [
-        {
-            "type": "inventory_aging",
-            "result_ids": ["r_items", "r_prior", "r_trend", "r_meta"],
-            "params": {"locations": ["Acme", "Globex"]},
-        }
+    # Task 2 (Slice 1): the ONE "inventory_aging" placeholder section Task 1 left here
+    # is now the eight section TYPES report_html.py actually knows how to render
+    # (report_html.build_inventory_aging_sections' names, final per that task's
+    # interfaces note) -- each still referencing all four sources (result_ids) and the
+    # same params, since the render wiring that turns them into `model`-bearing
+    # sections (a later task, same as before) computes ONE AgingReport from all four
+    # and slices it per section, not per-source.
+    expected_types = [
+        "watch_items",
+        "kpi_cards",
+        "trend_chart",
+        "variance_table",
+        "bucket_table",
+        "top_positions",
+        "highlights",
+        "narrative",
     ]
+    assert [s["type"] for s in recipe["sections"]] == expected_types
+    for section in recipe["sections"]:
+        assert section["result_ids"] == ["r_items", "r_prior", "r_trend", "r_meta"]
+        assert section["params"] == {"locations": ["Acme", "Globex"]}
 
 
 def test_build_playbook_recipe_for_inventory_aging_rejects_bad_location():
