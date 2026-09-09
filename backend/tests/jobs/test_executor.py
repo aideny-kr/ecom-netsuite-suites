@@ -1656,6 +1656,65 @@ async def test_run_now_uses_the_plan_snapshotted_on_the_jobs_row_not_a_later_edi
     assert "s1_edited" not in job.result_summary["outputs"]
 
 
+async def test_run_now_preserves_the_enqueue_time_plan_version_after_a_later_plan_version_bump(
+    db: AsyncSession, monkeypatch
+):
+    """Item 4 (delta gate fix): `run_schedule_now` used to overwrite
+    `job.parameters` WHOLESALE, replacing `plan_version` with the schedule's
+    CURRENT value even when the pre-created row already snapshotted the
+    plan_version the operator actually validated at enqueue time -- the
+    completed job no longer said what version actually ran. The fix merges
+    onto the existing row's own parameters instead: `plan`/`plan_version`
+    survive when already present; only the runtime facts (period_key,
+    attempt, use_pending, schedule_id) are always overwritten."""
+    tenant = await create_test_tenant(db, name="Plan Version Snapshot Co")
+    await set_tenant_context(db, str(tenant.id))
+
+    async def fake_exec(ctx, params):
+        return {"ok": True}
+
+    monkeypatch.setitem(STEP_REGISTRY, "fake.step", _fake_spec("read", fake_exec))
+
+    snapshot_plan = {"steps": [{"id": "s1", "type": "fake.step", "params": {}}]}
+    schedule = await _seed_job_schedule(
+        db,
+        tenant,
+        plan_json=snapshot_plan,
+        next_run_at=None,
+        cron_expression="0 6 * * 1",
+        plan_version=1,
+    )
+
+    # Mirrors `schedule_service.enqueue_run`'s own pre-created row shape:
+    # plan_version + plan snapshotted at ENQUEUE time.
+    pre_created = Job(
+        tenant_id=tenant.id,
+        job_type="scheduled_job",
+        status="pending",
+        parameters={"schedule_id": str(schedule.id), "plan_version": 1, "use_pending": False, "plan": snapshot_plan},
+    )
+    db.add(pre_created)
+    await db.flush()
+    await db.commit()
+    pre_created_id = pre_created.id
+
+    # The schedule's plan_version is bumped AFTER enqueue (e.g. an instruction
+    # edit was approved) -- before the Celery task actually executes.
+    schedule.plan_version = 2
+    await db.commit()
+
+    outcome = await run_schedule_now(
+        db, schedule.id, tenant_id=tenant.id, actor_id=None, use_pending=False, existing_job_id=pre_created_id
+    )
+    assert outcome.reason == REASON_DONE
+
+    job = (await db.execute(select(Job).where(Job.id == pre_created_id))).scalar_one()
+    # The completed job still says what version ACTUALLY ran (1), never the
+    # schedule's current value (2).
+    assert job.parameters["plan_version"] == 1
+    assert job.parameters["plan"] == snapshot_plan
+
+
 async def test_early_blocked_return_resolves_a_pre_created_jobs_row_unapproved_plan(db: AsyncSession, monkeypatch):
     """review finding, MAJOR: both REASON_BLOCKED guard blocks in
     run_schedule_now (plan not approved; no compiled plan) used to return
