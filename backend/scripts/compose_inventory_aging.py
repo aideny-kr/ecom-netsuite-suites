@@ -63,9 +63,13 @@ from app.services.report.inventory_aging import (  # noqa: E402
 from app.services.report.report_html import (  # noqa: E402
     build_inventory_aging_provenance,
     build_inventory_aging_sections,
+    inventory_aging_title,
     render_report_html,
 )
 
+# The Report ROW's series title (spec §A6): the app's page header and the Drive folder
+# name. The rendered page's own <h1> is the mock's "Inventory Aging — Week of <date>"
+# (spec §A1, `inventory_aging_title`) — the two are deliberately different strings.
 TITLE = "Inventory Aging Weekly"
 
 
@@ -154,11 +158,15 @@ async def main(
     payloads = await _fetch_payloads(db, sources, tenant_id=tenant_id, actor_id=actor_id, correlation_id=correlation_id)
 
     report_data = compute(payloads, params)
-    sections = build_inventory_aging_sections(report_data)
+    # One timestamp for the head's "Composed …" line and the row's pin time, so the
+    # page and the row never disagree about when this report was made.
+    now = datetime.now(timezone.utc)
+    sections = build_inventory_aging_sections(report_data, composed_at=now.isoformat())
     provenance = build_inventory_aging_provenance(report_data.provenance)
-    spec = {"title": TITLE, "sections": sections}
+    page_title = inventory_aging_title(report_data)
+    spec = {"title": page_title, "sections": sections}
     rendered_html = render_report_html(spec, provenance=provenance)
-    spec_json = {"title": TITLE, "sections": [_json_safe(s) for s in sections]}
+    spec_json = {"title": page_title, "sections": [_json_safe(s) for s in sections]}
 
     # recipe_json is deliberately left None — this is a snapshot-only report.
     # Review finding (fix round 1): refresh_service.refresh_report / report_service
@@ -180,7 +188,6 @@ async def main(
     # re-establish tenant context before the RLS-scoped insert below, same reasoning
     # as compose_playbook_report.
     await set_tenant_context(db, str(tenant_id))
-    now = datetime.now(timezone.utc)
     report = Report(
         tenant_id=tenant_id,
         title=TITLE,

@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Any, TypedDict
 
@@ -186,6 +186,11 @@ class Provenance:
 @dataclass(frozen=True)
 class AgingReport:
     snapshot_date: date
+    # The snapshot every "vs prior week" delta compares against: snapshot_date -
+    # compare_days (the date r_prior's aggregate was taken at, per §A7's prior_date
+    # CTE). r_prior's rows carry no date of their own, so this is the only place a
+    # renderer can get "compared with <date>" for the report head's sub-line.
+    prior_date: date
     locations: tuple[LocationSummary, ...]
     all_locations: LocationSummary
     trend: dict[str, tuple[TrendPoint, ...]]
@@ -991,6 +996,7 @@ def compute(payloads: dict[str, list[dict]], params: dict[str, Any]) -> AgingRep
         raw_locations = list(DEFAULT_LOCATIONS)
     locations = _validate_locations(raw_locations)
     trend_weeks = _validate_positive_int(params.get("trend_weeks", DEFAULT_TREND_WEEKS), "trend_weeks")
+    compare_days = _validate_positive_int(params.get("compare_days", DEFAULT_COMPARE_DAYS), "compare_days")
 
     items = payloads.get("r_items") or []
     prior_rows = payloads.get("r_prior") or []
@@ -1041,6 +1047,7 @@ def compute(payloads: dict[str, list[dict]], params: dict[str, Any]) -> AgingRep
 
     return AgingReport(
         snapshot_date=snapshot_date,
+        prior_date=snapshot_date - timedelta(days=compare_days),
         locations=locations_tuple,
         all_locations=all_locations,
         trend=trend_by_loc,

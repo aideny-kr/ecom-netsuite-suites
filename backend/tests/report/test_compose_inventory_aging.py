@@ -71,7 +71,14 @@ async def test_main_persists_the_report_row_in_the_db(db, monkeypatch):
     row = (await db.execute(select(Report).where(Report.id == report.id))).scalar_one()
     assert row.tenant_id == tenant.id
     assert row.status == "draft"
-    assert "Inventory Aging Weekly" in row.rendered_html
+    # The rendered page's head is the MOCK's title ("Inventory Aging — Week of
+    # 8 Sep 2026", spec §A1) plus its sub-line/meta block; "Inventory Aging Weekly"
+    # is the Report ROW's series title (§A6), shown by the app's page header, and
+    # must not be stamped into the page as its <h1> (readiness-gate finding).
+    assert "<h1>Inventory Aging — Week of " in row.rendered_html
+    assert "<h1>Inventory Aging Weekly</h1>" not in row.rendered_html
+    assert "compared with " in row.rendered_html
+    assert "Composed " in row.rendered_html
     # the mock's own section heading, so a real render actually happened -- not just
     # a title stamped on an empty page.
     assert "Watch items" in row.rendered_html
@@ -137,7 +144,8 @@ async def test_main_spec_json_is_actually_json_safe(db, monkeypatch):
     report = await compose_inventory_aging.main(tenant.id, params["locations"], db=db)
 
     assert isinstance(report.spec_json, dict)
-    assert report.spec_json["title"] == "Inventory Aging Weekly"
+    assert report.spec_json["title"].startswith("Inventory Aging — Week of ")
+    assert report.spec_json["sections"][0]["type"] == "report_head"
 
 
 async def test_main_uses_default_locations_when_none_given(db, monkeypatch):

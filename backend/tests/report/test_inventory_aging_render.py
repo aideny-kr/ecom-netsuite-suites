@@ -439,3 +439,63 @@ def test_print_media_unclips_the_collapsible_aged_list():
 
 def test_render_report_html_deterministic(spec):
     assert render_report_html(spec) == render_report_html(spec)
+
+
+# ---------------------------------------------------------------------------
+# Report head (spec §A1: "report head (title `Inventory Aging — Week of {snapshot
+# date}`, sub-line, meta block incl. 'no model generated a figure')"). Found at the
+# readiness gate by rendering the fixture and comparing it with the mock's
+# `.report-head`: the render went straight from <h1> to "Watch items" -- no sub-line,
+# no meta block, and the <h1> date was ISO (2026-09-08) where the mock reads
+# "8 Sep 2026". The composed Framework report was worse: its <h1> was the SERIES
+# title "Inventory Aging Weekly" (the Report row's title), never the mock's head.
+# ---------------------------------------------------------------------------
+def test_inventory_aging_title_is_the_mocks_week_of_with_day_month_year(report):
+    from app.services.report.report_html import inventory_aging_title
+
+    assert inventory_aging_title(report) == "Inventory Aging — Week of 8 Sep 2026"
+
+
+def test_report_head_is_the_first_section_with_sub_line_and_meta(report):
+    sections = build_inventory_aging_sections(report, composed_at="2026-09-08T13:05:00+00:00")
+    assert sections[0]["type"] == "report_head"
+    head = sections[0]["model"]
+    # the mock's sub-line, verbatim shape: locations · method · compared with <prior>
+    assert head["sub"] == "Nova · Solace · on-hand stock aged by days since last restock · compared with 1 Sep 2026"
+    assert head["snapshot"] == "2026-09-08"
+    assert head["prior"] == "2026-09-01"
+    assert head["composed_at"] == "2026-09-08T13:05:00+00:00"
+
+
+def test_report_head_renders_sub_line_and_meta_under_the_title(report):
+    from app.services.report.report_html import inventory_aging_title
+
+    sections = build_inventory_aging_sections(report, composed_at="2026-09-08T13:05:00+00:00")
+    out = render_report_html({"title": inventory_aging_title(report), "sections": sections})
+    h1_end = out.index("</h1>")
+    watch = out.index("Watch items")
+    head_block = out[h1_end:watch]
+    assert "on-hand stock aged by days since last restock · compared with 1 Sep 2026" in head_block
+    assert "Snapshot <b>2026-09-08</b>" in head_block
+    assert "prior <b>2026-09-01</b>" in head_block
+    assert "Composed 8 Sep 2026, 13:05 UTC" in head_block
+    assert "no model generated a figure" in head_block
+
+
+def test_report_head_without_composed_at_still_carries_the_no_model_line(report):
+    sections = build_inventory_aging_sections(report)
+    out = render_report_html({"title": "x", "sections": sections})
+    head_block = out[out.index("</h1>") : out.index("Watch items")]
+    assert "no model generated a figure" in head_block
+    assert "Composed" not in head_block
+
+
+def test_report_head_model_is_json_native(report):
+    """spec_json is persisted as JSONB (compose script's _json_safe) and re-rendered
+    from it by scripts/backfill_report_html.py -- the head model must already be
+    plain strings so a round trip through JSON renders byte-identically."""
+    import json
+
+    sections = build_inventory_aging_sections(report, composed_at="2026-09-08T13:05:00+00:00")
+    head = sections[0]
+    assert json.loads(json.dumps(head)) == head

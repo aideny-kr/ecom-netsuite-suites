@@ -285,6 +285,12 @@ _IA_CSS = """
   --ia-line-soft: #D9D2C3; --ia-muted: #8E8B84; --ia-paper-2: #F4F1E9;
   --ia-b1: #E7E1D3; --ia-b2: #CFC7B4; --ia-b3: #AFA48C; --ia-b4: #6E6552; --ia-b5: #2B2722;
 }
+.ia-head { display: grid; grid-template-columns: 1fr auto; gap: 6px 24px; align-items: end;
+  margin: -8px 0 22px; padding-bottom: 14px; border-bottom: 3px solid var(--border); }
+.ia-sub { color: var(--ia-muted); font-size: 12.5px; }
+.ia-meta { text-align: right; font-size: 11.5px; color: var(--ia-muted); line-height: 1.6; }
+.ia-meta b { color: var(--ink); font-weight: 600; }
+@media (max-width: 900px) { .ia-head { grid-template-columns: 1fr; } .ia-meta { text-align: left; } }
 .ia-section { margin: 26px 0; }
 .ia-section h2 { font-size: 12px; letter-spacing: .12em; text-transform: uppercase;
   margin: 0 0 12px; font-weight: 800; display: flex; align-items: baseline; gap: 10px; }
@@ -521,6 +527,8 @@ def _section_html(s: dict) -> str:
         if "model" in s:
             return _ia_narrative_html(s["model"])
         return f'<div class="nb-card svg-wrap">{_md_block(str(s.get("markdown", "")))}</div>'
+    if t == "report_head":
+        return _ia_report_head_html(s.get("model") or {})
     if t == "watch_items":
         return _ia_watch_html(s.get("model") or ())
     if t == "kpi_cards":
@@ -1767,6 +1775,7 @@ def build_inventory_aging_provenance(prov: Provenance) -> list[dict]:
 # this task).
 _IA_SECTION_TYPES = frozenset(
     {
+        "report_head",
         "watch_items",
         "kpi_cards",
         "trend_chart",
@@ -1779,7 +1788,56 @@ _IA_SECTION_TYPES = frozenset(
 )
 
 
-def build_inventory_aging_sections(report: AgingReport) -> list[dict]:
+def _ia_long_date(d: date) -> str:
+    """The mock's head date form: ``8 Sep 2026`` (day, abbreviated month, year)."""
+    return f"{d.day} {d.strftime('%b %Y')}"
+
+
+def inventory_aging_title(report: AgingReport) -> str:
+    """The page's <h1>, verbatim from the mock: ``Inventory Aging — Week of 8 Sep 2026``
+    (spec §A1). Distinct from the Report ROW's series title "Inventory Aging Weekly"
+    (§A6) — the row title names the series in the app's page header and the Drive
+    folder; the <h1> names the week."""
+    return f"Inventory Aging — Week of {_ia_long_date(report.snapshot_date)}"
+
+
+def build_inventory_aging_head(report: AgingReport, *, composed_at: str | None = None) -> dict:
+    """The mock's ``.report-head`` sub-line + meta block as a JSON-native model (plain
+    strings only: spec_json is persisted as JSONB and re-rendered from it by
+    scripts/backfill_report_html.py, so the model must survive a JSON round trip
+    byte-for-byte). ``composed_at`` is the compose timestamp in ISO form (the compose
+    script's ``now``); None omits the "Composed …" fragment rather than inventing one.
+    The mock's tenant-name / "weekly, Monday 06:00 PT" line is the schedule's — Part B —
+    and is deliberately not rendered until a schedule actually owns this report."""
+    locations = " · ".join(loc.location for loc in report.locations)
+    sub = (
+        f"{locations} · on-hand stock aged by days since last restock · compared with "
+        f"{_ia_long_date(report.prior_date)}"
+    )
+    return {
+        "sub": sub,
+        "snapshot": report.snapshot_date.isoformat(),
+        "prior": report.prior_date.isoformat(),
+        "composed_at": composed_at,
+    }
+
+
+def _ia_report_head_html(model: dict) -> str:
+    sub = escape(str(model.get("sub", "")))
+    snapshot = escape(str(model.get("snapshot", "")))
+    prior = escape(str(model.get("prior", "")))
+    composed_at = model.get("composed_at")
+    composed = f"Composed {_fmt_stamp(composed_at)} · " if composed_at else ""
+    return (
+        '<div class="ia-head">'
+        f'<div class="ia-sub">{sub}</div>'
+        f'<div class="ia-meta">Snapshot <b>{snapshot}</b> · prior <b>{prior}</b><br>'
+        f"{composed}no model generated a figure</div>"
+        "</div>"
+    )
+
+
+def build_inventory_aging_sections(report: AgingReport, *, composed_at: str | None = None) -> list[dict]:
     """Turn a computed `AgingReport` (Task 1) into the section list `render_report_html`
     already knows how to join — one dict per section type, `model` holding exactly the
     slice of `report` that type's renderer needs (see the `_section_html` branches
@@ -1797,6 +1855,7 @@ def build_inventory_aging_sections(report: AgingReport) -> list[dict]:
     report — each card only needs its own slice, same as the standalone
     `trend_chart`/`variance_table` types those two renderer functions still serve)."""
     return [
+        {"type": "report_head", "model": build_inventory_aging_head(report, composed_at=composed_at)},
         {"type": "watch_items", "model": report.watch_items},
         {"type": "kpi_cards", "model": report.kpis},
         {"type": "mid_row", "model": report},
