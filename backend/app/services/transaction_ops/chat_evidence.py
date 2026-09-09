@@ -17,6 +17,7 @@ def condense_status(result):
                     "continuation_run_id",
                     "continuation_blocked",
                     "findings",
+                    "investigation_guidance",
                     "proposals",
                     "settlement",
                     "case_id",

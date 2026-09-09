@@ -215,6 +215,7 @@ async def _execute(operation, params, context):
             raise _ToolError("invalid_parameters")
         if "case_id" in params:
             from app.services.transaction_ops import case_service
+            from app.services.transaction_ops.resolution_guidance import investigation_guidance
             from app.services.transaction_ops.resolution_history import history
 
             case_id = uuid.UUID(str(params["case_id"]))
@@ -229,6 +230,7 @@ async def _execute(operation, params, context):
                 "status": case.status,
                 "last_observed_at": case.last_observed_at.isoformat(),
                 "findings": [_finding_summary(finding)],
+                "investigation_guidance": investigation_guidance(case.latest_report_json),
                 "resolution_history": resolutions["resolutions"],
                 "resolution_examples": resolutions["examples"],
                 "resolution_usage": resolutions["usage"],

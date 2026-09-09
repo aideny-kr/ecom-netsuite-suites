@@ -431,9 +431,11 @@ async def test_status_can_read_a_case_with_bounded_history_and_exact_amounts(ctx
     assert result["rows"][0][-3:] == ["100.00", "99.00", "1.00"]
     assert result["suppress_llm_value"] is True
     assert result["resolution_history"] == history["resolutions"]
+    assert result["investigation_guidance"]["executable"] is False
     from app.services.transaction_ops.chat_evidence import condense_status
 
     assert json.loads(condense_status(result))["resolution_history"] == history["resolutions"]
+    assert json.loads(condense_status(result))["investigation_guidance"] == result["investigation_guidance"]
     loader.assert_awaited_once_with(ctx["db"], TENANT, identifier)
     bad = await mod.execute_status({"case_id": str(identifier), "run_id": str(RUN)}, context=ctx)
     assert bad["error"] == "invalid_parameters"
@@ -461,10 +463,12 @@ async def test_real_dispatch_reads_case_history_and_preserves_scope(db, admin_us
     result = await dispatch(actor, {"case_id": str(case.id)})
     assert result["success"] is True, result
     assert result["case_id"] == str(case.id)
+    assert result["investigation_guidance"]["kind"] == "investigation_guidance"
     assert result["resolution_history"][0]["proposal_id"] == str(proposal.id)
     assert result["resolution_history"][0]["requires_new_human_approval"] is True
     foreign = await dispatch(foreign_actor, {"case_id": str(case.id)})
     assert foreign["error"] == "not_found"
     assert "resolution_history" not in foreign
+    assert "investigation_guidance" not in foreign
     mixed = await dispatch(actor, {"case_id": str(case.id), "run_id": str(proposal.run_id)})
     assert mixed["error"] == "invalid_parameters"
