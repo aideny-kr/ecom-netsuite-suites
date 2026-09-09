@@ -543,3 +543,49 @@ def test_r_trend_sums_multiple_skus_sharing_a_date_into_one_trend_point():
     # so two SKUs on the same date collapse to one (location, date) pair.
     distinct_line = query[distinct_idx : distinct_idx + 80]
     assert "sku" not in distinct_line.lower()
+
+
+# ---------------------------------------------------------------------------
+# rows_from_table_payload / json_safe (refresh-support follow-up) -- shared
+# converters used by refresh_service/playbooks (payload -> compute() rows) and
+# by compose_inventory_aging/report_service (compute() result -> JSONB-safe).
+# ---------------------------------------------------------------------------
+def test_rows_from_table_payload_zips_columns_and_positional_rows():
+    payload = {"columns": ["location", "sku"], "rows": [["Acme", "A-1"], ["Globex", "G-1"]]}
+    assert ia.rows_from_table_payload(payload) == [
+        {"location": "Acme", "sku": "A-1"},
+        {"location": "Globex", "sku": "G-1"},
+    ]
+
+
+def test_rows_from_table_payload_tolerates_missing_or_malformed_payload():
+    assert ia.rows_from_table_payload({}) == []
+    assert ia.rows_from_table_payload({"columns": ["a"], "rows": None}) == []
+    assert ia.rows_from_table_payload(None) == []  # type: ignore[arg-type]
+
+
+def test_json_safe_converts_decimal_date_and_dataclasses_never_through_float():
+    payloads, params = _full_fixture()
+    report = ia.compute(payloads, params)
+
+    safe = ia.json_safe(report)
+
+    assert isinstance(safe, dict)
+    _assert_no_float(safe)
+
+    def _walk_for_raw(value):
+        assert not isinstance(value, Decimal)
+        assert not isinstance(value, date)
+        assert not dataclasses.is_dataclass(value) or isinstance(value, type)
+        if isinstance(value, dict):
+            for v in value.values():
+                _walk_for_raw(v)
+        elif isinstance(value, list):
+            for v in value:
+                _walk_for_raw(v)
+
+    _walk_for_raw(safe)
+    # round-trips through real JSON (the actual JSONB-safety proof)
+    import json
+
+    json.dumps(safe)

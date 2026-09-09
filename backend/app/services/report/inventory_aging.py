@@ -24,6 +24,7 @@ independently correct on its own terms — which is what every test in
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -1081,3 +1082,51 @@ def compute(payloads: dict[str, list[dict]], params: dict[str, Any]) -> AgingRep
             integrity_checks=INTEGRITY_CHECKS,
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Refresh-support glue (Slice 1 follow-up task): converters shared by
+# refresh_service/playbooks (a dispatched source's table payload -> the
+# list[dict] rows compute() reads) and by report_service/compose_inventory_aging
+# (compute()'s frozen dataclass result -> JSONB-safe for persistence). Single-
+# sourced here so headless compose and refresh can never diverge on either.
+# ---------------------------------------------------------------------------
+def rows_from_table_payload(payload: dict | None) -> list[dict]:
+    """``{"columns": [...], "rows": [[...], ...]}`` (the shape both
+    ``refresh_service._execute_sources``/``extract_result_payload`` and the raw
+    ``bigquery_sql_execute`` tool result share -- rows POSITIONAL, never dicts) ->
+    the ``list[dict]`` rows ``compute()`` reads (``row["location"]`` etc.), same
+    zip ``compose_inventory_aging._fetch_payloads`` uses against the raw tool
+    result. Tolerates a missing/malformed payload (empty columns/rows, or a
+    non-dict altogether) by returning ``[]`` rather than raising -- the caller's
+    own required-rid gating (``_execute_sources``) is what decides whether an
+    empty/absent result is fatal, not this converter."""
+    if not isinstance(payload, dict):
+        return []
+    columns = payload.get("columns") or []
+    rows = payload.get("rows") or []
+    return [dict(zip(columns, row, strict=False)) for row in rows]
+
+
+def json_safe(value: Any) -> Any:
+    """Recursively convert a value tree that may contain this module's frozen
+    dataclasses (``AgingReport`` and its nested ``BucketRow``/``TopItem``/
+    ``TrendPoint``/etc.), ``Decimal``, and ``date``/``datetime`` into something
+    ``json.dumps`` -- and therefore JSONB -- can actually store. Never through
+    ``float`` (no precision loss on money); ``Decimal`` becomes its exact string
+    form, same convention as ``report_service.spec_json_safe``'s statement-model
+    sanitizing. Single-sourced here so ``report_service.spec_json_safe`` (refresh
+    + headless playbook compose) and ``compose_inventory_aging.py`` (which
+    originally carried its own private copy of this exact function) persist an
+    inventory_aging ``spec_json`` identically."""
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {f.name: json_safe(getattr(value, f.name)) for f in dataclasses.fields(value)}
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(k): json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(v) for v in value]
+    return value
