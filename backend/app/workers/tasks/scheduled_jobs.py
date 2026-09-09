@@ -577,6 +577,23 @@ async def _finalize_run(
     return row, job
 
 
+def _stamp_blocked_existing_job(job: Job | None, detail: str) -> uuid.UUID | None:
+    """An early `REASON_BLOCKED` return in `run_schedule_now` (plan not
+    approved; no compiled plan) must still resolve a pre-created `jobs` row —
+    the sweep's claim-time insert (item 6 above) or Task 5's `POST .../run` —
+    exactly as `_finalize_run` would, rather than returning `jobs_row_id=None`
+    and leaving that row stuck at `status="pending"` forever (review finding,
+    MAJOR). `job=None` (no pre-created row, e.g. the MCP `schedule.run` tool)
+    is a no-op — nothing to resolve."""
+    if job is None:
+        return None
+    job.status = "completed"
+    job.completed_at = datetime.now(timezone.utc)
+    job.result_summary = {"reason": REASON_BLOCKED, "outputs": {}, "detail": detail}
+    job.error_message = detail
+    return job.id
+
+
 async def run_schedule_now(
     db: AsyncSession,
     schedule_id: uuid.UUID,
@@ -602,11 +619,21 @@ async def run_schedule_now(
     itself — status `pending` — BEFORE dispatching `tasks.scheduled_jobs_run_now`
     (below), so its `202` response can carry the real id immediately; this
     param makes the run below REUSE that SAME row (update in place) instead of
-    inserting a second one. `None` (every other caller — the Beat sweep, the
-    MCP `schedule.run` tool) keeps the original insert-a-fresh-row behaviour.
-    If the given id no longer resolves (defensive only — e.g. the schedule was
+    inserting a second one. The Beat sweep ALSO passes this now (item 6 above
+    — `_claim_due_schedules` creates the row at claim time, in the same
+    transaction as the claim). `None` (the MCP `schedule.run` tool, which has
+    no pre-created row) keeps the original insert-a-fresh-row behaviour. If
+    the given id no longer resolves (defensive only — e.g. the schedule was
     deleted between enqueue and pickup), falls back to inserting fresh rather
     than crashing the run.
+
+    The row this resolves to is fetched ONCE, early (`existing_job` above),
+    and reused three ways: the plan-snapshot check just below, resolving a
+    pre-created row on an early `REASON_BLOCKED` return (review finding,
+    MAJOR — both guard blocks used to return `jobs_row_id=None` without
+    touching the pre-created row at all, leaving it stuck at `status=
+    "pending"` forever; `_stamp_blocked_existing_job` now stamps it exactly
+    as `_finalize_run` would), and the success-path reuse-vs-insert decision.
 
     `use_pending=True` (spec §B5 "Run once with this change") replays
     `pending_plan_json` instead of the approved `plan_json`, WITHOUT bumping
@@ -661,6 +688,15 @@ async def run_schedule_now(
         await db.execute(select(Schedule).where(Schedule.id == schedule_id, Schedule.tenant_id == tenant_id))
     ).scalar_one()
 
+    # Fetched ONCE, early, and reused for three things below: (1) the plan
+    # snapshot check, (2) resolving a pre-created row on an early BLOCKED
+    # return (review finding, MAJOR — see `_stamp_blocked_existing_job`), and
+    # (3) the success-path reuse-vs-insert decision near the bottom of this
+    # function.
+    existing_job: Job | None = None
+    if existing_job_id is not None:
+        existing_job = await db.get(Job, existing_job_id)
+
     # HITL gate (spec Goal line: "approved by a person, run deterministically"):
     # `use_pending=False` replays the schedule's live `plan_json`, which must
     # have gone through `POST .../approve` — `plan_json` being non-empty is
@@ -688,8 +724,9 @@ async def run_schedule_now(
             payload={"detail": "plan not approved", "plan_status": row.plan_status, "use_pending": use_pending},
             status="error",
         )
+        jobs_row_id = _stamp_blocked_existing_job(existing_job, "plan not approved")
         await db.commit()
-        return RunOutcome(reason=REASON_BLOCKED, jobs_row_id=None, outputs={})
+        return RunOutcome(reason=REASON_BLOCKED, jobs_row_id=jobs_row_id, outputs={})
 
     plan_json = row.pending_plan_json if use_pending else row.plan_json
     plan_version_used = (row.plan_version + 1) if use_pending else row.plan_version
@@ -702,12 +739,10 @@ async def run_schedule_now(
     # instead of re-reading `row.plan_json`/`pending_plan_json` live. The HITL
     # `plan_status` gate above and `plan_version_used` bookkeeping are
     # unaffected — both still read the schedule row live, exactly as before.
-    if existing_job_id is not None:
-        snapshot_job = await db.get(Job, existing_job_id)
-        if snapshot_job is not None:
-            snapshot_plan = (snapshot_job.parameters or {}).get("plan")
-            if snapshot_plan and snapshot_plan.get("steps"):
-                plan_json = snapshot_plan
+    if existing_job is not None:
+        snapshot_plan = (existing_job.parameters or {}).get("plan")
+        if snapshot_plan and snapshot_plan.get("steps"):
+            plan_json = snapshot_plan
 
     if not plan_json or not (plan_json.get("steps")):
         row.last_run_status = REASON_BLOCKED
@@ -725,8 +760,9 @@ async def run_schedule_now(
             payload={"detail": "no compiled plan to run", "use_pending": use_pending},
             status="error",
         )
+        jobs_row_id = _stamp_blocked_existing_job(existing_job, "no compiled plan to run")
         await db.commit()
-        return RunOutcome(reason=REASON_BLOCKED, jobs_row_id=None, outputs={})
+        return RunOutcome(reason=REASON_BLOCKED, jobs_row_id=jobs_row_id, outputs={})
 
     period_key = due_at.astimezone(ZoneInfo(row.timezone)).date().isoformat()
     correlation_id = str(uuid.uuid4())
@@ -769,9 +805,7 @@ async def run_schedule_now(
         "retry_of_job_id": str(retry_of_job_id) if retry_of_job_id else None,
     }
 
-    job: Job | None = None
-    if existing_job_id is not None:
-        job = await db.get(Job, existing_job_id)
+    job: Job | None = existing_job
     if job is not None:
         job.status = "running"
         job.correlation_id = correlation_id

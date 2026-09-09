@@ -1495,6 +1495,94 @@ async def test_run_now_uses_the_plan_snapshotted_on_the_jobs_row_not_a_later_edi
     assert "s1_edited" not in job.result_summary["outputs"]
 
 
+async def test_early_blocked_return_resolves_a_pre_created_jobs_row_unapproved_plan(
+    db: AsyncSession, monkeypatch
+):
+    """review finding, MAJOR: both REASON_BLOCKED guard blocks in
+    run_schedule_now (plan not approved; no compiled plan) used to return
+    without touching `existing_job_id`, leaving a pre-created row (item 6's
+    claim-time insert, or Task 5's `POST .../run`) stuck at `pending`
+    forever. This is the HITL-gate guard block."""
+    tenant = await create_test_tenant(db, name="Blocked Pre-created Co")
+    await set_tenant_context(db, str(tenant.id))
+
+    schedule = await _seed_job_schedule(
+        db,
+        tenant,
+        plan_json={"steps": [{"id": "s1", "type": "fake.step", "params": {}}]},
+        next_run_at=None,
+        cron_expression="0 6 * * 1",
+        plan_status="pending_approval",  # never approved
+    )
+
+    pre_created = Job(
+        tenant_id=tenant.id,
+        job_type="scheduled_job",
+        status="pending",
+        parameters={"schedule_id": str(schedule.id), "use_pending": False},
+    )
+    db.add(pre_created)
+    await db.flush()
+    await db.commit()
+    pre_created_id = pre_created.id
+
+    outcome = await run_schedule_now(
+        db, schedule.id, tenant_id=tenant.id, actor_id=None, use_pending=False, existing_job_id=pre_created_id
+    )
+
+    assert outcome.reason == REASON_BLOCKED
+    assert outcome.jobs_row_id == pre_created_id
+
+    job = (await db.execute(select(Job).where(Job.id == pre_created_id))).scalar_one()
+    assert job.status == "completed"
+    assert job.result_summary == {"reason": REASON_BLOCKED, "outputs": {}, "detail": "plan not approved"}
+    assert job.error_message == "plan not approved"
+
+
+async def test_early_blocked_return_resolves_a_pre_created_jobs_row_no_compiled_plan(
+    db: AsyncSession, monkeypatch
+):
+    """Same fix, the OTHER early REASON_BLOCKED guard block (no compiled plan
+    to run) -- reached only past the HITL gate, so `plan_status="approved"`
+    with an empty `plan_json` (e.g. an approved schedule whose plan was
+    later cleared)."""
+    tenant = await create_test_tenant(db, name="Blocked No Plan Co")
+    await set_tenant_context(db, str(tenant.id))
+
+    schedule = await _seed_job_schedule(
+        db,
+        tenant,
+        plan_json=None,
+        next_run_at=None,
+        cron_expression="0 6 * * 1",
+        plan_status="approved",
+        plan_version=1,
+    )
+
+    pre_created = Job(
+        tenant_id=tenant.id,
+        job_type="scheduled_job",
+        status="pending",
+        parameters={"schedule_id": str(schedule.id), "use_pending": False},
+    )
+    db.add(pre_created)
+    await db.flush()
+    await db.commit()
+    pre_created_id = pre_created.id
+
+    outcome = await run_schedule_now(
+        db, schedule.id, tenant_id=tenant.id, actor_id=None, use_pending=False, existing_job_id=pre_created_id
+    )
+
+    assert outcome.reason == REASON_BLOCKED
+    assert outcome.jobs_row_id == pre_created_id
+
+    job = (await db.execute(select(Job).where(Job.id == pre_created_id))).scalar_one()
+    assert job.status == "completed"
+    assert job.result_summary == {"reason": REASON_BLOCKED, "outputs": {}, "detail": "no compiled plan to run"}
+    assert job.error_message == "no compiled plan to run"
+
+
 async def test_run_schedule_now_falls_back_to_inserting_when_existing_job_id_is_missing(db: AsyncSession, monkeypatch):
     """Defensive only (row deleted between enqueue and pickup) — must not crash."""
     tenant = await create_test_tenant(db, name="Missing Job Co")
