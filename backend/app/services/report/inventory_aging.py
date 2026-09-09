@@ -321,9 +321,14 @@ def _fmt_pts(value: Decimal) -> str:
 
 
 def _sku_delta_clause(
-    delta: int, *, connector: str = "as", left_verb: str = "left", entered_verb: str = "entered"
+    delta: int,
+    *,
+    connector: str = "as",
+    left_verb: str = "left",
+    entered_verb: str = "entered",
+    bucket_noun: str = "the 90+ buckets",
 ) -> str:
-    """Zero-count-safe SKU-delta clause for the 90+ buckets (render-polish brief
+    """Zero-count-safe SKU-delta clause for the aged buckets (render-polish brief
     item 2). A literal ``0`` had been rendering as ``"as 0 SKUs left the 90+
     buckets"`` -- a real threshold-fixture case (a location can cross the $50K
     aged-VALUE threshold with its aged SKU COUNT unchanged, e.g. a pure
@@ -331,11 +336,15 @@ def _sku_delta_clause(
     wording instead of an arbitrarily-picked direction word. ``connector``/
     ``left_verb``/``entered_verb`` let both call sites (watch items' "as N SKUs
     left/entered ..." and highlights' "driven by N SKUs leaving/entering ...")
-    share this one zero-handling rule while keeping their own grammar."""
+    share this one zero-handling rule while keeping their own grammar.
+    ``bucket_noun`` lets narrative paragraph 2 use its own pre-existing "the
+    aged buckets" phrasing (matching the mock's literal reference sentence)
+    while watch items/highlights keep "the 90+ buckets" -- the two call sites
+    were never meant to share this noun, only the zero-handling rule."""
     if delta == 0:
         return "with no change in the number of aged SKUs"
     verb = entered_verb if delta > 0 else left_verb
-    return f"{connector} {abs(delta)} SKUs {verb} the 90+ buckets"
+    return f"{connector} {abs(delta)} SKUs {verb} {bucket_noun}"
 
 
 def _ordinal(n: int) -> str:
@@ -1006,7 +1015,7 @@ def _narrative(
         improved_clause = (
             f"{most_improved.location} improved the most: aged value fell "
             f"{_fmt_money(abs(most_improved.aged90_value_delta))} to {_fmt_money(most_improved.aged90_value)} "
-            f"{_sku_delta_clause(most_improved.skus_90p_delta)}."
+            f"{_sku_delta_clause(most_improved.skus_90p_delta, bucket_noun='the aged buckets')}."
         )
 
     if most_worsened is None:

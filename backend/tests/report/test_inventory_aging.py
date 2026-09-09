@@ -506,13 +506,17 @@ def _narrative_loc_items(location, current_value, aged_value):
     ]
 
 
-def _narrative_fixture(loc_specs):
+def _narrative_fixture(loc_specs, *, prior_skus_90p_by_location: dict[str, int] | None = None):
     """``loc_specs``: ``(location, current_value, aged_value, prior_value,
     prior_aged90)`` 5-tuples. One current + one aged item per location (see
     ``_narrative_loc_items``), a matching prior row, a 2-point trend, and
     per-location meta -- the minimum ``compute()`` needs to exercise paragraph_2's
     location-naming logic without pulling in bucket/top-item concerns this group
-    of tests isn't about."""
+    of tests isn't about. ``prior_skus_90p_by_location`` overrides the prior
+    aged-SKU count for a named location (default 1, matching the fixture's fixed
+    one-aged-item-per-location shape, i.e. a zero SKU delta) -- pass it to give a
+    location a nonzero ``skus_90p_delta`` for tests that need the real "N SKUs
+    left/entered ..." clause rather than the zero-delta branch."""
     items: list[dict] = []
     prior: list[dict] = []
     trend: list[dict] = []
@@ -528,7 +532,7 @@ def _narrative_fixture(loc_specs):
                 value_90p=prior_aged90,
                 value_180p=0,
                 skus=2,
-                skus_90p=1,
+                skus_90p=(prior_skus_90p_by_location or {}).get(location, 1),
                 skus_180p=0,
                 qty=100,
                 qty_90p=10,
@@ -589,6 +593,32 @@ def test_narrative_paragraph2_one_improving_one_worsening_both_named():
     assert "Byte moved the other way" in p2
     assert "No location improved this week." not in p2
     assert "No location worsened this week." not in p2
+
+
+def test_narrative_paragraph2_improved_clause_uses_the_aged_buckets_wording():
+    # Regression: paragraph 2's "improved the most" clause must read "... the
+    # aged buckets" (the pre-existing narrative wording, and the mock's literal
+    # reference sentence "... as 23 SKUs left the aged buckets"), NOT "the 90+
+    # buckets" -- the wording the watch-items/highlights call sites use for
+    # ``_sku_delta_clause``. Reusing that shared helper for item 3's rewrite
+    # silently switched paragraph 2 to the wrong noun; the shipped Nova/Solace
+    # fixture never caught it because it happens to hit the zero-delta branch
+    # (`"with no change in the number of aged SKUs"`), which carries no bucket
+    # noun at all. Give Aphex (the only improver) a nonzero SKU delta --
+    # prior skus_90p=3 vs the fixture's fixed current aged90_skus=1 -> delta=-2
+    # -- so the real "N SKUs left ..." branch renders.
+    payloads, params = _narrative_fixture(
+        [
+            ("Aphex", 40000, 10000, 50000, 15000),
+            ("Byte", 20000, 20000, 40000, 12000),
+        ],
+        prior_skus_90p_by_location={"Aphex": 3},
+    )
+    report = ia.compute(payloads, params)
+    p2 = report.narrative.paragraph_2
+    assert "Aphex improved the most" in p2
+    assert "2 SKUs left the aged buckets" in p2
+    assert "the 90+ buckets" not in p2
 
 
 def test_narrative_paragraph2_three_locations_one_flat_only_two_qualify():
