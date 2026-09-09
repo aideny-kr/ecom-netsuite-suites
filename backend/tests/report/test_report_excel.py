@@ -22,13 +22,15 @@ pasted into a test. Three locations are used deliberately so the "seven sheets"
 requirement (Summary + Buckets + 3 location sheets + Aged 90+ + Method) is the
 same shape ``DEFAULT_LOCATIONS`` produces in production.
 
-AgingReport carries item-level detail ONLY for the aged buckets (91-180 / 180+) —
-``aged_items`` (Task 1's unbounded per-location list) — never for the 0-90 day
-buckets (those exist only as ``BucketRow`` aggregates on ``LocationSummary``).
-So each per-location sheet here is built from ``report.aged_items[location]``,
-and "Aged 90+" is the union of those same per-location lists across all
-locations — there is no broader per-SKU source this task's ``AgingReport`` input
-can draw a full 0-90-day item list from.
+Per spec §A3 the per-location sheets carry "every SKU" (r_items returns "every
+on-hand SKU per location" per §A1) — so they are built from
+``report.all_items[location]``, the full unbounded per-location list covering
+every bucket (review finding: an earlier version of this module built the
+per-location sheets from ``report.aged_items`` instead, a Task-1 gap now
+closed by adding ``AgingReport.all_items``). "Aged 90+" stays the smaller,
+aged-only (91-180 / 180+) union across locations, built from
+``report.aged_items`` as before — a distinct, narrower sheet, not the same
+rows repeated.
 """
 
 from __future__ import annotations
@@ -276,21 +278,44 @@ def test_build_workbook_strips_tz_from_tz_aware_datetime():
 
 
 # ---------------------------------------------------------------------------
-# Per-location row count matches the fixture exactly (aged items only — see
-# module docstring for why non-aged items never reach this sheet)
+# Per-location row count matches the fixture's FULL per-location item count —
+# every bucket, not just the aged (91+ day) subset (spec §A3 "every SKU";
+# blocker finding: an earlier version undercounted these sheets to aged-only)
 # ---------------------------------------------------------------------------
 def test_per_location_sheet_row_count_matches_fixture(wb, report):
     for loc in LOCATIONS:
         ws = wb[loc]
         data_rows = list(ws.iter_rows(min_row=2))
-        assert len(data_rows) == len(report.aged_items[loc])
+        assert len(data_rows) == len(report.all_items[loc])
 
 
-def test_ember_location_sheet_is_empty_but_present(wb, report):
+def test_per_location_sheet_row_count_exceeds_aged_only_when_current_items_exist(wb, report):
+    """Nova and Solace each carry current (0-90 day) items alongside aged ones —
+    the per-location sheet must be strictly bigger than the aged-only subset,
+    proving the sheet is not secretly the same rows as "Aged 90+"."""
+    for loc in ("Nova", "Solace"):
+        assert len(report.all_items[loc]) > len(report.aged_items[loc])
+        ws = wb[loc]
+        assert len(list(ws.iter_rows(min_row=2))) == len(report.all_items[loc])
+
+
+def test_location_sheet_includes_current_bucket_skus_not_only_aged(wb):
+    """NOV-A1 (10 days -> bucket "0-30", a CURRENT item) must appear in Nova's
+    sheet even though it is absent from report.aged_items — this is the exact
+    gap the blocker finding identified."""
+    ws = wb["Nova"]
+    skus = {row[0].value for row in ws.iter_rows(min_row=2)}
+    assert "NOV-A1" in skus
+
+
+def test_ember_location_sheet_has_the_current_item_aged_items_alone_would_miss(wb, report):
+    """Ember has exactly one on-hand SKU (EMB-C1, a CURRENT item, 0 aged) — a
+    sheet built from aged_items alone would wrongly render this as empty."""
     assert report.aged_items["Ember"] == ()
     ws = wb["Ember"]
-    assert list(ws.iter_rows(min_row=2)) == []
-    assert ws.max_row == 1  # header only
+    rows = list(ws.iter_rows(min_row=2))
+    assert len(rows) == 1
+    assert rows[0][0].value == "EMB-C1"
 
 
 # ---------------------------------------------------------------------------

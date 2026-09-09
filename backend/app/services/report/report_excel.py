@@ -9,14 +9,15 @@ so every string cell gets the same OWASP CSV-injection escaping as the
 reconciliation evidence pack, every sheet freezes its header row and carries an
 autofilter, and sheet names are capped at Excel's 31-char limit.
 
-Per-location item detail: ``AgingReport`` carries individual SKU rows ONLY for
-the aged buckets (91-180 / 180+ days) — Task 1's unbounded ``aged_items`` per
-location. The 0-90 day buckets exist on ``AgingReport`` only as ``BucketRow``
-aggregates (value/units/SKU count, no per-SKU breakdown) — there is no broader
-per-SKU list this module's single ``AgingReport`` input can draw from. So each
-per-location sheet here, and the "Aged 90+" sheet (their union across
-locations), are built from ``report.aged_items`` — the full aged list per spec's
-"never truncated" requirement, not a truncated ``top_items`` slice.
+Per-location item detail: each per-location sheet is built from
+``report.all_items`` — Task 1's unbounded per-location list covering EVERY
+bucket (0-30 through 180+), matching spec §A3's "every SKU" requirement and
+the binding mock's per-location row counts (a prior version of this module
+built these sheets from ``report.aged_items`` alone, silently dropping every
+0-90 day SKU — a blocker finding, fixed by adding ``AgingReport.all_items``).
+The "Aged 90+" sheet stays the smaller, aged-only (91-180 / 180+) union across
+locations, built from ``report.aged_items`` as before — a distinct, narrower
+sheet, never the same rows as a per-location sheet.
 
 ``TopItem`` (Task 1) does not carry ``last_restock_date``/``snapshot_date``
 fields directly, but both are derivable without approximation: every aged item's
@@ -120,7 +121,7 @@ _LOCATION_SHEET_HEADERS = [
 ]
 
 
-def _aged_item_row(item: TopItem, report: AgingReport) -> list[Any]:
+def _item_row(item: TopItem, report: AgingReport) -> list[Any]:
     last_restock = report.snapshot_date - timedelta(days=item.days)
     return [
         item.sku,
@@ -136,7 +137,7 @@ def _aged_item_row(item: TopItem, report: AgingReport) -> list[Any]:
 
 
 def _location_sheet(location: str, report: AgingReport) -> SheetSpec:
-    rows = [_aged_item_row(item, report) for item in report.aged_items.get(location, ())]
+    rows = [_item_row(item, report) for item in report.all_items.get(location, ())]
     return {"name": location, "headers": _LOCATION_SHEET_HEADERS, "rows": rows}
 
 
@@ -144,7 +145,7 @@ def _aged_sheet(report: AgingReport) -> SheetSpec:
     rows: list[list[Any]] = []
     for loc in report.locations:
         for item in report.aged_items.get(loc.location, ()):
-            rows.append([loc.location, *_aged_item_row(item, report)])
+            rows.append([loc.location, *_item_row(item, report)])
     return {
         "name": AGED_SHEET_NAME,
         "headers": ["Location", *_LOCATION_SHEET_HEADERS],
