@@ -43,6 +43,9 @@ async def test_schedules_table_has_the_scheduled_jobs_columns(db):
         "next_run_at",
         "paused_at",
         "pause_reason",
+        # migration 102_schedule_retry_job (delta gate item 1): the retry is
+        # an explicit column now, not a JSON-query lookup on `jobs`.
+        "retry_job_id",
     } <= set(cols), f"schedules columns missing: {cols}"
 
     assert cols["instruction"] == "text"
@@ -61,6 +64,41 @@ async def test_schedules_table_has_the_scheduled_jobs_columns(db):
     assert cols["next_run_at"] == "timestamp with time zone"
     assert cols["paused_at"] == "timestamp with time zone"
     assert cols["pause_reason"] == "text"
+    assert cols["retry_job_id"] == "uuid"
+
+
+async def test_retry_job_id_is_nullable_and_fk_references_jobs(db):
+    """Migration 102: `schedules.retry_job_id` is NULL-able (a schedule with
+    no pending retry is the common case) and a real FK to `jobs.id` — the
+    retry is a reference to a REAL `jobs` row, never a bare UUID string a
+    query has to re-derive meaning from."""
+    row = (
+        await db.execute(
+            text(
+                "SELECT is_nullable FROM information_schema.columns "
+                "WHERE table_name='schedules' AND column_name='retry_job_id'"
+            )
+        )
+    ).first()
+    assert row is not None and row[0] == "YES"
+
+    fk = (
+        await db.execute(
+            text(
+                "SELECT ccu.table_name AS foreign_table, ccu.column_name AS foreign_column "
+                "FROM information_schema.table_constraints tc "
+                "JOIN information_schema.key_column_usage kcu "
+                "  ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema "
+                "JOIN information_schema.constraint_column_usage ccu "
+                "  ON tc.constraint_name = ccu.constraint_name AND tc.table_schema = ccu.table_schema "
+                "WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_name = 'schedules' "
+                "  AND kcu.column_name = 'retry_job_id'"
+            )
+        )
+    ).first()
+    assert fk is not None, "schedules.retry_job_id must be a real FK"
+    assert fk[0] == "jobs"
+    assert fk[1] == "id"
 
 
 async def test_schedules_new_columns_have_the_spec_defaults(db):
@@ -125,6 +163,7 @@ async def test_schedule_model_roundtrip_with_new_columns(db):
     assert schedule.is_active is True
     assert schedule.pending_plan_json is None
     assert schedule.paused_at is None
+    assert schedule.retry_job_id is None
 
 
 # The up/down/up round-trip itself (spec §B1's binding requirement, brief's

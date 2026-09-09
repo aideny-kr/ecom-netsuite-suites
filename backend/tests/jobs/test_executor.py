@@ -387,10 +387,13 @@ async def test_catch_up_runs_once_and_advances_next_run_at_past_now(db: AsyncSes
 
 async def test_catch_up_skip_never_skips_the_pending_retry(db: AsyncSession, monkeypatch):
     """review finding, MAJOR: `skip = row.catch_up == "skip" and missed` also
-    fired for the attempt-2 retry (`last_run_status == "retry_pending"`),
-    marking it `skipped` with `run=False` -- retry-then-pause never actually
-    ran the retry, silently swallowing the original failure forever. `skip`
-    must only ever apply to a fresh attempt-1 claim."""
+    fired for the attempt-2 retry, marking it `skipped` with `run=False` --
+    retry-then-pause never actually ran the retry, silently swallowing the
+    original failure forever. `skip` must only ever apply to a fresh
+    attempt-1 claim. Item 1 (gate fix): attempt is read off the explicit
+    `retry_job_id` column now, so the pending retry needs a REAL pre-created
+    `jobs` row to point at (created eagerly at scheduling time, never at
+    claim time -- see `run_schedule_now`'s retry-then-pause branch)."""
     tenant = await create_test_tenant(db, name="CatchUpSkip Retry Co")
     await set_tenant_context(db, str(tenant.id))
 
@@ -412,6 +415,22 @@ async def test_catch_up_skip_never_skips_the_pending_retry(db: AsyncSession, mon
         catch_up="skip",
         last_run_status="retry_pending",
     )
+    retry_job = Job(
+        tenant_id=tenant.id,
+        job_type="scheduled_job",
+        status="pending",
+        parameters={
+            "schedule_id": str(schedule.id),
+            "attempt": 2,
+            "period_key": "2026-01-01",
+            "retry_of_job_id": str(uuid.uuid4()),
+            "due_at": (now - timedelta(minutes=5)).isoformat(),
+        },
+    )
+    db.add(retry_job)
+    await db.flush()
+    schedule.retry_job_id = retry_job.id
+    await db.commit()
 
     stats = await run_due_jobs(db, tenant.id, now=now)
 
@@ -421,9 +440,11 @@ async def test_catch_up_skip_never_skips_the_pending_retry(db: AsyncSession, mon
     assert len(calls) == 1
 
     jobs = (await db.execute(select(Job).where(Job.tenant_id == tenant.id))).scalars().all()
-    assert len(jobs) == 1
+    assert len(jobs) == 1  # the pre-created retry row is REUSED, not a second one created
+    assert jobs[0].id == retry_job.id
     assert jobs[0].parameters["attempt"] == 2
     assert schedule.last_run_status == REASON_DONE
+    assert schedule.retry_job_id is None  # cleared at claim time
 
 
 async def test_catch_up_skip_does_not_run_a_missed_window(db: AsyncSession, monkeypatch):
@@ -507,10 +528,17 @@ async def test_step_error_retries_once_then_pauses(db: AsyncSession, monkeypatch
     assert retry_at - now >= timedelta(minutes=14)  # ~15 minutes, allow test-clock slack
     assert retry_at - now <= timedelta(minutes=16)
 
+    # Item 1 (gate fix): the retry's `jobs` row is created EAGERLY, right here
+    # at scheduling time (not lazily at the second sweep's claim) -- so a
+    # second, still-pending attempt-2 row already exists after just attempt 1.
     jobs_after_1 = (await db.execute(select(Job).where(Job.tenant_id == tenant_id))).scalars().all()
-    assert len(jobs_after_1) == 1
-    assert jobs_after_1[0].result_summary["reason"] == REASON_ERROR
-    assert jobs_after_1[0].parameters["attempt"] == 1
+    assert len(jobs_after_1) == 2
+    attempt1_job = next(j for j in jobs_after_1 if j.parameters["attempt"] == 1)
+    pending_retry_job = next(j for j in jobs_after_1 if j.parameters["attempt"] == 2)
+    assert attempt1_job.result_summary["reason"] == REASON_ERROR
+    assert pending_retry_job.status == "pending"
+    assert pending_retry_job.parameters["retry_of_job_id"] == str(attempt1_job.id)
+    assert schedule.retry_job_id == pending_retry_job.id
 
     # Attempt 2, 15 minutes later: fails again -> pause + pause_reason + owner-notify audit.
     now2 = retry_at + timedelta(seconds=1)
@@ -521,8 +549,9 @@ async def test_step_error_retries_once_then_pauses(db: AsyncSession, monkeypatch
     assert schedule.last_run_status == "paused"
 
     jobs_after_2 = (await db.execute(select(Job).where(Job.tenant_id == tenant_id))).scalars().all()
-    assert len(jobs_after_2) == 2  # a SECOND jobs row for the retry (attempt=2)
+    assert len(jobs_after_2) == 2  # still just the two rows -- the retry REUSED the pre-created one
     retry_job = next(j for j in jobs_after_2 if j.parameters.get("attempt") == 2)
+    assert retry_job.id == pending_retry_job.id
     assert retry_job.result_summary["reason"] == REASON_ERROR
 
     pause_events = (
@@ -850,8 +879,10 @@ async def test_db_error_inside_a_step_still_completes_retry_bookkeeping(db: Asyn
     assert refreshed_schedule.next_run_at is not None
     assert refreshed_schedule.next_run_at > now
 
-    job = (await db.execute(select(Job).where(Job.tenant_id == tenant_id))).scalar_one()
-    assert job.status == "failed"
+    # Item 1 (gate fix): the retry's `jobs` row is now created EAGERLY, right
+    # here at scheduling time -- so the failed attempt-1 row is joined by a
+    # second, still-pending attempt-2 row before the retry ever fires.
+    job = (await db.execute(select(Job).where(Job.tenant_id == tenant_id, Job.status == "failed"))).scalar_one()
     assert job.result_summary["reason"] == REASON_ERROR
 
 
@@ -913,8 +944,10 @@ async def test_finalize_crash_after_run_steps_still_completes_retry_bookkeeping(
     assert refreshed_schedule.next_run_at is not None
     assert refreshed_schedule.next_run_at > now
 
-    job = (await db.execute(select(Job).where(Job.tenant_id == tenant_id))).scalar_one()
-    assert job.status == "failed"
+    # Item 1 (gate fix): the retry's `jobs` row is created eagerly at
+    # scheduling time, so a second (still-pending) row now exists alongside
+    # the failed one.
+    job = (await db.execute(select(Job).where(Job.tenant_id == tenant_id, Job.status == "failed"))).scalar_one()
     assert job.result_summary["reason"] == REASON_ERROR
 
 
@@ -1223,11 +1256,16 @@ async def test_run_due_jobs_still_schedules_the_retry_on_error(db: AsyncSession,
 
 
 # ---------------------------------------------------------------------------
-# The retry keeps the ORIGINAL occurrence's period_key (review finding,
-# MAJOR): the retry branch sets `next_run_at = now + 15 min`, and the claim
-# later reads THAT as `due_at` -- so attempt 2's `period_key` (and with it
-# the Drive idempotency key and the recon.run window) was the RETRY time's
-# date, wrong whenever the retry crosses local midnight.
+# Item 1 (delta gate fix): the retry is an explicit `schedules.retry_job_id`
+# column now, never a JSON query on `jobs` ordered by `started_at`. That old
+# query broke in three ways at once: a BLOCKED attempt-1 row with
+# `started_at IS NULL` sorts FIRST under `DESC`, a manual "Run now" also
+# creates an `attempt=1` row it couldn't tell apart from the sweep's own, and
+# a manual failure overwrites `last_run_status` (which the claim ALSO read to
+# decide "is this the retry?"). The retry's `jobs` row is now created EAGERLY
+# at SCHEDULING time (`run_schedule_now`'s retry-then-pause branch), and
+# `_claim_due_schedules` reuses it via `retry_job_id`, clearing the column in
+# the same claim transaction -- see the four tests below.
 # ---------------------------------------------------------------------------
 
 
@@ -1261,33 +1299,171 @@ async def test_retry_reuses_attempt_ones_period_key_across_local_midnight(db: As
 
     refreshed = (await db.execute(select(Schedule).where(Schedule.id == schedule_id))).scalar_one()
     assert refreshed.last_run_status == "retry_pending"
+    assert refreshed.retry_job_id is not None
     due_at2 = refreshed.next_run_at
     assert due_at2 == datetime(2026, 9, 7, 7, 5, tzinfo=timezone.utc)  # Monday 00:05 PDT
 
+    # The retry's jobs row already exists -- created eagerly at scheduling
+    # time -- with the CORRECT period_key/retry_of_job_id already on it,
+    # never derived from a query at claim/run time.
     jobs_after_1 = (await db.execute(select(Job).where(Job.tenant_id == tenant_id))).scalars().all()
-    assert len(jobs_after_1) == 1
-    attempt1_period_key = jobs_after_1[0].parameters["period_key"]
+    assert len(jobs_after_1) == 2
+    attempt1_job = next(j for j in jobs_after_1 if j.parameters["attempt"] == 1)
+    retry_job = next(j for j in jobs_after_1 if j.parameters["attempt"] == 2)
+    assert retry_job.id == refreshed.retry_job_id
+    assert retry_job.status == "pending"  # not run yet
+    attempt1_period_key = attempt1_job.parameters["period_key"]
     assert attempt1_period_key == "2026-09-06"  # Sunday, local date
+    attempt1_job_id = attempt1_job.id  # captured now -- the next run_due_jobs commits, expiring this object
+    retry_job_id = retry_job.id
+    assert retry_job.parameters["period_key"] == attempt1_period_key == "2026-09-06"
+    assert retry_job.parameters["retry_of_job_id"] == str(attempt1_job_id)
 
     now2 = due_at2 + timedelta(seconds=1)
     stats2 = await run_due_jobs(db, tenant_id, now=now2)
     assert stats2["failed"] == 1
 
-    jobs_after_2 = (await db.execute(select(Job).where(Job.tenant_id == tenant_id))).scalars().all()
-    assert len(jobs_after_2) == 2
-    retry_job = next(j for j in jobs_after_2 if j.parameters.get("attempt") == 2)
-
     # The naive computation (due_at2's own local date) would be Monday
-    # 2026-09-07 -- a DIFFERENT day than attempt 1's. The fix must reuse
-    # attempt 1's actual period_key instead.
-    assert retry_job.parameters["period_key"] == attempt1_period_key == "2026-09-06"
-    assert retry_job.parameters["retry_of_job_id"] == str(jobs_after_1[0].id)
+    # 2026-09-07 -- a DIFFERENT day than attempt 1's. period_key/retry_of_job_id
+    # survive on the completed retry row exactly as pre-created.
+    completed_retry = (await db.execute(select(Job).where(Job.id == retry_job_id))).scalar_one()
+    assert completed_retry.status == "failed"
+    assert completed_retry.parameters["period_key"] == attempt1_period_key == "2026-09-06"
+    assert completed_retry.parameters["retry_of_job_id"] == str(attempt1_job_id)
 
 
-async def test_retry_falls_back_to_computed_period_key_when_no_attempt_one_row_exists(db: AsyncSession, monkeypatch):
-    """Defensive only (e.g. attempt-1's jobs row was somehow purged) — must
-    not crash, and falls back to the same computed value as before."""
-    tenant = await create_test_tenant(db, name="Retry No Attempt1 Co")
+async def test_retry_attribution_survives_a_stale_null_started_at_row_and_a_manual_run(db: AsyncSession, monkeypatch):
+    """review finding, MAJOR: the OLD JSON-query mechanism attributed the
+    retry via `Job.parameters["attempt"].astext == "1"` ORDER BY `started_at`
+    DESC — a stale BLOCKED attempt-1 row with `started_at IS NULL` sorts
+    FIRST under `DESC` (Postgres: NULLS FIRST for DESC), and a manual "Run
+    now" landing in between ALSO creates an `attempt=1` row and flips
+    `last_run_status` away from `retry_pending` — either one could make the
+    retry pick up the WRONG occurrence's `period_key`/`retry_of_job_id`. The
+    new `retry_job_id` column is structurally immune: neither noise row is
+    ever consulted."""
+    tenant = await create_test_tenant(db, name="Retry Attribution Co")
+    tenant_id = tenant.id
+    await set_tenant_context(db, str(tenant_id))
+
+    async def always_fails(ctx, params):
+        raise StepExecutionError("boom: sweep run fails")
+
+    monkeypatch.setitem(STEP_REGISTRY, "fake.step", _fake_spec("read", always_fails))
+
+    now = datetime.now(timezone.utc)
+    schedule = await _seed_job_schedule(
+        db,
+        tenant,
+        plan_json={"steps": [{"id": "s1", "type": "fake.step", "params": {}}]},
+        next_run_at=now - timedelta(minutes=1),
+        cron_expression="0 6 * * 1",
+    )
+    schedule_id = schedule.id
+
+    # A stale BLOCKED attempt-1 row with started_at IS NULL -- exactly what
+    # the old bug's ORDER BY started_at DESC would have surfaced FIRST.
+    stale_blocked = Job(
+        tenant_id=tenant_id,
+        job_type="scheduled_job",
+        status="completed",
+        started_at=None,
+        parameters={"schedule_id": str(schedule_id), "attempt": 1, "period_key": "1999-01-01"},
+        result_summary={"reason": REASON_BLOCKED, "outputs": {}, "detail": "stale"},
+    )
+    db.add(stale_blocked)
+    await db.commit()
+
+    # The real sweep-triggered attempt 1: fails, schedules the retry.
+    stats1 = await run_due_jobs(db, tenant_id, now=now)
+    assert stats1["failed"] == 1
+
+    refreshed = (await db.execute(select(Schedule).where(Schedule.id == schedule_id))).scalar_one()
+    retry_at = refreshed.next_run_at
+    jobs_after_1 = (await db.execute(select(Job).where(Job.tenant_id == tenant_id))).scalars().all()
+    real_attempt1 = next(j for j in jobs_after_1 if j.id != stale_blocked.id and j.parameters.get("attempt") == 1)
+    retry_job = next(j for j in jobs_after_1 if j.parameters.get("attempt") == 2)
+    real_attempt1_id = real_attempt1.id  # captured now -- the next commit expires these objects
+    retry_job_id = retry_job.id
+    assert retry_job.parameters["retry_of_job_id"] == str(real_attempt1_id)
+    assert retry_job.parameters["period_key"] == real_attempt1.parameters["period_key"]
+
+    # A manual "Run now" lands BEFORE the retry fires -- also attempt=1
+    # (its own fresh row, no existing_job_id), also fails, and per item 1's
+    # own rule flips last_run_status to "error" WITHOUT touching
+    # retry_job_id (manual runs never read/write it).
+    await run_schedule_now(db, schedule_id, tenant_id=tenant_id, actor_id=None, actor_type="user", use_pending=False)
+
+    refreshed_after_manual = (await db.execute(select(Schedule).where(Schedule.id == schedule_id))).scalar_one()
+    assert refreshed_after_manual.last_run_status == "error"
+    assert refreshed_after_manual.retry_job_id == retry_job_id  # untouched by the manual run
+    assert refreshed_after_manual.next_run_at == retry_at  # untouched by the manual run
+
+    # The scheduled retry, when it fires, must still resolve to the REAL
+    # attempt 1's occurrence -- never the stale row, never the manual run.
+    now2 = retry_at + timedelta(seconds=1)
+    stats2 = await run_due_jobs(db, tenant_id, now=now2)
+    assert stats2["ran"] == 1
+    assert stats2["failed"] == 1
+
+    final_jobs = (await db.execute(select(Job).where(Job.tenant_id == tenant_id))).scalars().all()
+    assert len(final_jobs) == 4  # stale + real attempt1 + retry + the manual run's own row -- no extra
+    completed_retry = next(j for j in final_jobs if j.id == retry_job_id)
+    real_attempt1_refreshed = next(j for j in final_jobs if j.id == real_attempt1_id)
+    assert completed_retry.status == "failed"
+    assert completed_retry.parameters["retry_of_job_id"] == str(real_attempt1_id)
+    assert completed_retry.parameters["period_key"] == real_attempt1_refreshed.parameters["period_key"]
+
+
+async def test_sweep_claim_clears_retry_job_id_and_reuses_the_row_no_third_row(db: AsyncSession, monkeypatch):
+    """After the sweep claims the pending retry, `retry_job_id` must be NULL
+    (cleared in the same claim transaction) and the reused row -- never a
+    third one -- is the one that completes."""
+    tenant = await create_test_tenant(db, name="Retry Claim Clears Co")
+    tenant_id = tenant.id
+    await set_tenant_context(db, str(tenant_id))
+
+    async def always_fails(ctx, params):
+        raise StepExecutionError("boom: always fails")
+
+    monkeypatch.setitem(STEP_REGISTRY, "fake.step", _fake_spec("read", always_fails))
+
+    now = datetime.now(timezone.utc)
+    schedule = await _seed_job_schedule(
+        db,
+        tenant,
+        plan_json={"steps": [{"id": "s1", "type": "fake.step", "params": {}}]},
+        next_run_at=now - timedelta(minutes=1),
+        cron_expression="0 6 * * 1",
+    )
+    schedule_id = schedule.id
+
+    stats1 = await run_due_jobs(db, tenant_id, now=now)
+    assert stats1["failed"] == 1
+
+    refreshed = (await db.execute(select(Schedule).where(Schedule.id == schedule_id))).scalar_one()
+    assert refreshed.retry_job_id is not None
+    retry_job_id = refreshed.retry_job_id
+    retry_at = refreshed.next_run_at
+
+    now2 = retry_at + timedelta(seconds=1)
+    stats2 = await run_due_jobs(db, tenant_id, now=now2)
+    assert stats2["ran"] == 1
+
+    refreshed2 = (await db.execute(select(Schedule).where(Schedule.id == schedule_id))).scalar_one()
+    assert refreshed2.retry_job_id is None  # cleared at claim time
+
+    jobs = (await db.execute(select(Job).where(Job.tenant_id == tenant_id))).scalars().all()
+    assert len(jobs) == 2  # attempt 1 + the retry -- NO third row
+    completed_retry = next(j for j in jobs if j.id == retry_job_id)
+    assert completed_retry.status == "failed"
+
+
+async def test_period_key_falls_back_to_computed_value_when_not_supplied(db: AsyncSession, monkeypatch):
+    """Defensive only -- a caller invoking `run_schedule_now` directly with
+    `attempt=2` but no `period_key` (e.g. the MCP tool) must not crash; it
+    falls back to the same due_at-derived computation attempt 1 uses."""
+    tenant = await create_test_tenant(db, name="Retry No PeriodKey Co")
     await set_tenant_context(db, str(tenant.id))
 
     async def fake_exec(ctx, params):
@@ -1302,7 +1478,6 @@ async def test_retry_falls_back_to_computed_period_key_when_no_attempt_one_row_e
         next_run_at=None,
         cron_expression="0 6 * * 1",
         tz="UTC",
-        last_run_status="retry_pending",
     )
 
     due_at = datetime(2026, 9, 7, 12, 0, tzinfo=timezone.utc)

@@ -247,6 +247,13 @@ class _Claim:
     # transaction as the claim itself -- see _claim_due_schedules. `None`
     # only for a `run=False` (skipped) claim, which never runs a job at all.
     job_id: uuid.UUID | None = None
+    # Item 1 (delta gate fix): for attempt 2, the ORIGINAL occurrence's
+    # period_key, read directly off the pre-created retry row's own
+    # parameters (set at SCHEDULING time -- see `run_schedule_now`'s
+    # retry-then-pause branch) -- never re-derived from a query. `None` for
+    # attempt 1 (computed fresh from `due_at`, as always) or the defensive
+    # fallback where the retry row could not be found.
+    period_key: str | None = None
 
 
 async def _claim_due_schedules(db: AsyncSession, tenant_id: uuid.UUID, now: datetime) -> list[_Claim]:
@@ -274,6 +281,17 @@ async def _claim_due_schedules(db: AsyncSession, tenant_id: uuid.UUID, now: date
     past it: a `continue` left `next_run_at <= now` forever, so the row was
     re-claimed and this same exception re-logged every minute, indefinitely,
     with nothing ever recorded for a human to see (review finding, MAJOR).
+
+    Item 1 (delta gate fix): attempt is read off `row.retry_job_id` — an
+    explicit FK, set by `run_schedule_now`'s retry-then-pause branch at
+    SCHEDULING time — never `last_run_status`. The old `last_run_status ==
+    "retry_pending"` check broke the moment a MANUAL run (which never
+    touches `retry_job_id`) failed in between and overwrote that same field
+    to `"error"`; `retry_job_id` cannot be perturbed that way. Attempt 2's
+    `jobs` row already exists (created eagerly at scheduling time, in the
+    SAME retry-then-pause branch) — this function REUSES it via
+    `retry_job_id` rather than creating a second one, and clears the column
+    in this SAME claim transaction so a re-claim can never double-reuse it.
     """
     rows = (
         (await db.execute(select(Schedule).where(*_due_predicate(tenant_id, now)).with_for_update(skip_locked=True)))
@@ -287,10 +305,11 @@ async def _claim_due_schedules(db: AsyncSession, tenant_id: uuid.UUID, now: date
     pending_jobs: list[tuple[_Claim, Job]] = []
     for row in rows:
         due_at = row.next_run_at
-        # Captured BEFORE `last_run_status` is overwritten below — this is the
-        # ONLY place attempt-2 (the retry) is distinguishable from a fresh due
-        # run, since `run_schedule_now` no longer sees the pre-claim value.
-        attempt = 2 if row.last_run_status == _RETRY_PENDING else 1
+        attempt = 2 if row.retry_job_id is not None else 1
+        retry_job_row: Job | None = None
+        if attempt == 2:
+            retry_job_row = await db.get(Job, row.retry_job_id)
+            row.retry_job_id = None  # cleared in the SAME claim transaction, either way
         try:
             next_after_due = compute_next_run(row.cron_expression, row.timezone, after=due_at)
             missed = next_after_due <= now
@@ -337,26 +356,44 @@ async def _claim_due_schedules(db: AsyncSession, tenant_id: uuid.UUID, now: date
         # retry, silently swallowing the original failure forever.
         skip = row.catch_up == "skip" and missed and attempt == 1
         row.last_run_status = "skipped" if skip else "running"
-        claim = _Claim(schedule_id=row.id, due_at=due_at, plan_version=row.plan_version, run=not skip, attempt=attempt)
+        claim = _Claim(
+            schedule_id=row.id,
+            due_at=due_at,
+            plan_version=row.plan_version,
+            run=not skip,
+            attempt=attempt,
+            period_key=(retry_job_row.parameters or {}).get("period_key") if retry_job_row is not None else None,
+        )
 
         if claim.run:
-            # The `jobs` row is created HERE, inside the SAME transaction as
-            # the claim (review finding, MAJOR): before this fix, the claim
-            # committed `next_run_at` advanced + `running` with NO `jobs` row
-            # yet -- a worker crash between that commit and `run_schedule_now`'s
-            # own insert dropped the occurrence with no record anywhere. A
-            # crash now leaves a visible `pending` row against a `running`
-            # schedule instead of nothing. `run_due_jobs` passes this id as
-            # `existing_job_id` so `run_schedule_now` reuses it rather than
-            # inserting a second row.
-            pending_job = Job(
-                tenant_id=tenant_id,
-                job_type="scheduled_job",
-                status="pending",
-                parameters={"schedule_id": str(row.id), "attempt": attempt, "due_at": due_at.isoformat()},
-            )
-            db.add(pending_job)
-            pending_jobs.append((claim, pending_job))
+            if retry_job_row is not None:
+                # Item 1 (delta gate fix): the retry's `jobs` row already
+                # exists -- created eagerly at SCHEDULING time (see
+                # `run_schedule_now`'s retry-then-pause branch) -- reuse it
+                # rather than inserting a second one.
+                claim.job_id = retry_job_row.id
+            else:
+                # The `jobs` row is created HERE, inside the SAME transaction
+                # as the claim (review finding, MAJOR): before this fix, the
+                # claim committed `next_run_at` advanced + `running` with NO
+                # `jobs` row yet -- a worker crash between that commit and
+                # `run_schedule_now`'s own insert dropped the occurrence with
+                # no record anywhere. A crash now leaves a visible `pending`
+                # row against a `running` schedule instead of nothing.
+                # `run_due_jobs` passes this id as `existing_job_id` so
+                # `run_schedule_now` reuses it rather than inserting a second
+                # one. (Also the defensive path for attempt 2 when its
+                # pre-created row could not be found -- extremely unlikely
+                # given the FK, but falls back to a fresh insert rather than
+                # crashing the sweep.)
+                pending_job = Job(
+                    tenant_id=tenant_id,
+                    job_type="scheduled_job",
+                    status="pending",
+                    parameters={"schedule_id": str(row.id), "attempt": attempt, "due_at": due_at.isoformat()},
+                )
+                db.add(pending_job)
+                pending_jobs.append((claim, pending_job))
 
         claims.append(claim)
 
@@ -607,6 +644,7 @@ async def run_schedule_now(
     attempt: int = 1,
     existing_job_id: uuid.UUID | None = None,
     retry_on_error: bool = False,
+    period_key: str | None = None,
 ) -> RunOutcome:
     """Run one schedule ONE time: one `jobs` row, plan steps replayed in order,
     schedule bookkeeping updated, one commit at the end (plus the write-step
@@ -658,15 +696,22 @@ async def run_schedule_now(
     schedule's `last_run_status="error"` (via `_finalize_run`, unconditionally)
     and stop there — it must NOT overwrite `next_run_at` with `now + 15 min`
     (clobbering the real next cron occurrence), set `paused_at`/
-    `pause_reason`, or flip `last_run_status` to `retry_pending`/`paused`.
+    `pause_reason`, or flip `last_run_status` to `retry_pending`/`paused`, or
+    touch `retry_job_id` (item 1, delta gate fix) — a pending retry must
+    survive a manual run's failure untouched.
+
     Before this fix, a `use_pending=True` preview run failing from the API or
     the MCP tool would silently schedule a retry of the schedule's APPROVED
     plan — a plan the operator never asked to run again.
 
-    The retry itself keeps the ORIGINAL occurrence's `period_key` (see the
-    lookup below, right before `job_parameters` is built): the retry claim's
-    `due_at` is `now + 15 min` from attempt 1, which is the WRONG basis for a
-    period key whenever the retry crosses local midnight (review finding).
+    `period_key` (item 1, delta gate fix): the retry keeps the ORIGINAL
+    occurrence's period, not one computed from its own `due_at` (`now + 15
+    min` from attempt 1, the WRONG basis whenever the retry crosses local
+    midnight — review finding). `run_due_jobs` passes `claim.period_key`,
+    read directly off the pre-created retry row's own parameters (set at
+    SCHEDULING time, below) — never re-derived from a query. `None` (every
+    other caller — attempt 1, the API/MCP "Run now" paths) computes it fresh
+    from `due_at` in the schedule's own timezone, exactly as before.
 
     HITL gate (review finding, spec Goal line: "approved by a person, run
     deterministically"): `use_pending=False` refuses to run unless
@@ -764,46 +809,35 @@ async def run_schedule_now(
         await db.commit()
         return RunOutcome(reason=REASON_BLOCKED, jobs_row_id=jobs_row_id, outputs={})
 
-    period_key = due_at.astimezone(ZoneInfo(row.timezone)).date().isoformat()
+    # Item 1 (delta gate fix): period_key is the CALLER's fact when given
+    # (attempt 2, via `run_due_jobs` -> `claim.period_key`, read off the
+    # pre-created retry row's own parameters at scheduling time) -- never
+    # re-derived from a query here. `None` (attempt 1; every non-sweep
+    # caller) computes it fresh from `due_at`, exactly as before.
+    if period_key is None:
+        period_key = due_at.astimezone(ZoneInfo(row.timezone)).date().isoformat()
     correlation_id = str(uuid.uuid4())
 
-    # The retry (attempt >= 2) must keep attempt 1's OWN period_key, not one
-    # computed from the retry's own due_at (review finding, MAJOR): the retry
-    # claim's due_at is `now + RETRY_DELAY_MINUTES` from attempt 1 (see the
-    # retry branch below), which is the WRONG basis for a period key whenever
-    # the retry crosses local midnight -- and different from attempt 1's even
-    # when it doesn't. The Drive idempotency key and the recon.run window are
-    # both keyed on period_key, so a wrong one here silently targets the
-    # WRONG day's period on the retry. Falls back to the computed value only
-    # when no attempt-1 row exists (defensive — e.g. it was purged).
-    retry_of_job_id: uuid.UUID | None = None
-    if attempt >= 2:
-        attempt1_stmt = (
-            select(Job)
-            .where(
-                Job.tenant_id == tenant_id,
-                Job.job_type == "scheduled_job",
-                Job.parameters["schedule_id"].astext == str(schedule_id),
-                Job.parameters["attempt"].astext == "1",
-            )
-            .order_by(Job.started_at.desc())
-            .limit(1)
-        )
-        attempt1_job = (await db.execute(attempt1_stmt)).scalars().first()
-        if attempt1_job is not None and attempt1_job.parameters:
-            original_period_key = attempt1_job.parameters.get("period_key")
-            if original_period_key:
-                period_key = original_period_key
-            retry_of_job_id = attempt1_job.id
-
-    job_parameters = {
-        "schedule_id": str(schedule_id),
-        "plan_version": plan_version_used,
-        "period_key": period_key,
-        "attempt": attempt,
-        "use_pending": use_pending,
-        "retry_of_job_id": str(retry_of_job_id) if retry_of_job_id else None,
-    }
+    # Item 4 (delta gate fix): MERGE onto the existing row's own parameters
+    # rather than overwriting wholesale -- a snapshot replay (Task 5's "Run
+    # now") stores `plan`/`plan_version` on the pre-created row at ENQUEUE
+    # time (the plan the operator actually validated); overwriting
+    # `plan_version` with the schedule's CURRENT value here dropped that
+    # record the moment an instruction edit landed between enqueue and
+    # execution (review finding, MAJOR — the job no longer said what ran).
+    # `retry_of_job_id` for attempt 2 comes the SAME way: the pre-created
+    # retry row already carries it (set at scheduling time, item 1) -- never
+    # a query. Only the RUNTIME facts (schedule_id, period_key, attempt,
+    # use_pending) are always overwritten; everything else on the existing
+    # row's parameters (plan, plan_version, retry_of_job_id, due_at) survives
+    # untouched unless this run supplies its own value.
+    job_parameters: dict[str, Any] = dict(existing_job.parameters or {}) if existing_job is not None else {}
+    job_parameters["schedule_id"] = str(schedule_id)
+    job_parameters["period_key"] = period_key
+    job_parameters["attempt"] = attempt
+    job_parameters["use_pending"] = use_pending
+    job_parameters.setdefault("plan_version", plan_version_used)
+    job_parameters.setdefault("retry_of_job_id", None)
 
     job: Job | None = existing_job
     if job is not None:
@@ -1018,7 +1052,30 @@ async def run_schedule_now(
                 status="error",
             )
         else:
-            row.next_run_at = now + timedelta(minutes=RETRY_DELAY_MINUTES)
+            # Item 1 (delta gate fix): the retry's `jobs` row is created
+            # EAGERLY, right here, at SCHEDULING time -- not lazily at the
+            # second sweep's claim -- so `retry_job_id` always points at a
+            # REAL row from the moment it is set. `period_key`/
+            # `retry_of_job_id` are THIS run's own facts, captured directly
+            # (never a query); `_claim_due_schedules` reads them straight off
+            # this row's parameters when the retry is claimed.
+            retry_due_at = now + timedelta(minutes=RETRY_DELAY_MINUTES)
+            retry_job = Job(
+                tenant_id=tenant_id,
+                job_type="scheduled_job",
+                status="pending",
+                parameters={
+                    "schedule_id": str(schedule_id),
+                    "attempt": attempt + 1,
+                    "period_key": period_key,
+                    "retry_of_job_id": str(job.id),
+                    "due_at": retry_due_at.isoformat(),
+                },
+            )
+            db.add(retry_job)
+            await db.flush()  # need retry_job.id before assigning it below
+            row.retry_job_id = retry_job.id
+            row.next_run_at = retry_due_at
             row.last_run_status = _RETRY_PENDING
 
     await audit_service.log_event(
@@ -1079,6 +1136,7 @@ async def run_due_jobs(db: AsyncSession, tenant_id: uuid.UUID, *, now: datetime 
                 attempt=claim.attempt,
                 retry_on_error=True,
                 existing_job_id=claim.job_id,
+                period_key=claim.period_key,
             )
             stats["ran"] += 1
             if outcome.reason == REASON_ERROR:

@@ -79,3 +79,13 @@ class Schedule(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     pause_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # migration 102_schedule_retry_job, delta gate item 1: the one 15-minutes-
+    # later retry (spec §B4) is an explicit reference to its pre-created
+    # `jobs` row -- set by `run_schedule_now`'s retry-then-pause branch at
+    # SCHEDULING time, read by `_claim_due_schedules` to decide `attempt`
+    # (2 if set, else 1) and to reuse that SAME row rather than a JSON query
+    # ordered by `started_at` (see the migration's own docstring for why that
+    # broke). Cleared in the SAME transaction the sweep claims it in.
+    retry_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True
+    )
