@@ -1360,6 +1360,20 @@ def _ia_dollar_money(value: Decimal) -> str:
     return f"${_ia_money(value)}"
 
 
+# Display labels for Task 1's bucket identifiers (inventory_aging.py's BUCKETS):
+# the mock's binding copy uses an en dash (U+2013) throughout ("0–30 days"), not
+# the ASCII hyphen the bucket codes themselves use ("0-30") -- those codes are a
+# code-facing identifier, not display copy, so they're mapped rather than
+# interpolated directly.
+_IA_BUCKET_LABEL = {
+    "0-30": "0–30",
+    "31-60": "31–60",
+    "61-90": "61–90",
+    "91-180": "91–180",
+    "180+": "180+",
+}
+
+
 def _ia_short_date(d: date) -> str:
     return f"{d.day} {d.strftime('%b')}"
 
@@ -1564,7 +1578,7 @@ def _ia_mid_row_html(report: AgingReport) -> str:
 
 def _ia_bucket_row_html(bucket: str, locations: tuple[LocationSummary, ...]) -> str:
     swatch = f'<span class="bar" style="background:{_IA_BUCKET_SWATCH[bucket]}"></span>'
-    cells = f'<td class="lbl">{swatch}{bucket} days</td>'
+    cells = f'<td class="lbl">{swatch}{_IA_BUCKET_LABEL[bucket]} days</td>'
     for loc in locations:
         br = next(b for b in loc.buckets if b.bucket == bucket)
         cells += (

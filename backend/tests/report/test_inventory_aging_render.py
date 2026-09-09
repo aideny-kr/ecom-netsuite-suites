@@ -240,6 +240,19 @@ def test_bucket_table_has_current_and_aged_subtotals_and_on_hand_total(html):
 
 
 # ---------------------------------------------------------------------------
+# Review finding (major): bucket-row labels must use the mock's en dash
+# (U+2013), not an ASCII hyphen -- "0–30 days", not "0-30 days".
+# ---------------------------------------------------------------------------
+def test_bucket_row_labels_use_en_dash_not_ascii_hyphen(html):
+    for en_dash_label in ("0–30 days", "31–60 days", "61–90 days", "91–180 days"):
+        assert en_dash_label in html
+    for ascii_label in ("0-30 days", "31-60 days", "61-90 days", "91-180 days"):
+        assert ascii_label not in html
+    # "180+ days" has no dash either way -- still present, unaffected by the fix.
+    assert "180+ days" in html
+
+
+# ---------------------------------------------------------------------------
 # Largest aged positions: full list present (collapsed) and complete
 # ---------------------------------------------------------------------------
 def test_full_aged_list_present_collapsed_and_complete(html, report):
