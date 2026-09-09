@@ -451,6 +451,44 @@ async def test_non_playbook_report_delivery_still_uses_the_generic_workbook(db, 
     assert seen_xlsx_bytes["content"] == b"XLSX-FAKE"
 
 
+async def test_pdf_and_xlsx_rendering_run_off_the_event_loop_via_to_thread(db, monkeypatch):
+    """Gate fix #10: WeasyPrint (_render_pdf_bytes) and openpyxl
+    (_render_xlsx_bytes) are CPU-bound and were called synchronously inline --
+    for a real render, that blocks the event loop (and every other concurrent
+    request on this worker) for the duration. Both must run via
+    asyncio.to_thread, matching the pattern _GoogleDriveClient's own blocking
+    googleapiclient calls already use."""
+    tenant = await create_test_tenant(db, name="ToThreadCorp")
+    user, _ = await create_test_user(db, tenant)
+    await set_tenant_context(db, str(tenant.id))
+    report = await _seed_report(db, tenant, user)
+    await _add_sheets_connector(db, tenant.id)
+
+    calls: list[str] = []
+    _patch_renderers(monkeypatch, calls)
+    client = FakeDriveClient(calls)
+    _patch_drive_client(monkeypatch, client)
+
+    to_thread_targets: list[object] = []
+    real_to_thread = report_delivery.asyncio.to_thread
+
+    async def spy_to_thread(func, *args, **kwargs):
+        to_thread_targets.append(func)
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(report_delivery.asyncio, "to_thread", spy_to_thread)
+
+    await report_delivery.deliver_report_to_drive(
+        db, tenant_id=tenant.id, report_id=report.id, actor_type="user", actor_id=user.id, period_key="2026-09-08"
+    )
+
+    assert report_delivery._render_pdf_bytes in to_thread_targets
+    assert report_delivery._render_xlsx_bytes in to_thread_targets
+    # the renders still ran (not skipped) -- to_thread actually invoked them.
+    assert "render_pdf" in calls
+    assert "render_xlsx" in calls
+
+
 async def test_first_delivery_uploads_two_files(db, monkeypatch):
     tenant = await create_test_tenant(db, name="FirstDelivery")
     user, _ = await create_test_user(db, tenant)

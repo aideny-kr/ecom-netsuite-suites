@@ -519,8 +519,13 @@ async def deliver_report_to_drive(
             client, name=report.title, parent_id=reports_folder_id, app_properties=folder_app_properties
         )
 
-        pdf_bytes = _render_pdf_bytes(report)
-        xlsx_bytes = _render_xlsx_bytes(report)
+        # Gate fix #10: both renderers are CPU-bound (WeasyPrint / openpyxl) and were
+        # called synchronously inline — for a real render that blocks the event loop,
+        # and therefore every other concurrent request on this worker, for the
+        # duration. Same asyncio.to_thread pattern _GoogleDriveClient's own blocking
+        # googleapiclient calls already use.
+        pdf_bytes = await asyncio.to_thread(_render_pdf_bytes, report)
+        xlsx_bytes = await asyncio.to_thread(_render_xlsx_bytes, report)
 
         pdf_name = f"{report.title} — {period_key}.pdf"
         xlsx_name = f"{report.title} — {period_key}.xlsx"
