@@ -69,15 +69,21 @@ async def _add_sheets_connector(db, tenant_id, *, shared_drive_id: str | None = 
 
 
 class FakeDriveClient:
-    """In-memory DriveClient — folders/files keyed by (name, parent_id); records every
-    call into ``calls`` (shared with the test) so ordering vs. the audit-event write
-    can be asserted without a real Google API round-trip."""
+    """In-memory DriveClient. Gate fix #5: folders/files are keyed by their
+    ``app_properties`` identity (report_series_id/report_id for a folder;
+    report_id/period_key/kind for a file) when given — the SAME identity scheme
+    ``deliver_report_to_drive`` now keys on, so this fake reproduces the real
+    collision fix rather than papering over it. ``app_properties=None`` (the
+    singleton top-level "Reports" folder) falls back to name-based keying,
+    unchanged. Records every call into ``calls`` (shared with the test) so
+    ordering vs. the audit-event write can be asserted without a real Google API
+    round-trip."""
 
     def __init__(self, calls: list[str], *, fail_on: str | None = None):
         self.calls = calls
         self.fail_on = fail_on
-        self._folders: dict[tuple[str, str | None], str] = {}
-        self._files: dict[tuple[str, str], dict[str, str]] = {}
+        self._folders: dict[tuple, str] = {}
+        self._files: dict[tuple, dict[str, str]] = {}
         self._next_id = 0
 
     def _new_id(self, prefix: str) -> str:
@@ -88,29 +94,48 @@ class FakeDriveClient:
         if self.fail_on == call:
             raise RuntimeError(f"simulated Drive failure at {call}")
 
-    async def find_folder(self, *, name: str, parent_id: str | None) -> str | None:
+    @staticmethod
+    def _key(name: str, parent_id: str | None, app_properties: dict[str, str] | None) -> tuple:
+        identity = tuple(sorted(app_properties.items())) if app_properties else (("name", name),)
+        return (identity, parent_id)
+
+    async def find_folder(
+        self, *, name: str, parent_id: str | None, app_properties: dict[str, str] | None = None
+    ) -> str | None:
         self.calls.append("find_folder")
         self._maybe_fail("find_folder")
-        return self._folders.get((name, parent_id))
+        return self._folders.get(self._key(name, parent_id, app_properties))
 
-    async def create_folder(self, *, name: str, parent_id: str | None) -> str:
+    async def create_folder(
+        self, *, name: str, parent_id: str | None, app_properties: dict[str, str] | None = None
+    ) -> str:
         self.calls.append("create_folder")
         self._maybe_fail("create_folder")
         folder_id = self._new_id("folder")
-        self._folders[(name, parent_id)] = folder_id
+        self._folders[self._key(name, parent_id, app_properties)] = folder_id
         return folder_id
 
-    async def find_file(self, *, name: str, parent_id: str) -> dict[str, str] | None:
+    async def find_file(
+        self, *, name: str, parent_id: str, app_properties: dict[str, str] | None = None
+    ) -> dict[str, str] | None:
         self.calls.append("find_file")
         self._maybe_fail("find_file")
-        return self._files.get((name, parent_id))
+        return self._files.get(self._key(name, parent_id, app_properties))
 
-    async def upload_new(self, *, name: str, parent_id: str, content: bytes, mime_type: str) -> dict[str, str]:
+    async def upload_new(
+        self,
+        *,
+        name: str,
+        parent_id: str,
+        content: bytes,
+        mime_type: str,
+        app_properties: dict[str, str] | None = None,
+    ) -> dict[str, str]:
         self.calls.append("upload_new")
         self._maybe_fail("upload_new")
         file_id = self._new_id("file")
         record = {"file_id": file_id, "url": f"https://drive.example/{file_id}"}
-        self._files[(name, parent_id)] = record
+        self._files[self._key(name, parent_id, app_properties)] = record
         return record
 
     async def update_existing(self, *, file_id: str, content: bytes, mime_type: str) -> dict[str, str]:
@@ -189,6 +214,66 @@ async def test_folder_found_or_created_only_once_across_two_deliveries(db, monke
     )
     assert calls.count("create_folder") == 0
     assert calls.count("find_folder") == 2
+
+
+async def test_two_reports_with_the_same_title_get_separate_folders_and_files(db, monkeypatch):
+    """Gate fix #5: folder/file lookup used to key on report.title + period_key alone
+    -- two DIFFERENT reports sharing a title (e.g. two inventory_aging series, or a
+    renamed/recomposed report reusing a common name) collided on the SAME Drive
+    folder and files, silently overwriting one report's delivery with the other's.
+    Identity must be the report (series_id, or report.id when there is no series),
+    not the human-readable title."""
+    tenant = await create_test_tenant(db, name="SameTitleCorp")
+    user, _ = await create_test_user(db, tenant)
+    await set_tenant_context(db, str(tenant.id))
+    report_a = await _seed_report(db, tenant, user, title="Inventory Aging Weekly")
+    report_b = await _seed_report(db, tenant, user, title="Inventory Aging Weekly")
+    await _add_sheets_connector(db, tenant.id)
+
+    calls: list[str] = []
+    _patch_renderers(monkeypatch, calls)
+    client = FakeDriveClient(calls)
+    _patch_drive_client(monkeypatch, client)
+
+    result_a = await report_delivery.deliver_report_to_drive(
+        db, tenant_id=tenant.id, report_id=report_a.id, actor_type="user", actor_id=user.id, period_key="2026-09-08"
+    )
+    await set_tenant_context(db, str(tenant.id))
+    result_b = await report_delivery.deliver_report_to_drive(
+        db, tenant_id=tenant.id, report_id=report_b.id, actor_type="user", actor_id=user.id, period_key="2026-09-08"
+    )
+
+    assert result_a.folder_id != result_b.folder_id
+    assert result_a.pdf_file_id != result_b.pdf_file_id
+    assert result_a.xlsx_file_id != result_b.xlsx_file_id
+
+
+async def test_redelivery_of_the_same_report_and_period_still_updates_in_place(db, monkeypatch):
+    """Companion to the collision fix above: identity-by-report must not break the
+    existing idempotency contract -- the SAME report + period re-delivered still
+    resolves to the SAME folder/files (update, never a duplicate)."""
+    tenant = await create_test_tenant(db, name="RedeliverSameCorp")
+    user, _ = await create_test_user(db, tenant)
+    await set_tenant_context(db, str(tenant.id))
+    report = await _seed_report(db, tenant, user, title="Inventory Aging Weekly")
+    await _add_sheets_connector(db, tenant.id)
+
+    calls: list[str] = []
+    _patch_renderers(monkeypatch, calls)
+    client = FakeDriveClient(calls)
+    _patch_drive_client(monkeypatch, client)
+
+    first = await report_delivery.deliver_report_to_drive(
+        db, tenant_id=tenant.id, report_id=report.id, actor_type="user", actor_id=user.id, period_key="2026-09-08"
+    )
+    await set_tenant_context(db, str(tenant.id))
+    second = await report_delivery.deliver_report_to_drive(
+        db, tenant_id=tenant.id, report_id=report.id, actor_type="user", actor_id=user.id, period_key="2026-09-08"
+    )
+
+    assert second.folder_id == first.folder_id
+    assert second.pdf_file_id == first.pdf_file_id
+    assert second.xlsx_file_id == first.xlsx_file_id
 
 
 async def test_first_delivery_uploads_two_files(db, monkeypatch):
@@ -421,9 +506,11 @@ async def test_filenames_include_report_title_and_period_key(db, monkeypatch):
     seen_names: list[str] = []
 
     class NamingDriveClient(FakeDriveClient):
-        async def upload_new(self, *, name, parent_id, content, mime_type):
+        async def upload_new(self, *, name, parent_id, content, mime_type, app_properties=None):
             seen_names.append(name)
-            return await super().upload_new(name=name, parent_id=parent_id, content=content, mime_type=mime_type)
+            return await super().upload_new(
+                name=name, parent_id=parent_id, content=content, mime_type=mime_type, app_properties=app_properties
+            )
 
     client = NamingDriveClient(calls)
     _patch_drive_client(monkeypatch, client)

@@ -2,12 +2,18 @@
 
 Spec: docs/superpowers/specs/2026-09-08-scheduled-jobs-and-inventory-aging-design.md
 §A5. ``deliver_report_to_drive`` uploads a PDF + Excel workbook of ``report_id`` to
-the tenant's Google Drive, under ``Reports / <report title>`` (found-or-created by
-name), idempotently keyed by ``period_key``: a same-named existing file is UPDATED
-in place, never duplicated. Credentials come from the tenant's ``google_sheets``
-service-account ``McpConnector`` (same lookup as ``api/v1/drive_folders.py::
-_sheets_connector``) — no connector raises ``DeliveryUnavailable`` (a clean, expected
-outcome for a scheduled run: it ends ``blocked``, never a 500).
+the tenant's Google Drive, under ``Reports / <report title>``. Gate fix #5: the
+per-report folder and its files are found-or-created by IDENTITY, via Drive
+``appProperties`` — the folder keys on the report's series (``report_series_id``,
+or ``report_id`` when there is no series); a file keys on ``report_id`` +
+``period_key`` + ``kind`` (pdf/xlsx). ``name`` is cosmetic only (the human-readable
+title/period an operator sees in Drive) — two reports sharing a title can never
+collide on the same folder/files, and a re-delivery of the same report + period
+still UPDATES the existing file in place, never duplicating it. Credentials come
+from the tenant's ``google_sheets`` service-account ``McpConnector`` (same lookup
+as ``api/v1/drive_folders.py::_sheets_connector``) — no connector raises
+``DeliveryUnavailable`` (a clean, expected outcome for a scheduled run: it ends
+``blocked``, never a 500).
 
 Two seams exist purely for testability and are patched at the MODULE level by tests
 (not passed as function parameters, so the public signature matches the interface
@@ -100,17 +106,40 @@ class DeliveryResult:
 class DriveClient(Protocol):
     """Just enough Drive surface for idempotent folder/file delivery. Every method is
     a single logical Drive operation so a fake can record call order without knowing
-    anything about Google's actual request/response shapes."""
+    anything about Google's actual request/response shapes.
 
-    async def find_folder(self, *, name: str, parent_id: str | None) -> str | None: ...
+    Gate fix #5: ``app_properties`` (when given) is the REAL identity a
+    find/create/upload keys on — Drive ``appProperties`` (``report_series_id`` or
+    ``report_id`` for a folder; ``report_id``/``period_key``/``kind`` for a file),
+    never ``name`` (two reports can share a human-readable title and must never
+    collide on the same folder/files). ``name`` stays purely cosmetic — the
+    human-readable display name shown in Drive — and is still what a caller with no
+    identity to key on (the singleton top-level "Reports" folder) is found/created
+    by."""
 
-    async def create_folder(self, *, name: str, parent_id: str | None) -> str: ...
+    async def find_folder(
+        self, *, name: str, parent_id: str | None, app_properties: dict[str, str] | None = None
+    ) -> str | None: ...
 
-    async def find_file(self, *, name: str, parent_id: str) -> dict[str, str] | None:
+    async def create_folder(
+        self, *, name: str, parent_id: str | None, app_properties: dict[str, str] | None = None
+    ) -> str: ...
+
+    async def find_file(
+        self, *, name: str, parent_id: str, app_properties: dict[str, str] | None = None
+    ) -> dict[str, str] | None:
         """Returns ``{"file_id": ..., "url": ...}`` or ``None``."""
         ...
 
-    async def upload_new(self, *, name: str, parent_id: str, content: bytes, mime_type: str) -> dict[str, str]:
+    async def upload_new(
+        self,
+        *,
+        name: str,
+        parent_id: str,
+        content: bytes,
+        mime_type: str,
+        app_properties: dict[str, str] | None = None,
+    ) -> dict[str, str]:
         """Returns ``{"file_id": ..., "url": ...}``."""
         ...
 
@@ -123,6 +152,16 @@ class DriveClient(Protocol):
 def _escape_drive_query(value: str) -> str:
     """Drive's ``q`` string-literal escaping: backslash then single-quote."""
     return value.replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _app_properties_query(app_properties: dict[str, str]) -> str:
+    """A Drive ``q`` fragment requiring EVERY given key/value pair to match via
+    ``appProperties has {...}`` — one clause per pair, ANDed together (Drive's query
+    grammar tests exactly one key/value per ``has`` clause)."""
+    return " and ".join(
+        f"appProperties has {{ key='{_escape_drive_query(k)}' and value='{_escape_drive_query(v)}' }}"
+        for k, v in sorted(app_properties.items())
+    )
 
 
 class _GoogleDriveClient:
@@ -142,16 +181,25 @@ class _GoogleDriveClient:
         creds = service_account.Credentials.from_service_account_info(self._credentials, scopes=_DRIVE_SCOPES)
         return build("drive", "v3", credentials=creds)
 
-    async def find_folder(self, *, name: str, parent_id: str | None) -> str | None:
-        return await asyncio.to_thread(self._find_folder_sync, name, parent_id)
+    async def find_folder(
+        self, *, name: str, parent_id: str | None, app_properties: dict[str, str] | None = None
+    ) -> str | None:
+        return await asyncio.to_thread(self._find_folder_sync, name, parent_id, app_properties)
 
-    def _find_folder_sync(self, name: str, parent_id: str | None) -> str | None:
-        q = (
-            f"name = '{_escape_drive_query(name)}' and "
-            "mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+    def _find_folder_sync(
+        self, name: str, parent_id: str | None, app_properties: dict[str, str] | None = None
+    ) -> str | None:
+        # Gate fix #5: identity keyed by appProperties when given (report_series_id /
+        # report_id) — name is cosmetic only and would collide across two reports that
+        # happen to share a title. No app_properties (the singleton top-level "Reports"
+        # folder) falls back to the pre-existing name-based lookup unchanged.
+        clauses = ["mimeType = 'application/vnd.google-apps.folder'", "trashed = false"]
+        clauses.append(
+            _app_properties_query(app_properties) if app_properties else f"name = '{_escape_drive_query(name)}'"
         )
         if parent_id:
-            q += f" and '{_escape_drive_query(parent_id)}' in parents"
+            clauses.append(f"'{_escape_drive_query(parent_id)}' in parents")
+        q = " and ".join(clauses)
         resp = (
             self._service()
             .files()
@@ -168,25 +216,43 @@ class _GoogleDriveClient:
         files = resp.get("files", [])
         return files[0]["id"] if files else None
 
-    async def create_folder(self, *, name: str, parent_id: str | None) -> str:
-        return await asyncio.to_thread(self._create_folder_sync, name, parent_id)
+    async def create_folder(
+        self, *, name: str, parent_id: str | None, app_properties: dict[str, str] | None = None
+    ) -> str:
+        return await asyncio.to_thread(self._create_folder_sync, name, parent_id, app_properties)
 
-    def _create_folder_sync(self, name: str, parent_id: str | None) -> str:
+    def _create_folder_sync(
+        self, name: str, parent_id: str | None, app_properties: dict[str, str] | None = None
+    ) -> str:
         body: dict[str, Any] = {"name": name, "mimeType": "application/vnd.google-apps.folder"}
         if parent_id:
             body["parents"] = [parent_id]
+        if app_properties:
+            body["appProperties"] = app_properties
         result = self._service().files().create(body=body, supportsAllDrives=True, fields="id").execute()
         return result["id"]
 
-    async def find_file(self, *, name: str, parent_id: str) -> dict[str, str] | None:
-        return await asyncio.to_thread(self._find_file_sync, name, parent_id)
+    async def find_file(
+        self, *, name: str, parent_id: str, app_properties: dict[str, str] | None = None
+    ) -> dict[str, str] | None:
+        return await asyncio.to_thread(self._find_file_sync, name, parent_id, app_properties)
 
-    def _find_file_sync(self, name: str, parent_id: str) -> dict[str, str] | None:
-        q = (
-            f"name = '{_escape_drive_query(name)}' and "
-            f"'{_escape_drive_query(parent_id)}' in parents and "
-            "mimeType != 'application/vnd.google-apps.folder' and trashed = false"
+    def _find_file_sync(
+        self, name: str, parent_id: str, app_properties: dict[str, str] | None = None
+    ) -> dict[str, str] | None:
+        # Gate fix #5: identity keyed by appProperties (report_id/period_key/kind) when
+        # given — never name, so a re-delivery of the same report+period+kind always
+        # finds the SAME file (update in place) regardless of what the human-readable
+        # name happens to be, and two different reports' files can never collide.
+        clauses = [
+            f"'{_escape_drive_query(parent_id)}' in parents",
+            "mimeType != 'application/vnd.google-apps.folder'",
+            "trashed = false",
+        ]
+        clauses.append(
+            _app_properties_query(app_properties) if app_properties else f"name = '{_escape_drive_query(name)}'"
         )
+        q = " and ".join(clauses)
         resp = (
             self._service()
             .files()
@@ -205,18 +271,36 @@ class _GoogleDriveClient:
             return None
         return {"file_id": files[0]["id"], "url": files[0].get("webViewLink", "")}
 
-    async def upload_new(self, *, name: str, parent_id: str, content: bytes, mime_type: str) -> dict[str, str]:
-        return await asyncio.to_thread(self._upload_new_sync, name, parent_id, content, mime_type)
+    async def upload_new(
+        self,
+        *,
+        name: str,
+        parent_id: str,
+        content: bytes,
+        mime_type: str,
+        app_properties: dict[str, str] | None = None,
+    ) -> dict[str, str]:
+        return await asyncio.to_thread(self._upload_new_sync, name, parent_id, content, mime_type, app_properties)
 
-    def _upload_new_sync(self, name: str, parent_id: str, content: bytes, mime_type: str) -> dict[str, str]:
+    def _upload_new_sync(
+        self,
+        name: str,
+        parent_id: str,
+        content: bytes,
+        mime_type: str,
+        app_properties: dict[str, str] | None = None,
+    ) -> dict[str, str]:
         from googleapiclient.http import MediaInMemoryUpload
 
         media = MediaInMemoryUpload(content, mimetype=mime_type)
+        body: dict[str, Any] = {"name": name, "parents": [parent_id]}
+        if app_properties:
+            body["appProperties"] = app_properties
         result = (
             self._service()
             .files()
             .create(
-                body={"name": name, "parents": [parent_id]},
+                body=body,
                 media_body=media,
                 supportsAllDrives=True,
                 fields="id,webViewLink",
@@ -297,20 +381,30 @@ async def _sheets_connector(db: AsyncSession, tenant_id: uuid.UUID) -> McpConnec
     )
 
 
-async def _find_or_create_folder(client: DriveClient, *, name: str, parent_id: str | None) -> str:
-    existing = await client.find_folder(name=name, parent_id=parent_id)
+async def _find_or_create_folder(
+    client: DriveClient, *, name: str, parent_id: str | None, app_properties: dict[str, str] | None = None
+) -> str:
+    existing = await client.find_folder(name=name, parent_id=parent_id, app_properties=app_properties)
     if existing:
         return existing
-    return await client.create_folder(name=name, parent_id=parent_id)
+    return await client.create_folder(name=name, parent_id=parent_id, app_properties=app_properties)
 
 
 async def _upload_or_update(
-    client: DriveClient, *, name: str, parent_id: str, content: bytes, mime_type: str
+    client: DriveClient,
+    *,
+    name: str,
+    parent_id: str,
+    content: bytes,
+    mime_type: str,
+    app_properties: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    existing = await client.find_file(name=name, parent_id=parent_id)
+    existing = await client.find_file(name=name, parent_id=parent_id, app_properties=app_properties)
     if existing:
         return await client.update_existing(file_id=existing["file_id"], content=content, mime_type=mime_type)
-    return await client.upload_new(name=name, parent_id=parent_id, content=content, mime_type=mime_type)
+    return await client.upload_new(
+        name=name, parent_id=parent_id, content=content, mime_type=mime_type, app_properties=app_properties
+    )
 
 
 async def deliver_report_to_drive(
@@ -369,7 +463,21 @@ async def deliver_report_to_drive(
         await set_tenant_context(db, str(tenant_id))
 
         reports_folder_id = await _find_or_create_folder(client, name=_REPORTS_FOLDER_NAME, parent_id=shared_drive_id)
-        series_folder_id = await _find_or_create_folder(client, name=report.title, parent_id=reports_folder_id)
+        # Gate fix #5: the per-report folder is keyed by the report's SERIES (or the
+        # report id itself when there is no series — a one-off compose, or a
+        # mode="period" report) via Drive appProperties, never by report.title — two
+        # reports can share a title (two series with the same name, a recomposed
+        # report reusing a common name) and must never collide on the same Drive
+        # folder. `name` stays the human-readable title; only the appProperties
+        # identity is load-bearing for find/create.
+        folder_app_properties = (
+            {"report_series_id": str(report.series_id)}
+            if report.series_id is not None
+            else {"report_id": str(report_id)}
+        )
+        series_folder_id = await _find_or_create_folder(
+            client, name=report.title, parent_id=reports_folder_id, app_properties=folder_app_properties
+        )
 
         pdf_bytes = _render_pdf_bytes(report)
         xlsx_bytes = _render_xlsx_bytes(report)
@@ -378,10 +486,20 @@ async def deliver_report_to_drive(
         xlsx_name = f"{report.title} — {period_key}.xlsx"
 
         pdf_result = await _upload_or_update(
-            client, name=pdf_name, parent_id=series_folder_id, content=pdf_bytes, mime_type=_PDF_MIME
+            client,
+            name=pdf_name,
+            parent_id=series_folder_id,
+            content=pdf_bytes,
+            mime_type=_PDF_MIME,
+            app_properties={"report_id": str(report_id), "period_key": period_key, "kind": "pdf"},
         )
         xlsx_result = await _upload_or_update(
-            client, name=xlsx_name, parent_id=series_folder_id, content=xlsx_bytes, mime_type=_XLSX_MIME
+            client,
+            name=xlsx_name,
+            parent_id=series_folder_id,
+            content=xlsx_bytes,
+            mime_type=_XLSX_MIME,
+            app_properties={"report_id": str(report_id), "period_key": period_key, "kind": "xlsx"},
         )
 
         delivered_at = datetime.now(timezone.utc)
