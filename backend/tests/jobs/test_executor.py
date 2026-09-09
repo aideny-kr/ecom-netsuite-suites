@@ -887,7 +887,10 @@ async def test_finalize_double_failure_does_not_leave_the_job_row_running(db: As
     # The jobs row must never be left stuck at status="running" -- even
     # when BOTH the finalize call and its one retry crash.
     job = (await db.execute(select(Job).where(Job.tenant_id == tenant_id))).scalar_one()
-    assert job.status != "running"
+    # The raw-SQL fallback must land on the same vocabulary every other writer
+    # uses (pending/running/completed/failed) so a doubly-failed run still shows
+    # up in ?status=failed filters and failed-job counts.
+    assert job.status == "failed"
     assert job.result_summary is not None
     assert job.result_summary["reason"] == REASON_ERROR
 

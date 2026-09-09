@@ -70,11 +70,15 @@ than leaving the `jobs` row it created stuck at `status="running"` (review findi
 That retry is itself guarded too (a second review finding): if the SAME `_finalize_run`
 call fails AGAIN — the ORM re-fetch path apparently broken, not just flaky once — a
 third ORM attempt is not made. Instead a minimal, non-ORM raw SQL `UPDATE` marks the
-`jobs` row `status='error'` and the `schedules` row `last_run_status='error'` by id,
-best-effort audits the failure, and returns — never leaving the `jobs` row stuck at
-`status="running"` even in that doubly-failed case, though (unlike the normal error
-path) it does NOT also schedule the usual 15-minutes-later retry-then-pause cycle,
-since that needs the very ORM objects this fallback exists because it could not get.
+`jobs` row `status='failed'` (the same vocabulary every other writer of that column
+uses, so the run still shows in failed-job filters) and the `schedules` row
+`last_run_status='error'` by id, best-effort audits the failure, and returns. This is
+best effort, not a guarantee: if that single UPDATE-by-id itself raises (extremely
+unlikely, but possible if the database is unreachable) the failure is logged and not
+retried again, and the `jobs` row would remain at `status="running"` until the
+startup stale-job cleanup marks it failed. Unlike the normal error path, this
+fallback does NOT schedule the usual 15-minutes-later retry-then-pause cycle, since
+that needs the very ORM objects this fallback exists because it could not get.
 
 Claim vs. run (the SKIP LOCKED lock is short-lived, not held for the run's duration):
 `_claim_due_schedules` does the `SELECT ... FOR UPDATE SKIP LOCKED`, immediately
@@ -642,7 +646,7 @@ async def run_schedule_now(
             try:
                 await db.execute(
                     text(
-                        "UPDATE jobs SET status = 'error', "
+                        "UPDATE jobs SET status = 'failed', "
                         "result_summary = CAST(:result_summary AS JSON), "
                         "error_message = :error_message, "
                         "completed_at = :completed_at "
