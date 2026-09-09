@@ -347,24 +347,31 @@ async def refresh_report(
     await db.commit()
 
     correlation_id = f"report-refresh:{report_id}:{uuid.uuid4().hex[:8]}"
-    # Refresh-support follow-up: a recipe carrying a "playbook" key (inventory_aging;
-    # see playbooks.build_playbook_recipe) is NOT financial_statement-shaped — its
-    # sections have no result_id/compare map for referenced_result_ids/
-    # required_result_ids to find (they carry a plural `result_ids` list instead), and
-    # compute() needs every one of its sources regardless of which section a caller
-    # happens to look at first. Dispatch the recipe's OWN sources directly (never more,
-    # never fewer — the cost guard) rather than routing through those two statement-only
-    # helpers. A statement recipe (no "playbook" key) is completely untouched below.
-    playbook_meta = recipe.get("playbook")
-    if playbook_meta is not None:
-        needed_rids = list(sources)
-        required_rids = set(sources)
-    else:
-        # Only the rids the ORIGINAL sections reference are dispatched; a referenced rid
-        # without a source fails closed inside _execute_sources (never "Data unavailable").
-        needed_rids = referenced_result_ids(recipe["sections"])
-        required_rids = required_result_ids(recipe["sections"])
     try:
+        # Gate fix (was OUTSIDE this try — a malformed recipe raised unhandled after
+        # last_refreshed_at was already stamped, with no failure audit and no RefreshError
+        # wrapping): this computation now runs INSIDE the failure-audit try/except, same
+        # as every other Phase-2/3 step, so any exception here funnels through the
+        # `except Exception` below (rollback, durable report.refresh audit row, wrapped
+        # as RefreshError(500) unless it's already a RefreshError).
+        #
+        # Refresh-support follow-up: a recipe carrying a "playbook" key (inventory_aging;
+        # see playbooks.build_playbook_recipe) is NOT financial_statement-shaped — its
+        # sections have no result_id/compare map for referenced_result_ids/
+        # required_result_ids to find (they carry a plural `result_ids` list instead), and
+        # compute() needs every one of its sources regardless of which section a caller
+        # happens to look at first. Dispatch the recipe's OWN sources directly (never more,
+        # never fewer — the cost guard) rather than routing through those two statement-only
+        # helpers. A statement recipe (no "playbook" key) is completely untouched below.
+        playbook_meta = recipe.get("playbook")
+        if playbook_meta is not None:
+            needed_rids = list(sources)
+            required_rids = set(sources)
+        else:
+            # Only the rids the ORIGINAL sections reference are dispatched; a referenced rid
+            # without a source fails closed inside _execute_sources (never "Data unavailable").
+            needed_rids = referenced_result_ids(recipe["sections"])
+            required_rids = required_result_ids(recipe["sections"])
         # ---- Phase 2: headless re-execution (no report writes) ----------------------
         payloads = await _execute_sources(
             db,

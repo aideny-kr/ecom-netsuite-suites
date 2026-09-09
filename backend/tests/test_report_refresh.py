@@ -323,6 +323,42 @@ async def test_sections_referencing_missing_source_fail_before_publish(db, monke
     assert row.rendered_html == "<html>golden</html>" and row.version == 1
 
 
+async def test_malformed_sections_computation_wrapped_as_refresh_error_with_audit(db, monkeypatch):
+    """Gate fix: the needed_rids/required_rids computation (the recipe.get('playbook')
+    branch) must run INSIDE the failure-audit try/except, not between the Phase-1 commit
+    and the try. A malformed recipe blowing up there (e.g. a corrupted sections shape a
+    future change to referenced_result_ids no longer tolerates) must still surface as a
+    clean RefreshError(500) with a durable report.refresh audit row — never an unhandled
+    exception escaping refresh_report with the current version left untouched (the
+    attempt-time stamp itself staying set is correct/unchanged; no OTHER dangling state)."""
+    tenant, user, report = await _seed_report(db, recipe=_recipe(), html="<html>golden</html>")
+    rid, tid, uid = report.id, tenant.id, user.id  # the service's rollback expires ORM instances
+
+    def _boom(sections):
+        raise TypeError("malformed sections")
+
+    monkeypatch.setattr("app.services.report.report_service.referenced_result_ids", _boom)
+    with pytest.raises(RefreshError) as exc:
+        await refresh_report(db, report_id=rid, tenant_id=tid, actor_id=uid)
+    assert exc.value.status_code == 500
+    # current version untouched; no version rows created
+    row = (await db.execute(select(Report).where(Report.id == rid))).scalar_one()
+    assert row.rendered_html == "<html>golden</html>" and row.version == 1
+    count = (await db.execute(select(func.count(ReportVersion.id)).where(ReportVersion.report_id == rid))).scalar()
+    assert count == 0
+    # durable failure audit — proves the exception was caught, not left to escape raw
+    audit = (
+        await db.execute(
+            text(
+                "SELECT count(*) FROM audit_events WHERE action='report.refresh' "
+                "AND status='error' AND resource_id=:arid"
+            ),
+            {"arid": str(rid)},
+        )
+    ).scalar()
+    assert audit == 1
+
+
 # --- T2-gate round-1 fixes: RLS context across commits, LLM strip, supersede guard ----
 # SET LOCAL app.current_tenant_id is TRANSACTION-scoped: every commit/rollback clears it.
 # The test fixture wraps tests in an outer transaction (savepoints), so the GUC survives
