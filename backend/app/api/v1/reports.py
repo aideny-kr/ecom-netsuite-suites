@@ -383,6 +383,19 @@ async def view_report_version(
 # exists) — "report permissions as the existing settings route" per spec §A5.
 
 
+def _report_head_snapshot(spec_json: object) -> str | None:
+    """The `snapshot` (ISO date) of a spec's `report_head` section, or None. The section
+    is JSON-native by contract (report_html.build_inventory_aging_head), but spec_json
+    is operator-editable JSONB — read defensively, never raise."""
+    if not isinstance(spec_json, dict):
+        return None
+    for section in spec_json.get("sections") or []:
+        if isinstance(section, dict) and section.get("type") == "report_head":
+            snapshot = (section.get("model") or {}).get("snapshot") if isinstance(section.get("model"), dict) else None
+            return str(snapshot) if snapshot else None
+    return None
+
+
 @router.post("/{report_id}/deliver", response_model=DeliveryResultResponse)
 async def deliver_report_endpoint(
     report_id: str,
@@ -391,10 +404,15 @@ async def deliver_report_endpoint(
 ):
     row = await _get_owned(db, report_id, user)  # 404 shape identical to every other route
     # period_key: the snapshot/period this delivery covers, for the idempotent
-    # filename + delivery_json (spec §A5) — `period` is only populated for
-    # mode="tracking" composes (Task 3), so a one-off snapshot report falls back to
-    # today's date, still a stable key for same-day re-delivery.
-    period_key = row.period or datetime.now(timezone.utc).date().isoformat()
+    # filename + delivery_json (spec §A5). Resolution order:
+    #   1. `period` — populated only for mode="tracking" composes (Task 3);
+    #   2. the report_head section's snapshot date — the inventory aging report
+    #      (compose_inventory_aging.py) has `period` NULL, and its files must be named
+    #      by the SNAPSHOT they cover so a later re-delivery of the same snapshot
+    #      replaces rather than duplicates (readiness-gate finding: the old fallback
+    #      keyed a Tuesday re-delivery of Monday's snapshot to Tuesday);
+    #   3. today's date — a stable key for same-day re-delivery of anything else.
+    period_key = row.period or _report_head_snapshot(row.spec_json) or datetime.now(timezone.utc).date().isoformat()
     try:
         result = await report_delivery.deliver_report_to_drive(
             db,

@@ -96,6 +96,53 @@ async def test_deliver_returns_200_with_result(client, db, monkeypatch):
     assert body["delivered_at"]
 
 
+async def test_deliver_period_key_is_the_snapshot_date_for_an_inventory_aging_report(client, db, monkeypatch):
+    """Spec §A5: files are named `<title> — <snapshot date>` and a re-delivery of the
+    same snapshot REPLACES (idempotent on period_key). The composed aging report has
+    `period` NULL (that column is the tracking series' "Mon YYYY"), so the route fell
+    back to TODAY's date: a Tuesday re-delivery of Monday's snapshot would have made a
+    second file instead of replacing, and the filename carried the delivery day, not
+    the snapshot. The report_head section's `snapshot` is the authoritative key."""
+    tenant = await create_test_tenant(db, name="DeliverPeriodKey")
+    user, _ = await create_test_user(db, tenant)
+    await set_tenant_context(db, str(tenant.id))
+    report = await _seed_report(db, tenant, user)
+    report.spec_json = {
+        "title": "Inventory Aging — Week of 8 Sep 2026",
+        "sections": [
+            {"type": "report_head", "model": {"sub": "x", "snapshot": "2026-09-08", "prior": "2026-09-01"}},
+            {"type": "watch_items", "model": []},
+        ],
+    }
+    await db.flush()
+    await _add_sheets_connector(db, tenant.id)
+    _patch_delivery_stack(monkeypatch)
+
+    resp = await client.post(f"/api/v1/reports/{report.id}/deliver", headers=make_auth_headers(user))
+    assert resp.status_code == 200
+
+    got = await client.get(f"/api/v1/reports/{report.id}", headers=make_auth_headers(user))
+    assert got.status_code == 200
+    assert got.json()["delivery_json"]["period_key"] == "2026-09-08"
+
+
+async def test_deliver_period_key_falls_back_to_today_without_a_report_head(client, db, monkeypatch):
+    tenant = await create_test_tenant(db, name="DeliverPeriodKeyFallback")
+    user, _ = await create_test_user(db, tenant)
+    await set_tenant_context(db, str(tenant.id))
+    report = await _seed_report(db, tenant, user)
+    await _add_sheets_connector(db, tenant.id)
+    _patch_delivery_stack(monkeypatch)
+
+    resp = await client.post(f"/api/v1/reports/{report.id}/deliver", headers=make_auth_headers(user))
+    assert resp.status_code == 200
+
+    from datetime import datetime, timezone
+
+    got = await client.get(f"/api/v1/reports/{report.id}", headers=make_auth_headers(user))
+    assert got.json()["delivery_json"]["period_key"] == datetime.now(timezone.utc).date().isoformat()
+
+
 async def test_deliver_404_for_unknown_report(client, db, monkeypatch):
     tenant = await create_test_tenant(db, name="DeliverUnknown")
     user, _ = await create_test_user(db, tenant)
