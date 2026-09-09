@@ -147,6 +147,7 @@ class ScheduleResponse(BaseModel):
     pause_reason: Optional[str] = None
     kinds: list[str] = Field(default_factory=list)
     summary_line: Optional[str] = None
+    has_pending_plan: bool = False
 
     model_config = {"from_attributes": True}
 

@@ -223,6 +223,51 @@ async def _async_return(value):
 
 
 # ---------------------------------------------------------------------------
+# GET /schedules — list (spec §B6: list-level `has_pending_plan` so the list
+# page's "Needs attention" tile / row indicator can see an approved schedule
+# sitting on an unapproved recompiled change — that state lives only in
+# `pending_plan_json`, which the list-level `ScheduleResponse` otherwise never
+# exposes; see the review finding this covers.)
+# ---------------------------------------------------------------------------
+
+
+class TestScheduleList:
+    async def test_list_flags_has_pending_plan_true_for_approved_schedule_with_pending_change(
+        self, client: AsyncClient, admin_user, db: AsyncSession
+    ):
+        user, headers = admin_user
+        tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
+        new_plan = {"steps": [{"id": "q1", "type": "bigquery_sql", "params": {"query": "SELECT 2"}}]}
+        await _seed_job_schedule(
+            db,
+            tenant,
+            plan_json=_INVENTORY_AGING_PLAN,
+            plan_status="approved",
+            pending_plan_json=new_plan,
+        )
+        await db.commit()
+
+        resp = await client.get("/api/v1/schedules", headers=headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["has_pending_plan"] is True
+
+    async def test_list_flags_has_pending_plan_false_with_no_pending_change(
+        self, client: AsyncClient, admin_user, db: AsyncSession
+    ):
+        user, headers = admin_user
+        tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
+        await _seed_job_schedule(db, tenant, plan_json=_INVENTORY_AGING_PLAN, plan_status="approved")
+        await db.commit()
+
+        resp = await client.get("/api/v1/schedules", headers=headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data[0]["has_pending_plan"] is False
+
+
+# ---------------------------------------------------------------------------
 # GET /schedules/{id} — detail
 # ---------------------------------------------------------------------------
 

@@ -110,6 +110,7 @@ def _to_response(schedule: Schedule) -> ScheduleResponse:
         pause_reason=schedule.pause_reason,
         kinds=_plan_kinds(schedule.plan_json),
         summary_line=_plan_summary_line(schedule.plan_json),
+        has_pending_plan=schedule.pending_plan_json is not None,
     )
 
 
@@ -151,7 +152,11 @@ async def list_schedules(
     request: Request,
 ):
     """List all schedules for the current tenant (spec §B5/§B6: last run
-    status/at, next_run_at, kind tags, delivery summary)."""
+    status/at, next_run_at, kind tags, delivery summary, and
+    `has_pending_plan` — an approved schedule whose instruction was edited
+    since, so it has a recompiled `pending_plan_json` awaiting approval; the
+    list page's own gate is `schedules.manage`, not the detail-only view that
+    would otherwise reveal this)."""
     schedules = await schedule_service.list_schedules(db, user.tenant_id)
     return [_to_response(s) for s in schedules]
 
