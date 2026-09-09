@@ -72,6 +72,23 @@ async def list_schedules(db: AsyncSession, tenant_id: uuid.UUID) -> list[Schedul
     return list(result.scalars().all())
 
 
+async def get_schedule(db: AsyncSession, schedule_id: uuid.UUID, tenant_id: uuid.UUID) -> Optional[Schedule]:
+    """Fetch one schedule scoped to a tenant, or ``None`` — the shared lookup
+    every Slice 2 (spec §B5) endpoint uses so "not found" and "belongs to a
+    different tenant" both read as a 404, never a 403 that would leak
+    existence across tenants."""
+    result = await db.execute(select(Schedule).where(Schedule.id == schedule_id, Schedule.tenant_id == tenant_id))
+    return result.scalar_one_or_none()
+
+
+def default_job_name(instruction: str) -> str:
+    """A schedule name derived from its instruction when the caller (API or
+    MCP, spec §B5: "`{name?, instruction, ...}`") omits one — the first line,
+    truncated to a title-sized length, never the whole instruction verbatim."""
+    first_line = instruction.strip().splitlines()[0] if instruction.strip() else "Scheduled job"
+    return first_line[:77] + "..." if len(first_line) > 80 else first_line
+
+
 async def delete_schedule(db: AsyncSession, schedule_id: uuid.UUID, tenant_id: uuid.UUID) -> bool:
     """Delete a schedule owned by the given tenant. Returns True if deleted, False if not found."""
     result = await db.execute(

@@ -348,12 +348,23 @@ TOOL_REGISTRY = {
         },
     },
     "schedule.create": {
-        "description": "Create a scheduled job",
+        "description": (
+            "Create a scheduled job. Give 'instruction' (a plain-language description) to compile "
+            "an allow-listed step plan for approval; otherwise give 'name' + 'schedule_type' for a "
+            "legacy schedule."
+        ),
         "execute": schedule_ops.execute_create,
         "params_schema": {
-            "name": {"type": "string", "required": True},
-            "schedule_type": {"type": "string", "required": True},
+            "instruction": {
+                "type": "string",
+                "required": False,
+                "description": "Plain-language schedule instruction — compiled into a plan pending approval",
+            },
+            "name": {"type": "string", "required": False},
+            "schedule_type": {"type": "string", "required": False},
             "cron": {"type": "string", "required": False},
+            "timezone": {"type": "string", "required": False},
+            "delivery": {"type": "object", "required": False},
             "params": {"type": "object", "required": False},
         },
     },
@@ -363,10 +374,16 @@ TOOL_REGISTRY = {
         "params_schema": {},
     },
     "schedule.run": {
-        "description": "Trigger a scheduled job run",
+        "description": "Trigger a scheduled job run now",
         "execute": schedule_ops.execute_run,
         "params_schema": {
             "schedule_id": {"type": "string", "required": True},
+            "use_pending": {
+                "type": "boolean",
+                "required": False,
+                "default": False,
+                "description": "Run the not-yet-approved pending plan instead of the approved one",
+            },
         },
     },
     "workspace.list_files": {
