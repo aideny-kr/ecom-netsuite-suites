@@ -1072,6 +1072,95 @@ async def test_finalize_double_failure_does_not_leave_the_job_row_running(db: As
 
 
 # ---------------------------------------------------------------------------
+# Retry-then-pause applies to SWEEP-started occurrences only (review finding,
+# MAJOR): `run_schedule_now`'s `reason == REASON_ERROR` branch used to fire
+# for EVERY caller -- an operator's "Run now" (Celery path, actor_type=
+# "user") or the MCP tool failing overwrote `next_run_at` with `now + 15 min`
+# (clobbering the real next cron occurrence) and marked `retry_pending`, so
+# the sweep later replayed the APPROVED plan even when the failed run was a
+# `use_pending=True` preview. `retry_on_error` (default False) gates this;
+# only `run_due_jobs` (the sweep) passes `True`.
+# ---------------------------------------------------------------------------
+
+
+async def test_run_schedule_now_default_does_not_retry_or_touch_next_run_at_on_error(
+    db: AsyncSession, monkeypatch
+):
+    """Mirrors the Celery "Run now" path (`run_schedule_now_task`) and the
+    MCP `schedule.run` tool -- neither passes `retry_on_error`, so both get
+    the default `False`. A failing run must stamp the jobs row + schedule's
+    `last_run_status="error"` (via `_finalize_run`, as always) WITHOUT
+    scheduling the 15-minutes-later retry or touching `next_run_at`/
+    `paused_at`/`pause_reason` at all."""
+    tenant = await create_test_tenant(db, name="Manual Run No Retry Co")
+    tenant_id = tenant.id  # captured now -- a step's StepExecutionError triggers a
+    # real rollback (_run_steps), which expires every object in the session's
+    # identity map, `tenant` included; re-reading an expired attribute outside
+    # an awaited DB call raises MissingGreenlet (same class of bug documented
+    # on test_step_error_retries_once_then_pauses above).
+    await set_tenant_context(db, str(tenant_id))
+
+    async def always_fails(ctx, params):
+        raise StepExecutionError("boom: manual run failed")
+
+    monkeypatch.setitem(STEP_REGISTRY, "fake.step", _fake_spec("read", always_fails))
+
+    original_next_run_at = datetime(2026, 12, 25, 6, 0, tzinfo=timezone.utc)
+    schedule = await _seed_job_schedule(
+        db,
+        tenant,
+        plan_json={"steps": [{"id": "s1", "type": "fake.step", "params": {}}]},
+        next_run_at=original_next_run_at,
+        cron_expression="0 6 * * 1",
+    )
+    schedule_id = schedule.id
+
+    outcome = await run_schedule_now(
+        db, schedule_id, tenant_id=tenant_id, actor_id=None, actor_type="user", use_pending=False
+    )
+
+    assert outcome.reason == REASON_ERROR
+
+    refreshed = (await db.execute(select(Schedule).where(Schedule.id == schedule_id))).scalar_one()
+    assert refreshed.last_run_status == "error"  # not "retry_pending", not "paused"
+    assert refreshed.next_run_at == original_next_run_at  # untouched
+    assert refreshed.paused_at is None
+    assert refreshed.pause_reason is None
+
+    job = (await db.execute(select(Job).where(Job.tenant_id == tenant_id))).scalar_one()
+    assert job.status == "failed"
+    assert job.result_summary["reason"] == REASON_ERROR
+
+
+async def test_run_due_jobs_still_schedules_the_retry_on_error(db: AsyncSession, monkeypatch):
+    """The sweep path (`run_due_jobs` -> `retry_on_error=True`) must keep the
+    existing retry-then-pause behaviour exactly as before this fix."""
+    tenant = await create_test_tenant(db, name="Sweep Still Retries Co")
+    await set_tenant_context(db, str(tenant.id))
+
+    async def always_fails(ctx, params):
+        raise StepExecutionError("boom: sweep run failed")
+
+    monkeypatch.setitem(STEP_REGISTRY, "fake.step", _fake_spec("read", always_fails))
+
+    now = datetime.now(timezone.utc)
+    schedule = await _seed_job_schedule(
+        db,
+        tenant,
+        plan_json={"steps": [{"id": "s1", "type": "fake.step", "params": {}}]},
+        next_run_at=now - timedelta(minutes=1),
+        cron_expression="0 6 * * 1",
+    )
+
+    stats = await run_due_jobs(db, tenant.id, now=now)
+    assert stats["failed"] == 1
+    assert schedule.last_run_status == "retry_pending"
+    assert schedule.next_run_at is not None
+    assert schedule.next_run_at - now >= timedelta(minutes=14)
+    assert schedule.next_run_at - now <= timedelta(minutes=16)
+
+
+# ---------------------------------------------------------------------------
 # recon.run's window follows the SCHEDULE's own timezone (review finding):
 # `_recon_run_executor` (registry.py) used a naive `date.today()` -- the
 # server/UTC wall clock -- instead of the run's own `period_key` (spec §B4),

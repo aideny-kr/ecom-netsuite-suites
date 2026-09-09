@@ -553,6 +553,7 @@ async def run_schedule_now(
     now: datetime | None = None,
     attempt: int = 1,
     existing_job_id: uuid.UUID | None = None,
+    retry_on_error: bool = False,
 ) -> RunOutcome:
     """Run one schedule ONE time: one `jobs` row, plan steps replayed in order,
     schedule bookkeeping updated, one commit at the end (plus the write-step
@@ -586,6 +587,23 @@ async def run_schedule_now(
     `_claim_due_schedules`); by the time this function runs, the row no longer
     carries that information itself. A manual "Run now" (Task 5's API) is
     always attempt 1 — it is never the scheduled retry.
+
+    `retry_on_error` (review finding, MAJOR) gates the entire retry-then-pause
+    block below — ONLY `run_due_jobs` (the sweep) passes `True`. Every other
+    caller (the Celery "Run now" path, the MCP `schedule.run` tool) keeps the
+    default `False`: a failing manual run must stamp the jobs row + this
+    schedule's `last_run_status="error"` (via `_finalize_run`, unconditionally)
+    and stop there — it must NOT overwrite `next_run_at` with `now + 15 min`
+    (clobbering the real next cron occurrence), set `paused_at`/
+    `pause_reason`, or flip `last_run_status` to `retry_pending`/`paused`.
+    Before this fix, a `use_pending=True` preview run failing from the API or
+    the MCP tool would silently schedule a retry of the schedule's APPROVED
+    plan — a plan the operator never asked to run again.
+
+    The retry itself keeps the ORIGINAL occurrence's `period_key` (see the
+    lookup below, right before `job_parameters` is built): the retry claim's
+    `due_at` is `now + 15 min` from attempt 1, which is the WRONG basis for a
+    period key whenever the retry crosses local midnight (review finding).
 
     HITL gate (review finding, spec Goal line: "approved by a person, run
     deterministically"): `use_pending=False` refuses to run unless
@@ -861,7 +879,7 @@ async def run_schedule_now(
 
             return RunOutcome(reason=REASON_ERROR, jobs_row_id=job_id_value, outputs=outputs)
 
-    if reason == REASON_ERROR:
+    if reason == REASON_ERROR and retry_on_error:
         if attempt >= RETRY_MAX_ATTEMPTS:
             row.paused_at = datetime.now(timezone.utc)
             row.pause_reason = f"paused after {attempt} failed attempts: {detail}"[:1000]
@@ -937,6 +955,7 @@ async def run_due_jobs(db: AsyncSession, tenant_id: uuid.UUID, *, now: datetime 
                 due_at=claim.due_at,
                 now=now,
                 attempt=claim.attempt,
+                retry_on_error=True,
             )
             stats["ran"] += 1
             if outcome.reason == REASON_ERROR:
