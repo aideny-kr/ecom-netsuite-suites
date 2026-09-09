@@ -58,6 +58,12 @@ logger = logging.getLogger(__name__)
 
 REFRESH_MIN_INTERVAL_SECONDS = 300  # spec §6.3 "~5 min" per-report debounce
 MAX_RECIPE_SOURCES = 12  # cheap guard against absurd synchronous fan-out (risk §8.4)
+# Ceiling for a per-source row cap read off a recipe's OWN stored `max_rows` (see
+# `_execute_sources._row_cap`) -- matches inventory_aging's own declared cap
+# (`build_sources`'s `max_rows = 200_000`) so its r_items/r_prior/r_trend sources
+# extract in full, while still bounding what a corrupted/tampered recipe row could
+# otherwise demand.
+_MAX_EXTRACT_ROW_CAP = 200_000
 
 
 class RefreshError(Exception):
@@ -190,6 +196,26 @@ async def _execute_sources(
     if required_rids is None:
         required_rids = set(needed_rids)
 
+    def _row_cap(source_params: dict) -> int:
+        """The extraction-layer row cap for ONE source: its OWN stored ``max_rows``
+        (inventory_aging's bigquery_sql sources declare ``200_000`` -- see
+        ``inventory_aging.build_sources`` -- an order of magnitude above
+        ``STATEMENT_ROW_CAP``) when present, else ``STATEMENT_ROW_CAP`` (a
+        ``netsuite_financial_report`` source's params carry no ``max_rows`` key at
+        all -- see ``playbooks._source`` -- so this is a pure widen-only override,
+        never a narrowing one: every statement source keeps exactly the 5000-row
+        cap it already had). Review finding (blocker): this used to be
+        unconditionally ``STATEMENT_ROW_CAP`` for every dispatched source, silently
+        truncating an inventory_aging source at 5000 rows even though its own
+        recipe declared room for 200k -- an incomplete SKU list baked into every
+        KPI/bucket/top-positions total with no truncation indicator anywhere in the
+        render. Clamped at ``_MAX_EXTRACT_ROW_CAP`` as a floor-safety bound against
+        a corrupted/tampered ``max_rows`` value in a stored recipe row."""
+        declared = source_params.get("max_rows")
+        if isinstance(declared, int) and not isinstance(declared, bool) and declared > 0:
+            return min(declared, _MAX_EXTRACT_ROW_CAP)
+        return STATEMENT_ROW_CAP
+
     payloads: dict[str, dict] = {}
     for rid in needed_rids:
         try:
@@ -229,13 +255,19 @@ async def _execute_sources(
                     or (error_val if isinstance(error_val, str) else "")
                 )
                 raise RefreshError(502, f"source {rid} ({tool}) failed{': ' + message[:200] if message else ''}")
-            # T2 gate B1a (round 2): every report-source extraction (v1 table/narrative
-            # AND financial_statement) gets the higher STATEMENT_ROW_CAP (5000), not the
+            # T2 gate B1a (round 2) + refresh-support follow-up review finding: every
+            # report-source extraction (v1 table/narrative AND financial_statement AND
+            # inventory_aging) gets AT LEAST the STATEMENT_ROW_CAP (5000), never the
             # chat-turn default (2000) -- a report must never truncate a source silently
-            # below what its own SQL cap allows (report-design.md #7). The live chat-turn
-            # dispatch path (execute_tool_call's OWN interceptor) is a completely separate
-            # call site and never passes this -- its default stays untouched.
-            payload = extract_result_payload(tool, params, result_str, max_rows=STATEMENT_ROW_CAP)
+            # below what its own SQL cap allows (report-design.md #7). A source whose
+            # OWN recipe params declare a HIGHER `max_rows` (inventory_aging's
+            # bigquery_sql sources: 200_000) gets that instead, via `_row_cap` above --
+            # the pre-existing STATEMENT_ROW_CAP-for-everyone behavior was itself the
+            # same silent-truncation bug this cap exists to prevent, just applied one
+            # playbook later. The live chat-turn dispatch path (execute_tool_call's OWN
+            # interceptor) is a completely separate call site and never passes this --
+            # its default stays untouched.
+            payload = extract_result_payload(tool, params, result_str, max_rows=_row_cap(params))
             if payload is None:
                 raise RefreshError(502, f"source {rid} ({tool}) returned no extractable data")
             payloads[rid] = payload
@@ -348,11 +380,20 @@ async def refresh_report(
         if playbook_meta is not None:
             from app.services.report.playbooks import rebuild_playbook_spec
 
+            # Review finding (major): `now` (this refresh's own timestamp, computed at
+            # the top of Phase 1), never the ORIGINAL recipe's frozen `captured_at` --
+            # inventory_aging's rendered page has no separate "Data refreshed" banner
+            # the way financial_statement's `freshness` param gets below (see
+            # render_report_html's stamp_html); the report_head's "Composed <date>"
+            # line is its ONLY in-page freshness indicator, so on refresh it must
+            # advance to the refresh's own time or it silently disagrees with
+            # `report.last_refreshed_at` (the DB column the dashboard badge reads)
+            # forever after the first refresh.
             spec, method_provenance = rebuild_playbook_spec(
                 playbook_meta.get("key"),
                 playbook_meta.get("params") or {},
                 payloads,
-                composed_at=recipe.get("captured_at"),
+                composed_at=now.isoformat(),
             )
             html = render_report_html(spec, provenance=method_provenance)
         else:

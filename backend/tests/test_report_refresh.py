@@ -942,3 +942,68 @@ async def test_refresh_inventory_aging_source_failure_fails_the_whole_refresh(db
     row = (await db.execute(select(Report).where(Report.id == rid))).scalar_one()
     assert row.rendered_html == "<html>v1</html>"  # current version untouched
     assert row.version == 1
+
+
+async def test_refresh_inventory_aging_r_items_over_5000_rows_not_truncated(db, monkeypatch):
+    """Review finding (blocker): ``_execute_sources`` used to apply the statement-only
+    ``STATEMENT_ROW_CAP`` (5000) to EVERY dispatched source unconditionally --
+    including inventory_aging's own bigquery_sql sources, which declare their own
+    ``max_rows=200_000`` in the recipe (``inventory_aging.build_sources``, an order of
+    magnitude above the reused constant). 6000 on-hand SKUs at one location must all
+    survive extraction -- a silent truncation at 5000 would drop 1000 SKUs from every
+    KPI/bucket/top-positions total with no truncation indicator anywhere in the
+    inventory_aging render (unlike statement_builder's own row-cap warn chip)."""
+    from tests.report.test_inventory_aging import SNAPSHOT, _item, _prior_row, _trend_row
+
+    location = "Acme"
+    items = [_item(location, f"SKU-{i:05d}", 5, 10, 1) for i in range(6000)]
+    prior = [
+        _prior_row(location, value=0, value_90p=0, value_180p=0, skus=0, skus_90p=0, skus_180p=0, qty=0, qty_90p=0)
+    ]
+    trend = [_trend_row(location, SNAPSHOT, 60000, 0, 0.0)]
+    meta = [
+        {
+            "location": location,
+            "first_snapshot_date": SNAPSHOT.isoformat(),
+            "last_snapshot_date": SNAPSHOT.isoformat(),
+            "snapshot_count": 1,
+        }
+    ]
+    payloads = {"r_items": items, "r_prior": prior, "r_trend": trend, "r_meta": meta}
+    params = {"locations": [location]}
+
+    _title, recipe = build_playbook_recipe("inventory_aging", params)
+    tenant, user, report = await _seed_report(db, recipe=recipe, html="<html>v1</html>")
+    calls = _patch_bigquery_executor(monkeypatch, recipe, payloads)
+
+    updated = await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
+
+    assert len(calls) == 4
+    kpi_model = next(s["model"] for s in updated.spec_json["sections"] if s["type"] == "kpi_cards")
+    on_hand = next(k for k in kpi_model if k["key"] == "on_hand_value")
+    assert "6,000 SKUs" in on_hand["sub_detail"], on_hand["sub_detail"]
+
+
+async def test_refresh_inventory_aging_composed_at_stamp_advances_on_refresh(db, monkeypatch):
+    """Review finding (major): the rendered page's ``.report-head`` "Composed <date>"
+    line is inventory_aging's ONLY in-page freshness stamp (no separate 'Data
+    refreshed' banner the way financial_statement gets). Passing refresh_report's
+    ORIGINAL recipe['captured_at'] (frozen at first compose) into rebuild_playbook_spec
+    on every refresh means that stamp never advances, even though
+    ``report.last_refreshed_at`` (the DB column driving the dashboard's OWN freshness
+    badge) is correctly updated -- two freshness indicators on the same report
+    disagreeing after the very first refresh."""
+    from tests.report.test_inventory_aging import _full_fixture
+
+    payloads, params = _full_fixture()
+    _title, recipe = build_playbook_recipe("inventory_aging", params)
+    original_captured_at = recipe["captured_at"]
+    tenant, user, report = await _seed_report(db, recipe=recipe, html="<html>v1</html>")
+    _patch_bigquery_executor(monkeypatch, recipe, payloads)
+
+    updated = await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
+
+    head_model = next(s["model"] for s in updated.spec_json["sections"] if s["type"] == "report_head")
+    assert head_model["composed_at"] != original_captured_at
+    stamped = datetime.fromisoformat(head_model["composed_at"])
+    assert (datetime.now(timezone.utc) - stamped).total_seconds() < 30
