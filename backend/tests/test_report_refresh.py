@@ -846,3 +846,97 @@ async def test_refresh_of_v1_style_recipe_stays_byte_stable_no_fs_markup(db, mon
         isinstance(s, dict) and s.get("type") == "financial_statement" for s in updated.spec_json["sections"]
     )
     assert json.dumps(updated.spec_json)
+
+
+# ---------------------------------------------------------------------------
+# Refresh-support follow-up: refresh_report delegates to
+# playbooks.rebuild_playbook_spec for a recipe carrying a "playbook" key
+# (inventory_aging, Slice 1's own non-financial_statement playbook).
+# ---------------------------------------------------------------------------
+def _inventory_aging_table_result(rows: list[dict]) -> str:
+    """A test_inventory_aging-shaped list[dict] fixture rendered as the raw
+    ``{"columns": [...], "rows": [[...], ...]}`` JSON a real bigquery_sql call
+    returns (rows POSITIONAL, matching ia.rows_from_table_payload's contract)."""
+    columns = list(rows[0].keys()) if rows else []
+    return json.dumps({"columns": columns, "rows": [[row[c] for c in columns] for row in rows]})
+
+
+def _patch_bigquery_executor(monkeypatch, recipe: dict, payloads: dict[str, list[dict]]):
+    """Fake ``execute_tool_call`` keyed by the exact SQL text each of the recipe's
+    four bigquery_sql sources carries — the only thing distinguishing
+    r_items/r_prior/r_trend/r_meta once stripped of report_type/period."""
+    by_query = {recipe["sources"][rid]["params"]["query"]: _inventory_aging_table_result(rows) for rid, rows in payloads.items()}
+    calls: list[dict] = []
+
+    async def fake_execute(tool_name, tool_input, tenant_id, actor_id, correlation_id, db, **kw):
+        calls.append({"tool": tool_name, "params": tool_input})
+        return by_query[tool_input["query"]]
+
+    monkeypatch.setattr("app.services.chat.tools.execute_tool_call", fake_execute)
+    return calls
+
+
+async def test_refresh_delegates_to_the_inventory_aging_playbook_rebuild_hook(db, monkeypatch):
+    """Requirement 2: a recipe carrying a "playbook" key routes through
+    playbooks.rebuild_playbook_spec instead of assemble_spec — refresh succeeds,
+    publishes a new version, and the rendered page is a real inventory_aging
+    render (not a crash, not a snapshot echo)."""
+    from tests.report.test_inventory_aging import _full_fixture
+
+    payloads, params = _full_fixture()
+    _title, recipe = build_playbook_recipe("inventory_aging", params)
+    tenant, user, report = await _seed_report(db, recipe=recipe, html="<html>v1</html>")
+    calls = _patch_bigquery_executor(monkeypatch, recipe, payloads)
+
+    updated = await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
+
+    assert len(calls) == 4
+    assert updated.version == 2
+    assert "<h1>Inventory Aging — Week of " in updated.rendered_html
+    assert "Watch items" in updated.rendered_html
+    assert json.dumps(updated.spec_json)  # persisted spec is actually JSON-safe
+    assert updated.spec_json["sections"][0]["type"] == "report_head"
+
+
+async def test_refresh_inventory_aging_dispatches_exactly_the_four_recipe_sources_with_max_rows(db, monkeypatch):
+    """Requirement 5 (cost guard): a refresh must run ONLY the recipe's own
+    sources, each with its stored max_rows — never more, never fewer."""
+    from tests.report.test_inventory_aging import _full_fixture
+
+    payloads, params = _full_fixture()
+    _title, recipe = build_playbook_recipe("inventory_aging", params)
+    tenant, user, report = await _seed_report(db, recipe=recipe, html="<html>v1</html>")
+    calls = _patch_bigquery_executor(monkeypatch, recipe, payloads)
+
+    await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
+
+    assert len(calls) == 4
+    expected_queries = {src["params"]["query"] for src in recipe["sources"].values()}
+    actual_queries = {c["params"]["query"] for c in calls}
+    assert actual_queries == expected_queries
+    for c in calls:
+        assert isinstance(c["params"].get("max_rows"), int)
+
+
+async def test_refresh_inventory_aging_source_failure_fails_the_whole_refresh(db, monkeypatch):
+    """Every one of inventory_aging's four sources is required (compute() cannot
+    build a partial AgingReport) — a single tool failure must fail closed, never
+    publish a version built on incomplete data."""
+    from tests.report.test_inventory_aging import _full_fixture
+
+    payloads, params = _full_fixture()
+    _title, recipe = build_playbook_recipe("inventory_aging", params)
+    tenant, user, report = await _seed_report(db, recipe=recipe, html="<html>v1</html>")
+    rid, tid, uid = report.id, tenant.id, user.id
+
+    async def failing_execute(tool_name, tool_input, tenant_id, actor_id, correlation_id, db, **kw):
+        return json.dumps({"error": True, "message": "bigquery unavailable"})
+
+    monkeypatch.setattr("app.services.chat.tools.execute_tool_call", failing_execute)
+
+    with pytest.raises(RefreshError):
+        await refresh_report(db, report_id=rid, tenant_id=tid, actor_id=uid)
+
+    row = (await db.execute(select(Report).where(Report.id == rid))).scalar_one()
+    assert row.rendered_html == "<html>v1</html>"  # current version untouched
+    assert row.version == 1

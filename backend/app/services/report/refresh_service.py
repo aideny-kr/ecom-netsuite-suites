@@ -315,11 +315,25 @@ async def refresh_report(
     await db.commit()
 
     correlation_id = f"report-refresh:{report_id}:{uuid.uuid4().hex[:8]}"
-    try:
-        # ---- Phase 2: headless re-execution (no report writes) ----------------------
+    # Refresh-support follow-up: a recipe carrying a "playbook" key (inventory_aging;
+    # see playbooks.build_playbook_recipe) is NOT financial_statement-shaped — its
+    # sections have no result_id/compare map for referenced_result_ids/
+    # required_result_ids to find (they carry a plural `result_ids` list instead), and
+    # compute() needs every one of its sources regardless of which section a caller
+    # happens to look at first. Dispatch the recipe's OWN sources directly (never more,
+    # never fewer — the cost guard) rather than routing through those two statement-only
+    # helpers. A statement recipe (no "playbook" key) is completely untouched below.
+    playbook_meta = recipe.get("playbook")
+    if playbook_meta is not None:
+        needed_rids = list(sources)
+        required_rids = set(sources)
+    else:
         # Only the rids the ORIGINAL sections reference are dispatched; a referenced rid
         # without a source fails closed inside _execute_sources (never "Data unavailable").
         needed_rids = referenced_result_ids(recipe["sections"])
+        required_rids = required_result_ids(recipe["sections"])
+    try:
+        # ---- Phase 2: headless re-execution (no report writes) ----------------------
         payloads = await _execute_sources(
             db,
             sources,
@@ -328,27 +342,35 @@ async def refresh_report(
             actor_id=actor_id,
             actor_type=actor_type,
             correlation_id=correlation_id,
-            required_rids=required_result_ids(recipe["sections"]),
+            required_rids=required_rids,
         )
 
-        spec = assemble_spec(report.title, recipe["sections"], lambda rid: payloads[rid])
-        # T2 gate M2: r1 can RESOLVE but still fail to become a real statement (e.g. a
-        # well-shaped but empty account list). For a statement report the section IS the
-        # report, so this fails closed (raised inside this try -> the except below
-        # writes a failure audit + re-raises unchanged, never publishing a version over
-        # the current one) rather than letting the error-card degrade publish a
-        # contentless statement.
-        error_reason = financial_statement_resolution_error(recipe["sections"], spec)
-        if error_reason is not None:
-            raise RefreshError(502, f"statement could not be built: {error_reason}")
-        html = render_report_html(
-            spec,
-            freshness={"composed_at": recipe.get("captured_at", ""), "refreshed_at": now.isoformat()},
-            # T2 gate M1: resolved_rids marks any compare rid the degrade seam omitted
-            # from payloads as "not available this run" instead of falsely claiming it
-            # executed — see build_provenance's docstring.
-            provenance=build_provenance(recipe["sources"], now.isoformat(), resolved_rids=set(payloads)),
-        )
+        if playbook_meta is not None:
+            from app.services.report.playbooks import rebuild_playbook_spec
+
+            spec, method_provenance = rebuild_playbook_spec(
+                playbook_meta.get("key"), playbook_meta.get("params") or {}, payloads, composed_at=recipe.get("captured_at")
+            )
+            html = render_report_html(spec, provenance=method_provenance)
+        else:
+            spec = assemble_spec(report.title, recipe["sections"], lambda rid: payloads[rid])
+            # T2 gate M2: r1 can RESOLVE but still fail to become a real statement (e.g. a
+            # well-shaped but empty account list). For a statement report the section IS the
+            # report, so this fails closed (raised inside this try -> the except below
+            # writes a failure audit + re-raises unchanged, never publishing a version over
+            # the current one) rather than letting the error-card degrade publish a
+            # contentless statement.
+            error_reason = financial_statement_resolution_error(recipe["sections"], spec)
+            if error_reason is not None:
+                raise RefreshError(502, f"statement could not be built: {error_reason}")
+            html = render_report_html(
+                spec,
+                freshness={"composed_at": recipe.get("captured_at", ""), "refreshed_at": now.isoformat()},
+                # T2 gate M1: resolved_rids marks any compare rid the degrade seam omitted
+                # from payloads as "not available this run" instead of falsely claiming it
+                # executed — see build_provenance's docstring.
+                provenance=build_provenance(recipe["sources"], now.isoformat(), resolved_rids=set(payloads)),
+            )
         persisted_spec = spec_json_safe(spec)
 
         # ---- Phase 3: atomic publish -------------------------------------------------
