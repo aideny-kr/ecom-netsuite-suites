@@ -1161,6 +1161,102 @@ async def test_run_due_jobs_still_schedules_the_retry_on_error(db: AsyncSession,
 
 
 # ---------------------------------------------------------------------------
+# The retry keeps the ORIGINAL occurrence's period_key (review finding,
+# MAJOR): the retry branch sets `next_run_at = now + 15 min`, and the claim
+# later reads THAT as `due_at` -- so attempt 2's `period_key` (and with it
+# the Drive idempotency key and the recon.run window) was the RETRY time's
+# date, wrong whenever the retry crosses local midnight.
+# ---------------------------------------------------------------------------
+
+
+async def test_retry_reuses_attempt_ones_period_key_across_local_midnight(db: AsyncSession, monkeypatch):
+    tenant = await create_test_tenant(db, name="Retry Period Key Co")
+    tenant_id = tenant.id
+    await set_tenant_context(db, str(tenant_id))
+
+    async def always_fails(ctx, params):
+        raise StepExecutionError("boom: always fails")
+
+    monkeypatch.setitem(STEP_REGISTRY, "fake.step", _fake_spec("read", always_fails))
+
+    # Sunday 2026-09-06 23:50 America/Los_Angeles (PDT, UTC-7) == Monday
+    # 2026-09-07 06:50 UTC. Attempt 1 fails here; the 15-minutes-later retry
+    # (now + RETRY_DELAY_MINUTES == exactly 07:05 UTC) is Monday 00:05
+    # local -- crossing local midnight.
+    due_at1 = datetime(2026, 9, 7, 6, 50, tzinfo=timezone.utc)
+    schedule = await _seed_job_schedule(
+        db,
+        tenant,
+        plan_json={"steps": [{"id": "s1", "type": "fake.step", "params": {}}]},
+        next_run_at=due_at1,
+        cron_expression="0 6 * * 1",
+        tz="America/Los_Angeles",
+    )
+    schedule_id = schedule.id
+
+    stats1 = await run_due_jobs(db, tenant_id, now=due_at1)
+    assert stats1["failed"] == 1
+
+    refreshed = (await db.execute(select(Schedule).where(Schedule.id == schedule_id))).scalar_one()
+    assert refreshed.last_run_status == "retry_pending"
+    due_at2 = refreshed.next_run_at
+    assert due_at2 == datetime(2026, 9, 7, 7, 5, tzinfo=timezone.utc)  # Monday 00:05 PDT
+
+    jobs_after_1 = (await db.execute(select(Job).where(Job.tenant_id == tenant_id))).scalars().all()
+    assert len(jobs_after_1) == 1
+    attempt1_period_key = jobs_after_1[0].parameters["period_key"]
+    assert attempt1_period_key == "2026-09-06"  # Sunday, local date
+
+    now2 = due_at2 + timedelta(seconds=1)
+    stats2 = await run_due_jobs(db, tenant_id, now=now2)
+    assert stats2["failed"] == 1
+
+    jobs_after_2 = (await db.execute(select(Job).where(Job.tenant_id == tenant_id))).scalars().all()
+    assert len(jobs_after_2) == 2
+    retry_job = next(j for j in jobs_after_2 if j.parameters.get("attempt") == 2)
+
+    # The naive computation (due_at2's own local date) would be Monday
+    # 2026-09-07 -- a DIFFERENT day than attempt 1's. The fix must reuse
+    # attempt 1's actual period_key instead.
+    assert retry_job.parameters["period_key"] == attempt1_period_key == "2026-09-06"
+    assert retry_job.parameters["retry_of_job_id"] == str(jobs_after_1[0].id)
+
+
+async def test_retry_falls_back_to_computed_period_key_when_no_attempt_one_row_exists(
+    db: AsyncSession, monkeypatch
+):
+    """Defensive only (e.g. attempt-1's jobs row was somehow purged) — must
+    not crash, and falls back to the same computed value as before."""
+    tenant = await create_test_tenant(db, name="Retry No Attempt1 Co")
+    await set_tenant_context(db, str(tenant.id))
+
+    async def fake_exec(ctx, params):
+        return {"ok": True}
+
+    monkeypatch.setitem(STEP_REGISTRY, "fake.step", _fake_spec("read", fake_exec))
+
+    schedule = await _seed_job_schedule(
+        db,
+        tenant,
+        plan_json={"steps": [{"id": "s1", "type": "fake.step", "params": {}}]},
+        next_run_at=None,
+        cron_expression="0 6 * * 1",
+        tz="UTC",
+        last_run_status="retry_pending",
+    )
+
+    due_at = datetime(2026, 9, 7, 12, 0, tzinfo=timezone.utc)
+    outcome = await run_schedule_now(
+        db, schedule.id, tenant_id=tenant.id, actor_id=None, due_at=due_at, attempt=2
+    )
+
+    assert outcome.reason == REASON_DONE
+    job = (await db.execute(select(Job).where(Job.tenant_id == tenant.id))).scalar_one()
+    assert job.parameters["period_key"] == "2026-09-07"  # computed from due_at, as before
+    assert job.parameters.get("retry_of_job_id") is None
+
+
+# ---------------------------------------------------------------------------
 # recon.run's window follows the SCHEDULE's own timezone (review finding):
 # `_recon_run_executor` (registry.py) used a naive `date.today()` -- the
 # server/UTC wall clock -- instead of the run's own `period_key` (spec §B4),

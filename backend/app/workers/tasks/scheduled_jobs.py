@@ -679,12 +679,43 @@ async def run_schedule_now(
 
     period_key = due_at.astimezone(ZoneInfo(row.timezone)).date().isoformat()
     correlation_id = str(uuid.uuid4())
+
+    # The retry (attempt >= 2) must keep attempt 1's OWN period_key, not one
+    # computed from the retry's own due_at (review finding, MAJOR): the retry
+    # claim's due_at is `now + RETRY_DELAY_MINUTES` from attempt 1 (see the
+    # retry branch below), which is the WRONG basis for a period key whenever
+    # the retry crosses local midnight -- and different from attempt 1's even
+    # when it doesn't. The Drive idempotency key and the recon.run window are
+    # both keyed on period_key, so a wrong one here silently targets the
+    # WRONG day's period on the retry. Falls back to the computed value only
+    # when no attempt-1 row exists (defensive — e.g. it was purged).
+    retry_of_job_id: uuid.UUID | None = None
+    if attempt >= 2:
+        attempt1_stmt = (
+            select(Job)
+            .where(
+                Job.tenant_id == tenant_id,
+                Job.job_type == "scheduled_job",
+                Job.parameters["schedule_id"].astext == str(schedule_id),
+                Job.parameters["attempt"].astext == "1",
+            )
+            .order_by(Job.started_at.desc())
+            .limit(1)
+        )
+        attempt1_job = (await db.execute(attempt1_stmt)).scalars().first()
+        if attempt1_job is not None and attempt1_job.parameters:
+            original_period_key = attempt1_job.parameters.get("period_key")
+            if original_period_key:
+                period_key = original_period_key
+            retry_of_job_id = attempt1_job.id
+
     job_parameters = {
         "schedule_id": str(schedule_id),
         "plan_version": plan_version_used,
         "period_key": period_key,
         "attempt": attempt,
         "use_pending": use_pending,
+        "retry_of_job_id": str(retry_of_job_id) if retry_of_job_id else None,
     }
 
     job: Job | None = None
