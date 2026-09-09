@@ -213,7 +213,7 @@ class TestExecuteCreate:
             assert plan_version == 0
             return _compiled_plan()
 
-        monkeypatch.setattr("app.services.jobs.compiler.compile_instruction", fake_compile)
+        monkeypatch.setattr("app.services.schedule_service.compile_instruction", fake_compile)
 
         result = await schedule_ops.execute_create(
             {"instruction": "weekly inventory aging report"},
@@ -222,7 +222,12 @@ class TestExecuteCreate:
         assert not result.get("error")
         assert result["plan_status"] == "pending_approval"
         assert result["schedule_id"]
-        assert result["summary_line"] == "1 step · BigQuery SQL query"
+        # Item 5 (gate fix): create_scheduled_job returns only the persisted
+        # Schedule row, not the transient CompiledPlan — summary_line is
+        # recomputed from plan_json (same STEP_REGISTRY-derived rendering
+        # app.api.v1.schedules._plan_summary_line uses for the API's own
+        # response), not passed through from the compiler's own value.
+        assert result["summary_line"] == "1 steps · BigQuery SQL query"
 
         row = (await db.execute(select(Schedule).where(Schedule.id == uuid.UUID(result["schedule_id"])))).scalar_one()
         assert row.schedule_type == "job"
@@ -237,7 +242,7 @@ class TestExecuteCreate:
         async def fake_compile(db, *, tenant_id, instruction, actor_id, llm=None, plan_version=None):
             return Clarification(question="Which subsidiary?")
 
-        monkeypatch.setattr("app.services.jobs.compiler.compile_instruction", fake_compile)
+        monkeypatch.setattr("app.services.schedule_service.compile_instruction", fake_compile)
 
         result = await schedule_ops.execute_create(
             {"instruction": "deliver inventory aging weekly"},
@@ -278,6 +283,69 @@ class TestExecuteCreate:
     async def test_execute_create_no_context_is_error_not_a_crash(self):
         result = await schedule_ops.execute_create({"name": "x", "schedule_type": "sync"}, context={})
         assert result.get("error") is True
+
+    async def test_execute_create_with_a_10000_char_instruction_is_error_no_row(
+        self, db: AsyncSession, admin_user, monkeypatch
+    ):
+        """Item 5 (gate fix): `execute_create`'s instruction branch used to
+        bypass every `ScheduleCreate` validator (instruction max length
+        included) by building the `Schedule` row directly — it must now run
+        through the SAME `ScheduleCreate` model the API validates against.
+        The compile call must never even happen: the length is rejected
+        before `create_scheduled_job`'s compile step is reached."""
+        user, _ = admin_user
+
+        async def fail_if_called(*a, **k):
+            raise AssertionError("compile_instruction must not be called for an over-length instruction")
+
+        monkeypatch.setattr("app.services.schedule_service.compile_instruction", fail_if_called)
+
+        result = await schedule_ops.execute_create(
+            {"instruction": "x" * 10_000},
+            context={"db": db, "tenant_id": str(user.tenant_id), "actor_id": str(user.id)},
+        )
+        assert result.get("error") is True
+
+        rows = (
+            (
+                await db.execute(
+                    select(Schedule).where(Schedule.tenant_id == user.tenant_id, Schedule.schedule_type == "job")
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert rows == []
+
+    async def test_execute_create_over_quota_is_error_no_row(
+        self, db: AsyncSession, admin_user, monkeypatch
+    ):
+        """Item 5 (gate fix): `execute_create`'s instruction branch used to
+        bypass the plan-quota entitlement check entirely."""
+        user, _ = admin_user
+
+        async def fake_check_entitlement(db, tenant_id, feature):
+            assert feature == "schedules"
+            return False
+
+        monkeypatch.setattr("app.services.schedule_service.entitlement_service.check_entitlement", fake_check_entitlement)
+
+        result = await schedule_ops.execute_create(
+            {"instruction": "weekly inventory aging report"},
+            context={"db": db, "tenant_id": str(user.tenant_id), "actor_id": str(user.id)},
+        )
+        assert result.get("error") is True
+
+        rows = (
+            (
+                await db.execute(
+                    select(Schedule).where(Schedule.tenant_id == user.tenant_id, Schedule.schedule_type == "job")
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert rows == []
 
 
 # ---------------------------------------------------------------------------

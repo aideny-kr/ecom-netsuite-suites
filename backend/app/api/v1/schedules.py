@@ -238,61 +238,38 @@ async def create_schedule(
     convention. `instruction` absent -> the legacy direct-create path,
     unchanged from pre-Slice-2 behaviour.
     """
+    correlation_id = _correlation_id(request)
+
+    if body.instruction:
+        # Item 5 (gate fix): the shared create path (also used by the MCP
+        # `schedule.create` tool's instruction branch) owns the entitlement
+        # check + compile + persist — see its own docstring.
+        try:
+            schedule = await schedule_service.create_scheduled_job(
+                db,
+                tenant_id=user.tenant_id,
+                body=body,
+                actor_id=user.id,
+                created_via="page",
+            )
+        except schedule_service.QuotaExceeded as exc:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+        except Clarification as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"clarification": exc.question},
+            ) from exc
+
+        await db.commit()
+        await db.refresh(schedule)
+        return _to_response(schedule)
+
     allowed = await entitlement_service.check_entitlement(db, user.tenant_id, "schedules")
     if not allowed:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Schedule limit reached for your plan",
         )
-
-    correlation_id = _correlation_id(request)
-
-    if body.instruction:
-        compiled = await compile_instruction(
-            db,
-            tenant_id=user.tenant_id,
-            instruction=body.instruction,
-            actor_id=user.id,
-            plan_version=0,
-        )
-        if isinstance(compiled, Clarification):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={"clarification": compiled.question},
-            )
-
-        schedule = Schedule(
-            tenant_id=user.tenant_id,
-            name=body.name or schedule_service.default_job_name(body.instruction),
-            schedule_type="job",
-            cron_expression=body.cron_expression,
-            timezone=body.timezone or "UTC",
-            is_active=True,
-            instruction=body.instruction,
-            plan_json=compiled.plan_json,
-            plan_version=0,
-            plan_status="pending_approval",
-            delivery_json=body.delivery,
-            owner_id=user.id,
-            created_via="page",
-        )
-        db.add(schedule)
-        await db.flush()
-
-        await audit_service.log_event(
-            db=db,
-            tenant_id=user.tenant_id,
-            category="schedule",
-            action="schedule.create",
-            actor_id=user.id,
-            resource_type="schedule",
-            resource_id=str(schedule.id),
-            correlation_id=correlation_id,
-            payload={"instruction": body.instruction, "plan_status": "pending_approval", "model": compiled.model},
-        )
-        await db.commit()
-        await db.refresh(schedule)
-        return _to_response(schedule)
 
     schedule = await schedule_service.create_schedule(
         db=db,

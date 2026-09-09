@@ -109,7 +109,18 @@ class CompilerLLM:
 
 
 @dataclass
-class Clarification:
+class Clarification(Exception):  # noqa: N818 — interface name from spec §B3, not a generic Error
+    """Also an ``Exception`` (item 5, gate fix): ``schedule_service.
+    create_scheduled_job`` has a single ``-> Schedule`` return type — a
+    ``Clarification`` outcome is communicated by raising this value rather
+    than returning a union, so a caller that forgets to check
+    ``isinstance(result, Clarification)`` fails loudly instead of treating a
+    clarification question as a created schedule. Every existing caller that
+    checks ``isinstance(compiled, Clarification)`` against
+    ``compile_instruction``'s own return value is unaffected — this only
+    adds a second capability (raisable), it does not remove the first
+    (returnable)."""
+
     question: str
 
 

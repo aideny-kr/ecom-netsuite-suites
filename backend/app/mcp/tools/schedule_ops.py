@@ -15,6 +15,31 @@ def _as_uuid(value) -> uuid.UUID | None:
     return uuid.UUID(value) if isinstance(value, str) else value
 
 
+def _plan_summary_line(plan_json: dict | None) -> str | None:
+    """Mirrors `compiler._build_compiled_plan`'s rendering exactly (steps
+    count + a de-duplicated arrow chain of step labels) — the same
+    duplication `app.api.v1.schedules._plan_summary_line` already accepts
+    (see that function's own docstring) rather than importing a compile-time
+    -only helper into this dispatch-time module. `create_scheduled_job`
+    returns only the persisted `Schedule` row (item 5), not the transient
+    `CompiledPlan` the compiler produced, so this recomputes the same text
+    from `schedule.plan_json` instead of carrying the CompiledPlan through."""
+    from app.services.jobs.registry import STEP_REGISTRY
+
+    if not plan_json:
+        return None
+    steps = plan_json.get("steps") or []
+    if not steps:
+        return None
+    labels: list[str] = []
+    for step in steps:
+        spec = STEP_REGISTRY.get(step.get("type"))
+        label = spec.label if spec is not None else str(step.get("type"))
+        if not labels or labels[-1] != label:
+            labels.append(label)
+    return f"{len(steps)} steps · " + " → ".join(labels)
+
+
 async def execute_create(params: dict, **kwargs) -> dict:
     """Create a schedule in the database via MCP context.
 
@@ -42,44 +67,54 @@ async def execute_create(params: dict, **kwargs) -> dict:
 
     instruction = params.get("instruction")
     if instruction:
+        import pydantic
+
+        from app.schemas.schedule import ScheduleCreate
         from app.services import schedule_service
-        from app.services.jobs.compiler import Clarification, compile_instruction
+        from app.services.jobs.compiler import Clarification
 
-        compiled = await compile_instruction(
-            db,
-            tenant_id=tenant_id,
-            instruction=instruction,
-            actor_id=actor_id,
-            plan_version=0,
-        )
-        if isinstance(compiled, Clarification):
-            return {"error": True, "clarification": True, "message": compiled.question}
+        # Item 5 (gate fix): build the SAME `ScheduleCreate` the API validates
+        # against (instruction/name length, cron_expression/timezone from
+        # item 1) instead of constructing the `Schedule` row by hand — that
+        # bypassed every one of those validators AND the plan-quota
+        # entitlement check `schedule_service.create_scheduled_job` now makes.
+        # Wire names -> model field names: `cron` -> `cron_expression`,
+        # `params` -> `parameters` (the legacy-branch field; unused here but
+        # accepted by the model for the other shape).
+        try:
+            body = ScheduleCreate(
+                name=params.get("name"),
+                instruction=instruction,
+                cron_expression=params.get("cron_expression") or params.get("cron"),
+                timezone=params.get("timezone"),
+                delivery=params.get("delivery"),
+            )
+        except pydantic.ValidationError as exc:
+            return {"error": True, "message": f"Invalid schedule: {exc}"}
 
-        schedule = Schedule(
-            tenant_id=tenant_id,
-            name=params.get("name") or schedule_service.default_job_name(instruction),
-            schedule_type="job",
-            cron_expression=params.get("cron_expression") or params.get("cron"),
-            timezone=params.get("timezone") or "UTC",
-            is_active=True,
-            instruction=instruction,
-            plan_json=compiled.plan_json,
-            plan_version=0,
-            plan_status="pending_approval",
-            delivery_json=params.get("delivery"),
-            owner_id=actor_id,
-            created_via="chat",
-        )
-        db.add(schedule)
-        await db.flush()
+        try:
+            schedule = await schedule_service.create_scheduled_job(
+                db,
+                tenant_id=tenant_id,
+                body=body,
+                actor_id=actor_id,
+                created_via="chat",
+            )
+        except schedule_service.QuotaExceeded as exc:
+            return {"error": True, "message": str(exc)}
+        except Clarification as exc:
+            return {"error": True, "clarification": True, "message": exc.question}
 
+        # create_scheduled_job already added + flushed the row; the caller
+        # (this MCP handler) owns the commit, per that function's own
+        # docstring — mirrors the API route's identical division of labour.
         logger.info("mcp.schedule.created", schedule_id=str(schedule.id), tenant_id=str(tenant_id), job=True)
         return {
             "schedule_id": str(schedule.id),
             "name": schedule.name,
             "schedule_type": schedule.schedule_type,
             "plan_status": schedule.plan_status,
-            "summary_line": compiled.summary_line,
+            "summary_line": _plan_summary_line(schedule.plan_json),
         }
 
     name = params.get("name")

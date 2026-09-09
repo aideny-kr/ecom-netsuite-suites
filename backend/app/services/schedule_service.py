@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 from zoneinfo import ZoneInfo
 
 import structlog
@@ -11,8 +11,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.job import Job
 from app.models.pipeline import Schedule
 from app.models.user import User
+from app.services import audit_service, entitlement_service
+from app.services.jobs.compiler import Clarification, compile_instruction
+
+if TYPE_CHECKING:
+    from app.schemas.schedule import ScheduleCreate
 
 logger = structlog.get_logger()
+
+
+class QuotaExceeded(Exception):  # noqa: N818 — interface name from item 5's gate-fix brief, not a generic Error
+    """Raised by ``create_scheduled_job`` when the tenant's plan-quota
+    entitlement check (``entitlement_service.check_entitlement(...,
+    "schedules")``) fails — the same check ``POST /schedules`` has always
+    made, now shared with the MCP ``schedule.create`` tool's instruction
+    branch (item 5, gate fix) so the two create paths cannot drift out of
+    sync on it."""
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +83,77 @@ async def create_schedule(
     )
     db.add(schedule)
     await db.flush()
+    return schedule
+
+
+async def create_scheduled_job(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    body: "ScheduleCreate",
+    actor_id: Optional[uuid.UUID],
+    created_via: str,
+) -> Schedule:
+    """Item 5 (gate fix): the ONE instruction-create path for both
+    `POST /schedules` and the MCP `schedule.create` tool's instruction
+    branch — before this fix, the MCP handler built its `Schedule` row by
+    hand, bypassing BOTH the plan-quota entitlement check the API route
+    always made AND every `ScheduleCreate` validator (instruction/name
+    length, cron_expression/timezone from item 1) since it never constructed
+    that model at all. Callers on both sides now build a `ScheduleCreate`
+    from their own input shape (validators run there, at construction) and
+    hand it to this one function for the entitlement check + compile +
+    persist.
+
+    Raises `QuotaExceeded` when the tenant's plan quota is exhausted, or
+    `Clarification` (also an `Exception` — see its own docstring) when the
+    compiler needs more detail instead of a plan. Only flushes — never
+    commits, per this codebase's "service flushes, endpoint commits once"
+    convention (`.claude/rules/sqlalchemy-fastapi.md`); the caller (the API
+    route, or the MCP tool handler) owns the commit.
+    """
+    allowed = await entitlement_service.check_entitlement(db, tenant_id, "schedules")
+    if not allowed:
+        raise QuotaExceeded("Schedule limit reached for your plan")
+
+    compiled = await compile_instruction(
+        db,
+        tenant_id=tenant_id,
+        instruction=body.instruction,
+        actor_id=actor_id,
+        plan_version=0,
+    )
+    if isinstance(compiled, Clarification):
+        raise compiled
+
+    schedule = Schedule(
+        tenant_id=tenant_id,
+        name=body.name or default_job_name(body.instruction),
+        schedule_type="job",
+        cron_expression=body.cron_expression,
+        timezone=body.timezone or "UTC",
+        is_active=True,
+        instruction=body.instruction,
+        plan_json=compiled.plan_json,
+        plan_version=0,
+        plan_status="pending_approval",
+        delivery_json=body.delivery,
+        owner_id=actor_id,
+        created_via=created_via,
+    )
+    db.add(schedule)
+    await db.flush()
+
+    await audit_service.log_event(
+        db=db,
+        tenant_id=tenant_id,
+        category="schedule",
+        action="schedule.create",
+        actor_id=actor_id,
+        resource_type="schedule",
+        resource_id=str(schedule.id),
+        payload={"instruction": body.instruction, "plan_status": "pending_approval", "model": compiled.model},
+    )
     return schedule
 
 

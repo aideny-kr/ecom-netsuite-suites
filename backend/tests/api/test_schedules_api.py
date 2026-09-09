@@ -117,7 +117,10 @@ class TestScheduleCompileCreate:
             assert instruction == "every Monday, deliver the inventory aging report to Drive"
             return _compiled_plan()
 
-        monkeypatch.setattr("app.api.v1.schedules.compile_instruction", fake_compile)
+        # Item 5 (gate fix): the compile call now happens inside
+        # schedule_service.create_scheduled_job (shared with the MCP tool),
+        # not in this route module directly — patch where it is USED.
+        monkeypatch.setattr("app.services.schedule_service.compile_instruction", fake_compile)
 
         resp = await client.post(
             "/api/v1/schedules",
@@ -143,7 +146,7 @@ class TestScheduleCompileCreate:
         async def fake_compile(db, *, tenant_id, instruction, actor_id, llm=None, plan_version=None):
             return Clarification(question="Which subsidiary should this cover?")
 
-        monkeypatch.setattr("app.api.v1.schedules.compile_instruction", fake_compile)
+        monkeypatch.setattr("app.services.schedule_service.compile_instruction", fake_compile)
 
         resp = await client.post(
             "/api/v1/schedules",
@@ -166,7 +169,9 @@ class TestScheduleCompileCreate:
 
     async def test_create_job_with_explicit_name_keeps_it(self, client: AsyncClient, admin_user, monkeypatch):
         user, headers = admin_user
-        monkeypatch.setattr("app.api.v1.schedules.compile_instruction", lambda *a, **k: _async_return(_compiled_plan()))
+        monkeypatch.setattr(
+            "app.services.schedule_service.compile_instruction", lambda *a, **k: _async_return(_compiled_plan())
+        )
 
         resp = await client.post(
             "/api/v1/schedules",
@@ -249,7 +254,9 @@ class TestScheduleCompileCreate:
             )
             assert resp.status_code == 201
 
-        monkeypatch.setattr("app.api.v1.schedules.compile_instruction", lambda *a, **k: _async_return(_compiled_plan()))
+        monkeypatch.setattr(
+            "app.services.schedule_service.compile_instruction", lambda *a, **k: _async_return(_compiled_plan())
+        )
         resp = await client.post(
             "/api/v1/schedules",
             json={"instruction": "over the limit"},
