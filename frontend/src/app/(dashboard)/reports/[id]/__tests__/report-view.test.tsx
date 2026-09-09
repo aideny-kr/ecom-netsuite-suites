@@ -88,6 +88,38 @@ it("offers a Download HTML action once the report is loaded (save-as-page)", asy
   expect(btn).toBeTruthy();
 });
 
+// --- Task 6 (Slice 1): "Delivered to Drive" line -------------------------------------
+
+it("shows no Delivered to Drive line when delivery_json is absent", async () => {
+  const { findByText, queryByText } = renderPage();
+  await findByText(/data as of/i); // metadata loaded
+  expect(queryByText(/delivered to drive/i)).toBeNull();
+});
+
+it("shows a Delivered to Drive line with PDF + XLSX links when delivery_json is present", async () => {
+  api.get.mockImplementation((path: string) =>
+    path.endsWith("/versions")
+      ? Promise.resolve(_versions)
+      : Promise.resolve(
+          _report({
+            delivery_json: {
+              pdf: { file_id: "pdf-1", url: "https://drive.example/pdf-1" },
+              xlsx: { file_id: "xlsx-1", url: "https://drive.example/xlsx-1" },
+              folder_id: "folder-1",
+              period_key: "2026-09-08",
+              delivered_at: "2026-09-08T06:00:00Z",
+            },
+          })
+        )
+  );
+  const { findByText, findByRole } = renderPage();
+  await findByText(/delivered to drive/i);
+  const pdfLink = await findByRole("link", { name: /^pdf$/i });
+  expect(pdfLink.getAttribute("href")).toBe("https://drive.example/pdf-1");
+  const xlsxLink = await findByRole("link", { name: /^xlsx$/i });
+  expect(xlsxLink.getAttribute("href")).toBe("https://drive.example/xlsx-1");
+});
+
 // --- Slice B: Refresh button, version picker, "data as of" stamp ---------------------
 
 it("shows Refresh only for recipe-bearing reports", async () => {

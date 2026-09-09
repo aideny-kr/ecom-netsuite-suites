@@ -25,6 +25,19 @@ export interface ReportSummary {
   created_by?: string | null;
   /** Set when pinned to the dashboard landing page; sorts pinned reports newest-first. */
   dashboard_pinned_at?: string | null;
+  /** Task 5 (Drive delivery): the last successful delivery's receipt, or null/absent
+   * if never delivered (or the last attempt failed — never partially written, see
+   * backend/app/services/report/report_delivery.py). Drives the "Delivered to Drive"
+   * line (Task 6). */
+  delivery_json?: DeliveryJson | null;
+}
+
+export interface DeliveryJson {
+  pdf: { file_id: string; url: string };
+  xlsx: { file_id: string; url: string };
+  folder_id: string;
+  period_key: string;
+  delivered_at: string;
 }
 
 export interface ReportVersionEntry {
