@@ -201,9 +201,7 @@ async def test_claim_pauses_a_schedule_whose_next_run_at_cannot_be_computed(db: 
 # ---------------------------------------------------------------------------
 
 
-async def test_claim_creates_the_jobs_row_before_run_schedule_now_executes_any_step(
-    db: AsyncSession, monkeypatch
-):
+async def test_claim_creates_the_jobs_row_before_run_schedule_now_executes_any_step(db: AsyncSession, monkeypatch):
     tenant = await create_test_tenant(db, name="Claim Job Row Co")
     await set_tenant_context(db, str(tenant.id))
 
@@ -666,9 +664,7 @@ def test_distill_artifact_coerces_decimal_date_and_drops_unknown_top_level_value
     assert json.loads(json.dumps(distilled)) == distilled
 
 
-async def test_executor_persists_decimal_and_date_artifact_values_without_typeerror(
-    db: AsyncSession, monkeypatch
-):
+async def test_executor_persists_decimal_and_date_artifact_values_without_typeerror(db: AsyncSession, monkeypatch):
     """The end-to-end failure this used to raise: a step returns an artifact
     with Decimal/date values, and `_finalize_run` assigning `job.result_summary`
     (a JSON column) raised TypeError at flush time -- reachable even though
@@ -1151,9 +1147,7 @@ async def test_finalize_double_failure_does_not_leave_the_job_row_running(db: As
 # ---------------------------------------------------------------------------
 
 
-async def test_run_schedule_now_default_does_not_retry_or_touch_next_run_at_on_error(
-    db: AsyncSession, monkeypatch
-):
+async def test_run_schedule_now_default_does_not_retry_or_touch_next_run_at_on_error(db: AsyncSession, monkeypatch):
     """Mirrors the Celery "Run now" path (`run_schedule_now_task`) and the
     MCP `schedule.run` tool -- neither passes `retry_on_error`, so both get
     the default `False`. A failing run must stamp the jobs row + schedule's
@@ -1290,9 +1284,7 @@ async def test_retry_reuses_attempt_ones_period_key_across_local_midnight(db: As
     assert retry_job.parameters["retry_of_job_id"] == str(jobs_after_1[0].id)
 
 
-async def test_retry_falls_back_to_computed_period_key_when_no_attempt_one_row_exists(
-    db: AsyncSession, monkeypatch
-):
+async def test_retry_falls_back_to_computed_period_key_when_no_attempt_one_row_exists(db: AsyncSession, monkeypatch):
     """Defensive only (e.g. attempt-1's jobs row was somehow purged) — must
     not crash, and falls back to the same computed value as before."""
     tenant = await create_test_tenant(db, name="Retry No Attempt1 Co")
@@ -1314,9 +1306,7 @@ async def test_retry_falls_back_to_computed_period_key_when_no_attempt_one_row_e
     )
 
     due_at = datetime(2026, 9, 7, 12, 0, tzinfo=timezone.utc)
-    outcome = await run_schedule_now(
-        db, schedule.id, tenant_id=tenant.id, actor_id=None, due_at=due_at, attempt=2
-    )
+    outcome = await run_schedule_now(db, schedule.id, tenant_id=tenant.id, actor_id=None, due_at=due_at, attempt=2)
 
     assert outcome.reason == REASON_DONE
     job = (await db.execute(select(Job).where(Job.tenant_id == tenant.id))).scalar_one()
@@ -1431,9 +1421,7 @@ async def test_run_schedule_now_reuses_an_existing_jobs_row_when_given_one(db: A
     assert jobs[0].parameters["schedule_id"] == str(schedule.id)
 
 
-async def test_run_now_uses_the_plan_snapshotted_on_the_jobs_row_not_a_later_edit(
-    db: AsyncSession, monkeypatch
-):
+async def test_run_now_uses_the_plan_snapshotted_on_the_jobs_row_not_a_later_edit(db: AsyncSession, monkeypatch):
     """review finding, MAJOR: `run_schedule_now` used to read
     `row.pending_plan_json`/`row.plan_json` LIVE when the Celery task
     executed -- an instruction edit or discard landing between enqueue
@@ -1458,9 +1446,7 @@ async def test_run_now_uses_the_plan_snapshotted_on_the_jobs_row_not_a_later_edi
         cron_expression="0 6 * * 1",
     )
 
-    snapshot_plan = {
-        "steps": [{"id": "s1_snapshot", "type": "fake.step", "params": {"label": "snapshot"}}]
-    }
+    snapshot_plan = {"steps": [{"id": "s1_snapshot", "type": "fake.step", "params": {"label": "snapshot"}}]}
     pre_created = Job(
         tenant_id=tenant.id,
         job_type="scheduled_job",
@@ -1495,9 +1481,7 @@ async def test_run_now_uses_the_plan_snapshotted_on_the_jobs_row_not_a_later_edi
     assert "s1_edited" not in job.result_summary["outputs"]
 
 
-async def test_early_blocked_return_resolves_a_pre_created_jobs_row_unapproved_plan(
-    db: AsyncSession, monkeypatch
-):
+async def test_early_blocked_return_resolves_a_pre_created_jobs_row_unapproved_plan(db: AsyncSession, monkeypatch):
     """review finding, MAJOR: both REASON_BLOCKED guard blocks in
     run_schedule_now (plan not approved; no compiled plan) used to return
     without touching `existing_job_id`, leaving a pre-created row (item 6's
@@ -1539,9 +1523,7 @@ async def test_early_blocked_return_resolves_a_pre_created_jobs_row_unapproved_p
     assert job.error_message == "plan not approved"
 
 
-async def test_early_blocked_return_resolves_a_pre_created_jobs_row_no_compiled_plan(
-    db: AsyncSession, monkeypatch
-):
+async def test_early_blocked_return_resolves_a_pre_created_jobs_row_no_compiled_plan(db: AsyncSession, monkeypatch):
     """Same fix, the OTHER early REASON_BLOCKED guard block (no compiled plan
     to run) -- reached only past the HITL gate, so `plan_status="approved"`
     with an empty `plan_json` (e.g. an approved schedule whose plan was
