@@ -24,7 +24,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from app.core.config import settings
@@ -499,3 +499,56 @@ async def test_use_pending_records_the_pending_plan_version_on_the_run(db: Async
     )
     assert approved_job.parameters["plan_version"] == 3
     assert approved_outcome.reason == REASON_DONE
+
+
+# ---------------------------------------------------------------------------
+# A step that poisons the DB transaction still leaves the run recoverable
+# (review finding: _run_steps must roll back before returning on any except
+# branch, or run_schedule_now's very next statement -- set_tenant_context --
+# raises InFailedSqlTransactionError and the schedule's retry/pause
+# bookkeeping never runs, leaking a 'running' jobs row).
+# ---------------------------------------------------------------------------
+
+
+async def test_db_error_inside_a_step_still_completes_retry_bookkeeping(db: AsyncSession, monkeypatch):
+    tenant = await create_test_tenant(db, name="Poisoned Txn Co")
+    tenant_id = tenant.id  # captured now: a service-side rollback (below) can
+    # expire other objects touched earlier in the same session, and re-reading
+    # an expired attribute outside an awaited DB call raises MissingGreenlet.
+    await set_tenant_context(db, str(tenant_id))
+
+    async def poisons_the_transaction(ctx, params):
+        # A real DB-level error (not an app-level StepExecutionError) --
+        # Postgres marks the whole transaction aborted, exactly like a
+        # genuine asyncpg/SQLAlchemy failure inside a real executor.
+        await ctx.db.execute(text("SELECT 1/0"))
+        return {"ok": True}  # never reached
+
+    monkeypatch.setitem(STEP_REGISTRY, "fake.step", _fake_spec("read", poisons_the_transaction))
+
+    now = datetime.now(timezone.utc)
+    schedule = await _seed_job_schedule(
+        db,
+        tenant,
+        plan_json={"steps": [{"id": "s1", "type": "fake.step", "params": {}}]},
+        next_run_at=now - timedelta(minutes=1),
+        cron_expression="0 6 * * 1",
+    )
+    schedule_id = schedule.id
+
+    stats = await run_due_jobs(db, tenant_id, now=now)
+
+    # The sweep must not silently swallow this as a bare rollback+log with no
+    # bookkeeping -- it must record reason=error and schedule the retry, same
+    # as an app-level StepExecutionError would.
+    assert stats["ran"] == 1
+    assert stats["failed"] == 1
+
+    refreshed_schedule = (await db.execute(select(Schedule).where(Schedule.id == schedule_id))).scalar_one()
+    assert refreshed_schedule.last_run_status == "retry_pending"
+    assert refreshed_schedule.next_run_at is not None
+    assert refreshed_schedule.next_run_at > now
+
+    job = (await db.execute(select(Job).where(Job.tenant_id == tenant_id))).scalar_one()
+    assert job.status == "failed"
+    assert job.result_summary["reason"] == REASON_ERROR

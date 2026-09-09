@@ -323,11 +323,25 @@ async def _run_steps(
         try:
             artifact = await spec.executor(ctx, params)
         except DeliveryUnavailable as exc:
+            # A DeliveryUnavailable-raising executor may still have touched
+            # the DB before raising (e.g. a partial write attempt) -- roll
+            # back unconditionally so the caller's post-loop bookkeeping
+            # (re-fetching Schedule/Job, retry-then-pause, the final commit)
+            # always runs against a clean transaction. A rollback on an
+            # already-clean transaction is a harmless no-op.
+            await db.rollback()
             return REASON_BLOCKED, outputs, str(exc)
         except StepExecutionError as exc:
+            await db.rollback()
             return REASON_ERROR, outputs, str(exc)
         except Exception as exc:  # an executor's own unexpected failure
             logger.exception("scheduled_jobs.step_failed", extra={"step_id": step_id, "step_type": step_type})
+            # A genuine DB-level error (SQLAlchemy/asyncpg) leaves the
+            # session's transaction aborted; without this rollback,
+            # run_schedule_now's very next statement (set_tenant_context)
+            # raises InFailedSqlTransactionError and the schedule's
+            # retry/pause bookkeeping never runs (review finding).
+            await db.rollback()
             return REASON_ERROR, outputs, f"{type(exc).__name__}: {exc}"
 
         ctx.artifacts[step_id] = artifact
@@ -428,6 +442,12 @@ async def run_schedule_now(
     )
     db.add(job)
     await db.flush()
+    # Captured now (job is freshly flushed, not expired) rather than read off
+    # `job.id` after `_run_steps` returns: a rollback inside `_run_steps`
+    # (review finding) expires every attribute on `job`, including its PK,
+    # and re-reading an expired attribute outside an awaited DB call raises
+    # sqlalchemy.exc.MissingGreenlet.
+    job_id_value = job.id
 
     await audit_service.log_event(
         db,
@@ -471,7 +491,7 @@ async def run_schedule_now(
     row = (
         await db.execute(select(Schedule).where(Schedule.id == schedule_id, Schedule.tenant_id == tenant_id))
     ).scalar_one()
-    job = await db.get(Job, job.id)
+    job = await db.get(Job, job_id_value)
 
     job.status = "completed" if reason in (REASON_DONE, REASON_BUDGET, REASON_BLOCKED) else "failed"
     job.completed_at = datetime.now(timezone.utc)
