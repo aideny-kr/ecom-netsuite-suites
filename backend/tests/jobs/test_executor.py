@@ -399,6 +399,58 @@ async def test_budget_exceeded_between_steps_stops_remaining_steps(db: AsyncSess
     assert "s2" not in jobs[0].result_summary["outputs"]
 
 
+async def test_usd_only_budget_stops_the_run(db: AsyncSession, monkeypatch):
+    """Spec §B4: budget is "(bytes scanned, seconds, usd) enforced between
+    steps". A schedule configured with ONLY a usd cap (no bytes_scanned/
+    seconds cap at all) must still stop the run (review finding: `usage` only
+    tracked bytes_scanned/seconds, so a usd-only cap never fired)."""
+    tenant = await create_test_tenant(db, name="USD Budget Co")
+    await set_tenant_context(db, str(tenant.id))
+
+    step2_calls: list[dict] = []
+
+    async def pricey_step(ctx, params):
+        # 1 TB scanned -> $5 at the existing $5/TB BigQuery rate
+        # (app.services.bigquery_service.estimate_query_cost's own constant)
+        # -> blows through a $1 cap even though bytes_scanned/seconds are
+        # both left unset on the schedule's budget.
+        return {"bytes_processed": 1_000_000_000_000}
+
+    async def never_reached(ctx, params):
+        step2_calls.append(params)
+        return {"ok": True}
+
+    monkeypatch.setitem(STEP_REGISTRY, "fake.pricey", _fake_spec("read", pricey_step, step_type="fake.pricey"))
+    monkeypatch.setitem(STEP_REGISTRY, "fake.never", _fake_spec("read", never_reached, step_type="fake.never"))
+
+    now = datetime.now(timezone.utc)
+    schedule = await _seed_job_schedule(
+        db,
+        tenant,
+        plan_json={
+            "steps": [
+                {"id": "s1", "type": "fake.pricey", "params": {}},
+                {"id": "s2", "type": "fake.never", "params": {}},
+            ]
+        },
+        next_run_at=now - timedelta(minutes=1),
+        cron_expression="0 6 * * 1",
+        budget_json={"usd": 1.0},  # ONLY a usd cap -- no bytes_scanned/seconds cap
+    )
+
+    stats = await run_due_jobs(db, tenant.id, now=now)
+
+    assert stats["ran"] == 1
+    assert schedule.last_run_status == REASON_BUDGET
+    assert step2_calls == []  # step 2 never ran
+
+    jobs = (await db.execute(select(Job).where(Job.tenant_id == tenant.id))).scalars().all()
+    assert len(jobs) == 1
+    assert jobs[0].result_summary["reason"] == REASON_BUDGET
+    assert "s1" in jobs[0].result_summary["outputs"]
+    assert "s2" not in jobs[0].result_summary["outputs"]
+
+
 # ---------------------------------------------------------------------------
 # drive.upload (a WRITE step) audits `started` with the idempotency key
 # BEFORE its executor is called.
@@ -543,6 +595,69 @@ async def test_db_error_inside_a_step_still_completes_retry_bookkeeping(db: Asyn
     # as an app-level StepExecutionError would.
     assert stats["ran"] == 1
     assert stats["failed"] == 1
+
+    refreshed_schedule = (await db.execute(select(Schedule).where(Schedule.id == schedule_id))).scalar_one()
+    assert refreshed_schedule.last_run_status == "retry_pending"
+    assert refreshed_schedule.next_run_at is not None
+    assert refreshed_schedule.next_run_at > now
+
+    job = (await db.execute(select(Job).where(Job.tenant_id == tenant_id))).scalar_one()
+    assert job.status == "failed"
+    assert job.result_summary["reason"] == REASON_ERROR
+
+
+# ---------------------------------------------------------------------------
+# A crash in run_schedule_now's OWN post-_run_steps bookkeeping (the
+# Schedule/Job re-fetch, outside _run_steps entirely) must still complete
+# retry-then-pause (review finding: only _run_steps's own exceptions were
+# covered; a crash one layer up leaked a jobs row stuck at status='running'
+# with no retry scheduled, reachable even though every step itself succeeded).
+# ---------------------------------------------------------------------------
+
+
+async def test_finalize_crash_after_run_steps_still_completes_retry_bookkeeping(db: AsyncSession, monkeypatch):
+    tenant = await create_test_tenant(db, name="Finalize Crash Co")
+    tenant_id = tenant.id
+    await set_tenant_context(db, str(tenant_id))
+
+    async def ok_step(ctx, params):
+        return {"ok": True}
+
+    monkeypatch.setitem(STEP_REGISTRY, "fake.step", _fake_spec("read", ok_step))
+
+    now = datetime.now(timezone.utc)
+    schedule = await _seed_job_schedule(
+        db,
+        tenant,
+        plan_json={"steps": [{"id": "s1", "type": "fake.step", "params": {}}]},
+        next_run_at=now - timedelta(minutes=1),
+        cron_expression="0 6 * * 1",
+    )
+    schedule_id = schedule.id
+
+    real_finalize = scheduled_jobs._finalize_run
+    calls = {"n": 0}
+
+    async def flaky_finalize(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # Simulates ANY crash in this layer -- not a DB-transaction
+            # poisoning (that's the other test above), a genuine unexpected
+            # exception (e.g. a stale row, a connectivity blip) hitting the
+            # re-fetch/bookkeeping code that runs AFTER `_run_steps` returns.
+            raise RuntimeError("simulated crash re-fetching Schedule/Job")
+        return await real_finalize(*args, **kwargs)
+
+    monkeypatch.setattr(scheduled_jobs, "_finalize_run", flaky_finalize)
+
+    stats = await run_due_jobs(db, tenant_id, now=now)
+
+    # The step itself succeeded -- the crash happened only in bookkeeping --
+    # but the run must still be recorded as a failure so retry-then-pause
+    # fires, not left silently stuck at status="running".
+    assert stats["ran"] == 1
+    assert stats["failed"] == 1
+    assert calls["n"] == 2  # one crash, one successful retry against a clean session
 
     refreshed_schedule = (await db.execute(select(Schedule).where(Schedule.id == schedule_id))).scalar_one()
     assert refreshed_schedule.last_run_status == "retry_pending"

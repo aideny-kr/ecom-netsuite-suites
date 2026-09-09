@@ -50,6 +50,24 @@ This is a deliberate, one-off exception to the "service flushes, endpoint commit
 once" convention (`.claude/rules/sqlalchemy-fastapi.md`) — durability is the entire
 point of that particular commit.
 
+One `jobs` row per run, via "the instrumented task base" (spec §B4): honored in
+spirit, not literally. `run_schedule_now` writes the same `jobs` table with the same
+field conventions `InstrumentedTask` (`base_task.py`) uses — `job_type`, `status`,
+`correlation_id`, `parameters`, `result_summary`, `started_at`/`completed_at` — via
+direct async-session ORM writes, because this function must be directly callable
+against an async session both from this module's own per-tenant sweep loop AND,
+per spec, from Task 5's future request-scoped "Run now" endpoint; `InstrumentedTask`'s
+`before_start`/`on_success`/`on_failure` hooks only fire around an actual Celery task
+dispatch, and wrapping every individual schedule's run in its own Celery task would
+trade this module's straightforward per-tenant sweep loop for one Celery task per
+schedule per minute. The residual gap that design choice leaves open — a crash
+OUTSIDE `_run_steps`'s own rollback-before-return protection (e.g. re-fetching the
+`Schedule`/`Job` rows afterward) has no `InstrumentedTask.on_failure` to fall back
+on — is closed explicitly: `run_schedule_now` retries `_finalize_run` once, against a
+freshly rolled-back session, forcing `reason=error` on the retry, so the SAME
+retry-then-pause bookkeeping every other error path uses always runs rather than
+leaving the `jobs` row it created stuck at `status="running"` (review finding).
+
 Claim vs. run (the SKIP LOCKED lock is short-lived, not held for the run's duration):
 `_claim_due_schedules` does the `SELECT ... FOR UPDATE SKIP LOCKED`, immediately
 advances `next_run_at` past `now` and marks the row `running`, and COMMITS — a
@@ -115,6 +133,17 @@ REASON_BUDGET = "budget"
 REASON_STALL = "stall"
 REASON_ERROR = "error"
 REASON_BLOCKED = "blocked"
+
+#: Spec §B4: the run budget is "(bytes scanned, seconds, usd) enforced between
+#: steps", but no v1 step type (registry.py) reports a `cost_usd` figure
+#: directly in its artifact -- only `bigquery_sql` reports `bytes_processed`
+#: at all. Derive a run's usd usage from that the SAME way
+#: `app.services.bigquery_service.estimate_query_cost` already prices a
+#: BigQuery dry-run (`estimated_bytes / 1e12 * 5`) -- keep this literal in
+#: sync with that function's if the BigQuery on-demand rate ever changes.
+#: If a future step type starts reporting cost directly, extend `usage["usd"]`
+#: below to also sum that field rather than replacing this derivation.
+_BIGQUERY_USD_PER_BYTE = 5.0 / 1_000_000_000_000
 
 RETRY_DELAY_MINUTES = 15  # spec §B4: "retry once after 15 minutes"
 RETRY_MAX_ATTEMPTS = 2  # attempt 1 (the original due run) + attempt 2 (the one retry)
@@ -287,7 +316,7 @@ async def _run_steps(
     from app.services.report.report_delivery import DeliveryUnavailable
 
     outputs: dict[str, Any] = {}
-    usage = {"bytes_scanned": 0, "seconds": 0.0}
+    usage = {"bytes_scanned": 0, "seconds": 0.0, "usd": 0.0}
     started_at = time.monotonic()
 
     for step in steps:
@@ -349,16 +378,55 @@ async def _run_steps(
 
         usage["bytes_scanned"] += int(artifact.get("bytes_processed") or 0)
         usage["seconds"] = time.monotonic() - started_at
+        usage["usd"] = usage["bytes_scanned"] * _BIGQUERY_USD_PER_BYTE
 
         limit_bytes = budget.get("bytes_scanned")
         limit_seconds = budget.get("seconds")
-        over_budget = (limit_bytes is not None and usage["bytes_scanned"] > limit_bytes) or (
-            limit_seconds is not None and usage["seconds"] > limit_seconds
+        limit_usd = budget.get("usd")
+        over_budget = (
+            (limit_bytes is not None and usage["bytes_scanned"] > limit_bytes)
+            or (limit_seconds is not None and usage["seconds"] > limit_seconds)
+            or (limit_usd is not None and usage["usd"] > limit_usd)
         )
         if over_budget:
             return REASON_BUDGET, outputs, None
 
     return REASON_DONE, outputs, None
+
+
+async def _finalize_run(
+    db: AsyncSession,
+    *,
+    schedule_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    job_id_value: uuid.UUID,
+    reason: str,
+    outputs: dict[str, Any],
+    detail: str | None,
+    now: datetime,
+) -> tuple[Schedule, Job]:
+    """Re-fetch the `Schedule` + `Job` rows fresh and stamp this run's outcome
+    onto both. Split out of `run_schedule_now` so a crash HERE (review
+    finding: this layer sits outside `_run_steps`'s own rollback-before-return
+    protection — a stale row, a connectivity blip, anything) can be retried
+    once against a freshly rolled-back session by the caller, instead of
+    leaving the `jobs` row it's about to update stuck at status="running"
+    forever with no retry-then-pause bookkeeping ever applied."""
+    await set_tenant_context(db, str(tenant_id))
+    row = (
+        await db.execute(select(Schedule).where(Schedule.id == schedule_id, Schedule.tenant_id == tenant_id))
+    ).scalar_one()
+    job = await db.get(Job, job_id_value)
+
+    job.status = "completed" if reason in (REASON_DONE, REASON_BUDGET, REASON_BLOCKED) else "failed"
+    job.completed_at = datetime.now(timezone.utc)
+    job.result_summary = {"reason": reason, "outputs": outputs, "detail": detail}
+    if detail:
+        job.error_message = detail
+
+    row.last_run_at = now
+    row.last_run_status = reason
+    return row, job
 
 
 async def run_schedule_now(
@@ -487,20 +555,45 @@ async def run_schedule_now(
         actor_type=actor_type,
     )
 
-    await set_tenant_context(db, str(tenant_id))
-    row = (
-        await db.execute(select(Schedule).where(Schedule.id == schedule_id, Schedule.tenant_id == tenant_id))
-    ).scalar_one()
-    job = await db.get(Job, job_id_value)
-
-    job.status = "completed" if reason in (REASON_DONE, REASON_BUDGET, REASON_BLOCKED) else "failed"
-    job.completed_at = datetime.now(timezone.utc)
-    job.result_summary = {"reason": reason, "outputs": outputs, "detail": detail}
-    if detail:
-        job.error_message = detail
-
-    row.last_run_at = now
-    row.last_run_status = reason
+    try:
+        row, job = await _finalize_run(
+            db,
+            schedule_id=schedule_id,
+            tenant_id=tenant_id,
+            job_id_value=job_id_value,
+            reason=reason,
+            outputs=outputs,
+            detail=detail,
+            now=now,
+        )
+    except Exception as exc:
+        # This layer sits OUTSIDE `_run_steps`'s own rollback-before-return
+        # protection: a crash re-fetching Schedule/Job (or in the stamping
+        # above) must still trigger retry-then-pause (spec §B4), or the
+        # `jobs` row created above is left stuck at status="running" forever
+        # (review finding — reachable even when every step itself succeeded).
+        # Roll back and retry ONCE against a clean session, forcing
+        # reason=error so the retry/pause branch below always fires,
+        # regardless of what `_run_steps` actually returned.
+        logger.exception(
+            "scheduled_jobs.run_schedule_now.finalize_failed",
+            extra={"schedule_id": str(schedule_id), "job_id": str(job_id_value)},
+        )
+        try:
+            await db.rollback()
+        except Exception:
+            logger.warning("scheduled_jobs.run_schedule_now.rollback_failed", exc_info=True)
+        reason, detail = REASON_ERROR, f"{type(exc).__name__}: {exc}"
+        row, job = await _finalize_run(
+            db,
+            schedule_id=schedule_id,
+            tenant_id=tenant_id,
+            job_id_value=job_id_value,
+            reason=reason,
+            outputs=outputs,
+            detail=detail,
+            now=now,
+        )
 
     if reason == REASON_ERROR:
         if attempt >= RETRY_MAX_ATTEMPTS:
