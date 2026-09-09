@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -11,9 +12,15 @@ from app.core.dependencies import get_current_user
 from app.models.report import Report
 from app.models.report_version import ReportVersion
 from app.models.user import User
-from app.schemas.report import PlaybookComposeRequest, ReportResponse, ReportSettingsUpdate, ReportVersionResponse
+from app.schemas.report import (
+    DeliveryResultResponse,
+    PlaybookComposeRequest,
+    ReportResponse,
+    ReportSettingsUpdate,
+    ReportVersionResponse,
+)
 from app.services import audit_service
-from app.services.report import refresh_service
+from app.services.report import refresh_service, report_delivery
 from app.services.report.playbooks import PLAYBOOKS, compose_playbook_report
 
 router = APIRouter(prefix="/reports", tags=["reports"])
@@ -38,6 +45,7 @@ def _to_response(r: Report) -> ReportResponse:
         dashboard_pinned_at=r.dashboard_pinned_at,
         period=r.period,
         series_id=str(r.series_id) if r.series_id else None,
+        delivery_json=r.delivery_json,
     )
 
 
@@ -368,3 +376,45 @@ async def view_report_version(
     if version == row.version:  # never-refreshed report: the parent IS v1
         return Response(content=row.rendered_html, media_type="text/html")
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Version not found")
+
+
+# --- Slice 1 (inventory aging weekly), Task 5: Drive delivery --------------------------
+# Same gate as every other report route (§6.3 note above, no report.* permission scope
+# exists) — "report permissions as the existing settings route" per spec §A5.
+
+
+@router.post("/{report_id}/deliver", response_model=DeliveryResultResponse)
+async def deliver_report_endpoint(
+    report_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    row = await _get_owned(db, report_id, user)  # 404 shape identical to every other route
+    # period_key: the snapshot/period this delivery covers, for the idempotent
+    # filename + delivery_json (spec §A5) — `period` is only populated for
+    # mode="tracking" composes (Task 3), so a one-off snapshot report falls back to
+    # today's date, still a stable key for same-day re-delivery.
+    period_key = row.period or datetime.now(timezone.utc).date().isoformat()
+    try:
+        result = await report_delivery.deliver_report_to_drive(
+            db,
+            tenant_id=user.tenant_id,
+            report_id=row.id,
+            actor_type="user",
+            actor_id=user.id,
+            period_key=period_key,
+        )
+    except report_delivery.DeliveryUnavailable as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e)) from e
+    except report_delivery.DeliveryFailed as e:
+        # an external (Drive) failure, not a client error — never a bare 500 with a
+        # raw traceback (memory: no connector → never 500 applies to failed calls too).
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
+    return DeliveryResultResponse(
+        pdf_file_id=result.pdf_file_id,
+        pdf_url=result.pdf_url,
+        xlsx_file_id=result.xlsx_file_id,
+        xlsx_url=result.xlsx_url,
+        folder_id=result.folder_id,
+        delivered_at=result.delivered_at,
+    )
