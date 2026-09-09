@@ -104,6 +104,12 @@ class ScheduleUpdate(BaseModel):
     budget: Optional[dict] = None
     catch_up: Optional[str] = None
     name: Optional[str] = Field(default=None, max_length=255)
+    # Task 6 (frontend detail page, spec §B5/§B6): the pending-change panel's
+    # "Discard" button — drops a recompiled `pending_plan_json` a person
+    # doesn't want, leaving the live `plan_json` (still what actually runs)
+    # untouched. `True` clears it; `False`/absent is a no-op (never clears
+    # implicitly on an unrelated field edit).
+    discard_pending: Optional[bool] = None
 
     @field_validator("catch_up")
     @classmethod

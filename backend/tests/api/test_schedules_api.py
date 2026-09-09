@@ -407,6 +407,55 @@ class TestScheduleUpdate:
         assert data["plan_json"] == _INVENTORY_AGING_PLAN
         assert data["pending_plan_json"] is None
 
+    async def test_patch_discard_pending_clears_pending_plan_without_touching_live_plan(
+        self, client: AsyncClient, admin_user, db: AsyncSession
+    ):
+        """Task 6 (frontend detail page) wires the pending-change panel's
+        "Discard" button to `PATCH {discard_pending: true}` (spec §B5/§B6):
+        the recompiled `pending_plan_json` a person doesn't want is dropped,
+        the live `plan_json` (still what actually runs) is untouched."""
+        user, headers = admin_user
+        tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
+        new_plan = {"steps": [{"id": "q1", "type": "bigquery_sql", "params": {"query": "SELECT 2"}}]}
+        schedule = await _seed_job_schedule(
+            db,
+            tenant,
+            plan_json=_INVENTORY_AGING_PLAN,
+            pending_plan_json=new_plan,
+            plan_status="approved",
+            plan_version=1,
+        )
+        await db.commit()
+
+        resp = await client.patch(
+            f"/api/v1/schedules/{schedule.id}",
+            json={"discard_pending": True},
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["pending_plan_json"] is None
+        assert data["pending_plan_diff"] == []
+        assert data["plan_json"] == _INVENTORY_AGING_PLAN
+        assert data["plan_status"] == "approved"
+
+    async def test_patch_discard_pending_false_is_a_noop(self, client: AsyncClient, admin_user, db: AsyncSession):
+        user, headers = admin_user
+        tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
+        new_plan = {"steps": [{"id": "q1", "type": "bigquery_sql", "params": {"query": "SELECT 2"}}]}
+        schedule = await _seed_job_schedule(
+            db, tenant, plan_json=_INVENTORY_AGING_PLAN, pending_plan_json=new_plan, plan_status="approved"
+        )
+        await db.commit()
+
+        resp = await client.patch(
+            f"/api/v1/schedules/{schedule.id}",
+            json={"discard_pending": False},
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["pending_plan_json"] == new_plan
+
 
 # ---------------------------------------------------------------------------
 # POST /schedules/{id}/approve

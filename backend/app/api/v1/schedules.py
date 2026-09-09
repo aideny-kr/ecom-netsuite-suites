@@ -317,6 +317,10 @@ async def update_schedule(
     if body.catch_up is not None:
         schedule.catch_up = body.catch_up
         changed_fields["catch_up"] = body.catch_up
+    if body.discard_pending:
+        schedule.pending_plan_json = None
+        schedule.pending_plan_reason = None
+        changed_fields["discard_pending"] = True
 
     if body.instruction is not None:
         compiled = await compile_instruction(
