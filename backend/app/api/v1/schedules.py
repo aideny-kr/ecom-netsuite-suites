@@ -41,7 +41,7 @@ from app.schemas.schedule import (
 from app.services import audit_service, entitlement_service, schedule_service
 from app.services.jobs.compiler import Clarification, compile_instruction, plan_diff
 from app.services.jobs.registry import STEP_REGISTRY
-from app.workers.tasks.scheduled_jobs import run_schedule_now
+from app.workers.celery_app import celery_app
 
 router = APIRouter(prefix="/schedules", tags=["schedules"])
 
@@ -411,21 +411,26 @@ async def approve_schedule(
     return _to_detail_response(schedule)
 
 
-@router.post("/{schedule_id}/run", response_model=ScheduleRunResponse)
+@router.post("/{schedule_id}/run", response_model=ScheduleRunResponse, status_code=status.HTTP_202_ACCEPTED)
 async def run_schedule(
     schedule_id: uuid.UUID,
     body: ScheduleRunRequest,
     user: Annotated[User, Depends(require_permission("schedules.manage"))],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Run one schedule now (spec §B5: "enqueues one run now; records the
-    plan version used"). Calls `run_schedule_now` directly on this request's
-    own session — per that function's own docstring it is written to be
-    "directly callable ... from ... a request-scoped 'Run now' endpoint",
-    not routed through a Celery dispatch, so the response can carry the real
-    `jobs` row id it just created rather than only a fire-and-forget task id.
-    `run_schedule_now` owns its own transaction boundaries (audit-before-write
-    commits, the final commit) — this route makes no additional writes.
+    """Enqueue one run now (spec §B5: "enqueues one run now; records the plan
+    version used") — via Celery, NOT executed inline on this request's own
+    session (residual fix): a real Inventory Aging run can take minutes,
+    which used to hold the HTTP request open long enough for nginx to cut it.
+
+    This route creates the `jobs` row itself — status `pending` — so the
+    `202` response can carry its real id immediately, then dispatches
+    `tasks.scheduled_jobs_run_now` (`app.workers.tasks.scheduled_jobs.
+    run_schedule_now_task`) with that row's id; `run_schedule_now`'s
+    `existing_job_id` param (see its own docstring) makes the task REUSE this
+    SAME row rather than inserting a second one. The HITL precondition checks
+    below still run synchronously, on THIS request — a blocked run never
+    creates a row or enqueues a task, matching the pre-existing 409 contract.
     """
     schedule = await _get_or_404(db, schedule_id, user.tenant_id)
     plan_to_run = schedule.pending_plan_json if body.use_pending else schedule.plan_json
@@ -445,19 +450,47 @@ async def run_schedule(
     if not body.use_pending and schedule.plan_status != "approved":
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Plan is not approved")
 
-    outcome = await run_schedule_now(
-        db,
-        schedule_id,
+    plan_version_used = (schedule.plan_version + 1) if body.use_pending else schedule.plan_version
+    job = Job(
         tenant_id=user.tenant_id,
+        job_type="scheduled_job",
+        status="pending",
+        parameters={
+            "schedule_id": str(schedule_id),
+            "plan_version": plan_version_used,
+            "use_pending": body.use_pending,
+        },
+    )
+    db.add(job)
+    await db.flush()
+    job_id = job.id
+
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="jobs",
+        action="jobs.run.enqueued",
         actor_id=user.id,
-        actor_type="user",
-        use_pending=body.use_pending,
+        resource_type="schedule",
+        resource_id=str(schedule_id),
+        job_id=job_id,
+        payload={"jobs_id": str(job_id), "use_pending": body.use_pending},
     )
-    return ScheduleRunResponse(
-        jobs_id=str(outcome.jobs_row_id) if outcome.jobs_row_id else None,
-        reason=outcome.reason,
-        outputs=outcome.outputs,
+    await db.commit()
+
+    celery_app.send_task(
+        "tasks.scheduled_jobs_run_now",
+        kwargs={
+            "schedule_id": str(schedule_id),
+            "tenant_id": str(user.tenant_id),
+            "use_pending": body.use_pending,
+            "actor_id": str(user.id),
+            "job_id": str(job_id),
+        },
+        queue="sync",
     )
+
+    return ScheduleRunResponse(jobs_id=str(job_id), status="queued", reason=None, outputs={})
 
 
 @router.post("/{schedule_id}/pause", response_model=ScheduleResponse)

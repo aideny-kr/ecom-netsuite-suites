@@ -16,10 +16,15 @@ test_report_refresh's ctx-spy tests) with a canned `CompiledPlan` or
 deterministic/network-free — `tests/jobs/test_compiler.py` already covers
 `compile_instruction` itself end-to-end with a FakeAdapter.
 
-`POST /schedules/{id}/run` monkeypatches a `fake.read` step onto the SAME
-`STEP_REGISTRY` dict object the executor looks up at run time (the technique
-`tests/jobs/test_executor.py` already established) so a real `jobs` row is
-produced with no BigQuery/Drive/WeasyPrint credentials involved.
+`POST /schedules/{id}/run` now enqueues via Celery instead of executing the
+plan inline (Task 5 residual — see the endpoint's own docstring): these tests
+fake `app.api.v1.schedules.celery_app.send_task` (`_capture_send_task` below,
+this repo's established pattern — see `tests/workers/test_report_auto_
+refresh.py`'s identical `monkeypatch.setattr(mod.celery_app, "send_task",
+...)`) rather than monkeypatching `STEP_REGISTRY`, since the request itself
+never runs a step any more — only the Celery task does, and that task's own
+`existing_job_id` reuse behaviour is covered end-to-end in
+`tests/jobs/test_executor.py`, not here.
 """
 
 from __future__ import annotations
@@ -35,7 +40,6 @@ from app.models.job import Job
 from app.models.pipeline import Schedule
 from app.models.tenant import Tenant
 from app.services.jobs.compiler import Clarification, CompiledPlan
-from app.services.jobs.registry import STEP_REGISTRY, StepSpec
 from tests.conftest import create_test_tenant, create_test_user, make_auth_headers
 
 _INVENTORY_AGING_PLAN = {
@@ -63,12 +67,6 @@ def _compiled_plan(plan_json: dict = _INVENTORY_AGING_PLAN) -> CompiledPlan:
         summary_line="5 steps · BigQuery SQL query → Compose report → Render PDF → Build Excel workbook → Upload to Google Drive",
         kinds={"read", "write"},
         model="claude-test-model",
-    )
-
-
-def _fake_read_spec(executor, step_type: str = "fake.read") -> StepSpec:
-    return StepSpec(
-        type=step_type, label="Fake step (test)", kind="read", params_schema={"type": "object"}, executor=executor
     )
 
 
@@ -530,17 +528,37 @@ class TestScheduleApprove:
 # ---------------------------------------------------------------------------
 
 
+def _capture_send_task(monkeypatch) -> list[tuple[str, dict]]:
+    """Fakes `celery_app.send_task` at the point `schedules.py` calls it —
+    this repo's established convention (`tests/workers/test_report_auto_
+    refresh.py`'s `monkeypatch.setattr(mod.celery_app, "send_task", ...)`) —
+    so `/run` never actually touches a broker; returns the list of
+    `(task_name, kwargs)` calls captured."""
+
+    class _FakeResult:
+        id = "fake-celery-task-id"
+
+    sent: list[tuple[str, dict]] = []
+
+    def fake_send_task(name, kwargs=None, **_kw):
+        sent.append((name, kwargs or {}))
+        return _FakeResult()
+
+    monkeypatch.setattr("app.api.v1.schedules.celery_app.send_task", fake_send_task)
+    return sent
+
+
 class TestScheduleRun:
-    async def test_run_now_executes_the_approved_plan_and_returns_the_jobs_id(
+    async def test_run_now_enqueues_and_returns_202_with_the_jobs_id(
         self, client: AsyncClient, admin_user, db: AsyncSession, monkeypatch
     ):
-        calls = []
-
-        async def fake_exec(ctx, params):
-            calls.append(params)
-            return {"ok": True}
-
-        monkeypatch.setitem(STEP_REGISTRY, "fake.read", _fake_read_spec(fake_exec))
+        """Task 5 residual: `/run` now enqueues via Celery instead of running
+        the plan inline on the request — a real Inventory Aging run can take
+        minutes, which used to hold the request open long enough for nginx to
+        cut it. The endpoint itself never runs a step; it creates the `jobs`
+        row (so the `202` response carries a real id immediately) and
+        dispatches `tasks.scheduled_jobs_run_now` with that row's id."""
+        sent = _capture_send_task(monkeypatch)
 
         user, headers = admin_user
         tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
@@ -550,16 +568,25 @@ class TestScheduleRun:
         await db.commit()
 
         resp = await client.post(f"/api/v1/schedules/{schedule.id}/run", json={"use_pending": False}, headers=headers)
-        assert resp.status_code == 200
+        assert resp.status_code == 202
         data = resp.json()
-        assert data["reason"] == "done"
+        assert data["status"] == "queued"
+        assert data["reason"] is None
         assert data["jobs_id"]
-        assert len(calls) == 1
 
         job_row = (await db.execute(select(Job).where(Job.id == uuid.UUID(data["jobs_id"])))).scalar_one()
         assert job_row.tenant_id == user.tenant_id
         assert job_row.job_type == "scheduled_job"
-        assert job_row.result_summary["reason"] == "done"
+        assert job_row.status == "pending"  # not executed by this request — the task hasn't run
+
+        assert len(sent) == 1
+        task_name, kwargs = sent[0]
+        assert task_name == "tasks.scheduled_jobs_run_now"
+        assert kwargs["schedule_id"] == str(schedule.id)
+        assert kwargs["tenant_id"] == str(user.tenant_id)
+        assert kwargs["use_pending"] is False
+        assert kwargs["actor_id"] == str(user.id)
+        assert kwargs["job_id"] == data["jobs_id"]
 
     async def test_run_now_with_no_compiled_plan_is_409(self, client: AsyncClient, admin_user, db: AsyncSession):
         user, headers = admin_user
@@ -579,13 +606,7 @@ class TestScheduleRun:
         `plan_json` already on it — `run` with `use_pending=False` must
         refuse to execute that plan's steps until `/approve` has run, even
         though the plan is non-empty."""
-        calls = []
-
-        async def fake_exec(ctx, params):
-            calls.append(params)
-            return {"ok": True}
-
-        monkeypatch.setitem(STEP_REGISTRY, "fake.read", _fake_read_spec(fake_exec))
+        sent = _capture_send_task(monkeypatch)
 
         user, headers = admin_user
         tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
@@ -600,18 +621,15 @@ class TestScheduleRun:
 
         resp = await client.post(f"/api/v1/schedules/{schedule.id}/run", json={"use_pending": False}, headers=headers)
         assert resp.status_code == 409
-        assert calls == []
+        assert sent == []  # blocked before a jobs row was created or a task enqueued
 
         job_count = await db.execute(select(Job).where(Job.tenant_id == user.tenant_id))
         assert job_count.scalars().all() == []
 
-    async def test_run_now_use_pending_runs_the_pending_plan(
+    async def test_run_now_use_pending_enqueues_with_the_pending_flag_and_next_plan_version(
         self, client: AsyncClient, admin_user, db: AsyncSession, monkeypatch
     ):
-        async def fake_exec(ctx, params):
-            return {"ok": True}
-
-        monkeypatch.setitem(STEP_REGISTRY, "fake.read", _fake_read_spec(fake_exec))
+        sent = _capture_send_task(monkeypatch)
 
         user, headers = admin_user
         tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
@@ -622,8 +640,16 @@ class TestScheduleRun:
         await db.commit()
 
         resp = await client.post(f"/api/v1/schedules/{schedule.id}/run", json={"use_pending": True}, headers=headers)
-        assert resp.status_code == 200
-        assert resp.json()["reason"] == "done"
+        assert resp.status_code == 202
+        assert resp.json()["status"] == "queued"
+
+        job_row = (await db.execute(select(Job).where(Job.id == uuid.UUID(resp.json()["jobs_id"])))).scalar_one()
+        # plan_version + 1 -- the version pending_plan_json WOULD become on approval
+        # (matches run_schedule_now's own use_pending convention, spec §B4).
+        assert job_row.parameters["plan_version"] == 1
+
+        assert len(sent) == 1
+        assert sent[0][1]["use_pending"] is True
 
     async def test_readonly_cannot_run(self, client: AsyncClient, readonly_user, admin_user, db: AsyncSession):
         admin, admin_headers = admin_user

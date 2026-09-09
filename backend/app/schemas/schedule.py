@@ -167,8 +167,16 @@ class ScheduleDetailResponse(ScheduleResponse):
 
 
 class ScheduleRunResponse(BaseModel):
+    """`POST /schedules/{id}/run`'s response (Task 5 residual: this now
+    enqueues via Celery instead of running inline — see the endpoint's own
+    docstring). `jobs_id` is real and present immediately (the endpoint
+    creates that row itself before dispatching); `reason`/`outputs` are
+    `None`/`{}` at enqueue time — the run has not necessarily happened yet —
+    and are populated once it has, readable via `GET /schedules/{id}/runs`."""
+
     jobs_id: Optional[str] = None
-    reason: str
+    status: str = "queued"
+    reason: Optional[str] = None
     outputs: dict = Field(default_factory=dict)
 
 

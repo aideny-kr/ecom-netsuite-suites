@@ -943,3 +943,98 @@ async def test_recon_run_uses_the_schedule_timezone_local_date_not_utc_date(db: 
     assert len(captured) == 1
     assert captured[0]["date_to"] == "2026-09-08"
     assert captured[0]["date_from"] == "2026-09-01"
+
+
+# ---------------------------------------------------------------------------
+# run_schedule_now(existing_job_id=...) reuses that jobs row instead of
+# inserting a second one (Task 5 residual: the request-scoped "Run now"
+# endpoint now enqueues via Celery instead of executing inline; it creates
+# the jobs row itself, up front, so its 202 response can carry a real id
+# immediately, then dispatches a task that calls run_schedule_now with that
+# row's id).
+# ---------------------------------------------------------------------------
+
+
+async def test_run_schedule_now_reuses_an_existing_jobs_row_when_given_one(db: AsyncSession, monkeypatch):
+    tenant = await create_test_tenant(db, name="Existing Job Co")
+    await set_tenant_context(db, str(tenant.id))
+
+    async def fake_exec(ctx, params):
+        return {"ok": True}
+
+    monkeypatch.setitem(STEP_REGISTRY, "fake.step", _fake_spec("read", fake_exec))
+
+    schedule = await _seed_job_schedule(
+        db,
+        tenant,
+        plan_json={"steps": [{"id": "s1", "type": "fake.step", "params": {}}]},
+        next_run_at=None,
+        cron_expression="0 6 * * 1",
+    )
+
+    # Mirrors what the API endpoint does before dispatching the Celery task:
+    # create a placeholder jobs row up front.
+    pre_created = Job(
+        tenant_id=tenant.id,
+        job_type="scheduled_job",
+        status="pending",
+        parameters={"schedule_id": str(schedule.id), "use_pending": False},
+    )
+    db.add(pre_created)
+    await db.flush()
+    await db.commit()
+    pre_created_id = pre_created.id
+
+    outcome = await run_schedule_now(
+        db,
+        schedule.id,
+        tenant_id=tenant.id,
+        actor_id=None,
+        use_pending=False,
+        existing_job_id=pre_created_id,
+    )
+
+    assert outcome.reason == REASON_DONE
+    assert outcome.jobs_row_id == pre_created_id
+
+    jobs = (await db.execute(select(Job).where(Job.tenant_id == tenant.id))).scalars().all()
+    assert len(jobs) == 1, f"expected the SAME jobs row to be reused, got {len(jobs)}"
+    assert jobs[0].id == pre_created_id
+    assert jobs[0].status == "completed"
+    assert jobs[0].result_summary["reason"] == REASON_DONE
+    assert jobs[0].parameters["schedule_id"] == str(schedule.id)
+
+
+async def test_run_schedule_now_falls_back_to_inserting_when_existing_job_id_is_missing(db: AsyncSession, monkeypatch):
+    """Defensive only (row deleted between enqueue and pickup) — must not crash."""
+    tenant = await create_test_tenant(db, name="Missing Job Co")
+    await set_tenant_context(db, str(tenant.id))
+
+    async def fake_exec(ctx, params):
+        return {"ok": True}
+
+    monkeypatch.setitem(STEP_REGISTRY, "fake.step", _fake_spec("read", fake_exec))
+
+    schedule = await _seed_job_schedule(
+        db,
+        tenant,
+        plan_json={"steps": [{"id": "s1", "type": "fake.step", "params": {}}]},
+        next_run_at=None,
+        cron_expression="0 6 * * 1",
+    )
+
+    missing_id = uuid.uuid4()
+    outcome = await run_schedule_now(
+        db,
+        schedule.id,
+        tenant_id=tenant.id,
+        actor_id=None,
+        use_pending=False,
+        existing_job_id=missing_id,
+    )
+
+    assert outcome.reason == REASON_DONE
+    assert outcome.jobs_row_id != missing_id
+
+    jobs = (await db.execute(select(Job).where(Job.tenant_id == tenant.id))).scalars().all()
+    assert len(jobs) == 1

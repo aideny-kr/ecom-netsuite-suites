@@ -129,6 +129,7 @@ __all__ = [
     "compute_next_run",
     "run_due_jobs",
     "run_schedule_now",
+    "run_schedule_now_task",
     "scheduled_jobs_sweep_all",
     "scheduled_jobs_sweep_tenant",
 ]
@@ -464,10 +465,24 @@ async def run_schedule_now(
     due_at: datetime | None = None,
     now: datetime | None = None,
     attempt: int = 1,
+    existing_job_id: uuid.UUID | None = None,
 ) -> RunOutcome:
     """Run one schedule ONE time: one `jobs` row, plan steps replayed in order,
     schedule bookkeeping updated, one commit at the end (plus the write-step
     audit-before-call commits inside `_run_steps`).
+
+    `existing_job_id` (Task 5 residual): the request-scoped "Run now" endpoint
+    (`POST /schedules/{id}/run`) now enqueues via Celery instead of executing
+    inline on the request's own session (a real Inventory Aging run can take
+    minutes; nginx cuts the request). That endpoint creates the `jobs` row
+    itself — status `pending` — BEFORE dispatching `tasks.scheduled_jobs_run_now`
+    (below), so its `202` response can carry the real id immediately; this
+    param makes the run below REUSE that SAME row (update in place) instead of
+    inserting a second one. `None` (every other caller — the Beat sweep, the
+    MCP `schedule.run` tool) keeps the original insert-a-fresh-row behaviour.
+    If the given id no longer resolves (defensive only — e.g. the schedule was
+    deleted between enqueue and pickup), falls back to inserting fresh rather
+    than crashing the run.
 
     `use_pending=True` (spec §B5 "Run once with this change") replays
     `pending_plan_json` instead of the approved `plan_json`, WITHOUT bumping
@@ -559,22 +574,32 @@ async def run_schedule_now(
 
     period_key = due_at.astimezone(ZoneInfo(row.timezone)).date().isoformat()
     correlation_id = str(uuid.uuid4())
+    job_parameters = {
+        "schedule_id": str(schedule_id),
+        "plan_version": plan_version_used,
+        "period_key": period_key,
+        "attempt": attempt,
+        "use_pending": use_pending,
+    }
 
-    job = Job(
-        tenant_id=tenant_id,
-        job_type="scheduled_job",
-        status="running",
-        correlation_id=correlation_id,
-        started_at=now,
-        parameters={
-            "schedule_id": str(schedule_id),
-            "plan_version": plan_version_used,
-            "period_key": period_key,
-            "attempt": attempt,
-            "use_pending": use_pending,
-        },
-    )
-    db.add(job)
+    job: Job | None = None
+    if existing_job_id is not None:
+        job = await db.get(Job, existing_job_id)
+    if job is not None:
+        job.status = "running"
+        job.correlation_id = correlation_id
+        job.started_at = now
+        job.parameters = job_parameters
+    else:
+        job = Job(
+            tenant_id=tenant_id,
+            job_type="scheduled_job",
+            status="running",
+            correlation_id=correlation_id,
+            started_at=now,
+            parameters=job_parameters,
+        )
+        db.add(job)
     await db.flush()
     # Captured now (job is freshly flushed, not expired) rather than read off
     # `job.id` after `_run_steps` returns: a rollback inside `_run_steps`
@@ -899,5 +924,42 @@ def scheduled_jobs_sweep_tenant(tenant_id: str):
             # use the identical pattern for the identical reason).
             await set_tenant_context_session(db, tenant_id)
             return await run_due_jobs(db, uuid.UUID(tenant_id))
+
+    return asyncio.run(_run())
+
+
+@celery_app.task(base=InstrumentedTask, name="tasks.scheduled_jobs_run_now", queue="sync")
+def run_schedule_now_task(schedule_id: str, tenant_id: str, use_pending: bool, actor_id: str | None, job_id: str):
+    """Celery wrapper for a request-scoped "Run now" (Task 5 residual, spec
+    §B5): `POST /schedules/{id}/run` used to call `run_schedule_now` directly
+    on the REQUEST's own session, holding the HTTP request open for as long
+    as the plan took to run — a real Inventory Aging run takes minutes, which
+    nginx cuts. The endpoint now creates the `jobs` row itself (status
+    `pending`, so its `202` response can carry the real id immediately) and
+    dispatches this task with that row's id; `run_schedule_now`'s
+    `existing_job_id` (see its own docstring) makes it reuse that SAME row
+    rather than inserting a second one. Own session — never the request's —
+    same convention as every other Celery entry point in this module."""
+    import asyncio
+    import uuid as _uuid
+
+    from app.core.database import set_tenant_context_session, worker_async_session
+
+    async def _run() -> dict:
+        async with worker_async_session() as db:
+            await set_tenant_context_session(db, tenant_id)
+            outcome = await run_schedule_now(
+                db,
+                _uuid.UUID(schedule_id),
+                tenant_id=_uuid.UUID(tenant_id),
+                actor_id=_uuid.UUID(actor_id) if actor_id else None,
+                actor_type="user",
+                use_pending=use_pending,
+                existing_job_id=_uuid.UUID(job_id),
+            )
+            return {
+                "reason": outcome.reason,
+                "jobs_id": str(outcome.jobs_row_id) if outcome.jobs_row_id else None,
+            }
 
     return asyncio.run(_run())
