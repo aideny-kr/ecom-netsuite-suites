@@ -316,6 +316,47 @@ async def test_catch_up_runs_once_and_advances_next_run_at_past_now(db: AsyncSes
     assert jobs[0].result_summary["reason"] == REASON_DONE
 
 
+async def test_catch_up_skip_never_skips_the_pending_retry(db: AsyncSession, monkeypatch):
+    """review finding, MAJOR: `skip = row.catch_up == "skip" and missed` also
+    fired for the attempt-2 retry (`last_run_status == "retry_pending"`),
+    marking it `skipped` with `run=False` -- retry-then-pause never actually
+    ran the retry, silently swallowing the original failure forever. `skip`
+    must only ever apply to a fresh attempt-1 claim."""
+    tenant = await create_test_tenant(db, name="CatchUpSkip Retry Co")
+    await set_tenant_context(db, str(tenant.id))
+
+    calls: list[dict] = []
+
+    async def fake_exec(ctx, params):
+        calls.append(dict(params))
+        return {"ok": True}
+
+    monkeypatch.setitem(STEP_REGISTRY, "fake.step", _fake_spec("read", fake_exec))
+
+    now = datetime.now(timezone.utc)
+    schedule = await _seed_job_schedule(
+        db,
+        tenant,
+        plan_json={"steps": [{"id": "s1", "type": "fake.step", "params": {}}]},
+        next_run_at=now - timedelta(minutes=5),
+        cron_expression="* * * * *",  # every minute -- 5 minutes overdue == missed
+        catch_up="skip",
+        last_run_status="retry_pending",
+    )
+
+    stats = await run_due_jobs(db, tenant.id, now=now)
+
+    assert stats["due"] == 1
+    assert stats["ran"] == 1  # NOT skipped, even though catch_up="skip" and missed
+    assert stats["skipped"] == 0
+    assert len(calls) == 1
+
+    jobs = (await db.execute(select(Job).where(Job.tenant_id == tenant.id))).scalars().all()
+    assert len(jobs) == 1
+    assert jobs[0].parameters["attempt"] == 2
+    assert schedule.last_run_status == REASON_DONE
+
+
 async def test_catch_up_skip_does_not_run_a_missed_window(db: AsyncSession, monkeypatch):
     tenant = await create_test_tenant(db, name="CatchUpSkip Co")
     await set_tenant_context(db, str(tenant.id))

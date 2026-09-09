@@ -316,7 +316,12 @@ async def _claim_due_schedules(db: AsyncSession, tenant_id: uuid.UUID, now: date
             )
             continue
 
-        skip = row.catch_up == "skip" and missed
+        # `skip` applies ONLY to a fresh attempt-1 claim (review finding,
+        # MAJOR): the pending attempt-2 retry is never "missed" in the
+        # catch-up sense, and letting `skip` fire there marked the retry
+        # `skipped`/`run=False` -- retry-then-pause never actually ran the
+        # retry, silently swallowing the original failure forever.
+        skip = row.catch_up == "skip" and missed and attempt == 1
         row.last_run_status = "skipped" if skip else "running"
         claims.append(
             _Claim(schedule_id=row.id, due_at=due_at, plan_version=row.plan_version, run=not skip, attempt=attempt)
