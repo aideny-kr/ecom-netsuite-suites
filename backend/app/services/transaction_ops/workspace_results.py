@@ -77,28 +77,48 @@ def result_item(row):
 async def review_page(db, tenant_id, run_ids, *, limit=50, offset=0, status=None, search=""):
     latest, _ = await selected_evidence(db, tenant_id, run_ids)
     category = result_category(latest)
-    summary = (
+    # Count before filtering, then count the filtered result before paging. One
+    # evidence evaluation supplies both summary cards and the visible page.
+    counted = select(
+        latest,
+        func.count().over().label("checked"),
+        *[func.count().filter(category == name).over().label(name) for name in CATEGORIES],
+    ).subquery()
+    filtered = filtered_query(counted, status, search).subquery()
+    rows = (
         (
             await db.execute(
-                select(
-                    func.count().label("checked"),
-                    *[func.count().filter(category == name).label(name) for name in CATEGORIES],
-                ).select_from(latest)
+                select(filtered, func.count().over().label("total"))
+                .order_by(filtered.c.order_reference, filtered.c.id)
+                .offset(offset)
+                .limit(limit)
             )
         )
         .mappings()
-        .one()
-    )
-    query = filtered_query(latest, status, search)
-    total = await db.scalar(select(func.count()).select_from(query.subquery()))
-    rows = (
-        (await db.execute(query.order_by(latest.c.order_reference, latest.c.id).offset(offset).limit(limit)))
-        .mappings()
         .all()
     )
+    if rows:
+        summary = {key: rows[0][key] for key in ("checked", *CATEGORIES)}
+        total = rows[0]["total"]
+    else:
+        # An empty or out-of-range page cannot carry window counts. Keep its
+        # summary explicit and its filtered total accurate, never guess zero.
+        summary = dict(
+            (
+                await db.execute(
+                    select(
+                        func.count().label("checked"),
+                        *[func.count().filter(category == name).label(name) for name in CATEGORIES],
+                    ).select_from(latest)
+                )
+            )
+            .mappings()
+            .one()
+        )
+        total = await db.scalar(select(func.count()).select_from(filtered_query(latest, status, search).subquery()))
     return {
         "items": [result_item(row) for row in rows],
-        "summary": dict(summary),
+        "summary": summary,
         "total": total,
         "has_next": offset + len(rows) < total,
     }
