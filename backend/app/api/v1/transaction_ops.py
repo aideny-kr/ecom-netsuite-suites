@@ -209,7 +209,7 @@ async def decide_proposal(proposal_id: UUID, request: ProposalDecision, user: Re
 async def list_case_groups(
     user: Reader,
     db: Database,
-    limit: Annotated[int, Query(ge=1, le=50)] = 50,
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
     review_run_ids: Annotated[list[UUID] | None, Query(max_length=20)] = None,
     status: Literal["matched", "needs_review", "not_verified"] | None = None,
@@ -345,6 +345,72 @@ async def investigate_cases(request: CaseBatchInvestigation, user: Reader, db: D
     try:
         return await case_service.investigate_cases(
             db, user.tenant_id, request.case_ids, request.evaluation_key, actor=user
+        )
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
+class ReviewExport(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    review_run_ids: list[UUID] = Field(min_length=1, max_length=20)
+    status: Literal["matched", "needs_review", "not_verified"] | None = None
+    search: str = Field(default="", max_length=200)
+
+
+@router.get("/review-results")
+async def selected_review_results(
+    user: Reader,
+    db: Database,
+    review_run_ids: Annotated[list[UUID], Query(min_length=1, max_length=20)],
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    status: Literal["matched", "needs_review", "not_verified"] | None = None,
+    search: Annotated[str, Query(max_length=200)] = "",
+):
+    from app.services.transaction_ops.workspace_results import review_page
+
+    try:
+        return await review_page(
+            db, user.tenant_id, review_run_ids, limit=limit, offset=offset, status=status, search=search
+        )
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
+@router.get("/workspace-page")
+async def workspace_page(
+    user: Reader,
+    db: Database,
+    view: Literal["cases", "runs", "proposals"],
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    config_id: UUID | None = None,
+):
+    from app.services.transaction_ops.workspace_results import record_page
+
+    try:
+        return await record_page(db, user.tenant_id, view, limit=limit, offset=offset, config_id=config_id)
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
+@router.post("/review-export")
+async def download_review_report(request: ReviewExport, user: Reader, db: Database):
+    from fastapi.responses import Response
+
+    from app.services.transaction_ops.excel_report import export_review
+
+    try:
+        content, report_id = await export_review(
+            db, user, request.review_run_ids, status=request.status, search=request.search
+        )
+        return Response(
+            content,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": f'attachment; filename="reconciliation-{report_id}.xlsx"',
+                "Cache-Control": "no-store",
+            },
         )
     except service.StateError as exc:
         raise _http_error(exc) from None

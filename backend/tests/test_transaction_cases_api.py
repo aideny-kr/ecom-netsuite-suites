@@ -59,7 +59,7 @@ async def test_group_routes_require_auth_and_keep_members_tenant_scoped(client, 
     foreign = await client.get(f"{prefix}/{group['group_id']}/cases", headers=other_headers)
     assert foreign.status_code == 200 and foreign.json()["cases"] == []
     assert (await client.get(f"{prefix}/invalid/cases", headers=headers)).status_code == 422
-    assert (await client.get(f"{prefix}?limit=51", headers=headers)).status_code == 422
+    assert (await client.get(f"{prefix}?limit=501", headers=headers)).status_code == 422
 
 
 async def test_group_period_query_validates_scope_and_never_exposes_foreign_reviews(

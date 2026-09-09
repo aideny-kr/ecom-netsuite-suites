@@ -8,6 +8,7 @@ import {
   useTransactionAccess,
   useTransactionConfigs,
 } from "@/hooks/use-transaction-ops";
+import { Pagination } from "./pagination";
 import { Button } from "@/components/ui/button";
 import { safeError } from "../transaction-ops/format";
 import type { JsonObject, TransactionConfig } from "../transaction-ops/types";
@@ -23,7 +24,12 @@ type Group = {
   refunds: string;
   target_state: string | null;
 };
-type Groups = { groups: Group[]; has_next: boolean };
+type Groups = {
+  groups: Group[];
+  has_next: boolean;
+  total_groups: number;
+  total_cases: number;
+};
 
 function matches(config: TransactionConfig, scope: JsonObject) {
   return (
@@ -54,10 +60,14 @@ export function IssueGroups({
   const access = useTransactionAccess();
   const configs = useTransactionConfigs();
   const [offset, setOffset] = useState(0);
+  const [size, setSize] = useState(50);
   const scope = reviewRunIds
     ? { review_run_ids: reviewRunIds, status, search }
     : {};
-  const query = new URLSearchParams({ limit: "20", offset: String(offset) });
+  const query = new URLSearchParams({
+    limit: String(size),
+    offset: String(offset),
+  });
   if (reviewRunIds) {
     reviewRunIds.forEach((id) => query.append("review_run_ids", id));
     query.set("status", status);
@@ -70,6 +80,7 @@ export function IssueGroups({
       "case-groups",
       scope,
       offset,
+      size,
     ],
     enabled:
       access.allowed && (reviewRunIds === undefined || reviewRunIds.length > 0),
@@ -87,7 +98,7 @@ export function IssueGroups({
         <p className="mt-1 text-[13px] text-muted-foreground">
           {reviewRunIds
             ? `${status === "not_verified" ? "Not verified" : "Needs review"} orders in the selected period and entities${search ? ", matching your search" : ""}, grouped by issue pattern.`
-            : "All open cases across periods and entities, including historical cases. These counts differ from the selected period."}
+            : "All open cases across periods and entities, including historical cases. These counts differ from the selected period."}{" "}
           The agent verifies a shared cause before proposing a batch fix.
         </p>
       </div>
@@ -176,22 +187,19 @@ export function IssueGroups({
               orders.
             </p>
           )}
-          <div className="flex items-center gap-3">
-            <Button
-              variant="outline"
-              disabled={!offset}
-              onClick={() => setOffset(Math.max(0, offset - 20))}
-            >
-              Previous groups
-            </Button>
-            <Button
-              variant="outline"
-              disabled={!groups.data?.has_next}
-              onClick={() => setOffset(offset + 20)}
-            >
-              Next groups
-            </Button>
-          </div>
+          <Pagination
+            offset={offset}
+            size={size}
+            total={groups.data?.total_groups}
+            setOffset={setOffset}
+            setSize={setSize}
+            label="groups"
+          />
+          {groups.data && (
+            <p className="text-xs text-muted-foreground">
+              {groups.data.total_cases} orders across all groups in this view
+            </p>
+          )}
         </>
       )}
       <p className="text-xs text-muted-foreground">

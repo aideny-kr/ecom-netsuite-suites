@@ -32,7 +32,7 @@ vi.mock("@/hooks/use-transaction-ops", () => ({
   useTransactionDecision: () => ({ mutateAsync: vi.fn() }),
 }));
 vi.mock("@/lib/api-client", () => ({
-  apiClient: { get: vi.fn(), post: vi.fn() },
+  apiClient: { get: vi.fn(), post: vi.fn(), download: vi.fn() },
 }));
 vi.mock("./orders-page", () => ({
   OrdersPage: () => <div>Imported source orders</div>,
@@ -87,14 +87,18 @@ beforeEach(() => {
           },
         ],
         has_next: false,
+        total_groups: 1,
+        total_cases: 2,
       } as never;
-    if (path.includes("/review/findings"))
+    if (path.includes("/review-results?"))
       return {
         summary: { checked: 8, matched: 5, needs_review: 2, not_verified: 1 },
         items: [
           {
             id: "f1",
             run_id: run.id,
+            review_run_id: run.id,
+            config_id: run.config_id,
             order_reference: "R123456789",
             case_id: "case-a",
             balance,
@@ -112,18 +116,25 @@ beforeEach(() => {
         period_end: run.params_json.review.end,
       } as never;
     if (path.includes("/runs?")) return [run] as never;
-    if (path.includes("/cases?"))
-      return [
-        {
-          id: "case-a",
-          order_reference: "R123456789",
-          status: "open",
-          scope_json: { subsidiary_id: "1" },
-          latest_report_json: { balance },
-          last_observed_at: "2026-09-08T10:00:00Z",
-        },
-      ] as never;
-    if (path.includes("/proposals?")) return [] as never;
+    if (path.includes("view=runs"))
+      return { items: [run], total: 1, has_next: false } as never;
+    if (path.includes("view=cases"))
+      return {
+        items: [
+          {
+            id: "case-a",
+            order_reference: "R123456789",
+            status: "open",
+            scope_json: { subsidiary_id: "1" },
+            latest_report_json: { balance },
+            last_observed_at: "2026-09-08T10:00:00Z",
+          },
+        ],
+        total: 1,
+        has_next: false,
+      } as never;
+    if (path.includes("view=proposals"))
+      return { items: [], total: 0, has_next: false } as never;
     throw new Error(`Unexpected ${path}`);
   });
 });
@@ -255,7 +266,7 @@ it("keeps a revised entity's existing period visible with its current entity nam
     });
     expect(await screen.findByText("R123456789")).toBeInTheDocument();
     expect(apiClient.get).toHaveBeenCalledWith(
-      expect.stringContaining(`/runs/${run.id}/review/findings`),
+      expect.stringContaining(`review_run_ids=${run.id}`),
     );
   } finally {
     mocks.configs[0] = config;
@@ -308,4 +319,116 @@ it("launches one group investigation with all-member pagination and exact scope"
     screen.queryByRole("region", { name: "Issue groups" }),
   ).not.toBeInTheDocument();
   expect(apiClient.post).not.toHaveBeenCalled();
+});
+
+it("uses 50/100/500 globally and resets pagination when filters change", async () => {
+  const original = vi.mocked(apiClient.get).getMockImplementation()!;
+  vi.mocked(apiClient.get).mockImplementation(async (path: string) => {
+    const data = await original(path);
+    if (path.includes("/review-results?"))
+      return { ...(data as object), total: 1202 } as never;
+    return data;
+  });
+  mount();
+  expect(
+    await screen.findByText("Showing 1–50 of 1202 orders"),
+  ).toBeInTheDocument();
+  expect(screen.getByLabelText("orders per page")).toHaveValue("50");
+  expect(
+    Array.from(
+      (screen.getByLabelText("orders per page") as HTMLSelectElement).options,
+    ).map((o) => o.value),
+  ).toEqual(["50", "100", "500"]);
+  fireEvent.click(screen.getAllByRole("button", { name: "Next" })[0]);
+  await waitFor(() =>
+    expect(apiClient.get).toHaveBeenCalledWith(
+      expect.stringContaining("offset=50&limit=50"),
+    ),
+  );
+  fireEvent.change(screen.getByLabelText("orders per page"), {
+    target: { value: "100" },
+  });
+  await waitFor(() =>
+    expect(apiClient.get).toHaveBeenCalledWith(
+      expect.stringContaining("offset=0&limit=100"),
+    ),
+  );
+  fireEvent.change(screen.getByLabelText("orders per page"), {
+    target: { value: "500" },
+  });
+  await waitFor(() =>
+    expect(apiClient.get).toHaveBeenCalledWith(
+      expect.stringContaining("offset=0&limit=500"),
+    ),
+  );
+  fireEvent.click(screen.getAllByRole("button", { name: "Next" })[0]);
+  await waitFor(() =>
+    expect(apiClient.get).toHaveBeenCalledWith(
+      expect.stringContaining("offset=500&limit=500"),
+    ),
+  );
+  fireEvent.change(screen.getByLabelText("Result status"), {
+    target: { value: "needs_review" },
+  });
+  await waitFor(() =>
+    expect(apiClient.get).toHaveBeenCalledWith(
+      expect.stringContaining("offset=0&limit=500&status=needs_review"),
+    ),
+  );
+  fireEvent.change(screen.getByLabelText("groups per page"), {
+    target: { value: "500" },
+  });
+  await waitFor(() =>
+    expect(apiClient.get).toHaveBeenCalledWith(
+      expect.stringContaining("case-groups?limit=500&offset=0"),
+    ),
+  );
+});
+
+it("exports the full filter scope without including pagination parameters", async () => {
+  const click = vi
+    .spyOn(HTMLAnchorElement.prototype, "click")
+    .mockImplementation(() => {});
+  const create = vi.fn(() => "blob:report");
+  const revoke = vi.fn();
+  vi.stubGlobal(
+    "URL",
+    Object.assign(URL, { createObjectURL: create, revokeObjectURL: revoke }),
+  );
+  vi.mocked(apiClient.download).mockResolvedValue(
+    new Response(new Blob(["workbook"]), {
+      headers: {
+        "content-type":
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "content-disposition":
+          'attachment; filename="reconciliation-report.xlsx"',
+      },
+    }),
+  );
+  try {
+    mount();
+    await screen.findByText("R123456789");
+    fireEvent.change(screen.getByLabelText("Result status"), {
+      target: { value: "needs_review" },
+    });
+    fireEvent.change(screen.getByLabelText("Search order number"), {
+      target: { value: "R123" },
+    });
+    const button = screen.getByRole("button", { name: "Download Excel" });
+    await waitFor(() => expect(button).not.toBeDisabled());
+    fireEvent.click(button);
+    await waitFor(() =>
+      expect(apiClient.download).toHaveBeenCalledWith(
+        "/api/v1/transaction-ops/review-export",
+        { review_run_ids: [run.id], status: "needs_review", search: "R123" },
+      ),
+    );
+    await waitFor(() => expect(click).toHaveBeenCalledTimes(1));
+    expect(create).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(revoke).toHaveBeenCalledWith("blob:report"));
+    expect(apiClient.post).not.toHaveBeenCalled();
+  } finally {
+    click.mockRestore();
+    vi.unstubAllGlobals();
+  }
 });

@@ -25,12 +25,15 @@ import {
 } from "../transaction-ops/format";
 import type { TransactionRun } from "../transaction-ops/types";
 import { BulkProposals } from "./bulk-proposals";
+import { Pagination } from "./pagination";
+import { ReportDownload } from "./report-download";
 import { IssueGroups } from "./issue-groups";
 import { Variance, deltaValue } from "./variance";
 import { OrdersPage } from "./orders-page";
 import { configForRun } from "./review-scope";
 import {
   useReviewRuns,
+  useRunHistory,
   usePeriodData,
   useCases,
   useCaseEvidence,
@@ -79,6 +82,11 @@ function Workspace() {
   const [error, setError] = useState("");
   const [tab, setTab] = useState("Orders");
   const [offset, setOffset] = useState(0);
+  const [size, setSize] = useState(50);
+  const [caseSize, setCaseSize] = useState(50);
+  const [proposalSize, setProposalSize] = useState(50);
+  const [historySize, setHistorySize] = useState(50);
+  const [historyOffset, setHistoryOffset] = useState(0);
   const [caseOffset, setCaseOffset] = useState(0);
   const [proposalOffset, setProposalOffset] = useState(0);
   const [search, setSearch] = useState("");
@@ -127,9 +135,24 @@ function Workspace() {
     offset,
     status,
     search.trim(),
+    size,
   );
-  const cases = useCases(caseOffset, tab === "Cases");
-  const proposals = useFixProposals(proposalOffset, tab === "Fix approvals");
+  const cases = useCases(caseOffset, tab === "Cases", caseSize);
+  const proposals = useFixProposals(
+    proposalOffset,
+    tab === "Fix approvals",
+    proposalSize,
+  );
+  const history = useRunHistory(
+    historyOffset,
+    tab === "Run history",
+    historySize,
+    entity,
+  );
+  const selectionKey = JSON.stringify(selectedRuns.map((r) => r.id));
+  useEffect(() => {
+    setOffset(0);
+  }, [selectionKey]);
   const usable =
     selectedRuns.length > 0 && data.results.every((q) => q.data && !q.error);
   const totals = usable
@@ -142,11 +165,16 @@ function Workspace() {
         { checked: 0, matched: 0, needs_review: 0, not_verified: 0 },
       )
     : null;
-  const rows = data.results.flatMap((q, index) =>
+  const rows = data.results.flatMap((q) =>
     (q.error ? [] : q.data?.items || []).map((row) => ({
       ...row,
       configId:
-        currentConfig(selectedRuns[index])?.id || selectedRuns[index].config_id,
+        currentConfig(
+          selectedRuns.find((run) => run.id === row.review_run_id) ||
+            selectedRuns[0],
+        )?.id ||
+        row.config_id ||
+        selectedRuns[0]?.config_id,
     })),
   );
   const failure =
@@ -271,6 +299,7 @@ function Workspace() {
                 setEntity(e.target.value);
                 setPinned([]);
                 setOffset(0);
+                setHistoryOffset(0);
               }}
             >
               <option value="">All entities</option>
@@ -427,20 +456,28 @@ function Workspace() {
                 setOffset(0);
               }}
             />
-            <select
-              aria-label="Result status"
-              className={input}
-              value={status}
-              onChange={(e) => {
-                setStatus(e.target.value);
-                setOffset(0);
-              }}
-            >
-              <option value="">All results</option>
-              <option value="needs_review">Needs review</option>
-              <option value="matched">Matched</option>
-              <option value="not_verified">Not verified</option>
-            </select>
+            <div className="flex flex-wrap items-start gap-3">
+              <select
+                aria-label="Result status"
+                className={input}
+                value={status}
+                onChange={(e) => {
+                  setStatus(e.target.value);
+                  setOffset(0);
+                }}
+              >
+                <option value="">All results</option>
+                <option value="needs_review">Needs review</option>
+                <option value="matched">Matched</option>
+                <option value="not_verified">Not verified</option>
+              </select>
+              <ReportDownload
+                runIds={selectedRuns.map((r) => r.id)}
+                status={status}
+                search={search.trim()}
+                total={usable ? data.results[0].data?.total : undefined}
+              />
+            </div>
           </div>
           {tab === "Refunds" && (
             <p className="text-[13px] text-muted-foreground">
@@ -505,10 +542,11 @@ function Workspace() {
           )}
           <Pagination
             offset={offset}
-            size={25}
-            hasNext={data.results.some((q) => q.data?.has_next)}
+            size={size}
+            total={usable ? data.results[0].data?.total : undefined}
             setOffset={setOffset}
-            label="25 rows per entity per page"
+            setSize={setSize}
+            label="orders"
           />
           {tab === "Orders" && status !== "matched" && (
             <IssueGroups
@@ -597,7 +635,7 @@ function Workspace() {
                 </tr>
               </thead>
               <tbody>
-                {(cases.data || []).slice(0, 50).map((c) => (
+                {(cases.data?.items || []).map((c) => (
                   <tr key={c.id} className="border-b last:border-0">
                     <td className="p-4">
                       <input
@@ -655,7 +693,7 @@ function Workspace() {
               </tbody>
             </table>
           </div>
-          {!cases.data?.length && !cases.error && (
+          {!cases.data?.items.length && !cases.error && (
             <p className="text-[13px] text-muted-foreground">
               {cases.isLoading
                 ? "Loading cases…"
@@ -664,8 +702,13 @@ function Workspace() {
           )}
           <Pagination
             offset={caseOffset}
-            size={50}
-            hasNext={(cases.data?.length || 0) > 50}
+            size={caseSize}
+            total={cases.error ? undefined : cases.data?.total}
+            setSize={(n) => {
+              setCaseSize(n);
+              setSelectedCases([]);
+            }}
+            label="cases"
             setOffset={(n) => {
               setCaseOffset(n);
               setSelectedCases([]);
@@ -676,8 +719,8 @@ function Workspace() {
       {tab === "Run history" && (
         <section className="space-y-4">
           <p className="text-[13px] text-muted-foreground">
-            Latest 200 investigations. A daily slice finishing does not mean the
-            whole period has finished.
+            All investigations in the selected entity. A daily slice finishing
+            does not mean the whole period has finished.
           </p>
           <div className="overflow-x-auto rounded-xl border">
             <table className="w-full text-[13px]">
@@ -691,47 +734,54 @@ function Workspace() {
                 </tr>
               </thead>
               <tbody>
-                {(runs.data || [])
-                  .filter(
-                    (r) =>
-                      !entity ||
-                      (currentConfig(r)?.id || r.config_id) === entity,
-                  )
-                  .map((r) => (
-                    <tr key={r.id} className="border-b">
-                      <td className="p-4">{dateLabel(r.created_at)}</td>
-                      <td className="p-4">
-                        {currentConfig(r)?.name || "Historical scope"}
-                      </td>
-                      <td className="p-4">
-                        {runState(r.status, r.termination_reason)}
-                      </td>
-                      <td className="space-x-4 p-4">
-                        <Link
+                {(history.data?.items || []).map((r) => (
+                  <tr key={r.id} className="border-b">
+                    <td className="p-4">{dateLabel(r.created_at)}</td>
+                    <td className="p-4">
+                      {currentConfig(r)?.name || "Historical scope"}
+                    </td>
+                    <td className="p-4">
+                      {runState(r.status, r.termination_reason)}
+                    </td>
+                    <td className="space-x-4 p-4">
+                      <Link
+                        className="text-primary underline"
+                        href={runLink(r.id)}
+                      >
+                        Open run
+                      </Link>
+                      {Boolean(span(r).id) && (
+                        <button
                           className="text-primary underline"
-                          href={runLink(r.id)}
+                          onClick={() => {
+                            setEntity(currentConfig(r)?.id || r.config_id);
+                            setPinned([r]);
+                            setOffset(0);
+                            setTab("Orders");
+                          }}
                         >
-                          Open run
-                        </Link>
-                        {Boolean(span(r).id) && (
-                          <button
-                            className="text-primary underline"
-                            onClick={() => {
-                              setEntity(currentConfig(r)?.id || r.config_id);
-                              setPinned([r]);
-                              setOffset(0);
-                              setTab("Orders");
-                            }}
-                          >
-                            View period
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
+                          View period
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
+          {history.error && (
+            <p role="alert">
+              Run history unavailable. {safeError(history.error)}
+            </p>
+          )}
+          <Pagination
+            offset={historyOffset}
+            size={historySize}
+            total={history.error ? undefined : history.data?.total}
+            setOffset={setHistoryOffset}
+            setSize={setHistorySize}
+            label="runs"
+          />
         </section>
       )}
       {tab === "Fix approvals" && (
@@ -744,15 +794,17 @@ function Workspace() {
             <p role="status">Loading fix proposals…</p>
           ) : (
             <BulkProposals
-              key={proposalOffset}
-              proposals={(proposals.data || []).slice(0, 20)}
+              key={`${proposalOffset}:${proposalSize}`}
+              proposals={proposals.data?.items || []}
             />
           )}
           <Pagination
             offset={proposalOffset}
-            size={20}
-            hasNext={(proposals.data?.length || 0) > 20}
+            size={proposalSize}
+            total={proposals.error ? undefined : proposals.data?.total}
             setOffset={setProposalOffset}
+            setSize={setProposalSize}
+            label="fixes"
           />
         </section>
       )}
@@ -822,41 +874,6 @@ function ResultRow({
         )}
       </td>
     </tr>
-  );
-}
-function Pagination({
-  offset,
-  size,
-  hasNext,
-  setOffset,
-  label,
-}: {
-  offset: number;
-  size: number;
-  hasNext: boolean;
-  setOffset: (n: number) => void;
-  label?: string;
-}) {
-  return (
-    <div className="flex flex-wrap items-center justify-end gap-3 text-[13px]">
-      <span className="text-muted-foreground">
-        {label || `Page ${offset / size + 1}`}
-      </span>
-      <Button
-        variant="outline"
-        disabled={!offset}
-        onClick={() => setOffset(Math.max(0, offset - size))}
-      >
-        Previous
-      </Button>
-      <Button
-        variant="outline"
-        disabled={!hasNext}
-        onClick={() => setOffset(offset + size)}
-      >
-        Next
-      </Button>
-    </div>
   );
 }
 function CaseDrawer({ id, close }: { id: string; close: () => void }) {

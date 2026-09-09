@@ -154,11 +154,15 @@ async def list_groups(db, tenant_id, *, limit=50, offset=0, review_run_ids=None,
         .group_by(source.c.tenant_id, *columns)
         .subquery()
     )
-    limit = min(50, max(1, limit))
+    limit = min(500, max(1, limit))
     rows = (
         (
             await db.execute(
-                select(grouped)
+                select(
+                    grouped,
+                    func.count().over().label("total_groups"),
+                    func.sum(grouped.c.case_count).over().label("total_cases"),
+                )
                 .order_by(grouped.c.case_count.desc(), grouped.c.group_id)
                 .offset(max(0, offset))
                 .limit(limit + 1)
@@ -167,17 +171,32 @@ async def list_groups(db, tenant_id, *, limit=50, offset=0, review_run_ids=None,
         .mappings()
         .all()
     )
+    if rows:
+        total_groups, total_cases = rows[0]["total_groups"], int(rows[0]["total_cases"])
+    else:
+        total_groups, total_cases = (
+            await db.execute(
+                select(func.count(), func.coalesce(func.sum(grouped.c.case_count), 0)).select_from(grouped)
+            )
+        ).one()
     groups = []
     for row in rows[:limit]:
         groups.append(
             {
-                **dict(row),
+                **{key: value for key, value in row.items() if key not in ("total_groups", "total_cases")},
                 "pattern": _pattern(row),
                 "cause_verified": False,
                 "last_observed_at": row["last_observed_at"].isoformat(),
             }
         )
-    return {"groups": groups, "has_next": len(rows) > limit, "offset": offset, "usage": USAGE}
+    return {
+        "groups": groups,
+        "has_next": len(rows) > limit,
+        "offset": offset,
+        "total_groups": total_groups,
+        "total_cases": int(total_cases),
+        "usage": USAGE,
+    }
 
 
 async def group_members(db, tenant_id, group_id, *, limit=50, offset=0, review_run_ids=None, status=None, search=""):

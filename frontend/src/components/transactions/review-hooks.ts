@@ -24,6 +24,8 @@ export type TransactionCase = {
 };
 export type ReviewRow = {
   id: string;
+  review_run_id?: string;
+  config_id?: string;
   run_id: string;
   order_reference: string;
   case_id?: string;
@@ -75,27 +77,33 @@ export function usePeriodData(
   offset: number,
   status: string,
   search: string,
+  size = 50,
 ) {
   const access = useTransactionAccess();
-  const results = useQueries({
-    queries: ids.map((id) => ({
-      queryKey: [
-        "transaction-ops",
-        access.tenantId,
-        "period-results",
-        id,
-        offset,
-        status,
-        search,
-      ],
-      enabled: access.allowed,
-      queryFn: () =>
-        apiClient.get<ReviewResults>(
-          `${base}/runs/${enc(id)}/review/findings?${new URLSearchParams({ offset: String(offset), limit: "25", ...(status ? { status } : {}), ...(search ? { search } : {}) })}`,
-        ),
-      refetchInterval: 10000,
-    })),
+  const query = new URLSearchParams({
+    offset: String(offset),
+    limit: String(size),
+    ...(status ? { status } : {}),
+    ...(search ? { search } : {}),
   });
+  ids.forEach((id) => query.append("review_run_ids", id));
+  const result = useQuery({
+    queryKey: [
+      "transaction-ops",
+      access.tenantId,
+      "period-results",
+      ids,
+      offset,
+      size,
+      status,
+      search,
+    ],
+    enabled: access.allowed && ids.length > 0,
+    queryFn: () =>
+      apiClient.get<ReviewResults>(`${base}/review-results?${query}`),
+    refetchInterval: 30000,
+  });
+  const results = [result];
   const coverage = useQueries({
     queries: ids.map((id) => ({
       queryKey: ["transaction-ops", access.tenantId, "period-coverage", id],
@@ -106,17 +114,47 @@ export function usePeriodData(
   });
   return { results, coverage };
 }
-export function useCases(offset: number, enabled: boolean) {
+export type RecordPage<T> = { items: T[]; total: number; has_next: boolean };
+function useRecordPage<T>(
+  view: string,
+  offset: number,
+  size: number,
+  enabled: boolean,
+  configId = "",
+) {
   const access = useTransactionAccess();
+  const params = new URLSearchParams({
+    view,
+    offset: String(offset),
+    limit: String(size),
+    ...(configId ? { config_id: configId } : {}),
+  });
   return useQuery({
-    queryKey: ["transaction-ops", access.tenantId, "cases", offset],
+    queryKey: [
+      "transaction-ops",
+      access.tenantId,
+      "workspace-page",
+      view,
+      offset,
+      size,
+      configId,
+    ],
     enabled: access.allowed && enabled,
     queryFn: () =>
-      apiClient.get<TransactionCase[]>(
-        `${base}/cases?status=open&limit=51&offset=${offset}`,
-      ),
-    refetchInterval: 10000,
+      apiClient.get<RecordPage<T>>(`${base}/workspace-page?${params}`),
+    refetchInterval: 30000,
   });
+}
+export function useCases(offset: number, enabled: boolean, size = 50) {
+  return useRecordPage<TransactionCase>("cases", offset, size, enabled);
+}
+export function useRunHistory(
+  offset: number,
+  enabled: boolean,
+  size = 50,
+  configId = "",
+) {
+  return useRecordPage<TransactionRun>("runs", offset, size, enabled, configId);
 }
 export function useCaseEvidence(id: string) {
   const access = useTransactionAccess();
@@ -142,17 +180,8 @@ export function useCaseEvidence(id: string) {
   });
   return { detail, history };
 }
-export function useFixProposals(offset: number, enabled: boolean) {
-  const access = useTransactionAccess();
-  return useQuery({
-    queryKey: ["transaction-ops", access.tenantId, "fix-proposals", offset],
-    enabled: access.allowed && enabled,
-    queryFn: () =>
-      apiClient.get<TransactionProposal[]>(
-        `${base}/proposals?limit=21&offset=${offset}`,
-      ),
-    refetchInterval: 10000,
-  });
+export function useFixProposals(offset: number, enabled: boolean, size = 50) {
+  return useRecordPage<TransactionProposal>("proposals", offset, size, enabled);
 }
 export function useStartPeriodReview() {
   const access = useTransactionAccess();
