@@ -33,10 +33,44 @@ from tests.fixtures import statement_fixture as fx
 
 
 def test_catalog_lists_three_statement_playbooks_with_period_param():
-    assert set(PLAYBOOKS) == {"income_statement", "balance_sheet", "trial_balance"}
-    for meta in PLAYBOOKS.values():
+    statement_playbooks = {"income_statement", "balance_sheet", "trial_balance"}
+    assert statement_playbooks <= set(PLAYBOOKS)
+    for key in statement_playbooks:
+        meta = PLAYBOOKS[key]
         assert meta["name"] and meta["description"]
         assert [p["key"] for p in meta["params"]] == ["period"]
+
+
+def test_catalog_includes_inventory_aging_with_locations_param():
+    # Slice 1 (docs/superpowers/specs/2026-09-08-...) added a non-statement playbook
+    # with its own param shape -- it must not collapse the statement-only assertion
+    # above, and must be independently well-formed.
+    assert "inventory_aging" in PLAYBOOKS
+    meta = PLAYBOOKS["inventory_aging"]
+    assert meta["name"] and meta["description"]
+    assert "locations" in [p["key"] for p in meta["params"]]
+
+
+def test_build_playbook_recipe_for_inventory_aging_uses_bigquery_sources():
+    title, recipe = build_playbook_recipe("inventory_aging", {"locations": ["Acme", "Globex"]})
+    assert title == "Inventory Aging Weekly"
+    assert recipe["schema_version"] == 1
+    assert set(recipe["sources"]) == {"r_items", "r_prior", "r_trend", "r_meta"}
+    for source in recipe["sources"].values():
+        assert source["tool"] == "bigquery_sql"
+        assert source["connection_id"] is None
+    assert recipe["sections"] == [
+        {
+            "type": "inventory_aging",
+            "result_ids": ["r_items", "r_prior", "r_trend", "r_meta"],
+            "params": {"locations": ["Acme", "Globex"]},
+        }
+    ]
+
+
+def test_build_playbook_recipe_for_inventory_aging_rejects_bad_location():
+    with pytest.raises(ValueError):
+        build_playbook_recipe("inventory_aging", {"locations": ["O'Brien Depot"]})
 
 
 # ---------------------------------------------------------------------------

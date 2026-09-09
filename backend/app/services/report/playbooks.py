@@ -178,6 +178,23 @@ PLAYBOOKS: dict[str, dict] = {
         "description": "All GL accounts with debit/credit totals for one accounting period.",
         "params": [{"key": "period", "label": "Accounting period", "example": "Jun 2026"}],
     },
+    # Slice 1 (docs/superpowers/specs/2026-09-08-scheduled-jobs-and-inventory-aging-design.md
+    # Part A): NOT a netsuite_financial_report statement -- straight off the BigQuery
+    # inventory snapshot, so it takes a different param shape (locations/windows, not a
+    # single "period") and build_playbook_recipe branches for it below rather than
+    # running it through the period-normalization machinery every other entry here uses.
+    "inventory_aging": {
+        "name": "Inventory Aging Weekly",
+        "description": (
+            "On-hand inventory aging by stock location, straight from the BigQuery "
+            "snapshot -- buckets, watch items, and a deterministic narrative."
+        ),
+        "params": [
+            {"key": "locations", "label": "Stock locations", "example": "Dimerco,Fedex,Panurgy"},
+            {"key": "compare_days", "label": "Comparison window (days)", "example": "7"},
+            {"key": "trend_weeks", "label": "Trend weeks", "example": "9"},
+        ],
+    },
 }
 
 
@@ -189,10 +206,35 @@ def _source(report_type: str, period: str) -> dict:
     }
 
 
+def _build_inventory_aging_recipe(params: dict) -> tuple[str, dict]:
+    """``inventory_aging``'s own recipe shape: four ``bigquery_sql`` sources (Task 1's
+    ``inventory_aging.build_sources``), one ``inventory_aging`` section referencing all
+    of them. Wiring that section type into ``assemble_spec``/the renderer is a later
+    Slice-1 task -- this only has to produce the recipe the refresh engine can store
+    and (once that wiring lands) replay unchanged, exactly like every other recipe here."""
+    from app.services.report.inventory_aging import RESULT_IDS, build_sources
+
+    sources = build_sources(params)
+    return "Inventory Aging Weekly", {
+        "schema_version": 1,
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "sections": [
+            {
+                "type": "inventory_aging",
+                "result_ids": list(RESULT_IDS),
+                "params": params,
+            }
+        ],
+        "sources": sources,
+    }
+
+
 def build_playbook_recipe(playbook_key: str, params: dict[str, str]) -> tuple[str, dict]:
     meta = PLAYBOOKS.get(playbook_key)
     if meta is None:
         raise ValueError(f"Unknown playbook: '{playbook_key}'")
+    if playbook_key == "inventory_aging":
+        return _build_inventory_aging_recipe(params or {})
     # normalize_period accepts several human spellings ("jun 2026", "June 2026",
     # "6/2026", "2026-06") and returns the canonical "Mon YYYY" form -- everything
     # below (title, sections, EVERY source's params) uses that canonical string, so
