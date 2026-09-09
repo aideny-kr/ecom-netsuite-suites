@@ -63,6 +63,9 @@ dependencies = [
     # here because app/services/jobs/registry.py imports it for real, not just
     # incidentally (Slice 2, Scheduled Jobs plan validation, spec §B2/B3).
     "jsonschema>=4.0.0",
+    # Scheduled Jobs Beat sweep (Slice 2, Task 3, spec §B4): DST-safe cron ->
+    # next-fire-time computation in the schedule's own IANA timezone.
+    "croniter>=2.0.0",
 ]
 
 [project.optional-dependencies]
