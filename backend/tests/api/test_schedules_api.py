@@ -701,6 +701,82 @@ class TestScheduleUpdate:
         assert data["plan_json"] == _INVENTORY_AGING_PLAN
         assert data["plan_status"] == "approved"
 
+    async def test_patch_instruction_on_legacy_schedule_is_409(
+        self, client: AsyncClient, admin_user, db: AsyncSession
+    ):
+        """Item 3 (gate fix): a job-only edit must not act on a pre-Slice-2
+        `sync|report|recon` row — there is no `plan_json`/compiler pipeline
+        on that row type at all."""
+        user, headers = admin_user
+        tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
+        legacy = Schedule(
+            tenant_id=tenant.id,
+            name="Legacy Sync",
+            schedule_type="sync",
+            cron_expression="0 0 * * *",
+            is_active=True,
+        )
+        db.add(legacy)
+        await db.commit()
+
+        resp = await client.patch(
+            f"/api/v1/schedules/{legacy.id}",
+            json={"instruction": "do something"},
+            headers=headers,
+        )
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "not a scheduled job"
+
+    async def test_patch_discard_pending_on_legacy_schedule_is_409(
+        self, client: AsyncClient, admin_user, db: AsyncSession
+    ):
+        user, headers = admin_user
+        tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
+        legacy = Schedule(
+            tenant_id=tenant.id,
+            name="Legacy Sync",
+            schedule_type="sync",
+            cron_expression="0 0 * * *",
+            is_active=True,
+        )
+        db.add(legacy)
+        await db.commit()
+
+        resp = await client.patch(
+            f"/api/v1/schedules/{legacy.id}",
+            json={"discard_pending": True},
+            headers=headers,
+        )
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "not a scheduled job"
+
+    async def test_patch_cron_and_name_on_legacy_schedule_still_allowed(
+        self, client: AsyncClient, admin_user, db: AsyncSession
+    ):
+        """Legacy-style direct field edits are unaffected — only job-only
+        edits (instruction, discard_pending) are refused."""
+        user, headers = admin_user
+        tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
+        legacy = Schedule(
+            tenant_id=tenant.id,
+            name="Legacy Sync",
+            schedule_type="sync",
+            cron_expression="0 0 * * *",
+            is_active=True,
+        )
+        db.add(legacy)
+        await db.commit()
+
+        resp = await client.patch(
+            f"/api/v1/schedules/{legacy.id}",
+            json={"name": "Legacy Sync Renamed", "cron_expression": "0 1 * * *"},
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["name"] == "Legacy Sync Renamed"
+        assert data["cron_expression"] == "0 1 * * *"
+
     async def test_patch_discard_pending_false_is_a_noop(self, client: AsyncClient, admin_user, db: AsyncSession):
         user, headers = admin_user
         tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
@@ -773,6 +849,25 @@ class TestScheduleApprove:
 
         resp = await client.post(f"/api/v1/schedules/{schedule.id}/approve", headers=headers)
         assert resp.status_code == 400
+
+    async def test_approve_on_legacy_schedule_is_409(self, client: AsyncClient, admin_user, db: AsyncSession):
+        """Item 3 (gate fix): approve is a job-only concept (plan_status /
+        plan_json don't mean anything on a legacy row)."""
+        user, headers = admin_user
+        tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
+        legacy = Schedule(
+            tenant_id=tenant.id,
+            name="Legacy Sync",
+            schedule_type="sync",
+            cron_expression="0 0 * * *",
+            is_active=True,
+        )
+        db.add(legacy)
+        await db.commit()
+
+        resp = await client.post(f"/api/v1/schedules/{legacy.id}/approve", headers=headers)
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "not a scheduled job"
 
     async def test_readonly_cannot_approve(self, client: AsyncClient, readonly_user, admin_user, db: AsyncSession):
         admin, admin_headers = admin_user

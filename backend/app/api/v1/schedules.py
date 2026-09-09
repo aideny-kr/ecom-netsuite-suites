@@ -343,6 +343,16 @@ async def update_schedule(
     applies immediately, no approval needed.
     """
     schedule = await _get_or_404(db, schedule_id, user.tenant_id)
+
+    # Item 3 (gate fix): a Scheduled-Job-only edit must not act on a
+    # pre-Slice-2 `sync|report|recon` row — that row type has no
+    # `plan_json`/compiler pipeline at all, so `instruction` and
+    # `discard_pending` are meaningless there. Direct field edits
+    # (name/cron_expression/timezone/delivery/budget/catch_up) stay allowed
+    # on every schedule type, exactly as before.
+    if (body.instruction is not None or body.discard_pending) and schedule.schedule_type != "job":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="not a scheduled job")
+
     correlation_id = _correlation_id(request)
     changed_fields: dict = {}
     cron_or_tz_changed = False
@@ -446,6 +456,13 @@ async def approve_schedule(
     later pending-CHANGE approval (`pending_plan_json` promoted over
     `plan_json`)."""
     schedule = await _get_or_404(db, schedule_id, user.tenant_id)
+
+    # Item 3 (gate fix): approve is a Scheduled-Job-only concept — a legacy
+    # row's `plan_status`/`plan_json` don't mean anything (always None), so
+    # without this check a legacy row falls through to the generic "no
+    # pending plan" 400 below instead of the clearer "wrong row type" signal.
+    if schedule.schedule_type != "job":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="not a scheduled job")
 
     if schedule.pending_plan_json:
         schedule.plan_json = schedule.pending_plan_json
