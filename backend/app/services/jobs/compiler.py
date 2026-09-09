@@ -23,6 +23,13 @@ edit — never inside the executor (Task 4), which only ever replays
 itself: persisting the compiled plan, bumping ``plan_version``, and deciding
 ``plan_json`` vs. ``pending_plan_json`` are the API layer's job (§B5, Task
 3/5), which already has the existing schedule row those fields live on.
+
+Transaction ownership: ``compile_instruction`` NEVER commits its own session
+(it only flushes, via ``audit_service.log_event``) — it runs on the caller's
+session and leaves the single commit to the caller, so a caller that applies
+RLS tenant context (``set_tenant_context``, ``SET LOCAL``) before calling in
+still has that context after it returns, for its own subsequent writes on the
+same session. See ``_audit_compile``'s docstring for the mechanics.
 """
 
 from __future__ import annotations
@@ -136,10 +143,15 @@ async def _tenant_locations(db: AsyncSession, tenant_id: uuid.UUID) -> list[str]
     except Exception:
         logger.warning("jobs.compiler.tenant_locations_failed", exc_info=True)
         return []
+    # ``execute_query`` (app/services/bigquery_service.py) returns each row as
+    # a plain positional sequence — ``row.values()`` on a
+    # ``google.cloud.bigquery.table.Row``, in ``columns`` order — never a
+    # dict; ``bigquery_sql_execute`` passes that shape straight through.
+    columns = result.get("columns") or []
     rows = result.get("rows") or []
     locations: list[str] = []
     for row in rows:
-        loc = row.get("location") if isinstance(row, dict) else None
+        loc = dict(zip(columns, row)).get("location")
         if loc:
             locations.append(str(loc))
     return locations
@@ -207,7 +219,20 @@ async def _audit_compile(
 ) -> None:
     """One audit event per ``compile_instruction`` call, regardless of how
     many LLM hops (including a repair round) it took to get there — spec §B3
-    "Every compile writes an audit event"."""
+    "Every compile writes an audit event".
+
+    Flushes only — never commits. ``compile_instruction`` runs on the
+    caller's own session (Task 3's endpoint, on its pooled per-request
+    session, per this module's docstring), which typically already carries
+    RLS tenant context applied via ``set_tenant_context`` (``SET LOCAL`` —
+    app/core/database.py). ``SET LOCAL`` is cleared at the FIRST commit on
+    that session, so committing here would silently drop tenant scoping for
+    every write the caller makes afterward on the same session (e.g.
+    persisting ``plan_json`` onto the ``schedules`` row). Per
+    .claude/rules/sqlalchemy-fastapi.md's endpoint template, the service
+    flushes and the endpoint commits once, after all of its own writes —
+    ``compile_instruction`` follows that convention like every other service
+    function in this codebase."""
     await audit_service.log_event(
         db,
         tenant_id=tenant_id,
@@ -222,7 +247,6 @@ async def _audit_compile(
             "outcome": outcome,  # "compiled" | "clarification"
         },
     )
-    await db.commit()
 
 
 def _repair_tool_result_content(errors: list[str]) -> str:

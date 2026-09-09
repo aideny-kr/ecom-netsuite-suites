@@ -17,6 +17,9 @@ network-free.
 
 from __future__ import annotations
 
+import dataclasses
+import uuid
+
 from sqlalchemy import select
 
 from app.models.audit import AuditEvent
@@ -30,6 +33,7 @@ from app.services.jobs.compiler import (
     compile_instruction,
     plan_diff,
 )
+from app.services.jobs.registry import STEP_REGISTRY
 
 
 class FakeAdapter:
@@ -218,6 +222,45 @@ async def test_tenant_locations_are_fed_to_the_compiler_prompt(db, tenant_a, mon
     assert "Dimerco" in joined and "Virtual" in joined
 
 
+async def test_tenant_locations_parses_the_real_bigquery_row_shape(monkeypatch):
+    """``execute_query`` (app/services/bigquery_service.py) returns rows as
+    plain sequences — ``row.values()`` on a ``google.cloud.bigquery.table.Row``
+    — in ``columns`` order, never as dicts; ``bigquery_sql_execute`` passes
+    that result straight through unchanged. Exercises the real row-parsing
+    branch of ``_tenant_locations`` against a stand-in for the registry's own
+    ``bigquery_sql`` executor returning THAT shape, instead of monkeypatching
+    ``_tenant_locations`` itself away (which the other tests do, and which
+    would never catch a row-parsing bug here)."""
+
+    async def fake_executor(ctx, params):
+        return {"columns": ["location", "sku"], "rows": [["Dimerco", "ABC"], ["Fedex", "DEF"]]}
+
+    monkeypatch.setitem(
+        compiler.STEP_REGISTRY,
+        "bigquery_sql",
+        dataclasses.replace(STEP_REGISTRY["bigquery_sql"], executor=fake_executor),
+    )
+
+    locations = await compiler._tenant_locations(db=None, tenant_id=uuid.uuid4())
+
+    assert locations == ["Dimerco", "Fedex"]
+
+
+async def test_tenant_locations_degrades_to_empty_when_the_executor_returns_no_location_column(monkeypatch):
+    async def fake_executor(ctx, params):
+        return {"columns": ["sku"], "rows": [["ABC"]]}
+
+    monkeypatch.setitem(
+        compiler.STEP_REGISTRY,
+        "bigquery_sql",
+        dataclasses.replace(STEP_REGISTRY["bigquery_sql"], executor=fake_executor),
+    )
+
+    locations = await compiler._tenant_locations(db=None, tenant_id=uuid.uuid4())
+
+    assert locations == []
+
+
 async def test_compile_writes_one_audit_event(db, tenant_a, monkeypatch):
     monkeypatch.setattr(compiler, "_tenant_locations", lambda *_a, **_kw: _async_list([]))
     fake = FakeAdapter([_compile_plan_response(_inventory_aging_plan())])
@@ -256,6 +299,51 @@ async def test_a_clarification_also_writes_exactly_one_audit_event(db, tenant_a,
     after = await _compiled_audit_events(db, tenant_a.id)
     assert len(after) == 1
     assert after[0].payload["outcome"] == "clarification"
+
+
+async def test_compile_instruction_never_commits_leaving_the_transaction_to_the_caller(db, tenant_a, monkeypatch):
+    """Task 3's endpoint (not yet built) calls ``compile_instruction`` on its
+    own pooled request session, having already applied RLS tenant context via
+    ``set_tenant_context`` (``SET LOCAL`` — see app/core/database.py). ``SET
+    LOCAL`` is cleared at the FIRST commit on that session; the endpoint then
+    still has to persist ``plan_json``/``plan_version`` onto the ``schedules``
+    row on the SAME session (this module's own docstring says so). So
+    ``compile_instruction`` must never call ``db.commit()`` itself — it may
+    only flush (via ``audit_service.log_event``) and leave the single commit
+    to the caller, exactly like every other service function in this codebase
+    (see .claude/rules/sqlalchemy-fastapi.md's endpoint template: the SERVICE
+    flushes, the ENDPOINT commits once). This is checked by spying on
+    ``db.commit`` directly rather than asserting the GUC survives, because the
+    `db` test fixture's SAVEPOINT-based isolation makes ``SET LOCAL`` survive
+    an inner commit regardless — that would be a false green either way."""
+    monkeypatch.setattr(compiler, "_tenant_locations", lambda *_a, **_kw: _async_list([]))
+    fake = FakeAdapter([_compile_plan_response(_inventory_aging_plan())])
+
+    commits: list[bool] = []
+    real_commit = db.commit
+
+    async def _spy_commit():
+        commits.append(True)
+        return await real_commit()
+
+    monkeypatch.setattr(db, "commit", _spy_commit)
+
+    result = await compile_instruction(
+        db,
+        tenant_id=tenant_a.id,
+        instruction=_MOCK_INSTRUCTION,
+        actor_id=None,
+        llm=CompilerLLM(adapter=fake, model="fake-model"),
+    )
+
+    assert isinstance(result, CompiledPlan)
+    assert commits == []  # compile_instruction must not commit — the caller owns the transaction
+
+    # The audit event is still visible on this session even though nothing
+    # committed — audit_service.log_event() flushes, which is enough within
+    # the same open transaction.
+    after = await _compiled_audit_events(db, tenant_a.id)
+    assert len(after) == 1
 
 
 def _diff_fixture() -> tuple[dict, dict]:
