@@ -425,6 +425,16 @@ async def run_schedule(
             status_code=status.HTTP_409_CONFLICT,
             detail="No compiled plan to run" if not body.use_pending else "No pending plan to run",
         )
+    # HITL gate (review finding): a non-empty `plan_json` is not the same as
+    # a person having approved it — `use_pending=False` must not be able to
+    # run a plan still sitting at `plan_status == "pending_approval"` (e.g.
+    # straight off `POST /schedules`, before anyone has clicked Approve).
+    # `use_pending=True` is exempt on purpose: "Run once with this change"
+    # (spec §B5) previews an edited-but-not-yet-approved `pending_plan_json`
+    # BEFORE approval, by design — `run_schedule_now` enforces the same rule
+    # (see its docstring) so the MCP tool inherits it too.
+    if not body.use_pending and schedule.plan_status != "approved":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Plan is not approved")
 
     outcome = await run_schedule_now(
         db,

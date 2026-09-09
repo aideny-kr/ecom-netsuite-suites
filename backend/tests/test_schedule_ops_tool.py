@@ -120,6 +120,38 @@ class TestExecuteRun:
         # The old canned stub message must be gone.
         assert "Stub" not in str(result)
 
+    async def test_execute_run_rejects_a_never_approved_plan(self, db: AsyncSession, admin_user, monkeypatch):
+        """HITL gate (review finding): the chat agent must not be able to
+        call `schedule.create` then `schedule.run` back-to-back and execute
+        a compiled-but-unreviewed plan's steps. `use_pending=False` (the
+        default) against a `plan_status == "pending_approval"` schedule —
+        even with a real non-empty `plan_json` — must be refused."""
+        calls = []
+
+        async def fake_exec(ctx, params):
+            calls.append(params)
+            return {"ok": True}
+
+        monkeypatch.setitem(STEP_REGISTRY, "fake.read", _fake_read_spec(fake_exec))
+
+        user, _ = admin_user
+        tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
+        schedule = await _seed_job_schedule(
+            db,
+            tenant,
+            plan_json={"steps": [{"id": "s1", "type": "fake.read", "params": {}}]},
+            plan_status="pending_approval",
+        )
+        await db.commit()
+
+        result = await schedule_ops.execute_run(
+            {"schedule_id": str(schedule.id)},
+            context={"db": db, "tenant_id": str(user.tenant_id), "actor_id": str(user.id)},
+        )
+        assert result["reason"] == "blocked"
+        assert not result.get("jobs_id")
+        assert calls == []
+
     async def test_execute_run_use_pending_runs_the_pending_plan(self, db: AsyncSession, admin_user, monkeypatch):
         async def fake_exec(ctx, params):
             return {"ok": True}

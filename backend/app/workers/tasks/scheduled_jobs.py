@@ -484,6 +484,18 @@ async def run_schedule_now(
     `_claim_due_schedules`); by the time this function runs, the row no longer
     carries that information itself. A manual "Run now" (Task 5's API) is
     always attempt 1 — it is never the scheduled retry.
+
+    HITL gate (review finding, spec Goal line: "approved by a person, run
+    deterministically"): `use_pending=False` refuses to run unless
+    `plan_status == "approved"` — a non-empty `plan_json` is not proof a
+    person approved it (a freshly-compiled schedule already has one, still
+    sitting at `plan_status == "pending_approval"`). This is the ONE choke
+    point for that rule: every caller (the API's `POST .../run`, the MCP
+    `schedule.run` tool, `run_due_jobs`) goes through here, so none of them
+    can independently drift out of sync with it. `use_pending=True` is
+    deliberately exempt — "Run once with this change" previews a pending,
+    not-yet-approved edit on purpose, and `pending_plan_json` only ever
+    exists on a schedule whose `plan_json` was approved once already.
     """
     now = now or datetime.now(timezone.utc)
     due_at = due_at or now
@@ -492,6 +504,36 @@ async def run_schedule_now(
     row = (
         await db.execute(select(Schedule).where(Schedule.id == schedule_id, Schedule.tenant_id == tenant_id))
     ).scalar_one()
+
+    # HITL gate (spec Goal line: "approved by a person, run deterministically"):
+    # `use_pending=False` replays the schedule's live `plan_json`, which must
+    # have gone through `POST .../approve` — `plan_json` being non-empty is
+    # NOT the same fact as a person having approved it (a freshly-compiled
+    # schedule sits at `plan_status == "pending_approval"` with a real
+    # `plan_json` already on it, straight off `POST /schedules`). This check
+    # deliberately does NOT apply when `use_pending=True`: "Run once with
+    # this change" (spec §B5) is the documented escape hatch to preview an
+    # edited-but-not-yet-approved `pending_plan_json` BEFORE approving it,
+    # and `pending_plan_json` only ever exists on a schedule whose `plan_json`
+    # was already approved once (see `PATCH /schedules/{id}` in schedules.py).
+    if not use_pending and row.plan_status != "approved":
+        row.last_run_status = REASON_BLOCKED
+        row.last_run_at = now
+        await set_tenant_context(db, str(tenant_id))
+        await audit_service.log_event(
+            db,
+            tenant_id=tenant_id,
+            category="jobs",
+            action="jobs.run.blocked",
+            actor_id=actor_id,
+            actor_type=actor_type,
+            resource_type="schedule",
+            resource_id=str(schedule_id),
+            payload={"detail": "plan not approved", "plan_status": row.plan_status, "use_pending": use_pending},
+            status="error",
+        )
+        await db.commit()
+        return RunOutcome(reason=REASON_BLOCKED, jobs_row_id=None, outputs={})
 
     plan_json = row.pending_plan_json if use_pending else row.plan_json
     plan_version_used = (row.plan_version + 1) if use_pending else row.plan_version

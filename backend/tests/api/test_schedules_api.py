@@ -476,6 +476,41 @@ class TestScheduleRun:
         resp = await client.post(f"/api/v1/schedules/{schedule.id}/run", json={"use_pending": False}, headers=headers)
         assert resp.status_code == 409
 
+    async def test_run_now_rejects_a_never_approved_plan_is_409(
+        self, client: AsyncClient, admin_user, db: AsyncSession, monkeypatch
+    ):
+        """HITL gate (review finding): `plan_json` non-empty is not the same
+        as a human having approved it. A schedule fresh off `POST /schedules`
+        sits at `plan_status == "pending_approval"` with a real compiled
+        `plan_json` already on it — `run` with `use_pending=False` must
+        refuse to execute that plan's steps until `/approve` has run, even
+        though the plan is non-empty."""
+        calls = []
+
+        async def fake_exec(ctx, params):
+            calls.append(params)
+            return {"ok": True}
+
+        monkeypatch.setitem(STEP_REGISTRY, "fake.read", _fake_read_spec(fake_exec))
+
+        user, headers = admin_user
+        tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
+        schedule = await _seed_job_schedule(
+            db,
+            tenant,
+            plan_json={"steps": [{"id": "s1", "type": "fake.read", "params": {}}]},
+            plan_status="pending_approval",
+            plan_version=0,
+        )
+        await db.commit()
+
+        resp = await client.post(f"/api/v1/schedules/{schedule.id}/run", json={"use_pending": False}, headers=headers)
+        assert resp.status_code == 409
+        assert calls == []
+
+        job_count = await db.execute(select(Job).where(Job.tenant_id == user.tenant_id))
+        assert job_count.scalars().all() == []
+
     async def test_run_now_use_pending_runs_the_pending_plan(
         self, client: AsyncClient, admin_user, db: AsyncSession, monkeypatch
     ):
