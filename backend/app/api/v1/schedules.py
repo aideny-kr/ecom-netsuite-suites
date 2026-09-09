@@ -345,6 +345,7 @@ async def update_schedule(
     schedule = await _get_or_404(db, schedule_id, user.tenant_id)
     correlation_id = _correlation_id(request)
     changed_fields: dict = {}
+    cron_or_tz_changed = False
 
     if body.name is not None:
         schedule.name = body.name
@@ -352,9 +353,11 @@ async def update_schedule(
     if body.cron_expression is not None:
         schedule.cron_expression = body.cron_expression
         changed_fields["cron_expression"] = body.cron_expression
+        cron_or_tz_changed = True
     if body.timezone is not None:
         schedule.timezone = body.timezone
         changed_fields["timezone"] = body.timezone
+        cron_or_tz_changed = True
     if body.delivery is not None:
         schedule.delivery_json = body.delivery
         changed_fields["delivery_json"] = body.delivery
@@ -391,6 +394,23 @@ async def update_schedule(
             schedule.plan_json = compiled.plan_json
             schedule.plan_status = "pending_approval"
         changed_fields["instruction"] = True
+
+    # Item 2 (gate fix): `approve_schedule`/`resume_schedule` both recompute
+    # `next_run_at` when their own preconditions hold — a bare cron/timezone
+    # edit on an already-approved, active, unpaused schedule must mirror that,
+    # or the schedule keeps firing at the STALE fire time until the next
+    # approve/resume happens to touch it (which may be never, for a schedule
+    # nobody re-approves after this edit).
+    if (
+        cron_or_tz_changed
+        and schedule.plan_status == "approved"
+        and schedule.is_active
+        and schedule.paused_at is None
+        and schedule.cron_expression
+    ):
+        schedule.next_run_at = schedule_service.compute_next_run(
+            schedule.cron_expression, schedule.timezone, datetime.now(timezone.utc)
+        )
 
     await audit_service.log_event(
         db=db,

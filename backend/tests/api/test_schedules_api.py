@@ -39,6 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.job import Job
 from app.models.pipeline import Schedule
 from app.models.tenant import Tenant
+from app.services import schedule_service
 from app.services.jobs.compiler import Clarification, CompiledPlan
 from tests.conftest import create_test_tenant, create_test_user, make_auth_headers
 
@@ -583,6 +584,90 @@ class TestScheduleUpdate:
         assert data["budget_json"] == {"usd": 5.0}
         assert data["plan_json"] == _INVENTORY_AGING_PLAN
         assert data["pending_plan_json"] is None
+
+    async def test_patch_cron_on_approved_schedule_recomputes_next_run_at(
+        self, client: AsyncClient, admin_user, db: AsyncSession
+    ):
+        """Item 2 (gate fix): `approve`/`resume` both recompute `next_run_at`
+        when their preconditions hold — a bare `PATCH` changing the cron must
+        mirror that, or the schedule keeps firing at the STALE (weekly) time
+        until the next approve/resume happens to touch it."""
+        user, headers = admin_user
+        tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
+        schedule = await _seed_job_schedule(
+            db,
+            tenant,
+            plan_json=_INVENTORY_AGING_PLAN,
+            plan_status="approved",
+            cron_expression="0 6 * * 1",  # weekly, Monday 06:00
+            tz="UTC",
+        )
+        await db.commit()
+
+        resp = await client.patch(
+            f"/api/v1/schedules/{schedule.id}",
+            json={"cron_expression": "0 6 * * *"},  # daily 06:00
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["next_run_at"] is not None
+
+        expected_next = schedule_service.compute_next_run("0 6 * * *", "UTC", datetime.now(timezone.utc))
+        actual_next = datetime.fromisoformat(data["next_run_at"].replace("Z", "+00:00"))
+        assert abs((actual_next - expected_next).total_seconds()) < 5
+
+    async def test_patch_timezone_on_approved_schedule_recomputes_next_run_at(
+        self, client: AsyncClient, admin_user, db: AsyncSession
+    ):
+        user, headers = admin_user
+        tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
+        schedule = await _seed_job_schedule(
+            db,
+            tenant,
+            plan_json=_INVENTORY_AGING_PLAN,
+            plan_status="approved",
+            cron_expression="0 6 * * *",
+            tz="UTC",
+        )
+        await db.commit()
+
+        resp = await client.patch(
+            f"/api/v1/schedules/{schedule.id}",
+            json={"timezone": "America/Los_Angeles"},
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        expected_next = schedule_service.compute_next_run(
+            "0 6 * * *", "America/Los_Angeles", datetime.now(timezone.utc)
+        )
+        actual_next = datetime.fromisoformat(data["next_run_at"].replace("Z", "+00:00"))
+        assert abs((actual_next - expected_next).total_seconds()) < 5
+
+    async def test_patch_cron_on_unapproved_schedule_does_not_set_next_run_at(
+        self, client: AsyncClient, admin_user, db: AsyncSession
+    ):
+        """No approved plan yet -> nothing should be scheduled to fire."""
+        user, headers = admin_user
+        tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
+        schedule = await _seed_job_schedule(
+            db,
+            tenant,
+            plan_json=_INVENTORY_AGING_PLAN,
+            plan_status="pending_approval",
+            cron_expression="0 6 * * 1",
+            tz="UTC",
+        )
+        await db.commit()
+
+        resp = await client.patch(
+            f"/api/v1/schedules/{schedule.id}",
+            json={"cron_expression": "0 6 * * *"},
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["next_run_at"] is None
 
     async def test_patch_discard_pending_clears_pending_plan_without_touching_live_plan(
         self, client: AsyncClient, admin_user, db: AsyncSession
