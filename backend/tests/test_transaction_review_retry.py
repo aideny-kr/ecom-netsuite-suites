@@ -225,3 +225,31 @@ async def test_foreign_tenant_and_disabled_configuration_cannot_retry(
     )
     response = await client.post(url, json=body, headers=headers)
     assert response.status_code == 409 and response.json()["detail"]["code"] == "config_disabled"
+
+
+async def test_unrelated_daily_check_does_not_block_on_demand_period_recovery(db, admin_user, monkeypatch):
+    actor = admin_user[0]
+    config, _, failed = await stopped_review(db, actor, monkeypatch)
+    config.schedule_enabled = True
+    await db.flush()
+    daily = await state.create_run(
+        db,
+        actor.tenant_id,
+        config.id,
+        RunCreate(
+            origin="schedule",
+            evaluation_key="daily-check",
+            window_start=datetime(2026, 9, 6, 7, tzinfo=timezone.utc),
+            window_end=datetime(2026, 9, 8, 7, tzinfo=timezone.utc),
+        ),
+    )
+    resumed = await period_review.create_review(
+        db,
+        actor.tenant_id,
+        config.id,
+        period_review.PeriodReview(evaluation_key=uuid4(), period="last_week"),
+        actor=actor,
+    )
+    assert resumed.progress_json["continuation_of"] == str(failed.id)
+    assert resumed.progress_json["last_source_id"] == 1234
+    assert daily.status == resumed.status == "pending" and daily.id != resumed.id

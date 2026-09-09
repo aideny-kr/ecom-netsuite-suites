@@ -75,12 +75,8 @@ async def create_review(db, tenant_id, config_id, request, *, actor):
         raise state.StateError("review_already_running")
     if previous and previous.status == "finished" and previous.termination_reason in ("error", "budget", "stall"):
         active = await db.scalar(
-            select(TransactionRun.id)
-            .where(
-                TransactionRun.tenant_id == tenant_id,
-                TransactionRun.config_id == config_id,
-                TransactionRun.status.in_(("pending", "running")),
-            )
+            same_period.with_only_columns(TransactionRun.id)
+            .where(TransactionRun.status.in_(("pending", "running")))
             .limit(1)
         )
         if active:
