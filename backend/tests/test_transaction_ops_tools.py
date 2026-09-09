@@ -437,3 +437,34 @@ async def test_status_can_read_a_case_with_bounded_history_and_exact_amounts(ctx
     loader.assert_awaited_once_with(ctx["db"], TENANT, identifier)
     bad = await mod.execute_status({"case_id": str(identifier), "run_id": str(RUN)}, context=ctx)
     assert bad["error"] == "invalid_parameters"
+
+
+async def test_real_dispatch_reads_case_history_and_preserves_scope(db, admin_user, admin_user_b, monkeypatch):
+    from app.services.chat.tools import execute_tool_call
+    from tests.conftest import enable_feature_flag
+    from tests.test_transaction_ops_state_db import seed_config
+    from tests.test_transaction_resolution_history import case_and_proposal
+
+    actor, foreign_actor = admin_user[0], admin_user_b[0]
+    config = await seed_config(db, actor.tenant_id, actor)
+    case, proposal = await case_and_proposal(db, actor, config, ORDER)
+    for user in (actor, foreign_actor):
+        for flag in ("celigo", "reconciliation"):
+            await enable_feature_flag(db, user.tenant_id, flag)
+    monkeypatch.setattr("app.mcp.governance.check_rate_limit", lambda *args: True)
+
+    async def dispatch(user, params):
+        return json.loads(
+            await execute_tool_call("transaction_ops_status", params, user.tenant_id, user.id, "case-dispatch-test", db)
+        )
+
+    result = await dispatch(actor, {"case_id": str(case.id)})
+    assert result["success"] is True, result
+    assert result["case_id"] == str(case.id)
+    assert result["resolution_history"][0]["proposal_id"] == str(proposal.id)
+    assert result["resolution_history"][0]["requires_new_human_approval"] is True
+    foreign = await dispatch(foreign_actor, {"case_id": str(case.id)})
+    assert foreign["error"] == "not_found"
+    assert "resolution_history" not in foreign
+    mixed = await dispatch(actor, {"case_id": str(case.id), "run_id": str(proposal.run_id)})
+    assert mixed["error"] == "invalid_parameters"

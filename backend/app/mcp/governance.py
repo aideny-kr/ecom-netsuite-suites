@@ -65,7 +65,7 @@ TOOL_CONFIGS = {
         "timeout_seconds": 15,
         "rate_limit_per_minute": 30,
         "requires_entitlement": "mcp_tools",
-        "allowlisted_params": ["run_id"],
+        "allowlisted_params": ["run_id", "case_id"],
     },
     "health": {
         "default_limit": None,
@@ -619,6 +619,12 @@ async def governed_execute(
 
     # 4. Redact
     redacted = redact_result(result)
+    # Tools can report a handled failure without raising an exception. Preserve
+    # that outcome in telemetry and audit instead of treating every return as success.
+    failed = isinstance(result, dict) and (
+        result.get("success") is False or result.get("isError") is True or bool(result.get("error"))
+    )
+    outcome = "error" if failed else "success"
 
     # 5. Log + metrics
     duration_ms = (time.monotonic() - start) * 1000
@@ -629,9 +635,9 @@ async def governed_execute(
         actor_id=actor_id,
         correlation_id=correlation_id,
         duration_ms=round(duration_ms, 2),
-        status="success",
+        status=outcome,
     )
-    record_call(tool_name, "success")
+    record_call(tool_name, outcome)
     record_duration(tool_name, duration_ms / 1000)
 
     # 6. Audit to DB
@@ -643,14 +649,14 @@ async def governed_execute(
                 db=db,
                 tenant_id=tenant_uuid,
                 category="tool_call",
-                action="tool.executed",
+                action="tool.failed" if failed else "tool.executed",
                 actor_id=actor_uuid,
                 actor_type=actor_type,
                 resource_type="mcp_tool",
                 resource_id=tool_name,
                 correlation_id=correlation_id,
                 payload=create_audit_payload(tool_name, validated_params, result=result),
-                status="success",
+                status=outcome,
             )
         except Exception:
             logger.exception("mcp.audit_write_failed", tool=tool_name)
