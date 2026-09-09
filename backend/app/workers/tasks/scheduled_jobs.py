@@ -320,6 +320,18 @@ async def _run_steps(
     started_at = time.monotonic()
 
     for step in steps:
+        # Tenant context unconditionally, EVERY step — read and write alike
+        # (review finding, MAJOR). The caller commits right before the loop
+        # starts (the `jobs.run.start` audit commit), which clears the
+        # transaction-scoped `SET LOCAL app.current_tenant_id`; a READ step
+        # used to get no context reset at all, so a plan whose first (or
+        # only) step is a read — e.g. `recon.run`, whose own callee
+        # (`OrderReconJob.run`) does not self-manage context for its initial
+        # queries either — ran with app.current_tenant_id unset. Re-setting
+        # it fresh at the top of every iteration means a step never depends
+        # on what an earlier step (or the caller) happened to leave in scope.
+        await set_tenant_context(db, str(tenant_id))
+
         step_id = step.get("id")
         step_type = step.get("type")
         spec = STEP_REGISTRY.get(step_type)  # looked up FRESH — see module docstring
@@ -330,7 +342,6 @@ async def _run_steps(
 
         if spec.kind == "write":
             idem_key = spec.idempotency(ctx, params)
-            await set_tenant_context(db, str(tenant_id))
             await audit_service.log_event(
                 db,
                 tenant_id=tenant_id,

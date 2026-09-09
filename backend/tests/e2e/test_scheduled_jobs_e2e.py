@@ -201,7 +201,16 @@ async def test_a_missed_job_catches_up_exactly_once(db, monkeypatch):
 
 async def test_a_failed_job_pauses_after_the_one_retry(db, monkeypatch):
     tenant = await create_test_tenant(db, name="Scheduled Jobs Failure E2E Co")
-    await set_tenant_context(db, str(tenant.id))
+    # Captured now: a step that raises with no db access of its own used to
+    # make `_run_steps`'s `db.rollback()` a no-op (nothing had opened a
+    # transaction since the last commit). Now that EVERY step unconditionally
+    # re-sets tenant context first (the MAJOR tenant-context fix), that SET
+    # LOCAL opens a real transaction, so the rollback is real and expires the
+    # whole identity map -- `_finalize_run`'s own re-fetch keeps `schedule`/
+    # `job` fresh, but nothing re-selects `Tenant`, so re-reading its expired
+    # `.id` outside an awaited DB call raises MissingGreenlet.
+    tenant_id = tenant.id
+    await set_tenant_context(db, str(tenant_id))
 
     async def always_fails(ctx, params):
         raise StepExecutionError("e2e: the source query is unreachable")
@@ -212,7 +221,7 @@ async def test_a_failed_job_pauses_after_the_one_retry(db, monkeypatch):
 
     now = datetime.now(timezone.utc)
     schedule = Schedule(
-        tenant_id=tenant.id,
+        tenant_id=tenant_id,
         name="Inventory Aging Weekly",
         schedule_type="job",
         cron_expression="0 6 * * 1",
@@ -228,23 +237,23 @@ async def test_a_failed_job_pauses_after_the_one_retry(db, monkeypatch):
     db.add(schedule)
     await db.flush()
 
-    await run_due_jobs(db, tenant.id, now=now)
+    await run_due_jobs(db, tenant_id, now=now)
     assert schedule.paused_at is None
     assert schedule.last_run_status == "retry_pending"
     retry_at = schedule.next_run_at
 
-    await run_due_jobs(db, tenant.id, now=retry_at + timedelta(seconds=1))
+    await run_due_jobs(db, tenant_id, now=retry_at + timedelta(seconds=1))
     assert schedule.paused_at is not None
     assert schedule.last_run_status == "paused"
 
-    jobs = (await db.execute(select(Job).where(Job.tenant_id == tenant.id))).scalars().all()
+    jobs = (await db.execute(select(Job).where(Job.tenant_id == tenant_id))).scalars().all()
     assert len(jobs) == 2
     assert all(j.result_summary["reason"] == REASON_ERROR for j in jobs)
 
     pause_events = (
         (
             await db.execute(
-                select(AuditEvent).where(AuditEvent.tenant_id == tenant.id, AuditEvent.action == "jobs.paused")
+                select(AuditEvent).where(AuditEvent.tenant_id == tenant_id, AuditEvent.action == "jobs.paused")
             )
         )
         .scalars()

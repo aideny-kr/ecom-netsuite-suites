@@ -293,7 +293,19 @@ async def test_catch_up_skip_does_not_run_a_missed_window(db: AsyncSession, monk
 
 async def test_step_error_retries_once_then_pauses(db: AsyncSession, monkeypatch):
     tenant = await create_test_tenant(db, name="Retry Co")
-    await set_tenant_context(db, str(tenant.id))
+    # Captured now (fix for the MAJOR tenant-context finding above): a step
+    # that raises with NO db access of its own used to make `_run_steps`'s
+    # `db.rollback()` a no-op (nothing had opened a transaction since the
+    # last commit) -- now that EVERY step unconditionally re-sets tenant
+    # context first, that SET LOCAL opens a real transaction, so the
+    # subsequent rollback is a real one and expires the whole identity map.
+    # `_finalize_run`'s own re-fetch keeps `schedule`/`job` fresh afterward,
+    # but nothing re-selects `Tenant` -- re-reading its expired `.id`
+    # attribute outside an awaited DB call raises MissingGreenlet, same
+    # failure mode `test_db_error_inside_a_step_still_completes_retry_bookkeeping`
+    # already documents above.
+    tenant_id = tenant.id
+    await set_tenant_context(db, str(tenant_id))
 
     async def always_fails(ctx, params):
         raise StepExecutionError("boom: the fake step always fails")
@@ -310,7 +322,7 @@ async def test_step_error_retries_once_then_pauses(db: AsyncSession, monkeypatch
     )
 
     # Attempt 1: fails -> reason=error, retry scheduled 15 minutes out, not paused yet.
-    stats1 = await run_due_jobs(db, tenant.id, now=now)
+    stats1 = await run_due_jobs(db, tenant_id, now=now)
     assert stats1["ran"] == 1
     assert stats1["failed"] == 1
     assert schedule.paused_at is None
@@ -320,20 +332,20 @@ async def test_step_error_retries_once_then_pauses(db: AsyncSession, monkeypatch
     assert retry_at - now >= timedelta(minutes=14)  # ~15 minutes, allow test-clock slack
     assert retry_at - now <= timedelta(minutes=16)
 
-    jobs_after_1 = (await db.execute(select(Job).where(Job.tenant_id == tenant.id))).scalars().all()
+    jobs_after_1 = (await db.execute(select(Job).where(Job.tenant_id == tenant_id))).scalars().all()
     assert len(jobs_after_1) == 1
     assert jobs_after_1[0].result_summary["reason"] == REASON_ERROR
     assert jobs_after_1[0].parameters["attempt"] == 1
 
     # Attempt 2, 15 minutes later: fails again -> pause + pause_reason + owner-notify audit.
     now2 = retry_at + timedelta(seconds=1)
-    stats2 = await run_due_jobs(db, tenant.id, now=now2)
+    stats2 = await run_due_jobs(db, tenant_id, now=now2)
     assert stats2["ran"] == 1
     assert schedule.paused_at is not None
     assert schedule.pause_reason
     assert schedule.last_run_status == "paused"
 
-    jobs_after_2 = (await db.execute(select(Job).where(Job.tenant_id == tenant.id))).scalars().all()
+    jobs_after_2 = (await db.execute(select(Job).where(Job.tenant_id == tenant_id))).scalars().all()
     assert len(jobs_after_2) == 2  # a SECOND jobs row for the retry (attempt=2)
     retry_job = next(j for j in jobs_after_2 if j.parameters.get("attempt") == 2)
     assert retry_job.result_summary["reason"] == REASON_ERROR
@@ -341,7 +353,7 @@ async def test_step_error_retries_once_then_pauses(db: AsyncSession, monkeypatch
     pause_events = (
         (
             await db.execute(
-                select(AuditEvent).where(AuditEvent.tenant_id == tenant.id, AuditEvent.action == "jobs.paused")
+                select(AuditEvent).where(AuditEvent.tenant_id == tenant_id, AuditEvent.action == "jobs.paused")
             )
         )
         .scalars()
@@ -667,3 +679,164 @@ async def test_finalize_crash_after_run_steps_still_completes_retry_bookkeeping(
     job = (await db.execute(select(Job).where(Job.tenant_id == tenant_id))).scalar_one()
     assert job.status == "failed"
     assert job.result_summary["reason"] == REASON_ERROR
+
+
+# ---------------------------------------------------------------------------
+# Tenant context on EVERY step (review finding, MAJOR): `_run_steps` used to
+# call `set_tenant_context` only inside the `if spec.kind == "write":` branch.
+# `run_schedule_now` commits right before `_run_steps` even starts (the
+# `jobs.run.start` audit commit), which clears the transaction-scoped
+# `SET LOCAL app.current_tenant_id` -- so a READ step (or any step that is
+# not itself the write branch) ran with no tenant context set at all unless
+# something upstream happened to leave it in scope.
+#
+# The `db` fixture wraps every test in an outer transaction (savepoints,
+# `conftest.py`'s own comment above the fixture): a service-side commit here
+# is RELEASE SAVEPOINT, which -- unlike a real COMMIT -- does NOT clear
+# `SET LOCAL`. Asserting the GUC value directly would therefore FALSE-PASS
+# regardless of whether `_run_steps` re-sets it. Following the established
+# fix for the identical class of bug (test_report_refresh.py's `_spy_events`
+# / "T2-gate round-1 fixes: RLS context across commits" section): spy on
+# `set_tenant_context` in the module's own namespace, actually execute the
+# real `SET LOCAL` from inside the spy (so the run stays correct), and
+# assert on the ORDERING of ctx/commit/exec events instead.
+# ---------------------------------------------------------------------------
+
+
+def _spy_events(monkeypatch, db):
+    """Mirrors test_report_refresh.py's `_spy_events` helper for the
+    identical class of bug in this module: records `"ctx"`/`"commit"`/
+    `"rollback"` events for `scheduled_jobs.set_tenant_context`/`db.commit`/
+    `db.rollback`, while still performing the real operation so the run
+    itself stays correct."""
+    events: list[str] = []
+    real_commit, real_rollback = db.commit, db.rollback
+
+    async def spy_ctx(session, tenant_id):
+        events.append("ctx")
+        await set_tenant_context(session, tenant_id)
+
+    async def spy_commit():
+        events.append("commit")
+        await real_commit()
+
+    async def spy_rollback():
+        events.append("rollback")
+        await real_rollback()
+
+    monkeypatch.setattr(scheduled_jobs, "set_tenant_context", spy_ctx)
+    monkeypatch.setattr(db, "commit", spy_commit)
+    monkeypatch.setattr(db, "rollback", spy_rollback)
+    return events
+
+
+async def test_tenant_context_set_before_every_step_read_and_write(db: AsyncSession, monkeypatch):
+    tenant = await create_test_tenant(db, name="Tenant Ctx Order Co")
+    events = _spy_events(monkeypatch, db)
+
+    def idem(ctx, params):
+        return f"job:{ctx.job_id}:step:{params['label']}"
+
+    async def read_step(ctx, params):
+        events.append(f"exec:{params['label']}")
+        return {"ok": True}
+
+    async def write_step(ctx, params):
+        events.append(f"exec:{params['label']}")
+        return {"ok": True}
+
+    monkeypatch.setitem(STEP_REGISTRY, "fake.read", _fake_spec("read", read_step, step_type="fake.read"))
+    monkeypatch.setitem(
+        STEP_REGISTRY, "fake.write", _fake_spec("write", write_step, idempotency=idem, step_type="fake.write")
+    )
+
+    now = datetime.now(timezone.utc)
+    await _seed_job_schedule(
+        db,
+        tenant,
+        plan_json={
+            "steps": [
+                {"id": "s1", "type": "fake.read", "params": {"label": "s1"}},
+                {"id": "s2", "type": "fake.write", "params": {"label": "s2"}},
+                {"id": "s3", "type": "fake.read", "params": {"label": "s3"}},
+            ]
+        },
+        next_run_at=now - timedelta(minutes=1),
+        cron_expression="0 6 * * 1",
+    )
+
+    stats = await run_due_jobs(db, tenant.id, now=now)
+    assert stats["ran"] == 1
+    assert stats["failed"] == 0
+
+    # Every step -- read s1, write s2, read s3 -- must be immediately preceded
+    # by a fresh "ctx" event: a READ step is never exempt, and a step is never
+    # left to inherit whatever context happened to still be in scope from
+    # something earlier (a commit, or nothing at all, both currently show up
+    # here as the preceding event before the fix).
+    for label in ("s1", "s2", "s3"):
+        exec_idx = events.index(f"exec:{label}")
+        assert events[exec_idx - 1] == "ctx", (
+            f"step {label} must run with tenant context freshly (re-)set immediately before it; "
+            f"events around it: {events[max(0, exec_idx - 3) : exec_idx + 1]}"
+        )
+
+    # The write step's audit-before-call commit must ALSO sit between two ctx
+    # events within its own iteration (top-of-loop, then re-established after
+    # the commit) -- this half already worked before the fix; kept here as a
+    # regression guard against ever dropping it while fixing the read-step gap.
+    s2_idx = events.index("exec:s2")
+    s1_idx = events.index("exec:s1")
+    between = events[s1_idx + 1 : s2_idx]
+    assert "commit" in between, "the write step's audit-before-call commit must run inside its own iteration"
+    commit_idx = between.index("commit")
+    assert "ctx" in between[:commit_idx], "context must be set before the write step's audit log + commit"
+    assert "ctx" in between[commit_idx:], "context must be re-set after the audit-before-call commit"
+
+
+async def test_recon_run_as_lone_first_step_runs_with_tenant_context_set(db: AsyncSession, monkeypatch):
+    """The same MAJOR finding, exercised through the REAL `recon.run` step
+    (not a fake): `OrderReconJob.run` does not self-manage tenant context for
+    its own initial queries (it only re-establishes context deep inside,
+    right before its own `plan_run` INSERT -- see order_recon_job.py's own
+    comment) -- so `recon.run` as a plan's ONLY/first step is exactly the
+    "callee does not self-manage tenant context" case the fix must cover."""
+    tenant = await create_test_tenant(db, name="Recon First Step Co")
+    events = _spy_events(monkeypatch, db)
+
+    real_spec = STEP_REGISTRY["recon.run"]
+
+    async def recon_run_recording(ctx, params):
+        events.append("exec:recon.run")
+        return await real_spec.executor(ctx, params)
+
+    monkeypatch.setitem(
+        STEP_REGISTRY,
+        "recon.run",
+        StepSpec(
+            type="recon.run",
+            label=real_spec.label,
+            kind="read",
+            params_schema=real_spec.params_schema,
+            executor=recon_run_recording,
+        ),
+    )
+
+    now = datetime.now(timezone.utc)
+    await _seed_job_schedule(
+        db,
+        tenant,
+        plan_json={"steps": [{"id": "s1", "type": "recon.run", "params": {"window_days": 1}}]},
+        next_run_at=now - timedelta(minutes=1),
+        cron_expression="0 6 * * 1",
+    )
+
+    stats = await run_due_jobs(db, tenant.id, now=now)
+    assert stats["ran"] == 1
+    assert stats["failed"] == 0
+
+    exec_idx = events.index("exec:recon.run")
+    assert events[exec_idx - 1] == "ctx", (
+        f"recon.run must run with tenant context freshly set immediately before it; "
+        f"events around it: {events[max(0, exec_idx - 3) : exec_idx + 1]}"
+    )
