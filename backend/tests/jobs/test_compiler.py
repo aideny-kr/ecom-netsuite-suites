@@ -104,7 +104,7 @@ def _inventory_aging_plan() -> dict:
             {
                 "id": "s5",
                 "type": "drive.upload",
-                "params": {"report_step": "s2", "period_key": "2026-09-08"},
+                "params": {"report_step": "s2"},
             },
         ]
     }

@@ -80,7 +80,7 @@ def _valid_plan() -> dict:
             {
                 "id": "s3",
                 "type": "drive.upload",
-                "params": {"report_step": "s2", "period_key": "2026-09-08"},
+                "params": {"report_step": "s2"},
             },
         ]
     }
@@ -114,7 +114,7 @@ def test_validate_plan_rejects_drive_upload_referencing_a_later_step():
     would produce the artifact has not run yet when drive.upload would run."""
     plan = _valid_plan()
     plan["steps"] = [
-        {"id": "s1", "type": "drive.upload", "params": {"report_step": "s2", "period_key": "2026-09-08"}},
+        {"id": "s1", "type": "drive.upload", "params": {"report_step": "s2"}},
         {"id": "s2", "type": "report.compose", "params": {"report_id": "11111111-1111-1111-1111-111111111111"}},
     ]
     with pytest.raises(PlanInvalid) as exc_info:
@@ -181,3 +181,93 @@ def test_validate_plan_collects_every_error_not_just_the_first():
     with pytest.raises(PlanInvalid) as exc_info:
         validate_plan(plan)
     assert len(exc_info.value.errors) == 2
+
+
+# ---------------------------------------------------------------------------
+# drive.upload's period comes from the RUN, never from the compiled plan.
+# ---------------------------------------------------------------------------
+
+
+def test_validate_plan_rejects_drive_upload_carrying_a_compiled_period_key():
+    """A plan is compiled ONCE and replayed every week (spec §0.3). A literal
+    `period_key` baked into the plan would therefore be the compile date on
+    every run — the Drive filename and the write step's idempotency key
+    (spec §0.5: "job + period key"; the mock: "job + snapshot date") would
+    never vary between weeks. The registry makes that unrepresentable: the
+    period is the run's own (`StepContext.period_key`), and a compiled
+    drive.upload step may not carry one."""
+    plan = _valid_plan()
+    plan["steps"][2]["params"] = {"report_step": "s2", "period_key": "2026-09-08"}
+    with pytest.raises(PlanInvalid) as exc_info:
+        validate_plan(plan)
+    assert any("period_key" in msg for msg in exc_info.value.errors)
+
+
+@pytest.mark.asyncio
+async def test_drive_upload_uses_the_runs_period_key_for_delivery_and_idempotency(monkeypatch):
+    """The executor hands `deliver_report_to_drive` the RUN's period (the due
+    date in the schedule's timezone, set by the run loop), and the
+    idempotency key is `job:{schedule id}:period:{that same period}` — so a
+    retry of the same period reuses the key and next week's run gets a new one."""
+    import uuid
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from app.services.jobs.registry import StepContext
+    from app.services.report import report_delivery
+
+    captured: dict = {}
+
+    async def fake_deliver(db, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            pdf_file_id="pdf1",
+            pdf_url="https://drive/pdf1",
+            xlsx_file_id="xlsx1",
+            xlsx_url="https://drive/xlsx1",
+            folder_id="folder1",
+            delivered_at=datetime(2026, 9, 14, 13, 0, tzinfo=timezone.utc),
+        )
+
+    monkeypatch.setattr(report_delivery, "deliver_report_to_drive", fake_deliver)
+
+    schedule_id = uuid.uuid4()
+    report_id = uuid.uuid4()
+    ctx = StepContext(
+        job_id=schedule_id,
+        run_id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        db=object(),
+        artifacts={"s2": {"report": object(), "report_id": str(report_id)}},
+        period_key="2026-09-14",
+    )
+    spec = STEP_REGISTRY["drive.upload"]
+    params = {"report_step": "s2"}
+
+    artifact = await spec.executor(ctx, params)
+
+    assert captured["period_key"] == "2026-09-14"
+    assert captured["report_id"] == report_id
+    assert artifact["pdf_file_id"] == "pdf1"
+    assert spec.idempotency(ctx, params) == f"job:{schedule_id}:period:2026-09-14"
+
+
+@pytest.mark.asyncio
+async def test_drive_upload_without_a_run_period_is_a_step_execution_error():
+    """A caller that forgot to set the run's period (the run loop always
+    does) must fail as a RUN-time step error — never silently upload under a
+    `None` period or a stale compiled one."""
+    import uuid
+
+    from app.services.jobs.registry import StepContext, StepExecutionError
+
+    ctx = StepContext(
+        job_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        db=object(),
+        artifacts={"s2": {"report": object(), "report_id": str(uuid.uuid4())}},
+        period_key=None,
+    )
+    with pytest.raises(StepExecutionError):
+        await STEP_REGISTRY["drive.upload"].executor(ctx, {"report_step": "s2"})

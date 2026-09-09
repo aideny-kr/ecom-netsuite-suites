@@ -51,7 +51,7 @@ _INVENTORY_AGING_PLAN = {
         {
             "id": "upload",
             "type": "drive.upload",
-            "params": {"report_step": "compose", "period_key": "2026-09-07"},
+            "params": {"report_step": "compose"},
         },
     ]
 }

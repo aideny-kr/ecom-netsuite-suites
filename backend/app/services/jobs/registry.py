@@ -276,17 +276,28 @@ async def _drive_upload_executor(ctx: StepContext, params: dict) -> dict:
     would duplicate exactly the machinery this executor exists to reuse
     correctly. The earlier render/xlsx steps still run and their artifacts are
     attached to the job's own run record for provenance, matching the binding
-    mock's step 3 guard line ("local artifacts, attached to the run")."""
+    mock's step 3 guard line ("local artifacts, attached to the run").
+
+    The period is the RUN's (``ctx.period_key`` — the due date in the
+    schedule's timezone, set by the run loop), never a value from ``params``:
+    a plan is compiled once and replayed every week, so a literal baked into
+    the plan would be the compile date on every run — the Drive filename
+    (``<title> — <period_key>.pdf``) and the idempotency key below would never
+    vary between weeks. ``_DRIVE_UPLOAD_SCHEMA`` rejects a compiled
+    ``period_key`` outright so the compiler cannot produce that plan."""
     from app.services.report.report_delivery import deliver_report_to_drive
 
     artifact = _resolve_report_step_artifact(ctx, params)
+    period_key = ctx.period_key
+    if not period_key:
+        raise StepExecutionError("drive.upload: the run supplied no period_key")
     result = await deliver_report_to_drive(
         ctx.db,
         tenant_id=ctx.tenant_id,
         report_id=uuid.UUID(artifact["report_id"]),
         actor_type=ctx.actor_type,
         actor_id=ctx.actor_id,
-        period_key=params["period_key"],
+        period_key=period_key,
     )
     return {
         "pdf_file_id": result.pdf_file_id,
@@ -294,6 +305,7 @@ async def _drive_upload_executor(ctx: StepContext, params: dict) -> dict:
         "xlsx_file_id": result.xlsx_file_id,
         "xlsx_url": result.xlsx_url,
         "folder_id": result.folder_id,
+        "period_key": period_key,
         "delivered_at": result.delivered_at.isoformat() if result.delivered_at else None,
     }
 
@@ -301,8 +313,13 @@ async def _drive_upload_executor(ctx: StepContext, params: dict) -> dict:
 def _drive_upload_idempotency(ctx: StepContext, params: dict) -> str:
     """Spec §0.5 / the mock's own copy: "idempotency key = job + snapshot date".
     ``job`` is the SCHEDULE's stable id (``ctx.job_id``, NOT ``ctx.run_id`` — see
-    ``StepContext``'s docstring for why a retry must reuse this key)."""
-    return f"job:{ctx.job_id}:period:{params['period_key']}"
+    ``StepContext``'s docstring for why a retry must reuse this key); the
+    snapshot date is the RUN's ``period_key`` (see ``_drive_upload_executor``),
+    so a retry of the same period reuses the key and next week's run gets a
+    new one. Deliberately never raises (the run loop calls it outside its
+    per-step try): a missing run period surfaces as the executor's own
+    ``StepExecutionError`` on the very next line of the loop."""
+    return f"job:{ctx.job_id}:period:{ctx.period_key}"
 
 
 async def _recon_run_executor(ctx: StepContext, params: dict) -> dict:
@@ -390,13 +407,16 @@ _REPORT_BUILD_XLSX_SCHEMA = {
     "additionalProperties": False,
 }
 
+# No `period_key` param on purpose: the period is the run's own (see
+# `_drive_upload_executor`). `additionalProperties: False` is what rejects a
+# compiled literal — at compile time (validate_plan) and, via plan_schema(),
+# in the structured-output contract the compiler's LLM call is bound to.
 _DRIVE_UPLOAD_SCHEMA = {
     "type": "object",
     "properties": {
         "report_step": {"type": "string", "minLength": 1, "x-step-ref": True},
-        "period_key": {"type": "string", "minLength": 1},
     },
-    "required": ["report_step", "period_key"],
+    "required": ["report_step"],
     "additionalProperties": False,
 }
 
