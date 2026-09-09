@@ -60,3 +60,23 @@ async def test_group_routes_require_auth_and_keep_members_tenant_scoped(client, 
     assert foreign.status_code == 200 and foreign.json()["cases"] == []
     assert (await client.get(f"{prefix}/invalid/cases", headers=headers)).status_code == 422
     assert (await client.get(f"{prefix}?limit=51", headers=headers)).status_code == 422
+
+
+async def test_group_period_query_validates_scope_and_never_exposes_foreign_reviews(
+    client, db, admin_user, admin_user_b, monkeypatch
+):
+    from tests.test_transaction_review_slices import review
+
+    actor, headers = admin_user
+    _, root = await review(db, actor, monkeypatch)
+    prefix = "/api/v1/transaction-ops/case-groups"
+    params = {"review_run_ids": str(root.id), "status": "needs_review"}
+    result = await client.get(prefix, params=params, headers=headers)
+    assert result.status_code == 200 and result.json()["groups"] == [], result.text
+    for feature in ("celigo", "reconciliation"):
+        await enable_feature_flag(db, admin_user_b[0].tenant_id, feature)
+    assert (await client.get(prefix, params=params, headers=admin_user_b[1])).status_code == 404
+    assert (await client.get(prefix, params={"review_run_ids": "bad"}, headers=headers)).status_code == 422
+    assert (await client.get(prefix, params={"status": "needs_review"}, headers=headers)).status_code == 422
+    members = await client.get(f"{prefix}/{'a' * 32}/cases", params=params, headers=headers)
+    assert members.status_code == 200 and members.json()["cases"] == []

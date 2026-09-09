@@ -34,14 +34,30 @@ from app.mcp.tools import (
 TOOL_REGISTRY = {
     "transaction_ops.groups": {
         "description": (
-            "Group all open reconciliation cases by entity, source, currency, variance direction and credit context. "
-            "Groups describe symptoms, not a verified shared cause. Supply group_id to read exact case members. "
+            "Group reconciliation cases by entity, source, currency, variance direction and credit context. "
+            "Supply review_run_ids for the selected period; otherwise lists all open historical cases. "
+            "Repeat the exact review_run_ids, status and search on every member request. "
+            "Groups describe symptoms, not a verified shared cause. "
+            "Supply group_id to read exact case members. "
             "Follow has_next with offset+limit. Investigate cases before exact proposal approval; "
             "a group never authorizes writes."
         ),
         "execute": transaction_ops_tools.execute_groups,
         "params_schema": {
             "group_id": {"type": "string", "description": "Group ID from the group list; omit to list groups"},
+            "review_run_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Selected period run UUIDs, 1 to 20. Preserve on every page/member request.",
+            },
+            "status": {
+                "type": "string",
+                "description": "Category: needs_review (default), matched, not_verified. Requires review_run_ids.",
+            },
+            "search": {
+                "type": "string",
+                "description": "Exact order-reference search text, at most 200 characters. Requires review_run_ids.",
+            },
             "limit": {"type": "integer", "description": "Page size, 1 to 50; default 20"},
             "offset": {"type": "integer", "description": "Page offset; default 0"},
         },

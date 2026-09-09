@@ -49,7 +49,7 @@ TOOL_CONFIGS = {
         "timeout_seconds": 15,
         "rate_limit_per_minute": 30,
         "requires_entitlement": "mcp_tools",
-        "allowlisted_params": ["group_id", "limit", "offset"],
+        "allowlisted_params": ["group_id", "limit", "offset", "review_run_ids", "status", "search"],
     },
     "transaction_ops.configs": {
         "default_limit": None,

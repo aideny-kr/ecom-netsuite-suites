@@ -510,7 +510,18 @@ function Workspace() {
             setOffset={setOffset}
             label="25 rows per entity per page"
           />
-          {tab === "Orders" && <IssueGroups />}
+          {tab === "Orders" && status !== "matched" && (
+            <IssueGroups
+              key={JSON.stringify([
+                selectedRuns.map((run) => run.id),
+                status,
+                search.trim(),
+              ])}
+              reviewRunIds={selectedRuns.map((run) => run.id)}
+              status={status || "needs_review"}
+              search={search.trim()}
+            />
+          )}
         </section>
       )}
       {tab === "Cases" && (

@@ -211,10 +211,18 @@ async def list_case_groups(
     db: Database,
     limit: Annotated[int, Query(ge=1, le=50)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
+    review_run_ids: Annotated[list[UUID] | None, Query(max_length=20)] = None,
+    status: Literal["matched", "needs_review", "not_verified"] | None = None,
+    search: Annotated[str, Query(max_length=200)] = "",
 ):
     from app.services.transaction_ops.case_groups import list_groups
 
-    return await list_groups(db, user.tenant_id, limit=limit, offset=offset)
+    try:
+        return await list_groups(
+            db, user.tenant_id, limit=limit, offset=offset, review_run_ids=review_run_ids, status=status, search=search
+        )
+    except service.StateError as exc:
+        raise _http_error(exc) from None
 
 
 @router.get("/case-groups/{group_id}/cases")
@@ -224,11 +232,23 @@ async def list_group_cases(
     db: Database,
     limit: Annotated[int, Query(ge=1, le=50)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
+    review_run_ids: Annotated[list[UUID] | None, Query(max_length=20)] = None,
+    status: Literal["matched", "needs_review", "not_verified"] | None = None,
+    search: Annotated[str, Query(max_length=200)] = "",
 ):
     from app.services.transaction_ops.case_groups import group_members
 
     try:
-        return await group_members(db, user.tenant_id, group_id, limit=limit, offset=offset)
+        return await group_members(
+            db,
+            user.tenant_id,
+            group_id,
+            limit=limit,
+            offset=offset,
+            review_run_ids=review_run_ids,
+            status=status,
+            search=search,
+        )
     except service.StateError as exc:
         raise _http_error(exc) from None
 

@@ -4,9 +4,11 @@ SQL aggregates before pagination, so groups include cases beyond the current UI
 page. Group IDs are selectors, never authorization or frozen approval identities.
 """
 
+import json
 import re
+from uuid import UUID
 
-from sqlalchemy import String, case, cast, func, select
+from sqlalchemy import String, case, cast, func, select, union_all
 
 from app.core.database import set_tenant_context
 from app.models.transaction_ops import TransactionCase as Case
@@ -21,11 +23,70 @@ USAGE = (
 )
 
 
-def _signature():
-    report = Case.latest_report_json
+async def _source(db, tenant_id, review_run_ids=None, status=None, search=""):
+    from app.services.transaction_ops.review_evidence import period_evidence, result_category
+
+    if status not in (None, "matched", "needs_review", "not_verified"):
+        raise StateError("invalid_result_status", 422)
+    if not isinstance(search, str) or len(search) > 200:
+        raise StateError("invalid_group_scope", 422)
+    if review_run_ids is None:
+        if status or search:
+            raise StateError("review_scope_required", 422)
+        return select(
+            Case.id,
+            Case.tenant_id,
+            Case.order_reference,
+            Case.scope_json,
+            Case.latest_report_json,
+            Case.last_observed_at,
+        ).where(Case.tenant_id == tenant_id, Case.status == "open").subquery(), "all_open"
+    if not isinstance(review_run_ids, list) or not 1 <= len(review_run_ids) <= 20:
+        raise StateError("invalid_group_scope", 422)
+    try:
+        run_ids = sorted({str(UUID(str(value))) for value in review_run_ids})
+    except (ValueError, TypeError, AttributeError):
+        raise StateError("invalid_group_scope", 422) from None
+    status = status or "needs_review"
+    queries = []
+    for run_id in run_ids:
+        latest, _ = await period_evidence(db, tenant_id, UUID(run_id))
+        query = (
+            select(
+                Case.id,
+                Case.tenant_id,
+                Case.order_reference,
+                Case.scope_json,
+                latest.c.report_json.label("latest_report_json"),
+                latest.c.updated_at.label("last_observed_at"),
+            )
+            .select_from(latest)
+            .join(
+                Case,
+                (cast(Case.id, String) == latest.c.report_json["case_id"].astext)
+                & (Case.tenant_id == tenant_id)
+                & (Case.order_reference == latest.c.order_reference),
+            )
+        )
+        query = query.where(result_category(latest) == status)
+        if search:
+            query = query.where(latest.c.order_reference.contains(search, autoescape=True))
+        queries.append(query)
+    combined = union_all(*queries).subquery()
+    source = (
+        select(combined).distinct(combined.c.id).order_by(combined.c.id, combined.c.last_observed_at.desc()).subquery()
+    )
+    # Bind the selector to the cohort and filters: dropping scope in a later
+    # agent call must return no members, never expand to historical cases.
+    scope_key = json.dumps([run_ids, status, search], separators=(",", ":"))
+    return source, scope_key
+
+
+def _signature(source, scope_key):
+    report = source.c.latest_report_json
     balance = report["balance"]
     columns = [
-        Case.scope_json.label("scope"),
+        source.c.scope_json.label("scope"),
         balance["status"].astext.label("status"),
         balance["currency"].astext.label("currency"),
         balance["target_currency"].astext.label("target_currency"),
@@ -52,7 +113,9 @@ def _signature():
         columns.append(func.coalesce(balance["adjustments"].contains([{"kind": kind}]), False).label(kind))
     # MD5 is a compact non-security locator. Explicit tenant predicates and RLS
     # enforce access, including when callers supply another tenant's group ID.
-    identifier = func.md5(cast(func.jsonb_build_array(Case.tenant_id, *columns), String)).label("group_id")
+    identifier = func.md5(
+        cast(func.jsonb_build_array(source.c.tenant_id, cast(scope_key, String), *columns), String)
+    ).label("group_id")
     return columns, identifier
 
 
@@ -77,18 +140,18 @@ def _pattern(row):
     return " + ".join(changed) + " differences" + suffix
 
 
-async def list_groups(db, tenant_id, *, limit=50, offset=0):
+async def list_groups(db, tenant_id, *, limit=50, offset=0, review_run_ids=None, status=None, search=""):
     await set_tenant_context(db, str(tenant_id))
-    columns, identifier = _signature()
+    source, scope_key = await _source(db, tenant_id, review_run_ids, status, search)
+    columns, identifier = _signature(source, scope_key)
     grouped = (
         select(
             *columns,
             identifier,
             func.count().label("case_count"),
-            func.max(Case.last_observed_at).label("last_observed_at"),
+            func.max(source.c.last_observed_at).label("last_observed_at"),
         )
-        .where(Case.tenant_id == tenant_id, Case.status == "open")
-        .group_by(Case.tenant_id, *columns)
+        .group_by(source.c.tenant_id, *columns)
         .subquery()
     )
     limit = min(50, max(1, limit))
@@ -117,17 +180,18 @@ async def list_groups(db, tenant_id, *, limit=50, offset=0):
     return {"groups": groups, "has_next": len(rows) > limit, "offset": offset, "usage": USAGE}
 
 
-async def group_members(db, tenant_id, group_id, *, limit=50, offset=0):
+async def group_members(db, tenant_id, group_id, *, limit=50, offset=0, review_run_ids=None, status=None, search=""):
     if not isinstance(group_id, str) or not re.fullmatch(r"[0-9a-f]{32}", group_id):
         raise StateError("invalid_group_id", 422)
     await set_tenant_context(db, str(tenant_id))
-    _, identifier = _signature()
+    source, scope_key = await _source(db, tenant_id, review_run_ids, status, search)
+    _, identifier = _signature(source, scope_key)
     limit = min(50, max(1, limit))
     rows = (
         await db.execute(
-            select(Case.id, Case.order_reference, Case.last_observed_at)
-            .where(Case.tenant_id == tenant_id, Case.status == "open", identifier == group_id)
-            .order_by(Case.id)
+            select(source.c.id, source.c.order_reference, source.c.last_observed_at)
+            .where(identifier == group_id)
+            .order_by(source.c.id)
             .offset(max(0, offset))
             .limit(limit + 1)
         )

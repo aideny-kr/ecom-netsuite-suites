@@ -42,17 +42,39 @@ function matches(config: TransactionConfig, scope: JsonObject) {
   );
 }
 
-export function IssueGroups() {
+export function IssueGroups({
+  reviewRunIds,
+  status = "needs_review",
+  search = "",
+}: {
+  reviewRunIds?: string[];
+  status?: string;
+  search?: string;
+}) {
   const access = useTransactionAccess();
   const configs = useTransactionConfigs();
   const [offset, setOffset] = useState(0);
+  const scope = reviewRunIds
+    ? { review_run_ids: reviewRunIds, status, search }
+    : {};
+  const query = new URLSearchParams({ limit: "20", offset: String(offset) });
+  if (reviewRunIds) {
+    reviewRunIds.forEach((id) => query.append("review_run_ids", id));
+    query.set("status", status);
+    if (search) query.set("search", search);
+  }
   const groups = useQuery({
-    queryKey: ["transaction-ops", access.tenantId, "case-groups", offset],
-    enabled: access.allowed,
+    queryKey: [
+      "transaction-ops",
+      access.tenantId,
+      "case-groups",
+      scope,
+      offset,
+    ],
+    enabled:
+      access.allowed && (reviewRunIds === undefined || reviewRunIds.length > 0),
     queryFn: () =>
-      apiClient.get<Groups>(
-        `/api/v1/transaction-ops/case-groups?limit=20&offset=${offset}`,
-      ),
+      apiClient.get<Groups>(`/api/v1/transaction-ops/case-groups?${query}`),
     refetchInterval: 30000,
   });
   return (
@@ -63,7 +85,9 @@ export function IssueGroups() {
       <div>
         <h2 className="font-semibold">Issue groups</h2>
         <p className="mt-1 text-[13px] text-muted-foreground">
-          All open cases across periods and entities, grouped by issue pattern.
+          {reviewRunIds
+            ? `${status === "not_verified" ? "Not verified" : "Needs review"} orders in the selected period and entities${search ? ", matching your search" : ""}, grouped by issue pattern.`
+            : "All open cases across periods and entities, including historical cases. These counts differ from the selected period."}
           The agent verifies a shared cause before proposing a batch fix.
         </p>
       </div>
@@ -112,7 +136,7 @@ export function IssueGroups() {
                         ]
                       : [];
                   });
-                  const prompt = `Investigate issue group ${group.group_id} (${group.pattern}). Use transaction_ops.groups with this group_id and follow every has_next page to include all current members. ${active.length === 1 ? `The exact active investigation config for this scope is ${active[0].id}.` : "Verify the exact configuration scope before starting any run."} Verify a shared cause across the cases; split any different causes. Use existing investigations or queue bounded fresh investigations for the exact order references in this scope. Prepare supported exact fixes together for human approval in Fix approvals. Do not approve or execute changes, issue duplicate refunds, or treat a group ID as authorization. Preserve per-case audit and independently verify each outcome.`;
+                  const prompt = `Investigate issue group ${group.group_id} (${group.pattern}). Use transaction_ops.groups with this group_id${reviewRunIds ? ` and these exact scope parameters on every call: ${JSON.stringify(scope)}.` : "."} Follow every has_next page to include all current members within this scope. ${active.length === 1 ? `The exact active investigation config for this scope is ${active[0].id}.` : "Verify the exact configuration scope before starting any run."} Verify a shared cause across the cases; split any different causes. Use existing investigations or queue bounded fresh investigations for the exact order references in this scope. Prepare supported exact fixes together for human approval in Fix approvals. Do not approve or execute changes, issue duplicate refunds, or treat a group ID as authorization. Preserve per-case audit and independently verify each outcome.`;
                   return (
                     <tr key={group.group_id} className="border-b last:border-0">
                       <td className="p-3 font-medium">

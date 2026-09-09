@@ -20,7 +20,7 @@ _PARAMS = {
     "configs": frozenset(),
     "run": frozenset({"config_id", "order_references", "window_start", "window_end"}),
     "status": frozenset({"run_id", "case_id"}),
-    "groups": frozenset({"group_id", "limit", "offset"}),
+    "groups": frozenset({"group_id", "limit", "offset", "review_run_ids", "status", "search"}),
 }
 _MAX_FINDINGS = 100
 _MAX_ROWS = 500
@@ -164,10 +164,11 @@ async def _execute(operation, params, context):
             limit, offset = params.get("limit", 20), params.get("offset", 0)
             if type(limit) is not int or type(offset) is not int or not 1 <= limit <= 50 or offset < 0:
                 raise _ToolError("invalid_parameters")
+            scope = {key: params[key] for key in ("review_run_ids", "status", "search") if key in params}
             if "group_id" in params:
-                result = await group_members(db, tenant_id, params["group_id"], limit=limit, offset=offset)
+                result = await group_members(db, tenant_id, params["group_id"], limit=limit, offset=offset, **scope)
             else:
-                result = await list_groups(db, tenant_id, limit=limit, offset=offset)
+                result = await list_groups(db, tenant_id, limit=limit, offset=offset, **scope)
             return {"success": True, **result}
         if operation == "configs":
             configs = await state.list_configs(db, tenant_id)

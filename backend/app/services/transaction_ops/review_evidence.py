@@ -52,3 +52,45 @@ def current_review_evidence(cohort, tenant_id, snapshot):
         .select_from(cohort.outerjoin(replacement, true()))
         .subquery()
     )
+
+
+async def period_evidence(db, tenant_id, run_id):
+    """One authorized period's cohort with compatible later rechecks."""
+    from app.models.transaction_ops import TransactionFinding, TransactionRun
+    from app.schemas.transaction_runs import ReviewSpan
+    from app.services.transaction_ops import state_service as state
+
+    root = await state.get_run(db, tenant_id, run_id)
+    if not root.params_json.get("review"):
+        raise state.StateError("not_a_period_review", 422)
+    span = ReviewSpan.model_validate(root.params_json["review"])
+    f, r = TransactionFinding, TransactionRun
+    cohort = (
+        select(f.id, f.run_id, f.order_reference, f.report_json, f.updated_at)
+        .join(r, (f.tenant_id == r.tenant_id) & (f.run_id == r.id))
+        .where(
+            f.tenant_id == tenant_id,
+            r.tenant_id == tenant_id,
+            r.config_id == root.config_id,
+            r.params_json["review"] == span.model_dump(mode="json"),
+        )
+        .distinct(f.order_reference)
+        .order_by(f.order_reference, f.updated_at.desc(), f.id.desc())
+        .subquery()
+    )
+    latest = current_review_evidence(cohort, tenant_id, root.config_snapshot)
+    return latest, span
+
+
+def result_category(latest):
+    from sqlalchemy import case
+
+    verdict = latest.c.report_json["balance"]["status"].astext
+    return case(
+        (verdict == "matched", "matched"),
+        (
+            verdict.in_(["difference", "mismatch", "missing_in_netsuite", "ambiguous", "currency_mismatch"]),
+            "needs_review",
+        ),
+        else_="not_verified",
+    )

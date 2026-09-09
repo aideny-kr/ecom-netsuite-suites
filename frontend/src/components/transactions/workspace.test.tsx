@@ -71,7 +71,7 @@ beforeEach(() => {
           {
             group_id: "a".repeat(32),
             pattern: "Tax differences",
-            case_count: 53,
+            case_count: 2,
             currency: "USD",
             scope: {
               source_connection_id: "source-a",
@@ -280,6 +280,32 @@ it("launches one group investigation with all-member pagination and exact scope"
   expect(prompt).toContain("scope-a");
   expect(prompt).toContain("Split".toLowerCase());
   expect(prompt).toContain("Do not approve or execute");
-  expect(screen.getByText("53")).toBeInTheDocument();
+  expect(prompt).toContain('"review_run_ids":["review-a"]');
+  expect(prompt).toContain('"status":"needs_review"');
+  expect(apiClient.get).toHaveBeenCalledWith(
+    expect.stringContaining("review_run_ids=review-a&status=needs_review"),
+  );
+  fireEvent.change(screen.getByLabelText("Result status"), {
+    target: { value: "not_verified" },
+  });
+  await waitFor(() =>
+    expect(apiClient.get).toHaveBeenCalledWith(
+      expect.stringContaining("review_run_ids=review-a&status=not_verified"),
+    ),
+  );
+  fireEvent.change(screen.getByLabelText("Search order number"), {
+    target: { value: "R123" },
+  });
+  await waitFor(() =>
+    expect(apiClient.get).toHaveBeenCalledWith(
+      expect.stringContaining("status=not_verified&search=R123"),
+    ),
+  );
+  fireEvent.change(screen.getByLabelText("Result status"), {
+    target: { value: "matched" },
+  });
+  expect(
+    screen.queryByRole("region", { name: "Issue groups" }),
+  ).not.toBeInTheDocument();
   expect(apiClient.post).not.toHaveBeenCalled();
 });
