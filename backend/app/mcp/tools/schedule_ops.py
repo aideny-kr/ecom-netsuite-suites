@@ -109,6 +109,11 @@ async def execute_create(params: dict, **kwargs) -> dict:
         # create_scheduled_job already added + flushed the row; the caller
         # (this MCP handler) owns the commit, per that function's own
         # docstring — mirrors the API route's identical division of labour.
+        # Item 2 (delta gate fix): this comment used to be aspirational --
+        # no commit actually followed it, so a chat-created Scheduled Job
+        # never became durable past the request (consistent with
+        # `execute_run`/`recon_approve.py`, which DO commit).
+        await db.commit()
         logger.info("mcp.schedule.created", schedule_id=str(schedule.id), tenant_id=str(tenant_id), job=True)
         return {
             "schedule_id": str(schedule.id),
@@ -141,6 +146,10 @@ async def execute_create(params: dict, **kwargs) -> dict:
     )
     db.add(schedule)
     await db.flush()
+    # Item 2 (delta gate fix): this legacy direct-create path never
+    # committed either -- add it here too, consistent with the compile path
+    # above and with `execute_run`/`recon_approve.py`'s own convention.
+    await db.commit()
 
     logger.info("mcp.schedule.created", schedule_id=str(schedule.id), tenant_id=str(tenant_id))
     return {

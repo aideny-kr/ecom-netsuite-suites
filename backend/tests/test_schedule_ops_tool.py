@@ -29,6 +29,7 @@ no real LLM call happens here either.
 from __future__ import annotations
 
 import uuid
+from unittest.mock import AsyncMock
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -383,6 +384,107 @@ class TestExecuteCreate:
             .all()
         )
         assert rows == []
+
+    async def test_execute_create_commits_after_a_successful_instruction_create(
+        self, db: AsyncSession, admin_user, monkeypatch
+    ):
+        """Item 2 (delta gate fix): `execute_create`'s instruction branch
+        called `create_scheduled_job` (flush-only) and never committed, while
+        its own inline comment claimed this handler owns the commit — a
+        schedule created via chat was never actually durable past the
+        request. `commit` is spied with `AsyncMock(wraps=db.commit)` so the
+        REAL commit still runs (the row must actually land)."""
+        user, _ = admin_user
+
+        async def fake_compile(db, *, tenant_id, instruction, actor_id, llm=None, plan_version=None):
+            return _compiled_plan()
+
+        monkeypatch.setattr("app.services.schedule_service.compile_instruction", fake_compile)
+        commit_spy = AsyncMock(wraps=db.commit)
+        monkeypatch.setattr(db, "commit", commit_spy)
+
+        result = await schedule_ops.execute_create(
+            {"instruction": "weekly inventory aging report"},
+            context={"db": db, "tenant_id": str(user.tenant_id), "actor_id": str(user.id)},
+        )
+        assert not result.get("error")
+        commit_spy.assert_awaited_once()
+
+    async def test_execute_create_commits_after_a_successful_legacy_create(
+        self, db: AsyncSession, admin_user, monkeypatch
+    ):
+        """Item 2 (delta gate fix): the legacy direct-create branch (no
+        `instruction`) never committed either -- both branches must, per the
+        same convention `execute_run`/`recon_approve.py` already follow."""
+        user, _ = admin_user
+        commit_spy = AsyncMock(wraps=db.commit)
+        monkeypatch.setattr(db, "commit", commit_spy)
+
+        result = await schedule_ops.execute_create(
+            {"name": "Legacy MCP Sync", "schedule_type": "sync", "cron": "0 0 * * *"},
+            context={"db": db, "tenant_id": str(user.tenant_id)},
+        )
+        assert not result.get("error")
+        commit_spy.assert_awaited_once()
+
+    async def test_execute_create_does_not_commit_on_clarification(self, db: AsyncSession, admin_user, monkeypatch):
+        """Item 2 (delta gate fix): a Clarification creates NOTHING -- commit
+        must not be called on this error path."""
+        user, _ = admin_user
+
+        async def fake_compile(db, *, tenant_id, instruction, actor_id, llm=None, plan_version=None):
+            return Clarification(question="Which subsidiary?")
+
+        monkeypatch.setattr("app.services.schedule_service.compile_instruction", fake_compile)
+        commit_spy = AsyncMock(wraps=db.commit)
+        monkeypatch.setattr(db, "commit", commit_spy)
+
+        result = await schedule_ops.execute_create(
+            {"instruction": "deliver inventory aging weekly"},
+            context={"db": db, "tenant_id": str(user.tenant_id)},
+        )
+        assert result.get("clarification") is True
+        commit_spy.assert_not_awaited()
+
+    async def test_execute_create_does_not_commit_on_validation_error(self, db: AsyncSession, admin_user, monkeypatch):
+        """Item 2 (delta gate fix): an over-length instruction is rejected by
+        `ScheduleCreate` before `create_scheduled_job` ever runs -- no commit."""
+        user, _ = admin_user
+
+        async def fail_if_called(*a, **k):
+            raise AssertionError("compile_instruction must not be called for an over-length instruction")
+
+        monkeypatch.setattr("app.services.schedule_service.compile_instruction", fail_if_called)
+        commit_spy = AsyncMock(wraps=db.commit)
+        monkeypatch.setattr(db, "commit", commit_spy)
+
+        result = await schedule_ops.execute_create(
+            {"instruction": "x" * 10_000},
+            context={"db": db, "tenant_id": str(user.tenant_id), "actor_id": str(user.id)},
+        )
+        assert result.get("error") is True
+        commit_spy.assert_not_awaited()
+
+    async def test_execute_create_does_not_commit_on_over_quota_error(self, db: AsyncSession, admin_user, monkeypatch):
+        """Item 2 (delta gate fix): a quota-exceeded rejection creates
+        nothing -- no commit."""
+        user, _ = admin_user
+
+        async def fake_check_entitlement(db, tenant_id, feature):
+            return False
+
+        monkeypatch.setattr(
+            "app.services.schedule_service.entitlement_service.check_entitlement", fake_check_entitlement
+        )
+        commit_spy = AsyncMock(wraps=db.commit)
+        monkeypatch.setattr(db, "commit", commit_spy)
+
+        result = await schedule_ops.execute_create(
+            {"instruction": "weekly inventory aging report"},
+            context={"db": db, "tenant_id": str(user.tenant_id), "actor_id": str(user.id)},
+        )
+        assert result.get("error") is True
+        commit_spy.assert_not_awaited()
 
     async def test_schedule_create_instruction_survives_real_dispatch(self, db: AsyncSession, admin_user, monkeypatch):
         """Governance regression (item 6): schedule.create's OLD allowlist
