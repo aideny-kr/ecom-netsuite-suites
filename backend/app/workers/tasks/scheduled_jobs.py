@@ -101,7 +101,8 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
@@ -337,24 +338,67 @@ async def _claim_due_schedules(db: AsyncSession, tenant_id: uuid.UUID, now: date
 # ---------------------------------------------------------------------------
 
 
+def _json_safe(value: Any) -> Any:
+    """Recursive JSON-safe coercion for a value NESTED inside a dict/list
+    (see `_distill_artifact` for the top-level rule, which DROPS an
+    unrecognized value instead of coercing it to `None`). `Decimal` becomes
+    `str(value)` — never `float` — so a bigquery_sql row's exact decimal
+    value round-trips instead of picking up float rounding error."""
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if isinstance(value, bytes):
+        return {"bytes": len(value)}
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return None  # a live object nested inside a dict/list — safe null, never raises
+
+
 def _distill_artifact(artifact: dict) -> dict:
     """A JSON-safe subset of one step's artifact, for `jobs.result_summary`.
     registry.py's own docstring assigns this to the run loop, not the
     registry: an artifact may hold live objects (a `Report` ORM row, raw PDF/
-    Excel bytes) that never belong in a persisted JSON column."""
+    Excel bytes) that never belong in a persisted JSON column, OR — a
+    `bigquery_sql` artifact's row values — `Decimal`/`date`/`datetime`
+    Python objects that a plain `dict`/`list` pass-through does NOT make
+    JSON-safe (review finding, MAJOR): `job.result_summary = {...outputs...}`
+    raised `TypeError` at flush time in `_finalize_run`, outside `_run_steps`'
+    own protection entirely, for ANY step whose artifact carried one.
+
+    A top-level unrecognized value (e.g. a live ORM row) is still DROPPED,
+    exactly as before; a `dict`/`list` value recurses through `_json_safe`,
+    which coerces `Decimal`/`date`/`datetime`/`uuid.UUID` and turns an
+    unrecognized value NESTED inside it into `None` (it can't be dropped
+    without breaking the container's shape). `json.loads(json.dumps(...))` at
+    the end is the final belt-and-suspenders guarantee: this function itself
+    can never hand back something the `jobs.result_summary` JSON column
+    rejects."""
     distilled: dict[str, Any] = {}
     for key, value in artifact.items():
         if isinstance(value, (str, int, float, bool)) or value is None:
             distilled[key] = value
+        elif isinstance(value, Decimal):
+            distilled[key] = str(value)
+        elif isinstance(value, (datetime, date)):
+            distilled[key] = value.isoformat()
+        elif isinstance(value, uuid.UUID):
+            distilled[key] = str(value)
         elif isinstance(value, bytes):
             distilled[key] = {"bytes": len(value)}
         elif isinstance(value, dict):
-            distilled[key] = value
-        elif isinstance(value, list):
-            distilled[key] = value
-        # anything else (e.g. a live ORM row) is dropped — it is still available
-        # in-memory via ctx.artifacts for a later step in THIS run.
-    return distilled
+            distilled[key] = _json_safe(value)
+        elif isinstance(value, (list, tuple)):
+            distilled[key] = _json_safe(list(value))
+        # anything else (e.g. a live ORM row) is dropped at the TOP LEVEL —
+        # it is still available in-memory via ctx.artifacts for a later step.
+    return json.loads(json.dumps(distilled))
 
 
 async def _run_steps(

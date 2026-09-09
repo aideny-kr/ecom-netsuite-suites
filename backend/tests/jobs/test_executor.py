@@ -21,7 +21,8 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import select, text
@@ -37,10 +38,12 @@ from app.models.tenant import Tenant, TenantConfig
 from app.services.jobs.registry import STEP_REGISTRY, StepExecutionError, StepSpec
 from app.workers.tasks import scheduled_jobs
 from app.workers.tasks.scheduled_jobs import (
+    REASON_BLOCKED,
     REASON_BUDGET,
     REASON_DONE,
     REASON_ERROR,
     RunOutcome,
+    _distill_artifact,
     compute_next_run,
     run_due_jobs,
     run_schedule_now,
@@ -567,6 +570,70 @@ async def test_usd_only_budget_stops_the_run(db: AsyncSession, monkeypatch):
     assert jobs[0].result_summary["reason"] == REASON_BUDGET
     assert "s1" in jobs[0].result_summary["outputs"]
     assert "s2" not in jobs[0].result_summary["outputs"]
+
+
+# ---------------------------------------------------------------------------
+# _distill_artifact must produce JSON-serializable output, always (review
+# finding, MAJOR): it passed dict/list values through unchanged, so a
+# bigquery_sql artifact carrying Decimal/date/datetime row values raised
+# TypeError at flush time in _finalize_run -- outside _run_steps's own
+# protection entirely.
+# ---------------------------------------------------------------------------
+
+
+def test_distill_artifact_coerces_decimal_date_and_drops_unknown_top_level_values():
+    class _LiveRow:
+        pass
+
+    artifact = {
+        "rows": [{"qty": Decimal("1.50"), "as_of": date(2026, 9, 8)}],
+        "report": _LiveRow(),
+    }
+    distilled = _distill_artifact(artifact)
+    assert distilled == {"rows": [{"qty": "1.50", "as_of": "2026-09-08"}]}
+    # The whole thing must actually round-trip through JSON -- the real
+    # guarantee _finalize_run needs when it assigns this to a JSON column.
+    import json
+
+    assert json.loads(json.dumps(distilled)) == distilled
+
+
+async def test_executor_persists_decimal_and_date_artifact_values_without_typeerror(
+    db: AsyncSession, monkeypatch
+):
+    """The end-to-end failure this used to raise: a step returns an artifact
+    with Decimal/date values, and `_finalize_run` assigning `job.result_summary`
+    (a JSON column) raised TypeError at flush time -- reachable even though
+    every step itself "succeeded"."""
+    tenant = await create_test_tenant(db, name="Decimal Artifact Co")
+    await set_tenant_context(db, str(tenant.id))
+
+    async def bigquery_like_step(ctx, params):
+        return {
+            "bytes_processed": 100,
+            "rows": [{"qty": Decimal("1.50"), "as_of": date(2026, 9, 8)}],
+        }
+
+    monkeypatch.setitem(STEP_REGISTRY, "fake.step", _fake_spec("read", bigquery_like_step))
+
+    now = datetime.now(timezone.utc)
+    schedule = await _seed_job_schedule(
+        db,
+        tenant,
+        plan_json={"steps": [{"id": "s1", "type": "fake.step", "params": {}}]},
+        next_run_at=now - timedelta(minutes=1),
+        cron_expression="0 6 * * 1",
+    )
+
+    stats = await run_due_jobs(db, tenant.id, now=now)
+    assert stats["ran"] == 1
+    assert stats["failed"] == 0
+    assert schedule.last_run_status == REASON_DONE
+
+    jobs = (await db.execute(select(Job).where(Job.tenant_id == tenant.id))).scalars().all()
+    assert len(jobs) == 1
+    assert jobs[0].status == "completed"
+    assert jobs[0].result_summary["outputs"]["s1"]["rows"] == [{"qty": "1.50", "as_of": "2026-09-08"}]
 
 
 # ---------------------------------------------------------------------------
