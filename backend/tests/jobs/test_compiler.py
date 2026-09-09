@@ -501,5 +501,47 @@ def test_plan_diff_is_empty_for_two_identical_plans():
     assert plan_diff(plan, plan) == []
 
 
+def test_plan_diff_reports_a_reorder_even_when_params_are_unchanged():
+    """Item 8 (gate fix): matching by step id and reporting only param/type
+    changes means swapping two steps produced an EMPTY diff before this fix
+    — an operator approving "no changes" would silently approve a reordered
+    plan."""
+    old = _inventory_aging_plan()
+    new = _inventory_aging_plan()
+    # Swap steps 3 (id "s3", report.render_pdf) and 4 (id "s4",
+    # report.build_xlsx) — each step's OWN params are unchanged, only their
+    # positions moved.
+    new["steps"][2], new["steps"][3] = new["steps"][3], new["steps"][2]
+
+    lines = plan_diff(old, new)
+    assert lines, "a reorder must not produce an empty diff"
+
+    ctx_by_step = {line.step: line.text for line in lines if line.kind == "ctx"}
+    # id "s4" (report.build_xlsx) is now at position 3, was at old position 4.
+    assert 3 in ctx_by_step and "moved from step 4" in ctx_by_step[3]
+    # id "s3" (report.render_pdf) is now at position 4, was at old position 3.
+    assert 4 in ctx_by_step and "moved from step 3" in ctx_by_step[4]
+    # No param changes on either step -> no del/add lines for them, just the
+    # position-change ctx line.
+    assert not any(line.kind in ("del", "add") for line in lines if line.step in (3, 4))
+    # Steps 1, 2, 5 did not move and are untouched -> no hunks for them.
+    assert set(ctx_by_step) == {3, 4}
+
+
+def test_plan_diff_reports_a_removed_step_with_its_params_as_del_lines():
+    old = _inventory_aging_plan()
+    new = _inventory_aging_plan()
+    del new["steps"][2]  # drop report.render_pdf (id "s3") entirely
+
+    lines = plan_diff(old, new)
+    removed = [line for line in lines if line.kind == "ctx" and line.step is None and "removed" in line.text]
+    assert len(removed) == 1
+    assert "s3" in removed[0].text
+    assert "report.render_pdf" in removed[0].text
+
+    del_lines = [line for line in lines if line.kind == "del" and line.step is None]
+    assert any("report_step: s2" in line.text for line in del_lines)
+
+
 async def _async_list(items: list) -> list:
     return items

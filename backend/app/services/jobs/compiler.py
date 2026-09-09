@@ -458,12 +458,33 @@ def _step_map(plan: dict | None) -> dict[str, dict]:
     return {s["id"]: s for s in steps if isinstance(s, dict) and s.get("id")}
 
 
+def _step_positions(plan: dict | None) -> dict[str, int]:
+    """1-based `{step_id: position}` for every step in `plan` — used to
+    detect a pure reorder (item 8, gate fix): matching steps by id alone
+    (as `_step_map` does) says nothing about whether a matched step's
+    POSITION also changed."""
+    steps = (plan or {}).get("steps") or []
+    return {s["id"]: idx for idx, s in enumerate(steps, start=1) if isinstance(s, dict) and s.get("id")}
+
+
 def plan_diff(old: dict, new: dict) -> list[DiffLine]:
     """One hunk (a ``ctx`` header line, then ``del``/``add`` lines) per step
-    whose params or type changed between ``old`` and ``new`` — an unchanged
-    step produces no lines at all, so a small instruction edit (like the
-    mock's "and Virtual") only ever surfaces the steps it actually touched."""
+    whose params, type, or POSITION changed between ``old`` and ``new`` — an
+    unchanged step produces no lines at all, so a small instruction edit
+    (like the mock's "and Virtual") only ever surfaces the steps it actually
+    touched.
+
+    Item 8 (gate fix): matching by step id and reporting only param/type
+    changes meant swapping two steps produced an EMPTY diff (an operator
+    approving "no changes" would silently approve a reordered plan) — a
+    matched step whose position moved now gets a ``step N · <type> · moved
+    from step M`` ``ctx`` line even when its own params are byte-identical;
+    a step removed entirely (present in ``old``, absent from ``new``) gets
+    its own ``ctx`` "removed" line followed by its params as ``del`` lines
+    (this half already existed before item 8 — kept here, tested here for
+    the first time)."""
     old_by_id = _step_map(old)
+    old_positions = _step_positions(old)
     new_steps = (new or {}).get("steps") or []
 
     lines: list[DiffLine] = []
@@ -478,12 +499,17 @@ def plan_diff(old: dict, new: dict) -> list[DiffLine]:
                 lines.append(DiffLine(kind="add", step=idx, text=text))
             continue
 
+        old_position = old_positions.get(step_id)
+        moved = old_position is not None and old_position != idx
         old_lines = _render_params(old_step.get("params") or {})
         new_lines = _render_params(step.get("params") or {})
-        if old_lines == new_lines and old_step.get("type") == step_type:
+        if old_lines == new_lines and old_step.get("type") == step_type and not moved:
             continue
 
-        lines.append(DiffLine(kind="ctx", step=idx, text=f"step {idx} · {step_type}"))
+        header = f"step {idx} · {step_type}"
+        if moved:
+            header += f" · moved from step {old_position}"
+        lines.append(DiffLine(kind="ctx", step=idx, text=header))
         matcher = difflib.SequenceMatcher(a=old_lines, b=new_lines, autojunk=False)
         for tag, i1, i2, j1, j2 in matcher.get_opcodes():
             if tag == "equal":
