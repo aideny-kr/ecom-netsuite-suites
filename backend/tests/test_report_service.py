@@ -3,12 +3,13 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from app.services.report.report_html import render_report_html
+from app.services.report.report_html import build_inventory_aging_sections, render_report_html
 from app.services.report.report_service import (
     _REPORT_TABLE_TOP_K,
     _resolve_data_section,
     assemble_spec,
     fill_placeholders,
+    spec_json_safe,
 )
 from tests.fixtures import statement_fixture as fx
 
@@ -626,3 +627,27 @@ async def test_compose_report_rejects_financial_statement_section():
             created_by=uuid.uuid4(),
         )
     db.add.assert_not_called()  # never even constructed a Report row
+
+
+def test_spec_json_safe_converts_inventory_aging_sections_decimal_and_date():
+    """Refresh-support follow-up: build_inventory_aging_sections' sections carry
+    raw Decimal/date/dataclass ``model`` values (report.watch_items, etc, straight
+    off inventory_aging.compute()) -- spec_json_safe must sanitize THOSE too, not
+    just financial_statement's, or persisting spec_json for a headlessly-composed/
+    refreshed inventory_aging report crashes JSONB serialization outright (a bug
+    this exact regression caught: TypeError: Object of type WatchItem is not JSON
+    serializable)."""
+    from tests.report.test_inventory_aging import _full_fixture
+
+    payloads, params = _full_fixture()
+    from app.services.report.inventory_aging import compute
+
+    report = compute(payloads, params)
+    sections = build_inventory_aging_sections(report, composed_at="2026-09-08T13:05:00+00:00")
+    spec = {"title": "Inventory Aging — Week of 8 Sep 2026", "sections": sections}
+
+    safe = spec_json_safe(spec)
+
+    assert json.dumps(safe)  # the actual JSONB-safety proof
+    # the LIVE spec is untouched (render_report_html needs the real Decimals)
+    assert spec["sections"][1]["model"] == report.watch_items

@@ -24,12 +24,14 @@ from app.services.report.playbooks import (
     compose_playbook_report,
     normalize_period,
     prior_period,
+    rebuild_playbook_spec,
     trailing_periods,
     yoy_period,
 )
 from app.services.report.refresh_service import RefreshError
 from tests.conftest import create_test_tenant, create_test_user
 from tests.fixtures import statement_fixture as fx
+from tests.report.test_inventory_aging import _full_fixture
 
 
 def test_catalog_lists_three_statement_playbooks_with_period_param():
@@ -83,37 +85,125 @@ def test_build_playbook_recipe_for_inventory_aging_uses_bigquery_sources():
         assert section["params"] == {"locations": ["Acme", "Globex"]}
 
 
+def test_build_playbook_recipe_for_inventory_aging_carries_the_playbook_key():
+    """Refresh-support follow-up (Requirement 1): recipe_json for a non-statement
+    playbook must carry a top-level "playbook" key naming the playbook + the
+    params it was built with -- refresh_service.refresh_report / this file's own
+    compose_playbook_report branch on its PRESENCE to route to
+    rebuild_playbook_spec instead of the financial_statement-only assemble_spec
+    path. A statement recipe (income_statement/balance_sheet/trial_balance) must
+    NEVER carry this key -- see test_build_income_statement_recipe below, which
+    asserts its absence so the statement path stays untouched byte-for-byte."""
+    _, recipe = build_playbook_recipe("inventory_aging", {"locations": ["Acme", "Globex"]})
+    assert recipe["playbook"] == {"key": "inventory_aging", "params": {"locations": ["Acme", "Globex"]}}
+
+
 def test_build_playbook_recipe_for_inventory_aging_rejects_bad_location():
     with pytest.raises(ValueError):
         build_playbook_recipe("inventory_aging", {"locations": ["O'Brien Depot"]})
 
 
-async def test_compose_playbook_report_fails_closed_for_inventory_aging_not_yet_wired(db, monkeypatch):
-    """Review finding: registering inventory_aging in PLAYBOOKS made
-    POST /reports/playbooks/inventory_aging reachable, but compose_playbook_report
-    unconditionally read recipe["sections"][0]["period"] right after
-    build_playbook_recipe returned — the inventory_aging section dict has no
-    "period" key (only type/result_ids/params), so this used to raise an
-    unhandled KeyError that propagated as a real 500 to a user who picked the
-    now-visible catalog entry. Composing a non-financial_statement recipe must
-    fail CLEANLY (a RefreshError, which compose_playbook_endpoint already maps
-    to an HTTP error) until the render wiring lands in a later task — and it
-    must fail before any tool dispatch (never partially execute sources for a
-    playbook it cannot render)."""
-    tenant = await create_test_tenant(db, name="InventoryAgingNotWiredCorp")
-    user, _ = await create_test_user(db, tenant)
-    calls = _patch_executor(monkeypatch)
+def _table_result(rows: list[dict]) -> str:
+    """A list[dict] fixture (test_inventory_aging's own row shape) rendered as the
+    ``{"columns": [...], "rows": [[...], ...]}`` JSON string a real bigquery_sql
+    tool call returns -- rows POSITIONAL, matching ia.rows_from_table_payload's
+    zip contract."""
+    columns = list(rows[0].keys()) if rows else []
+    return json.dumps({"columns": columns, "rows": [[row[c] for c in columns] for row in rows]})
 
-    with pytest.raises(RefreshError) as exc:
+
+def _patch_bigquery_executor(monkeypatch):
+    """Fake ``execute_tool_call`` keyed by the exact SQL text a bigquery_sql source
+    carries (the only thing that distinguishes r_items/r_prior/r_trend/r_meta —
+    unlike the statement fixtures' report_type/period, these sources share no
+    other params) -- built from the SAME recipe the assertions check against, so
+    a test can never accidentally serve the wrong rid's canned rows."""
+    payloads, params = _full_fixture()
+    _, recipe = build_playbook_recipe("inventory_aging", params)
+    by_query = {
+        recipe["sources"][rid]["params"]["query"]: _table_result(payloads[rid]) for rid in payloads
+    }
+    calls: list[dict] = []
+
+    async def fake_execute(tool_name, tool_input, tenant_id, actor_id, correlation_id, db, **kw):
+        calls.append({"tool": tool_name, "params": tool_input})
+        return by_query[tool_input["query"]]
+
+    monkeypatch.setattr("app.services.chat.tools.execute_tool_call", fake_execute)
+    return calls, recipe, params
+
+
+async def test_compose_playbook_report_composes_inventory_aging_headlessly(db, monkeypatch):
+    """Requirement 3: compose_playbook_report now has a rebuild hook for
+    inventory_aging (playbooks.rebuild_playbook_spec) -- it dispatches the same
+    four bigquery_sql sources through the same dispatcher refresh uses (no LLM),
+    computes the AgingReport, renders it with Task 2's section builders, and
+    stores the report WITH the recipe (Requirement 4's has_recipe flip)."""
+    tenant = await create_test_tenant(db, name="InventoryAgingWiredCorp")
+    user, _ = await create_test_user(db, tenant)
+    calls, _recipe, params = _patch_bigquery_executor(monkeypatch)
+
+    report = await compose_playbook_report(
+        db,
+        playbook_key="inventory_aging",
+        params=params,
+        tenant_id=tenant.id,
+        actor_id=user.id,
+    )
+
+    assert len(calls) == 4
+    assert report.title == "Inventory Aging Weekly"
+    assert report.recipe_json is not None
+    assert report.recipe_json["playbook"] == {"key": "inventory_aging", "params": params}
+    assert len(report.recipe_json["sources"]) == 4
+    assert "Watch items" in report.rendered_html
+    assert "<h1>Inventory Aging — Week of " in report.rendered_html
+    assert json.dumps(report.spec_json)  # persisted spec is actually JSON-safe
+
+
+async def test_compose_playbook_report_inventory_aging_fails_closed_on_a_source_failure(db, monkeypatch):
+    """The same required-rid fail-closed contract every other playbook gets:
+    compute() needs all four sources, so every one of them is required — a
+    single tool failure must fail the WHOLE compose, never persist a report."""
+    tenant = await create_test_tenant(db, name="InventoryAgingSourceFailCorp")
+    user, _ = await create_test_user(db, tenant)
+    _, _recipe, params = _patch_bigquery_executor(monkeypatch)
+
+    async def failing_execute(tool_name, tool_input, tenant_id, actor_id, correlation_id, db, **kw):
+        return json.dumps({"error": True, "message": "bigquery unavailable"})
+
+    monkeypatch.setattr("app.services.chat.tools.execute_tool_call", failing_execute)
+
+    with pytest.raises(RefreshError):
         await compose_playbook_report(
-            db,
-            playbook_key="inventory_aging",
-            params={"locations": ["Acme"]},
-            tenant_id=tenant.id,
-            actor_id=user.id,
+            db, playbook_key="inventory_aging", params=params, tenant_id=tenant.id, actor_id=user.id
         )
-    assert exc.value.status_code != 500
-    assert calls == []  # failed before any source ever dispatched
+
+    rows = (await db.execute(select(Report).where(Report.tenant_id == tenant.id))).scalars().all()
+    assert rows == []
+
+
+def test_rebuild_playbook_spec_raises_501_for_a_playbook_with_no_rebuild_hook():
+    """Requirement 3: "keep 501 only for playbooks without one" — any playbook_key
+    other than the ones with a registered rebuild hook fails CLEANLY (a
+    RefreshError, never an unhandled KeyError/AttributeError deep inside
+    inventory_aging.compute for a shape this function doesn't know)."""
+    with pytest.raises(RefreshError) as exc:
+        rebuild_playbook_spec("some_future_playbook", {}, {})
+    assert exc.value.status_code == 501
+
+
+def test_rebuild_playbook_spec_builds_the_aging_report_and_method_provenance():
+    payloads, params = _full_fixture()
+    table_payloads = {rid: {"columns": list(rows[0]), "rows": [list(r.values()) for r in rows]} for rid, rows in payloads.items()}
+
+    spec, method_provenance = rebuild_playbook_spec(
+        "inventory_aging", params, table_payloads, composed_at="2026-09-08T13:05:00+00:00"
+    )
+
+    assert spec["title"].startswith("Inventory Aging — Week of ")
+    assert [s["type"] for s in spec["sections"]][:2] == ["report_head", "watch_items"]
+    assert any(entry["label"] == "BigQuery inventory snapshot" for entry in method_provenance)
 
 
 # ---------------------------------------------------------------------------
@@ -278,6 +368,11 @@ def test_build_income_statement_recipe():
             "compare": {"prior": "r2", "yoy": "r3", "trend": "r4"},
         }
     ]
+    # Requirement 1 (refresh-support follow-up): a statement recipe carries NO
+    # "playbook" key — refresh_service/compose_playbook_report branch on its
+    # presence, and a statement recipe must keep going through the untouched
+    # financial_statement/assemble_spec path byte-for-byte.
+    assert "playbook" not in recipe
 
 
 @pytest.mark.parametrize("key", ["balance_sheet", "trial_balance"])

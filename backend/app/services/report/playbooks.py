@@ -244,6 +244,16 @@ def _build_inventory_aging_recipe(params: dict) -> tuple[str, dict]:
     return "Inventory Aging Weekly", {
         "schema_version": 1,
         "captured_at": datetime.now(timezone.utc).isoformat(),
+        # Refresh-support follow-up: the "playbook" key is what
+        # refresh_service.refresh_report / compose_playbook_report branch on to
+        # route to rebuild_playbook_spec instead of assemble_spec's
+        # financial_statement-only path -- a statement recipe (built below, NOT
+        # by this function) never carries this key, so that path stays
+        # untouched byte-for-byte. `params` here is the SAME dict every section
+        # already carries (never re-derived), so replaying the recipe can never
+        # disagree with itself about which locations/compare_days/trend_weeks
+        # were composed.
+        "playbook": {"key": "inventory_aging", "params": params},
         "sections": [
             {
                 "type": section_type,
@@ -254,6 +264,59 @@ def _build_inventory_aging_recipe(params: dict) -> tuple[str, dict]:
         ],
         "sources": sources,
     }
+
+
+# Refresh-support follow-up: playbooks whose recipe carries a "playbook" key AND
+# have a rebuild hook registered in rebuild_playbook_spec below. Checked BEFORE
+# any tool dispatch (compose_playbook_report) so a playbook_key that is visible
+# in the catalog but has neither a financial_statement recipe NOR a rebuild hook
+# still fails CLEANLY, never partially executing sources for a shape nothing can
+# render.
+_PLAYBOOK_REBUILD_HOOKS: frozenset[str] = frozenset({"inventory_aging"})
+
+
+def rebuild_playbook_spec(
+    playbook_key: str, params: dict, payloads: dict[str, dict], *, composed_at: str | None = None
+) -> tuple[dict, list[dict]]:
+    """Rebuild a non-``financial_statement`` playbook's ``{"title", "sections"}``
+    spec (plus its "Sources & method" provenance entries) from ALREADY-DISPATCHED
+    source payloads — the refresh/headless-compose counterpart of
+    ``build_playbook_recipe``'s TEMPLATE (that builds the RECIPE; this builds the
+    RENDERED spec from real data). ``payloads`` is the table-shaped dict
+    ``refresh_service._execute_sources``/``extract_result_payload`` produce for
+    every ``bigquery_sql`` source (``{result_id: {"columns": [...], "rows":
+    [[...], ...]}}``) — converted here via ``inventory_aging.rows_from_table_payload``
+    into the ``list[dict]`` rows ``compute()`` reads.
+
+    Only ``inventory_aging`` implements a rebuild hook today (Slice 1's own
+    section shape — watch_items/kpi_cards/mid_row/bucket_table/top_positions/
+    highlights/narrative, Task 2's ``build_inventory_aging_sections``). Every
+    OTHER registered playbook is ``financial_statement``-shaped and never reaches
+    this function: its recipe carries no ``"playbook"`` key at all (see
+    ``build_playbook_recipe``), so ``refresh_service.refresh_report`` /
+    ``compose_playbook_report`` route it through ``assemble_spec`` instead. Any
+    OTHER ``playbook_key`` raises a clean ``RefreshError(501)`` — a future
+    playbook registered with a "playbook" key but no matching branch here fails
+    closed at this single choke point, not with an unhandled KeyError/AttributeError
+    deep inside a compute function that has never seen its shape."""
+    from app.services.report.refresh_service import RefreshError
+
+    if playbook_key != "inventory_aging":
+        raise RefreshError(501, f"playbook '{playbook_key}' has no rebuild hook — cannot compose/refresh headlessly")
+
+    from app.services.report.inventory_aging import compute, rows_from_table_payload
+    from app.services.report.report_html import (
+        build_inventory_aging_provenance,
+        build_inventory_aging_sections,
+        inventory_aging_title,
+    )
+
+    converted = {rid: rows_from_table_payload(payload) for rid, payload in payloads.items()}
+    report_data = compute(converted, params)
+    sections = build_inventory_aging_sections(report_data, composed_at=composed_at)
+    spec = {"title": inventory_aging_title(report_data), "sections": sections}
+    method_provenance = build_inventory_aging_provenance(report_data.provenance)
+    return spec, method_provenance
 
 
 def build_playbook_recipe(playbook_key: str, params: dict[str, str]) -> tuple[str, dict]:
@@ -439,59 +502,93 @@ async def compose_playbook_report(
             series_id = existing_series_id
 
     title, recipe = build_playbook_recipe(playbook_key, params)
-    # T2-review finding: registering a playbook in PLAYBOOKS makes it immediately
-    # reachable through GET /reports/playbooks and POST /reports/playbooks/{key}
-    # (the endpoint's 404 gate is `playbook_key not in PLAYBOOKS`, nothing more) —
-    # but only a `financial_statement`-shaped recipe (`sections[0]["period"]`
-    # below) can be composed by the rest of this function. A playbook whose
-    # recipe uses a different section shape (e.g. inventory_aging's four
-    # bigquery_sql sources feeding its own watch_items/kpi_cards/.../narrative
-    # sections -- see _INVENTORY_AGING_SECTION_TYPES -- none of which has a
-    # "period" key) must fail CLEANLY here, before any tool dispatch, rather
-    # than let the next line's KeyError propagate as an unhandled 500 to a real
-    # user who picked a now-visible-but-not-yet-composable catalog entry.
-    if recipe["sections"][0].get("type") != "financial_statement":
+    playbook_meta = recipe.get("playbook")
+    # T2-review finding (retained + extended by the refresh-support follow-up):
+    # registering a playbook in PLAYBOOKS makes it immediately reachable through
+    # GET /reports/playbooks and POST /reports/playbooks/{key} (the endpoint's
+    # 404 gate is `playbook_key not in PLAYBOOKS`, nothing more) — but only a
+    # recipe shape this function actually knows how to RENDER can be composed.
+    # A `financial_statement`-shaped recipe (no "playbook" key) goes through
+    # assemble_spec below, unchanged. Any OTHER shape must carry a "playbook"
+    # key naming a REGISTERED rebuild hook (rebuild_playbook_spec) —
+    # inventory_aging is the only one today (Slice 1). Anything else fails
+    # CLEANLY here, before any tool dispatch, rather than crashing deep inside
+    # assemble_spec/compute for a catalog entry that's visible but not wired.
+    if playbook_meta is None:
+        if recipe["sections"][0].get("type") != "financial_statement":
+            raise RefreshError(
+                501,
+                f"playbook '{playbook_key}' is listed but cannot be composed yet "
+                "(its report section type has no renderer wired up)",
+            )
+    elif playbook_meta.get("key") not in _PLAYBOOK_REBUILD_HOOKS:
         raise RefreshError(
             501,
-            f"playbook '{playbook_key}' is listed but cannot be composed yet "
-            "(its report section type has no renderer wired up)",
+            f"playbook '{playbook_key}' is listed but cannot be composed yet (no rebuild hook registered)",
         )
-    period = recipe["sections"][0]["period"]
     correlation_id = f"report-playbook:{playbook_key}:{uuid.uuid4().hex[:8]}"
+    # Initialized before the branch below (never inferred from it): a playbook
+    # recipe (inventory_aging) has no NetSuite accounting "period" at all — the
+    # Report row's `period` column stays NULL for it (a one-off snapshot outside
+    # any ReportSeries lineage, mode="tracking" is statement-only and never
+    # reaches the playbook branch), same as compose_inventory_aging.py's own
+    # Report insert never sets it.
+    period: str | None = None
 
     await set_tenant_context(db, str(tenant_id))
+    sources = _validated_sources(recipe)
+    if playbook_meta is not None:
+        # inventory_aging's compute() needs every one of its four sources — there
+        # is no optional/degrading rid the way a statement's prior/yoy/trend
+        # compare sources are (Risk 2, below). Dispatching exactly the recipe's
+        # own sources (never more) is the cost guard: a tampered/drifted recipe
+        # can never make this fan out beyond what it was composed with.
+        needed_rids = list(sources)
+        required_rids = set(sources)
+    else:
+        needed_rids = referenced_result_ids(recipe["sections"])
+        # Risk 2 (statement compare-degrade seam): only the CURRENT-period source
+        # (r1) is a hard dependency for a financial_statement recipe — a
+        # prior/yoy/trend source outage renders the statement without that
+        # comparison instead of failing the whole compose. See
+        # report_service.required_result_ids / refresh_service._execute_sources
+        # docstrings for the mechanics.
+        required_rids = required_result_ids(recipe["sections"])
     payloads = await _execute_sources(
         db,
-        _validated_sources(recipe),
-        referenced_result_ids(recipe["sections"]),
+        sources,
+        needed_rids,
         tenant_id=tenant_id,
         actor_id=actor_id,
         actor_type=actor_type,
         correlation_id=correlation_id,
-        # Risk 2 (statement compare-degrade seam): only the CURRENT-period source (r1)
-        # is a hard dependency for a financial_statement recipe — a prior/yoy/trend
-        # source outage renders the statement without that comparison instead of
-        # failing the whole compose. See report_service.required_result_ids /
-        # refresh_service._execute_sources docstrings for the mechanics.
-        required_rids=required_result_ids(recipe["sections"]),
+        required_rids=required_rids,
     )
-    spec = assemble_spec(title, recipe["sections"], lambda rid: payloads[rid])
-    # T2 gate M2: r1 can RESOLVE but still fail to become a real statement (e.g. a
-    # well-shaped but empty account list — statement_builder._require_rows rejects
-    # that). For a statement report the section IS the report, so this fails closed
-    # (never persists a Report row) rather than letting the error-card degrade publish
-    # a contentless statement the way any OTHER section type's failure would.
-    error_reason = financial_statement_resolution_error(recipe["sections"], spec)
-    if error_reason is not None:
-        raise RefreshError(502, f"statement could not be built: {error_reason}")
-    html = render_report_html(
-        spec,
-        freshness={"composed_at": recipe["captured_at"], "refreshed_at": ""},
-        # T2 gate M1: resolved_rids marks any compare rid the degrade seam omitted from
-        # payloads as "not available this run" in the frozen provenance block instead of
-        # falsely claiming it executed — see build_provenance's docstring.
-        provenance=build_provenance(recipe["sources"], recipe["captured_at"], resolved_rids=set(payloads)),
-    )
+
+    if playbook_meta is not None:
+        spec, method_provenance = rebuild_playbook_spec(
+            playbook_meta["key"], playbook_meta.get("params") or {}, payloads, composed_at=recipe["captured_at"]
+        )
+        html = render_report_html(spec, provenance=method_provenance)
+    else:
+        period = recipe["sections"][0]["period"]
+        spec = assemble_spec(title, recipe["sections"], lambda rid: payloads[rid])
+        # T2 gate M2: r1 can RESOLVE but still fail to become a real statement (e.g. a
+        # well-shaped but empty account list — statement_builder._require_rows rejects
+        # that). For a statement report the section IS the report, so this fails closed
+        # (never persists a Report row) rather than letting the error-card degrade publish
+        # a contentless statement the way any OTHER section type's failure would.
+        error_reason = financial_statement_resolution_error(recipe["sections"], spec)
+        if error_reason is not None:
+            raise RefreshError(502, f"statement could not be built: {error_reason}")
+        html = render_report_html(
+            spec,
+            freshness={"composed_at": recipe["captured_at"], "refreshed_at": ""},
+            # T2 gate M1: resolved_rids marks any compare rid the degrade seam omitted from
+            # payloads as "not available this run" in the frozen provenance block instead of
+            # falsely claiming it executed — see build_provenance's docstring.
+            provenance=build_provenance(recipe["sources"], recipe["captured_at"], resolved_rids=set(payloads)),
+        )
 
     # tool calls may commit (e.g. token refresh) — re-establish before RLS writes
     await set_tenant_context(db, str(tenant_id))
