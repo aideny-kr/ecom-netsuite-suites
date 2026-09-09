@@ -65,8 +65,16 @@ OUTSIDE `_run_steps`'s own rollback-before-return protection (e.g. re-fetching t
 `Schedule`/`Job` rows afterward) has no `InstrumentedTask.on_failure` to fall back
 on — is closed explicitly: `run_schedule_now` retries `_finalize_run` once, against a
 freshly rolled-back session, forcing `reason=error` on the retry, so the SAME
-retry-then-pause bookkeeping every other error path uses always runs rather than
-leaving the `jobs` row it created stuck at `status="running"` (review finding).
+retry-then-pause bookkeeping every other error path uses runs on that retry rather
+than leaving the `jobs` row it created stuck at `status="running"` (review finding).
+That retry is itself guarded too (a second review finding): if the SAME `_finalize_run`
+call fails AGAIN — the ORM re-fetch path apparently broken, not just flaky once — a
+third ORM attempt is not made. Instead a minimal, non-ORM raw SQL `UPDATE` marks the
+`jobs` row `status='error'` and the `schedules` row `last_run_status='error'` by id,
+best-effort audits the failure, and returns — never leaving the `jobs` row stuck at
+`status="running"` even in that doubly-failed case, though (unlike the normal error
+path) it does NOT also schedule the usual 15-minutes-later retry-then-pause cycle,
+since that needs the very ORM objects this fallback exists because it could not get.
 
 Claim vs. run (the SKIP LOCKED lock is short-lived, not held for the run's duration):
 `_claim_due_schedules` does the `SELECT ... FOR UPDATE SKIP LOCKED`, immediately
@@ -84,6 +92,7 @@ the next tenant's sweep tick.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 import uuid
@@ -92,7 +101,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Awaitable, Callable
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -595,16 +604,104 @@ async def run_schedule_now(
         except Exception:
             logger.warning("scheduled_jobs.run_schedule_now.rollback_failed", exc_info=True)
         reason, detail = REASON_ERROR, f"{type(exc).__name__}: {exc}"
-        row, job = await _finalize_run(
-            db,
-            schedule_id=schedule_id,
-            tenant_id=tenant_id,
-            job_id_value=job_id_value,
-            reason=reason,
-            outputs=outputs,
-            detail=detail,
-            now=now,
-        )
+        try:
+            row, job = await _finalize_run(
+                db,
+                schedule_id=schedule_id,
+                tenant_id=tenant_id,
+                job_id_value=job_id_value,
+                reason=reason,
+                outputs=outputs,
+                detail=detail,
+                now=now,
+            )
+        except Exception as exc2:
+            # The ONE retry ITSELF failed too (review finding, MINOR): the
+            # ORM re-fetch path is apparently broken, not just flaky once —
+            # do NOT try it a third time. Fall back to a MINIMAL raw SQL
+            # UPDATE by id on both rows, with no ORM re-fetch (that is
+            # exactly what just failed twice), so the `jobs` row is never
+            # left stuck at status="running" forever with `next_run_at`
+            # already advanced by the claim and no record of what happened.
+            # This intentionally skips the normal retry-then-pause bookkeeping
+            # below (it needs the `row`/`job` ORM objects this branch does not
+            # have) — a schedule reaching this branch needs a human to look at
+            # it, not a clever third automatic attempt.
+            logger.exception(
+                "scheduled_jobs.run_schedule_now.finalize_retry_failed",
+                extra={"schedule_id": str(schedule_id), "job_id": str(job_id_value)},
+            )
+            try:
+                await db.rollback()
+            except Exception:
+                logger.warning("scheduled_jobs.run_schedule_now.finalize_retry_rollback_failed", exc_info=True)
+
+            fallback_detail = f"{type(exc2).__name__}: {exc2}"
+            fallback_now = datetime.now(timezone.utc)
+            fallback_summary = json.dumps({"reason": REASON_ERROR, "outputs": outputs, "detail": fallback_detail})
+            try:
+                await db.execute(
+                    text(
+                        "UPDATE jobs SET status = 'error', "
+                        "result_summary = CAST(:result_summary AS JSON), "
+                        "error_message = :error_message, "
+                        "completed_at = :completed_at "
+                        "WHERE id = :job_id"
+                    ),
+                    {
+                        "result_summary": fallback_summary,
+                        "error_message": fallback_detail[:1000],
+                        "completed_at": fallback_now,
+                        "job_id": job_id_value,
+                    },
+                )
+                await db.execute(
+                    text(
+                        "UPDATE schedules SET last_run_status = 'error', "
+                        "last_run_at = :last_run_at WHERE id = :schedule_id"
+                    ),
+                    {"last_run_at": fallback_now, "schedule_id": schedule_id},
+                )
+                await db.commit()
+            except Exception:
+                logger.exception(
+                    "scheduled_jobs.run_schedule_now.finalize_fallback_update_failed",
+                    extra={"schedule_id": str(schedule_id), "job_id": str(job_id_value)},
+                )
+                try:
+                    await db.rollback()
+                except Exception:
+                    logger.warning("scheduled_jobs.run_schedule_now.finalize_fallback_rollback_failed", exc_info=True)
+
+            try:
+                await audit_service.log_event(
+                    db,
+                    tenant_id=tenant_id,
+                    category="jobs",
+                    action="jobs.run.finalize_failed",
+                    actor_id=None,
+                    actor_type="system",
+                    resource_type="job",
+                    resource_id=str(job_id_value),
+                    correlation_id=correlation_id,
+                    job_id=job_id_value,
+                    payload={"schedule_id": str(schedule_id), "detail": fallback_detail},
+                    status="error",
+                )
+                await db.commit()
+            except Exception:
+                logger.exception(
+                    "scheduled_jobs.run_schedule_now.finalize_failure_audit_failed",
+                    extra={"schedule_id": str(schedule_id), "job_id": str(job_id_value)},
+                )
+                try:
+                    await db.rollback()
+                except Exception:
+                    logger.warning(
+                        "scheduled_jobs.run_schedule_now.finalize_failure_audit_rollback_failed", exc_info=True
+                    )
+
+            return RunOutcome(reason=REASON_ERROR, jobs_row_id=job_id_value, outputs=outputs)
 
     if reason == REASON_ERROR:
         if attempt >= RETRY_MAX_ATTEMPTS:

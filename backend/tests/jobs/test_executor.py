@@ -840,3 +840,56 @@ async def test_recon_run_as_lone_first_step_runs_with_tenant_context_set(db: Asy
         f"recon.run must run with tenant context freshly set immediately before it; "
         f"events around it: {events[max(0, exec_idx - 3) : exec_idx + 1]}"
     )
+
+
+# ---------------------------------------------------------------------------
+# `_finalize_run`'s OWN retry (the one after a first finalize crash) must
+# itself be guarded (review finding, MINOR): if it ALSO fails, the exception
+# was propagating straight out of `run_schedule_now`, leaving the `jobs` row
+# stuck at status="running" forever with `next_run_at` already advanced and
+# no record of what happened.
+# ---------------------------------------------------------------------------
+
+
+async def test_finalize_double_failure_does_not_leave_the_job_row_running(db: AsyncSession, monkeypatch):
+    tenant = await create_test_tenant(db, name="Finalize Double Crash Co")
+    tenant_id = tenant.id
+    await set_tenant_context(db, str(tenant_id))
+
+    async def ok_step(ctx, params):
+        return {"ok": True}
+
+    monkeypatch.setitem(STEP_REGISTRY, "fake.step", _fake_spec("read", ok_step))
+
+    now = datetime.now(timezone.utc)
+    schedule = await _seed_job_schedule(
+        db,
+        tenant,
+        plan_json={"steps": [{"id": "s1", "type": "fake.step", "params": {}}]},
+        next_run_at=now - timedelta(minutes=1),
+        cron_expression="0 6 * * 1",
+    )
+    schedule_id = schedule.id
+
+    async def always_flaky_finalize(*args, **kwargs):
+        # BOTH calls fail -- the first attempt AND its retry -- simulating
+        # whatever broke the first time (a stale row, a connectivity blip)
+        # still being broken on the retry.
+        raise RuntimeError("simulated crash re-fetching Schedule/Job (never recovers)")
+
+    monkeypatch.setattr(scheduled_jobs, "_finalize_run", always_flaky_finalize)
+
+    stats = await run_due_jobs(db, tenant_id, now=now)
+
+    assert stats["ran"] == 1
+    assert stats["failed"] == 1
+
+    # The jobs row must never be left stuck at status="running" -- even
+    # when BOTH the finalize call and its one retry crash.
+    job = (await db.execute(select(Job).where(Job.tenant_id == tenant_id))).scalar_one()
+    assert job.status != "running"
+    assert job.result_summary is not None
+    assert job.result_summary["reason"] == REASON_ERROR
+
+    refreshed_schedule = (await db.execute(select(Schedule).where(Schedule.id == schedule_id))).scalar_one()
+    assert refreshed_schedule.last_run_status == REASON_ERROR
