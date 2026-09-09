@@ -717,10 +717,13 @@ def test_narrative_paragraph2_same_location_both_extremes_drops_the_worsened_cla
     # unfavourable share move (share rose, because total on-hand collapsed much
     # harder than the aged value did) -- the same location can't headline both
     # clauses without repeating its own name, so the second ("moved the other
-    # way") clause drops to the generic "No location worsened" line while the
-    # first still names Solo. Solo is trivially also the lead (the only
-    # location), so (fix round 2) its "carries X%" clause combines with
-    # "improved the most" via "and" rather than two separate sentences.
+    # way") clause drops entirely (gate fix #9: NOT to the generic "No location
+    # worsened" line -- a location DID worsen this week, Solo itself, so that
+    # sentence would be false; the correct behaviour is to say nothing about
+    # worsening at all) while the first still names Solo. Solo is trivially
+    # also the lead (the only location), so (fix round 2) its "carries X%"
+    # clause combines with "improved the most" via "and" rather than two
+    # separate sentences.
     payloads, params = _narrative_fixture([("Solo", 7000, 3000, 50000, 4000)])
     report = ia.compute(payloads, params)
     solo = report.locations[0]
@@ -729,10 +732,16 @@ def test_narrative_paragraph2_same_location_both_extremes_drops_the_worsened_cla
     p2 = report.narrative.paragraph_2
     assert "Solo carries" in p2
     assert "and improved the most" in p2
-    assert "No location worsened this week." in p2
+    # Gate fix #9: a location (Solo) DID worsen this week -- "No location
+    # worsened this week" would be false and must never print here.
+    assert "No location worsened this week." not in p2
     assert "Solo moved the other way" not in p2
     # Not two back-to-back sentences repeating the location's name.
     assert "on-hand value. Solo improved" not in p2
+    # Dropping the worsened clause entirely must not leave a stray double space
+    # or a sentence starting mid-word where it used to sit.
+    assert "  " not in p2
+    assert "Solo holds the highest" in p2
 
 
 # ---------------------------------------------------------------------------

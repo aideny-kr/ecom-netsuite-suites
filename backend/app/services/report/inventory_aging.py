@@ -1025,8 +1025,16 @@ def _narrative(
     # in the same paragraph (brief item 3's "if they are the same location") --
     # drop the "moved the other way" clause (the second-named one) in that case; the
     # "improved the most" clause still gets to name it.
+    #
+    # Gate fix #9: this drop is NOT the same thing as "no location worsened at
+    # all" (an empty `worsening` list) -- a location DID worsen here, it's just
+    # not getting its own sentence because it's already credited above. Track
+    # that distinction so the fallback below never prints the false "No location
+    # worsened this week" when `worsening` was in fact non-empty.
+    worsened_dropped_as_duplicate = False
     if most_improved is not None and most_worsened is not None and most_improved.location == most_worsened.location:
         most_worsened = None
+        worsened_dropped_as_duplicate = True
 
     if most_improved is None:
         improved_detail = None
@@ -1058,19 +1066,24 @@ def _narrative(
         else:
             improved_clause = f"{most_improved.location} improved the most: {improved_detail}."
 
-    if most_worsened is None:
-        worsened_clause = "No location worsened this week."
-    else:
+    if most_worsened is not None:
         total_move_word = "rise" if most_worsened.delta_value >= 0 else "fall"
         worsened_clause = (
             f"{most_worsened.location} moved the other way, with its aged share climbing to "
             f"{_fmt_pct(most_worsened.aged90_share_pct)} on a {_fmt_money(abs(most_worsened.delta_value))} "
             f"{total_move_word} in total value."
         )
+    elif worsened_dropped_as_duplicate:
+        # Gate fix #9: a location DID worsen (it's just already named above as the
+        # improver) -- say nothing about worsening rather than falsely claim none
+        # did. Never "No location worsened this week." here.
+        worsened_clause = ""
+    else:
+        worsened_clause = "No location worsened this week."
 
     highest_share = max(locations, key=lambda loc: loc.aged90_share_pct)
     tail = (
-        f"{worsened_clause} {highest_share.location} holds the highest aged "
+        f"{worsened_clause + ' ' if worsened_clause else ''}{highest_share.location} holds the highest aged "
         f"share of the group, {_fmt_pct(highest_share.aged90_share_pct)}. The 180+ day list across all "
         f"{len(locations)} locations totals {_fmt_money(all_locations.aged180_value)} in "
         f"{all_locations.aged180_skus} SKUs."
