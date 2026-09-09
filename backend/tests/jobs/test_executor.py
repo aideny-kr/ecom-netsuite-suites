@@ -896,3 +896,50 @@ async def test_finalize_double_failure_does_not_leave_the_job_row_running(db: As
 
     refreshed_schedule = (await db.execute(select(Schedule).where(Schedule.id == schedule_id))).scalar_one()
     assert refreshed_schedule.last_run_status == REASON_ERROR
+
+
+# ---------------------------------------------------------------------------
+# recon.run's window follows the SCHEDULE's own timezone (review finding):
+# `_recon_run_executor` (registry.py) used a naive `date.today()` -- the
+# server/UTC wall clock -- instead of the run's own `period_key` (spec §B4),
+# which `run_schedule_now` already computes in the schedule's timezone. Near
+# midnight UTC a non-UTC schedule's "today" and the UTC server's "today"
+# disagree by a day.
+# ---------------------------------------------------------------------------
+
+
+async def test_recon_run_uses_the_schedule_timezone_local_date_not_utc_date(db: AsyncSession, monkeypatch):
+    tenant = await create_test_tenant(db, name="Recon TZ Co")
+    await set_tenant_context(db, str(tenant.id))
+
+    captured: list[dict] = []
+
+    async def fake_execute(db_, **kwargs):
+        captured.append(kwargs)
+        return {"ok": True}
+
+    import app.workers.tasks.reconciliation_run as recon_run_module
+
+    monkeypatch.setattr(recon_run_module, "_execute", fake_execute)
+
+    # 2026-09-09 05:00 UTC == 2026-09-08 22:00 America/Los_Angeles (PDT,
+    # UTC-7) -- still "yesterday" in the schedule's own timezone, so a naive
+    # date.today() (server/UTC wall clock) disagrees with the schedule's own
+    # local date at the moment this test runs.
+    due_at = datetime(2026, 9, 9, 5, 0, tzinfo=timezone.utc)
+    await _seed_job_schedule(
+        db,
+        tenant,
+        plan_json={"steps": [{"id": "s1", "type": "recon.run", "params": {"window_days": 7}}]},
+        next_run_at=due_at,
+        cron_expression="0 6 * * *",
+        tz="America/Los_Angeles",
+    )
+
+    stats = await run_due_jobs(db, tenant.id, now=due_at)
+    assert stats["ran"] == 1
+    assert stats["failed"] == 0
+
+    assert len(captured) == 1
+    assert captured[0]["date_to"] == "2026-09-08"
+    assert captured[0]["date_from"] == "2026-09-01"

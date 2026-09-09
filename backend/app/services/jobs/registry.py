@@ -328,13 +328,23 @@ async def _recon_run_executor(ctx: StepContext, params: dict) -> dict:
     product-default OrderReconJob engine ``recon_scheduled_run_all.py`` already
     uses for its own nightly sweep. Read + match only: OrderReconJob never
     approves, locks, or posts — needs-review lines wait on the recon run page
-    for a person, unchanged by running from a scheduled job."""
+    for a person, unchanged by running from a scheduled job.
+
+    The window's end date is the run's own ``period_key`` (spec §B4) —
+    ``run_schedule_now`` already computes this as ``due_at`` converted into
+    the SCHEDULE's own timezone (``app.workers.tasks.scheduled_jobs``), not a
+    naive ``date.today()`` (review finding): near midnight UTC, a schedule in
+    a non-UTC timezone (e.g. ``America/Los_Angeles``) and the server's UTC
+    wall clock disagree on what "today" is, and the window must follow the
+    schedule's own date, not the server's. ``ctx.period_key`` is only unset
+    for a ``StepContext`` built without a real run (no production caller does
+    this) — fall back to ``date.today()`` defensively rather than raise."""
     from datetime import date, timedelta
 
     from app.workers.tasks.reconciliation_run import _execute
 
     window_days = params.get("window_days", 7)
-    today = date.today()
+    today = date.fromisoformat(ctx.period_key) if ctx.period_key else date.today()
     summary = await _execute(
         ctx.db,
         tenant_id=str(ctx.tenant_id),
