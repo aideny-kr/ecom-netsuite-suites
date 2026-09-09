@@ -384,6 +384,23 @@ def test_ia_css_percent_integrity_canary_full_render_does_not_raise(html):
     assert "ia-" in html
 
 
+def test_details_summary_is_never_white_on_white():
+    """Found during the fix-round-1 rendered-artifact acceptance gate (viewed in a
+    real browser, per report-design.md's process rule): `--accent-ink` is the
+    contrast color computed for text ON the `--accent` background (table headers,
+    `.fs-chip.fs-dark`, etc. -- see `_accent_ink`'s own docstring and the identical
+    print-media workaround for financial_statement above). Reusing it directly for
+    `.ia-section summary` -- which sits on the plain `--card` background, no
+    `--accent` fill -- renders white-on-white whenever `accent_hsl` is dark (the
+    DEFAULT accent, `render_report_html`'s own default param), making the "All N
+    aged SKUs" collapsible toggle genuinely invisible, not merely low-contrast."""
+    from app.services.report.report_html import _IA_CSS
+
+    assert "var(--accent-ink)" not in _IA_CSS
+    assert ".ia-section summary" in _IA_CSS
+    assert "color: var(--ink)" in _IA_CSS.split(".ia-section summary", 1)[1].split("}", 1)[0]
+
+
 def test_print_media_unclips_the_collapsible_aged_list():
     from app.services.report.report_html import _IA_CSS
 

@@ -340,7 +340,12 @@ _IA_CSS = """
 .tblcard .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
 .tblcard .muted { color: var(--ia-muted); font-size: 11px; margin-top: 8px; }
 .ia-section details { margin-top: 10px; }
-.ia-section summary { cursor: default; font-size: 12px; font-weight: 700; color: var(--accent-ink); list-style: none; }
+/* --ink (not --accent-ink): --accent-ink is the contrast color computed for text ON
+   the --accent background (table headers, .fs-chip.fs-dark) -- this summary sits on
+   the plain --card background with no --accent fill, so --accent-ink renders
+   white-on-white whenever accent_hsl is dark (the default) -- see _accent_ink's own
+   docstring and the identical print-media workaround for financial_statement above. */
+.ia-section summary { cursor: default; font-size: 12px; font-weight: 700; color: var(--ink); list-style: none; }
 .ia-section summary::before { content: "▸ "; }
 .narr { border-left: 4px solid var(--accent); padding: 4px 0 4px 14px; max-width: 84ch; }
 .narr p { margin: 0 0 8px; }
