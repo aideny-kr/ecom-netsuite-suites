@@ -237,6 +237,31 @@ export function useRunScheduleNow() {
   });
 }
 
+// ---------------------------------------------------------------------------
+// New job flow (Task 7, mock state three) — the compile-then-approve create
+// path, whether started from this page or from the chat's "schedule this".
+// ---------------------------------------------------------------------------
+
+/** `POST /api/v1/schedules` body for the compile path (`ScheduleCreate`'s
+ * `instruction`-given branch — `backend/app/api/v1/schedules.py`). A 201
+ * response is a `ScheduledJob` (list shape, no `plan_json`) already
+ * persisted with `plan_status: "pending_approval"`; the new-job page fetches
+ * the full `ScheduleDetail` separately (`useScheduledJob`) to read the
+ * compiled plan's steps. A 409 means the compiler asked a clarifying
+ * question and created NOTHING — the caller re-`mutate()`s with the
+ * instruction plus the operator's answer appended. */
+export interface ScheduleCreateBody {
+  instruction: string;
+}
+
+export function useCreateSchedule() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: ScheduleCreateBody) => apiClient.post<ScheduledJob>("/api/v1/schedules", body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["scheduled-jobs"] }),
+  });
+}
+
 /** "Resume" (mock state one, the paused row) — clears `paused_at` server-side. */
 export function useResumeScheduledJob() {
   const qc = useQueryClient();

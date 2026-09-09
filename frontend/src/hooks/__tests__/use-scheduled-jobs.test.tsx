@@ -14,6 +14,7 @@ vi.mock("@/lib/api-client", () => ({ apiClient: api }));
 
 import {
   useApproveSchedule,
+  useCreateSchedule,
   useDeleteSchedule,
   usePauseSchedule,
   useResumeScheduledJob,
@@ -139,6 +140,25 @@ it("useDeleteSchedule DELETEs /api/v1/schedules/{id} and invalidates scheduled-j
   result.current.mutate();
   await waitFor(() => expect(result.current.isSuccess).toBe(true));
   expect(api.delete).toHaveBeenCalledWith("/api/v1/schedules/s-1");
+  const keys = invalidate.mock.calls.map((c) => JSON.stringify(c[0]?.queryKey));
+  expect(keys).toContain(JSON.stringify(["scheduled-jobs"]));
+});
+
+// ---------------------------------------------------------------------------
+// New job flow (Task 7) — the compile-then-approve create path.
+// ---------------------------------------------------------------------------
+
+it("useCreateSchedule POSTs /api/v1/schedules with the instruction and invalidates scheduled-jobs", async () => {
+  api.post.mockResolvedValueOnce({ id: "s-9", plan_status: "pending_approval" });
+  const qc = new QueryClient(qcOpts);
+  const invalidate = vi.spyOn(qc, "invalidateQueries");
+  const { result } = renderHook(() => useCreateSchedule(), { wrapper: makeWrapper(qc) });
+  result.current.mutate({ instruction: "every Friday email the exception summary" });
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(api.post).toHaveBeenCalledWith("/api/v1/schedules", {
+    instruction: "every Friday email the exception summary",
+  });
+  expect(result.current.data?.id).toBe("s-9");
   const keys = invalidate.mock.calls.map((c) => JSON.stringify(c[0]?.queryKey));
   expect(keys).toContain(JSON.stringify(["scheduled-jobs"]));
 });
