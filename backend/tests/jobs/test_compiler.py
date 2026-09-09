@@ -23,6 +23,8 @@ import uuid
 from sqlalchemy import select
 
 from app.models.audit import AuditEvent
+from app.models.connection import Connection
+from app.models.report import Report
 from app.services.chat.llm_adapter import LLMResponse, ToolUseBlock
 from app.services.jobs import compiler
 from app.services.jobs.compiler import (
@@ -259,6 +261,107 @@ async def test_tenant_locations_degrades_to_empty_when_the_executor_returns_no_l
     locations = await compiler._tenant_locations(db=None, tenant_id=uuid.uuid4())
 
     assert locations == []
+
+
+async def test_tenant_connections_and_reports_are_fed_to_the_compiler_prompt(db, tenant_a, monkeypatch):
+    """Spec §B3 (binding): "plus the tenant's context (connections available,
+    locations known from the snapshot, existing reports)" — connections and
+    reports are the other two hooks review-round-1's fix only wired locations
+    for."""
+    monkeypatch.setattr(compiler, "_tenant_locations", lambda *_a, **_kw: _async_list([]))
+    monkeypatch.setattr(
+        compiler, "_tenant_connections", lambda *_a, **_kw: _async_list(["netsuite: Framework NS (active)"])
+    )
+    monkeypatch.setattr(
+        compiler,
+        "_tenant_reports",
+        lambda *_a, **_kw: _async_list([{"id": "rpt-123", "title": "Sales Weekly", "playbook_key": None}]),
+    )
+    fake = FakeAdapter([_compile_plan_response(_inventory_aging_plan())])
+
+    await compile_instruction(
+        db,
+        tenant_id=tenant_a.id,
+        instruction=_MOCK_INSTRUCTION,
+        actor_id=None,
+        llm=CompilerLLM(adapter=fake, model="fake-model"),
+    )
+
+    sent_messages = fake.calls[0]["messages"]
+    joined = "\n".join(str(m.get("content", "")) for m in sent_messages)
+    assert "Framework NS" in joined
+    assert "rpt-123" in joined and "Sales Weekly" in joined
+
+
+async def test_tenant_connections_queries_the_real_connections_table(db, tenant_a):
+    db.add(
+        Connection(
+            tenant_id=tenant_a.id,
+            provider="netsuite",
+            label="Framework NetSuite",
+            status="active",
+            encrypted_credentials="x",
+        )
+    )
+    await db.flush()
+
+    connections = await compiler._tenant_connections(db, tenant_a.id)
+
+    assert any("netsuite" in c and "Framework NetSuite" in c for c in connections)
+
+
+async def test_tenant_reports_returns_recent_refreshable_reports(db, tenant_a):
+    db.add(
+        Report(
+            tenant_id=tenant_a.id,
+            title="Inventory Aging Weekly",
+            spec_json={},
+            rendered_html="<html></html>",
+            recipe_json={"playbook": {"key": "inventory_aging", "params": {}}},
+        )
+    )
+    # A snapshot-only report (recipe_json NULL) can never be refreshed by
+    # report_id, so it must not be offered as a refresh target.
+    db.add(
+        Report(
+            tenant_id=tenant_a.id,
+            title="One-off snapshot",
+            spec_json={},
+            rendered_html="<html></html>",
+            recipe_json=None,
+        )
+    )
+    await db.flush()
+
+    reports = await compiler._tenant_reports(db, tenant_a.id)
+
+    titles = [r["title"] for r in reports]
+    assert "Inventory Aging Weekly" in titles
+    assert "One-off snapshot" not in titles
+    (aging,) = [r for r in reports if r["title"] == "Inventory Aging Weekly"]
+    assert aging["playbook_key"] == "inventory_aging"
+    assert aging["id"]
+
+
+async def test_compile_audit_payload_carries_the_plan_version(db, tenant_a, monkeypatch):
+    """Spec §B3 (binding): "Every compile writes an audit event (instruction
+    hash, plan version, model)." — plan_version correlates the audit row back
+    to the schedule row a Task 3 caller is compiling for."""
+    monkeypatch.setattr(compiler, "_tenant_locations", lambda *_a, **_kw: _async_list([]))
+    fake = FakeAdapter([_compile_plan_response(_inventory_aging_plan())])
+
+    await compile_instruction(
+        db,
+        tenant_id=tenant_a.id,
+        instruction=_MOCK_INSTRUCTION,
+        actor_id=None,
+        llm=CompilerLLM(adapter=fake, model="fake-model"),
+        plan_version=3,
+    )
+
+    after = await _compiled_audit_events(db, tenant_a.id)
+    assert len(after) == 1
+    assert after[0].payload["plan_version"] == 3
 
 
 async def test_compile_writes_one_audit_event(db, tenant_a, monkeypatch):

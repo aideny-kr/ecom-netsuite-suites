@@ -40,8 +40,11 @@ import logging
 import uuid
 from dataclasses import dataclass
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.connection import Connection
+from app.models.report import Report
 from app.services import audit_service
 from app.services.chat.llm_adapter import BaseLLMAdapter, LLMResponse, ToolUseBlock, get_adapter
 from app.services.chat.nodes import get_tenant_ai_config
@@ -157,10 +160,75 @@ async def _tenant_locations(db: AsyncSession, tenant_id: uuid.UUID) -> list[str]
     return locations
 
 
-def _user_message(instruction: str, locations: list[str]) -> str:
+async def _tenant_connections(db: AsyncSession, tenant_id: uuid.UUID) -> list[str]:
+    """The tenant's connections, fed to the compiler's prompt (spec §B3,
+    binding: "connections available") so the model knows what data sources
+    actually exist for this tenant rather than assuming one. Best-effort —
+    same shape as ``_tenant_locations``: a query failure narrows context, it
+    must never fail the whole compile."""
+    try:
+        result = await db.execute(
+            select(Connection.provider, Connection.label, Connection.status)
+            .where(Connection.tenant_id == tenant_id)
+            .order_by(Connection.created_at.desc())
+        )
+        return [f"{provider}: {label} ({status})" for provider, label, status in result.all()]
+    except Exception:
+        logger.warning("jobs.compiler.tenant_connections_failed", exc_info=True)
+        return []
+
+
+async def _tenant_reports(db: AsyncSession, tenant_id: uuid.UUID) -> list[dict]:
+    """Recent, refreshable reports for this tenant, fed to the compiler's
+    prompt (spec §B3, binding: "existing reports") so a ``report.compose``
+    step referencing an EXISTING report (its ``report_id`` oneOf branch) has a
+    real id to name instead of guessing one — ``validate_plan`` only checks
+    that ``report_id`` is a non-empty string, it cannot catch a hallucinated
+    one. Filtered to a non-null ``recipe_json``: a snapshot-only report has no
+    recipe and ``report.compose``'s own executor (``refresh_report``) can
+    never refresh it, so offering its id would just be a different way to
+    hand the model a dead end.
+
+    The filter runs in PYTHON, not SQL (``r.recipe_json is not None``, the
+    same check ``app/api/v1/reports.py`` and ``dashboard.py`` already use) —
+    SQLAlchemy's JSON/JSONB type defaults ``none_as_null=False``, so a Python
+    ``None`` written through it is stored as the JSON *value* ``null``, not
+    SQL ``NULL``; a ``WHERE recipe_json IS NOT NULL`` at the SQL level would
+    therefore match every row, including the ones this filter exists to
+    drop. Best-effort, same shape as ``_tenant_locations``."""
+    try:
+        result = await db.execute(
+            select(Report.id, Report.title, Report.recipe_json)
+            .where(Report.tenant_id == tenant_id)
+            .order_by(Report.created_at.desc())
+            .limit(50)
+        )
+        reports: list[dict] = []
+        for report_id, title, recipe_json in result.all():
+            if recipe_json is None:
+                continue
+            playbook_key = recipe_json.get("playbook", {}).get("key")
+            reports.append({"id": str(report_id), "title": title, "playbook_key": playbook_key})
+            if len(reports) == 20:
+                break
+        return reports
+    except Exception:
+        logger.warning("jobs.compiler.tenant_reports_failed", exc_info=True)
+        return []
+
+
+def _user_message(instruction: str, locations: list[str], connections: list[str], reports: list[dict]) -> str:
     lines = [f"Instruction: {instruction}"]
     if locations:
         lines.append(f"Locations known from the tenant's inventory snapshot: {', '.join(locations)}")
+    if connections:
+        lines.append("Connections available: " + "; ".join(connections))
+    if reports:
+        report_lines = "; ".join(
+            f"{r['id']} ({r['title']}" + (f", playbook={r['playbook_key']}" if r.get("playbook_key") else "") + ")"
+            for r in reports
+        )
+        lines.append("Existing reports (refresh via report_id): " + report_lines)
     return "\n".join(lines)
 
 
@@ -214,12 +282,27 @@ async def _audit_compile(
     actor_id: uuid.UUID | None,
     instruction: str,
     model: str,
+    plan_version: int | None,
     *,
     outcome: str,
 ) -> None:
     """One audit event per ``compile_instruction`` call, regardless of how
     many LLM hops (including a repair round) it took to get there — spec §B3
     "Every compile writes an audit event".
+
+    ``plan_version`` (spec §B3, binding: "instruction hash, plan version,
+    model") is whatever the caller passes in — the ``schedules`` row's
+    CURRENT ``plan_version`` at the moment it calls in (0 for a schedule that
+    does not exist yet, i.e. the very first compile of a brand-new job; the
+    existing version being re-compiled for a ``PATCH`` edit). It correlates
+    this audit row back to the compile that produced a given ``plan_json`` /
+    ``pending_plan_json`` — see spec §B5's approve step ("pending -> approved,
+    version+1") and run step ("records the plan version used"), both of which
+    need that same correlation. ``compile_instruction`` itself never persists
+    anything and so has no independent way to know this number; ``None`` is
+    accepted (and written through verbatim) only for call sites with no
+    schedule row context at all — every real caller (Task 3's endpoint)
+    should pass the actual value.
 
     Flushes only — never commits. ``compile_instruction`` runs on the
     caller's own session (Task 3's endpoint, on its pooled per-request
@@ -244,6 +327,7 @@ async def _audit_compile(
         payload={
             "instruction_hash": hashlib.sha256(instruction.encode("utf-8")).hexdigest(),
             "model": model,
+            "plan_version": plan_version,
             "outcome": outcome,  # "compiled" | "clarification"
         },
     )
@@ -265,19 +349,22 @@ async def compile_instruction(
     instruction: str,
     actor_id: uuid.UUID | None,
     llm: CompilerLLM | None = None,
+    plan_version: int | None = None,
 ) -> CompiledPlan | Clarification:
     if llm is None:
         provider, model, api_key, _is_byok = await get_tenant_ai_config(db, tenant_id)
         llm = CompilerLLM(adapter=get_adapter(provider, api_key), model=model)
 
     locations = await _tenant_locations(db, tenant_id)
-    messages: list[dict] = [{"role": "user", "content": _user_message(instruction, locations)}]
+    connections = await _tenant_connections(db, tenant_id)
+    reports = await _tenant_reports(db, tenant_id)
+    messages: list[dict] = [{"role": "user", "content": _user_message(instruction, locations, connections, reports)}]
 
     tool_name, tool_input, block, response = await _one_call(llm, messages)
 
     if tool_name == _CLARIFY_TOOL_NAME:
         question = (tool_input or {}).get("question") or "Could you clarify the instruction?"
-        await _audit_compile(db, tenant_id, actor_id, instruction, llm.model, outcome="clarification")
+        await _audit_compile(db, tenant_id, actor_id, instruction, llm.model, plan_version, outcome="clarification")
         return Clarification(question=question)
 
     errors: list[str]
@@ -288,7 +375,7 @@ async def compile_instruction(
             errors = exc.errors
         else:
             compiled = _build_compiled_plan(tool_input, validated, llm.model)
-            await _audit_compile(db, tenant_id, actor_id, instruction, llm.model, outcome="compiled")
+            await _audit_compile(db, tenant_id, actor_id, instruction, llm.model, plan_version, outcome="compiled")
             return compiled
     else:
         errors = ["the model did not call compile_plan or ask_clarification"]
@@ -312,7 +399,7 @@ async def compile_instruction(
 
         if tool_name == _CLARIFY_TOOL_NAME:
             question = (tool_input or {}).get("question") or "Could you clarify the instruction?"
-            await _audit_compile(db, tenant_id, actor_id, instruction, llm.model, outcome="clarification")
+            await _audit_compile(db, tenant_id, actor_id, instruction, llm.model, plan_version, outcome="clarification")
             return Clarification(question=question)
 
         if tool_name == _COMPILE_TOOL_NAME:
@@ -322,11 +409,11 @@ async def compile_instruction(
                 errors = exc.errors
             else:
                 compiled = _build_compiled_plan(tool_input, validated, llm.model)
-                await _audit_compile(db, tenant_id, actor_id, instruction, llm.model, outcome="compiled")
+                await _audit_compile(db, tenant_id, actor_id, instruction, llm.model, plan_version, outcome="compiled")
                 return compiled
 
     question = "I couldn't compile a valid plan for this instruction: " + "; ".join(errors)
-    await _audit_compile(db, tenant_id, actor_id, instruction, llm.model, outcome="clarification")
+    await _audit_compile(db, tenant_id, actor_id, instruction, llm.model, plan_version, outcome="clarification")
     return Clarification(question=question)
 
 
