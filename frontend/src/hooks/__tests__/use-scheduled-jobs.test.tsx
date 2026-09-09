@@ -35,12 +35,22 @@ function makeWrapper(qc: QueryClient) {
 const qcOpts = { defaultOptions: { queries: { retry: false }, mutations: { retry: false } } };
 
 it("useScheduledJobs GETs /api/v1/schedules", async () => {
-  api.get.mockResolvedValueOnce([{ id: "s-1", name: "Inventory Aging Weekly" }]);
+  // Task 5 residual: the response is {schedules, runs_last_7_days_total,
+  // runs_last_7_days_failed} — a wrapper, not a bare array — since the
+  // list page's "Last 7 days" tile is a tenant-wide aggregate the rows
+  // alone can't carry.
+  api.get.mockResolvedValueOnce({
+    schedules: [{ id: "s-1", name: "Inventory Aging Weekly" }],
+    runs_last_7_days_total: 21,
+    runs_last_7_days_failed: 1,
+  });
   const qc = new QueryClient(qcOpts);
   const { result } = renderHook(() => useScheduledJobs(), { wrapper: makeWrapper(qc) });
   await waitFor(() => expect(result.current.isSuccess).toBe(true));
   expect(api.get).toHaveBeenCalledWith("/api/v1/schedules");
-  expect(result.current.data?.[0].name).toBe("Inventory Aging Weekly");
+  expect(result.current.data?.schedules[0].name).toBe("Inventory Aging Weekly");
+  expect(result.current.data?.runs_last_7_days_total).toBe(21);
+  expect(result.current.data?.runs_last_7_days_failed).toBe(1);
 });
 
 it("useRunScheduleNow POSTs /run with use_pending: false and invalidates the list", async () => {

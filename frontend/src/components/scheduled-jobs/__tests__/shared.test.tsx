@@ -7,10 +7,12 @@ import {
   describeBudget,
   describeCron,
   describeDelivery,
+  describeJobOrigin,
   describeStep,
   describeStepParams,
   formatCountdown,
   formatDuration,
+  formatDurationSeconds,
   formatWhen,
   runStatusLabel,
   runStatusTone,
@@ -201,4 +203,36 @@ it("formatDuration reads minutes and seconds between started_at and completed_at
 it("formatDuration returns null when either timestamp is missing", () => {
   expect(formatDuration(null, "2026-09-08T06:01:52Z")).toBeNull();
   expect(formatDuration("2026-09-08T06:00:00Z", null)).toBeNull();
+});
+
+// formatDurationSeconds — the list page's Last run cell (Task 5 residual).
+
+it("formatDurationSeconds reads minutes and seconds from a plain number", () => {
+  expect(formatDurationSeconds(112)).toBe("1m 52s");
+});
+
+it("formatDurationSeconds returns null for null, negative, or NaN — never a fabricated 0m 0s", () => {
+  expect(formatDurationSeconds(null)).toBeNull();
+  expect(formatDurationSeconds(undefined)).toBeNull();
+  expect(formatDurationSeconds(-5)).toBeNull();
+  expect(formatDurationSeconds(NaN)).toBeNull();
+});
+
+// describeJobOrigin — the Job column sub-line (Task 5 residual).
+
+it("describeJobOrigin renders 'from the chat · owner {name}' for a chat-created schedule with an owner", () => {
+  expect(describeJobOrigin("chat", "Aiden Yi")).toBe("from the chat · owner Aiden Yi");
+});
+
+it("describeJobOrigin renders just 'owner {name}' for a page-created schedule", () => {
+  expect(describeJobOrigin("page", "Aiden Yi")).toBe("owner Aiden Yi");
+});
+
+it("describeJobOrigin renders just 'from the chat' when there is no owner", () => {
+  expect(describeJobOrigin("chat", null)).toBe("from the chat");
+});
+
+it("describeJobOrigin returns null when there is nothing to show", () => {
+  expect(describeJobOrigin(null, null)).toBeNull();
+  expect(describeJobOrigin("seed", null)).toBeNull();
 });

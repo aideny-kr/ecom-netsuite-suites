@@ -154,8 +154,29 @@ class ScheduleResponse(BaseModel):
     kinds: list[str] = Field(default_factory=list)
     summary_line: Optional[str] = None
     has_pending_plan: bool = False
+    # Task 5 residual (spec §B6, mock state one): the list page's Job column
+    # sub-line and Last run cell duration. Computed server-side from `jobs`
+    # (`schedule_service.schedule_run_stats`) -- never stored on the row
+    # itself, so these are `None`/`0` unless the list endpoint fills them in.
+    last_run_duration_seconds: Optional[float] = None
+    runs_last_7_days: int = 0
+    owner_name: Optional[str] = None
+    created_via: Optional[str] = None
 
     model_config = {"from_attributes": True}
+
+
+class ScheduleListResponse(BaseModel):
+    """`GET /schedules`'s response shape (Task 5 residual, spec §B6): the
+    tenant's own rows PLUS the list page's "Last 7 days" tile's tenant-wide
+    totals. The tile is TENANT-scoped, not per-schedule, so it cannot live on
+    any one `ScheduleResponse` row — it is computed by ONE aggregate query
+    (`schedule_service.tenant_run_totals_7d`), not N+1, and returned
+    alongside the list rather than via a second round-trip."""
+
+    schedules: list[ScheduleResponse]
+    runs_last_7_days_total: int = 0
+    runs_last_7_days_failed: int = 0
 
 
 class ScheduleDetailResponse(ScheduleResponse):

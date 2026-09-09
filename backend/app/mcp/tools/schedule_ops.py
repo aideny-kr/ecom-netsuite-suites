@@ -67,6 +67,8 @@ async def execute_create(params: dict, **kwargs) -> dict:
             plan_version=0,
             plan_status="pending_approval",
             delivery_json=params.get("delivery"),
+            owner_id=actor_id,
+            created_via="chat",
         )
         db.add(schedule)
         await db.flush()
@@ -98,6 +100,8 @@ async def execute_create(params: dict, **kwargs) -> dict:
         cron_expression=cron_expression,
         is_active=True,
         parameters=parameters,
+        owner_id=actor_id,
+        created_via="chat",
     )
     db.add(schedule)
     await db.flush()

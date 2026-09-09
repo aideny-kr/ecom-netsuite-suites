@@ -32,6 +32,7 @@ from app.schemas.schedule import (
     DiffLineOut,
     ScheduleCreate,
     ScheduleDetailResponse,
+    ScheduleListResponse,
     ScheduleResponse,
     ScheduleRunItem,
     ScheduleRunRequest,
@@ -87,7 +88,20 @@ def _plan_summary_line(plan_json: dict | None) -> str | None:
     return f"{len(steps)} steps · " + " → ".join(labels)
 
 
-def _to_response(schedule: Schedule) -> ScheduleResponse:
+def _to_response(
+    schedule: Schedule,
+    *,
+    owner_name: str | None = None,
+    run_stats: dict | None = None,
+) -> ScheduleResponse:
+    """`run_stats` (Task 5 residual, spec §B6) is this ONE schedule's own
+    `{"last_run_duration_seconds", "runs_last_7_days"}` slice of
+    `schedule_service.schedule_run_stats`'s batched result — the caller looks
+    it up once per row from that single query's output, never re-queries
+    here. `None` (every non-list caller — `get_schedule`/`update_schedule`/
+    etc.) renders the un-enriched defaults (`schedule_run_stats` is a list-
+    page-only cost; see `list_schedules` below)."""
+    run_stats = run_stats or {}
     return ScheduleResponse(
         id=str(schedule.id),
         tenant_id=str(schedule.tenant_id),
@@ -111,6 +125,10 @@ def _to_response(schedule: Schedule) -> ScheduleResponse:
         kinds=_plan_kinds(schedule.plan_json),
         summary_line=_plan_summary_line(schedule.plan_json),
         has_pending_plan=schedule.pending_plan_json is not None,
+        last_run_duration_seconds=run_stats.get("last_run_duration_seconds"),
+        runs_last_7_days=run_stats.get("runs_last_7_days", 0),
+        owner_name=owner_name,
+        created_via=schedule.created_via,
     )
 
 
@@ -145,7 +163,7 @@ def _correlation_id(request: Request) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-@router.get("", response_model=list[ScheduleResponse])
+@router.get("", response_model=ScheduleListResponse)
 async def list_schedules(
     user: Annotated[User, Depends(require_permission("schedules.manage"))],
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -156,9 +174,34 @@ async def list_schedules(
     `has_pending_plan` — an approved schedule whose instruction was edited
     since, so it has a recompiled `pending_plan_json` awaiting approval; the
     list page's own gate is `schedules.manage`, not the detail-only view that
-    would otherwise reveal this)."""
+    would otherwise reveal this).
+
+    Task 5 residual (spec §B6): also carries each row's own
+    `last_run_duration_seconds`/`runs_last_7_days`/`owner_name` and the page's
+    tenant-wide "Last 7 days" tile totals — THREE queries total for the whole
+    page regardless of schedule count (`schedule_run_stats`,
+    `tenant_run_totals_7d`, `owner_names`), never one per row.
+    """
     schedules = await schedule_service.list_schedules(db, user.tenant_id)
-    return [_to_response(s) for s in schedules]
+    schedule_ids = [s.id for s in schedules]
+    owner_ids = [s.owner_id for s in schedules if s.owner_id is not None]
+
+    run_stats = await schedule_service.schedule_run_stats(db, user.tenant_id, schedule_ids)
+    names = await schedule_service.owner_names(db, owner_ids)
+    total, failed = await schedule_service.tenant_run_totals_7d(db, user.tenant_id)
+
+    return ScheduleListResponse(
+        schedules=[
+            _to_response(
+                s,
+                owner_name=names.get(s.owner_id) if s.owner_id else None,
+                run_stats=run_stats.get(s.id),
+            )
+            for s in schedules
+        ],
+        runs_last_7_days_total=total,
+        runs_last_7_days_failed=failed,
+    )
 
 
 @router.get("/{schedule_id}", response_model=ScheduleDetailResponse)
@@ -230,6 +273,8 @@ async def create_schedule(
             plan_version=0,
             plan_status="pending_approval",
             delivery_json=body.delivery,
+            owner_id=user.id,
+            created_via="page",
         )
         db.add(schedule)
         await db.flush()
@@ -256,6 +301,8 @@ async def create_schedule(
         schedule_type=body.schedule_type,
         cron_expression=body.cron_expression,
         parameters=body.parameters,
+        owner_id=user.id,
+        created_via="page",
     )
 
     await audit_service.log_event(

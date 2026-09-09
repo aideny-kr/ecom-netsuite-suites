@@ -1,14 +1,16 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from zoneinfo import ZoneInfo
 
 import structlog
 from croniter import croniter
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.job import Job
 from app.models.pipeline import Schedule
+from app.models.user import User
 
 logger = structlog.get_logger()
 
@@ -49,8 +51,12 @@ async def create_schedule(
     schedule_type: str,
     cron_expression: Optional[str] = None,
     parameters: Optional[dict] = None,
+    owner_id: Optional[uuid.UUID] = None,
+    created_via: Optional[str] = None,
 ) -> Schedule:
-    """Create a new schedule for a tenant."""
+    """Create a new schedule for a tenant. `owner_id`/`created_via` (Task 5
+    residual, spec §B6) are optional so this legacy direct-create path stays
+    callable exactly as it always was for any caller that doesn't have them."""
     schedule = Schedule(
         tenant_id=tenant_id,
         name=name,
@@ -58,6 +64,8 @@ async def create_schedule(
         cron_expression=cron_expression,
         is_active=True,
         parameters=parameters,
+        owner_id=owner_id,
+        created_via=created_via,
     )
     db.add(schedule)
     await db.flush()
@@ -103,3 +111,112 @@ async def delete_schedule(db: AsyncSession, schedule_id: uuid.UUID, tenant_id: u
     await db.delete(schedule)
     await db.flush()
     return True
+
+
+# ---------------------------------------------------------------------------
+# List-page aggregates (Task 5 residual, spec §B6) — one or two queries
+# total, never one per schedule row (N+1). `Job.parameters["schedule_id"]`
+# is the same JSON lookup `GET /schedules/{id}/runs` already uses
+# (`app/api/v1/schedules.py`'s own `list_runs`); comparing it as text
+# (`.astext`), not casting to UUID, matches that established convention.
+# ---------------------------------------------------------------------------
+
+
+async def schedule_run_stats(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    schedule_ids: list[uuid.UUID],
+    *,
+    now: Optional[datetime] = None,
+) -> dict[uuid.UUID, dict]:
+    """Per-schedule `{"last_run_duration_seconds": float | None,
+    "runs_last_7_days": int}` for every id in `schedule_ids` — TWO queries
+    total regardless of how many schedules there are, never one per row:
+
+    - a Postgres `DISTINCT ON` pick of each schedule's most recent `jobs`
+      row (by `started_at`), to compute the duration of ITS last run;
+    - a `GROUP BY` count of each schedule's `jobs` rows in the trailing 7
+      days.
+
+    A schedule absent from either result (never run, or no runs in the last
+    7 days) is simply missing from the returned dict — callers read via
+    `.get(schedule_id)` / `.get(schedule_id, {})`, never index directly.
+    """
+    if not schedule_ids:
+        return {}
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=7)
+    schedule_id_expr = Job.parameters["schedule_id"].astext
+    schedule_id_strs = [str(sid) for sid in schedule_ids]
+
+    duration_stmt = (
+        select(schedule_id_expr.label("schedule_id"), Job.started_at, Job.completed_at)
+        .where(
+            Job.tenant_id == tenant_id,
+            Job.job_type == "scheduled_job",
+            schedule_id_expr.in_(schedule_id_strs),
+            Job.completed_at.isnot(None),
+        )
+        .distinct(schedule_id_expr)
+        .order_by(schedule_id_expr, Job.started_at.desc())
+    )
+    duration_rows = (await db.execute(duration_stmt)).all()
+
+    count_stmt = (
+        select(schedule_id_expr.label("schedule_id"), func.count().label("cnt"))
+        .where(
+            Job.tenant_id == tenant_id,
+            Job.job_type == "scheduled_job",
+            schedule_id_expr.in_(schedule_id_strs),
+            Job.started_at >= cutoff,
+        )
+        .group_by(schedule_id_expr)
+    )
+    count_rows = (await db.execute(count_stmt)).all()
+
+    stats: dict[uuid.UUID, dict] = {}
+    for row in duration_rows:
+        try:
+            sid = uuid.UUID(row.schedule_id)
+        except (TypeError, ValueError):
+            continue
+        duration = None
+        if row.started_at is not None and row.completed_at is not None:
+            duration = (row.completed_at - row.started_at).total_seconds()
+        stats.setdefault(sid, {})["last_run_duration_seconds"] = duration
+    for row in count_rows:
+        try:
+            sid = uuid.UUID(row.schedule_id)
+        except (TypeError, ValueError):
+            continue
+        stats.setdefault(sid, {})["runs_last_7_days"] = row.cnt
+    return stats
+
+
+async def tenant_run_totals_7d(
+    db: AsyncSession, tenant_id: uuid.UUID, *, now: Optional[datetime] = None
+) -> tuple[int, int]:
+    """Tenant-wide `(total, failed)` run counts in the trailing 7 days — ONE
+    aggregate query for the list page's "Last 7 days" tile (spec §B6), never
+    per-schedule. `failed` matches `Job.status == "failed"` (set by
+    `_finalize_run` for `reason in (error, stall)`, `app.workers.tasks.
+    scheduled_jobs`) — the SAME vocabulary every other reader of that column
+    already uses, not a re-derivation from `result_summary`."""
+    now = now or datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=7)
+    stmt = select(
+        func.count().label("total"),
+        func.count().filter(Job.status == "failed").label("failed"),
+    ).where(Job.tenant_id == tenant_id, Job.job_type == "scheduled_job", Job.started_at >= cutoff)
+    row = (await db.execute(stmt)).one()
+    return int(row.total or 0), int(row.failed or 0)
+
+
+async def owner_names(db: AsyncSession, owner_ids: list[Optional[uuid.UUID]]) -> dict[uuid.UUID, str]:
+    """`{owner_id: full_name}` for every id in `owner_ids` — ONE query, not
+    one per schedule row (spec §B6's Job column sub-line, "owner {name}")."""
+    ids = [oid for oid in owner_ids if oid is not None]
+    if not ids:
+        return {}
+    result = await db.execute(select(User.id, User.full_name).where(User.id.in_(ids)))
+    return {row.id: row.full_name for row in result.all()}

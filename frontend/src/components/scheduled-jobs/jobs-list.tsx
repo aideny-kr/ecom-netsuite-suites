@@ -25,15 +25,14 @@
  * - `usePlanInfo()` — `GET /api/v1/tenants/me/plan`, for the Jobs tile's
  *   quota sub-line.
  *
- * Two honest simplifications versus the mock's illustrative numbers, both
- * because the actual API shape (built by Tasks 3/4) doesn't carry the
- * underlying data — see this file's PR description for the fuller case:
- * - The mock's "Last run" cell shows a duration ("1m 52s"); `ScheduleResponse`
- *   carries only `last_run_at`/`last_run_status` (no duration), so this page
- *   shows the pill + when, not a duration it doesn't have.
- * - The mock's "Last 7 days" tile counts individual RUNS; `GET /schedules`
- *   carries only each schedule's MOST RECENT run, so this page counts
- *   distinct schedules that ran in the trailing 7 days, not total runs.
+ * Task 5 residual: `GET /schedules` now returns `{schedules,
+ * runs_last_7_days_total, runs_last_7_days_failed}` rather than a bare
+ * array — the tile's totals are a real tenant-wide aggregate computed
+ * server-side (one query, not N+1 — `schedule_service.py`), not a
+ * client-side sum of each row's own most-recent run. Each row also carries
+ * its own `last_run_duration_seconds` (the mock's "1m 52s") and
+ * `owner_name`/`created_via` (the Job column's "from the chat · owner
+ * {name}" sub-line).
  */
 
 import Link from "next/link";
@@ -52,8 +51,10 @@ import { Skeleton } from "@/components/ui/skeleton";
 import {
   describeCron,
   describeDelivery,
+  describeJobOrigin,
   ErrorNotice,
   formatCountdown,
+  formatDurationSeconds,
   formatWhen,
   KindTags,
   Pill,
@@ -62,8 +63,6 @@ import {
   SystemPill,
   Tile,
 } from "./shared";
-
-const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
 const EMPTY_COPY = "No scheduled jobs yet. Describe one in plain language, or ask the chat to schedule something.";
 const FOOTER_HINT =
@@ -105,6 +104,8 @@ function RowAction({ job }: { job: ScheduledJob }): JSX.Element {
 function JobRow({ job }: { job: ScheduledJob }): JSX.Element {
   const schedule = describeCron(job.cron_expression);
   const delivery = describeDelivery(job.delivery_json);
+  const origin = describeJobOrigin(job.created_via, job.owner_name);
+  const duration = formatDurationSeconds(job.last_run_duration_seconds);
   const next = job.next_run_at;
   return (
     <tr className="border-b last:border-0">
@@ -112,6 +113,7 @@ function JobRow({ job }: { job: ScheduledJob }): JSX.Element {
         <Link href={`/scheduled-jobs/${job.id}`} className="font-medium hover:underline">
           {job.name}
         </Link>
+        {origin && <div className="mt-0.5 text-[11.5px] text-muted-foreground">{origin}</div>}
         {job.has_pending_plan && (
           <div className="mt-0.5">
             <Pill tone="warn">pending change</Pill>
@@ -131,7 +133,9 @@ function JobRow({ job }: { job: ScheduledJob }): JSX.Element {
       <td className="px-2.5 py-2 align-top">
         <Pill tone={runStatusTone(job.last_run_status)}>{runStatusLabel(job.last_run_status)}</Pill>
         <div className="mt-0.5 text-[11.5px] text-muted-foreground">
-          {job.paused_at ? job.pause_reason ?? "paused" : formatWhen(job.last_run_at)}
+          {job.paused_at
+            ? job.pause_reason ?? "paused"
+            : `${formatWhen(job.last_run_at)}${duration ? ` · ${duration}` : ""}`}
         </div>
       </td>
       <td className="px-2.5 py-2 align-top">
@@ -205,7 +209,7 @@ export function ScheduledJobsList(): JSX.Element {
   } else if (jobsState === "error") {
     body = <ErrorNotice message="Couldn't load scheduled jobs." onRetry={() => jobsQuery.refetch()} />;
   } else {
-    const jobs = jobsQuery.data ?? [];
+    const jobs = jobsQuery.data?.schedules ?? [];
     const totalRows = jobs.length + systemRows.length;
 
     if (totalRows === 0) {
@@ -255,7 +259,14 @@ export function ScheduledJobsList(): JSX.Element {
         </div>
       </div>
 
-      <TilesRow jobsState={jobsState} jobs={jobsQuery.data} systemCount={systemRows.length} planQuery={planQuery} />
+      <TilesRow
+        jobsState={jobsState}
+        jobs={jobsQuery.data?.schedules}
+        runsLast7DaysTotal={jobsQuery.data?.runs_last_7_days_total ?? 0}
+        runsLast7DaysFailed={jobsQuery.data?.runs_last_7_days_failed ?? 0}
+        systemCount={systemRows.length}
+        planQuery={planQuery}
+      />
 
       {body}
 
@@ -272,11 +283,18 @@ export function ScheduledJobsList(): JSX.Element {
 function TilesRow({
   jobsState,
   jobs,
+  runsLast7DaysTotal,
+  runsLast7DaysFailed,
   systemCount,
   planQuery,
 }: {
   jobsState: ReturnType<typeof queryState>;
   jobs: ScheduledJob[] | undefined;
+  /** Tenant-wide, server-computed (Task 5 residual, spec §B6) — NOT summed
+   * from `jobs` client-side; see `ScheduledJobsListResponse`'s own docstring
+   * for why the tile can't be derived from the per-row fields alone. */
+  runsLast7DaysTotal: number;
+  runsLast7DaysFailed: number;
   systemCount: number;
   planQuery: ReturnType<typeof usePlanInfo>;
 }): JSX.Element {
@@ -301,10 +319,7 @@ function TilesRow({
       ? `${planQuery.data.usage.schedules} of ${planQuery.data.limits.max_schedules} in your plan's quota`
       : undefined;
 
-  const now = Date.now();
-  const recentRuns = rows.filter((j) => j.last_run_at && now - new Date(j.last_run_at).getTime() <= SEVEN_DAYS_MS);
-  const recentDone = recentRuns.filter((j) => j.last_run_status === "done").length;
-  const recentNotDone = recentRuns.length - recentDone;
+  const runsDone = runsLast7DaysTotal - runsLast7DaysFailed;
 
   // Three reasons a job needs a human: a freshly-compiled plan still awaiting
   // its FIRST approval (plan_status), a paused schedule, or an already-
@@ -321,9 +336,9 @@ function TilesRow({
       <Tile label="Jobs" value={`${total} · ${yourCount} yours, ${systemCount} system`} sub={quotaSub} />
       <Tile
         label="Last 7 days"
-        value={`${recentRuns.length} run${recentRuns.length === 1 ? "" : "s"}`}
-        sub={recentRuns.length > 0 ? `${recentDone} done · ${recentNotDone} not done` : undefined}
-        tone={recentNotDone > 0 ? "warn" : recentRuns.length > 0 ? "ok" : undefined}
+        value={`${runsLast7DaysTotal} run${runsLast7DaysTotal === 1 ? "" : "s"}`}
+        sub={runsLast7DaysTotal > 0 ? `${runsDone} done · ${runsLast7DaysFailed} failed` : undefined}
+        tone={runsLast7DaysFailed > 0 ? "warn" : runsLast7DaysTotal > 0 ? "ok" : undefined}
       />
       <Tile
         label="Needs attention"

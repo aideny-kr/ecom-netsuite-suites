@@ -70,6 +70,10 @@ class Schedule(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     owner_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
+    # migration 101_schedule_created_via, Task 5 residual: "chat" | "page" |
+    # "seed" -- how this schedule was created (spec §B6's list-page sub-line).
+    # `None` for a row created before this field existed.
+    created_via: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_run_status: Mapped[str | None] = mapped_column(Text, nullable=True)
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

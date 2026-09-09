@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
-import type { ScheduledJob } from "@/hooks/use-scheduled-jobs";
+import type { ScheduledJob, ScheduledJobsListResponse } from "@/hooks/use-scheduled-jobs";
 
 // Scheduled Jobs platform, Task 5 (spec §B6, mock state one) — the list page.
 // Mocks every hook module directly (celigo-integrations-page.test.tsx's
@@ -62,15 +62,35 @@ function job(overrides: Partial<ScheduledJob> = {}): ScheduledJob {
     kinds: ["read", "write"],
     summary_line: "5 steps · Query the inventory snapshot → Compose the report → Render → Upload → Finish",
     has_pending_plan: false,
+    last_run_duration_seconds: 112,
+    runs_last_7_days: 1,
+    owner_name: "Aiden Yi",
+    created_via: "chat",
     ...overrides,
   };
+}
+
+/** `GET /api/v1/schedules`'s response shape (Task 5 residual): the tenant's
+ * rows plus the page's tenant-wide "Last 7 days" tile totals — see
+ * `ScheduledJobsListResponse`'s own docstring for why the tile isn't
+ * derived from the rows client-side. */
+function listData(
+  schedules: ScheduledJob[],
+  overrides: Partial<Pick<ScheduledJobsListResponse, "runs_last_7_days_total" | "runs_last_7_days_failed">> = {},
+): ScheduledJobsListResponse {
+  return { schedules, runs_last_7_days_total: 0, runs_last_7_days_failed: 0, ...overrides };
 }
 
 const NOW = new Date("2026-09-09T00:00:00Z");
 
 beforeEach(() => {
   vi.setSystemTime(NOW);
-  mocks.scheduledJobs.mockReturnValue({ data: [job()], isPending: false, isError: false, refetch: vi.fn() });
+  mocks.scheduledJobs.mockReturnValue({
+    data: listData([job()], { runs_last_7_days_total: 1, runs_last_7_days_failed: 0 }),
+    isPending: false,
+    isError: false,
+    refetch: vi.fn(),
+  });
   mocks.jobSchedules.mockReturnValue({
     data: [{ name: "report-auto-refresh-sweep", task: "tasks.report_auto_refresh_all", schedule: "3600.0", enabled: true }],
     isPending: false,
@@ -99,9 +119,29 @@ it("renders the four tiles with real counts from the list + plan usage", () => {
   expect(screen.getByText(/2 of 5 in your plan's quota/)).toBeInTheDocument();
 });
 
+it("renders the Last 7 days tile from the tenant-wide aggregate, not a client-side sum of the rows", () => {
+  // Two schedules, several runs (Task 5 residual: "the aggregate query").
+  // The totals below deliberately DON'T match what summing the two rows'
+  // own `runs_last_7_days` would give (1 + 1 = 2) — proving the tile reads
+  // the server's own tenant-wide total/failed fields, not a client re-derive.
+  mocks.scheduledJobs.mockReturnValue({
+    data: listData(
+      [job(), job({ id: "s-2", name: "Stripe payout reconciliation" })],
+      { runs_last_7_days_total: 21, runs_last_7_days_failed: 1 },
+    ),
+    isPending: false,
+    isError: false,
+    refetch: vi.fn(),
+  });
+  wrap(<ScheduledJobsList />);
+  const tile = screen.getByText("Last 7 days").closest("div")!;
+  expect(within(tile).getByText("21 runs")).toBeInTheDocument();
+  expect(within(tile).getByText("20 done · 1 failed")).toBeInTheDocument();
+});
+
 it("counts a pending-approval or paused schedule as needing attention", () => {
   mocks.scheduledJobs.mockReturnValue({
-    data: [job(), job({ id: "s-2", name: "Stripe payout reconciliation", plan_status: "pending_approval" })],
+    data: listData([job(), job({ id: "s-2", name: "Stripe payout reconciliation", plan_status: "pending_approval" })]),
     isPending: false,
     isError: false,
     refetch: vi.fn(),
@@ -116,7 +156,9 @@ it("counts an approved schedule with a pending recompiled plan change as needing
   // approval") is an APPROVED schedule whose instruction was edited since —
   // plan_status stays "approved"; only has_pending_plan flips.
   mocks.scheduledJobs.mockReturnValue({
-    data: [job({ id: "s-2", name: "Inventory Aging Weekly (edited)", plan_status: "approved", has_pending_plan: true })],
+    data: listData([
+      job({ id: "s-2", name: "Inventory Aging Weekly (edited)", plan_status: "approved", has_pending_plan: true }),
+    ]),
     isPending: false,
     isError: false,
     refetch: vi.fn(),
@@ -149,9 +191,45 @@ it("renders the last-run pill and when for a completed run", () => {
   expect(screen.getAllByText(/Sep/).length).toBeGreaterThan(0);
 });
 
+it("renders the Last run cell's duration when present (Task 5 residual)", () => {
+  wrap(<ScheduledJobsList />);
+  const row = screen.getByText("Inventory Aging Weekly").closest("tr")!;
+  expect(within(row).getByText(/1m 52s/)).toBeInTheDocument();
+});
+
+it("omits the duration from the Last run cell when there is none yet", () => {
+  mocks.scheduledJobs.mockReturnValue({
+    data: listData([job({ last_run_duration_seconds: null, last_run_at: null, last_run_status: null })]),
+    isPending: false,
+    isError: false,
+    refetch: vi.fn(),
+  });
+  wrap(<ScheduledJobsList />);
+  const row = screen.getByText("Inventory Aging Weekly").closest("tr")!;
+  expect(within(row).queryByText(/\dm \ds/)).toBeNull();
+});
+
+it("renders the Job column sub-line as 'from the chat · owner {name}' for a chat-created schedule", () => {
+  wrap(<ScheduledJobsList />);
+  const row = screen.getByText("Inventory Aging Weekly").closest("tr")!;
+  expect(within(row).getByText("from the chat · owner Aiden Yi")).toBeInTheDocument();
+});
+
+it("renders the Job column sub-line as just 'owner {name}' for a page-created schedule", () => {
+  mocks.scheduledJobs.mockReturnValue({
+    data: listData([job({ created_via: "page" })]),
+    isPending: false,
+    isError: false,
+    refetch: vi.fn(),
+  });
+  wrap(<ScheduledJobsList />);
+  const row = screen.getByText("Inventory Aging Weekly").closest("tr")!;
+  expect(within(row).getByText("owner Aiden Yi")).toBeInTheDocument();
+});
+
 it("marks a row with a pending recompiled plan change so it isn't silently invisible", () => {
   mocks.scheduledJobs.mockReturnValue({
-    data: [job({ has_pending_plan: true })],
+    data: listData([job({ has_pending_plan: true })]),
     isPending: false,
     isError: false,
     refetch: vi.fn(),
@@ -185,7 +263,7 @@ it("shows Run now for an approved, unpaused job and calls the run mutation", () 
 
 it("shows Resume (not Run now) for a paused job and calls the resume mutation", () => {
   mocks.scheduledJobs.mockReturnValue({
-    data: [
+    data: listData([
       job({
         id: "s-2",
         name: "Stripe payout reconciliation",
@@ -194,7 +272,7 @@ it("shows Resume (not Run now) for a paused job and calls the resume mutation", 
         paused_at: "2026-09-05T18:02:00Z",
         pause_reason: "paused after 2 failed attempts: NetSuite token expired",
       }),
-    ],
+    ]),
     isPending: false,
     isError: false,
     refetch: vi.fn(),
@@ -237,7 +315,7 @@ it("renders an error notice with retry when the schedules query fails", () => {
 });
 
 it("shows the exact empty-state copy when the tenant has no scheduled jobs", () => {
-  mocks.scheduledJobs.mockReturnValue({ data: [], isPending: false, isError: false, refetch: vi.fn() });
+  mocks.scheduledJobs.mockReturnValue({ data: listData([]), isPending: false, isError: false, refetch: vi.fn() });
   mocks.jobSchedules.mockReturnValue({ data: [], isPending: false, isError: false });
   wrap(<ScheduledJobsList />);
   expect(

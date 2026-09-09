@@ -57,12 +57,42 @@ export interface ScheduledJob {
    * row indicator; the full `pending_plan_json`/diff is detail-page only,
    * `ScheduleDetailResponse`). */
   has_pending_plan: boolean;
+  /** Task 5 residual (spec §B6): the wall-clock duration (seconds) of this
+   * schedule's MOST RECENT completed run, or `null`/absent when there is no
+   * completed run yet (never run, or still running/queued). Optional (not
+   * every existing test fixture across this surface sets it) — every real
+   * `GET /schedules` response always carries it. */
+  last_run_duration_seconds?: number | null;
+  /** Count of this schedule's OWN `jobs` rows in the trailing 7 days —
+   * scoped to ONE schedule, distinct from the page's tenant-wide "Last 7
+   * days" tile (`ScheduledJobsListResponse.runs_last_7_days_total` below). */
+  runs_last_7_days?: number;
+  /** The owner user's display name (`User.full_name`), or `null`/absent for
+   * a schedule with no `owner_id` set (a pre-Slice-2 row, or one created
+   * before this field existed). */
+  owner_name?: string | null;
+  /** How this schedule was created — the agent's chat tool call, this
+   * page's own New Job wizard, or an admin/seed script. `null`/absent for a
+   * row created before this field existed. */
+  created_via?: "chat" | "page" | "seed" | null;
+}
+
+/** `GET /api/v1/schedules`'s response shape (Task 5 residual, spec §B6): the
+ * tenant's own rows PLUS the list page's "Last 7 days" tile's tenant-wide
+ * totals. The tile is TENANT-scoped, not per-schedule, so it is computed by
+ * ONE aggregate query server-side (`schedule_service.tenant_run_totals_7d`)
+ * and returned alongside the list, not via a second round-trip or a
+ * client-side sum of the per-row `runs_last_7_days` field above. */
+export interface ScheduledJobsListResponse {
+  schedules: ScheduledJob[];
+  runs_last_7_days_total: number;
+  runs_last_7_days_failed: number;
 }
 
 export function useScheduledJobs() {
-  return useQuery<ScheduledJob[]>({
+  return useQuery<ScheduledJobsListResponse>({
     queryKey: ["scheduled-jobs"],
-    queryFn: () => apiClient.get<ScheduledJob[]>("/api/v1/schedules"),
+    queryFn: () => apiClient.get<ScheduledJobsListResponse>("/api/v1/schedules"),
   });
 }
 

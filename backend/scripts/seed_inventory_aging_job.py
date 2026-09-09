@@ -163,6 +163,7 @@ async def main(
         delivery_json=DELIVERY,
         budget_json=BUDGET,
         owner_id=owner_id,
+        created_via="seed",
     )
     db.add(schedule)
     await db.flush()

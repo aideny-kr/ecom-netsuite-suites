@@ -252,6 +252,33 @@ export function formatDuration(startedAt: string | null | undefined, completedAt
   return `${mins}m ${secs}s`;
 }
 
+/** Task 5 residual (spec §B6): the list page's Last run cell duration —
+ * `ScheduledJob.last_run_duration_seconds` is a plain number (computed
+ * server-side from the last run's `jobs` row), unlike the runs panel's
+ * `formatDuration` above which takes two timestamps. `null`/negative/NaN
+ * (no completed run yet) renders nothing — never a fabricated "0m 0s". */
+export function formatDurationSeconds(seconds: number | null | undefined): string | null {
+  if (seconds == null || Number.isNaN(seconds) || seconds < 0) return null;
+  const total = Math.round(seconds);
+  const mins = Math.floor(total / 60);
+  const secs = total % 60;
+  return `${mins}m ${secs}s`;
+}
+
+/** The Job column's sub-line (mock state one): `"from the chat · owner
+ * {name}"` for a chat-created schedule, `"owner {name}"` otherwise, or
+ * `null` when there is nothing to show (no owner, not chat-created) —
+ * never an empty sub-line rendered as a stray dot. */
+export function describeJobOrigin(
+  createdVia: string | null | undefined,
+  ownerName: string | null | undefined,
+): string | null {
+  const parts: string[] = [];
+  if (createdVia === "chat") parts.push("from the chat");
+  if (ownerName) parts.push(`owner ${ownerName}`);
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
 export function formatCountdown(iso: string | null | undefined, now: Date = new Date()): string | null {
   if (!iso) return null;
   const target = new Date(iso).getTime();

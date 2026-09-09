@@ -248,8 +248,8 @@ class TestScheduleList:
         resp = await client.get("/api/v1/schedules", headers=headers)
         assert resp.status_code == 200
         data = resp.json()
-        assert len(data) == 1
-        assert data[0]["has_pending_plan"] is True
+        assert len(data["schedules"]) == 1
+        assert data["schedules"][0]["has_pending_plan"] is True
 
     async def test_list_flags_has_pending_plan_false_with_no_pending_change(
         self, client: AsyncClient, admin_user, db: AsyncSession
@@ -262,7 +262,104 @@ class TestScheduleList:
         resp = await client.get("/api/v1/schedules", headers=headers)
         assert resp.status_code == 200
         data = resp.json()
-        assert data[0]["has_pending_plan"] is False
+        assert data["schedules"][0]["has_pending_plan"] is False
+
+    async def test_list_returns_tenant_wide_7day_totals_and_per_row_run_stats_owner_and_created_via(
+        self, client: AsyncClient, admin_user, db: AsyncSession
+    ):
+        """Task 5 residual (spec §B6): the list response carries the page's
+        tenant-wide "Last 7 days" tile totals — ONE aggregate query, not N+1
+        — plus each row's own last_run_duration_seconds/runs_last_7_days/
+        owner_name/created_via."""
+        user, headers = admin_user
+        tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
+        now = datetime.now(timezone.utc)
+
+        schedule_a = await _seed_job_schedule(
+            db, tenant, plan_json=_INVENTORY_AGING_PLAN, plan_status="approved", name="Inventory Aging Weekly"
+        )
+        schedule_b = await _seed_job_schedule(
+            db, tenant, plan_json=_INVENTORY_AGING_PLAN, plan_status="approved", name="Stripe payout reconciliation"
+        )
+        schedule_a.owner_id = user.id
+        schedule_a.created_via = "chat"
+        schedule_b.created_via = "page"
+        await db.flush()
+
+        # schedule_a: most recent completed run — 1m52s, 2 minutes ago (within 7d).
+        recent_started = now - timedelta(minutes=2)
+        db.add(
+            Job(
+                tenant_id=user.tenant_id,
+                job_type="scheduled_job",
+                status="completed",
+                started_at=recent_started,
+                completed_at=recent_started + timedelta(minutes=1, seconds=52),
+                parameters={"schedule_id": str(schedule_a.id)},
+                result_summary={"reason": "done"},
+            )
+        )
+        # schedule_a: an OLDER completed run, also within 7d — must not win the duration.
+        older_started = now - timedelta(days=1)
+        db.add(
+            Job(
+                tenant_id=user.tenant_id,
+                job_type="scheduled_job",
+                status="completed",
+                started_at=older_started,
+                completed_at=older_started + timedelta(minutes=10),
+                parameters={"schedule_id": str(schedule_a.id)},
+                result_summary={"reason": "done"},
+            )
+        )
+        # schedule_a: a run OUTSIDE the 7-day window — must not be counted either place.
+        stale_started = now - timedelta(days=10)
+        db.add(
+            Job(
+                tenant_id=user.tenant_id,
+                job_type="scheduled_job",
+                status="completed",
+                started_at=stale_started,
+                completed_at=stale_started + timedelta(minutes=1),
+                parameters={"schedule_id": str(schedule_a.id)},
+                result_summary={"reason": "done"},
+            )
+        )
+        # schedule_b: one FAILED run within 7 days.
+        failed_started = now - timedelta(hours=1)
+        db.add(
+            Job(
+                tenant_id=user.tenant_id,
+                job_type="scheduled_job",
+                status="failed",
+                started_at=failed_started,
+                completed_at=failed_started + timedelta(minutes=5),
+                parameters={"schedule_id": str(schedule_b.id)},
+                result_summary={"reason": "error"},
+            )
+        )
+        await db.commit()
+
+        resp = await client.get("/api/v1/schedules", headers=headers)
+        assert resp.status_code == 200
+        data = resp.json()
+
+        # Tenant-wide tile: 3 runs in the trailing 7 days (2 for a + 1 for b); 1 failed.
+        assert data["runs_last_7_days_total"] == 3
+        assert data["runs_last_7_days_failed"] == 1
+
+        rows = {r["name"]: r for r in data["schedules"]}
+        row_a = rows["Inventory Aging Weekly"]
+        row_b = rows["Stripe payout reconciliation"]
+
+        assert row_a["runs_last_7_days"] == 2
+        assert row_a["last_run_duration_seconds"] == 112.0  # 1m52s — the MOST RECENT run, not the older one
+        assert row_a["owner_name"] == user.full_name
+        assert row_a["created_via"] == "chat"
+
+        assert row_b["runs_last_7_days"] == 1
+        assert row_b["owner_name"] is None
+        assert row_b["created_via"] == "page"
 
 
 # ---------------------------------------------------------------------------
