@@ -13,6 +13,11 @@ const mocks = vi.hoisted(() => ({
       schedule_enabled: true,
       interval_minutes: 1440,
       tenant_id: "tenant-a",
+      source_connection_id: "source-a",
+      source_step_id: null,
+      netsuite_account_id: "123",
+      subsidiary_id: "1",
+      record_type: "salesorder",
     },
   ],
   allowed: true,
@@ -60,6 +65,29 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.allowed = true;
   vi.mocked(apiClient.get).mockImplementation(async (path: string) => {
+    if (path.includes("/case-groups?"))
+      return {
+        groups: [
+          {
+            group_id: "a".repeat(32),
+            pattern: "Tax differences",
+            case_count: 53,
+            currency: "USD",
+            scope: {
+              source_connection_id: "source-a",
+              source_step_id: null,
+              netsuite_account_id: "123",
+              subsidiary_id: "1",
+              record_type: "salesorder",
+            },
+            order_total: "zero",
+            tax: "negative",
+            refunds: "zero",
+            target_state: "fulfilled",
+          },
+        ],
+        has_next: false,
+      } as never;
     if (path.includes("/review/findings"))
       return {
         summary: { checked: 8, matched: 5, needs_review: 2, not_verified: 1 },
@@ -119,7 +147,11 @@ it("renders server totals and exact evidence without claiming a complete financi
   mount();
   expect(await screen.findByText("R123456789")).toBeInTheDocument();
   expect(screen.getByTestId("stat-checked")).toHaveTextContent("8");
-  expect(screen.getByText("123456789012345.123456")).toBeInTheDocument();
+  expect(screen.getByText("+123456789012335.123456")).toBeInTheDocument();
+  expect(screen.queryByText("123456789012345.123456")).not.toBeInTheDocument();
+  expect(
+    screen.getByRole("columnheader", { name: /Variance/ }),
+  ).toBeInTheDocument();
   expect(
     screen.getByText(/Replica freshness is unverified/),
   ).toBeInTheDocument();
@@ -149,9 +181,11 @@ it("keeps failed evidence loading distinct from zero matches", async () => {
     throw new Error("Unavailable");
   });
   mount();
-  expect(await screen.findByRole("alert")).toHaveTextContent(
-    /could not|unavailable/i,
-  );
+  expect(
+    (await screen.findAllByRole("alert")).some((node) =>
+      /could not|unavailable/i.test(node.textContent || ""),
+    ),
+  ).toBe(true);
   expect(screen.getByTestId("stat-checked")).toHaveTextContent("—");
 });
 it("reuses a failed period request key but gives an intentional new review a fresh key", async () => {
@@ -201,12 +235,14 @@ it("keeps a revised entity's existing period visible with its current entity nam
   mocks.configs[0] = { ...config, ...scope };
   vi.mocked(apiClient.get).mockImplementation(async (path: string) =>
     path.includes("/runs?")
-      ? ([{
-          ...run,
-          tenant_id: "tenant-a",
-          config_id: "retired-scope",
-          config_snapshot: { ...scope, netsuite_account_id: "account-sb1" },
-        }] as never)
+      ? ([
+          {
+            ...run,
+            tenant_id: "tenant-a",
+            config_id: "retired-scope",
+            config_snapshot: { ...scope, netsuite_account_id: "account-sb1" },
+          },
+        ] as never)
       : original(path),
   );
   try {
@@ -214,9 +250,13 @@ it("keeps a revised entity's existing period visible with its current entity nam
     expect(await screen.findByText("R123456789")).toBeInTheDocument();
     expect(screen.getByTestId("stat-checked")).toHaveTextContent("8");
     expect(screen.getByText(/Framework Inc · USD/)).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("Review entity"), { target: { value: "scope-a" } });
+    fireEvent.change(screen.getByLabelText("Review entity"), {
+      target: { value: "scope-a" },
+    });
     expect(await screen.findByText("R123456789")).toBeInTheDocument();
-    expect(apiClient.get).toHaveBeenCalledWith(expect.stringContaining(`/runs/${run.id}/review/findings`));
+    expect(apiClient.get).toHaveBeenCalledWith(
+      expect.stringContaining(`/runs/${run.id}/review/findings`),
+    );
   } finally {
     mocks.configs[0] = config;
   }
@@ -226,4 +266,20 @@ it("preserves source-order browsing when reconciliation access is unavailable", 
   mount();
   expect(screen.getByText("Imported source orders")).toBeInTheDocument();
   expect(apiClient.get).not.toHaveBeenCalled();
+});
+
+it("launches one group investigation with all-member pagination and exact scope", async () => {
+  mount();
+  const link = await screen.findByRole("link", { name: "Investigate group →" });
+  const prompt = new URL(
+    link.getAttribute("href")!,
+    "https://example.test",
+  ).searchParams.get("compose")!;
+  expect(prompt).toContain("transaction_ops.groups");
+  expect(prompt).toContain("every has_next page");
+  expect(prompt).toContain("scope-a");
+  expect(prompt).toContain("Split".toLowerCase());
+  expect(prompt).toContain("Do not approve or execute");
+  expect(screen.getByText("53")).toBeInTheDocument();
+  expect(apiClient.post).not.toHaveBeenCalled();
 });

@@ -25,6 +25,8 @@ import {
 } from "../transaction-ops/format";
 import type { TransactionRun } from "../transaction-ops/types";
 import { BulkProposals } from "./bulk-proposals";
+import { IssueGroups } from "./issue-groups";
+import { Variance, deltaValue } from "./variance";
 import { OrdersPage } from "./orders-page";
 import { configForRun } from "./review-scope";
 import {
@@ -95,7 +97,8 @@ function Workspace() {
     };
   }, []);
   const scopes = (configs.data || []).filter((c) => !entity || c.id === entity);
-  const currentConfig = (run: TransactionRun) => configForRun(configs.data || [], run);
+  const currentConfig = (run: TransactionRun) =>
+    configForRun(configs.data || [], run);
   const startScopes = scopes.filter((c) => c.enabled);
   const reviewRuns = useMemo(
     () => (runs.data || []).filter((r) => typeof span(r).id === "string"),
@@ -142,7 +145,8 @@ function Workspace() {
   const rows = data.results.flatMap((q, index) =>
     (q.error ? [] : q.data?.items || []).map((row) => ({
       ...row,
-      configId: currentConfig(selectedRuns[index])?.id || selectedRuns[index].config_id,
+      configId:
+        currentConfig(selectedRuns[index])?.id || selectedRuns[index].config_id,
     })),
   );
   const failure =
@@ -340,10 +344,7 @@ function Workspace() {
         <div className="mt-3 flex flex-wrap gap-x-6 gap-y-2 text-[13px]">
           {data.coverage.map((q, i) => (
             <span key={selectedRuns[i].id}>
-              {
-                currentConfig(selectedRuns[i])?.name || "Historical scope"
-              }
-              :{" "}
+              {currentConfig(selectedRuns[i])?.name || "Historical scope"}:{" "}
               {q.error
                 ? "Coverage unavailable"
                 : q.data
@@ -455,13 +456,18 @@ function Workspace() {
                     "Order",
                     "Entity / currency",
                     ...(tab === "Refunds"
-                      ? ["Solidus refunds", "NetSuite refunds", "Difference"]
-                      : ["Order total", "Tax", "Refunds"]),
+                      ? ["Solidus refunds", "NetSuite refunds", "Variance"]
+                      : ["Variance"]),
                     "Finding",
                     "Next step",
                   ].map((h) => (
                     <th className="whitespace-nowrap p-4 font-medium" key={h}>
                       {h}
+                      {h === "Variance" && (
+                        <span className="mt-1 block text-xs font-normal">
+                          Source − ERP
+                        </span>
+                      )}
                     </th>
                   ))}
                 </tr>
@@ -482,6 +488,12 @@ function Workspace() {
               </tbody>
             </table>
           </div>
+          <p className="text-xs text-muted-foreground">
+            Every nonzero variance remains visible, including one cent. Order
+            total includes tax; the differences are not added together. Unknown
+            amounts appear as —. Full source and ERP amounts are in case
+            details.
+          </p>
           {!rows.length && (
             <p className="text-[13px] text-muted-foreground">
               {data.results.some((q) => q.isLoading)
@@ -498,10 +510,12 @@ function Workspace() {
             setOffset={setOffset}
             label="25 rows per entity per page"
           />
+          {tab === "Orders" && <IssueGroups />}
         </section>
       )}
       {tab === "Cases" && (
         <section className="space-y-4">
+          <IssueGroups />
           <div className="flex flex-wrap items-center justify-between gap-3">
             <p className="text-[13px] text-muted-foreground">
               Open cases across all periods and entities. Select up to 50 for
@@ -560,6 +574,7 @@ function Workspace() {
                     "Select",
                     "Order",
                     "Entity",
+                    "Variance",
                     "Finding",
                     "Last observed",
                     "Next step",
@@ -599,6 +614,9 @@ function Workspace() {
                           config.subsidiary_id === c.scope_json.subsidiary_id,
                       )?.name ||
                         `Entity ${exactValue(c.scope_json.subsidiary_id)}`}
+                    </td>
+                    <td className="p-4">
+                      <Variance balance={c.latest_report_json.balance} />
                     </td>
                     <td className="p-4">
                       {objectValue(c.latest_report_json.balance).status ===
@@ -663,7 +681,11 @@ function Workspace() {
               </thead>
               <tbody>
                 {(runs.data || [])
-                  .filter((r) => !entity || (currentConfig(r)?.id || r.config_id) === entity)
+                  .filter(
+                    (r) =>
+                      !entity ||
+                      (currentConfig(r)?.id || r.config_id) === entity,
+                  )
                   .map((r) => (
                     <tr key={r.id} className="border-b">
                       <td className="p-4">{dateLabel(r.created_at)}</td>
@@ -747,11 +769,6 @@ function ResultRow({
   const balance = objectValue(row.balance);
   const amounts = objectValue(balance.amounts);
   const refund = objectValue(amounts.refunds);
-  const values = refunds
-    ? [refund.source, refund.target, refund.delta]
-    : ["order_total", "tax", "refunds"].map(
-        (k) => objectValue(amounts[k]).source,
-      );
   return (
     <tr className="border-b last:border-0">
       <td className="whitespace-nowrap p-4 font-medium">
@@ -760,14 +777,20 @@ function ResultRow({
       <td className="p-4">
         {name} · {exactValue(balance.currency)}
       </td>
-      {values.map((v, i) => (
-        <td
-          key={i}
-          className="whitespace-nowrap p-4 text-right font-mono tabular-nums"
-        >
-          {exactValue(v)}
+      {refunds ? (
+        [refund.source, refund.target, refund.delta].map((v, i) => (
+          <td
+            key={i}
+            className="whitespace-nowrap p-4 text-right font-mono tabular-nums"
+          >
+            {i === 2 ? deltaValue(v).text : v == null ? "—" : exactValue(v)}
+          </td>
+        ))
+      ) : (
+        <td className="p-4">
+          <Variance balance={balance} />
         </td>
-      ))}
+      )}
       <td className="p-4">
         <span className="whitespace-nowrap rounded-full border px-2.5 py-1 text-xs">
           {verdicts[String(balance.status)] || "Not verified"}
