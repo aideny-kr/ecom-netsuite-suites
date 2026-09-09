@@ -1042,11 +1042,11 @@ def _narrative(
     if most_worsened is None:
         worsened_clause = "No location worsened this week."
     else:
-        total_word = "rise" if most_worsened.delta_value >= 0 else "fall"
+        total_move_word = "rise" if most_worsened.delta_value >= 0 else "fall"
         worsened_clause = (
             f"{most_worsened.location} moved the other way, with its aged share climbing to "
             f"{_fmt_pct(most_worsened.aged90_share_pct)} on a {_fmt_money(abs(most_worsened.delta_value))} "
-            f"{total_word} in total value."
+            f"{total_move_word} in total value."
         )
 
     highest_share = max(locations, key=lambda loc: loc.aged90_share_pct)

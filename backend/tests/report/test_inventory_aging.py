@@ -625,6 +625,27 @@ def test_narrative_paragraph2_lead_and_improved_same_location_combined_with_and(
     assert "Panurgy moved the other way" in p2
 
 
+def test_narrative_paragraph2_lead_and_improver_are_different_locations_two_sentences():
+    # Review finding on the polish pass: every paragraph-2 test exercised the
+    # "no improver" or the combined lead==improver branch; the plain two-sentence
+    # form -- value leader in one sentence, a DIFFERENT location improving the
+    # most in the next -- had no test. Big is the largest on-hand value and does
+    # not improve (aged value +2000); Small is the sole improver (aged -10000).
+    payloads, params = _narrative_fixture(
+        [
+            ("Big", 300000, 30000, 290000, 28000),
+            ("Small", 50000, 5000, 52000, 15000),
+        ]
+    )
+    report = ia.compute(payloads, params)
+    p2 = report.narrative.paragraph_2
+    assert "Big carries" in p2
+    assert "Small improved the most:" in p2
+    assert "and improved the most" not in p2
+    assert "Big improved" not in p2
+    assert "No location improved this week." not in p2
+
+
 def test_narrative_paragraph2_improved_clause_uses_the_aged_buckets_wording():
     # Regression: paragraph 2's "improved the most" clause must read "... the
     # aged buckets" (the pre-existing narrative wording, and the mock's literal
