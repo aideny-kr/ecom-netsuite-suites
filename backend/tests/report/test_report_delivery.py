@@ -310,6 +310,62 @@ async def test_redelivery_of_the_same_report_and_period_still_updates_in_place(d
     assert second.xlsx_file_id == first.xlsx_file_id
 
 
+async def test_deliver_report_to_drive_takes_a_per_report_advisory_lock_before_any_drive_call(db, monkeypatch):
+    """Gate fix #7: two concurrent deliveries of the SAME report can each run
+    _upload_or_update's find-then-create sequence for the folder and both files —
+    without serialization, both could see "nothing yet" and both upload, duplicating
+    every Drive artifact instead of one updating in place (test_redelivery_... above
+    proves find-then-create itself is correct once serialized; this proves the
+    serialization actually happens). deliver_report_to_drive must take a per-report
+    Postgres advisory TRANSACTION lock (pg_advisory_xact_lock(hashtext(report_id))),
+    acquired before the folder lookup and released only at the delivery's own
+    commit/rollback (xact-scoped), so a genuinely concurrent second caller's Drive
+    work cannot even START until the first's has fully landed.
+
+    A real cross-connection block can't be demonstrated with this repo's `db`
+    fixture (conftest.py wraps every test in one savepoint-scoped connection that
+    never truly commits, and a Postgres advisory xact lock is session-scoped —
+    re-acquiring it on the SAME session never blocks itself) — this instead proves
+    the mechanism is wired in correctly: the lock statement runs, with a key
+    derived from this report's id, and BEFORE any find/create/upload call."""
+    tenant = await create_test_tenant(db, name="AdvisoryLockCorp")
+    user, _ = await create_test_user(db, tenant)
+    await set_tenant_context(db, str(tenant.id))
+    report = await _seed_report(db, tenant, user)
+    await _add_sheets_connector(db, tenant.id)
+
+    calls: list[str] = []
+    _patch_renderers(monkeypatch, calls)
+    client = FakeDriveClient(calls)
+    _patch_drive_client(monkeypatch, client)
+
+    real_execute = db.execute
+
+    async def spy_execute(stmt, *args, **kwargs):
+        sql_text = str(getattr(stmt, "text", stmt))
+        if "pg_advisory_xact_lock" in sql_text:
+            calls.append("advisory_lock")
+            params = args[0] if args else kwargs.get("parameters") or {}
+            assert params.get("report_id") == str(report.id)
+        return await real_execute(stmt, *args, **kwargs)
+
+    monkeypatch.setattr(db, "execute", spy_execute)
+
+    await report_delivery.deliver_report_to_drive(
+        db, tenant_id=tenant.id, report_id=report.id, actor_type="user", actor_id=user.id, period_key="2026-09-08"
+    )
+
+    assert calls.count("advisory_lock") == 1
+    lock_idx = calls.index("advisory_lock")
+    drive_idxs = [
+        i
+        for i, c in enumerate(calls)
+        if c in ("find_folder", "create_folder", "find_file", "upload_new", "update_existing")
+    ]
+    assert drive_idxs, "expected at least one Drive call"
+    assert lock_idx < min(drive_idxs)
+
+
 async def test_inventory_aging_delivery_builds_the_real_seven_sheet_workbook(db, monkeypatch):
     """Gate fix #6: _render_xlsx_bytes built the generic 5-row metadata sheet for
     EVERY report type, including inventory_aging. For an inventory_aging report,

@@ -59,7 +59,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import set_tenant_context
@@ -490,6 +490,17 @@ async def deliver_report_to_drive(
         # any further RLS-protected read/write (the test fixture's savepoint-based
         # commit does not, but re-asserting is a safe no-op there too).
         await set_tenant_context(db, str(tenant_id))
+
+        # Gate fix #7: a per-report Postgres advisory TRANSACTION lock, held for the
+        # rest of this try block (released automatically at the commit/rollback
+        # below — xact-scoped, never needs an explicit unlock). Without it, two
+        # concurrent deliveries of the SAME report (two schedule runs, a
+        # double-click) can each run _upload_or_update's find-then-create sequence
+        # for the folder and both files independently, both see "nothing yet", and
+        # both upload — duplicating every Drive artifact instead of one updating
+        # in place. A genuinely concurrent second caller now cannot even START its
+        # own folder lookup until this one's Drive work has fully landed.
+        await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:report_id))"), {"report_id": str(report_id)})
 
         reports_folder_id = await _find_or_create_folder(client, name=_REPORTS_FOLDER_NAME, parent_id=shared_drive_id)
         # Gate fix #5: the per-report folder is keyed by the report's SERIES (or the
