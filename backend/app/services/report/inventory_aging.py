@@ -369,12 +369,21 @@ def _ordinal(n: int) -> str:
 # build_sources — the four bigquery_sql recipe sources (spec §A1/§A7)
 # ---------------------------------------------------------------------------
 def _validate_locations(locations: Any) -> tuple[str, ...]:
+    """Gate fix: reject a duplicate location outright (never dedupe silently) — a
+    duplicate would still be summed twice into the All-locations row downstream
+    (``_all_locations_summary``'s ``for loc in locations`` totals iterate this exact
+    tuple), so the caller must fix its input rather than have this function paper
+    over a tampered/drifted recipe or a launcher double-submit."""
     if not locations:
         raise ValueError("locations must be a non-empty list")
     validated: list[str] = []
+    seen: set[str] = set()
     for loc in locations:
         if not isinstance(loc, str) or not _SAFE_LOCATION_RE.match(loc):
             raise ValueError(f"unknown location: {loc!r}")
+        if loc in seen:
+            raise ValueError(f"duplicate location: {loc}")
+        seen.add(loc)
         validated.append(loc)
     return tuple(validated)
 

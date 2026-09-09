@@ -773,6 +773,16 @@ def test_build_sources_rejects_empty_locations():
         ia.build_sources({"locations": []})
 
 
+def test_build_sources_rejects_duplicate_locations():
+    """Gate fix: a duplicate location must be refused here (before any SQL is even
+    built), not silently deduped downstream — deduping inside compute()'s
+    location-keyed dict would collapse the duplicate but the All-locations summary's
+    own `for loc in locations` sum (see _all_locations_summary) would still iterate
+    the duplicate entry twice, double-counting that location into the totals."""
+    with pytest.raises(ValueError, match="duplicate location: Dimerco"):
+        ia.build_sources({"locations": ["Dimerco", "Dimerco"]})
+
+
 # ---------------------------------------------------------------------------
 # r_prior/r_trend last-restock freshness (review finding: negative `days`)
 #
@@ -820,6 +830,15 @@ def test_compute_also_rejects_unknown_location_shape():
     payloads, _ = _threshold_fixture()
     with pytest.raises(ValueError):
         ia.compute(payloads, {"locations": ["Acme", "Bad;Loc"]})
+
+
+def test_compute_also_rejects_duplicate_locations():
+    """compute() uses the same validated tuple as build_sources — defense in depth
+    against a tampered/drifted recipe that reached compute() directly with a
+    duplicated locations list (see test_build_sources_rejects_duplicate_locations)."""
+    payloads, _ = _threshold_fixture()
+    with pytest.raises(ValueError, match="duplicate location: Acme"):
+        ia.compute(payloads, {"locations": ["Acme", "Acme"]})
 
 
 # ---------------------------------------------------------------------------
