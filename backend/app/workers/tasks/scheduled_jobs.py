@@ -249,7 +249,18 @@ async def _claim_due_schedules(db: AsyncSession, tenant_id: uuid.UUID, now: date
     per-missed-period loop to accidentally run twice. `catch_up="skip"`
     instead skips a MISSED window's run entirely (still advances
     `next_run_at`, still marks the row so the page can show it) — a schedule
-    that is merely on time (not missed) always runs either way.
+    that is merely on time (not missed) always runs either way. `skip` never
+    applies to the one 15-minutes-later retry (`attempt == 2`): a retry is
+    never "missed" in the catch-up sense, and letting `skip` fire there would
+    silently swallow the original failure instead of ever running the retry.
+
+    A `compute_next_run` failure (bad `cron_expression`/`timezone`) PAUSES the
+    row right here — `paused_at`/`pause_reason`/`last_run_status="paused"`,
+    `next_run_at=None`, plus the same owner-notification audit event the
+    retry-then-pause path (`run_schedule_now`) uses — rather than `continue`
+    past it: a `continue` left `next_run_at <= now` forever, so the row was
+    re-claimed and this same exception re-logged every minute, indefinitely,
+    with nothing ever recorded for a human to see (review finding, MAJOR).
     """
     rows = (
         (await db.execute(select(Schedule).where(*_due_predicate(tenant_id, now)).with_for_update(skip_locked=True)))
@@ -270,11 +281,38 @@ async def _claim_due_schedules(db: AsyncSession, tenant_id: uuid.UUID, now: date
             next_after_due = compute_next_run(row.cron_expression, row.timezone, after=due_at)
             missed = next_after_due <= now
             row.next_run_at = compute_next_run(row.cron_expression, row.timezone, after=now)
-        except Exception:
+        except Exception as exc:
+            # A bad cron_expression/timezone must PAUSE the schedule, never
+            # silently `continue` (review finding, MAJOR): `continue` left
+            # `next_run_at <= now` untouched, so the sweep re-claimed this
+            # SAME row every minute forever with no record anywhere that
+            # anything was wrong. Pausing here uses the identical fields/audit
+            # shape the retry-then-pause path (below, in run_schedule_now)
+            # uses, so the page and the ops digest render this exactly like
+            # any other paused schedule.
             logger.warning(
                 "scheduled_jobs.claim.next_run_at_compute_failed",
                 exc_info=True,
                 extra={"schedule_id": str(row.id)},
+            )
+            row.paused_at = now
+            row.pause_reason = f"paused: schedule cannot be computed ({type(exc).__name__}: {exc})"[:1000]
+            row.last_run_status = "paused"
+            row.next_run_at = None
+            await audit_service.log_event(
+                db,
+                tenant_id=tenant_id,
+                category="jobs",
+                action="jobs.paused",
+                actor_id=None,
+                actor_type="system",
+                resource_type="schedule",
+                resource_id=str(row.id),
+                payload={
+                    "reason": row.pause_reason,
+                    "owner_id": str(row.owner_id) if row.owner_id else None,
+                },
+                status="error",
             )
             continue
 

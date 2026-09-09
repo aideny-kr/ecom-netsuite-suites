@@ -125,6 +125,71 @@ def test_compute_next_run_is_always_strictly_after_after():
 
 
 # ---------------------------------------------------------------------------
+# A compute_next_run failure must pause the schedule, never silently `continue`
+# (review finding, MAJOR): a bad cron_expression/timezone used to hit the
+# bare `except Exception: ... continue` branch, leaving `next_run_at <= now`
+# forever -- the sweep re-claimed the same row every minute, forever, with no
+# record anywhere that anything was wrong.
+# ---------------------------------------------------------------------------
+
+
+async def test_claim_pauses_a_schedule_whose_next_run_at_cannot_be_computed(db: AsyncSession, monkeypatch):
+    tenant = await create_test_tenant(db, name="Bad Cron Co")
+    await set_tenant_context(db, str(tenant.id))
+
+    async def fake_exec(ctx, params):
+        return {"ok": True}
+
+    monkeypatch.setitem(STEP_REGISTRY, "fake.step", _fake_spec("read", fake_exec))
+
+    now = datetime.now(timezone.utc)
+    schedule = await _seed_job_schedule(
+        db,
+        tenant,
+        plan_json={"steps": [{"id": "s1", "type": "fake.step", "params": {}}]},
+        next_run_at=now - timedelta(minutes=1),
+        # Written directly to the row -- the schema validators reject this at
+        # the API/compiler layer, but nothing stops a row already in the
+        # table (or a future validator gap) from carrying one.
+        cron_expression="not a cron",
+    )
+    schedule_id = schedule.id
+
+    stats = await run_due_jobs(db, tenant.id, now=now)
+    assert stats["due"] == 0  # never claimed as runnable -- paused, not run
+    assert stats["ran"] == 0
+
+    refreshed = (await db.execute(select(Schedule).where(Schedule.id == schedule_id))).scalar_one()
+    assert refreshed.paused_at is not None
+    assert refreshed.pause_reason is not None
+    assert refreshed.pause_reason.startswith("paused: schedule cannot be computed")
+    assert refreshed.last_run_status == "paused"
+    assert refreshed.next_run_at is None
+
+    pause_events = (
+        (
+            await db.execute(
+                select(AuditEvent).where(AuditEvent.tenant_id == tenant.id, AuditEvent.action == "jobs.paused")
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(pause_events) == 1
+    assert pause_events[0].payload["reason"] == refreshed.pause_reason
+    assert pause_events[0].status == "error"
+
+    # No jobs row -- this schedule never ran.
+    jobs = (await db.execute(select(Job).where(Job.tenant_id == tenant.id))).scalars().all()
+    assert jobs == []
+
+    # A second sweep must not re-claim the now-paused row.
+    now2 = now + timedelta(minutes=5)
+    stats2 = await run_due_jobs(db, tenant.id, now=now2)
+    assert stats2["due"] == 0
+
+
+# ---------------------------------------------------------------------------
 # FOR UPDATE SKIP LOCKED prevents a double run
 # ---------------------------------------------------------------------------
 
