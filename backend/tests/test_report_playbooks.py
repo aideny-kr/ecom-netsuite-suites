@@ -73,6 +73,34 @@ def test_build_playbook_recipe_for_inventory_aging_rejects_bad_location():
         build_playbook_recipe("inventory_aging", {"locations": ["O'Brien Depot"]})
 
 
+async def test_compose_playbook_report_fails_closed_for_inventory_aging_not_yet_wired(db, monkeypatch):
+    """Review finding: registering inventory_aging in PLAYBOOKS made
+    POST /reports/playbooks/inventory_aging reachable, but compose_playbook_report
+    unconditionally read recipe["sections"][0]["period"] right after
+    build_playbook_recipe returned — the inventory_aging section dict has no
+    "period" key (only type/result_ids/params), so this used to raise an
+    unhandled KeyError that propagated as a real 500 to a user who picked the
+    now-visible catalog entry. Composing a non-financial_statement recipe must
+    fail CLEANLY (a RefreshError, which compose_playbook_endpoint already maps
+    to an HTTP error) until the render wiring lands in a later task — and it
+    must fail before any tool dispatch (never partially execute sources for a
+    playbook it cannot render)."""
+    tenant = await create_test_tenant(db, name="InventoryAgingNotWiredCorp")
+    user, _ = await create_test_user(db, tenant)
+    calls = _patch_executor(monkeypatch)
+
+    with pytest.raises(RefreshError) as exc:
+        await compose_playbook_report(
+            db,
+            playbook_key="inventory_aging",
+            params={"locations": ["Acme"]},
+            tenant_id=tenant.id,
+            actor_id=user.id,
+        )
+    assert exc.value.status_code != 500
+    assert calls == []  # failed before any source ever dispatched
+
+
 # ---------------------------------------------------------------------------
 # Period math — pure calendar helpers over the validated "Mon YYYY" format.
 # ---------------------------------------------------------------------------

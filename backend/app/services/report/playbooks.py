@@ -412,6 +412,22 @@ async def compose_playbook_report(
             series_id = existing_series_id
 
     title, recipe = build_playbook_recipe(playbook_key, params)
+    # T2-review finding: registering a playbook in PLAYBOOKS makes it immediately
+    # reachable through GET /reports/playbooks and POST /reports/playbooks/{key}
+    # (the endpoint's 404 gate is `playbook_key not in PLAYBOOKS`, nothing more) —
+    # but only a `financial_statement`-shaped recipe (`sections[0]["period"]`
+    # below) can be composed by the rest of this function. A playbook whose
+    # recipe uses a different section shape (e.g. inventory_aging's four
+    # bigquery_sql sources feeding one `inventory_aging` section, which has no
+    # "period" key) must fail CLEANLY here, before any tool dispatch, rather
+    # than let the next line's KeyError propagate as an unhandled 500 to a real
+    # user who picked a now-visible-but-not-yet-composable catalog entry.
+    if recipe["sections"][0].get("type") != "financial_statement":
+        raise RefreshError(
+            501,
+            f"playbook '{playbook_key}' is listed but cannot be composed yet "
+            "(its report section type has no renderer wired up)",
+        )
     period = recipe["sections"][0]["period"]
     correlation_id = f"report-playbook:{playbook_key}:{uuid.uuid4().hex[:8]}"
 
