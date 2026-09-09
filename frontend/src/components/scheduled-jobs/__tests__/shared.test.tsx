@@ -162,10 +162,16 @@ it("describeStepParams renders the bigquery_sql query", () => {
   expect(describeStepParams("bigquery_sql", { query: "SELECT 1" })).toContain("SELECT 1");
 });
 
-it("describeStepParams renders drive.upload's report step and period key", () => {
+it("describeStepParams renders drive.upload's report step", () => {
+  const out = describeStepParams("drive.upload", { report_step: "compose" });
+  expect(out).toBe("step compose");
+});
+
+it("describeStepParams never renders a period chip for drive.upload — period_key is a param the schema forbids (additionalProperties: false), so a plan can never actually carry one", () => {
   const out = describeStepParams("drive.upload", { report_step: "compose", period_key: "2026-09-07" });
-  expect(out).toContain("compose");
-  expect(out).toContain("2026-09-07");
+  expect(out).toBe("step compose");
+  expect(out).not.toContain("2026-09-07");
+  expect(out).not.toContain("period");
 });
 
 it("describeStepParams falls back to key:value pairs for an unrecognised type", () => {

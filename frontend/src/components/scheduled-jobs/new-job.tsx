@@ -2,9 +2,17 @@
 
 /**
  * Scheduled Jobs platform (Slice 2, spec §B6, mock state three — "New job").
- * Two-step wizard, "the same compile-then-approve step" whether started from
- * this page's "+ New job" or from the chat's "schedule this" (the chat hand-
- * off in `schedule-created-card.tsx` lands HERE, on step 2, via `?id=`).
+ * Two-step wizard for creating a NEW schedule from scratch via this page's
+ * own "+ New job": a plain-language instruction, then a review of the
+ * compiled plan plus a schedule/delivery form. The chat's "schedule this"
+ * hand-off does NOT land here, even though it is "the same compile-then-
+ * approve step" (spec §B6) — a chat-compiled schedule already exists (a real
+ * `schedule_id`, `plan_status: "pending_approval"`) by the time
+ * `ScheduleCreatedCard` renders, so that card links straight to the
+ * schedule's OWN detail page (`/scheduled-jobs/{id}`, `job-detail.tsx`) for
+ * review, never to this wizard. This component reads no `?id=` query param;
+ * `createdId` below is purely this wizard's own in-memory state, set once
+ * `POST /schedules` succeeds within THIS page's own flow.
  *
  * - Step 1 ("1 of 2 · what should it do?"): a plain-language instruction.
  *   "Compile plan →" calls `useCreateSchedule()` — `POST /api/v1/schedules

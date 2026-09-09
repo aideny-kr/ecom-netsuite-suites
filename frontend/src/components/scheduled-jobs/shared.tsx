@@ -333,12 +333,15 @@ export function describeStepParams(type: string, params: Record<string, unknown>
     case "report.render_pdf":
     case "report.build_xlsx":
       return typeof params.report_step === "string" ? `from step ${params.report_step}` : "";
-    case "drive.upload": {
-      const parts: string[] = [];
-      if (typeof params.report_step === "string") parts.push(`step ${params.report_step}`);
-      if (typeof params.period_key === "string") parts.push(`period ${params.period_key}`);
-      return parts.join(" · ");
-    }
+    case "drive.upload":
+      // No `period_key` branch here on purpose: the registry's own
+      // `_DRIVE_UPLOAD_SCHEMA` (`app/services/jobs/registry.py`) is
+      // `additionalProperties: false` with only `report_step` — the run's
+      // period is the RUN's own, never a per-step compiled literal (see that
+      // schema's comment) — so a compiled plan can never actually carry a
+      // `drive.upload` step with a `period_key` param. A dead branch here
+      // used to render one anyway if a step somehow had it.
+      return typeof params.report_step === "string" ? `step ${params.report_step}` : "";
     default:
       return truncate(
         Object.entries(params)

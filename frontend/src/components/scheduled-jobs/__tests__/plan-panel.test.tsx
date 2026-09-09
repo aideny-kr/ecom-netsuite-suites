@@ -37,7 +37,7 @@ function detail(overrides: Partial<ScheduleDetail> = {}): ScheduleDetail {
         { id: "compose", type: "report.compose", params: { playbook_key: "inventory_aging" } },
         { id: "pdf", type: "report.render_pdf", params: { report_step: "compose" } },
         { id: "xlsx", type: "report.build_xlsx", params: { report_step: "compose" } },
-        { id: "upload", type: "drive.upload", params: { report_step: "compose", period_key: "2026-09-07" } },
+        { id: "upload", type: "drive.upload", params: { report_step: "compose" } },
       ],
     },
     pending_plan_json: null,
