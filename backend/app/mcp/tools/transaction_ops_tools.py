@@ -215,10 +215,12 @@ async def _execute(operation, params, context):
             raise _ToolError("invalid_parameters")
         if "case_id" in params:
             from app.services.transaction_ops import case_service
+            from app.services.transaction_ops.resolution_history import history
 
             case_id = uuid.UUID(str(params["case_id"]))
             case = await case_service.get_case(db, tenant_id, case_id)
             observations = await case_service.list_observations(db, tenant_id, case_id, limit=6)
+            resolutions = await history(db, tenant_id, case_id, limit=3)
             finding = SimpleNamespace(report_json=case.latest_report_json)
             rows, capped = _finding_rows([finding])
             return {
@@ -227,6 +229,10 @@ async def _execute(operation, params, context):
                 "status": case.status,
                 "last_observed_at": case.last_observed_at.isoformat(),
                 "findings": [_finding_summary(finding)],
+                "resolution_history": resolutions["resolutions"],
+                "resolution_examples": resolutions["examples"],
+                "resolution_usage": resolutions["usage"],
+                "resolution_history_url": f"/api/v1/transaction-ops/cases/{case.id}/resolution-history",
                 "history": [
                     {
                         "run_id": str(item.run_id),
@@ -238,7 +244,10 @@ async def _execute(operation, params, context):
                 "columns": ["order_reference", "recommended_action", "currency", "field", "source", "target", "delta"],
                 "rows": rows,
                 "row_count": len(rows),
-                "truncated": capped or len(observations) > 5,
+                "truncated": capped
+                or len(observations) > 5
+                or resolutions["truncated"]
+                or resolutions["examples_truncated"],
                 "query": "",
                 "suppress_llm_value": True,
                 "source_kind": "transaction_ops",

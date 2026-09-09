@@ -22,6 +22,10 @@ def condense_status(result):
                     "case_id",
                     "last_observed_at",
                     "history",
+                    "resolution_history",
+                    "resolution_examples",
+                    "resolution_usage",
+                    "resolution_history_url",
                     "truncated",
                 )
             },

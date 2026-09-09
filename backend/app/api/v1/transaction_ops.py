@@ -238,6 +238,22 @@ async def case_observations(
         raise _http_error(exc) from None
 
 
+@router.get("/cases/{case_id}/resolution-history")
+async def case_resolution_history(
+    case_id: UUID,
+    user: Reader,
+    db: Database,
+    limit: Annotated[int, Query(ge=1, le=25)] = 10,
+    offset: Annotated[int, Query(ge=0)] = 0,
+):
+    from app.services.transaction_ops.resolution_history import history
+
+    try:
+        return await history(db, user.tenant_id, case_id, limit=limit, offset=offset)
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
 @router.post("/cases/{case_id}/investigate", response_model=RunOut, status_code=202)
 async def investigate_case(case_id: UUID, request: OrderInvestigation, user: Reader, db: Database):
     try:

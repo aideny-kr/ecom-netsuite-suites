@@ -405,7 +405,7 @@ async def test_real_dispatch_rejects_foreign_run(db, admin_user, admin_user_b, m
 
 
 async def test_status_can_read_a_case_with_bounded_history_and_exact_amounts(ctx, state, monkeypatch):
-    from app.services.transaction_ops import case_service
+    from app.services.transaction_ops import case_service, resolution_history
     from tests.test_transaction_cases import NOW, report
 
     identifier = uuid.uuid4()
@@ -417,11 +417,23 @@ async def test_status_can_read_a_case_with_bounded_history_and_exact_amounts(ctx
     loader = AsyncMock(return_value=case)
     monkeypatch.setattr(case_service, "get_case", loader)
     monkeypatch.setattr(case_service, "list_observations", AsyncMock(return_value=[]))
+    history = {
+        "resolutions": [{"proposal_id": str(RUN), "approved_by": str(ACTOR), "settlement_status": "succeeded"}],
+        "examples": [],
+        "usage": "A new approval is required",
+        "truncated": False,
+        "examples_truncated": False,
+    }
+    monkeypatch.setattr(resolution_history, "history", AsyncMock(return_value=history))
     result = await mod.execute_status({"case_id": str(identifier)}, context=ctx)
     assert result["success"] is True, result
     assert result["case_id"] == str(identifier) and result["row_count"] == 3
     assert result["rows"][0][-3:] == ["100.00", "99.00", "1.00"]
     assert result["suppress_llm_value"] is True
+    assert result["resolution_history"] == history["resolutions"]
+    from app.services.transaction_ops.chat_evidence import condense_status
+
+    assert json.loads(condense_status(result))["resolution_history"] == history["resolutions"]
     loader.assert_awaited_once_with(ctx["db"], TENANT, identifier)
     bad = await mod.execute_status({"case_id": str(identifier), "run_id": str(RUN)}, context=ctx)
     assert bad["error"] == "invalid_parameters"
