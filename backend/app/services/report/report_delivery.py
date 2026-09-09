@@ -113,7 +113,15 @@ class DeliveryIdentity:
     `report.delivery.*` audit events.
 
     `None` (the default everywhere this parameter is threaded) means exactly
-    today's behaviour — report/series-keyed — unchanged."""
+    today's behaviour — report/series-keyed — unchanged.
+
+    Item 5 (delta gate fix): the identity actually used is persisted onto
+    ``report.delivery_json["identity"]`` on every delivery that supplies one
+    explicitly — see ``deliver_report_to_drive``'s own docstring for why a
+    LATER call with ``identity=None`` (the manual re-delivery endpoint's own
+    call shape) needs to recover it rather than falling back to the default
+    report/series-keyed identity, which would create a SECOND Drive folder
+    for a report a scheduled job already delivered."""
 
     folder_props: dict[str, str]
     file_props: dict[str, str]
@@ -489,6 +497,18 @@ async def deliver_report_to_drive(
     recomposed fresh every run). The folder name stays ``report.title`` and
     the file names stay ``<title> — <period_key>.<ext>`` either way — only
     the appProperties identity that find/create actually keys on changes.
+
+    Item 5 (delta gate fix): ``POST /reports/{id}/deliver`` (the manual
+    re-delivery endpoint) always calls this with ``identity=None`` — it has
+    no notion of "which schedule delivered this before". Re-delivering a
+    report a SCHEDULED JOB already uploaded (under its own schedule-keyed
+    identity) therefore fell back to the DEFAULT report-keyed identity,
+    creating a second Drive folder/file set for the same report. Fixed here,
+    not at the endpoint: when ``identity`` is ``None`` and this report's own
+    ``delivery_json["identity"]`` already holds one (persisted by whichever
+    prior delivery supplied it explicitly), THAT identity is recovered and
+    used instead of the default. A caller that DOES pass ``identity``
+    explicitly is unaffected — its value always wins.
     """
     if actor_id is None and actor_type == "user":
         raise ValueError("deliver_report_to_drive: actor_id=None requires a non-user actor_type")
@@ -499,6 +519,16 @@ async def deliver_report_to_drive(
     ).scalar_one_or_none()
     if report is None:
         raise LookupError(f"report {report_id} not found for tenant {tenant_id}")
+
+    if identity is None and isinstance(report.delivery_json, dict):
+        stored_identity = report.delivery_json.get("identity")
+        if stored_identity:
+            identity = DeliveryIdentity(
+                folder_props=stored_identity["folder_props"],
+                file_props=stored_identity["file_props"],
+                lock_key=stored_identity["lock_key"],
+                idempotency_key=stored_identity["idempotency_key"],
+            )
 
     connector = await _sheets_connector(db, tenant_id)
     if connector is None:
@@ -621,13 +651,28 @@ async def deliver_report_to_drive(
 
         report.published_drive_url = result.pdf_url
         report.published_at = delivered_at
-        report.delivery_json = {
-            "pdf": {"file_id": result.pdf_file_id, "url": result.pdf_url},
-            "xlsx": {"file_id": result.xlsx_file_id, "url": result.xlsx_url},
-            "folder_id": result.folder_id,
-            "period_key": period_key,
-            "delivered_at": delivered_at.isoformat(),
-        }
+        # Item 5 (delta gate fix): MERGE onto whatever delivery_json already
+        # holds (never overwrite wholesale) and persist the identity ACTUALLY
+        # USED this delivery when one was supplied -- the recovery path above
+        # reads this same key back on a later identity=None call.
+        merged_delivery_json = dict(report.delivery_json or {})
+        merged_delivery_json.update(
+            {
+                "pdf": {"file_id": result.pdf_file_id, "url": result.pdf_url},
+                "xlsx": {"file_id": result.xlsx_file_id, "url": result.xlsx_url},
+                "folder_id": result.folder_id,
+                "period_key": period_key,
+                "delivered_at": delivered_at.isoformat(),
+            }
+        )
+        if identity is not None:
+            merged_delivery_json["identity"] = {
+                "folder_props": identity.folder_props,
+                "file_props": identity.file_props,
+                "lock_key": identity.lock_key,
+                "idempotency_key": identity.idempotency_key,
+            }
+        report.delivery_json = merged_delivery_json
         await audit_service.log_event(
             db=db,
             tenant_id=tenant_id,

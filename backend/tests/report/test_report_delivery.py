@@ -421,6 +421,68 @@ async def test_identity_override_uses_its_own_lock_key_not_report_id(db, monkeyp
     assert identity.lock_key in lock_params[0].values()
 
 
+async def test_manual_redelivery_with_no_identity_reuses_the_schedule_identity_from_delivery_json(db, monkeypatch):
+    """Item 5 (delta gate fix): `POST /reports/{id}/deliver` always calls
+    `deliver_report_to_drive` with `identity=None` -- re-delivering a report a
+    SCHEDULED JOB already uploaded (under its own schedule-keyed
+    `DeliveryIdentity`) must not create a SECOND Drive folder/file set under
+    the default report-keyed identity. The identity actually used is
+    persisted onto `report.delivery_json["identity"]`; a later call with no
+    identity rebuilds it from there."""
+    tenant = await create_test_tenant(db, name="ManualRedeliverCorp")
+    user, _ = await create_test_user(db, tenant)
+    await set_tenant_context(db, str(tenant.id))
+    report = await _seed_report(db, tenant, user, title="Inventory Aging Weekly")
+    await _add_sheets_connector(db, tenant.id)
+
+    calls: list[str] = []
+    _patch_renderers(monkeypatch, calls)
+    client = FakeDriveClient(calls)
+    _patch_drive_client(monkeypatch, client)
+
+    schedule_id = "33333333-3333-3333-3333-333333333333"
+    identity = report_delivery.DeliveryIdentity(
+        folder_props={"schedule_id": schedule_id},
+        file_props={"schedule_id": schedule_id, "period_key": "2026-09-08"},
+        lock_key=f"schedule:{schedule_id}",
+        idempotency_key=f"job-delivery:{schedule_id}:2026-09-08",
+    )
+
+    first = await report_delivery.deliver_report_to_drive(
+        db,
+        tenant_id=tenant.id,
+        report_id=report.id,
+        actor_type="system",
+        actor_id=None,
+        period_key="2026-09-08",
+        identity=identity,
+    )
+    await set_tenant_context(db, str(tenant.id))
+    calls.clear()
+
+    # The manual endpoint's own call shape -- identity=None, exactly what
+    # POST /reports/{id}/deliver always passes.
+    second = await report_delivery.deliver_report_to_drive(
+        db,
+        tenant_id=tenant.id,
+        report_id=report.id,
+        actor_type="user",
+        actor_id=user.id,
+        period_key="2026-09-08",
+        identity=None,
+    )
+
+    assert second.folder_id == first.folder_id
+    assert second.pdf_file_id == first.pdf_file_id
+    assert second.xlsx_file_id == first.xlsx_file_id
+    assert calls.count("create_folder") == 0  # found by the recovered identity, never re-created
+    assert calls.count("find_folder") == 2  # "Reports" + the schedule-identity folder
+
+    row = (await db.execute(select(Report).where(Report.id == report.id))).scalar_one()
+    assert row.delivery_json["identity"]["lock_key"] == identity.lock_key
+    assert row.delivery_json["identity"]["file_props"] == identity.file_props
+
+
 async def test_deliver_report_to_drive_takes_a_per_report_advisory_lock_before_any_drive_call(db, monkeypatch):
     """Gate fix #7: two concurrent deliveries of the SAME report can each run
     _upload_or_update's find-then-create sequence for the folder and both files —
