@@ -162,6 +162,24 @@ def wb(report):
 
 
 # ---------------------------------------------------------------------------
+# Gate fix #6/#4: build_inventory_aging_workbook must accept the JSON-safe dict
+# form a report's persisted spec_json already carries -- the SAME single boundary-
+# conversion pattern report_html.build_inventory_aging_sections uses. A caller
+# that builds the delivered workbook straight off the stored model (rather than a
+# fresh compute()) must get byte-identical bytes.
+# ---------------------------------------------------------------------------
+def test_workbook_from_json_round_tripped_report_matches_fresh_compute(report):
+    import json
+
+    from app.services.report.inventory_aging import json_safe
+
+    stored = json.loads(json.dumps(json_safe(report)))
+    fresh_bytes = build_inventory_aging_workbook(report).getvalue()
+    stored_bytes = build_inventory_aging_workbook(stored).getvalue()
+    assert stored_bytes == fresh_bytes
+
+
+# ---------------------------------------------------------------------------
 # Sheet count / order / names (spec §A3)
 # ---------------------------------------------------------------------------
 def test_seven_sheets_in_spec_order_and_names(wb, report):

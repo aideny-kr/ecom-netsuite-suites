@@ -30,11 +30,12 @@ snapshot date for the whole report — see ``_resolve_snapshot_date``), and
 from __future__ import annotations
 
 import io
-from datetime import timedelta
+from datetime import date, timedelta
+from decimal import Decimal
 from typing import Any
 
 from app.services.reconciliation.evidence_service import SheetSpec, build_workbook
-from app.services.report.inventory_aging import BUCKETS, RESULT_IDS, AgingReport, LocationSummary, TopItem
+from app.services.report.inventory_aging import BUCKETS, RESULT_IDS, AgingReport
 
 SUMMARY_SHEET_NAME = "Summary"
 BUCKETS_SHEET_NAME = "Buckets"
@@ -54,39 +55,40 @@ _SOURCE_DESCRIPTIONS: dict[str, str] = {
 }
 
 
-def _kpi_rows(report: AgingReport) -> list[list[Any]]:
+def _kpi_rows(kpis: list[dict]) -> list[list[Any]]:
     return [
         [
             "KPI",
-            kpi.label,
-            kpi.value,
-            kpi.delta,
-            kpi.delta_pct if kpi.delta_pct is not None else "",
-            "Yes" if kpi.favourable else "No",
-            kpi.sub_detail,
+            kpi["label"],
+            Decimal(kpi["value"]),
+            Decimal(kpi["delta"]),
+            Decimal(kpi["delta_pct"]) if kpi["delta_pct"] is not None else "",
+            "Yes" if kpi["favourable"] else "No",
+            kpi["sub_detail"],
         ]
-        for kpi in report.kpis
+        for kpi in kpis
     ]
 
 
-def _location_summary_row(row_type: str, loc: LocationSummary) -> list[Any]:
-    detail = f"{loc.skus:,} SKUs · aged {loc.aged90_value} ({loc.aged90_share_pct}% of value)"
+def _location_summary_row(row_type: str, loc: dict) -> list[Any]:
+    delta_value = Decimal(loc["delta_value"])
+    detail = f"{loc['skus']:,} SKUs · aged {loc['aged90_value']} ({loc['aged90_share_pct']}% of value)"
     return [
         row_type,
-        loc.location,
-        loc.on_hand_value,
-        loc.delta_value,
-        loc.delta_pct,
-        "Yes" if loc.delta_value >= 0 else "No",
+        loc["location"],
+        Decimal(loc["on_hand_value"]),
+        delta_value,
+        Decimal(loc["delta_pct"]),
+        "Yes" if delta_value >= 0 else "No",
         detail,
     ]
 
 
-def _summary_sheet(report: AgingReport) -> SheetSpec:
-    rows = list(_kpi_rows(report))
-    for loc in report.locations:
+def _summary_sheet(report: dict) -> SheetSpec:
+    rows = list(_kpi_rows(report["kpis"]))
+    for loc in report["locations"]:
         rows.append(_location_summary_row("Location", loc))
-    rows.append(_location_summary_row("Location", report.all_locations))
+    rows.append(_location_summary_row("Location", report["all_locations"]))
     return {
         "name": SUMMARY_SHEET_NAME,
         "headers": ["Row type", "Label", "Value", "Δ", "Δ %", "Favourable", "Detail"],
@@ -94,13 +96,22 @@ def _summary_sheet(report: AgingReport) -> SheetSpec:
     }
 
 
-def _buckets_sheet(report: AgingReport) -> SheetSpec:
+def _buckets_sheet(report: dict) -> SheetSpec:
     rows: list[list[Any]] = []
-    for loc in (*report.locations, report.all_locations):
-        by_bucket = {b.bucket: b for b in loc.buckets}
+    for loc in (*report["locations"], report["all_locations"]):
+        by_bucket = {b["bucket"]: b for b in loc["buckets"]}
         for bucket in BUCKETS:
             b = by_bucket[bucket]
-            rows.append([loc.location, b.bucket, b.value, b.pct_of_location, b.units, b.skus])
+            rows.append(
+                [
+                    loc["location"],
+                    b["bucket"],
+                    Decimal(b["value"]),
+                    Decimal(b["pct_of_location"]),
+                    b["units"],
+                    b["skus"],
+                ]
+            )
     return {
         "name": BUCKETS_SHEET_NAME,
         "headers": ["Location", "Bucket", "Value", "% of location", "Units", "SKUs"],
@@ -121,31 +132,31 @@ _LOCATION_SHEET_HEADERS = [
 ]
 
 
-def _item_row(item: TopItem, report: AgingReport) -> list[Any]:
-    last_restock = report.snapshot_date - timedelta(days=item.days)
+def _item_row(item: dict, snapshot_date: date) -> list[Any]:
+    last_restock = snapshot_date - timedelta(days=item["days"])
     return [
-        item.sku,
-        item.item_desc,
-        item.category,
-        item.units,
-        item.value,
-        item.days,
-        item.bucket,
+        item["sku"],
+        item["item_desc"],
+        item["category"],
+        item["units"],
+        Decimal(item["value"]),
+        item["days"],
+        item["bucket"],
         last_restock,
-        report.snapshot_date,
+        snapshot_date,
     ]
 
 
-def _location_sheet(location: str, report: AgingReport) -> SheetSpec:
-    rows = [_item_row(item, report) for item in report.all_items.get(location, ())]
+def _location_sheet(location: str, report: dict, snapshot_date: date) -> SheetSpec:
+    rows = [_item_row(item, snapshot_date) for item in report["all_items"].get(location, ())]
     return {"name": location, "headers": _LOCATION_SHEET_HEADERS, "rows": rows}
 
 
-def _aged_sheet(report: AgingReport) -> SheetSpec:
+def _aged_sheet(report: dict, snapshot_date: date) -> SheetSpec:
     rows: list[list[Any]] = []
-    for loc in report.locations:
-        for item in report.aged_items.get(loc.location, ()):
-            rows.append([loc.location, *_item_row(item, report)])
+    for loc in report["locations"]:
+        for item in report["aged_items"].get(loc["location"], ()):
+            rows.append([loc["location"], *_item_row(item, snapshot_date)])
     return {
         "name": AGED_SHEET_NAME,
         "headers": ["Location", *_LOCATION_SHEET_HEADERS],
@@ -153,15 +164,15 @@ def _aged_sheet(report: AgingReport) -> SheetSpec:
     }
 
 
-def _method_sheet(report: AgingReport) -> SheetSpec:
-    prov = report.provenance
+def _method_sheet(report: dict) -> SheetSpec:
+    prov = report["provenance"]
     rows: list[list[Any]] = []
     for result_id in RESULT_IDS:
         rows.append([result_id, _SOURCE_DESCRIPTIONS.get(result_id, "")])
-    rows.append(["source", prov.source])
-    rows.append(["age_definition", prov.age_definition])
-    rows.append(["query_count", prov.query_count])
-    for check in prov.integrity_checks:
+    rows.append(["source", prov["source"]])
+    rows.append(["age_definition", prov["age_definition"]])
+    rows.append(["query_count", prov["query_count"]])
+    for check in prov["integrity_checks"]:
         rows.append(["integrity_check", check])
     return {
         "name": METHOD_SHEET_NAME,
@@ -170,12 +181,25 @@ def _method_sheet(report: AgingReport) -> SheetSpec:
     }
 
 
-def build_inventory_aging_workbook(report: AgingReport) -> io.BytesIO:
+def build_inventory_aging_workbook(report: AgingReport | dict) -> io.BytesIO:
     """Build the seven-sheet inventory-aging workbook (spec §A3), in order:
-    Summary, Buckets, one sheet per location, Aged 90+, Method."""
-    sheets: list[SheetSpec] = [_summary_sheet(report), _buckets_sheet(report)]
-    for loc in report.locations:
-        sheets.append(_location_sheet(loc.location, report))
-    sheets.append(_aged_sheet(report))
-    sheets.append(_method_sheet(report))
+    Summary, Buckets, one sheet per location, Aged 90+, Method.
+
+    Gate fix #6/#4: ``report`` may be either the live ``AgingReport`` straight off
+    ``inventory_aging.compute()`` OR the JSON-safe dict form a report's persisted
+    ``spec_json`` already carries (see ``report_html.build_inventory_aging_sections``'s
+    identical boundary-conversion pattern) — ``inventory_aging.json_safe`` is the
+    SINGLE conversion point, called exactly once here, idempotent on an
+    already-safe dict. Every sheet builder below reads dict form only,
+    reconstructing a real ``Decimal`` wherever a cell needs a genuinely numeric
+    (not string) value so Excel still sums/formats it as a number."""
+    from app.services.report.inventory_aging import json_safe as ia_json_safe
+
+    report_dict = ia_json_safe(report)
+    snapshot_date = date.fromisoformat(report_dict["snapshot_date"])
+    sheets: list[SheetSpec] = [_summary_sheet(report_dict), _buckets_sheet(report_dict)]
+    for loc in report_dict["locations"]:
+        sheets.append(_location_sheet(loc["location"], report_dict, snapshot_date))
+    sheets.append(_aged_sheet(report_dict, snapshot_date))
+    sheets.append(_method_sheet(report_dict))
     return build_workbook(sheets)

@@ -49,6 +49,40 @@ async def _seed_report(db, tenant, user, *, title: str = "Inventory Aging Weekly
     return report
 
 
+async def _seed_inventory_aging_report(db, tenant, user) -> Report:
+    """A real inventory_aging report row -- spec_json/recipe_json built exactly the
+    way compose_playbook_report persists them (compute() -> build_inventory_aging_sections
+    -> spec_json_safe), without going through the tool-dispatch machinery Task 5's
+    delivery service doesn't own. Gate fix #6's own test needs this (not the plain
+    _seed_report above, whose empty sections carry no playbook recipe at all)."""
+    from app.services.report.inventory_aging import compute
+    from app.services.report.report_html import build_inventory_aging_sections
+    from app.services.report.report_service import spec_json_safe
+    from tests.report.test_inventory_aging import _full_fixture
+
+    payloads, params = _full_fixture()
+    report_data = compute(payloads, params)
+    sections = build_inventory_aging_sections(report_data, composed_at="2026-09-08T13:00:00+00:00")
+    safe_spec = spec_json_safe({"title": "Inventory Aging Weekly", "sections": sections})
+    report = Report(
+        tenant_id=tenant.id,
+        title="Inventory Aging Weekly",
+        spec_json=safe_spec,
+        rendered_html="<html><body>REPORT</body></html>",
+        created_by=user.id,
+        recipe_json={
+            "schema_version": 1,
+            "captured_at": "2026-09-08T13:00:00+00:00",
+            "playbook": {"key": "inventory_aging", "params": params},
+            "sections": [{"type": "watch_items", "result_ids": ["r_items"], "params": params}],
+            "sources": {"r_items": {"tool": "bigquery_sql", "params": {"query": "SELECT 1"}, "connection_id": None}},
+        },
+    )
+    db.add(report)
+    await db.flush()
+    return report
+
+
 async def _add_sheets_connector(db, tenant_id, *, shared_drive_id: str | None = None) -> McpConnector:
     encrypted = encrypt_credentials({"service_account_json": {"client_email": "sa@test.iam.gserviceaccount.com"}})
     connector = McpConnector(
@@ -274,6 +308,91 @@ async def test_redelivery_of_the_same_report_and_period_still_updates_in_place(d
     assert second.folder_id == first.folder_id
     assert second.pdf_file_id == first.pdf_file_id
     assert second.xlsx_file_id == first.xlsx_file_id
+
+
+async def test_inventory_aging_delivery_builds_the_real_seven_sheet_workbook(db, monkeypatch):
+    """Gate fix #6: _render_xlsx_bytes built the generic 5-row metadata sheet for
+    EVERY report type, including inventory_aging. For an inventory_aging report,
+    delivery must build the real seven-sheet workbook
+    (report_excel.build_inventory_aging_workbook) from the report's stored
+    JSON-safe model (extended in gate fix #4/#6 to accept that form directly)."""
+    tenant = await create_test_tenant(db, name="RealWorkbookCorp")
+    user, _ = await create_test_user(db, tenant)
+    await set_tenant_context(db, str(tenant.id))
+    report = await _seed_inventory_aging_report(db, tenant, user)
+    await _add_sheets_connector(db, tenant.id)
+
+    calls: list[str] = []
+
+    def fake_pdf(report) -> bytes:
+        calls.append("render_pdf")
+        return b"%PDF-FAKE"
+
+    monkeypatch.setattr(report_delivery, "_render_pdf_bytes", fake_pdf)
+
+    seen_xlsx_bytes: dict[str, bytes] = {}
+
+    class CapturingDriveClient(FakeDriveClient):
+        async def upload_new(self, *, name, parent_id, content, mime_type, app_properties=None):
+            if mime_type == report_delivery._XLSX_MIME:
+                seen_xlsx_bytes["content"] = content
+            return await super().upload_new(
+                name=name, parent_id=parent_id, content=content, mime_type=mime_type, app_properties=app_properties
+            )
+
+    client = CapturingDriveClient(calls)
+    _patch_drive_client(monkeypatch, client)
+
+    await report_delivery.deliver_report_to_drive(
+        db, tenant_id=tenant.id, report_id=report.id, actor_type="user", actor_id=user.id, period_key="2026-09-08"
+    )
+
+    from io import BytesIO
+
+    from openpyxl import load_workbook
+
+    wb = load_workbook(BytesIO(seen_xlsx_bytes["content"]))
+    assert len(wb.sheetnames) == 7
+    assert wb.sheetnames[0] == "Summary"
+    assert wb.sheetnames[1] == "Buckets"
+    assert wb.sheetnames[-1] == "Method"
+
+
+async def test_non_playbook_report_delivery_still_uses_the_generic_workbook(db, monkeypatch):
+    """Companion to the fix above: a report with no inventory_aging playbook recipe
+    (a chat-composed table/narrative report) must keep the generic single-sheet
+    metadata workbook — the type-aware routing must not misfire on every report."""
+    tenant = await create_test_tenant(db, name="GenericWorkbookCorp")
+    user, _ = await create_test_user(db, tenant)
+    await set_tenant_context(db, str(tenant.id))
+    report = await _seed_report(db, tenant, user, title="Cash report")
+    await _add_sheets_connector(db, tenant.id)
+
+    calls: list[str] = []
+    _patch_renderers(monkeypatch, calls)
+
+    seen_xlsx_bytes: dict[str, bytes] = {}
+
+    class CapturingDriveClient(FakeDriveClient):
+        async def upload_new(self, *, name, parent_id, content, mime_type, app_properties=None):
+            if mime_type == report_delivery._XLSX_MIME:
+                seen_xlsx_bytes["content"] = content
+            return await super().upload_new(
+                name=name, parent_id=parent_id, content=content, mime_type=mime_type, app_properties=app_properties
+            )
+
+    client = CapturingDriveClient(calls)
+    _patch_drive_client(monkeypatch, client)
+
+    await report_delivery.deliver_report_to_drive(
+        db, tenant_id=tenant.id, report_id=report.id, actor_type="user", actor_id=user.id, period_key="2026-09-08"
+    )
+
+    # _render_xlsx_bytes was patched to the fake byte producer (calls it, doesn't
+    # build a real workbook) -- proves the inventory_aging-specific path was never
+    # taken for a report with no playbook recipe.
+    assert "render_xlsx" in calls
+    assert seen_xlsx_bytes["content"] == b"XLSX-FAKE"
 
 
 async def test_first_delivery_uploads_two_files(db, monkeypatch):

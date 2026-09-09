@@ -341,11 +341,40 @@ def _render_pdf_bytes(report: Report) -> bytes:
     return render_report_pdf(report.rendered_html)
 
 
+def _inventory_aging_model(report: Report) -> dict | None:
+    """Gate fix #6: the JSON-safe ``AgingReport`` dict a report's OWN persisted
+    ``spec_json`` already carries — ``mid_row``/``bucket_table``/``top_positions``
+    sections each hold the FULL model (see
+    ``report_html.build_inventory_aging_sections``), so any one of them is a
+    complete source. Returns ``None`` for a report with no inventory_aging playbook
+    recipe (the ``recipe_json.playbook.key`` gate below) — a report composed via
+    chat, or a statement playbook, never has one of these section types at all, so
+    this is belt-and-suspenders against a spec shape this delivery path was never
+    meant to route through."""
+    recipe = report.recipe_json
+    if not isinstance(recipe, dict) or (recipe.get("playbook") or {}).get("key") != "inventory_aging":
+        return None
+    for section in (report.spec_json or {}).get("sections") or []:
+        if isinstance(section, dict) and section.get("type") in ("mid_row", "bucket_table", "top_positions"):
+            return section.get("model")
+    return None
+
+
 def _render_xlsx_bytes(report: Report) -> bytes:
-    """Patched by tests — see module docstring. Production default: a generic
-    single-sheet metadata workbook built on Task 3's shared ``build_workbook``, so
-    every delivery has SOME Excel artifact even for a report type with no
-    report-specific workbook builder wired in yet."""
+    """Patched by tests — see module docstring. Gate fix #6: an inventory_aging
+    report builds the REAL seven-sheet workbook
+    (``report_excel.build_inventory_aging_workbook``) from the report's own stored
+    JSON-safe model — never the generic metadata sheet, which used to stand in for
+    every report type including this one. Production default for every OTHER
+    report type: a generic single-sheet metadata workbook built on Task 3's shared
+    ``build_workbook``, so every delivery has SOME Excel artifact even for a report
+    type with no report-specific workbook builder wired in yet."""
+    ia_model = _inventory_aging_model(report)
+    if ia_model is not None:
+        from app.services.report.report_excel import build_inventory_aging_workbook
+
+        return build_inventory_aging_workbook(ia_model).getvalue()
+
     from app.services.reconciliation.evidence_service import SheetSpec, build_workbook
 
     sheet: SheetSpec = {
