@@ -199,9 +199,7 @@ class TestScheduleCompileCreate:
         resp = await client.post("/api/v1/schedules", json={"name": "Nothing useful"}, headers=headers)
         assert resp.status_code == 422
 
-    async def test_create_schedule_type_job_without_instruction_is_422(
-        self, client: AsyncClient, admin_user
-    ):
+    async def test_create_schedule_type_job_without_instruction_is_422(self, client: AsyncClient, admin_user):
         """Item 4 (gate fix): `schedule_type="job"` with no `instruction`
         used to fall through to the legacy direct-create path — a Scheduled
         Job with no instruction is meaningless (nothing to compile)."""
@@ -214,9 +212,7 @@ class TestScheduleCompileCreate:
         assert resp.status_code == 422
         assert "a Scheduled Job needs an instruction" in str(resp.json())
 
-    async def test_create_legacy_schedule_without_name_is_422_not_500(
-        self, client: AsyncClient, admin_user
-    ):
+    async def test_create_legacy_schedule_without_name_is_422_not_500(self, client: AsyncClient, admin_user):
         """Item 4 (gate fix): `name` lost its `min_length=1` when it became
         optional (for the compile path, where a name is derived from the
         instruction) — the legacy branch (`instruction` absent) must not be
@@ -229,9 +225,7 @@ class TestScheduleCompileCreate:
         )
         assert resp.status_code == 422
 
-    async def test_create_legacy_schedule_with_empty_name_is_422(
-        self, client: AsyncClient, admin_user
-    ):
+    async def test_create_legacy_schedule_with_empty_name_is_422(self, client: AsyncClient, admin_user):
         user, headers = admin_user
         resp = await client.post(
             "/api/v1/schedules",
@@ -304,9 +298,7 @@ class TestScheduleCronTimezoneValidation:
         assert "timezone" in str(resp.json())
         assert "Mars/Olympus" in str(resp.json())
 
-    async def test_update_invalid_cron_expression_is_422(
-        self, client: AsyncClient, admin_user, db: AsyncSession
-    ):
+    async def test_update_invalid_cron_expression_is_422(self, client: AsyncClient, admin_user, db: AsyncSession):
         user, headers = admin_user
         tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
         schedule = await _seed_job_schedule(db, tenant, plan_json=_INVENTORY_AGING_PLAN, plan_status="approved")
@@ -334,9 +326,7 @@ class TestScheduleCronTimezoneValidation:
         assert resp.status_code == 422
         assert "timezone" in str(resp.json())
 
-    async def test_create_with_valid_cron_and_timezone_still_succeeds(
-        self, client: AsyncClient, admin_user
-    ):
+    async def test_create_with_valid_cron_and_timezone_still_succeeds(self, client: AsyncClient, admin_user):
         user, headers = admin_user
         resp = await client.post(
             "/api/v1/schedules",
@@ -749,9 +739,7 @@ class TestScheduleUpdate:
         assert data["plan_json"] == _INVENTORY_AGING_PLAN
         assert data["plan_status"] == "approved"
 
-    async def test_patch_instruction_on_legacy_schedule_is_409(
-        self, client: AsyncClient, admin_user, db: AsyncSession
-    ):
+    async def test_patch_instruction_on_legacy_schedule_is_409(self, client: AsyncClient, admin_user, db: AsyncSession):
         """Item 3 (gate fix): a job-only edit must not act on a pre-Slice-2
         `sync|report|recon` row — there is no `plan_json`/compiler pipeline
         on that row type at all."""
