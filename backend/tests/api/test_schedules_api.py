@@ -685,6 +685,30 @@ class TestScheduleRun:
         assert kwargs["actor_id"] == str(user.id)
         assert kwargs["job_id"] == data["jobs_id"]
 
+    async def test_run_now_snapshots_the_plan_it_saw_onto_the_pre_created_jobs_row(
+        self, client: AsyncClient, admin_user, db: AsyncSession, monkeypatch
+    ):
+        """review finding, MAJOR: an instruction edit or discard landing
+        between enqueue and the Celery task's execution used to silently
+        change what runs, because `run_schedule_now` re-read
+        `row.plan_json`/`row.pending_plan_json` live when the task actually
+        executed. The endpoint now snapshots the plan it validated onto the
+        pre-created jobs row's own `parameters["plan"]`."""
+        _capture_send_task(monkeypatch)
+
+        user, headers = admin_user
+        tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
+        schedule = await _seed_job_schedule(
+            db, tenant, plan_json=_INVENTORY_AGING_PLAN, plan_status="approved", plan_version=1
+        )
+        await db.commit()
+
+        resp = await client.post(f"/api/v1/schedules/{schedule.id}/run", json={"use_pending": False}, headers=headers)
+        assert resp.status_code == 202
+
+        job_row = (await db.execute(select(Job).where(Job.id == uuid.UUID(resp.json()["jobs_id"])))).scalar_one()
+        assert job_row.parameters["plan"] == _INVENTORY_AGING_PLAN
+
     async def test_run_now_with_no_compiled_plan_is_409(self, client: AsyncClient, admin_user, db: AsyncSession):
         user, headers = admin_user
         tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()

@@ -694,6 +694,21 @@ async def run_schedule_now(
     plan_json = row.pending_plan_json if use_pending else row.plan_json
     plan_version_used = (row.plan_version + 1) if use_pending else row.plan_version
 
+    # An operator's "Run now" runs the plan THEY SAW, not whatever happens to
+    # be live on the schedule when this Celery task actually executes (review
+    # finding, MAJOR): `POST /schedules/{id}/run` snapshots the plan it
+    # validated onto the pre-created jobs row's `parameters["plan"]` (see that
+    # endpoint's own docstring) — if that snapshot is present, replay IT
+    # instead of re-reading `row.plan_json`/`pending_plan_json` live. The HITL
+    # `plan_status` gate above and `plan_version_used` bookkeeping are
+    # unaffected — both still read the schedule row live, exactly as before.
+    if existing_job_id is not None:
+        snapshot_job = await db.get(Job, existing_job_id)
+        if snapshot_job is not None:
+            snapshot_plan = (snapshot_job.parameters or {}).get("plan")
+            if snapshot_plan and snapshot_plan.get("steps"):
+                plan_json = snapshot_plan
+
     if not plan_json or not (plan_json.get("steps")):
         row.last_run_status = REASON_BLOCKED
         row.last_run_at = now

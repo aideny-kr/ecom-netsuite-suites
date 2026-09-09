@@ -478,6 +478,15 @@ async def run_schedule(
     SAME row rather than inserting a second one. The HITL precondition checks
     below still run synchronously, on THIS request — a blocked run never
     creates a row or enqueues a task, matching the pre-existing 409 contract.
+
+    The row's `parameters["plan"]` is a SNAPSHOT of the plan THIS request
+    validated (`plan_to_run`, review finding, MAJOR): an instruction edit or
+    discard landing between this enqueue and the Celery task's execution used
+    to silently change what runs, because `run_schedule_now` re-read
+    `schedule.plan_json`/`pending_plan_json` LIVE when the task actually
+    executed. `run_schedule_now` replays this snapshot instead — the HITL
+    `plan_status` gate and the `plan_version_used` bookkeeping below are
+    unaffected, and still read the schedule row live.
     """
     schedule = await _get_or_404(db, schedule_id, user.tenant_id)
     plan_to_run = schedule.pending_plan_json if body.use_pending else schedule.plan_json
@@ -506,6 +515,14 @@ async def run_schedule(
             "schedule_id": str(schedule_id),
             "plan_version": plan_version_used,
             "use_pending": body.use_pending,
+            # Snapshot of the plan THIS request validated (review finding,
+            # MAJOR): an instruction edit or discard landing between this
+            # enqueue and the Celery task's execution used to silently
+            # change what runs, because `run_schedule_now` re-read
+            # `schedule.plan_json`/`pending_plan_json` LIVE when the task
+            # actually executed. `run_schedule_now` (given `existing_job_id`)
+            # now replays THIS snapshot instead.
+            "plan": plan_to_run,
         },
     )
     db.add(job)

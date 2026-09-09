@@ -1431,6 +1431,70 @@ async def test_run_schedule_now_reuses_an_existing_jobs_row_when_given_one(db: A
     assert jobs[0].parameters["schedule_id"] == str(schedule.id)
 
 
+async def test_run_now_uses_the_plan_snapshotted_on_the_jobs_row_not_a_later_edit(
+    db: AsyncSession, monkeypatch
+):
+    """review finding, MAJOR: `run_schedule_now` used to read
+    `row.pending_plan_json`/`row.plan_json` LIVE when the Celery task
+    executed -- an instruction edit or discard landing between enqueue
+    (`POST /schedules/{id}/run`) and execution silently changed what ran.
+    The endpoint now snapshots the validated plan onto the pre-created jobs
+    row's `parameters["plan"]` (see the API test); `run_schedule_now`, given
+    `existing_job_id`, must replay THAT snapshot instead of the schedule's
+    current live plan."""
+    tenant = await create_test_tenant(db, name="Plan Snapshot Co")
+    await set_tenant_context(db, str(tenant.id))
+
+    async def fake_exec(ctx, params):
+        return {"label": params.get("label")}
+
+    monkeypatch.setitem(STEP_REGISTRY, "fake.step", _fake_spec("read", fake_exec))
+
+    schedule = await _seed_job_schedule(
+        db,
+        tenant,
+        plan_json={"steps": [{"id": "s1_original", "type": "fake.step", "params": {"label": "original"}}]},
+        next_run_at=None,
+        cron_expression="0 6 * * 1",
+    )
+
+    snapshot_plan = {
+        "steps": [{"id": "s1_snapshot", "type": "fake.step", "params": {"label": "snapshot"}}]
+    }
+    pre_created = Job(
+        tenant_id=tenant.id,
+        job_type="scheduled_job",
+        status="pending",
+        parameters={"schedule_id": str(schedule.id), "use_pending": False, "plan": snapshot_plan},
+    )
+    db.add(pre_created)
+    await db.flush()
+    await db.commit()
+    pre_created_id = pre_created.id
+
+    # An instruction edit lands between enqueue and execution -- the live
+    # schedule row now has a COMPLETELY DIFFERENT plan than the snapshot.
+    schedule.plan_json = {"steps": [{"id": "s1_edited", "type": "fake.step", "params": {"label": "edited"}}]}
+    await db.commit()
+
+    outcome = await run_schedule_now(
+        db,
+        schedule.id,
+        tenant_id=tenant.id,
+        actor_id=None,
+        use_pending=False,
+        existing_job_id=pre_created_id,
+    )
+
+    assert outcome.reason == REASON_DONE
+    assert "s1_snapshot" in outcome.outputs
+    assert "s1_edited" not in outcome.outputs
+
+    job = (await db.execute(select(Job).where(Job.id == pre_created_id))).scalar_one()
+    assert "s1_snapshot" in job.result_summary["outputs"]
+    assert "s1_edited" not in job.result_summary["outputs"]
+
+
 async def test_run_schedule_now_falls_back_to_inserting_when_existing_job_id_is_missing(db: AsyncSession, monkeypatch):
     """Defensive only (row deleted between enqueue and pickup) — must not crash."""
     tenant = await create_test_tenant(db, name="Missing Job Co")
