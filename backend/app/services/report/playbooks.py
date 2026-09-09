@@ -167,16 +167,22 @@ PLAYBOOKS: dict[str, dict] = {
         "name": "Income Statement",
         "description": "Statement-grade P&L for one accounting period, straight from the GL.",
         "params": [{"key": "period", "label": "Accounting period", "example": "Jun 2026"}],
+        # Gate fix: declares whether mode="tracking" (rolling-period compose, see
+        # compose_playbook_report) is even meaningful for this playbook -- a
+        # financial_statement playbook has a real NetSuite accounting period to track.
+        "period_based": True,
     },
     "balance_sheet": {
         "name": "Balance Sheet",
         "description": "Balance Sheet as of the end of an accounting period (inception-to-date).",
         "params": [{"key": "period", "label": "As-of period", "example": "Jun 2026"}],
+        "period_based": True,
     },
     "trial_balance": {
         "name": "Trial Balance",
         "description": "All GL accounts with debit/credit totals for one accounting period.",
         "params": [{"key": "period", "label": "Accounting period", "example": "Jun 2026"}],
+        "period_based": True,
     },
     # Slice 1 (docs/superpowers/specs/2026-09-08-scheduled-jobs-and-inventory-aging-design.md
     # Part A): NOT a netsuite_financial_report statement -- straight off the BigQuery
@@ -194,6 +200,12 @@ PLAYBOOKS: dict[str, dict] = {
             {"key": "compare_days", "label": "Comparison window (days)", "example": "7"},
             {"key": "trend_weeks", "label": "Trend weeks", "example": "9"},
         ],
+        # Gate fix: no NetSuite accounting period exists for a BigQuery snapshot playbook
+        # -- mode="tracking" previously overwrote params with {"period": closed.name}
+        # (dropping locations/compare_days/trend_weeks) and persisted Report.period=None,
+        # so the rolling-period sweep never saw it as covered and re-composed it every
+        # cycle. compose_playbook_report refuses mode="tracking" for this flag = False.
+        "period_based": False,
     },
 }
 
@@ -419,6 +431,17 @@ async def compose_playbook_report(
 
     if mode not in ("period", "tracking"):
         raise ValueError(f"mode must be 'period' or 'tracking' (got {mode!r})")
+
+    # Gate fix: refuse mode="tracking" for a playbook with no accounting period to
+    # track (PLAYBOOKS[key]["period_based"] is False -- inventory_aging today) BEFORE
+    # any NetSuite period resolution, tool dispatch, or params mutation. Defaults to
+    # True (period-based) when a future playbook omits the flag entirely, matching the
+    # pre-existing behaviour for every playbook that predates this flag. An unknown
+    # playbook_key (meta is None) is left to the existing "Unknown playbook" check
+    # inside build_playbook_recipe further down — unchanged.
+    playbook_catalog_meta = PLAYBOOKS.get(playbook_key)
+    if mode == "tracking" and playbook_catalog_meta is not None and not playbook_catalog_meta.get("period_based", True):
+        raise ValueError(f"playbook '{playbook_key}' has no accounting period — mode='tracking' isn't supported for it")
 
     series_id: uuid.UUID | None = None
     if mode == "tracking":

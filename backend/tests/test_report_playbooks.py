@@ -53,6 +53,16 @@ def test_catalog_includes_inventory_aging_with_locations_param():
     assert "locations" in [p["key"] for p in meta["params"]]
 
 
+def test_catalog_declares_period_based_flag_per_playbook():
+    """Gate fix: mode="tracking" only makes sense for a playbook with a real
+    accounting period. The three statements declare period_based=True; inventory_aging
+    (a BigQuery snapshot with no period concept) declares False -- the single source
+    of truth compose_playbook_report's tracking-mode refusal reads."""
+    for key in ("income_statement", "balance_sheet", "trial_balance"):
+        assert PLAYBOOKS[key]["period_based"] is True
+    assert PLAYBOOKS["inventory_aging"]["period_based"] is False
+
+
 def test_build_playbook_recipe_for_inventory_aging_uses_bigquery_sources():
     title, recipe = build_playbook_recipe("inventory_aging", {"locations": ["Acme", "Globex"]})
     assert title == "Inventory Aging Weekly"
@@ -177,6 +187,35 @@ async def test_compose_playbook_report_inventory_aging_fails_closed_on_a_source_
             db, playbook_key="inventory_aging", params=params, tenant_id=tenant.id, actor_id=user.id
         )
 
+    rows = (await db.execute(select(Report).where(Report.tenant_id == tenant.id))).scalars().all()
+    assert rows == []
+
+
+async def test_compose_playbook_inventory_aging_tracking_mode_refused(db, monkeypatch):
+    """Gate fix: inventory_aging has no accounting period at all -- mode="tracking"
+    used to silently overwrite params with {"period": closed.name} (dropping
+    locations/compare_days/trend_weeks entirely) and persist Report.period=None, so
+    the rolling-period sweep never saw the report as covered and inserted a new one
+    every cycle. compose_playbook_report must refuse mode="tracking" for a
+    non-period-based playbook with a clear ValueError -- BEFORE any period
+    resolution, any tool dispatch, or any params mutation."""
+    tenant = await create_test_tenant(db, name="InventoryAgingTrackingRefusedCorp")
+    user, _ = await create_test_user(db, tenant)
+    calls, _recipe, params = _patch_bigquery_executor(monkeypatch)
+    original_params = dict(params)
+
+    with pytest.raises(ValueError, match="tracking"):
+        await compose_playbook_report(
+            db,
+            playbook_key="inventory_aging",
+            params=params,
+            tenant_id=tenant.id,
+            actor_id=user.id,
+            mode="tracking",
+        )
+
+    assert calls == []  # refused before any source dispatch
+    assert params == original_params  # never overwritten with {"period": ...}
     rows = (await db.execute(select(Report).where(Report.tenant_id == tenant.id))).scalars().all()
     assert rows == []
 
@@ -1404,6 +1443,38 @@ async def test_compose_playbook_endpoint_tracking_unresolved_period_is_400_namin
     assert exc.value.detail
     assert "no_closed_period" not in exc.value.detail
     assert "NO_CLOSED_PERIOD" not in exc.value.detail
+
+
+async def test_compose_playbook_endpoint_inventory_aging_tracking_mode_is_400(db, monkeypatch):
+    """Gate fix, endpoint layer: mode="tracking" for a non-period-based playbook
+    reaches the endpoint's existing `except ValueError -> 400` branch, same shape as
+    the unresolved-period 400 above -- no new endpoint code needed, only the service
+    refusing correctly, BEFORE ever attempting to resolve a NetSuite closed period
+    (there is none to resolve for a BigQuery-only playbook)."""
+    from app.api.v1.reports import PlaybookComposeRequest, compose_playbook_endpoint
+
+    tenant = await create_test_tenant(db, name="InventoryAgingEndpointTracking400Corp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_bigquery_executor(monkeypatch)
+    resolver_calls: list = []
+
+    async def spy_resolve(db, tenant_id):
+        resolver_calls.append(tenant_id)
+        raise AssertionError("resolve_last_closed_period must not be called for a non-period playbook")
+
+    monkeypatch.setattr("app.services.report.period_resolver.resolve_last_closed_period", spy_resolve)
+
+    with pytest.raises(HTTPException) as exc:
+        await compose_playbook_endpoint(
+            "inventory_aging",
+            PlaybookComposeRequest(mode="tracking"),
+            user=user,
+            db=db,
+        )
+
+    assert exc.value.status_code == 400
+    assert "tracking" in exc.value.detail
+    assert resolver_calls == []
 
 
 def test_playbook_compose_request_mode_defaults_to_period():
