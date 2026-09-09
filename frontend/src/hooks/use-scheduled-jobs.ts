@@ -50,6 +50,13 @@ export interface ScheduledJob {
   pause_reason: string | null;
   kinds: string[];
   summary_line: string | null;
+  /** True when an APPROVED schedule has a recompiled `pending_plan_json`
+   * awaiting approval (the instruction was edited since it was last
+   * approved) — `plan_status` stays "approved" in that state, so this is
+   * the only list-level signal for it (spec §B6's "Needs attention" tile /
+   * row indicator; the full `pending_plan_json`/diff is detail-page only,
+   * `ScheduleDetailResponse`). */
+  has_pending_plan: boolean;
 }
 
 export function useScheduledJobs() {

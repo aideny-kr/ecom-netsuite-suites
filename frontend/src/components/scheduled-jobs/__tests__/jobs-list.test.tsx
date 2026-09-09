@@ -61,6 +61,7 @@ function job(overrides: Partial<ScheduledJob> = {}): ScheduledJob {
     pause_reason: null,
     kinds: ["read", "write"],
     summary_line: "5 steps · Query the inventory snapshot → Compose the report → Render → Upload → Finish",
+    has_pending_plan: false,
     ...overrides,
   };
 }
@@ -110,6 +111,21 @@ it("counts a pending-approval or paused schedule as needing attention", () => {
   expect(within(tile).getByText("1")).toBeInTheDocument();
 });
 
+it("counts an approved schedule with a pending recompiled plan change as needing attention", () => {
+  // The mock's own scenario for this tile (state one: "a plan change awaiting
+  // approval") is an APPROVED schedule whose instruction was edited since —
+  // plan_status stays "approved"; only has_pending_plan flips.
+  mocks.scheduledJobs.mockReturnValue({
+    data: [job({ id: "s-2", name: "Inventory Aging Weekly (edited)", plan_status: "approved", has_pending_plan: true })],
+    isPending: false,
+    isError: false,
+    refetch: vi.fn(),
+  });
+  wrap(<ScheduledJobsList />);
+  const tile = screen.getByText("Needs attention").closest("div")!;
+  expect(within(tile).getByText("1")).toBeInTheDocument();
+});
+
 // --- Table cells -------------------------------------------------------------
 
 it("renders READ/WRITE tags and the plan summary in the Does column", () => {
@@ -131,6 +147,24 @@ it("renders the last-run pill and when for a completed run", () => {
   // The Last run and Next columns both carry a "Sep" date — assert at least
   // one, rather than pinning to a single ambiguous match.
   expect(screen.getAllByText(/Sep/).length).toBeGreaterThan(0);
+});
+
+it("marks a row with a pending recompiled plan change so it isn't silently invisible", () => {
+  mocks.scheduledJobs.mockReturnValue({
+    data: [job({ has_pending_plan: true })],
+    isPending: false,
+    isError: false,
+    refetch: vi.fn(),
+  });
+  wrap(<ScheduledJobsList />);
+  const row = screen.getByText("Inventory Aging Weekly").closest("tr")!;
+  expect(within(row).getByText("pending change")).toBeInTheDocument();
+});
+
+it("does not mark a row with no pending plan change", () => {
+  wrap(<ScheduledJobsList />);
+  const row = screen.getByText("Inventory Aging Weekly").closest("tr")!;
+  expect(within(row).queryByText("pending change")).toBeNull();
 });
 
 it("renders the Delivers to column from delivery_json", () => {

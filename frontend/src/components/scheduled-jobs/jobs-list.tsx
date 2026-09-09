@@ -5,9 +5,14 @@
  * Every job for the tenant, system jobs included, with what it does, when it
  * runs, and how the last run ended.
  *
- * Data sources, all pre-existing endpoints (no backend change in this task):
+ * Data sources:
  * - `useScheduledJobs()` — `GET /api/v1/schedules`, this tenant's own rows
- *   (legacy `sync|report|recon` schedules and Scheduled Jobs alike).
+ *   (legacy `sync|report|recon` schedules and Scheduled Jobs alike). Carries
+ *   `has_pending_plan` (a review-round backend addition — see the "pending
+ *   change" row Pill and the Needs-attention tile below) for an APPROVED
+ *   schedule whose instruction was edited since, leaving a recompiled
+ *   `pending_plan_json` awaiting approval; `plan_status` alone can't show
+ *   this because it stays `"approved"` in that state.
  * - `useJobSchedules()` — `GET /api/v1/jobs/schedules`, the platform's own
  *   Celery Beat entries (the mock's "system" rows, e.g. "Report
  *   auto-refresh"). A DIFFERENT table entirely from `schedules` — there is
@@ -107,6 +112,11 @@ function JobRow({ job }: { job: ScheduledJob }): JSX.Element {
         <Link href={`/scheduled-jobs/${job.id}`} className="font-medium hover:underline">
           {job.name}
         </Link>
+        {job.has_pending_plan && (
+          <div className="mt-0.5">
+            <Pill tone="warn">pending change</Pill>
+          </div>
+        )}
       </td>
       <td className="px-2.5 py-2 align-top">
         <div className="flex items-center gap-1">
@@ -296,7 +306,11 @@ function TilesRow({
   const recentDone = recentRuns.filter((j) => j.last_run_status === "done").length;
   const recentNotDone = recentRuns.length - recentDone;
 
-  const needsAttention = rows.filter((j) => j.plan_status === "pending_approval" || j.paused_at).length;
+  // Three reasons a job needs a human: a freshly-compiled plan still awaiting
+  // its FIRST approval (plan_status), a paused schedule, or an already-
+  // approved schedule with a recompiled CHANGE awaiting approval
+  // (has_pending_plan — plan_status stays "approved" in that state).
+  const needsAttention = rows.filter((j) => j.plan_status === "pending_approval" || j.paused_at || j.has_pending_plan).length;
 
   const upcoming = rows
     .filter((j) => j.plan_status === "approved" && !j.paused_at && j.next_run_at)
