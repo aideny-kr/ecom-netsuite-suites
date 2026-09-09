@@ -470,3 +470,47 @@ def test_compute_also_rejects_unknown_location_shape():
     payloads, _ = _threshold_fixture()
     with pytest.raises(ValueError):
         ia.compute(payloads, {"locations": ["Acme", "Bad;Loc"]})
+
+
+# ---------------------------------------------------------------------------
+# r_trend day_rn must rank DISTINCT dates, not per-SKU rows (review finding)
+#
+# The old `ranked` CTE computed `day_rn` as
+# ROW_NUMBER() OVER (PARTITION BY s.location ORDER BY s.snapshot_date DESC)
+# directly over the raw per-SKU-per-day rows. ROW_NUMBER never ties, so every
+# SKU sharing the same snapshot_date got a distinct, sequential day_rn:
+#   (1) `day_rn <= 7 * trend_weeks` capped by ROW count, not DAY count -- with
+#       N SKUs/location/day, only ~7*trend_weeks/N days of data survived.
+#   (2) `GROUP BY location, snapshot_date, day_rn` became a no-op aggregation
+#       (day_rn already unique per row within a location), so `per_day` never
+#       actually summed multiple SKUs on the same date -- each row was really
+#       one SKU's own inventory_amount mislabeled as a location-wide total.
+# The fix ranks DISTINCT (location, snapshot_date) pairs first, then joins
+# that day_rn onto every per-SKU row sharing that date.
+# ---------------------------------------------------------------------------
+def test_r_trend_day_rn_is_ranked_over_distinct_dates_not_per_sku_rows():
+    sources = ia.build_sources({"locations": ["Acme"]})
+    query = sources["r_trend"]["params"]["query"]
+    # day_rn must come from a CTE over DISTINCT (location, snapshot_date)
+    # pairs, not be computed inline over the raw per-SKU-per-day rows.
+    assert "SELECT DISTINCT" in query
+    # the per-SKU rows must be JOINED to that day_rn (not compute their own
+    # ROW_NUMBER partitioned only by location over raw per-SKU rows).
+    assert "ROW_NUMBER() OVER (PARTITION BY s.location ORDER BY s.snapshot_date DESC)" not in query
+
+
+def test_r_trend_sums_multiple_skus_sharing_a_date_into_one_trend_point():
+    """Execution-shaped regression for the day_rn bug: with 2 SKUs sharing the
+    same (location, snapshot_date), the query's own per_day GROUP BY key must
+    be able to collapse them to one row per date. This can't run against real
+    BigQuery here, so we assert the SQL groups by (location, snapshot_date)
+    with a day_rn that is IDENTICAL for every SKU on that date -- i.e. day_rn
+    is selected from the distinct-dates CTE, not computed per source row."""
+    sources = ia.build_sources({"locations": ["Acme"]})
+    query = sources["r_trend"]["params"]["query"]
+    # the distinct-dates CTE ranks by (location, snapshot_date) only -- no sku
+    distinct_idx = query.index("SELECT DISTINCT")
+    # the DISTINCT projection must be location + snapshot_date, never sku,
+    # so two SKUs on the same date collapse to one (location, date) pair.
+    distinct_line = query[distinct_idx : distinct_idx + 80]
+    assert "sku" not in distinct_line.lower()

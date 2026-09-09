@@ -427,13 +427,27 @@ FROM withbucket GROUP BY location"""
 
 
 def _r_trend_sql(locs: str, trend_weeks: int, snapshot_literal: str | None) -> str:
+    """`day_rn` ranks DISTINCT (location, snapshot_date) pairs -- never raw
+    per-SKU rows (a review finding). ROW_NUMBER() never ties, so ranking it
+    directly over per-SKU rows gave every SKU sharing a date its own distinct
+    day_rn: `day_rn <= 7*trend_weeks` then capped by ROW count rather than DAY
+    count, and `GROUP BY location, snapshot_date, day_rn` became a no-op
+    (day_rn already unique per row), so `per_day` never summed multiple SKUs
+    on the same date -- it just relabeled one SKU's own inventory_amount as a
+    location-wide daily total. `distinct_days` ranks dates only (no sku), then
+    every per-SKU row joins in that shared day_rn on (location, snapshot_date)."""
     return f"""WITH {_latest_cte(locs, snapshot_literal)},
 {_last_restock_ctes(locs, None)},
+distinct_days AS (
+  SELECT location, d, ROW_NUMBER() OVER (PARTITION BY location ORDER BY d DESC) AS day_rn
+  FROM (SELECT DISTINCT s.location, s.snapshot_date AS d FROM {BQ_TABLE} s
+        JOIN latest l ON l.location = s.location
+        WHERE s.qty_on_hand > 0 AND s.snapshot_date <= l.d)),
 ranked AS (
-  SELECT s.location, s.sku, s.snapshot_date, s.qty_on_hand, s.inventory_amount,
-         ROW_NUMBER() OVER (PARTITION BY s.location ORDER BY s.snapshot_date DESC) AS day_rn
-  FROM {BQ_TABLE} s JOIN latest l ON l.location = s.location
-  WHERE s.qty_on_hand > 0 AND s.snapshot_date <= l.d),
+  SELECT s.location, s.sku, s.snapshot_date, s.qty_on_hand, s.inventory_amount, dd.day_rn
+  FROM {BQ_TABLE} s
+  JOIN distinct_days dd ON dd.location = s.location AND dd.d = s.snapshot_date
+  WHERE s.qty_on_hand > 0),
 withbucket AS (
   SELECT rk.location, rk.sku, rk.snapshot_date, rk.inventory_amount,
          DATE_DIFF(rk.snapshot_date, lr.last_restock_date, DAY) AS days, rk.day_rn
