@@ -12,7 +12,18 @@ const api = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/api-client", () => ({ apiClient: api }));
 
-import { useResumeScheduledJob, useRunScheduleNow, useScheduledJobs } from "@/hooks/use-scheduled-jobs";
+import {
+  useApproveSchedule,
+  useDeleteSchedule,
+  usePauseSchedule,
+  useResumeScheduledJob,
+  useRunSchedule,
+  useRunScheduleNow,
+  useScheduledJob,
+  useScheduledJobs,
+  useScheduleRuns,
+  useUpdateSchedule,
+} from "@/hooks/use-scheduled-jobs";
 
 function makeWrapper(qc: QueryClient) {
   return function Wrapper({ children }: { children: ReactNode }) {
@@ -51,6 +62,83 @@ it("useResumeScheduledJob POSTs /resume and invalidates the list", async () => {
   result.current.mutate("s-3");
   await waitFor(() => expect(result.current.isSuccess).toBe(true));
   expect(api.post).toHaveBeenCalledWith("/api/v1/schedules/s-3/resume");
+  const keys = invalidate.mock.calls.map((c) => JSON.stringify(c[0]?.queryKey));
+  expect(keys).toContain(JSON.stringify(["scheduled-jobs"]));
+});
+
+// --- Task 6 (job detail page) additions ------------------------------------
+
+it("useScheduledJob GETs /api/v1/schedules/{id} keyed by id", async () => {
+  api.get.mockResolvedValueOnce({ id: "s-1", name: "Inventory Aging Weekly", plan_json: null });
+  const qc = new QueryClient(qcOpts);
+  const { result } = renderHook(() => useScheduledJob("s-1"), { wrapper: makeWrapper(qc) });
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(api.get).toHaveBeenCalledWith("/api/v1/schedules/s-1");
+  expect(result.current.data?.name).toBe("Inventory Aging Weekly");
+});
+
+it("useScheduleRuns GETs /api/v1/schedules/{id}/runs", async () => {
+  api.get.mockResolvedValueOnce([{ id: "j-1", status: "completed", reason: "done", outputs: {} }]);
+  const qc = new QueryClient(qcOpts);
+  const { result } = renderHook(() => useScheduleRuns("s-1"), { wrapper: makeWrapper(qc) });
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(api.get).toHaveBeenCalledWith("/api/v1/schedules/s-1/runs");
+  expect(result.current.data?.[0].id).toBe("j-1");
+});
+
+it("useUpdateSchedule PATCHes /api/v1/schedules/{id} with the given body and invalidates scheduled-jobs", async () => {
+  api.patch.mockResolvedValueOnce({ id: "s-1" });
+  const qc = new QueryClient(qcOpts);
+  const invalidate = vi.spyOn(qc, "invalidateQueries");
+  const { result } = renderHook(() => useUpdateSchedule("s-1"), { wrapper: makeWrapper(qc) });
+  result.current.mutate({ instruction: "and Virtual" });
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(api.patch).toHaveBeenCalledWith("/api/v1/schedules/s-1", { instruction: "and Virtual" });
+  const keys = invalidate.mock.calls.map((c) => JSON.stringify(c[0]?.queryKey));
+  expect(keys).toContain(JSON.stringify(["scheduled-jobs"]));
+});
+
+it("useApproveSchedule POSTs /approve and invalidates scheduled-jobs", async () => {
+  api.post.mockResolvedValueOnce({ id: "s-1", plan_status: "approved" });
+  const qc = new QueryClient(qcOpts);
+  const invalidate = vi.spyOn(qc, "invalidateQueries");
+  const { result } = renderHook(() => useApproveSchedule("s-1"), { wrapper: makeWrapper(qc) });
+  result.current.mutate();
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(api.post).toHaveBeenCalledWith("/api/v1/schedules/s-1/approve");
+  const keys = invalidate.mock.calls.map((c) => JSON.stringify(c[0]?.queryKey));
+  expect(keys).toContain(JSON.stringify(["scheduled-jobs"]));
+});
+
+it("useRunSchedule POSTs /run with the given use_pending flag", async () => {
+  api.post.mockResolvedValueOnce({ jobs_id: "j-2", reason: "done", outputs: {} });
+  const qc = new QueryClient(qcOpts);
+  const { result } = renderHook(() => useRunSchedule("s-1"), { wrapper: makeWrapper(qc) });
+  result.current.mutate(true);
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(api.post).toHaveBeenCalledWith("/api/v1/schedules/s-1/run", { use_pending: true });
+});
+
+it("usePauseSchedule POSTs /pause and invalidates scheduled-jobs", async () => {
+  api.post.mockResolvedValueOnce({ id: "s-1", paused_at: "2026-09-08T00:00:00Z" });
+  const qc = new QueryClient(qcOpts);
+  const invalidate = vi.spyOn(qc, "invalidateQueries");
+  const { result } = renderHook(() => usePauseSchedule("s-1"), { wrapper: makeWrapper(qc) });
+  result.current.mutate();
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(api.post).toHaveBeenCalledWith("/api/v1/schedules/s-1/pause");
+  const keys = invalidate.mock.calls.map((c) => JSON.stringify(c[0]?.queryKey));
+  expect(keys).toContain(JSON.stringify(["scheduled-jobs"]));
+});
+
+it("useDeleteSchedule DELETEs /api/v1/schedules/{id} and invalidates scheduled-jobs", async () => {
+  api.delete.mockResolvedValueOnce(undefined);
+  const qc = new QueryClient(qcOpts);
+  const invalidate = vi.spyOn(qc, "invalidateQueries");
+  const { result } = renderHook(() => useDeleteSchedule("s-1"), { wrapper: makeWrapper(qc) });
+  result.current.mutate();
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(api.delete).toHaveBeenCalledWith("/api/v1/schedules/s-1");
   const keys = invalidate.mock.calls.map((c) => JSON.stringify(c[0]?.queryKey));
   expect(keys).toContain(JSON.stringify(["scheduled-jobs"]));
 });

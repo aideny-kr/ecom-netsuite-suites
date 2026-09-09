@@ -236,6 +236,22 @@ export function formatWhen(iso: string | null | undefined): string {
   return `${d.toLocaleDateString(undefined, WHEN_DATE_FMT)} · ${d.toLocaleTimeString(undefined, WHEN_TIME_FMT)}`;
 }
 
+/** Duration between two ISO timestamps as the runs panel's "Took" column
+ * wants it ("1m 52s") — unlike the list page's "Last run" cell (spec §B6's
+ * documented simplification: `ScheduleResponse` carries no duration), the
+ * detail page's `ScheduleRunItem` carries both `started_at` and
+ * `completed_at`, so this one IS computable rather than omitted. */
+export function formatDuration(startedAt: string | null | undefined, completedAt: string | null | undefined): string | null {
+  if (!startedAt || !completedAt) return null;
+  const start = new Date(startedAt).getTime();
+  const end = new Date(completedAt).getTime();
+  if (Number.isNaN(start) || Number.isNaN(end) || end < start) return null;
+  const totalSeconds = Math.round((end - start) / 1000);
+  const mins = Math.floor(totalSeconds / 60);
+  const secs = totalSeconds % 60;
+  return `${mins}m ${secs}s`;
+}
+
 export function formatCountdown(iso: string | null | undefined, now: Date = new Date()): string | null {
   if (!iso) return null;
   const target = new Date(iso).getTime();
@@ -248,4 +264,117 @@ export function formatCountdown(iso: string | null | undefined, now: Date = new 
   if (days > 0) return `in ${days} d ${hours} h`;
   if (hours > 0) return `in ${hours} h`;
   return `in ${Math.max(mins, 1)} m`;
+}
+
+// ---------------------------------------------------------------------------
+// cronCadence — the schedule panel's segmented control (Hourly / Daily /
+// Weekly / Monthly / Cron) needs to know which one is "on" for the
+// schedule's current `cron_expression`, independent of `describeCron`'s
+// human-readable string. Recognises exactly the same shapes `describeCron`
+// does (kept in sync deliberately — a cron the control can't categorise
+// falls back to "Cron" in both places, never a guess).
+// ---------------------------------------------------------------------------
+
+export type CronCadence = "hourly" | "daily" | "weekly" | "monthly" | "cron";
+
+export function cronCadence(cron: string | null | undefined): CronCadence {
+  if (!cron) return "cron";
+  const parts = cron.trim().split(/\s+/);
+  if (parts.length !== 5) return "cron";
+  const [min, hour, dom, month, dow] = parts;
+  const isFixed = (v: string) => /^\d+$/.test(v);
+
+  if (isFixed(min) && hour === "*" && dom === "*" && month === "*" && dow === "*") return "hourly";
+  if (isFixed(min) && isFixed(hour) && dom === "*" && month === "*" && dow === "*") return "daily";
+  if (isFixed(min) && isFixed(hour) && dom === "*" && month === "*" && isFixed(dow)) return "weekly";
+  if (isFixed(min) && isFixed(hour) && isFixed(dom) && month === "*" && dow === "*") return "monthly";
+  return "cron";
+}
+
+// ---------------------------------------------------------------------------
+// describeStep / describeStepParams — a client-side mirror of the six v1
+// registry step types (`app.services.jobs.registry.STEP_REGISTRY`) for the
+// plan panel's per-step title, READ/WRITE tag, and one-line description.
+// `ScheduleDetailResponse` carries only the raw `plan_json.steps`
+// (`{id, type, params}`) — no per-step label, since the list-level
+// `summary_line`/`kinds` the API DOES compute are aggregate, not per-step
+// (see `_plan_summary_line`/`_plan_kinds` in `app/api/v1/schedules.py`).
+// Kept here rather than fetched from the backend so an unrecognised type
+// (a registry entry retired after this plan was compiled) still renders
+// something instead of crashing the panel — allow-listing itself stays the
+// registry's job, never this page's.
+// ---------------------------------------------------------------------------
+
+const STEP_META: Record<string, { label: string; kind: "read" | "write" }> = {
+  bigquery_sql: { label: "Query BigQuery", kind: "read" },
+  "report.compose": { label: "Compose the report", kind: "read" },
+  "report.render_pdf": { label: "Render the report PDF", kind: "read" },
+  "report.build_xlsx": { label: "Build the Excel workbook", kind: "read" },
+  "drive.upload": { label: "Upload to Google Drive", kind: "write" },
+  "recon.run": { label: "Run the reconciliation", kind: "read" },
+};
+
+export function describeStep(type: string): { label: string; kind: "read" | "write" } {
+  return STEP_META[type] ?? { label: type, kind: "read" };
+}
+
+function truncate(text: string, max = 90): string {
+  return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+}
+
+export function describeStepParams(type: string, params: Record<string, unknown>): string {
+  switch (type) {
+    case "bigquery_sql":
+      return typeof params.query === "string" ? truncate(params.query) : "";
+    case "report.compose":
+      if (typeof params.playbook_key === "string") return `playbook ${params.playbook_key}`;
+      if (typeof params.report_id === "string") return `report ${params.report_id}`;
+      return "";
+    case "report.render_pdf":
+    case "report.build_xlsx":
+      return typeof params.report_step === "string" ? `from step ${params.report_step}` : "";
+    case "drive.upload": {
+      const parts: string[] = [];
+      if (typeof params.report_step === "string") parts.push(`step ${params.report_step}`);
+      if (typeof params.period_key === "string") parts.push(`period ${params.period_key}`);
+      return parts.join(" · ");
+    }
+    default:
+      return truncate(
+        Object.entries(params)
+          .map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`)
+          .join(" · "),
+      );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// describeBudget — the schedule panel's Budget row. `budget_json` is a
+// plain, schema-less dict (same shape the executor's own `_run_steps`
+// budget check reads — `app/workers/tasks/scheduled_jobs.py`:
+// `bytes_scanned`, `seconds`, `usd`) rendered into the mock's
+// "5 GB scanned · 10 min · $2 per run, then stop with reason budget" style.
+// ---------------------------------------------------------------------------
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1_000_000_000) return `${Number((bytes / 1_000_000_000).toFixed(1)).toString()} GB scanned`;
+  if (bytes >= 1_000_000) return `${Number((bytes / 1_000_000).toFixed(1)).toString()} MB scanned`;
+  return `${bytes} bytes scanned`;
+}
+
+function formatUsd(usd: number): string {
+  const fixed = usd.toFixed(2).replace(/\.?0+$/, "");
+  return `$${fixed}`;
+}
+
+export function describeBudget(budget: Record<string, unknown> | null | undefined): string {
+  if (!budget || Object.keys(budget).length === 0) {
+    return "No budget set — runs until the plan finishes.";
+  }
+  const parts: string[] = [];
+  if (typeof budget.bytes_scanned === "number") parts.push(formatBytes(budget.bytes_scanned));
+  if (typeof budget.seconds === "number") parts.push(`${Math.round(budget.seconds / 60)} min`);
+  if (typeof budget.usd === "number") parts.push(`${formatUsd(budget.usd)} per run`);
+  if (parts.length === 0) return "No budget set — runs until the plan finishes.";
+  return `${parts.join(" · ")}, then stop with reason budget`;
 }

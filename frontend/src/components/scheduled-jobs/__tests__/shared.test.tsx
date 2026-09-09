@@ -3,9 +3,14 @@ import { expect, it } from "vitest";
 import {
   KindTags,
   Pill,
+  cronCadence,
+  describeBudget,
   describeCron,
   describeDelivery,
+  describeStep,
+  describeStepParams,
   formatCountdown,
+  formatDuration,
   formatWhen,
   runStatusLabel,
   runStatusTone,
@@ -118,4 +123,76 @@ it("formatCountdown counts forward in days and hours from a fixed 'now'", () => 
 it("formatCountdown says 'due now' for a run time already in the past", () => {
   const now = new Date("2026-09-09T00:00:00Z");
   expect(formatCountdown("2026-09-01T00:00:00Z", now)).toBe("due now");
+});
+
+// --- Task 6 (job detail page) additions ------------------------------------
+
+// cronCadence — the schedule panel's segmented-control "on" state.
+
+it("cronCadence recognises hourly/daily/weekly/monthly and falls back to cron", () => {
+  expect(cronCadence("15 * * * *")).toBe("hourly");
+  expect(cronCadence("0 6 * * *")).toBe("daily");
+  expect(cronCadence("0 6 * * 1")).toBe("weekly");
+  expect(cronCadence("0 6 1 * *")).toBe("monthly");
+  expect(cronCadence("*/5 * * * *")).toBe("cron");
+  expect(cronCadence(null)).toBe("cron");
+});
+
+// describeStep — registry mirror for the plan panel's per-step title/tag.
+
+it("describeStep labels the six v1 registry types with their read/write kind", () => {
+  expect(describeStep("bigquery_sql").kind).toBe("read");
+  expect(describeStep("report.compose").kind).toBe("read");
+  expect(describeStep("report.render_pdf").kind).toBe("read");
+  expect(describeStep("report.build_xlsx").kind).toBe("read");
+  expect(describeStep("drive.upload").kind).toBe("write");
+  expect(describeStep("recon.run").kind).toBe("read");
+  expect(describeStep("bigquery_sql").label).toBeTruthy();
+});
+
+it("describeStep never crashes on an unrecognised type — allow-listing is the registry's job, not this page's", () => {
+  const step = describeStep("netsuite.write");
+  expect(step.label).toBeTruthy();
+  expect(["read", "write"]).toContain(step.kind);
+});
+
+// describeStepParams — the plan panel's per-step description line.
+
+it("describeStepParams renders the bigquery_sql query", () => {
+  expect(describeStepParams("bigquery_sql", { query: "SELECT 1" })).toContain("SELECT 1");
+});
+
+it("describeStepParams renders drive.upload's report step and period key", () => {
+  const out = describeStepParams("drive.upload", { report_step: "compose", period_key: "2026-09-07" });
+  expect(out).toContain("compose");
+  expect(out).toContain("2026-09-07");
+});
+
+it("describeStepParams falls back to key:value pairs for an unrecognised type", () => {
+  expect(describeStepParams("recon.run", { window_days: 7 })).toContain("window_days");
+});
+
+// describeBudget — the schedule panel's Budget row.
+
+it("describeBudget renders bytes/seconds/usd caps and the stop-reason suffix", () => {
+  const out = describeBudget({ bytes_scanned: 5_000_000_000, seconds: 600, usd: 2 });
+  expect(out).toContain("5 GB");
+  expect(out).toContain("10 min");
+  expect(out).toContain("$2");
+  expect(out).toContain("budget");
+});
+
+it("describeBudget says no budget is set when budget_json is null", () => {
+  expect(describeBudget(null)).toMatch(/no budget/i);
+});
+
+// formatDuration — the runs panel's "Took" column.
+
+it("formatDuration reads minutes and seconds between started_at and completed_at", () => {
+  expect(formatDuration("2026-09-08T06:00:00Z", "2026-09-08T06:01:52Z")).toBe("1m 52s");
+});
+
+it("formatDuration returns null when either timestamp is missing", () => {
+  expect(formatDuration(null, "2026-09-08T06:01:52Z")).toBeNull();
+  expect(formatDuration("2026-09-08T06:00:00Z", null)).toBeNull();
 });
