@@ -255,11 +255,73 @@ async def test_drive_upload_uses_the_runs_period_key_for_delivery_and_idempotenc
     # DeliveryIdentity — inventory_aging composes a NEW Report every run
     # (mode="period"), so keying Drive identity on the report row would
     # create a new Drive folder every Monday and duplicate files on retry.
+    # Item 3 (delta gate fix): file_props/lock_key/idempotency_key also carry
+    # the PRODUCING step's id — a plan with two report.compose -> drive.upload
+    # chains must not overwrite the same files (see the test below).
     identity = captured["identity"]
     assert identity.folder_props == {"schedule_id": str(schedule_id)}
-    assert identity.file_props == {"schedule_id": str(schedule_id), "period_key": "2026-09-14"}
-    assert identity.lock_key == f"schedule:{schedule_id}"
-    assert identity.idempotency_key == f"job-delivery:{schedule_id}:2026-09-14"
+    assert identity.file_props == {"schedule_id": str(schedule_id), "period_key": "2026-09-14", "report_step": "s2"}
+    assert identity.lock_key == f"schedule:{schedule_id}:s2"
+    assert identity.idempotency_key == f"job-delivery:{schedule_id}:s2:2026-09-14"
+
+
+@pytest.mark.asyncio
+async def test_two_drive_upload_steps_in_one_run_get_distinct_identities_same_folder(monkeypatch):
+    """Item 3 (delta gate fix): `_drive_upload_executor` used to key files on
+    `schedule_id` + `period_key` ONLY -- a plan with two `report.compose ->
+    drive.upload` chains (two different reports delivered by the same
+    schedule run) collided on the SAME file identity and the SAME advisory
+    lock. Adding the producing step's id (`report_step`) to both keeps the
+    FOLDER identity shared (still schedule-only -- one Drive folder per
+    schedule) while giving each upload its own file identity and lock key."""
+    import uuid
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from app.services.jobs.registry import StepContext
+    from app.services.report import report_delivery
+
+    captured: list[dict] = []
+
+    async def fake_deliver(db, **kwargs):
+        captured.append(kwargs)
+        return SimpleNamespace(
+            pdf_file_id=f"pdf-{len(captured)}",
+            pdf_url="https://drive/pdf",
+            xlsx_file_id=f"xlsx-{len(captured)}",
+            xlsx_url="https://drive/xlsx",
+            folder_id="folder1",
+            delivered_at=datetime(2026, 9, 14, 13, 0, tzinfo=timezone.utc),
+        )
+
+    monkeypatch.setattr(report_delivery, "deliver_report_to_drive", fake_deliver)
+
+    schedule_id = uuid.uuid4()
+    ctx = StepContext(
+        job_id=schedule_id,
+        run_id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        db=object(),
+        artifacts={
+            "compose_a": {"report": object(), "report_id": str(uuid.uuid4())},
+            "compose_b": {"report": object(), "report_id": str(uuid.uuid4())},
+        },
+        period_key="2026-09-14",
+    )
+    spec = STEP_REGISTRY["drive.upload"]
+
+    await spec.executor(ctx, {"report_step": "compose_a"})
+    await spec.executor(ctx, {"report_step": "compose_b"})
+
+    identity_a = captured[0]["identity"]
+    identity_b = captured[1]["identity"]
+
+    assert identity_a.folder_props == identity_b.folder_props == {"schedule_id": str(schedule_id)}
+    assert identity_a.file_props != identity_b.file_props
+    assert identity_a.lock_key == f"schedule:{schedule_id}:compose_a"
+    assert identity_b.lock_key == f"schedule:{schedule_id}:compose_b"
+    assert identity_a.idempotency_key == f"job-delivery:{schedule_id}:compose_a:2026-09-14"
+    assert identity_b.idempotency_key == f"job-delivery:{schedule_id}:compose_b:2026-09-14"
 
 
 @pytest.mark.asyncio

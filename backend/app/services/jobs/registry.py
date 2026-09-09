@@ -297,6 +297,16 @@ async def _drive_upload_executor(ctx: StepContext, params: dict) -> dict:
     the same schedule resolves to the SAME folder, and a re-delivery of the
     same period replaces the SAME files rather than duplicating them.
 
+    Item 3 (delta gate fix): the FOLDER stays keyed on ``schedule_id`` alone
+    (one Drive folder per schedule is correct), but ``file_props``/
+    ``lock_key``/``idempotency_key`` also carry the PRODUCING
+    ``report.compose`` step's id (``params["report_step"]``) — a plan with
+    TWO ``report.compose -> drive.upload`` chains (two different reports
+    delivered by the same schedule run) previously collided on the exact
+    same file identity AND the exact same advisory lock, so the second
+    upload's find-then-update silently overwrote the first's files instead
+    of each keeping its own.
+
     Accepted wart: a retry after a partial upload (the pdf lands, the xlsx
     fails, the run retries) composes a SECOND ``Report`` row for that Monday
     — ``_report_compose_executor`` has no way to know a previous attempt's
@@ -313,11 +323,12 @@ async def _drive_upload_executor(ctx: StepContext, params: dict) -> dict:
         raise StepExecutionError("drive.upload: the run supplied no period_key")
 
     schedule_id = str(ctx.job_id)
+    report_step = params["report_step"]
     identity = DeliveryIdentity(
         folder_props={"schedule_id": schedule_id},
-        file_props={"schedule_id": schedule_id, "period_key": period_key},
-        lock_key=f"schedule:{schedule_id}",
-        idempotency_key=f"job-delivery:{schedule_id}:{period_key}",
+        file_props={"schedule_id": schedule_id, "period_key": period_key, "report_step": report_step},
+        lock_key=f"schedule:{schedule_id}:{report_step}",
+        idempotency_key=f"job-delivery:{schedule_id}:{report_step}:{period_key}",
     )
 
     result = await deliver_report_to_drive(
