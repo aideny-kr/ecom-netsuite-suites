@@ -1352,6 +1352,14 @@ def _ia_signed_abbrev_money(value: Decimal) -> str:
     return f"{sign}{_ia_abbrev_money(abs(value))}"
 
 
+def _ia_dollar_money(value: Decimal) -> str:
+    """PROSE money (not a table cell) -- ``_ia_money()`` with a literal '$' prefix.
+    The mock's group-header prose reads e.g. "aged $3,230,556" (design rule #9's
+    table-cell convention -- bare numbers, sign carried by the column header --
+    does not apply to sentence text)."""
+    return f"${_ia_money(value)}"
+
+
 def _ia_short_date(d: date) -> str:
     return f"{d.day} {d.strftime('%b')}"
 
@@ -1645,7 +1653,7 @@ def _ia_top_positions_html(report: AgingReport) -> str:
         items = report.top_items.get(loc.location, ())
         top_rows.append(
             f'<tr class="group"><td class="lbl" colspan="7">{escape(loc.location)} · aged '
-            f"{_ia_money(loc.aged90_value)} · top 5 = {loc.top5_share_pct}%</td></tr>"
+            f"{_ia_dollar_money(loc.aged90_value)} · top 5 = {loc.top5_share_pct}%</td></tr>"
         )
         for it in items:
             top_rows.append(_ia_top_item_row_html(it, loc))
@@ -1655,7 +1663,7 @@ def _ia_top_positions_html(report: AgingReport) -> str:
         total_aged += len(aged_items)
         all_rows.append(
             f'<tr class="group"><td class="lbl" colspan="7">{escape(loc.location)} · aged '
-            f"{_ia_money(loc.aged90_value)} · {len(aged_items)} SKUs</td></tr>"
+            f"{_ia_dollar_money(loc.aged90_value)} · {len(aged_items)} SKUs</td></tr>"
         )
         for it in aged_items:
             all_rows.append(_ia_top_item_row_html(it, loc))

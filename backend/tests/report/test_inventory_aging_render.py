@@ -262,6 +262,21 @@ def test_full_aged_list_present_collapsed_and_complete(html, report):
 
 
 # ---------------------------------------------------------------------------
+# Review finding (major): the per-location group-header prose ("<location> ·
+# aged <value> · ...") must carry a literal "$" before the aged value -- it is
+# prose, not a table cell, and the mock's binding copy reads e.g.
+# "Dimerco · aged $3,230,556 · top 5 = 55.5%". Covers both the top-5 table's
+# group header AND the "All N aged SKUs" details block's group header.
+# ---------------------------------------------------------------------------
+def test_group_header_prose_carries_dollar_sign_before_aged_value(html, report):
+    for loc in report.locations:
+        money = f"{loc.aged90_value:,.0f}"
+        assert f"aged ${money}" in html
+        # Every group-header occurrence carries the "$" -- none render bare.
+        assert html.count(f"aged {money} ·") == 0
+
+
+# ---------------------------------------------------------------------------
 # Review finding (blocker): "All N aged SKUs" was built from top_items, which
 # Task 1 caps at TOP_ITEMS_PER_LOCATION=5 -- a location with MORE than 5 aged
 # SKUs got a false-completeness claim (N understated, the details block byte-
