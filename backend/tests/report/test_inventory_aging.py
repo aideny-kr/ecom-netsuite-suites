@@ -423,6 +423,49 @@ def test_build_sources_rejects_empty_locations():
         ia.build_sources({"locations": []})
 
 
+# ---------------------------------------------------------------------------
+# r_prior/r_trend last-restock freshness (review finding: negative `days`)
+#
+# Regression for a review finding: r_prior/r_trend's `last_restock` join used
+# to be a bare (location, sku) match with NO date bound, so a SKU restocked
+# between the historical comparison date and "now" got a last_restock_date
+# LATER than the row being compared — a negative `days` that a strict `> 90`
+# / `> 180` COUNTIF/SUM silently drops, understating every prior/trend aged
+# aggregate. The fix computes `last_restock_date` as a per-row cumulative-max
+# window (as of THAT row's own snapshot_date) and joins on snapshot_date too,
+# so every row's `days` is always non-negative by construction.
+# ---------------------------------------------------------------------------
+def test_r_prior_last_restock_is_bound_to_each_rows_own_snapshot_date():
+    sources = ia.build_sources({"locations": ["Acme"]})
+    query = sources["r_prior"]["params"]["query"]
+    # the old bug signature: a location+sku-only join with no date component
+    assert "USING (location, sku)" not in query
+    # last_restock must be joined on the row's OWN snapshot_date, not a single
+    # scalar "as of latest" literal
+    assert "r.snapshot_date = sn.snapshot_date" in query
+    # last_restock itself must be a per-row cumulative max, not a single
+    # GROUP BY MAX(...) per (location, sku) that ignores the row's own date
+    assert "MAX(restock_date) OVER (PARTITION BY location, sku ORDER BY snapshot_date)" in query
+
+
+def test_r_trend_last_restock_is_bound_to_each_rows_own_snapshot_date():
+    sources = ia.build_sources({"locations": ["Acme"]})
+    query = sources["r_trend"]["params"]["query"]
+    assert "USING (location, sku)" not in query
+    assert "lr.snapshot_date = rk.snapshot_date" in query
+    assert "MAX(restock_date) OVER (PARTITION BY location, sku ORDER BY snapshot_date)" in query
+
+
+def test_r_items_last_restock_is_also_bound_to_snapshot_date():
+    """r_items wasn't the buggy source (it only ever compares against the single
+    latest snapshot), but it shares `_last_restock_ctes` — assert its join was
+    updated consistently rather than left on the old USING(...) shape."""
+    sources = ia.build_sources({"locations": ["Acme"]})
+    query = sources["r_items"]["params"]["query"]
+    assert "USING (location, sku)" not in query
+    assert "r.snapshot_date = c.snapshot_date" in query
+
+
 def test_compute_also_rejects_unknown_location_shape():
     payloads, _ = _threshold_fixture()
     with pytest.raises(ValueError):

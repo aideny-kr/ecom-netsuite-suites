@@ -338,19 +338,37 @@ def _snapshot_literal(snapshot_date: date | None) -> str | None:
 
 
 def _last_restock_ctes(locs: str, up_to_literal: str | None) -> str:
-    """The daily/restocks/last_restock CTE chain shared by r_items and r_prior —
-    "age = days since last restock" (spec §0 decision 2), computed identically
-    everywhere it's needed so a location's last-restock date never drifts between
-    the current-snapshot query and the prior-snapshot one."""
+    """The daily/flagged/last_restock CTE chain shared by r_items, r_prior, and
+    r_trend — "age = days since last restock" (spec §0 decision 2).
+
+    ``last_restock`` produces ONE ROW PER (location, sku, snapshot_date) — the
+    most recent restock date AT OR BEFORE that row's own snapshot_date, via a
+    cumulative ``MAX(...) OVER (... ORDER BY snapshot_date)`` window. That is
+    deliberate: r_items compares each row against the single latest snapshot,
+    but r_prior and r_trend compare rows against a HISTORICAL snapshot date
+    (a week-ago date per location for r_prior; a different date per trend
+    week). A plain ``GROUP BY (location, sku)`` MAX — the prior shape here —
+    computes the restock date as of "now" regardless of which historical row
+    it's joined to, so a SKU restocked between that historical date and now
+    got a last_restock_date LATER than the row being compared, producing a
+    NEGATIVE `days` value that silently escaped every `> 90`/`> 180` bucket
+    (a review finding — see test_r_prior_last_restock_is_bound_to_each_rows_own_snapshot_date).
+    The per-row cumulative-max shape makes every row's own snapshot_date the
+    join key (never just location+sku), so `days` is always >= 0 by
+    construction, in every one of the three queries that use this CTE chain."""
     date_filter = f" AND snapshot_date <= {up_to_literal}" if up_to_literal else ""
     return f"""daily AS (
   SELECT location, sku, snapshot_date, qty_on_hand,
          LAG(qty_on_hand) OVER (PARTITION BY location, sku ORDER BY snapshot_date) AS prev_qty
   FROM {BQ_TABLE} WHERE location IN ({locs}){date_filter}),
-restocks AS (
-  SELECT location, sku, snapshot_date AS restock_date FROM daily
-  WHERE prev_qty IS NULL OR qty_on_hand > prev_qty),
-last_restock AS (SELECT location, sku, MAX(restock_date) AS last_restock_date FROM restocks GROUP BY location, sku)"""
+flagged AS (
+  SELECT location, sku, snapshot_date,
+         CASE WHEN prev_qty IS NULL OR qty_on_hand > prev_qty THEN snapshot_date END AS restock_date
+  FROM daily),
+last_restock AS (
+  SELECT location, sku, snapshot_date,
+         MAX(restock_date) OVER (PARTITION BY location, sku ORDER BY snapshot_date) AS last_restock_date
+  FROM flagged)"""
 
 
 def _bucket_case(days_expr: str) -> str:
@@ -382,7 +400,8 @@ cur AS (SELECT s.location, s.sku, s.item_desc, s.category, s.qty_on_hand, s.inve
         FROM {BQ_TABLE} s JOIN latest l ON l.location = s.location AND l.d = s.snapshot_date WHERE s.qty_on_hand > 0)
 SELECT c.*, r.last_restock_date, DATE_DIFF(c.snapshot_date, r.last_restock_date, DAY) AS days,
        {_bucket_case("DATE_DIFF(c.snapshot_date, r.last_restock_date, DAY)")} AS bucket
-FROM cur c LEFT JOIN last_restock r USING (location, sku)"""
+FROM cur c LEFT JOIN last_restock r
+  ON r.location = c.location AND r.sku = c.sku AND r.snapshot_date = c.snapshot_date"""
 
 
 def _r_prior_sql(locs: str, compare_days: int, snapshot_literal: str | None) -> str:
@@ -396,7 +415,8 @@ snap AS (
 withbucket AS (
   SELECT sn.location, sn.sku, sn.qty_on_hand, sn.inventory_amount,
          DATE_DIFF(sn.snapshot_date, r.last_restock_date, DAY) AS days
-  FROM snap sn LEFT JOIN last_restock r USING (location, sku))
+  FROM snap sn LEFT JOIN last_restock r
+    ON r.location = sn.location AND r.sku = sn.sku AND r.snapshot_date = sn.snapshot_date)
 SELECT location,
        COUNT(*) AS skus, SUM(qty_on_hand) AS qty, SUM(inventory_amount) AS value,
        COUNTIF(days > 90) AS skus_90p, SUM(IF(days > 90, qty_on_hand, 0)) AS qty_90p,
@@ -417,7 +437,8 @@ ranked AS (
 withbucket AS (
   SELECT rk.location, rk.sku, rk.snapshot_date, rk.inventory_amount,
          DATE_DIFF(rk.snapshot_date, lr.last_restock_date, DAY) AS days, rk.day_rn
-  FROM ranked rk LEFT JOIN last_restock lr USING (location, sku)
+  FROM ranked rk LEFT JOIN last_restock lr
+    ON lr.location = rk.location AND lr.sku = rk.sku AND lr.snapshot_date = rk.snapshot_date
   WHERE rk.day_rn <= 7 * {trend_weeks}),
 per_day AS (
   SELECT location, snapshot_date AS d, day_rn,
