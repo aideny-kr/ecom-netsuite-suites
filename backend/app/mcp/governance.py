@@ -109,7 +109,16 @@ TOOL_CONFIGS = {
         "timeout_seconds": 10,
         "rate_limit_per_minute": 20,
         "requires_entitlement": "mcp_tools",
-        "allowlisted_params": ["name", "schedule_type", "cron", "params"],
+        # Item 6 (gate fix): MUST equal registry.py's own "schedule.create"
+        # params_schema keys exactly — this is the REAL dispatch path
+        # (mcp_server.call_tool -> governed_execute -> validate_params), and
+        # it filters params BEFORE execute_create ever sees them. This used
+        # to omit instruction/timezone/delivery, so a chat-created Scheduled
+        # Job silently fell through to the legacy direct-create path.
+        # tests/test_mcp.py::test_schedule_tool_allowlists_never_drift_from_
+        # the_registry_params_schema asserts this equality so it cannot
+        # drift again.
+        "allowlisted_params": ["instruction", "name", "schedule_type", "cron", "timezone", "delivery", "params"],
     },
     "schedule.list": {
         "default_limit": None,
@@ -125,7 +134,11 @@ TOOL_CONFIGS = {
         "timeout_seconds": 30,
         "rate_limit_per_minute": 20,
         "requires_entitlement": "mcp_tools",
-        "allowlisted_params": ["schedule_id"],
+        # Item 6 (gate fix): MUST equal registry.py's "schedule.run"
+        # params_schema keys — this used to omit use_pending, so "Run once
+        # with this change" (spec §B5) silently ran the APPROVED plan
+        # instead of the pending one through the real dispatch path.
+        "allowlisted_params": ["schedule_id", "use_pending"],
     },
     "netsuite.connectivity": {
         "default_limit": None,

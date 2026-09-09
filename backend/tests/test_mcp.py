@@ -53,6 +53,44 @@ class TestParamValidation:
         result = validate_params("schedule.list", {"extra": "value"})
         assert "extra" in result
 
+    def test_schedule_create_allowlist_lets_every_registry_field_through(self):
+        """Item 6 (gate fix): the OLD allowlist (name, schedule_type, cron,
+        params) stripped instruction/timezone/delivery before execute_create
+        ever saw them — a chat-created Scheduled Job silently fell through
+        to the legacy path. Every field the registry's own params_schema
+        declares for schedule.create must survive validate_params."""
+        result = validate_params(
+            "schedule.create",
+            {
+                "instruction": "weekly inventory aging report",
+                "name": "Inventory Aging Weekly",
+                "schedule_type": "job",
+                "cron": "0 6 * * 1",
+                "timezone": "America/Los_Angeles",
+                "delivery": {"drive": True},
+                "params": {"a": 1},
+                "evil_param": "DROP TABLE",
+            },
+        )
+        assert result == {
+            "instruction": "weekly inventory aging report",
+            "name": "Inventory Aging Weekly",
+            "schedule_type": "job",
+            "cron": "0 6 * * 1",
+            "timezone": "America/Los_Angeles",
+            "delivery": {"drive": True},
+            "params": {"a": 1},
+        }
+
+    def test_schedule_run_allowlist_lets_use_pending_through(self):
+        """Item 6 (gate fix): the OLD allowlist (schedule_id only) stripped
+        use_pending before execute_run ever saw it."""
+        result = validate_params(
+            "schedule.run",
+            {"schedule_id": "abc-123", "use_pending": True, "evil_param": "DROP TABLE"},
+        )
+        assert result == {"schedule_id": "abc-123", "use_pending": True}
+
 
 class TestRateLimiting:
     def setup_method(self):
@@ -261,3 +299,24 @@ class TestToolConfigs:
             assert "rate_limit_per_minute" in config, f"{name} missing rate_limit_per_minute"
             assert "requires_entitlement" in config, f"{name} missing requires_entitlement"
             assert "allowlisted_params" in config, f"{name} missing allowlisted_params"
+
+    def test_schedule_tool_allowlists_never_drift_from_the_registry_params_schema(self):
+        """Item 6 (gate fix): governed_execute -> validate_params filters
+        params to `allowlisted_params` BEFORE the tool's own execute() ever
+        sees them — a param the registry's params_schema declares but this
+        allowlist omits silently vanishes rather than raising anywhere.
+        Scoped to schedule.* deliberately (not every TOOL_CONFIGS entry):
+        two pre-existing tools already violate this same invariant —
+        netsuite.suiteql (registry declares `user_question`, not in the
+        allowlist — a prompt-guidance-only field, intentionally stripped)
+        and workspace.list_files (allowlist carries a `limit` the registry
+        schema doesn't declare) — fixing those is a separate, wider change
+        this item does not scope to."""
+        from app.mcp.registry import TOOL_REGISTRY
+
+        for name in ("schedule.create", "schedule.list", "schedule.run"):
+            allow = set(TOOL_CONFIGS[name].get("allowlisted_params") or [])
+            if not allow:
+                continue
+            schema_keys = set((TOOL_REGISTRY[name].get("params_schema") or {}).keys())
+            assert allow == schema_keys, f"{name}: allowlist={sorted(allow)} vs registry={sorted(schema_keys)}"

@@ -14,14 +14,13 @@ this registry.
 dict object the executor looks up at run time — the technique
 `tests/jobs/test_executor.py` already established — so this drives a REAL
 `jobs` row through `run_schedule_now` with no BigQuery/Drive/WeasyPrint
-credentials involved. `execute_create`'s compile path patches
-`app.services.jobs.compiler.compile_instruction` (patched where it is
-imported FROM at call time — `execute_create` does a local `from
-app.services.jobs.compiler import ... compile_instruction` inside the
-function body, so patching the module attribute is picked up on the next
-call) with a canned `CompiledPlan`/`Clarification`, exactly like
-`tests/api/test_schedules_api.py`'s API-level compile tests, so no real LLM
-call happens here either.
+credentials involved. `execute_create`'s compile path (item 5, gate fix) now
+goes through the shared `schedule_service.create_scheduled_job`, which
+imports `compile_instruction` at MODULE level — tests patch
+`app.services.schedule_service.compile_instruction` (patched where it is
+USED, not where it is defined) with a canned `CompiledPlan`/`Clarification`,
+exactly like `tests/api/test_schedules_api.py`'s API-level compile tests, so
+no real LLM call happens here either.
 """
 
 from __future__ import annotations
@@ -32,6 +31,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.mcp.registry import TOOL_REGISTRY
+from app.mcp.server import mcp_server
 from app.mcp.tools import schedule_ops
 from app.models.pipeline import Schedule
 from app.models.tenant import Tenant
@@ -317,9 +317,7 @@ class TestExecuteCreate:
         )
         assert rows == []
 
-    async def test_execute_create_over_quota_is_error_no_row(
-        self, db: AsyncSession, admin_user, monkeypatch
-    ):
+    async def test_execute_create_over_quota_is_error_no_row(self, db: AsyncSession, admin_user, monkeypatch):
         """Item 5 (gate fix): `execute_create`'s instruction branch used to
         bypass the plan-quota entitlement check entirely."""
         user, _ = admin_user
@@ -328,7 +326,9 @@ class TestExecuteCreate:
             assert feature == "schedules"
             return False
 
-        monkeypatch.setattr("app.services.schedule_service.entitlement_service.check_entitlement", fake_check_entitlement)
+        monkeypatch.setattr(
+            "app.services.schedule_service.entitlement_service.check_entitlement", fake_check_entitlement
+        )
 
         result = await schedule_ops.execute_create(
             {"instruction": "weekly inventory aging report"},
@@ -346,6 +346,47 @@ class TestExecuteCreate:
             .all()
         )
         assert rows == []
+
+    async def test_schedule_create_instruction_survives_real_dispatch(self, db: AsyncSession, admin_user, monkeypatch):
+        """Governance regression (item 6): schedule.create's OLD allowlist
+        (name, schedule_type, cron, params) stripped instruction/timezone/
+        delivery before execute_create ever saw them through the REAL
+        dispatch path — a chat-created Scheduled Job silently fell through
+        to the legacy path even though a direct execute_create() call (every
+        other test in this class) never exercises governance at all. Must
+        go through mcp_server.call_tool -> governed_execute ->
+        validate_params (mirrors
+        test_recon_resolution_chat_tools.py::test_approve_group_included_
+        above_materiality_ids_survives_real_dispatch's pattern)."""
+        user, _ = admin_user
+
+        async def fake_compile(db, *, tenant_id, instruction, actor_id, llm=None, plan_version=None):
+            return _compiled_plan()
+
+        monkeypatch.setattr("app.services.schedule_service.compile_instruction", fake_compile)
+
+        out = await mcp_server.call_tool(
+            tool_name="schedule.create",
+            params={"instruction": "weekly inventory aging report"},
+            tenant_id=str(user.tenant_id),
+            actor_id=str(user.id),
+            db=db,
+        )
+        assert not out.get("error"), out
+        assert out["plan_status"] == "pending_approval"
+
+        row = (
+            (
+                await db.execute(
+                    select(Schedule).where(Schedule.tenant_id == user.tenant_id, Schedule.schedule_type == "job")
+                )
+            )
+            .scalars()
+            .one()
+        )
+        # Proves instruction survived validate_params through the real
+        # dispatch, not just a direct execute_create() call.
+        assert row.instruction == "weekly inventory aging report"
 
 
 # ---------------------------------------------------------------------------
