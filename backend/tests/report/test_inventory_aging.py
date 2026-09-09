@@ -375,8 +375,43 @@ def test_watch_item_value_threshold_fires_at_exactly_fifty_thousand_not_below():
     payloads, params = _threshold_fixture()
     report = ia.compute(payloads, params)
     texts = [w.text for w in report.watch_items]
-    assert any("ValueHit" in t and "the 90+ buckets" in t for t in texts)
-    assert not any("ValueMiss" in t and "the 90+ buckets" in t for t in texts)
+    # ValueHit's own aged-SKU count is UNCHANGED vs prior (1 -> 1, a pure
+    # price/quantity move on the same position) -- the substring this test checks
+    # is "aged value" (the rule-2 watch item's own opener), not "the 90+ buckets",
+    # because that phrase is exactly the zero-count-safe clause this fixture now
+    # exercises (see test_watch_item_zero_sku_delta_renders_no_change_not_zero_left
+    # below) -- it deliberately does NOT contain "the 90+ buckets".
+    assert any("ValueHit" in t and "aged value" in t for t in texts)
+    assert not any("ValueMiss" in t and "aged value" in t for t in texts)
+
+
+def test_watch_item_zero_sku_delta_renders_no_change_not_zero_left():
+    """Render-polish brief item 2 (the bug this fixture caught): ValueHit's aged
+    SKU count is 1 both before and after (only its VALUE moved) -- the OLD wording
+    picked an arbitrary direction word for a zero delta ("as 0 SKUs left the 90+
+    buckets"), which is nonsensical. It must read as "no change" instead."""
+    payloads, params = _threshold_fixture()
+    report = ia.compute(payloads, params)
+    value_hit = next(loc for loc in report.locations if loc.location == "ValueHit")
+    assert value_hit.skus_90p_delta == 0  # sanity on the fixture contract
+    texts = [w.text for w in report.watch_items]
+    hit_text = next(t for t in texts if "ValueHit" in t and "aged value" in t)
+    assert "with no change in the number of aged SKUs" in hit_text
+    assert "0 SKUs" not in hit_text
+
+
+@pytest.mark.parametrize(
+    "delta,expected",
+    [
+        (0, "with no change in the number of aged SKUs"),
+        (-5, "as 5 SKUs left the 90+ buckets"),
+        (3, "as 3 SKUs entered the 90+ buckets"),
+    ],
+)
+def test_sku_delta_clause_zero_negative_positive(delta, expected):
+    """Direct unit coverage of the shared helper (render-polish brief item 2) --
+    the three cases the brief names explicitly, independent of any fixture."""
+    assert ia._sku_delta_clause(delta) == expected
 
 
 def test_watch_items_capped_at_four():
@@ -399,6 +434,46 @@ def test_highlight_ordering_largest_mover_first():
     assert mover_idx < attribution_idx
 
 
+def _mover_zero_sku_delta_fixture():
+    """One location whose aged VALUE moved (so the mover highlight fires) but whose
+    aged SKU COUNT did not (91-180's one SKU just got more expensive) -- render-
+    polish brief item 2's zero-count wording, exercised on the HIGHLIGHTS mover
+    clause specifically (the watch-item test above covers the same rule on watch
+    items)."""
+    items = [
+        _item("Only", "O-C1", 10, 5000, 50),
+        _item("Only", "O-G1", 100, 9000, 5),  # single aged SKU, value moved vs prior
+    ]
+    prior = [
+        _prior_row(
+            "Only", value=13000, value_90p=8000, value_180p=0, skus=2, skus_90p=1, skus_180p=0, qty=55, qty_90p=5
+        )
+    ]
+    trend = [_trend_row("Only", SNAPSHOT - timedelta(weeks=w), 14000, 9000, 64.3) for w in (1, 0)]
+    meta = [
+        {
+            "location": "Only",
+            "first_snapshot_date": (SNAPSHOT - timedelta(days=90)).isoformat(),
+            "last_snapshot_date": SNAPSHOT.isoformat(),
+            "snapshot_count": 90,
+        }
+    ]
+    payloads = {"r_items": items, "r_prior": prior, "r_trend": trend, "r_meta": meta}
+    params = {"locations": ["Only"], "compare_days": 7, "trend_weeks": 2}
+    return payloads, params
+
+
+def test_highlight_mover_zero_sku_delta_renders_no_change_not_zero_entering():
+    payloads, params = _mover_zero_sku_delta_fixture()
+    report = ia.compute(payloads, params)
+    only = report.locations[0]
+    assert only.skus_90p_delta == 0  # sanity on the fixture contract
+    assert only.aged90_value_delta != 0  # sanity: the mover rule still fires
+    mover_text = next(h.text for h in report.highlights if "Only" in h.text and "aged value" in h.text)
+    assert "with no change in the number of aged SKUs" in mover_text
+    assert "0 SKUs" not in mover_text
+
+
 # ---------------------------------------------------------------------------
 # Narrative — slots filled, deterministic
 # ---------------------------------------------------------------------------
@@ -412,6 +487,149 @@ def test_narrative_slots_filled_and_deterministic():
     assert "None" not in report_1.narrative.paragraph_1
     assert "None" not in report_1.narrative.paragraph_2
     assert "Acme" in report_1.narrative.paragraph_1 or "Acme" in report_1.narrative.paragraph_2
+
+
+# ---------------------------------------------------------------------------
+# Narrative paragraph 2 -- location-naming logic (render-polish brief item 3):
+# "improved the most" names the location with the largest FAVOURABLE aged-value
+# move, "moved the other way" names the location with the largest UNFAVOURABLE
+# share move -- each drops to "No location improved/worsened this week." when
+# nothing qualifies, and the second clause drops when it would repeat the first
+# clause's own location name. Every fixture here uses two items per location
+# (one current-bucket, one 91-180 aged) so on_hand/aged90 values are exact and
+# every percentage below divides evenly (no rounding surprises to account for).
+# ---------------------------------------------------------------------------
+def _narrative_loc_items(location, current_value, aged_value):
+    return [
+        _item(location, f"{location}-CUR", 10, current_value, 10),
+        _item(location, f"{location}-AGD", 100, aged_value, 5),
+    ]
+
+
+def _narrative_fixture(loc_specs):
+    """``loc_specs``: ``(location, current_value, aged_value, prior_value,
+    prior_aged90)`` 5-tuples. One current + one aged item per location (see
+    ``_narrative_loc_items``), a matching prior row, a 2-point trend, and
+    per-location meta -- the minimum ``compute()`` needs to exercise paragraph_2's
+    location-naming logic without pulling in bucket/top-item concerns this group
+    of tests isn't about."""
+    items: list[dict] = []
+    prior: list[dict] = []
+    trend: list[dict] = []
+    meta: list[dict] = []
+    locations: list[str] = []
+    for location, current_value, aged_value, prior_value, prior_aged90 in loc_specs:
+        locations.append(location)
+        items += _narrative_loc_items(location, current_value, aged_value)
+        prior.append(
+            _prior_row(
+                location,
+                value=prior_value,
+                value_90p=prior_aged90,
+                value_180p=0,
+                skus=2,
+                skus_90p=1,
+                skus_180p=0,
+                qty=100,
+                qty_90p=10,
+            )
+        )
+        total = current_value + aged_value
+        for weeks_ago in (1, 0):
+            pct_90p = round(aged_value / total * 100, 1) if total else 0.0
+            trend.append(_trend_row(location, SNAPSHOT - timedelta(weeks=weeks_ago), total, aged_value, pct_90p))
+        meta.append(
+            {
+                "location": location,
+                "first_snapshot_date": (SNAPSHOT - timedelta(days=90)).isoformat(),
+                "last_snapshot_date": SNAPSHOT.isoformat(),
+                "snapshot_count": 90,
+            }
+        )
+    payloads = {"r_items": items, "r_prior": prior, "r_trend": trend, "r_meta": meta}
+    params = {"locations": locations, "compare_days": 7, "trend_weeks": 2}
+    return payloads, params
+
+
+def test_narrative_paragraph2_two_locations_both_worsening_no_location_improved():
+    # Nova: aged value +5000 (not improving), share +5.0pts. Vex: aged value
+    # +10000 (not improving), share +20.0pts (the larger move -> most_worsened).
+    # Neither location's aged value fell -> "No location improved this week."
+    payloads, params = _narrative_fixture(
+        [
+            ("Nova", 80000, 20000, 100000, 15000),
+            ("Vex", 30000, 20000, 50000, 10000),
+        ]
+    )
+    report = ia.compute(payloads, params)
+    p2 = report.narrative.paragraph_2
+    assert "No location improved this week." in p2
+    assert "Vex moved the other way" in p2
+    assert "Nova moved the other way" not in p2
+    assert "improved the most" not in p2
+    # "carries X% of the on-hand value" still names the largest-BY-VALUE location
+    # (Nova, $100K on-hand vs Vex's $50K) regardless of who moved.
+    assert "Nova carries" in p2
+
+
+def test_narrative_paragraph2_one_improving_one_worsening_both_named():
+    # Aphex: aged value -5000 (the only improver) -> "improved the most". Byte:
+    # share +20.0pts (the only worsener, Aphex's own share delta is -10pts, not
+    # a worsening candidate) -> "moved the other way". Distinct locations, so
+    # both clauses render with no dedup.
+    payloads, params = _narrative_fixture(
+        [
+            ("Aphex", 40000, 10000, 50000, 15000),
+            ("Byte", 20000, 20000, 40000, 12000),
+        ]
+    )
+    report = ia.compute(payloads, params)
+    p2 = report.narrative.paragraph_2
+    assert "Aphex improved the most" in p2
+    assert "Byte moved the other way" in p2
+    assert "No location improved this week." not in p2
+    assert "No location worsened this week." not in p2
+
+
+def test_narrative_paragraph2_three_locations_one_flat_only_two_qualify():
+    # Faller improves (aged value -10000), Riser worsens (share +20.0pts),
+    # Flatly is exactly flat (delta_value 0, delta_pts 0) -- neither an improver
+    # nor a worsener, so it must not headline either clause even though it's a
+    # real third location in the report.
+    payloads, params = _narrative_fixture(
+        [
+            ("Faller", 90000, 10000, 100000, 20000),
+            ("Riser", 30000, 20000, 50000, 10000),
+            ("Flatly", 24000, 6000, 30000, 6000),
+        ]
+    )
+    report = ia.compute(payloads, params)
+    p2 = report.narrative.paragraph_2
+    assert "Faller improved the most" in p2
+    assert "Riser moved the other way" in p2
+    assert "Flatly improved the most" not in p2
+    assert "Flatly moved the other way" not in p2
+    assert "No location improved this week." not in p2
+    assert "No location worsened this week." not in p2
+
+
+def test_narrative_paragraph2_same_location_both_extremes_drops_the_worsened_clause():
+    # Solo is the ONLY location, and its own numbers make it simultaneously the
+    # largest favourable aged-value move (value fell) AND the largest
+    # unfavourable share move (share rose, because total on-hand collapsed much
+    # harder than the aged value did) -- the same location can't headline both
+    # clauses without repeating its own name, so the second ("moved the other
+    # way") clause drops to the generic "No location worsened" line while the
+    # first still names Solo.
+    payloads, params = _narrative_fixture([("Solo", 7000, 3000, 50000, 4000)])
+    report = ia.compute(payloads, params)
+    solo = report.locations[0]
+    assert solo.aged90_value_delta < 0  # sanity: Solo is the improver
+    assert solo.aged90_share_delta_pts > 0  # sanity: Solo is ALSO the worsener
+    p2 = report.narrative.paragraph_2
+    assert "Solo improved the most" in p2
+    assert "No location worsened this week." in p2
+    assert "Solo moved the other way" not in p2
 
 
 # ---------------------------------------------------------------------------

@@ -320,6 +320,24 @@ def _fmt_pts(value: Decimal) -> str:
     return f"{value}"
 
 
+def _sku_delta_clause(
+    delta: int, *, connector: str = "as", left_verb: str = "left", entered_verb: str = "entered"
+) -> str:
+    """Zero-count-safe SKU-delta clause for the 90+ buckets (render-polish brief
+    item 2). A literal ``0`` had been rendering as ``"as 0 SKUs left the 90+
+    buckets"`` -- a real threshold-fixture case (a location can cross the $50K
+    aged-VALUE threshold with its aged SKU COUNT unchanged, e.g. a pure
+    price/quantity move on the same positions) -- so zero gets its own honest
+    wording instead of an arbitrarily-picked direction word. ``connector``/
+    ``left_verb``/``entered_verb`` let both call sites (watch items' "as N SKUs
+    left/entered ..." and highlights' "driven by N SKUs leaving/entering ...")
+    share this one zero-handling rule while keeping their own grammar."""
+    if delta == 0:
+        return "with no change in the number of aged SKUs"
+    verb = entered_verb if delta > 0 else left_verb
+    return f"{connector} {abs(delta)} SKUs {verb} the 90+ buckets"
+
+
 def _ordinal(n: int) -> str:
     if 10 <= n % 100 <= 20:
         suffix = "th"
@@ -818,11 +836,10 @@ def _watch_items(
         if abs(loc.aged90_value_delta) >= WATCH_VALUE_THRESHOLD:
             unfavourable = loc.aged90_value_delta > 0  # rising aged value is unfavourable
             direction = "up" if loc.aged90_value_delta > 0 else "down"
-            verb = "entered" if loc.skus_90p_delta > 0 else "left"
             text = (
                 f"{loc.location} aged value {_fmt_money(loc.aged90_value)}, {direction} "
-                f"{_fmt_money(abs(loc.aged90_value_delta))} ({_fmt_signed_pct(loc.aged90_value_delta_pct)}) as "
-                f"{abs(loc.skus_90p_delta)} SKUs {verb} the 90+ buckets"
+                f"{_fmt_money(abs(loc.aged90_value_delta))} ({_fmt_signed_pct(loc.aged90_value_delta_pct)}) "
+                f"{_sku_delta_clause(loc.skus_90p_delta)}"
             )
             items.append(
                 WatchItem(text=text, dot="red" if unfavourable else "green", impact=abs(loc.aged90_value_delta))
@@ -888,11 +905,12 @@ def _highlights(
     mover = max(locations, key=lambda loc: abs(loc.aged90_value_delta))
     if mover.aged90_value_delta != 0:
         verb = "rose" if mover.aged90_value_delta > 0 else "fell"
-        entered_left = "entering" if mover.skus_90p_delta > 0 else "leaving"
+        driver_clause = _sku_delta_clause(
+            mover.skus_90p_delta, connector="driven by", left_verb="leaving", entered_verb="entering"
+        )
         text = (
             f"{mover.location}'s aged value {verb} {_fmt_money(abs(mover.aged90_value_delta))} "
-            f"({_fmt_signed_pct(mover.aged90_value_delta_pct)}), driven by {abs(mover.skus_90p_delta)} SKUs "
-            f"{entered_left} the 90+ buckets."
+            f"({_fmt_signed_pct(mover.aged90_value_delta_pct)}), {driver_clause}."
         )
         candidates.append(Highlight(text=text, impact=abs(mover.aged90_value_delta)))
 
@@ -957,18 +975,54 @@ def _narrative(
         f"{_fmt_pts(abs(all_locations.aged90_share_delta_pts))} points from the week earlier{range_clause}."
     )
 
+    # "carries X% of the on-hand value" always names the largest location BY VALUE
+    # (render-polish brief item 3) -- independent of which location (if any) is the
+    # biggest mover in either direction below.
     lead = max(locations, key=lambda loc: loc.on_hand_value)
     lead_share_of_total = share_pct(lead.on_hand_value, all_locations.on_hand_value)
-    lead_direction = "improved" if lead.aged90_value_delta <= 0 else "moved against the group"
-    mover = max(locations, key=lambda loc: abs(loc.aged90_value_delta))
+
+    # (a) the largest FAVOURABLE aged-value move -- aged value FALLING is favourable,
+    # so this is whichever location's aged90_value_delta is most negative; None when
+    # not one location's aged value fell at all this week (brief item 3).
+    improving = [loc for loc in locations if loc.aged90_value_delta < 0]
+    most_improved = min(improving, key=lambda loc: loc.aged90_value_delta) if improving else None
+
+    # (b) the largest UNFAVOURABLE share move -- 90+ day share RISING is
+    # unfavourable, so this is whichever location's aged90_share_delta_pts is most
+    # positive; None when no location's share rose at all.
+    worsening = [loc for loc in locations if loc.aged90_share_delta_pts > 0]
+    most_worsened = max(worsening, key=lambda loc: loc.aged90_share_delta_pts) if worsening else None
+
+    # The same location cannot headline both clauses without repeating its own name
+    # in the same paragraph (brief item 3's "if they are the same location") --
+    # drop the "moved the other way" clause (the second-named one) in that case; the
+    # "improved the most" clause still gets to name it.
+    if most_improved is not None and most_worsened is not None and most_improved.location == most_worsened.location:
+        most_worsened = None
+
+    if most_improved is None:
+        improved_clause = "No location improved this week."
+    else:
+        improved_clause = (
+            f"{most_improved.location} improved the most: aged value fell "
+            f"{_fmt_money(abs(most_improved.aged90_value_delta))} to {_fmt_money(most_improved.aged90_value)} "
+            f"{_sku_delta_clause(most_improved.skus_90p_delta)}."
+        )
+
+    if most_worsened is None:
+        worsened_clause = "No location worsened this week."
+    else:
+        total_word = "rise" if most_worsened.delta_value >= 0 else "fall"
+        worsened_clause = (
+            f"{most_worsened.location} moved the other way, with its aged share climbing to "
+            f"{_fmt_pct(most_worsened.aged90_share_pct)} on a {_fmt_money(abs(most_worsened.delta_value))} "
+            f"{total_word} in total value."
+        )
+
     highest_share = max(locations, key=lambda loc: loc.aged90_share_pct)
     paragraph_2 = (
-        f"{lead.location} carries {_fmt_pct(lead_share_of_total)} of the on-hand value and {lead_direction}: "
-        f"aged value {'fell' if lead.aged90_value_delta <= 0 else 'rose'} "
-        f"{_fmt_money(abs(lead.aged90_value_delta))} as {abs(lead.skus_90p_delta)} SKUs "
-        f"{'left' if lead.skus_90p_delta <= 0 else 'entered'} the aged buckets. "
-        f"{mover.location} moved the {'same way' if mover.location == lead.location else 'other way'}, with its "
-        f"aged share at {_fmt_pct(mover.aged90_share_pct)}. {highest_share.location} holds the highest aged "
+        f"{lead.location} carries {_fmt_pct(lead_share_of_total)} of the on-hand value. "
+        f"{improved_clause} {worsened_clause} {highest_share.location} holds the highest aged "
         f"share of the group, {_fmt_pct(highest_share.aged90_share_pct)}. The 180+ day list across all "
         f"{len(locations)} locations totals {_fmt_money(all_locations.aged180_value)} in "
         f"{all_locations.aged180_skus} SKUs."
