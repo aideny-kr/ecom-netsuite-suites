@@ -489,6 +489,16 @@ def test_narrative_slots_filled_and_deterministic():
     assert "Acme" in report_1.narrative.paragraph_1 or "Acme" in report_1.narrative.paragraph_2
 
 
+def test_narrative_paragraph1_snapshot_date_uses_the_mocks_long_form_not_iso():
+    """Render-fidelity fix: the mock reads "on the 8 Sep 2026 snapshot", not the ISO
+    form "2026-09-08" -- SNAPSHOT is date(2026, 9, 8) (module-level constant above),
+    so this pins the exact mock wording, not just "no ISO digits anywhere"."""
+    payloads, params = _full_fixture()
+    report = ia.compute(payloads, params)
+    assert "on the 8 Sep 2026 snapshot" in report.narrative.paragraph_1
+    assert SNAPSHOT.isoformat() not in report.narrative.paragraph_1
+
+
 # ---------------------------------------------------------------------------
 # Narrative paragraph 2 -- location-naming logic (render-polish brief item 3):
 # "improved the most" names the location with the largest FAVOURABLE aged-value

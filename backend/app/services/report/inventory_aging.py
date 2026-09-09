@@ -307,6 +307,16 @@ def _fmt_signed_money(value: Decimal) -> str:
     return f"{sign}{_fmt_money(abs(value))}"
 
 
+def _fmt_long_date(d: date) -> str:
+    """Prose-date form matching the mock's binding copy ("8 Sep 2026", day + abbreviated
+    month + year) -- for PROSE TEXT ONLY (Narrative paragraphs), same rule as
+    `_fmt_money` above. Mirrors `report_html._ia_long_date` exactly; not imported from
+    there because this module (Task 1's pure compute layer) owns its own prose
+    formatting and stays independent of the render module (report_html imports FROM
+    inventory_aging, never the reverse)."""
+    return f"{d.day} {d.strftime('%b %Y')}"
+
+
 def _fmt_pct(value: Decimal) -> str:
     return f"{value}%"
 
@@ -977,7 +987,7 @@ def _narrative(
         range_clause = f" (trailing range {min(pct_values)}% - {max(pct_values)}%)"
     paragraph_1 = (
         f"Across {', '.join(loc.location for loc in locations)}, on-hand inventory is worth "
-        f"{_fmt_money(all_locations.on_hand_value)} on the {snapshot_date.isoformat()} snapshot, {total_word} "
+        f"{_fmt_money(all_locations.on_hand_value)} on the {_fmt_long_date(snapshot_date)} snapshot, {total_word} "
         f"{_fmt_money(abs(all_locations.delta_value))} ({_fmt_signed_pct(all_locations.delta_pct)}) on the week. "
         f"Stock older than 90 days is {_fmt_money(all_locations.aged90_value)}, or "
         f"{_fmt_pct(all_locations.aged90_share_pct)} of value, {share_word} "

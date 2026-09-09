@@ -508,6 +508,21 @@ def test_top_positions_table_sits_in_the_overflow_auto_wrapper(html):
     assert 'class="tblcard"' in block
 
 
+def test_top_positions_headers_are_shortened_to_fit_the_reports_real_width(html):
+    """Render-fidelity fix: at the report's real in-app width (~780px) the original
+    "Days since restock" / "% of location aged" headers clip the table -- the section
+    sub-heading (and, earlier on the page, the Aging buckets section) already
+    establishes what the days/percent columns mean, so the header text itself can
+    shorten to "Days" / "% of aged" without losing meaning."""
+    idx = html.index("Largest aged positions")
+    thead_end = html.index("</thead>", idx)
+    header_block = html[idx:thead_end]
+    assert "<th>Days</th>" in header_block
+    assert "<th>% of aged</th>" in header_block
+    assert "Days since restock" not in header_block
+    assert "% of location aged" not in header_block
+
+
 def test_ia_css_desc_column_wraps_min_max_width_other_cells_stay_nowrap():
     from app.services.report.report_html import _IA_CSS
 
@@ -534,9 +549,27 @@ def test_ia_css_tblcard_scrolls_horizontally_as_a_last_resort():
 # mock ("▲ +$867.8K · +4.0% vs prior week"), sub-detail line beneath.
 # ---------------------------------------------------------------------------
 def test_kpi_delta_money_and_pct_share_one_bold_span_with_label_on_the_same_line(html):
+    """Render-fidelity fix: "vs prior week" must live INSIDE the same <b> element as
+    the delta (not as a sibling text node in the surrounding flex `.d` div) -- at the
+    report's real width, `.d`'s `flex-wrap: wrap` was splitting the delta and its
+    "vs prior week" label onto two separate lines."""
     import re
 
-    m = re.search(r'<div class="d"><b class="(fav|unf)">(▲|▼) [^<]+ · [^<]+%</b> vs prior week</div>', html)
+    m = re.search(r'<div class="d"><b class="(fav|unf)">(▲|▼) [^<]+ · [^<]+% vs prior week</b></div>', html)
+    assert m is not None
+    # the OLD structure (label as a sibling of </b>) must be gone
+    assert re.search(r"</b> vs prior week</div>", html) is None
+
+
+def test_kpi_aged_share_delta_and_vs_prior_pct_are_also_one_element(html, report):
+    """The aged-share card's delta variant ("vs {prior %}" rather than "vs prior
+    week") is subject to the identical flex-wrap split -- same fix, same structural
+    assertion, on the OTHER `_ia_kpi_delta_html` branch (``kpi.delta_pct is None``)."""
+    import re
+
+    aged_share = next(k for k in report.kpis if k.key == "aged_share")
+    assert aged_share.delta_pct is None  # sanity on the fixture contract
+    m = re.search(r'<div class="d"><b class="(fav|unf)">(▲|▼) [^<]+ pts vs [^<]+%</b></div>', html)
     assert m is not None
 
 
@@ -563,6 +596,20 @@ def test_sources_and_method_renders_the_mocks_labelled_grid(html):
     for label in ("Source", "Snapshots used", "Age", "Queries", "Integrity"):
         assert f"<b>{label}</b>" in tail
     assert "no model generated a figure" in tail
+
+
+def test_sources_and_method_integrity_cell_has_no_stray_semicolon_period(html):
+    """Render-fidelity fix: each entry in ``prov.integrity_checks`` already ends with
+    its own terminal period (see INTEGRITY_CHECKS in inventory_aging.py) -- joining
+    them with "; " and then appending "; no model generated a figure." produced a
+    stray ".; " sequence (e.g. "...on-hand value.; The all-locations row...
+    re-query.; no model..."). Sentences join with a single space instead, each
+    already carrying its own period."""
+    idx = html.index("<b>Integrity</b>")
+    end = html.index("</div>", idx)
+    cell = html[idx:end]
+    assert ".;" not in cell
+    assert "No model generated a figure." in cell or "no model generated a figure." in cell
 
 
 def test_sources_and_method_age_row_spans_full_width(html):

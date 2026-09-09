@@ -309,7 +309,7 @@ _IA_CSS = """
 .ia-kpis .kpi .l { font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--ia-muted);
   font-weight: 600; }
 .ia-kpis .kpi .v { font-size: 26px; font-weight: 800; letter-spacing: -.02em; line-height: 1.15; }
-.ia-kpis .kpi .d { font-size: 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+.ia-kpis .kpi .d { font-size: 11px; display: flex; gap: 8px; flex-wrap: wrap; }
 .ia-kpis .kpi .d b.fav { color: var(--ia-fav); } .ia-kpis .kpi .d b.unf { color: var(--ia-unf); }
 .ia-kpis .kpi .s { font-size: 11px; color: var(--ia-muted); }
 .ia-kpis .kpi svg { width: 100%; height: 34px; margin-top: 4px; color: #444; display: block; }
@@ -1327,7 +1327,12 @@ _IA_TREND_PAD_L, _IA_TREND_PAD_R, _IA_TREND_PAD_T, _IA_TREND_PAD_B = 52.0, 60.0,
 
 _IA_TOP_HEADER = (
     '<tr><th>SKU</th><th class="desc" style="text-align:left">Item</th><th>Category</th>'
-    "<th>Units</th><th>Value $</th><th>Days since restock</th><th>% of location aged</th></tr>"
+    # "Days" / "% of aged" (not the fuller "Days since restock" / "% of location
+    # aged") -- render-fidelity fix: at the report's real in-app width (~780px) the
+    # longer labels clipped the table; the Aging buckets section (rendered just
+    # above this one) already establishes "days since last restock" as the page's
+    # aging metric, so the short form loses no meaning here.
+    "<th>Units</th><th>Value $</th><th>Days</th><th>% of aged</th></tr>"
 )
 
 
@@ -1436,17 +1441,23 @@ def _ia_sparkline_svg(values: tuple[Decimal, ...]) -> str:
 
 
 def _ia_kpi_delta_html(kpi: KpiCard) -> str:
+    """Render-fidelity fix: the "vs prior week" / "vs {prior %}" label lives INSIDE
+    the same `<b>` element as the delta, not as a sibling text node in the
+    surrounding `.d` flex div — `.d` is `display: flex; flex-wrap: wrap`, and at the
+    report's real width that was splitting the delta and its label onto two lines.
+    One element means flexbox has nothing left to wrap between (see the matching
+    `.ia-kpis .kpi .d` font-size step-down in `_IA_CSS`, just below this function)."""
     cls = "fav" if kpi.favourable else "unf"
     arrow = "▲" if kpi.delta >= 0 else "▼"
     if kpi.delta_pct is not None:
-        main = f"{arrow} {_ia_signed_abbrev_money(kpi.delta)} · {_ia_signed_pct(kpi.delta_pct)}"
-        return f'<div class="d"><b class="{cls}">{main}</b> vs prior week</div>'
+        main = f"{arrow} {_ia_signed_abbrev_money(kpi.delta)} · {_ia_signed_pct(kpi.delta_pct)} vs prior week"
+        return f'<div class="d"><b class="{cls}">{main}</b></div>'
     # The aged-share card (KpiCard.delta_pct is None): the mock shows a point delta
     # plus "vs {prior %}" rather than "vs prior week" — reconstruct the prior share
     # from value/delta rather than adding a field Task 1's AgingReport doesn't carry.
     prior_value = kpi.value - kpi.delta
-    main = f"{arrow} {_ia_pts(kpi.delta)} pts"
-    return f'<div class="d"><b class="{cls}">{main}</b> vs {_ia_pct(prior_value)}</div>'
+    main = f"{arrow} {_ia_pts(kpi.delta)} pts vs {_ia_pct(prior_value)}"
+    return f'<div class="d"><b class="{cls}">{main}</b></div>'
 
 
 def _ia_kpi_html(kpi: KpiCard) -> str:
@@ -1813,8 +1824,13 @@ def _ia_provenance_html(prov: Provenance) -> str:
         queries += f" · executed {_fmt_stamp(prov.executed_at)}"
     if prov.bytes_scanned is not None:
         queries += f" · {escape(_ia_bytes_human(prov.bytes_scanned))} scanned"
-    integrity = escape("; ".join(prov.integrity_checks))
-    integrity = f"{integrity}; no model generated a figure." if integrity else "No model generated a figure."
+    # Each entry in `integrity_checks` already carries its own terminal period (see
+    # INTEGRITY_CHECKS in inventory_aging.py) -- join with a single space, not "; ",
+    # or the trailing period + separator collide into a stray ".;" (render-fidelity
+    # fix: the joined cell used to read "...on-hand value.; The all-locations row...
+    # re-query.; no model generated a figure.").
+    integrity = escape(" ".join(prov.integrity_checks))
+    integrity = f"{integrity} no model generated a figure." if integrity else "No model generated a figure."
     rows = (
         f'<div><b>Source</b> BigQuery <span class="mono">{table}</span></div>'
         f"<div><b>Snapshots used</b> {snaps}</div>"
