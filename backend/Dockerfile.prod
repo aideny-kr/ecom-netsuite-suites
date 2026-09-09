@@ -24,6 +24,24 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends gcc libpq-dev && \
     rm -rf /var/lib/apt/lists/*
 
+# WeasyPrint (backend/app/services/report/report_pdf.py) needs these native
+# libraries to render PDFs — it has no pure-Python fallback for text shaping
+# (pango) or non-PNG/JPEG image decoding (gdk-pixbuf). Same list as the dev
+# backend/Dockerfile; tests/test_dockerfile_prod.py pins the two images to each
+# other so an edit to one cannot silently miss the other (deploy.yml builds THIS
+# file, so a library missing here is a 502 on every POST /reports/{id}/deliver).
+# Explicitly-installed packages survive the `apt-get purge --auto-remove gcc`
+# below — auto-remove only drops packages nothing manually installed depends on.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpango-1.0-0 \
+    libpangoft2-1.0-0 \
+    libcairo2 \
+    libgdk-pixbuf-2.0-0 \
+    libffi-dev \
+    shared-mime-info \
+    fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install Python dependencies
 COPY backend/pyproject.toml backend/scripts/assert_dependency_ceilings.py ./
 RUN pip install --no-cache-dir . && \
@@ -115,6 +133,13 @@ EXPOSE 8000
 # while the dev image runs 4, so leaving it to the default silently mis-scaled
 # every production ceiling. Pinned by tests/test_worker_concurrency_config.py.
 ENV WEB_CONCURRENCY=2
+
+# appuser has HOME=/nonexistent, so fontconfig (driven by WeasyPrint/pango for every
+# PDF) has nowhere to write its font cache: it logs "Fontconfig error: No writable
+# cache directories" repeatedly and re-scans the font dirs on each process start.
+# Point the XDG cache at /tmp (writable) so the scan happens once per container.
+# Pinned by tests/test_dockerfile_prod.py.
+ENV XDG_CACHE_HOME=/tmp/.cache
 
 # Default: run FastAPI with production settings
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]

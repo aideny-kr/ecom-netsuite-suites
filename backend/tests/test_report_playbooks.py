@@ -24,19 +24,244 @@ from app.services.report.playbooks import (
     compose_playbook_report,
     normalize_period,
     prior_period,
+    rebuild_playbook_spec,
     trailing_periods,
     yoy_period,
 )
 from app.services.report.refresh_service import RefreshError
 from tests.conftest import create_test_tenant, create_test_user
 from tests.fixtures import statement_fixture as fx
+from tests.report.test_inventory_aging import _full_fixture
 
 
 def test_catalog_lists_three_statement_playbooks_with_period_param():
-    assert set(PLAYBOOKS) == {"income_statement", "balance_sheet", "trial_balance"}
-    for meta in PLAYBOOKS.values():
+    statement_playbooks = {"income_statement", "balance_sheet", "trial_balance"}
+    assert statement_playbooks <= set(PLAYBOOKS)
+    for key in statement_playbooks:
+        meta = PLAYBOOKS[key]
         assert meta["name"] and meta["description"]
         assert [p["key"] for p in meta["params"]] == ["period"]
+
+
+def test_catalog_includes_inventory_aging_with_locations_param():
+    # Slice 1 (docs/superpowers/specs/2026-09-08-...) added a non-statement playbook
+    # with its own param shape -- it must not collapse the statement-only assertion
+    # above, and must be independently well-formed.
+    assert "inventory_aging" in PLAYBOOKS
+    meta = PLAYBOOKS["inventory_aging"]
+    assert meta["name"] and meta["description"]
+    assert "locations" in [p["key"] for p in meta["params"]]
+
+
+def test_catalog_declares_period_based_flag_per_playbook():
+    """Gate fix: mode="tracking" only makes sense for a playbook with a real
+    accounting period. The three statements declare period_based=True; inventory_aging
+    (a BigQuery snapshot with no period concept) declares False -- the single source
+    of truth compose_playbook_report's tracking-mode refusal reads."""
+    for key in ("income_statement", "balance_sheet", "trial_balance"):
+        assert PLAYBOOKS[key]["period_based"] is True
+    assert PLAYBOOKS["inventory_aging"]["period_based"] is False
+
+
+def test_build_playbook_recipe_for_inventory_aging_uses_bigquery_sources():
+    title, recipe = build_playbook_recipe("inventory_aging", {"locations": ["Acme", "Globex"]})
+    assert title == "Inventory Aging Weekly"
+    assert recipe["schema_version"] == 1
+    assert set(recipe["sources"]) == {"r_items", "r_prior", "r_trend", "r_meta"}
+    for source in recipe["sources"].values():
+        assert source["tool"] == "bigquery_sql"
+        assert source["connection_id"] is None
+    # Task 2 (Slice 1): the ONE "inventory_aging" placeholder section Task 1 left here
+    # is now the seven section TYPES report_html.py actually knows how to render
+    # (report_html.build_inventory_aging_sections' names, final per that task's
+    # interfaces note) -- each still referencing all four sources (result_ids) and the
+    # same params, since the render wiring that turns them into `model`-bearing
+    # sections (a later task, same as before) computes ONE AgingReport from all four
+    # and slices it per section, not per-source. `mid_row` (fix round 1 -- review
+    # finding, major) replaces the separate trend_chart/variance_table entries: the
+    # mock renders those two cards side-by-side in one 2-column row.
+    expected_types = [
+        "watch_items",
+        "kpi_cards",
+        "mid_row",
+        "bucket_table",
+        "top_positions",
+        "highlights",
+        "narrative",
+    ]
+    assert [s["type"] for s in recipe["sections"]] == expected_types
+    for section in recipe["sections"]:
+        assert section["result_ids"] == ["r_items", "r_prior", "r_trend", "r_meta"]
+        assert section["params"] == {"locations": ["Acme", "Globex"]}
+
+
+def test_build_playbook_recipe_for_inventory_aging_carries_the_playbook_key():
+    """Refresh-support follow-up (Requirement 1): recipe_json for a non-statement
+    playbook must carry a top-level "playbook" key naming the playbook + the
+    params it was built with -- refresh_service.refresh_report / this file's own
+    compose_playbook_report branch on its PRESENCE to route to
+    rebuild_playbook_spec instead of the financial_statement-only assemble_spec
+    path. A statement recipe (income_statement/balance_sheet/trial_balance) must
+    NEVER carry this key -- see test_build_income_statement_recipe below, which
+    asserts its absence so the statement path stays untouched byte-for-byte."""
+    _, recipe = build_playbook_recipe("inventory_aging", {"locations": ["Acme", "Globex"]})
+    assert recipe["playbook"] == {"key": "inventory_aging", "params": {"locations": ["Acme", "Globex"]}}
+
+
+def test_build_playbook_recipe_for_inventory_aging_rejects_bad_location():
+    with pytest.raises(ValueError):
+        build_playbook_recipe("inventory_aging", {"locations": ["O'Brien Depot"]})
+
+
+def _table_result(rows: list[dict]) -> str:
+    """A list[dict] fixture (test_inventory_aging's own row shape) rendered as the
+    ``{"columns": [...], "rows": [[...], ...]}`` JSON string a real bigquery_sql
+    tool call returns -- rows POSITIONAL, matching ia.rows_from_table_payload's
+    zip contract."""
+    columns = list(rows[0].keys()) if rows else []
+    return json.dumps({"columns": columns, "rows": [[row[c] for c in columns] for row in rows]})
+
+
+def _patch_bigquery_executor(monkeypatch):
+    """Fake ``execute_tool_call`` keyed by the exact SQL text a bigquery_sql source
+    carries (the only thing that distinguishes r_items/r_prior/r_trend/r_meta —
+    unlike the statement fixtures' report_type/period, these sources share no
+    other params) -- built from the SAME recipe the assertions check against, so
+    a test can never accidentally serve the wrong rid's canned rows."""
+    payloads, params = _full_fixture()
+    _, recipe = build_playbook_recipe("inventory_aging", params)
+    by_query = {recipe["sources"][rid]["params"]["query"]: _table_result(payloads[rid]) for rid in payloads}
+    calls: list[dict] = []
+
+    async def fake_execute(tool_name, tool_input, tenant_id, actor_id, correlation_id, db, **kw):
+        calls.append({"tool": tool_name, "params": tool_input})
+        return by_query[tool_input["query"]]
+
+    monkeypatch.setattr("app.services.chat.tools.execute_tool_call", fake_execute)
+    return calls, recipe, params
+
+
+async def test_compose_playbook_report_composes_inventory_aging_headlessly(db, monkeypatch):
+    """Requirement 3: compose_playbook_report now has a rebuild hook for
+    inventory_aging (playbooks.rebuild_playbook_spec) -- it dispatches the same
+    four bigquery_sql sources through the same dispatcher refresh uses (no LLM),
+    computes the AgingReport, renders it with Task 2's section builders, and
+    stores the report WITH the recipe (Requirement 4's has_recipe flip)."""
+    tenant = await create_test_tenant(db, name="InventoryAgingWiredCorp")
+    user, _ = await create_test_user(db, tenant)
+    calls, _recipe, params = _patch_bigquery_executor(monkeypatch)
+
+    report = await compose_playbook_report(
+        db,
+        playbook_key="inventory_aging",
+        params=params,
+        tenant_id=tenant.id,
+        actor_id=user.id,
+    )
+
+    assert len(calls) == 4
+    assert report.title == "Inventory Aging Weekly"
+    assert report.recipe_json is not None
+    assert report.recipe_json["playbook"] == {"key": "inventory_aging", "params": params}
+    assert len(report.recipe_json["sources"]) == 4
+    assert "Watch items" in report.rendered_html
+    assert "<h1>Inventory Aging — Week of " in report.rendered_html
+    assert json.dumps(report.spec_json)  # persisted spec is actually JSON-safe
+
+
+async def test_compose_playbook_report_inventory_aging_fails_closed_on_a_source_failure(db, monkeypatch):
+    """The same required-rid fail-closed contract every other playbook gets:
+    compute() needs all four sources, so every one of them is required — a
+    single tool failure must fail the WHOLE compose, never persist a report."""
+    tenant = await create_test_tenant(db, name="InventoryAgingSourceFailCorp")
+    user, _ = await create_test_user(db, tenant)
+    _, _recipe, params = _patch_bigquery_executor(monkeypatch)
+
+    async def failing_execute(tool_name, tool_input, tenant_id, actor_id, correlation_id, db, **kw):
+        return json.dumps({"error": True, "message": "bigquery unavailable"})
+
+    monkeypatch.setattr("app.services.chat.tools.execute_tool_call", failing_execute)
+
+    with pytest.raises(RefreshError):
+        await compose_playbook_report(
+            db, playbook_key="inventory_aging", params=params, tenant_id=tenant.id, actor_id=user.id
+        )
+
+    rows = (await db.execute(select(Report).where(Report.tenant_id == tenant.id))).scalars().all()
+    assert rows == []
+
+
+async def test_compose_playbook_inventory_aging_tracking_mode_refused(db, monkeypatch):
+    """Gate fix: inventory_aging has no accounting period at all -- mode="tracking"
+    used to silently overwrite params with {"period": closed.name} (dropping
+    locations/compare_days/trend_weeks entirely) and persist Report.period=None, so
+    the rolling-period sweep never saw the report as covered and inserted a new one
+    every cycle. compose_playbook_report must refuse mode="tracking" for a
+    non-period-based playbook with a clear ValueError -- BEFORE any period
+    resolution, any tool dispatch, or any params mutation."""
+    tenant = await create_test_tenant(db, name="InventoryAgingTrackingRefusedCorp")
+    user, _ = await create_test_user(db, tenant)
+    calls, _recipe, params = _patch_bigquery_executor(monkeypatch)
+    original_params = dict(params)
+
+    with pytest.raises(ValueError, match="tracking"):
+        await compose_playbook_report(
+            db,
+            playbook_key="inventory_aging",
+            params=params,
+            tenant_id=tenant.id,
+            actor_id=user.id,
+            mode="tracking",
+        )
+
+    assert calls == []  # refused before any source dispatch
+    assert params == original_params  # never overwritten with {"period": ...}
+    rows = (await db.execute(select(Report).where(Report.tenant_id == tenant.id))).scalars().all()
+    assert rows == []
+
+
+def test_rebuild_playbook_spec_raises_501_for_a_playbook_with_no_rebuild_hook():
+    """Requirement 3: "keep 501 only for playbooks without one" — any playbook_key
+    other than the ones with a registered rebuild hook fails CLEANLY (a
+    RefreshError, never an unhandled KeyError/AttributeError deep inside
+    inventory_aging.compute for a shape this function doesn't know)."""
+    with pytest.raises(RefreshError) as exc:
+        rebuild_playbook_spec("some_future_playbook", {}, {})
+    assert exc.value.status_code == 501
+
+
+def test_rebuild_playbook_spec_builds_the_aging_report_and_method_provenance():
+    payloads, params = _full_fixture()
+    table_payloads = {
+        rid: {"columns": list(rows[0]), "rows": [list(r.values()) for r in rows]} for rid, rows in payloads.items()
+    }
+
+    spec, method_provenance = rebuild_playbook_spec(
+        "inventory_aging", params, table_payloads, composed_at="2026-09-08T13:05:00+00:00"
+    )
+
+    assert spec["title"].startswith("Inventory Aging — Week of ")
+    assert [s["type"] for s in spec["sections"]][:2] == ["report_head", "watch_items"]
+    assert any(entry["label"] == "BigQuery inventory snapshot" for entry in method_provenance)
+
+
+def test_rebuild_playbook_spec_fails_closed_on_a_truncated_source():
+    """Gate fix #8: rebuild_playbook_spec is the refresh/headless-compose seam both
+    playbooks.compose_playbook_report and refresh_service.refresh_report route an
+    inventory_aging recipe through -- a source's raw payload reporting
+    truncated=True must fail the WHOLE rebuild closed (RefreshError, never a
+    report built from a partial row set) rather than silently pass truncated rows
+    into compute()."""
+    payloads, params = _full_fixture()
+    table_payloads = {
+        rid: {"columns": list(rows[0]), "rows": [list(r.values()) for r in rows]} for rid, rows in payloads.items()
+    }
+    table_payloads["r_items"]["truncated"] = True
+
+    with pytest.raises(RefreshError) as exc:
+        rebuild_playbook_spec("inventory_aging", params, table_payloads, composed_at="2026-09-08T13:05:00+00:00")
+    assert exc.value.status_code == 502
+    assert "r_items" in exc.value.detail
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +426,11 @@ def test_build_income_statement_recipe():
             "compare": {"prior": "r2", "yoy": "r3", "trend": "r4"},
         }
     ]
+    # Requirement 1 (refresh-support follow-up): a statement recipe carries NO
+    # "playbook" key — refresh_service/compose_playbook_report branch on its
+    # presence, and a statement recipe must keep going through the untouched
+    # financial_statement/assemble_spec path byte-for-byte.
+    assert "playbook" not in recipe
 
 
 @pytest.mark.parametrize("key", ["balance_sheet", "trial_balance"])
@@ -1232,6 +1462,38 @@ async def test_compose_playbook_endpoint_tracking_unresolved_period_is_400_namin
     assert exc.value.detail
     assert "no_closed_period" not in exc.value.detail
     assert "NO_CLOSED_PERIOD" not in exc.value.detail
+
+
+async def test_compose_playbook_endpoint_inventory_aging_tracking_mode_is_400(db, monkeypatch):
+    """Gate fix, endpoint layer: mode="tracking" for a non-period-based playbook
+    reaches the endpoint's existing `except ValueError -> 400` branch, same shape as
+    the unresolved-period 400 above -- no new endpoint code needed, only the service
+    refusing correctly, BEFORE ever attempting to resolve a NetSuite closed period
+    (there is none to resolve for a BigQuery-only playbook)."""
+    from app.api.v1.reports import PlaybookComposeRequest, compose_playbook_endpoint
+
+    tenant = await create_test_tenant(db, name="InventoryAgingEndpointTracking400Corp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_bigquery_executor(monkeypatch)
+    resolver_calls: list = []
+
+    async def spy_resolve(db, tenant_id):
+        resolver_calls.append(tenant_id)
+        raise AssertionError("resolve_last_closed_period must not be called for a non-period playbook")
+
+    monkeypatch.setattr("app.services.report.period_resolver.resolve_last_closed_period", spy_resolve)
+
+    with pytest.raises(HTTPException) as exc:
+        await compose_playbook_endpoint(
+            "inventory_aging",
+            PlaybookComposeRequest(mode="tracking"),
+            user=user,
+            db=db,
+        )
+
+    assert exc.value.status_code == 400
+    assert "tracking" in exc.value.detail
+    assert resolver_calls == []
 
 
 def test_playbook_compose_request_mode_defaults_to_period():

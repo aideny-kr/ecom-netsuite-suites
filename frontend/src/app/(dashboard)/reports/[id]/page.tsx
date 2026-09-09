@@ -117,6 +117,32 @@ export default function ReportViewPage() {
         {stampSource && (
           <span className="text-[13px] text-muted-foreground whitespace-nowrap">Data as of {fmtStamp(stampSource)}</span>
         )}
+        {/* Task 6 (Slice 1): shows only once a Drive delivery has actually succeeded
+            (delivery_json is written atomically, never partially — see
+            report_delivery.py) — no delivery ever happened, or the last attempt
+            failed, both render nothing rather than a stale/misleading link. */}
+        {report?.delivery_json && (
+          <span className="text-[13px] text-muted-foreground whitespace-nowrap">
+            Delivered to Drive ·{" "}
+            <a
+              href={report.delivery_json.pdf.url}
+              target="_blank"
+              rel="noreferrer"
+              className="underline hover:text-foreground"
+            >
+              PDF
+            </a>{" "}
+            ·{" "}
+            <a
+              href={report.delivery_json.xlsx.url}
+              target="_blank"
+              rel="noreferrer"
+              className="underline hover:text-foreground"
+            >
+              XLSX
+            </a>
+          </span>
+        )}
         {actionMsg && <span className="text-[13px] text-destructive">{actionMsg}</span>}
         <div className="ml-auto flex items-center gap-2">
           {versions && versions.length > 1 && (

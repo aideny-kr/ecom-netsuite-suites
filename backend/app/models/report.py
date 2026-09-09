@@ -59,6 +59,12 @@ class Report(Base):
     period: Mapped[str | None] = mapped_column(Text, nullable=True)
     published_drive_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Task 5 (Drive delivery, migration 099): the full delivery receipt —
+    # {pdf: {file_id, url}, xlsx: {file_id, url}, folder_id, period_key, delivered_at} —
+    # written ONLY on a successful deliver_report_to_drive() call, atomically alongside
+    # published_drive_url/published_at. NULL = never delivered, or the last delivery
+    # attempt failed (a failed delivery never partially writes this column).
+    delivery_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
