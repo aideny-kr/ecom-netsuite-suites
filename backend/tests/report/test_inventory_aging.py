@@ -579,8 +579,11 @@ def test_narrative_paragraph2_two_locations_both_worsening_no_location_improved(
 def test_narrative_paragraph2_one_improving_one_worsening_both_named():
     # Aphex: aged value -5000 (the only improver) -> "improved the most". Byte:
     # share +20.0pts (the only worsener, Aphex's own share delta is -10pts, not
-    # a worsening candidate) -> "moved the other way". Distinct locations, so
-    # both clauses render with no dedup.
+    # a worsening candidate) -> "moved the other way". Aphex also happens to be
+    # the largest-by-value location (50000 vs Byte's 40000), i.e. the lead --
+    # so (fix round 2) its "carries X%" and "improved the most" clauses combine
+    # into one "and"-joined sentence rather than two separate ones; Byte is a
+    # distinct location so its clause is unaffected.
     payloads, params = _narrative_fixture(
         [
             ("Aphex", 40000, 10000, 50000, 15000),
@@ -589,10 +592,37 @@ def test_narrative_paragraph2_one_improving_one_worsening_both_named():
     )
     report = ia.compute(payloads, params)
     p2 = report.narrative.paragraph_2
-    assert "Aphex improved the most" in p2
+    assert "Aphex carries" in p2
+    assert "and improved the most" in p2
     assert "Byte moved the other way" in p2
     assert "No location improved this week." not in p2
     assert "No location worsened this week." not in p2
+
+
+def test_narrative_paragraph2_lead_and_improved_same_location_combined_with_and():
+    # Fix-round-2 regression (review finding): when the value leader ("carries
+    # X% of the on-hand value") is ALSO the biggest improver, the two clauses
+    # must combine into one sentence with "and" -- matching the mock's real-data
+    # sentence "Dimerco carries 89.7% of the on-hand value and improved the
+    # most: ..." -- instead of two back-to-back sentences that repeat the same
+    # location's name ("Dimerco carries ... Dimerco improved ..."). Reproduces
+    # the finding's own fixture almost verbatim: Dimerco is both the larger
+    # on-hand-value location AND the sole improver; Panurgy is the sole
+    # worsener, a distinct location, so its clause is unaffected.
+    payloads, params = _narrative_fixture(
+        [
+            ("Dimerco", 300000, 20000, 350000, 30000),
+            ("Panurgy", 40000, 10000, 60000, 4000),
+        ]
+    )
+    report = ia.compute(payloads, params)
+    p2 = report.narrative.paragraph_2
+    assert "Dimerco carries" in p2
+    assert "and improved the most: aged value fell" in p2
+    assert "Dimerco carries" not in p2.split("and improved the most", 1)[1]
+    # No back-to-back "Dimerco ... Dimerco" as two separate sentences.
+    assert "on-hand value. Dimerco improved" not in p2
+    assert "Panurgy moved the other way" in p2
 
 
 def test_narrative_paragraph2_improved_clause_uses_the_aged_buckets_wording():
@@ -606,7 +636,11 @@ def test_narrative_paragraph2_improved_clause_uses_the_aged_buckets_wording():
     # (`"with no change in the number of aged SKUs"`), which carries no bucket
     # noun at all. Give Aphex (the only improver) a nonzero SKU delta --
     # prior skus_90p=3 vs the fixture's fixed current aged90_skus=1 -> delta=-2
-    # -- so the real "N SKUs left ..." branch renders.
+    # -- so the real "N SKUs left ..." branch renders. Aphex is also the lead
+    # (largest on-hand value), so (fix round 2) its clause reads "... and
+    # improved the most: ..." rather than a separate "Aphex improved the
+    # most" sentence -- the wording assertion below only cares about the
+    # bucket noun, which is unaffected by that combination.
     payloads, params = _narrative_fixture(
         [
             ("Aphex", 40000, 10000, 50000, 15000),
@@ -616,7 +650,7 @@ def test_narrative_paragraph2_improved_clause_uses_the_aged_buckets_wording():
     )
     report = ia.compute(payloads, params)
     p2 = report.narrative.paragraph_2
-    assert "Aphex improved the most" in p2
+    assert "and improved the most" in p2
     assert "2 SKUs left the aged buckets" in p2
     assert "the 90+ buckets" not in p2
 
@@ -625,7 +659,9 @@ def test_narrative_paragraph2_three_locations_one_flat_only_two_qualify():
     # Faller improves (aged value -10000), Riser worsens (share +20.0pts),
     # Flatly is exactly flat (delta_value 0, delta_pts 0) -- neither an improver
     # nor a worsener, so it must not headline either clause even though it's a
-    # real third location in the report.
+    # real third location in the report. Faller is also the lead (largest
+    # on-hand value, 100000), so (fix round 2) it gets the combined "carries
+    # X% ... and improved the most" sentence rather than two separate ones.
     payloads, params = _narrative_fixture(
         [
             ("Faller", 90000, 10000, 100000, 20000),
@@ -635,7 +671,8 @@ def test_narrative_paragraph2_three_locations_one_flat_only_two_qualify():
     )
     report = ia.compute(payloads, params)
     p2 = report.narrative.paragraph_2
-    assert "Faller improved the most" in p2
+    assert "Faller carries" in p2
+    assert "and improved the most" in p2
     assert "Riser moved the other way" in p2
     assert "Flatly improved the most" not in p2
     assert "Flatly moved the other way" not in p2
@@ -650,16 +687,21 @@ def test_narrative_paragraph2_same_location_both_extremes_drops_the_worsened_cla
     # harder than the aged value did) -- the same location can't headline both
     # clauses without repeating its own name, so the second ("moved the other
     # way") clause drops to the generic "No location worsened" line while the
-    # first still names Solo.
+    # first still names Solo. Solo is trivially also the lead (the only
+    # location), so (fix round 2) its "carries X%" clause combines with
+    # "improved the most" via "and" rather than two separate sentences.
     payloads, params = _narrative_fixture([("Solo", 7000, 3000, 50000, 4000)])
     report = ia.compute(payloads, params)
     solo = report.locations[0]
     assert solo.aged90_value_delta < 0  # sanity: Solo is the improver
     assert solo.aged90_share_delta_pts > 0  # sanity: Solo is ALSO the worsener
     p2 = report.narrative.paragraph_2
-    assert "Solo improved the most" in p2
+    assert "Solo carries" in p2
+    assert "and improved the most" in p2
     assert "No location worsened this week." in p2
     assert "Solo moved the other way" not in p2
+    # Not two back-to-back sentences repeating the location's name.
+    assert "on-hand value. Solo improved" not in p2
 
 
 # ---------------------------------------------------------------------------

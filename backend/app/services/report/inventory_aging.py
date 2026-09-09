@@ -1010,13 +1010,34 @@ def _narrative(
         most_worsened = None
 
     if most_improved is None:
-        improved_clause = "No location improved this week."
+        improved_detail = None
     else:
-        improved_clause = (
-            f"{most_improved.location} improved the most: aged value fell "
-            f"{_fmt_money(abs(most_improved.aged90_value_delta))} to {_fmt_money(most_improved.aged90_value)} "
-            f"{_sku_delta_clause(most_improved.skus_90p_delta, bucket_noun='the aged buckets')}."
+        improved_detail = (
+            f"aged value fell {_fmt_money(abs(most_improved.aged90_value_delta))} to "
+            f"{_fmt_money(most_improved.aged90_value)} "
+            f"{_sku_delta_clause(most_improved.skus_90p_delta, bucket_noun='the aged buckets')}"
         )
+
+    # The value leader ("carries X% of the on-hand value") and the biggest
+    # improver are often the SAME location (the mock's real-data case: Dimerco
+    # is both) -- rendering them as two consecutive sentences repeats the
+    # location's name back to back ("Dimerco carries ... Dimerco improved
+    # ..."), the same awkward-repetition pattern the improved/worsened pair
+    # above already guards against. When they coincide, fold both into one
+    # "carries X% ... and improved the most: ..." sentence instead, matching
+    # the mock's literal phrasing.
+    if most_improved is not None and most_improved.location == lead.location:
+        lead_clause = (
+            f"{lead.location} carries {_fmt_pct(lead_share_of_total)} of the on-hand value "
+            f"and improved the most: {improved_detail}."
+        )
+        improved_clause = ""
+    else:
+        lead_clause = f"{lead.location} carries {_fmt_pct(lead_share_of_total)} of the on-hand value."
+        if most_improved is None:
+            improved_clause = "No location improved this week."
+        else:
+            improved_clause = f"{most_improved.location} improved the most: {improved_detail}."
 
     if most_worsened is None:
         worsened_clause = "No location worsened this week."
@@ -1029,13 +1050,14 @@ def _narrative(
         )
 
     highest_share = max(locations, key=lambda loc: loc.aged90_share_pct)
-    paragraph_2 = (
-        f"{lead.location} carries {_fmt_pct(lead_share_of_total)} of the on-hand value. "
-        f"{improved_clause} {worsened_clause} {highest_share.location} holds the highest aged "
+    tail = (
+        f"{worsened_clause} {highest_share.location} holds the highest aged "
         f"share of the group, {_fmt_pct(highest_share.aged90_share_pct)}. The 180+ day list across all "
         f"{len(locations)} locations totals {_fmt_money(all_locations.aged180_value)} in "
         f"{all_locations.aged180_skus} SKUs."
     )
+    # improved_clause is "" only when it was folded into lead_clause above.
+    paragraph_2 = f"{lead_clause} {improved_clause + ' ' if improved_clause else ''}{tail}"
     return Narrative(paragraph_1=paragraph_1, paragraph_2=paragraph_2)
 
 
