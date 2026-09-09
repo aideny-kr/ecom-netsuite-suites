@@ -245,6 +245,25 @@ def test_rebuild_playbook_spec_builds_the_aging_report_and_method_provenance():
     assert any(entry["label"] == "BigQuery inventory snapshot" for entry in method_provenance)
 
 
+def test_rebuild_playbook_spec_fails_closed_on_a_truncated_source():
+    """Gate fix #8: rebuild_playbook_spec is the refresh/headless-compose seam both
+    playbooks.compose_playbook_report and refresh_service.refresh_report route an
+    inventory_aging recipe through -- a source's raw payload reporting
+    truncated=True must fail the WHOLE rebuild closed (RefreshError, never a
+    report built from a partial row set) rather than silently pass truncated rows
+    into compute()."""
+    payloads, params = _full_fixture()
+    table_payloads = {
+        rid: {"columns": list(rows[0]), "rows": [list(r.values()) for r in rows]} for rid, rows in payloads.items()
+    }
+    table_payloads["r_items"]["truncated"] = True
+
+    with pytest.raises(RefreshError) as exc:
+        rebuild_playbook_spec("inventory_aging", params, table_payloads, composed_at="2026-09-08T13:05:00+00:00")
+    assert exc.value.status_code == 502
+    assert "r_items" in exc.value.detail
+
+
 # ---------------------------------------------------------------------------
 # Period math — pure calendar helpers over the validated "Mon YYYY" format.
 # ---------------------------------------------------------------------------

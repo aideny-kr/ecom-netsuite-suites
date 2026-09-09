@@ -1195,7 +1195,23 @@ def compute(payloads: dict[str, list[dict]], params: dict[str, Any]) -> AgingRep
 # (compute()'s frozen dataclass result -> JSONB-safe for persistence). Single-
 # sourced here so headless compose and refresh can never diverge on either.
 # ---------------------------------------------------------------------------
-def rows_from_table_payload(payload: dict | None) -> list[dict]:
+class SourceTruncated(Exception):  # noqa: N818 — gate-fix interface name, not a generic Error
+    """A bigquery_sql source's raw tool result reported ``truncated: true`` — its
+    own row-extraction cap (``bigquery_service.execute_query``'s ``max_rows``)
+    silently dropped rows before ``compute()`` ever saw them. Gate fix #8: fail
+    closed rather than build any part of an inventory_aging report (a KPI, bucket
+    total, or top-N list) from a partial row set with no truncation indicator
+    anywhere in the render. ``rid`` (the recipe source id, when the caller has
+    one) is attached purely for a better message — every raise site names it when
+    available."""
+
+    def __init__(self, rid: str | None = None):
+        self.rid = rid
+        suffix = f" (source {rid})" if rid else ""
+        super().__init__(f"BigQuery source result was truncated{suffix} — refusing to build an incomplete report")
+
+
+def rows_from_table_payload(payload: dict | None, *, rid: str | None = None) -> list[dict]:
     """``{"columns": [...], "rows": [[...], ...]}`` (the shape both
     ``refresh_service._execute_sources``/``extract_result_payload`` and the raw
     ``bigquery_sql_execute`` tool result share -- rows POSITIONAL, never dicts) ->
@@ -1204,9 +1220,18 @@ def rows_from_table_payload(payload: dict | None) -> list[dict]:
     result. Tolerates a missing/malformed payload (empty columns/rows, or a
     non-dict altogether) by returning ``[]`` rather than raising -- the caller's
     own required-rid gating (``_execute_sources``) is what decides whether an
-    empty/absent result is fatal, not this converter."""
+    empty/absent result is fatal, not this converter.
+
+    Gate fix #8: raises ``SourceTruncated`` when the payload's OWN ``truncated``
+    flag is true — never silently drops the tool result's truncation signal on
+    the floor the way returning bare (incomplete) rows would. ``rid`` is
+    optional (this function has no rid of its own to fall back on) and is only
+    ever used to make the exception's message name the source; the check itself
+    doesn't need it."""
     if not isinstance(payload, dict):
         return []
+    if payload.get("truncated"):
+        raise SourceTruncated(rid)
     columns = payload.get("columns") or []
     rows = payload.get("rows") or []
     return [dict(zip(columns, row, strict=False)) for row in rows]

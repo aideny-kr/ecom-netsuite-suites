@@ -904,6 +904,23 @@ def test_rows_from_table_payload_tolerates_missing_or_malformed_payload():
     assert ia.rows_from_table_payload(None) == []  # type: ignore[arg-type]
 
 
+def test_rows_from_table_payload_fails_closed_on_a_truncated_source():
+    """Gate fix #8: a BigQuery source's raw tool result reporting truncated=True
+    (its own row extraction cap silently dropped rows before compute() ever saw
+    them) must never pass through as if it were a complete row set -- a KPI,
+    bucket total, or top-N list built from a partial extraction with no
+    truncation indicator anywhere in the render is silently wrong."""
+    payload = {"columns": ["location", "sku"], "rows": [["Acme", "A-1"]], "truncated": True}
+    with pytest.raises(ia.SourceTruncated):
+        ia.rows_from_table_payload(payload)
+
+
+def test_rows_from_table_payload_truncated_error_names_the_source_when_given():
+    with pytest.raises(ia.SourceTruncated) as exc:
+        ia.rows_from_table_payload({"truncated": True}, rid="r_items")
+    assert "r_items" in str(exc.value)
+
+
 def test_json_safe_converts_decimal_date_and_dataclasses_never_through_float():
     payloads, params = _full_fixture()
     report = ia.compute(payloads, params)

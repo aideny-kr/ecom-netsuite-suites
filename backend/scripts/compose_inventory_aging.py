@@ -89,9 +89,19 @@ async def _fetch_payloads(
     ``list[dict]`` rows ``inventory_aging.compute()`` reads (``row["location"]`` etc.).
     Re-establishes tenant RLS context before each dispatch — a tool call earlier in
     the loop may have committed (e.g. a connector token refresh), which clears the
-    prior ``SET LOCAL`` (same reasoning as ``refresh_service._execute_sources``)."""
+    prior ``SET LOCAL`` (same reasoning as ``refresh_service._execute_sources``).
+
+    Gate fix #8: fails closed with ``inventory_aging.SourceTruncated`` (naming the
+    source) when a source's raw result reports ``truncated: true``
+    (``bigquery_service.execute_query``'s own row-extraction cap silently dropped
+    rows) — never silently passes a partial row set through to ``compute()``. The
+    same check ``inventory_aging.rows_from_table_payload`` applies for the
+    refresh/headless-compose-via-refresh-engine path; this script dispatches
+    ``bigquery_sql`` directly rather than through that helper, so it needs its own
+    check against the identical raw-result field."""
     from app.core.database import set_tenant_context
     from app.mcp.tools.bigquery_tools import bigquery_sql_execute
+    from app.services.report.inventory_aging import SourceTruncated
 
     payloads: dict[str, list[dict]] = {}
     for rid, source in sources.items():
@@ -100,6 +110,8 @@ async def _fetch_payloads(
         if not isinstance(result, dict) or result.get("error"):
             message = result.get("message") if isinstance(result, dict) else "malformed result"
             raise RuntimeError(f"source {rid} (bigquery_sql) failed: {message}")
+        if result.get("truncated"):
+            raise SourceTruncated(rid)
         columns = result.get("columns") or []
         rows = result.get("rows") or []
         payloads[rid] = [dict(zip(columns, row, strict=False)) for row in rows]
@@ -199,6 +211,7 @@ async def _run_cli(tenant_id: uuid.UUID, locations: list[str] | None) -> None:
     from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     from app.core.config import settings
+    from app.services.report.inventory_aging import SourceTruncated
 
     database_url = settings.DATABASE_URL_DIRECT or settings.DATABASE_URL
     engine = create_async_engine(database_url, echo=False)
@@ -207,6 +220,13 @@ async def _run_cli(tenant_id: uuid.UUID, locations: list[str] | None) -> None:
         async with session_factory() as db:
             report = await main(tenant_id, locations, db=db)
             print(f"Composed report {report.id} ({report.title!r}) for tenant {tenant_id}")
+    except SourceTruncated as exc:
+        # Gate fix #8: a truncated BigQuery source must end this cron invocation
+        # non-zero (never an unhandled traceback, and never a silent success) so
+        # the scheduler correctly flags the run as FAILED — naming the source, per
+        # the exception's own message.
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
     finally:
         await engine.dispose()
 

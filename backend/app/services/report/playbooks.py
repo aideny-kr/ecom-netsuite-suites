@@ -316,14 +316,24 @@ def rebuild_playbook_spec(
     if playbook_key != "inventory_aging":
         raise RefreshError(501, f"playbook '{playbook_key}' has no rebuild hook — cannot compose/refresh headlessly")
 
-    from app.services.report.inventory_aging import compute, rows_from_table_payload
+    from app.services.report.inventory_aging import SourceTruncated, compute, rows_from_table_payload
     from app.services.report.report_html import (
         build_inventory_aging_provenance,
         build_inventory_aging_sections,
         inventory_aging_title,
     )
 
-    converted = {rid: rows_from_table_payload(payload) for rid, payload in payloads.items()}
+    # Gate fix #8: a truncated source (BigQuery's own row-extraction cap silently
+    # dropped rows) must fail the WHOLE rebuild closed -- never render/persist any
+    # part of the report (a KPI, bucket total, top-N list) built from a partial
+    # row set with no truncation indicator anywhere in the output. Both callers of
+    # this function (playbooks.compose_playbook_report and
+    # refresh_service.refresh_report) already treat RefreshError as the clean,
+    # HTTP-mappable failure shape for this recipe branch.
+    try:
+        converted = {rid: rows_from_table_payload(payload, rid=rid) for rid, payload in payloads.items()}
+    except SourceTruncated as exc:
+        raise RefreshError(502, str(exc)) from exc
     report_data = compute(converted, params)
     sections = build_inventory_aging_sections(report_data, composed_at=composed_at)
     spec = {"title": inventory_aging_title(report_data), "sections": sections}

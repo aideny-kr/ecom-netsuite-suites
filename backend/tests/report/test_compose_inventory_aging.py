@@ -208,3 +208,73 @@ def test_fetch_payloads_converts_columns_rows_into_list_of_dicts(monkeypatch):
         )
     )
     assert result == {"r_items": [{"location": "Acme", "sku": "A-1"}, {"location": "Globex", "sku": "G-1"}]}
+
+
+def test_fetch_payloads_fails_closed_on_a_truncated_bigquery_result(monkeypatch):
+    """Gate fix #8: bigquery_service.execute_query's own row-extraction cap sets
+    truncated=True on the raw tool result when it drops rows -- _fetch_payloads
+    must not silently pass a partial row set through to compute(); it must raise
+    SourceTruncated naming the source id, same as rows_from_table_payload does for
+    the refresh/headless-compose path."""
+    import asyncio
+
+    async def fake_bigquery_sql_execute(params, context):
+        return {"columns": ["location", "sku"], "rows": [["Acme", "A-1"]], "truncated": True}
+
+    monkeypatch.setattr("app.mcp.tools.bigquery_tools.bigquery_sql_execute", fake_bigquery_sql_execute)
+
+    class _FakeSession:
+        async def execute(self, *a, **k):
+            return None
+
+    sources = {"r_items": {"tool": "bigquery_sql", "params": {"query": "SELECT 1"}, "connection_id": None}}
+    with pytest.raises(ia.SourceTruncated) as exc:
+        asyncio.run(
+            compose_inventory_aging._fetch_payloads(
+                _FakeSession(),
+                sources,
+                tenant_id="00000000-0000-0000-0000-000000000000",
+                actor_id=None,
+                correlation_id="test",
+            )
+        )
+    assert "r_items" in str(exc.value)
+
+
+async def test_main_propagates_a_truncated_source_without_persisting_a_report(db, monkeypatch):
+    """Companion to test_main_propagates_a_fetch_failure_without_persisting_a_report
+    above: a truncated source must fail BEFORE compute()/render/persist, exactly
+    like any other fetch failure -- nothing rendered, nothing stored."""
+    tenant = await create_test_tenant(db, name="ComposeAgingTruncated")
+    await set_tenant_context(db, str(tenant.id))
+
+    async def truncated_fetch(db, sources, *, tenant_id, actor_id, correlation_id):
+        raise ia.SourceTruncated("r_items")
+
+    monkeypatch.setattr(compose_inventory_aging, "_fetch_payloads", truncated_fetch)
+
+    with pytest.raises(ia.SourceTruncated, match="r_items"):
+        await compose_inventory_aging.main(tenant.id, ["Acme", "Globex", "Initech"], db=db)
+
+    await set_tenant_context(db, str(tenant.id))
+    rows = (await db.execute(select(Report).where(Report.tenant_id == tenant.id))).scalars().all()
+    assert rows == []
+
+
+async def test_run_cli_exits_non_zero_naming_the_truncated_source(monkeypatch, capsys):
+    """Gate fix #8: the compose script (a scheduled cron invocation) must not crash
+    with an unhandled traceback on a truncated source -- it must exit non-zero,
+    naming the source, so the caller can tell success from a data-quality failure."""
+    import uuid
+
+    async def raising_main(tenant_id, locations, *, db, **kw):
+        raise ia.SourceTruncated("r_items")
+
+    monkeypatch.setattr(compose_inventory_aging, "main", raising_main)
+
+    with pytest.raises(SystemExit) as exc:
+        await compose_inventory_aging._run_cli(uuid.uuid4(), None)
+
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert "r_items" in captured.err
