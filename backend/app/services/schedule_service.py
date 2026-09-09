@@ -29,6 +29,21 @@ class QuotaExceeded(Exception):  # noqa: N818 — interface name from item 5's g
     sync on it."""
 
 
+class NoPlanToRun(Exception):  # noqa: N818 — interface name from item 7's gate-fix brief, not a generic Error
+    """Raised by ``enqueue_run`` when there is no compiled plan to run — the
+    message text matches ``POST /schedules/{id}/run``'s pre-existing 409
+    detail exactly ("No compiled plan to run" / "No pending plan to run"),
+    so the API route's error contract is unchanged after moving the body
+    into this shared function (item 7, gate fix)."""
+
+
+class PlanNotApproved(Exception):  # noqa: N818 — interface name from item 7's gate-fix brief, not a generic Error
+    """Raised by ``enqueue_run`` when the HITL gate blocks a
+    ``use_pending=False`` run against a schedule whose plan is not
+    ``plan_status == "approved"``. Message text matches the API route's
+    pre-existing 409 detail exactly ("Plan is not approved")."""
+
+
 # ---------------------------------------------------------------------------
 # Due computation (Scheduled Jobs platform, Slice 2, spec §B4) — shared by the
 # Beat sweep (`app.workers.tasks.scheduled_jobs.run_due_jobs`, which decides
@@ -155,6 +170,73 @@ async def create_scheduled_job(
         payload={"instruction": body.instruction, "plan_status": "pending_approval", "model": compiled.model},
     )
     return schedule
+
+
+async def enqueue_run(
+    db: AsyncSession,
+    *,
+    schedule: Schedule,
+    tenant_id: uuid.UUID,
+    actor_id: Optional[uuid.UUID],
+    use_pending: bool,
+) -> Job:
+    """The ONE "enqueue a run now" body shared by ``POST /schedules/{id}/run``
+    and the MCP ``schedule.run`` tool's ``execute_run`` (item 7, gate fix) —
+    before this fix, the MCP tool ran the plan's steps INLINE on the chat
+    request's own session, which is exactly the nginx-timeout problem the
+    API route's own Task 5 residual fix solved (a real Inventory Aging run
+    can take minutes) but never carried over to the MCP tool.
+
+    Same two precondition checks as the route, in the same order: a plan
+    must exist (raises `NoPlanToRun`), then — unless `use_pending` — the
+    HITL gate requires `plan_status == "approved"` (raises
+    `PlanNotApproved`). Pre-creates the `jobs` row (`status="pending"`,
+    `parameters["plan"]` a SNAPSHOT of the plan THIS call validated — see
+    the route's own docstring for why: an instruction edit or discard
+    landing between enqueue and the Celery task's execution must not
+    silently change what runs) and audits `jobs.run.enqueued`.
+
+    Only flushes — never commits. The caller (the route, or the MCP handler)
+    must commit BEFORE dispatching the Celery task (`tasks.
+    scheduled_jobs_run_now`): the worker must see the committed row.
+    `recon_approve.py` already commits inside an MCP handler for the same
+    reason — an accepted convention (agent-graph.md #10), not a one-off
+    exception to "service flushes, endpoint commits once".
+    """
+    plan_to_run = schedule.pending_plan_json if use_pending else schedule.plan_json
+    if not plan_to_run or not plan_to_run.get("steps"):
+        raise NoPlanToRun("No compiled plan to run" if not use_pending else "No pending plan to run")
+
+    if not use_pending and schedule.plan_status != "approved":
+        raise PlanNotApproved("Plan is not approved")
+
+    plan_version_used = (schedule.plan_version + 1) if use_pending else schedule.plan_version
+    job = Job(
+        tenant_id=tenant_id,
+        job_type="scheduled_job",
+        status="pending",
+        parameters={
+            "schedule_id": str(schedule.id),
+            "plan_version": plan_version_used,
+            "use_pending": use_pending,
+            "plan": plan_to_run,
+        },
+    )
+    db.add(job)
+    await db.flush()
+
+    await audit_service.log_event(
+        db=db,
+        tenant_id=tenant_id,
+        category="jobs",
+        action="jobs.run.enqueued",
+        actor_id=actor_id,
+        resource_type="schedule",
+        resource_id=str(schedule.id),
+        job_id=job.id,
+        payload={"jobs_id": str(job.id), "use_pending": use_pending},
+    )
+    return job
 
 
 async def list_schedules(db: AsyncSession, tenant_id: uuid.UUID) -> list[Schedule]:

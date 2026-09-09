@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.pipeline import Schedule
+from app.workers.celery_app import celery_app
 
 logger = structlog.get_logger()
 
@@ -187,11 +188,17 @@ async def execute_list(params: dict, **kwargs) -> dict:
 
 
 async def execute_run(params: dict, **kwargs) -> dict:
-    """Run a schedule now (spec §B5: MCP `execute_run` "implemented — no
-    longer a stub"). Delegates to the SAME `run_schedule_now` the API's
-    `POST /schedules/{id}/run` calls — one `jobs` row, replaying whichever
-    plan `use_pending` selects; no LLM call happens here (the agent runs only
-    at compile time)."""
+    """Enqueue one run now (spec §B5: MCP `execute_run` "implemented — no
+    longer a stub"), mirroring `POST /schedules/{id}/run` exactly (item 7,
+    gate fix). This used to run the plan's steps INLINE on the chat
+    request's own session — exactly the nginx-timeout problem the API
+    route's own Task 5 residual fix solved (a real Inventory Aging run can
+    take minutes), never carried over here. Delegates to the SAME
+    `schedule_service.enqueue_run` the route calls — same two precondition
+    checks (plan exists, HITL `plan_status == "approved"` unless
+    `use_pending`), same pre-created `jobs` row with a plan snapshot, same
+    audit event — so the two enqueue paths cannot drift; no LLM call
+    happens here (the agent runs only at compile time)."""
     context = kwargs.get("context", {})
     db: AsyncSession | None = context.get("db")
     tenant_id_raw = context.get("tenant_id")
@@ -215,32 +222,52 @@ async def execute_run(params: dict, **kwargs) -> dict:
     actor_id = _as_uuid(context.get("actor_id"))
     use_pending = bool(params.get("use_pending", False))
 
-    from sqlalchemy.exc import NoResultFound
+    from app.services import schedule_service
 
-    from app.workers.tasks.scheduled_jobs import run_schedule_now
-
-    try:
-        outcome = await run_schedule_now(
-            db,
-            schedule_id,
-            tenant_id=tenant_id,
-            actor_id=actor_id,
-            actor_type="user",
-            use_pending=use_pending,
-        )
-    except NoResultFound:
+    schedule = await schedule_service.get_schedule(db, schedule_id, tenant_id)
+    if schedule is None:
         return {"error": True, "message": f"Schedule not found: {schedule_id}"}
 
+    try:
+        job = await schedule_service.enqueue_run(
+            db,
+            schedule=schedule,
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            use_pending=use_pending,
+        )
+    except schedule_service.NoPlanToRun as exc:
+        return {"error": True, "message": str(exc)}
+    except schedule_service.PlanNotApproved as exc:
+        return {"error": True, "message": str(exc)}
+
+    job_id = job.id
+    # The worker must see the COMMITTED row before its own task starts —
+    # commit here, before dispatching, exactly like the API route (item 7's
+    # own docstring); `recon_approve.py` already commits inside an MCP
+    # handler for the same reason (agent-graph.md #10, accepted convention).
+    await db.commit()
+
+    celery_app.send_task(
+        "tasks.scheduled_jobs_run_now",
+        kwargs={
+            "schedule_id": str(schedule_id),
+            "tenant_id": str(tenant_id),
+            "use_pending": use_pending,
+            "actor_id": str(actor_id) if actor_id else None,
+            "job_id": str(job_id),
+        },
+        queue="sync",
+    )
+
     logger.info(
-        "mcp.schedule.run",
+        "mcp.schedule.run.enqueued",
         schedule_id=str(schedule_id),
         tenant_id=str(tenant_id),
-        reason=outcome.reason,
-        jobs_id=str(outcome.jobs_row_id) if outcome.jobs_row_id else None,
+        jobs_id=str(job_id),
     )
     return {
-        "run_id": str(outcome.jobs_row_id) if outcome.jobs_row_id else None,
-        "jobs_id": str(outcome.jobs_row_id) if outcome.jobs_row_id else None,
+        "jobs_id": str(job_id),
         "schedule_id": str(schedule_id),
-        "reason": outcome.reason,
+        "status": "queued",
     }

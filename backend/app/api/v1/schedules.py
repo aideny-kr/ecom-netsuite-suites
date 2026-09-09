@@ -501,59 +501,28 @@ async def run_schedule(
     executed. `run_schedule_now` replays this snapshot instead — the HITL
     `plan_status` gate and the `plan_version_used` bookkeeping below are
     unaffected, and still read the schedule row live.
+
+    Item 7 (gate fix): the precondition checks + row-creation + audit body
+    now live in `schedule_service.enqueue_run`, shared with the MCP
+    `schedule.run` tool's `execute_run` — this route and that tool cannot
+    drift on the HITL gate or the plan-snapshot behaviour any more.
     """
     schedule = await _get_or_404(db, schedule_id, user.tenant_id)
-    plan_to_run = schedule.pending_plan_json if body.use_pending else schedule.plan_json
-    if not plan_to_run or not plan_to_run.get("steps"):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="No compiled plan to run" if not body.use_pending else "No pending plan to run",
+
+    try:
+        job = await schedule_service.enqueue_run(
+            db,
+            schedule=schedule,
+            tenant_id=user.tenant_id,
+            actor_id=user.id,
+            use_pending=body.use_pending,
         )
-    # HITL gate (review finding): a non-empty `plan_json` is not the same as
-    # a person having approved it — `use_pending=False` must not be able to
-    # run a plan still sitting at `plan_status == "pending_approval"` (e.g.
-    # straight off `POST /schedules`, before anyone has clicked Approve).
-    # `use_pending=True` is exempt on purpose: "Run once with this change"
-    # (spec §B5) previews an edited-but-not-yet-approved `pending_plan_json`
-    # BEFORE approval, by design — `run_schedule_now` enforces the same rule
-    # (see its docstring) so the MCP tool inherits it too.
-    if not body.use_pending and schedule.plan_status != "approved":
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Plan is not approved")
+    except schedule_service.NoPlanToRun as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except schedule_service.PlanNotApproved as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
-    plan_version_used = (schedule.plan_version + 1) if body.use_pending else schedule.plan_version
-    job = Job(
-        tenant_id=user.tenant_id,
-        job_type="scheduled_job",
-        status="pending",
-        parameters={
-            "schedule_id": str(schedule_id),
-            "plan_version": plan_version_used,
-            "use_pending": body.use_pending,
-            # Snapshot of the plan THIS request validated (review finding,
-            # MAJOR): an instruction edit or discard landing between this
-            # enqueue and the Celery task's execution used to silently
-            # change what runs, because `run_schedule_now` re-read
-            # `schedule.plan_json`/`pending_plan_json` LIVE when the task
-            # actually executed. `run_schedule_now` (given `existing_job_id`)
-            # now replays THIS snapshot instead.
-            "plan": plan_to_run,
-        },
-    )
-    db.add(job)
-    await db.flush()
     job_id = job.id
-
-    await audit_service.log_event(
-        db=db,
-        tenant_id=user.tenant_id,
-        category="jobs",
-        action="jobs.run.enqueued",
-        actor_id=user.id,
-        resource_type="schedule",
-        resource_id=str(schedule_id),
-        job_id=job_id,
-        payload={"jobs_id": str(job_id), "use_pending": body.use_pending},
-    )
     await db.commit()
 
     celery_app.send_task(
