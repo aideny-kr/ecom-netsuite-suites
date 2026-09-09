@@ -490,6 +490,109 @@ def test_report_head_without_composed_at_still_carries_the_no_model_line(report)
     assert "Composed" not in head_block
 
 
+# ---------------------------------------------------------------------------
+# Render-polish brief item 4: the "Largest aged positions" table never clips --
+# the Item column wraps (the mock's `.desc`), every other column stays nowrap,
+# and the table sits in an overflow-x:auto wrapper as a last resort.
+# ---------------------------------------------------------------------------
+def test_top_positions_item_column_carries_the_wrap_class(html):
+    idx = html.index("Largest aged positions")
+    table_end = html.index("</table>", idx)
+    block = html[idx:table_end]
+    assert 'class="desc"' in block
+
+
+def test_top_positions_table_sits_in_the_overflow_auto_wrapper(html):
+    idx = html.index("Largest aged positions")
+    block = html[idx : idx + 400]
+    assert 'class="tblcard"' in block
+
+
+def test_ia_css_desc_column_wraps_min_max_width_other_cells_stay_nowrap():
+    from app.services.report.report_html import _IA_CSS
+
+    assert ".tblcard .desc" in _IA_CSS
+    desc_rule = _IA_CSS.split(".tblcard .desc", 1)[1].split("}", 1)[0]
+    assert "white-space: normal !important" in desc_rule
+    assert "min-width: 220px" in desc_rule
+    assert "max-width: 360px" in desc_rule
+    # the plain `td` rule (every OTHER column) stays nowrap -- `.desc` is the only
+    # override.
+    td_rule = _IA_CSS.split(".tblcard td {", 1)[1].split("}", 1)[0]
+    assert "white-space: nowrap" in td_rule
+
+
+def test_ia_css_tblcard_scrolls_horizontally_as_a_last_resort():
+    from app.services.report.report_html import _IA_CSS
+
+    chart_tblcard_rule = _IA_CSS.split(".chart, .tblcard {", 1)[1].split("}", 1)[0]
+    assert "overflow-x: auto" in chart_tblcard_rule
+
+
+# ---------------------------------------------------------------------------
+# Render-polish brief item 5: KPI card delta + label render on one line, as the
+# mock ("▲ +$867.8K · +4.0% vs prior week"), sub-detail line beneath.
+# ---------------------------------------------------------------------------
+def test_kpi_delta_money_and_pct_share_one_bold_span_with_label_on_the_same_line(html):
+    import re
+
+    m = re.search(r'<div class="d"><b class="(fav|unf)">(▲|▼) [^<]+ · [^<]+%</b> vs prior week</div>', html)
+    assert m is not None
+
+
+def test_kpi_sub_detail_renders_beneath_the_delta_line(html, report):
+    kpi = report.kpis[0]
+    idx = html.index('class="kpi"')
+    block = html[idx : html.index("</div>", html.index('class="s"', idx))]
+    d_idx = block.index('class="d"')
+    s_idx = block.index('class="s"')
+    assert d_idx < s_idx  # sub-detail div comes AFTER the delta div, never merged into it
+    assert kpi.sub_detail in block
+
+
+# ---------------------------------------------------------------------------
+# Render-polish brief item 6: "Sources & method" renders as the mock's labelled
+# grid (Source / Snapshots used / Age (full width) / Queries / Integrity) inside
+# THIS module's own .ia-section styling, not the shared generic provenance
+# footer every other report type still uses.
+# ---------------------------------------------------------------------------
+def test_sources_and_method_renders_the_mocks_labelled_grid(html):
+    idx = html.index("Sources &amp; method")
+    tail = html[idx : idx + 2000]
+    assert 'class="ia-prov"' in tail
+    for label in ("Source", "Snapshots used", "Age", "Queries", "Integrity"):
+        assert f"<b>{label}</b>" in tail
+    assert "no model generated a figure" in tail
+
+
+def test_sources_and_method_age_row_spans_full_width(html):
+    idx = html.index("<b>Age</b>")
+    # backtrack to the wrapping <div ...> for this row -- it must carry class="full"
+    div_start = html.rindex("<div", 0, idx)
+    row = html[div_start : html.index(">", div_start) + 1]
+    assert 'class="full"' in row
+
+
+def test_sources_and_method_lives_inside_ia_section_not_the_plain_prov_footer(html):
+    idx = html.index("Sources &amp; method")
+    section_start = html.rfind('<div class="ia-section">', 0, idx)
+    assert section_start != -1
+    # the OLD plain-footer renderer's own class (`.prov`, no `ia-` prefix) never
+    # appears anywhere in the output for an inventory_aging report.
+    assert 'class="prov"' not in html
+
+
+def test_sources_and_method_never_duplicates_even_when_provenance_kwarg_is_also_passed(spec, report):
+    """Production compose/refresh call sites still pass
+    ``build_inventory_aging_provenance(report.provenance)`` as the generic
+    top-level ``provenance=`` kwarg (unmodified call sites, out of this brief's
+    scope) -- the section-embedded grid must be the ONLY "Sources & method"
+    block that renders, never a second copy from the old footer path."""
+    prov = build_inventory_aging_provenance(report.provenance)
+    out = render_report_html(spec, provenance=prov)
+    assert out.count("Sources &amp; method") == 1
+
+
 def test_report_head_model_is_json_native(report):
     """spec_json is persisted as JSONB (compose script's _json_safe) and re-rendered
     from it by scripts/backfill_report_html.py -- the head model must already be

@@ -360,6 +360,16 @@ _IA_CSS = """
 .hl li { font-size: 13px; padding-left: 14px; position: relative; }
 .hl li::before { content: ""; position: absolute; left: 0; top: .55em; width: 7px; height: 7px;
   background: var(--ink); }
+/* Render-polish brief item 6: "Sources & method" as the mock's labelled grid
+   (Source / Snapshots used / Age (full width) / Queries / Integrity) -- this
+   module's own styling, not the shared `.prov` plain-footer class every other
+   report type still uses via `_provenance_html`. */
+.ia-prov { font-size: 12px; color: var(--ia-muted); display: grid;
+  grid-template-columns: 1fr 1fr; gap: 6px 24px; }
+.ia-prov b { color: var(--ink); font-weight: 600; }
+.ia-prov .full { grid-column: 1 / -1; }
+.ia-prov .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+@media (max-width: 900px) { .ia-prov { grid-template-columns: 1fr; } }
 /* Print (design rule #15): a bare <details> (no `open` attribute) collapses its content
    natively in every browser -- board packs need the FULL aged list on paper regardless
    of the on-screen collapse state (spec §A4 "the appendix (full aged list) is appended
@@ -550,6 +560,9 @@ def _section_html(s: dict) -> str:
         return _ia_top_positions_html(model) if model is not None else ""
     if t == "highlights":
         return _ia_highlights_html(s.get("model") or ())
+    if t == "provenance_grid":
+        model = s.get("model")
+        return _ia_provenance_html(model) if model is not None else ""
     if t == "metric_headline":
         foot = ""
         if s.get("definition_version") is not None:
@@ -1768,6 +1781,50 @@ def build_inventory_aging_provenance(prov: Provenance) -> list[dict]:
     return entries
 
 
+def _ia_bytes_human(n: int) -> str:
+    """Human byte count for the "Queries" row's "... scanned" clause (mock:
+    ``1.4 GB``) — same unit-stepping shape as ``_ia_abbrev_money``, base 1024."""
+    v = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if v < 1024 or unit == "GB":
+            return f"{int(v)} B" if unit == "B" else f"{v:.1f} {unit}"
+        v /= 1024
+    return f"{v:.1f} TB"  # pragma: no cover — no realistic single-query scan reaches PB
+
+
+def _ia_provenance_html(prov: Provenance) -> str:
+    """The mock's labelled "Sources & method" grid (render-polish brief item 6):
+    rows Source / Snapshots used / Age (full width) / Queries / Integrity, each a
+    bold-labelled ``<div>`` cell, rendered inside THIS module's own ``.ia-section``
+    styling (the ``.ia-prov`` grid) — never the shared ``_provenance_html`` plain-
+    footer renderer every OTHER report type still uses unmodified. Reads the SAME
+    ``Provenance`` fields Task 1's ``compute()`` already produces (source /
+    snapshots_used / age_definition / query_count / executed_at / bytes_scanned /
+    integrity_checks) — no new data invented for this row layout, per the brief's
+    "keep the existing provenance data behind it"."""
+    table = escape(prov.source.strip("`"))
+    snaps = "; ".join(
+        f"{escape(loc)}: {first.isoformat()}–{last.isoformat()} ({count} snapshots)"
+        for loc, (first, last, count) in sorted(prov.snapshots_used.items())
+    )
+    age = escape(prov.age_definition)
+    queries = f'{prov.query_count} · <span class="mono">bigquery_sql</span>'
+    if prov.executed_at:
+        queries += f" · executed {_fmt_stamp(prov.executed_at)}"
+    if prov.bytes_scanned is not None:
+        queries += f" · {escape(_ia_bytes_human(prov.bytes_scanned))} scanned"
+    integrity = escape("; ".join(prov.integrity_checks))
+    integrity = f"{integrity}; no model generated a figure." if integrity else "No model generated a figure."
+    rows = (
+        f'<div><b>Source</b> BigQuery <span class="mono">{table}</span></div>'
+        f"<div><b>Snapshots used</b> {snaps}</div>"
+        f'<div class="full"><b>Age</b> {age}</div>'
+        f"<div><b>Queries</b> {queries}</div>"
+        f"<div><b>Integrity</b> {integrity}</div>"
+    )
+    return f'<div class="ia-section"><h2>Sources &amp; method</h2><div class="ia-prov">{rows}</div></div>'
+
+
 # The set of section `type`s this module owns in `_section_html` — used by
 # `render_report_html` to decide whether `_IA_CSS` needs to ship (same additive +
 # conditional pattern as `_FS_CSS`/`has_financial_statement` above: a report with no
@@ -1784,6 +1841,7 @@ _IA_SECTION_TYPES = frozenset(
         "bucket_table",
         "top_positions",
         "highlights",
+        "provenance_grid",
     }
 )
 
@@ -1853,7 +1911,17 @@ def build_inventory_aging_sections(report: AgingReport, *, composed_at: str | No
     side-by-side in one 2-column row (`.mid`), not as separate full-width stacked
     cards, so `_ia_mid_row_html` renders both from a single `model` (the whole
     report — each card only needs its own slice, same as the standalone
-    `trend_chart`/`variance_table` types those two renderer functions still serve)."""
+    `trend_chart`/`variance_table` types those two renderer functions still serve).
+
+    ``provenance_grid`` (render-polish brief item 6) is the mock's labelled
+    "Sources & method" grid, appended LAST (matching the mock's own placement,
+    after Narrative) — it renders from `report.provenance` directly via
+    `_ia_provenance_html`, so `render_report_html` suppresses its OWN generic
+    top-level `provenance=` footer for any spec whose sections include an
+    inventory_aging block (see `has_inventory_aging` there): the two would
+    otherwise render the SAME heading twice for the production compose/refresh
+    call sites, which still build and pass `build_inventory_aging_provenance`'s
+    list unchanged."""
     return [
         {"type": "report_head", "model": build_inventory_aging_head(report, composed_at=composed_at)},
         {"type": "watch_items", "model": report.watch_items},
@@ -1863,6 +1931,7 @@ def build_inventory_aging_sections(report: AgingReport, *, composed_at: str | No
         {"type": "top_positions", "model": report},
         {"type": "highlights", "model": report.highlights},
         {"type": "narrative", "model": report.narrative},
+        {"type": "provenance_grid", "model": report.provenance},
     ]
 
 
@@ -1895,7 +1964,24 @@ def render_report_html(
             parts.append(f"Data refreshed {_fmt_stamp(freshness['refreshed_at'])}")
         if parts:
             stamp_html = f'<div class="stamp">{" · ".join(parts)}</div>'
-    method_html = _provenance_html(provenance) if provenance else ""
+    # Task 2 (Slice 1) — a report with no inventory_aging section pays nothing for
+    # _IA_CSS. The bespoke inventory_aging "narrative" section (see _section_html)
+    # reuses the SHARED "narrative" type name, so it's detected by `model` presence
+    # rather than by type alone (a plain markdown narrative section must never pull
+    # this CSS in). Computed BEFORE `method_html` (below) because that gate needs it
+    # too — see the comment there.
+    has_inventory_aging = any(
+        sec.get("type") in _IA_SECTION_TYPES or (sec.get("type") == "narrative" and "model" in sec)
+        for sec in spec.get("sections", [])
+    )
+    # Render-polish brief item 6: an inventory_aging spec's OWN "Sources & method"
+    # renders from its `provenance_grid` section (build_inventory_aging_sections
+    # always appends one) — never ALSO from this generic top-level `provenance=`
+    # footer, or the heading would render twice. The production compose/refresh
+    # call sites still build and pass `build_inventory_aging_provenance`'s list
+    # unchanged (out of this brief's scope to touch); this gate is what keeps that
+    # a no-op instead of a duplicate block, with zero changes at those call sites.
+    method_html = "" if has_inventory_aging else (_provenance_html(provenance) if provenance else "")
     css = _CSS % {"accent": escape(accent_hsl), "accent_ink": _accent_ink(accent_hsl)}
     # Additive + conditional: only reports that actually use a financial_statement
     # section pay for its CSS — see _FS_CSS's docstring-comment for why this must stay a
@@ -1903,15 +1989,6 @@ def render_report_html(
     has_financial_statement = any(sec.get("type") == "financial_statement" for sec in spec.get("sections", []))
     if has_financial_statement:
         css += _FS_CSS
-    # Task 2 (Slice 1) — same additive + conditional pattern: a report with no
-    # inventory_aging section pays nothing for _IA_CSS. The bespoke inventory_aging
-    # "narrative" section (see _section_html) reuses the SHARED "narrative" type name,
-    # so it's detected by `model` presence rather than by type alone (a plain markdown
-    # narrative section must never pull this CSS in).
-    has_inventory_aging = any(
-        sec.get("type") in _IA_SECTION_TYPES or (sec.get("type") == "narrative" and "model" in sec)
-        for sec in spec.get("sections", [])
-    )
     if has_inventory_aging:
         css += _IA_CSS
     # EYEBALL-GATE FIX (F1, round 3): statement pages get a wider canvas (.report--wide,
