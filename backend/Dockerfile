@@ -2,6 +2,22 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+# WeasyPrint (backend/app/services/report/report_pdf.py) needs these native
+# libraries to render PDFs — it has no pure-Python fallback for text shaping
+# (pango) or non-PNG/JPEG image decoding (gdk-pixbuf). Installed before the
+# Python deps so this layer is cached independently of pyproject.toml churn.
+# See docs/superpowers/specs/2026-09-08-scheduled-jobs-and-inventory-aging-design.md
+# §A4 and .claude/rules/deploy.md (Dockerfile changes are T2 infra).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpango-1.0-0 \
+    libpangoft2-1.0-0 \
+    libcairo2 \
+    libgdk-pixbuf-2.0-0 \
+    libffi-dev \
+    shared-mime-info \
+    fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY pyproject.toml scripts/assert_dependency_ceilings.py ./
 # Same ceiling assertion as Dockerfile.prod — see the long comment there for
 # why an independent check is needed rather than trusting the pin alone. This
