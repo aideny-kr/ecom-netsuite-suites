@@ -310,6 +310,117 @@ async def test_redelivery_of_the_same_report_and_period_still_updates_in_place(d
     assert second.xlsx_file_id == first.xlsx_file_id
 
 
+async def test_identity_override_finds_the_same_folder_and_files_across_different_reports(db, monkeypatch):
+    """Item 9 (gate fix): a scheduled job's Drive identity is the SCHEDULE,
+    not the report row it happens to compose each run — inventory_aging
+    composes a NEW `Report` every run (`mode="period"` always, since
+    `period_based=False` refuses tracking/series mode), so the DEFAULT
+    report/series-keyed identity created a new Drive folder every Monday and
+    duplicated files on any retry. Passing `identity` overrides that default
+    entirely: two DIFFERENT report ids sharing the same `identity` must
+    resolve to the SAME folder and the SAME files (find, then update in
+    place), never a duplicate."""
+    tenant = await create_test_tenant(db, name="ScheduleIdentityCorp")
+    user, _ = await create_test_user(db, tenant)
+    await set_tenant_context(db, str(tenant.id))
+    report_a = await _seed_report(db, tenant, user, title="Inventory Aging Weekly")
+    report_b = await _seed_report(db, tenant, user, title="Inventory Aging Weekly")
+    await _add_sheets_connector(db, tenant.id)
+
+    calls: list[str] = []
+    _patch_renderers(monkeypatch, calls)
+    client = FakeDriveClient(calls)
+    _patch_drive_client(monkeypatch, client)
+
+    schedule_id = "11111111-1111-1111-1111-111111111111"
+    identity = report_delivery.DeliveryIdentity(
+        folder_props={"schedule_id": schedule_id},
+        file_props={"schedule_id": schedule_id, "period_key": "2026-09-08"},
+        lock_key=f"schedule:{schedule_id}",
+        idempotency_key=f"job-delivery:{schedule_id}:2026-09-08",
+    )
+
+    result_a = await report_delivery.deliver_report_to_drive(
+        db,
+        tenant_id=tenant.id,
+        report_id=report_a.id,
+        actor_type="user",
+        actor_id=user.id,
+        period_key="2026-09-08",
+        identity=identity,
+    )
+    await set_tenant_context(db, str(tenant.id))
+    result_b = await report_delivery.deliver_report_to_drive(
+        db,
+        tenant_id=tenant.id,
+        report_id=report_b.id,
+        actor_type="user",
+        actor_id=user.id,
+        period_key="2026-09-08",
+        identity=identity,
+    )
+
+    assert result_a.folder_id == result_b.folder_id
+    assert result_a.pdf_file_id == result_b.pdf_file_id
+    assert result_a.xlsx_file_id == result_b.xlsx_file_id
+    # Folder name stays the report's own title (cosmetic only); file names
+    # stay "<title> — <period_key>.<ext>" — only the appProperties identity
+    # changes. Two deliveries, but only ONE folder actually created (the
+    # second finds it by identity) — "Reports" itself is also created once.
+    assert client.calls.count("create_folder") == 2
+
+
+async def test_identity_override_uses_its_own_lock_key_not_report_id(db, monkeypatch):
+    """Item 9 (gate fix): the per-delivery advisory lock must serialize on
+    the SCHEDULE's identity when `identity` is given, not `report_id` — two
+    different reports delivered under the SAME schedule identity must
+    serialize against EACH OTHER, which a report_id-keyed lock cannot do."""
+    tenant = await create_test_tenant(db, name="ScheduleLockCorp")
+    user, _ = await create_test_user(db, tenant)
+    await set_tenant_context(db, str(tenant.id))
+    report = await _seed_report(db, tenant, user)
+    await _add_sheets_connector(db, tenant.id)
+
+    calls: list[str] = []
+    _patch_renderers(monkeypatch, calls)
+    client = FakeDriveClient(calls)
+    _patch_drive_client(monkeypatch, client)
+
+    schedule_id = "22222222-2222-2222-2222-222222222222"
+    identity = report_delivery.DeliveryIdentity(
+        folder_props={"schedule_id": schedule_id},
+        file_props={"schedule_id": schedule_id, "period_key": "2026-09-08"},
+        lock_key=f"schedule:{schedule_id}",
+        idempotency_key=f"job-delivery:{schedule_id}:2026-09-08",
+    )
+
+    real_execute = db.execute
+    lock_params: list[dict] = []
+
+    async def spy_execute(stmt, *args, **kwargs):
+        sql_text = str(getattr(stmt, "text", stmt))
+        if "pg_advisory_xact_lock" in sql_text:
+            params = args[0] if args else kwargs.get("parameters") or {}
+            lock_params.append(dict(params))
+        return await real_execute(stmt, *args, **kwargs)
+
+    monkeypatch.setattr(db, "execute", spy_execute)
+
+    await report_delivery.deliver_report_to_drive(
+        db,
+        tenant_id=tenant.id,
+        report_id=report.id,
+        actor_type="user",
+        actor_id=user.id,
+        period_key="2026-09-08",
+        identity=identity,
+    )
+
+    assert len(lock_params) == 1
+    assert lock_params[0].get("report_id") is None
+    assert identity.lock_key in lock_params[0].values()
+
+
 async def test_deliver_report_to_drive_takes_a_per_report_advisory_lock_before_any_drive_call(db, monkeypatch):
     """Gate fix #7: two concurrent deliveries of the SAME report can each run
     _upload_or_update's find-then-create sequence for the folder and both files —

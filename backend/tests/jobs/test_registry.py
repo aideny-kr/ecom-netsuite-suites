@@ -251,6 +251,16 @@ async def test_drive_upload_uses_the_runs_period_key_for_delivery_and_idempotenc
     assert artifact["pdf_file_id"] == "pdf1"
     assert spec.idempotency(ctx, params) == f"job:{schedule_id}:period:2026-09-14"
 
+    # Item 9 (gate fix): the executor now passes a schedule-keyed
+    # DeliveryIdentity — inventory_aging composes a NEW Report every run
+    # (mode="period"), so keying Drive identity on the report row would
+    # create a new Drive folder every Monday and duplicate files on retry.
+    identity = captured["identity"]
+    assert identity.folder_props == {"schedule_id": str(schedule_id)}
+    assert identity.file_props == {"schedule_id": str(schedule_id), "period_key": "2026-09-14"}
+    assert identity.lock_key == f"schedule:{schedule_id}"
+    assert identity.idempotency_key == f"job-delivery:{schedule_id}:2026-09-14"
+
 
 @pytest.mark.asyncio
 async def test_drive_upload_without_a_run_period_is_a_step_execution_error():

@@ -266,17 +266,17 @@ async def _report_build_xlsx_executor(ctx: StepContext, params: dict) -> dict:
 
 async def _drive_upload_executor(ctx: StepContext, params: dict) -> dict:
     """Delegates the entire delivery to ``deliver_report_to_drive`` — the one
-    function that already owns folder/file idempotency (keyed by report +
-    period, found-or-created by Drive ``appProperties``), the started/completed
-    audit pair, and the per-report advisory lock against a concurrent delivery
-    of the same report. It re-derives PDF/Excel bytes from the report itself
-    rather than accepting the bytes ``report.render_pdf``/``report.build_xlsx``
-    already produced — a deliberate seam, not an oversight: reimplementing
-    Drive's find-or-update-by-identity + locking here to save one re-render
-    would duplicate exactly the machinery this executor exists to reuse
-    correctly. The earlier render/xlsx steps still run and their artifacts are
-    attached to the job's own run record for provenance, matching the binding
-    mock's step 3 guard line ("local artifacts, attached to the run").
+    function that already owns folder/file idempotency (found-or-created by
+    Drive ``appProperties``), the started/completed audit pair, and a
+    per-delivery advisory lock against a concurrent delivery. It re-derives
+    PDF/Excel bytes from the report itself rather than accepting the bytes
+    ``report.render_pdf``/``report.build_xlsx`` already produced — a
+    deliberate seam, not an oversight: reimplementing Drive's
+    find-or-update-by-identity + locking here to save one re-render would
+    duplicate exactly the machinery this executor exists to reuse correctly.
+    The earlier render/xlsx steps still run and their artifacts are attached
+    to the job's own run record for provenance, matching the binding mock's
+    step 3 guard line ("local artifacts, attached to the run").
 
     The period is the RUN's (``ctx.period_key`` — the due date in the
     schedule's timezone, set by the run loop), never a value from ``params``:
@@ -284,13 +284,42 @@ async def _drive_upload_executor(ctx: StepContext, params: dict) -> dict:
     the plan would be the compile date on every run — the Drive filename
     (``<title> — <period_key>.pdf``) and the idempotency key below would never
     vary between weeks. ``_DRIVE_UPLOAD_SCHEMA`` rejects a compiled
-    ``period_key`` outright so the compiler cannot produce that plan."""
-    from app.services.report.report_delivery import deliver_report_to_drive
+    ``period_key`` outright so the compiler cannot produce that plan.
+
+    Drive identity is the SCHEDULE, never the report row (item 9, gate fix):
+    ``_report_compose_executor`` composes a NEW ``Report`` every run
+    (inventory_aging is ``period_based: False``, so tracking/series mode is
+    refused and ``mode="period"`` is what runs) — the default report/series
+    -keyed identity ``deliver_report_to_drive`` falls back to when
+    ``identity=None`` would create a NEW Drive folder every Monday. Passing
+    an explicit ``DeliveryIdentity`` keyed on ``ctx.job_id`` (the SCHEDULE's
+    own stable id — see ``StepContext``'s docstring) fixes that: every run of
+    the same schedule resolves to the SAME folder, and a re-delivery of the
+    same period replaces the SAME files rather than duplicating them.
+
+    Accepted wart: a retry after a partial upload (the pdf lands, the xlsx
+    fails, the run retries) composes a SECOND ``Report`` row for that Monday
+    — ``_report_compose_executor`` has no way to know a previous attempt's
+    row exists, since the executor is stateless between run attempts. Drive
+    itself stays clean (the second attempt's upload finds and replaces the
+    SAME files by schedule identity); only the ``reports`` table accumulates
+    an extra row for that period. Deduplicating ``reports`` rows across a
+    retry is a separate, deliberate non-goal of this fix."""
+    from app.services.report.report_delivery import DeliveryIdentity, deliver_report_to_drive
 
     artifact = _resolve_report_step_artifact(ctx, params)
     period_key = ctx.period_key
     if not period_key:
         raise StepExecutionError("drive.upload: the run supplied no period_key")
+
+    schedule_id = str(ctx.job_id)
+    identity = DeliveryIdentity(
+        folder_props={"schedule_id": schedule_id},
+        file_props={"schedule_id": schedule_id, "period_key": period_key},
+        lock_key=f"schedule:{schedule_id}",
+        idempotency_key=f"job-delivery:{schedule_id}:{period_key}",
+    )
+
     result = await deliver_report_to_drive(
         ctx.db,
         tenant_id=ctx.tenant_id,
@@ -298,6 +327,7 @@ async def _drive_upload_executor(ctx: StepContext, params: dict) -> dict:
         actor_type=ctx.actor_type,
         actor_id=ctx.actor_id,
         period_key=period_key,
+        identity=identity,
     )
     return {
         "pdf_file_id": result.pdf_file_id,

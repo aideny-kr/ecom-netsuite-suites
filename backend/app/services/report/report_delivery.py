@@ -94,6 +94,34 @@ class DeliveryFailed(Exception):  # noqa: N818 — interface name from spec §A5
 
 
 @dataclass(frozen=True)
+class DeliveryIdentity:
+    """Item 9 (gate fix): overrides `deliver_report_to_drive`'s DEFAULT
+    identity (report/series-keyed) with caller-supplied identity — for a
+    scheduled job, the SCHEDULE, not the `Report` row it happens to compose
+    each run. `_report_compose_executor` composes a NEW `Report` every run
+    (inventory_aging is `period_based: False`, so tracking/series mode is
+    refused and `mode="period"` is what runs) — the default identity would
+    create a NEW Drive folder every Monday and duplicate files on any retry
+    after a partial upload.
+
+    `folder_props` / `file_props` are Drive `appProperties` dicts
+    (`_drive_upload_executor` merges `"kind"` into a COPY of `file_props` per
+    file — this dataclass does not carry `kind` itself, since one identity
+    covers both the pdf and the xlsx file). `lock_key` replaces `report_id`
+    as the `pg_advisory_xact_lock(hashtext(...))` key. `idempotency_key`
+    replaces `report-delivery:<report_id>:<period_key>` in the
+    `report.delivery.*` audit events.
+
+    `None` (the default everywhere this parameter is threaded) means exactly
+    today's behaviour — report/series-keyed — unchanged."""
+
+    folder_props: dict[str, str]
+    file_props: dict[str, str]
+    lock_key: str
+    idempotency_key: str
+
+
+@dataclass(frozen=True)
 class DeliveryResult:
     pdf_file_id: str
     pdf_url: str
@@ -444,12 +472,24 @@ async def deliver_report_to_drive(
     actor_type: str,
     actor_id: uuid.UUID | None,
     period_key: str,
+    identity: DeliveryIdentity | None = None,
 ) -> DeliveryResult:
     """Upload ``report_id``'s PDF + Excel to
     ``<tenant Drive>/Reports/<report title>/``, idempotently keyed by ``period_key``.
 
     ``actor_id=None`` is valid ONLY with ``actor_type="system"`` (A6's headless
-    compose script) — same convention ``refresh_service.refresh_report`` enforces."""
+    compose script) — same convention ``refresh_service.refresh_report`` enforces.
+
+    ``identity`` (item 9, gate fix): ``None`` (the default) is exactly today's
+    behaviour — the folder/file Drive identity, the advisory-lock key, and
+    the audit idempotency key are all keyed on ``report_id``/``report.
+    series_id``. A caller that passes a ``DeliveryIdentity`` overrides ALL
+    FOUR of those with its own values instead — see that dataclass's own
+    docstring for why a scheduled job needs this (its `Report` row is
+    recomposed fresh every run). The folder name stays ``report.title`` and
+    the file names stay ``<title> — <period_key>.<ext>`` either way — only
+    the appProperties identity that find/create actually keys on changes.
+    """
     if actor_id is None and actor_type == "user":
         raise ValueError("deliver_report_to_drive: actor_id=None requires a non-user actor_type")
 
@@ -469,7 +509,7 @@ async def deliver_report_to_drive(
     shared_drive_id = (connector.metadata_json or {}).get("shared_drive_id")
     client = _build_drive_client(credentials, shared_drive_id)
 
-    idempotency_key = f"report-delivery:{report_id}:{period_key}"
+    idempotency_key = identity.idempotency_key if identity is not None else f"report-delivery:{report_id}:{period_key}"
 
     # ---- Phase 1: durable "started" record BEFORE any Drive call ----------------
     await audit_service.log_event(
@@ -500,7 +540,16 @@ async def deliver_report_to_drive(
         # both upload — duplicating every Drive artifact instead of one updating
         # in place. A genuinely concurrent second caller now cannot even START its
         # own folder lookup until this one's Drive work has fully landed.
-        await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:report_id))"), {"report_id": str(report_id)})
+        #
+        # Item 9 (gate fix): an `identity` override serializes on ITS OWN
+        # `lock_key`, never `report_id` — two different report rows sharing
+        # the same schedule identity (a scheduled job's weekly re-compose)
+        # must serialize against EACH OTHER, which a report_id-keyed lock
+        # cannot do (they are different reports every run).
+        if identity is not None:
+            await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"), {"lock_key": identity.lock_key})
+        else:
+            await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:report_id))"), {"report_id": str(report_id)})
 
         reports_folder_id = await _find_or_create_folder(client, name=_REPORTS_FOLDER_NAME, parent_id=shared_drive_id)
         # Gate fix #5: the per-report folder is keyed by the report's SERIES (or the
@@ -509,11 +558,16 @@ async def deliver_report_to_drive(
         # reports can share a title (two series with the same name, a recomposed
         # report reusing a common name) and must never collide on the same Drive
         # folder. `name` stays the human-readable title; only the appProperties
-        # identity is load-bearing for find/create.
+        # identity is load-bearing for find/create. Item 9 (gate fix): `identity`,
+        # when given, replaces this entirely with the caller's own folder_props.
         folder_app_properties = (
-            {"report_series_id": str(report.series_id)}
-            if report.series_id is not None
-            else {"report_id": str(report_id)}
+            identity.folder_props
+            if identity is not None
+            else (
+                {"report_series_id": str(report.series_id)}
+                if report.series_id is not None
+                else {"report_id": str(report_id)}
+            )
         )
         series_folder_id = await _find_or_create_folder(
             client, name=report.title, parent_id=reports_folder_id, app_properties=folder_app_properties
@@ -530,13 +584,21 @@ async def deliver_report_to_drive(
         pdf_name = f"{report.title} — {period_key}.pdf"
         xlsx_name = f"{report.title} — {period_key}.xlsx"
 
+        # Item 9 (gate fix): `identity.file_props`, when given, replaces the
+        # default report/period-keyed appProperties entirely — `"kind"` is
+        # still merged in per file here (never carried by `identity` itself,
+        # since one identity covers both files).
+        base_file_properties = (
+            identity.file_props if identity is not None else {"report_id": str(report_id), "period_key": period_key}
+        )
+
         pdf_result = await _upload_or_update(
             client,
             name=pdf_name,
             parent_id=series_folder_id,
             content=pdf_bytes,
             mime_type=_PDF_MIME,
-            app_properties={"report_id": str(report_id), "period_key": period_key, "kind": "pdf"},
+            app_properties={**base_file_properties, "kind": "pdf"},
         )
         xlsx_result = await _upload_or_update(
             client,
@@ -544,7 +606,7 @@ async def deliver_report_to_drive(
             parent_id=series_folder_id,
             content=xlsx_bytes,
             mime_type=_XLSX_MIME,
-            app_properties={"report_id": str(report_id), "period_key": period_key, "kind": "xlsx"},
+            app_properties={**base_file_properties, "kind": "xlsx"},
         )
 
         delivered_at = datetime.now(timezone.utc)
