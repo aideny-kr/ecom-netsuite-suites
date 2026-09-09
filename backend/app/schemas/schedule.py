@@ -1,7 +1,9 @@
 import re
 from datetime import datetime
 from typing import Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from croniter import croniter
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 # Dangerous patterns that should never appear in schedule parameters
@@ -21,6 +23,35 @@ ALLOWED_CATCH_UP = frozenset({"once", "skip"})
 MAX_PARAM_DEPTH = 3
 MAX_PARAM_STRING_LENGTH = 1000
 MAX_INSTRUCTION_LENGTH = 4000
+
+
+def _validate_cron_expression(v: Optional[str]) -> Optional[str]:
+    """Item 1 (gate fix): the executor already pauses a schedule whose
+    ``cron_expression`` cannot be computed (``_claim_due_schedules`` in
+    ``app.workers.tasks.scheduled_jobs``), but that is a run-time safety net,
+    not a substitute for telling the operator immediately. ``croniter.is_valid``
+    catches everything the existing character-set ``pattern=`` on the field
+    itself does not (e.g. ``"60 24 32 13 8"`` — the right characters, out-of-
+    range values)."""
+    if v is None:
+        return v
+    if not croniter.is_valid(v):
+        raise ValueError(f"cron_expression is not a valid cron expression: {v!r}")
+    return v
+
+
+def _validate_timezone(v: Optional[str]) -> Optional[str]:
+    """Item 1 (gate fix): ``ZoneInfo(tz)`` raises ``ZoneInfoNotFoundError`` for
+    anything that is not a real IANA zone — the same call
+    ``schedule_service.compute_next_run`` makes at run time, surfaced here at
+    write time instead."""
+    if v is None:
+        return v
+    try:
+        ZoneInfo(v)
+    except ZoneInfoNotFoundError:
+        raise ValueError(f"timezone is not a valid IANA timezone: {v!r}") from None
+    return v
 
 
 def _validate_param_value(value, depth=0):
@@ -82,6 +113,16 @@ class ScheduleCreate(BaseModel):
         _validate_param_value(v, depth=0)
         return v
 
+    @field_validator("cron_expression")
+    @classmethod
+    def validate_cron_expression(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_cron_expression(v)
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_timezone(v)
+
     @model_validator(mode="after")
     def check_instruction_or_type(self) -> "ScheduleCreate":
         if not self.instruction and not self.schedule_type:
@@ -119,6 +160,16 @@ class ScheduleUpdate(BaseModel):
         if v not in ALLOWED_CATCH_UP:
             raise ValueError(f"catch_up must be one of {sorted(ALLOWED_CATCH_UP)}, got '{v}'")
         return v
+
+    @field_validator("cron_expression")
+    @classmethod
+    def validate_cron_expression(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_cron_expression(v)
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_timezone(v)
 
 
 class ScheduleRunRequest(BaseModel):

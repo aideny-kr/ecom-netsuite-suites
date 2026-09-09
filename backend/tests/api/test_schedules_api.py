@@ -221,6 +221,88 @@ async def _async_return(value):
 
 
 # ---------------------------------------------------------------------------
+# Cron/timezone validated where they are written (gate fix, item 1): the
+# executor already pauses a schedule whose cron/timezone cannot be computed
+# (`_claim_due_schedules`), but an operator writing a bad value at
+# create/update time must see a 422 immediately, not silently get a paused
+# schedule at the next sweep tick.
+# ---------------------------------------------------------------------------
+
+
+class TestScheduleCronTimezoneValidation:
+    async def test_create_invalid_cron_expression_is_422(self, client: AsyncClient, admin_user):
+        user, headers = admin_user
+        # Matches ScheduleCreate's existing character-set pattern (digits/
+        # spaces only) but is not a real cron — proves this is croniter
+        # validation, not just the pre-existing regex.
+        resp = await client.post(
+            "/api/v1/schedules",
+            json={"name": "Bad Cron", "schedule_type": "sync", "cron_expression": "60 24 32 13 8"},
+            headers=headers,
+        )
+        assert resp.status_code == 422
+        assert "cron_expression" in str(resp.json())
+        assert "60 24 32 13 8" in str(resp.json())
+
+    async def test_create_invalid_timezone_is_422(self, client: AsyncClient, admin_user):
+        user, headers = admin_user
+        resp = await client.post(
+            "/api/v1/schedules",
+            json={"name": "Bad TZ", "schedule_type": "sync", "timezone": "Mars/Olympus"},
+            headers=headers,
+        )
+        assert resp.status_code == 422
+        assert "timezone" in str(resp.json())
+        assert "Mars/Olympus" in str(resp.json())
+
+    async def test_update_invalid_cron_expression_is_422(
+        self, client: AsyncClient, admin_user, db: AsyncSession
+    ):
+        user, headers = admin_user
+        tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
+        schedule = await _seed_job_schedule(db, tenant, plan_json=_INVENTORY_AGING_PLAN, plan_status="approved")
+        await db.commit()
+
+        resp = await client.patch(
+            f"/api/v1/schedules/{schedule.id}",
+            json={"cron_expression": "60 24 32 13 8"},
+            headers=headers,
+        )
+        assert resp.status_code == 422
+        assert "cron_expression" in str(resp.json())
+
+    async def test_update_invalid_timezone_is_422(self, client: AsyncClient, admin_user, db: AsyncSession):
+        user, headers = admin_user
+        tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
+        schedule = await _seed_job_schedule(db, tenant, plan_json=_INVENTORY_AGING_PLAN, plan_status="approved")
+        await db.commit()
+
+        resp = await client.patch(
+            f"/api/v1/schedules/{schedule.id}",
+            json={"timezone": "Mars/Olympus"},
+            headers=headers,
+        )
+        assert resp.status_code == 422
+        assert "timezone" in str(resp.json())
+
+    async def test_create_with_valid_cron_and_timezone_still_succeeds(
+        self, client: AsyncClient, admin_user
+    ):
+        user, headers = admin_user
+        resp = await client.post(
+            "/api/v1/schedules",
+            json={
+                "name": "Good Cron",
+                "schedule_type": "sync",
+                "cron_expression": "0 6 * * 1",
+                "timezone": "America/Los_Angeles",
+            },
+            headers=headers,
+        )
+        assert resp.status_code == 201
+
+
+# ---------------------------------------------------------------------------
 # GET /schedules — list (spec §B6: list-level `has_pending_plan` so the list
 # page's "Needs attention" tile / row indicator can see an approved schedule
 # sitting on an unapproved recompiled change — that state lives only in
