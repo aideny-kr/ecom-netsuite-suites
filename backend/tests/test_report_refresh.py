@@ -865,7 +865,9 @@ def _patch_bigquery_executor(monkeypatch, recipe: dict, payloads: dict[str, list
     """Fake ``execute_tool_call`` keyed by the exact SQL text each of the recipe's
     four bigquery_sql sources carries — the only thing distinguishing
     r_items/r_prior/r_trend/r_meta once stripped of report_type/period."""
-    by_query = {recipe["sources"][rid]["params"]["query"]: _inventory_aging_table_result(rows) for rid, rows in payloads.items()}
+    by_query = {
+        recipe["sources"][rid]["params"]["query"]: _inventory_aging_table_result(rows) for rid, rows in payloads.items()
+    }
     calls: list[dict] = []
 
     async def fake_execute(tool_name, tool_input, tenant_id, actor_id, correlation_id, db, **kw):

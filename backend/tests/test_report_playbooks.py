@@ -120,9 +120,7 @@ def _patch_bigquery_executor(monkeypatch):
     a test can never accidentally serve the wrong rid's canned rows."""
     payloads, params = _full_fixture()
     _, recipe = build_playbook_recipe("inventory_aging", params)
-    by_query = {
-        recipe["sources"][rid]["params"]["query"]: _table_result(payloads[rid]) for rid in payloads
-    }
+    by_query = {recipe["sources"][rid]["params"]["query"]: _table_result(payloads[rid]) for rid in payloads}
     calls: list[dict] = []
 
     async def fake_execute(tool_name, tool_input, tenant_id, actor_id, correlation_id, db, **kw):
@@ -195,7 +193,9 @@ def test_rebuild_playbook_spec_raises_501_for_a_playbook_with_no_rebuild_hook():
 
 def test_rebuild_playbook_spec_builds_the_aging_report_and_method_provenance():
     payloads, params = _full_fixture()
-    table_payloads = {rid: {"columns": list(rows[0]), "rows": [list(r.values()) for r in rows]} for rid, rows in payloads.items()}
+    table_payloads = {
+        rid: {"columns": list(rows[0]), "rows": [list(r.values()) for r in rows]} for rid, rows in payloads.items()
+    }
 
     spec, method_provenance = rebuild_playbook_spec(
         "inventory_aging", params, table_payloads, composed_at="2026-09-08T13:05:00+00:00"

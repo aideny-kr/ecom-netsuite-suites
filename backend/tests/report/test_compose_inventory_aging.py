@@ -108,19 +108,14 @@ async def test_main_writes_a_report_compose_audit_event_as_system_actor(db, monk
     assert event.payload.get("playbook") == "inventory_aging"
 
 
-async def test_main_leaves_recipe_json_none_so_refresh_stays_hidden(db, monkeypatch):
-    """Review finding (fix round 1): ``refresh_service.refresh_report`` /
-    ``report_service.assemble_spec`` only understand ``financial_statement``-shaped
-    recipes -- the exact reason ``compose_playbook_report`` (Task 1) fails CLOSED with
-    a 501 for this playbook instead of ever reaching that shared path. A non-None
-    ``recipe_json`` here would flip GET /reports/{id}'s ``has_recipe`` to true, which
-    is the ONLY gate the report page uses to show the Refresh button and the
-    auto-refresh interval selector (``frontend/.../reports/[id]/page.tsx``) -- so
-    clicking Refresh would commit a real debounce stamp, dispatch a live BigQuery
-    source, and only THEN crash inside ``normalize_and_validate_sections`` with an
-    unhandled 500 (none of watch_items/kpi_cards/mid_row/bucket_table/top_positions
-    is a recognized section type). Until refresh support for this playbook shape
-    actually exists, this report must be snapshot-only: no recipe, no Refresh."""
+async def test_main_stores_the_real_recipe_so_refresh_and_auto_refresh_selector_work(db, monkeypatch):
+    """Refresh-support follow-up: refresh_service.refresh_report / playbooks
+    .rebuild_playbook_spec now know how to replay an inventory_aging recipe (see
+    this repo's refresh_service/playbooks test files) -- the compose script no
+    longer needs the Task 6 501-avoidance workaround of leaving recipe_json None.
+    GET /reports/{id}'s has_recipe (recipe_json is not None) legitimately flips
+    true, so the report page's Refresh button and auto-refresh interval selector
+    are no longer hidden behind a workaround."""
     tenant = await create_test_tenant(db, name="ComposeAgingRecipe")
     await set_tenant_context(db, str(tenant.id))
     payloads, params = _full_fixture()
@@ -128,7 +123,9 @@ async def test_main_leaves_recipe_json_none_so_refresh_stays_hidden(db, monkeypa
 
     report = await compose_inventory_aging.main(tenant.id, params["locations"], db=db)
 
-    assert report.recipe_json is None
+    assert report.recipe_json is not None
+    assert report.recipe_json["playbook"] == {"key": "inventory_aging", "params": {"locations": params["locations"]}}
+    assert len(report.recipe_json["sources"]) == 4
 
 
 async def test_main_spec_json_is_actually_json_safe(db, monkeypatch):

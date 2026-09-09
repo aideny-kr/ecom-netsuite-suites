@@ -349,7 +349,10 @@ async def refresh_report(
             from app.services.report.playbooks import rebuild_playbook_spec
 
             spec, method_provenance = rebuild_playbook_spec(
-                playbook_meta.get("key"), playbook_meta.get("params") or {}, payloads, composed_at=recipe.get("captured_at")
+                playbook_meta.get("key"),
+                playbook_meta.get("params") or {},
+                payloads,
+                composed_at=recipe.get("captured_at"),
             )
             html = render_report_html(spec, provenance=method_provenance)
         else:

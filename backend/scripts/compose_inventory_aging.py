@@ -1,23 +1,26 @@
 """Headless compose of the ``inventory_aging`` playbook (Slice 1, Task 6).
 
 Spec: docs/superpowers/specs/2026-09-08-scheduled-jobs-and-inventory-aging-design.md
-§A6. ``main(tenant_id, locations, *, db) -> Report`` builds the four ``bigquery_sql``
-sources (Task 1's ``inventory_aging.build_sources``), dispatches them, computes the
-``AgingReport`` (Task 1's ``inventory_aging.compute``), renders it exactly like the
-mock (Task 2's ``build_inventory_aging_sections``/``render_report_html``), and
-persists it as a ``Report`` row titled "Inventory Aging Weekly" with
+§A6. ``main(tenant_id, locations, *, db) -> Report`` builds the real recipe
+(``playbooks.build_playbook_recipe`` -- the same four ``bigquery_sql`` sources
+Task 1's ``inventory_aging.build_sources`` produces, PLUS the "playbook" key that
+makes it replayable), dispatches those sources, computes the ``AgingReport`` (Task
+1's ``inventory_aging.compute``), renders it exactly like the mock (Task 2's
+``build_inventory_aging_sections``/``render_report_html``), and persists it as a
+``Report`` row titled "Inventory Aging Weekly" WITH that recipe (refresh-support
+follow-up -- ``recipe_json`` is no longer left ``None``, see
+``test_main_stores_the_real_recipe_so_refresh_and_auto_refresh_selector_work``),
 ``auto_refresh="off"`` (Slice 2's scheduled-jobs platform owns the run cadence, not
 this report's own hourly/daily auto-refresh sweep) and ``dashboard_pinned_at`` set.
 
-Why not ``playbooks.compose_playbook_report``: that function fails CLOSED with a 501
-for any playbook whose recipe's first section isn't ``financial_statement`` (Task 1's
-own review-finding fix) -- inventory_aging's ``_INVENTORY_AGING_SECTION_TYPES`` never
-is one (watch_items/kpi_cards/mid_row/bucket_table/top_positions/highlights/narrative),
-so it can never reach that shared compose path. This script takes the same *shape* of
-steps compose_playbook_report takes for a financial_statement (build recipe -> dispatch
-sources -> compute/assemble -> render -> persist -> audit -> commit) but drives Task
-1/2's own inventory_aging-specific functions directly instead of the shared
-recipe-resolver machinery, which has no branch for these section types.
+Why not ``playbooks.compose_playbook_report`` (which, as of the refresh-support
+follow-up, DOES know how to compose inventory_aging via its rebuild hook): that
+function has no ``auto_refresh``/``dashboard_pinned_at`` concept -- those are this
+script's own §A6 requirements, not shared with the generic playbook-compose
+endpoint. This script takes the same *shape* of steps compose_playbook_report takes
+(build recipe -> dispatch sources -> compute/render -> persist -> audit -> commit)
+but drives Task 1/2's own inventory_aging-specific functions directly so it can add
+those two fields to the Report row that compose_playbook_report never sets.
 
 ``_fetch_payloads`` is a MODULE-LEVEL, monkeypatchable seam (not a ``main()``
 parameter) -- same pattern as ``report_delivery.py``'s ``_build_drive_client``/
@@ -41,11 +44,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import dataclasses
 import sys
 import uuid
-from datetime import date, datetime, timezone
-from decimal import Decimal
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -57,9 +58,10 @@ from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 from app.services.report.inventory_aging import (  # noqa: E402
     Source,
-    build_sources,
     compute,
+    json_safe,
 )
+from app.services.report.playbooks import build_playbook_recipe  # noqa: E402
 from app.services.report.report_html import (  # noqa: E402
     build_inventory_aging_provenance,
     build_inventory_aging_sections,
@@ -71,26 +73,6 @@ from app.services.report.report_html import (  # noqa: E402
 # name. The rendered page's own <h1> is the mock's "Inventory Aging — Week of <date>"
 # (spec §A1, `inventory_aging_title`) — the two are deliberately different strings.
 TITLE = "Inventory Aging Weekly"
-
-
-def _json_safe(value: Any) -> Any:
-    """Recursively turn a value tree that may contain frozen dataclasses (Task 1's
-    ``AgingReport`` and its nested ``BucketRow``/``TopItem``/``TrendPoint``/etc.),
-    ``Decimal``, and ``date`` into something ``json.dumps`` — and therefore JSONB —
-    can actually store. Never through ``float`` (no precision loss on money);
-    ``Decimal`` becomes its exact string form, same convention as
-    ``report_service.spec_json_safe``'s statement-model sanitizing."""
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return {f.name: _json_safe(getattr(value, f.name)) for f in dataclasses.fields(value)}
-    if isinstance(value, Decimal):
-        return str(value)
-    if isinstance(value, (datetime, date)):
-        return value.isoformat()
-    if isinstance(value, dict):
-        return {str(k): _json_safe(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(v) for v in value]
-    return value
 
 
 async def _fetch_payloads(
@@ -151,7 +133,16 @@ async def main(
     if trend_weeks is not None:
         params["trend_weeks"] = trend_weeks
 
-    sources = build_sources(params)
+    # Refresh-support follow-up: build the RECIPE (not just its sources) via the
+    # same build_playbook_recipe playbooks.compose_playbook_report/refresh_report
+    # use — this is what gives the composed report a real, replayable recipe_json
+    # (below) instead of the Task 6 workaround's ``None``. TITLE (this module's own
+    # constant) and the recipe's own title are the identical string
+    # ("Inventory Aging Weekly" — build_playbook_recipe's inventory_aging branch)
+    # by construction, so using TITLE for the Report row's title column below stays
+    # unchanged.
+    _recipe_title, recipe = build_playbook_recipe("inventory_aging", params)
+    sources = recipe["sources"]
     correlation_id = f"report-compose:inventory_aging:{uuid.uuid4().hex[:8]}"
 
     await set_tenant_context(db, str(tenant_id))
@@ -166,23 +157,7 @@ async def main(
     page_title = inventory_aging_title(report_data)
     spec = {"title": page_title, "sections": sections}
     rendered_html = render_report_html(spec, provenance=provenance)
-    spec_json = {"title": page_title, "sections": [_json_safe(s) for s in sections]}
-
-    # recipe_json is deliberately left None — this is a snapshot-only report.
-    # Review finding (fix round 1): refresh_service.refresh_report / report_service
-    # .assemble_spec only understand financial_statement-shaped recipes (the exact
-    # reason compose_playbook_report fails CLOSED with a 501 for this playbook
-    # instead of ever reaching that shared path — see playbooks.py). GET
-    # /reports/{id} derives has_recipe = recipe_json is not None with no further
-    # gating, and that flag alone is what the report page uses to show the Refresh
-    # button AND the auto-refresh interval selector. A non-None recipe_json here
-    # would let a user trigger Refresh: it commits a real debounce stamp and
-    # dispatches a live BigQuery source BEFORE assemble_spec ever runs, so the
-    # eventual crash (none of watch_items/kpi_cards/mid_row/bucket_table/
-    # top_positions is a recognized section type) is an unhandled 500 downstream of
-    # real side effects, not a clean failure. Leave this None until refresh support
-    # for this playbook's section shape actually exists.
-    recipe: dict[str, Any] | None = None
+    spec_json = {"title": page_title, "sections": [json_safe(s) for s in sections]}
 
     # tool calls inside _fetch_payloads may commit (a connector token refresh) —
     # re-establish tenant context before the RLS-scoped insert below, same reasoning
