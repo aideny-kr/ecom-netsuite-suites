@@ -205,6 +205,34 @@ async def decide_proposal(proposal_id: UUID, request: ProposalDecision, user: Re
         raise _http_error(exc) from None
 
 
+@router.get("/case-groups")
+async def list_case_groups(
+    user: Reader,
+    db: Database,
+    limit: Annotated[int, Query(ge=1, le=50)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+):
+    from app.services.transaction_ops.case_groups import list_groups
+
+    return await list_groups(db, user.tenant_id, limit=limit, offset=offset)
+
+
+@router.get("/case-groups/{group_id}/cases")
+async def list_group_cases(
+    group_id: str,
+    user: Reader,
+    db: Database,
+    limit: Annotated[int, Query(ge=1, le=50)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+):
+    from app.services.transaction_ops.case_groups import group_members
+
+    try:
+        return await group_members(db, user.tenant_id, group_id, limit=limit, offset=offset)
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
 @router.get("/cases", response_model=list[CaseOut])
 async def list_cases(
     user: Reader,

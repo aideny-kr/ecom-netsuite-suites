@@ -36,3 +36,27 @@ async def test_authenticated_case_history_and_human_reinvestigation(client, db, 
     repeated = await client.post(f"{prefix}/{c.id}/investigate", json=body, headers=headers)
     assert repeated.json()["id"] == result.json()["id"]
     assert (await client.get(prefix)).status_code == 401
+
+
+async def test_group_routes_require_auth_and_keep_members_tenant_scoped(client, db, admin_user, admin_user_b):
+    from tests.test_transaction_case_groups import seed
+
+    actor, headers = admin_user
+    other, other_headers = admin_user_b
+    for user in (actor, other):
+        for feature in ("celigo", "reconciliation"):
+            await enable_feature_flag(db, user.tenant_id, feature)
+    await seed(db, actor.tenant_id, 2)
+    prefix = "/api/v1/transaction-ops/case-groups"
+    assert (await client.get(prefix)).status_code == 401
+    response = await client.get(prefix, headers=headers)
+    assert response.status_code == 200, response.text
+    group = response.json()["groups"][0]
+    assert group["case_count"] == 2
+    members = await client.get(f"{prefix}/{group['group_id']}/cases?limit=1", headers=headers)
+    assert members.status_code == 200 and members.json()["has_next"] is True
+    assert len(members.json()["cases"]) == 1
+    foreign = await client.get(f"{prefix}/{group['group_id']}/cases", headers=other_headers)
+    assert foreign.status_code == 200 and foreign.json()["cases"] == []
+    assert (await client.get(f"{prefix}/invalid/cases", headers=headers)).status_code == 422
+    assert (await client.get(f"{prefix}?limit=51", headers=headers)).status_code == 422

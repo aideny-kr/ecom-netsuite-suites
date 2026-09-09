@@ -32,6 +32,20 @@ from app.mcp.tools import (
 )
 
 TOOL_REGISTRY = {
+    "transaction_ops.groups": {
+        "description": (
+            "Group all open reconciliation cases by entity, source, currency, variance direction and credit context. "
+            "Groups describe symptoms, not a verified shared cause. Supply group_id to read exact case members. "
+            "Follow has_next with offset+limit. Investigate cases before exact proposal approval; "
+            "a group never authorizes writes."
+        ),
+        "execute": transaction_ops_tools.execute_groups,
+        "params_schema": {
+            "group_id": {"type": "string", "description": "Group ID from the group list; omit to list groups"},
+            "limit": {"type": "integer", "description": "Page size, 1 to 50; default 20"},
+            "offset": {"type": "integer", "description": "Page offset; default 0"},
+        },
+    },
     "transaction_ops.configs": {
         "description": "List configured Framework transaction investigation scopes before choosing a scope to inspect.",
         "execute": transaction_ops_tools.execute_configs,

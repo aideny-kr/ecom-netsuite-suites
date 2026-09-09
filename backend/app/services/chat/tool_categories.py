@@ -31,6 +31,8 @@ _EXACT: dict[str, Category] = {
     "transaction_ops.run": "control",
     "transaction_ops_run": "control",
     "transaction_ops.status": "data_table",
+    "transaction_ops.groups": "data_table",
+    "transaction_ops_groups": "data_table",
     "transaction_ops_status": "data_table",
     "netsuite_suiteql": "data_table",
     "netsuite.suiteql": "data_table",

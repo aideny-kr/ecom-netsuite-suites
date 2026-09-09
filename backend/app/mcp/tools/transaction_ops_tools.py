@@ -20,6 +20,7 @@ _PARAMS = {
     "configs": frozenset(),
     "run": frozenset({"config_id", "order_references", "window_start", "window_end"}),
     "status": frozenset({"run_id", "case_id"}),
+    "groups": frozenset({"group_id", "limit", "offset"}),
 }
 _MAX_FINDINGS = 100
 _MAX_ROWS = 500
@@ -157,6 +158,17 @@ async def _execute(operation, params, context):
         if not isinstance(params, dict) or set(params) - _PARAMS[operation]:
             raise _ToolError("invalid_parameters")
         state, run_request = _state_dependencies()
+        if operation == "groups":
+            from app.services.transaction_ops.case_groups import group_members, list_groups
+
+            limit, offset = params.get("limit", 20), params.get("offset", 0)
+            if type(limit) is not int or type(offset) is not int or not 1 <= limit <= 50 or offset < 0:
+                raise _ToolError("invalid_parameters")
+            if "group_id" in params:
+                result = await group_members(db, tenant_id, params["group_id"], limit=limit, offset=offset)
+            else:
+                result = await list_groups(db, tenant_id, limit=limit, offset=offset)
+            return {"success": True, **result}
         if operation == "configs":
             configs = await state.list_configs(db, tenant_id)
             return {
@@ -323,3 +335,7 @@ async def execute_run(params: dict, **kwargs) -> dict:
 
 async def execute_status(params: dict, **kwargs) -> dict:
     return await _with_deadline("status", params, kwargs.get("context") or {})
+
+
+async def execute_groups(params: dict, **kwargs) -> dict:
+    return await _with_deadline("groups", params, kwargs.get("context") or {})

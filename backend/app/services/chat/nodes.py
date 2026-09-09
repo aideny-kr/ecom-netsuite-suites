@@ -39,6 +39,7 @@ logger = logging.getLogger(__name__)
 ALLOWED_CHAT_TOOLS: frozenset[str] = frozenset(
     {
         "transaction_ops.configs",
+        "transaction_ops.groups",
         "transaction_ops.run",
         "transaction_ops.status",
         "netsuite.suiteql",
