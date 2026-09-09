@@ -37,6 +37,7 @@ Updated at the end of every task, not "later".
 | `feat/dev-loop-and-harness` | T2 | 21 commits, process only — gated ×3, blockers fixed, **frozen** | nothing |
 | `feat/agent-graph-operating-model` | T2 | Track O (22 majors) + reject action, **ungated** | needs Track O decision |
 | `feat/rolling-period` | T2 | **SHIPPED** — squash-merged as main `f74b781f` (PR #209), deployed + live-verified on staging (backend recreated, `alembic current`=`094_dashboard_preference_series` head, FE digest `4a37ebf8`, BUILD_ID baked). Gate ×4: majors 2→3→0 | nothing |
+| `feat/batch-write-idempotency` | T2 | **READY FOR A MERGE DECISION** (not merged — the human's call). Phase 1: work-derived key in `externalId`, side-effect log committed BEFORE the call, settle only on a definite answer, callable+bounded resume path, `kill -9` drill re-run green in both outcomes. Gate ×4 (ceiling reached) → 1 shipped blocker + 1 I wrongly declared fixed + ~22 real defects, ALL closed. The four-round shape ("one key, three jobs") is RESOLVED — see OPEN | human merge decision |
 | `feat/rolling-period-stage2` | T2 | Scheduled compose built: daily Beat sweep, reason enum → `jobs.result_summary`, per-tenant cost ceiling, waiting ribbon lit (DATA-gated on the sweep being enabled). verify **PASS @ `fa793ce6`** (+15 tests). **T2 gate round 1 in flight** | gate verdict → PR |
 
 **SHIPPED 2026-08-17 — `fix/ns-account-switch-and-chat-burst` → PR #194, squashed to
@@ -111,6 +112,29 @@ fresh branch off `main` and leave Track O behind pending its own decision.
   coverage. Passed no gate round cleanly: **22 open majors** from round 2.
 
 ## NEXT — ordered, with the why
+
+**Batch NetSuite writes — scoped 2026-08-31, mock APPROVED, not built.**
+Spec: `docs/superpowers/specs/2026-08-31-batch-write-idempotency-design.md`.
+**Design reference (anti-drift): `docs/superpowers/specs/batch-write-review-mockup-reference.html`**
+— when implementation and mock disagree, decide deliberately and update both in one commit.
+
+Order is load-bearing, not preference:
+1. **Idempotency key + side-effect log written BEFORE the call.** Blocks everything else
+   (agent-graph #10, explicitly unbuilt). Ships alone and is independently valuable — it
+   fixes the single-record timeout case too. FIRST unknown to settle: does NetSuite REST
+   support a client-supplied idempotency key? If not, reconcile on natural identity
+   (externalId), which changes the schema. Establish before writing it.
+2. **Deterministic server-side extraction** — operator decision 2026-08-28: model
+   transcription is fine for ONE record, never for a batch.
+3. **The review surface** per the mock — every row's values shown, environment badge
+   loudest, resume BLOCKED on any `Unknown` row.
+4. **Server-enforced cap** in code, not prompt.
+
+*Rejected, do not re-propose: "approve once, auto-approve the rest".* The approval would
+precede the payloads — consent to content nobody has seen. PR #210's duplicate bug was
+survivable only because a human was there to reject the identical retry; under
+auto-approve it writes the duplicate silently, every row. Batch review costs the same one
+click and keeps the approval attached to rows actually seen.
 
 **Multimodal record creation (2026-08-28).** User asked for: upload xlsx/pdf/csv/photo →
 agent proposes NetSuite records → existing HITL card. Research (7-agent survey) found upload,
@@ -187,6 +211,24 @@ path — OCR confidence is unquantified and the card cannot show what was misrea
 
 Written so the next session does not re-litigate these.
 
+- **2026-09-01 · Idempotency rides in `externalId`, NOT in a request header** · because
+  there is no header channel to ride in: `ns_createRecord` accepts exactly `recordType`
+  and `data`, read from the live MCP server's own schema, so a header-based scheme was
+  not a worse option — it was an impossible one. `externalId` is strictly better than the
+  header would have been: NetSuite enforces uniqueness **server-side**, so the guarantee
+  is not trusted from us. Measured live in the sandbox, not read in docs: identical create
+  twice → `recordId 5264548`, then HTTP 400 "This entity already exists", then a count of
+  1. A blind retry therefore cannot duplicate, and hitting the refusal *proves* the
+  original landed — which is why `classify_retry_result` maps a duplicate refusal to
+  WRITTEN rather than to an error.
+- **2026-09-01 · The payload is stamped at CARD BUILD, before the HMAC — never at
+  execution** · because stamping after approval would make the executed payload differ
+  from the approved one, which is the precise defect this branch already fixed once. The
+  key is therefore part of what the human sees and what the signature covers. Creates
+  only: an update targets an existing `recordId`, so stamping there would mutate a
+  business field for no benefit. A caller-supplied `externalId` is never overwritten —
+  their key is the better natural identity, and replacing it would corrupt an integration
+  we do not own.
 - **2026-08-30 · Stage 2 gates the RIBBON DATA on the scheduler being enabled, not just the
   wording** · because the amber ribbon promises a statement "is scheduled", and a promise
   about a background job is only as true as the job's on/off switch. The approved Stage 1
@@ -409,6 +451,43 @@ Written so the next session does not re-litigate these.
 
 ## OPEN — needs a human, blocking something
 
+### RESOLVED 2026-09-02 — "one key, three jobs" (was blocking `feat/batch-write-idempotency`)
+
+Four T2 gate rounds each found a fresh variant of ONE defect, which is what identified it as a
+design problem rather than a run of bugs:
+
+| round | variant |
+|---|---|
+| 1 | key derived from `.fields` — line items didn't participate; salesOrders posted header-only |
+| 2 | `record_type`/`connector`/`mutation_type` absent; payload-less mutations hashed to a CONSTANT; key frozen at card build |
+| 3 | the round-2 fix never reached the call site (un-asserted `.replace()`); `record_id` read from a different source than the card |
+| 4 | `record_id` dropped when the record is empty but an id exists; `merge_slot_values` never re-stamped; a synthesised key trusted as "sent" when it never was |
+
+**Root cause: one value served three jobs with three different validity conditions.**
+(1) the NetSuite dedupe token — must be IN the payload, creates only; (2) the ledger's row
+identity — needed for EVERY mutation type; (3) proof-of-landing — valid only if the key was
+actually SENT.
+
+**The fix conditions job 3 on job 1 rather than narrowing scope.** `key_was_sent(key,
+sent_payload)` is the single predicate deciding whether a uniqueness refusal proves anything, and
+BOTH the settle path and the reconcile path call it. It checks the key against `payload_json` —
+what we actually sent — so it cannot drift from reality the way an `ss-idem-` prefix check did.
+That is the "split the concept" option in substance without a schema change: "is this key in what
+we sent" is derivable, has one owner, and cannot disagree with itself.
+
+Chosen over narrowing phase 1 to creates only, because narrowing would keep the same latent
+conflict for whoever widened it later, and would drop the update/delete audit trail that a
+close-week reviewer actually wants.
+
+Not to be re-litigated: the key stays in `externalId` (no header channel exists — the MCP tool
+takes only `recordType` and `data`), and NetSuite's server-side uniqueness is the guarantee. Both
+measured live; see DECIDED.
+
+**Still open, deliberately:** `reconcile_unsettled` is callable, bounded and tested but NOT
+scheduled. Wiring it to a Beat cadence is its own slice with its own gate — per agent-graph it
+needs a cost budget and reason-enum reporting at the scheduler level too, not just inside the
+function.
+
 - **`feat/rolling-period-stage2` — resume here.** Worktree
   `.claude/worktrees/feat-rolling-period` (branch switched), verify PASS @ `fa793ce6`.
   Stage 1 is SHIPPED and live; this branch is Stage 2. NOTE: a re-parented migration can
@@ -526,6 +605,15 @@ Written so the next session does not re-litigate these.
   *One sub-question deferred, not blocking: at what materiality would a controller prefer a
   prior-period adjustment over a current-period reversal? Only matters once a reversal is
   large enough to distort the current month — ask before the first material one, not now.*
+- **`.gitignore` also shadows `docs/` — every spec in the repo was force-added.**
+  `docs/` appears TWICE (`.gitignore:51` and `:69`) while ~40 files under
+  `docs/superpowers/specs|plans` are tracked. So a new spec silently fails to commit unless
+  you spot the "paths are ignored" hint and reach for `-f`; miss it and the design doc you
+  just wrote is simply absent from the branch. Hit on 2026-08-31 filing the batch-write
+  spec. A proper fix needs the un-ignore chain (`docs/*` + `!docs/superpowers/` +
+  `docs/superpowers/*` + `!docs/superpowers/specs/`…) and would surface whatever else under
+  `docs/` is currently hidden on purpose — check that before changing it, and do it as its
+  own commit rather than riding along with feature work.
 - **`.gitignore` still shadows tracked FRONTEND files.** `tasks/` was anchored on this
   branch, which immediately exposed 3 lint violations in worker modules CI had never
   linted. The same defect remains at `.gitignore:59` — unanchored `memory/` matches

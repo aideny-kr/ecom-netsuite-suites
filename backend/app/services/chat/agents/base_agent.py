@@ -2176,6 +2176,81 @@ class BaseSpecialistAgent(abc.ABC):
                                 # the card over a label.
                                 logger.warning("could not resolve the write's target account", exc_info=True)
 
+                        # ── Idempotency key, stamped BEFORE the payload is
+                        # signed ──
+                        # It must be part of what the HMAC covers and what the
+                        # card displays, or the executed payload would differ
+                        # from the approved one — the precise defect this
+                        # branch already fixed once (ask_user stripped from the
+                        # display but not the execution).
+                        #
+                        # It rides in `externalId` because the MCP surface has
+                        # no header channel: ns_createRecord accepts only
+                        # recordType and data (read from the live server's
+                        # schema, 2026-09-01). NetSuite then enforces its
+                        # uniqueness itself and refuses a duplicate, which is
+                        # what makes a retry safe and a crash recoverable.
+                        #
+                        # Creates only: an update targets a recordId that
+                        # already exists, so stamping externalId would mutate a
+                        # business field the tenant may own, to no benefit.
+                        _idem_key: str | None = None
+                        # Which ACCOUNT this write is aimed at participates in
+                        # the key: the same payload sent to sandbox and to
+                        # production is not the same write.
+                        _connector_id_for_idem: str | None = None
+                        try:
+                            from app.services.chat.tools import parse_external_tool_name
+
+                            _connector_id_for_idem = (parse_external_tool_name(block.name) or (None, None))[0]
+                        except Exception:
+                            _connector_id_for_idem = None
+                        if _is_netsuite_write and mutation_type == "create":
+                            try:
+                                from app.services.chat.write_side_effect import stamp_tool_input
+
+                                # One seam, which owns every subtlety: merge
+                                # into the raw record so LINE ITEMS SURVIVE,
+                                # derive the key from the whole record so two
+                                # orders differing only in lines get different
+                                # keys, and write back under the key the parser
+                                # read from ("data" or "body") in that key's
+                                # original type. Open-coding this here is what
+                                # produced the T2 blocker — it stamped
+                                # `.fields`, which excludes line sublists, and
+                                # posted salesOrders header-only.
+                                block.input, _idem_key = stamp_tool_input(
+                                    block.input,
+                                    batch_id=None,
+                                    row_index=None,
+                                    # The key must identify the WORK, not just
+                                    # the payload: a customer and a vendor
+                                    # named "Acme" are different writes, and
+                                    # the same payload sent to sandbox vs
+                                    # production is not the same write either.
+                                    # Omitting these silently collapses both
+                                    # onto one externalId — NetSuite refuses
+                                    # the second, and a duplicate refusal
+                                    # classifies as WRITTEN.
+                                    connector_id=str(_connector_id_for_idem) if _connector_id_for_idem else None,
+                                    record_type=record_type,
+                                    mutation_type=mutation_type,
+                                )
+                            except Exception:
+                                # Never fail a card over a key. Without it the
+                                # write is exactly as (un)recoverable as it was
+                                # before — no worse, and the human still sees
+                                # and approves the same payload.
+                                logger.warning("idempotency key not stamped", exc_info=True)
+                                _idem_key = None
+                        # Deliberately NOT stashed on `self`. The key now lives
+                        # in the payload the human approves and the HMAC signs,
+                        # so the orchestrator reads it back from there — the
+                        # authoritative copy. An attribute holding a second
+                        # copy was write-only state (nothing read it) and, had
+                        # anything started reading it, would have been a copy
+                        # that could disagree with what was actually signed.
+
                         payload = build_confirmation_payload(
                             mutation_type=mutation_type,
                             record_type=record_type,
