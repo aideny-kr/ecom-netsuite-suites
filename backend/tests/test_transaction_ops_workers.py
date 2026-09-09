@@ -38,8 +38,13 @@ def test_run_uses_worker_session_and_shared_runner(monkeypatch):
     monkeypatch.setattr(mod, "worker_async_session", session)
     monkeypatch.setattr(mod, "set_tenant_context", AsyncMock())
     monkeypatch.setitem(sys.modules, "app.services.transaction_ops.runner", SimpleNamespace(run_investigation=runner))
+    next_review = AsyncMock(return_value=None)
+    monkeypatch.setitem(
+        sys.modules, "app.services.transaction_ops.period_review", SimpleNamespace(continue_review=next_review)
+    )
     result = mod.transaction_ops_run.run(str(tenant_id), str(run_id))
     runner.assert_awaited_once_with(db, tenant_id, run_id)
+    next_review.assert_awaited_once_with(db, tenant_id, run_id)
     assert result["termination_reason"] == "done"
 
 

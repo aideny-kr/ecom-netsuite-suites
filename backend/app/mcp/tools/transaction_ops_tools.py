@@ -261,6 +261,7 @@ async def _execute(operation, params, context):
             "run_id": str(run.id),
             "status": run.status,
             "termination_reason": run.termination_reason,
+            "settlement": (getattr(run, "progress_json", None) or {}).get("settlement"),
             "continuation_run_id": str(child.id) if child else None,
             "continuation_blocked": blocked,
             "review_url": f"/transaction-operations/runs/{run.id}",

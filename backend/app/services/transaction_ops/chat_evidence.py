@@ -18,12 +18,18 @@ def condense_status(result):
                     "continuation_blocked",
                     "findings",
                     "proposals",
+                    "settlement",
+                    "case_id",
+                    "last_observed_at",
+                    "history",
                     "truncated",
                 )
             },
             "note": "The evidence table displays exact amounts. Do not restate or recompute them. "
             "Use the findings to explain missing evidence and supported next steps. "
             "Pending proposals need exact-change human approval on the review page; "
-            "approved does not mean executed or verified. Follow continuation_run_id when present.",
+            "approved does not mean executed or verified. Follow continuation_run_id when present. "
+            "A succeeded settlement check verifies order total, tax and refunds, not payment/payout clearance. "
+            "Historical approvals never authorize a new change.",
         }
     )

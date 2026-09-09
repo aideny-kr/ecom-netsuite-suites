@@ -324,7 +324,10 @@ async def run_investigation(
     source_reader, target_reader = _source_reader or read_framework_order, _target_reader or read_netsuite_order
     page_reader = _page_reader or read_framework_orders_page
     run = await state.get_run(db, tenant_id, run_id)
-    if getattr(run, "origin", None) == "recovery":
+    from app.services.transaction_ops.settlement import is_settlement
+
+    settlement = is_settlement(run)
+    if getattr(run, "origin", None) == "recovery" and not settlement:
         from app.services.transaction_ops.recovery import reconcile_operation_run
 
         return await reconcile_operation_run(db, tenant_id, run_id, _clock=clock)
@@ -635,11 +638,16 @@ async def run_investigation(
             if report["order_reference"] != reference:
                 raise ValueError("source_reference_mismatch")
             action = report["comparison"]["recommended_action"]
-            if mapping.action_mode == "propose_actions" and action in {
-                "propose_amount_correction",
-                "no_action",
-                "propose_missing_sync",
-            }:
+            if (
+                not settlement
+                and mapping.action_mode == "propose_actions"
+                and action
+                in {
+                    "propose_amount_correction",
+                    "no_action",
+                    "propose_missing_sync",
+                }
+            ):
                 # Preserve detection even when extra action evidence is unavailable
                 # or its budget cannot fit. Models never manufacture this proof.
                 await state.record_finding(db, tenant_id, run_id, reference, report, lease_token=token, now=clock())

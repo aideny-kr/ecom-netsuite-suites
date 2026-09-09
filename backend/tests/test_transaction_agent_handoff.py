@@ -9,6 +9,9 @@ from tests.test_transaction_ops_tools import ORDER, RUN, ctx, state  # noqa: F40
 
 
 async def test_status_retains_balance_and_supported_solution_context_for_agent(ctx, state):  # noqa: F811
+    state.get_run.return_value.progress_json = {
+        "settlement": {"status": "difference", "operation_id": str(RUN), "approved_by": "stored-human-id"}
+    }
     state.list_findings.return_value = [
         SimpleNamespace(
             report_json={
@@ -43,6 +46,7 @@ async def test_status_retains_balance_and_supported_solution_context_for_agent(c
     )
     result = await mod.execute_status({"run_id": str(RUN)}, context=ctx)
     assert result["success"]
+    assert result["settlement"]["status"] == "difference"
     assert len(result["rows"]) == 3
     assert result["rows"][2][-3:] == ["0.00", None, None]
     assert result["findings"][0]["missing_metrics"] == ["refunds"]
@@ -59,6 +63,7 @@ async def test_status_retains_balance_and_supported_solution_context_for_agent(c
         assert "100.123456" not in condensed
         assert "refunds" in condensed and "correct_amounts" in condensed
         assert json.loads(condensed)["review_url"] == result["review_url"]
+        assert json.loads(condensed)["settlement"] == result["settlement"]
 
 
 @pytest.mark.parametrize("bad", [10.01, "NaN"])

@@ -163,6 +163,16 @@ async def list_proposals(
     return await service.list_proposals(db, user.tenant_id, run_id=run_id, limit=limit, offset=offset)
 
 
+@router.get("/operations/{operation_id}/settlement")
+async def operation_settlement(operation_id: UUID, user: Reader, db: Database):
+    from app.services.transaction_ops import settlement
+
+    try:
+        return await settlement.status(db, user.tenant_id, operation_id)
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
 @router.get("/runs/{run_id}/findings", response_model=list[FindingOut])
 async def list_findings(
     run_id: UUID,

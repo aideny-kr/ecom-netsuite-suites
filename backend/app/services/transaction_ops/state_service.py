@@ -459,6 +459,15 @@ def _finish(row, reason, now):
     row.lease_token = row.lease_until = None
 
 
+async def _finish_audited(db, tenant_id, row, reason, now):
+    from app.services.transaction_ops.settlement import is_settlement, record_outcome
+
+    if is_settlement(row):
+        await record_outcome(db, tenant_id, row, reason, now=now)
+    _finish(row, reason, now)
+    await _audit(db, tenant_id, "run.finish", row, payload={"reason": reason})
+
+
 def _lease(row, token, now):
     if row.status != "running" or token != row.lease_token or row.lease_until is None or now >= row.lease_until:
         raise StateError("run_lease_lost")
@@ -487,6 +496,8 @@ def _first_claim_deadline(row, now):
 
 
 async def claim_run(db, tenant_id, run_id, *, now=None):
+    from app.services.transaction_ops.settlement import is_settlement
+
     now = _clock(now)
     row = await get_run(db, tenant_id, run_id, lock=True)
     if row.status == "finished":
@@ -495,13 +506,13 @@ async def claim_run(db, tenant_id, run_id, *, now=None):
     deadline = row.deadline_at
     if (
         row.status == "pending"
-        and row.origin in {"manual", "chat", "schedule"}
+        and (row.origin in {"manual", "chat", "schedule"} or is_settlement(row))
         and row.lease_token is None
         and row.api_calls_used == row.orders_used == 0
     ):
         deadline = _first_claim_deadline(row, now)
     if deadline is None or now >= deadline:
-        _finish(row, "budget", now)
+        await _finish_audited(db, tenant_id, row, "budget", now)
         await _commit(db, tenant_id)
         return None
     if row.status == "running" and row.lease_until and now < row.lease_until:
@@ -509,7 +520,7 @@ async def claim_run(db, tenant_id, run_id, *, now=None):
         return None
     config = await get_config(db, tenant_id, row.config_id)
     if not config.enabled or (row.origin == "schedule" and not config.schedule_enabled):
-        _finish(row, "stall", now)
+        await _finish_audited(db, tenant_id, row, "stall", now)
         await _commit(db, tenant_id)
         return None
     row.deadline_at = deadline
@@ -528,12 +539,12 @@ async def reserve_budget(db, tenant_id, run_id, *, lease_token, api_calls=0, ord
         await _commit(db, tenant_id)
         return False
     if now >= row.deadline_at:
-        _finish(row, "budget", now)
+        await _finish_audited(db, tenant_id, row, "budget", now)
         await _commit(db, tenant_id)
         return False
     _lease(row, lease_token, now)
     if row.api_calls_used + api_calls > row.max_api_calls or row.orders_used + orders > row.max_orders:
-        _finish(row, "budget", now)
+        await _finish_audited(db, tenant_id, row, "budget", now)
         await _commit(db, tenant_id)
         return False
     row.api_calls_used += api_calls
@@ -573,8 +584,7 @@ async def finish_run(db, tenant_id, run_id, reason: Termination, *, lease_token,
         and lease_token == row.lease_token
     ):
         _lease(row, lease_token, now)
-    _finish(row, reason, now)
-    await _audit(db, tenant_id, "run.finish", row, payload={"reason": reason})
+    await _finish_audited(db, tenant_id, row, reason, now)
     await _commit(db, tenant_id)
     return row
 
@@ -682,6 +692,8 @@ async def propose(db, tenant_id, run_id, request: ProposalCreate, *, lease_token
         raise StateError("stale_evidence")
     run = await get_run(db, tenant_id, run_id, lock=True)
     _lease(run, lease_token, now)
+    if run.origin == "recovery":
+        raise StateError("read_only_verification_run")
     config = await get_config(db, tenant_id, run.config_id, lock=True)
     if not config.enabled:
         raise StateError("config_disabled")
@@ -912,6 +924,10 @@ async def complete_operation(db, tenant_id, operation_id, *, outcome, result_jso
         "termination_reason": {"verified": "done", "unknown": "stall", "failed": "error"}[outcome],
     }
     proposal = await get_proposal(db, tenant_id, row.proposal_id)
+    if outcome == "verified":
+        from app.services.transaction_ops.settlement import queue
+
+        await queue(db, tenant_id, row, proposal, now=row.completed_at)
     await _audit(
         db,
         tenant_id,
@@ -1200,6 +1216,11 @@ async def finish_operation_recovery(db, tenant_id, run_id, *, lease_token, reaso
             **details,
             "termination_reason": "done" if proof is not None else reason,
         }
+        if proof is not None:
+            from app.services.transaction_ops.settlement import queue
+
+            proposal = await get_proposal(db, tenant_id, operation.proposal_id)
+            await queue(db, tenant_id, operation, proposal, now=now)
     await _audit(
         db, tenant_id, "operation.recovery.complete", operation, payload={"run_id": str(run_id), "reason": reason}
     )

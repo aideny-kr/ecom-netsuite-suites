@@ -51,6 +51,12 @@ async def test_unknown_operation_gets_one_durable_read_only_budget_without_sched
         .scalars()
         .all()
     )
+    from app.services.transaction_ops.settlement import is_settlement
+
+    financial_checks = [run for run in runs if is_settlement(run)]
+    assert len(financial_checks) == 1 and financial_checks[0].status == "pending"
+    assert financial_checks[0].params_json["operation_id"] == str(row.id)
+    runs = [run for run in runs if not is_settlement(run)]
     assert len(runs) == 1 and runs[0].status == "finished"
     assert runs[0].api_calls_used == 16 and runs[0].max_api_calls == 32 and runs[0].orders_used == 1
     assert (await db.execute(text("SELECT current_setting('app.current_tenant_id',true)"))).scalar_one() == str(
