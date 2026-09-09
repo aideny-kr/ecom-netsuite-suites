@@ -60,7 +60,6 @@ from app.services.report.inventory_aging import (  # noqa: E402
     build_sources,
     compute,
 )
-from app.services.report.playbooks import build_playbook_recipe  # noqa: E402
 from app.services.report.report_html import (  # noqa: E402
     build_inventory_aging_provenance,
     build_inventory_aging_sections,
@@ -161,11 +160,21 @@ async def main(
     rendered_html = render_report_html(spec, provenance=provenance)
     spec_json = {"title": TITLE, "sections": [_json_safe(s) for s in sections]}
 
-    # The replayable recipe (Task 1's registration) — inert while auto_refresh="off",
-    # but capturing it now costs nothing and keeps this row consistent with every
-    # other composed report's recipe_json contract for whenever refresh IS wired up
-    # for this playbook.
-    _, recipe = build_playbook_recipe("inventory_aging", params)
+    # recipe_json is deliberately left None — this is a snapshot-only report.
+    # Review finding (fix round 1): refresh_service.refresh_report / report_service
+    # .assemble_spec only understand financial_statement-shaped recipes (the exact
+    # reason compose_playbook_report fails CLOSED with a 501 for this playbook
+    # instead of ever reaching that shared path — see playbooks.py). GET
+    # /reports/{id} derives has_recipe = recipe_json is not None with no further
+    # gating, and that flag alone is what the report page uses to show the Refresh
+    # button AND the auto-refresh interval selector. A non-None recipe_json here
+    # would let a user trigger Refresh: it commits a real debounce stamp and
+    # dispatches a live BigQuery source BEFORE assemble_spec ever runs, so the
+    # eventual crash (none of watch_items/kpi_cards/mid_row/bucket_table/
+    # top_positions is a recognized section type) is an unhandled 500 downstream of
+    # real side effects, not a clean failure. Leave this None until refresh support
+    # for this playbook's section shape actually exists.
+    recipe: dict[str, Any] | None = None
 
     # tool calls inside _fetch_payloads may commit (a connector token refresh) —
     # re-establish tenant context before the RLS-scoped insert below, same reasoning

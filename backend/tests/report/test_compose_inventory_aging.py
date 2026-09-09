@@ -101,7 +101,19 @@ async def test_main_writes_a_report_compose_audit_event_as_system_actor(db, monk
     assert event.payload.get("playbook") == "inventory_aging"
 
 
-async def test_main_stores_a_replayable_recipe_json(db, monkeypatch):
+async def test_main_leaves_recipe_json_none_so_refresh_stays_hidden(db, monkeypatch):
+    """Review finding (fix round 1): ``refresh_service.refresh_report`` /
+    ``report_service.assemble_spec`` only understand ``financial_statement``-shaped
+    recipes -- the exact reason ``compose_playbook_report`` (Task 1) fails CLOSED with
+    a 501 for this playbook instead of ever reaching that shared path. A non-None
+    ``recipe_json`` here would flip GET /reports/{id}'s ``has_recipe`` to true, which
+    is the ONLY gate the report page uses to show the Refresh button and the
+    auto-refresh interval selector (``frontend/.../reports/[id]/page.tsx``) -- so
+    clicking Refresh would commit a real debounce stamp, dispatch a live BigQuery
+    source, and only THEN crash inside ``normalize_and_validate_sections`` with an
+    unhandled 500 (none of watch_items/kpi_cards/mid_row/bucket_table/top_positions
+    is a recognized section type). Until refresh support for this playbook shape
+    actually exists, this report must be snapshot-only: no recipe, no Refresh."""
     tenant = await create_test_tenant(db, name="ComposeAgingRecipe")
     await set_tenant_context(db, str(tenant.id))
     payloads, params = _full_fixture()
@@ -109,9 +121,7 @@ async def test_main_stores_a_replayable_recipe_json(db, monkeypatch):
 
     report = await compose_inventory_aging.main(tenant.id, params["locations"], db=db)
 
-    assert report.recipe_json is not None
-    assert report.recipe_json["schema_version"] == 1
-    assert set(report.recipe_json["sources"]) == set(ia.RESULT_IDS)
+    assert report.recipe_json is None
 
 
 async def test_main_spec_json_is_actually_json_safe(db, monkeypatch):
