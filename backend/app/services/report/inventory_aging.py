@@ -191,6 +191,12 @@ class AgingReport:
     trend: dict[str, tuple[TrendPoint, ...]]
     kpis: tuple[KpiCard, ...]
     top_items: dict[str, tuple[TopItem, ...]]
+    # UNBOUNDED per-location aged-item list — same sort as top_items (value desc,
+    # never sliced). top_items alone cannot back a "nothing truncated" claim (it is
+    # capped at TOP_ITEMS_PER_LOCATION); this is what a renderer's collapsible
+    # "All N aged SKUs" block must draw from so N is actually true (review finding —
+    # see test_aged_items_is_unbounded_not_capped_at_five).
+    aged_items: dict[str, tuple[TopItem, ...]]
     watch_items: tuple[WatchItem, ...]
     highlights: tuple[Highlight, ...]
     narrative: Narrative
@@ -542,7 +548,7 @@ def _bucket_rows_for(location: str, items: list[dict]) -> tuple[BucketRow, ...]:
 
 def _build_location_summary(
     location: str, items: list[dict], prior_row: dict[str, Any]
-) -> tuple[LocationSummary, tuple[TopItem, ...]]:
+) -> tuple[LocationSummary, tuple[TopItem, ...], tuple[TopItem, ...]]:
     buckets = _bucket_rows_for(location, items)
     on_hand_value = sum((b.value for b in buckets), Decimal("0"))
     units = sum((b.units for b in buckets), 0)
@@ -567,14 +573,16 @@ def _build_location_summary(
     aged90_value_delta = aged90_value - prior_value_90p
     aged180_value_delta = aged180.value - prior_value_180p
 
-    aged_items = sorted(
+    aged_items_raw = sorted(
         (it for it in items if bucket_for_days(_int(it["days"])) in AGED_BUCKETS),
         key=lambda it: _to_decimal(it["inventory_amount"]),
         reverse=True,
     )
-    top5 = aged_items[:TOP_ITEMS_PER_LOCATION]
-    top5_value = sum((_to_decimal(it["inventory_amount"]) for it in top5), Decimal("0"))
-    top_items = tuple(
+    # The FULL (unbounded) aged-item list, same sort as top5, never sliced — the
+    # source of truth for "nothing truncated" (AgingReport.aged_items). top_items
+    # (top5 below) is a slice of THIS, never independently sorted/filtered, so the
+    # two can never disagree on ordering or membership.
+    all_aged_items = tuple(
         TopItem(
             location=location,
             sku=str(it["sku"]),
@@ -585,8 +593,10 @@ def _build_location_summary(
             days=_int(it["days"]),
             bucket=bucket_for_days(_int(it["days"])),
         )
-        for it in top5
+        for it in aged_items_raw
     )
+    top_items = all_aged_items[:TOP_ITEMS_PER_LOCATION]
+    top5_value = sum((it.value for it in top_items), Decimal("0"))
 
     summary = LocationSummary(
         location=location,
@@ -613,7 +623,7 @@ def _build_location_summary(
         top5_share_pct=share_pct(top5_value, aged90_value),
         buckets=buckets,
     )
-    return summary, top_items
+    return summary, top_items, all_aged_items
 
 
 def _all_locations_summary(
@@ -634,7 +644,7 @@ def _all_locations_summary(
         "skus_90p": sum((_int(prior_by_loc.get(loc, {}).get("skus_90p")) for loc in locations), 0),
         "skus_180p": sum((_int(prior_by_loc.get(loc, {}).get("skus_180p")) for loc in locations), 0),
     }
-    summary, _unused_top_items = _build_location_summary("All locations", all_items, combined_prior)
+    summary, _unused_top_items, _unused_aged_items = _build_location_summary("All locations", all_items, combined_prior)
     return summary
 
 
@@ -982,10 +992,12 @@ def compute(payloads: dict[str, list[dict]], params: dict[str, Any]) -> AgingRep
 
     location_summaries: list[LocationSummary] = []
     top_items_by_loc: dict[str, tuple[TopItem, ...]] = {}
+    aged_items_by_loc: dict[str, tuple[TopItem, ...]] = {}
     for loc in locations:
-        summary, top_items = _build_location_summary(loc, items_by_loc[loc], prior_by_loc.get(loc, {}))
+        summary, top_items, aged_items = _build_location_summary(loc, items_by_loc[loc], prior_by_loc.get(loc, {}))
         location_summaries.append(summary)
         top_items_by_loc[loc] = top_items
+        aged_items_by_loc[loc] = aged_items
     locations_tuple = tuple(location_summaries)
 
     all_locations = _all_locations_summary(locations, items_by_loc, prior_by_loc)
@@ -998,6 +1010,7 @@ def compute(payloads: dict[str, list[dict]], params: dict[str, Any]) -> AgingRep
         trend=trend_by_loc,
         kpis=_kpi_cards(all_locations, combined_trend, trend_weeks),
         top_items=top_items_by_loc,
+        aged_items=aged_items_by_loc,
         watch_items=_watch_items(locations_tuple, all_locations, trend_by_loc),
         highlights=_highlights(locations_tuple, all_locations, top_items_by_loc, combined_trend, trend_by_loc),
         narrative=_narrative(locations_tuple, all_locations, snapshot_date, combined_trend),

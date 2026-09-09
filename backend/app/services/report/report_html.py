@@ -1609,20 +1609,34 @@ def _ia_top_item_row_html(it: TopItem, loc: LocationSummary) -> str:
 
 
 def _ia_top_positions_html(report: AgingReport) -> str:
+    """The top-5 table draws from ``top_items`` (capped); the collapsible "All N"
+    details block draws from ``aged_items`` — the UNBOUNDED per-location list — so
+    N is always the TRUE aged-SKU count and the details block is never byte-
+    identical to the top-5 table above it when a location has more than 5 aged
+    SKUs (review finding: this used to source both from ``top_items``, which
+    made "All N aged SKUs" false-complete for any location with > 5 aged items)."""
     top_rows: list[str] = []
     all_rows: list[str] = []
     total_aged = 0
     for loc in report.locations:
         items = report.top_items.get(loc.location, ())
-        total_aged += len(items)
         top_rows.append(
             f'<tr class="group"><td class="lbl" colspan="7">{escape(loc.location)} · aged '
             f"{_ia_money(loc.aged90_value)} · top 5 = {loc.top5_share_pct}%</td></tr>"
         )
         for it in items:
-            row = _ia_top_item_row_html(it, loc)
-            top_rows.append(row)
-            all_rows.append(row)
+            top_rows.append(_ia_top_item_row_html(it, loc))
+
+    for loc in report.locations:
+        aged_items = report.aged_items.get(loc.location, ())
+        total_aged += len(aged_items)
+        all_rows.append(
+            f'<tr class="group"><td class="lbl" colspan="7">{escape(loc.location)} · aged '
+            f"{_ia_money(loc.aged90_value)} · {len(aged_items)} SKUs</td></tr>"
+        )
+        for it in aged_items:
+            all_rows.append(_ia_top_item_row_html(it, loc))
+
     details = (
         f"<details><summary>All {total_aged} aged SKUs (collapsed here; the Excel file "
         "carries every SKU)</summary>"

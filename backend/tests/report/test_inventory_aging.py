@@ -332,6 +332,35 @@ def test_top5_never_exceeds_five_even_with_fewer_aged_items():
 
 
 # ---------------------------------------------------------------------------
+# aged_items: the UNBOUNDED per-location aged list (review finding — top_items is
+# capped at TOP_ITEMS_PER_LOCATION=5, so it cannot back a "nothing truncated" claim
+# on its own; aged_items is the same sort (value desc), never sliced).
+# ---------------------------------------------------------------------------
+def test_aged_items_is_unbounded_not_capped_at_five():
+    payloads, params = _full_fixture()
+    report = ia.compute(payloads, params)
+    # Acme has 6 aged items (A-G1..A-G6) — top_items caps at 5, aged_items must not.
+    assert [item.sku for item in report.aged_items["Acme"]] == [
+        "A-G1",
+        "A-G2",
+        "A-G3",
+        "A-G4",
+        "A-G5",
+        "A-G6",
+    ]
+    assert len(report.aged_items["Acme"]) == 6
+    assert report.top_items["Acme"] == report.aged_items["Acme"][:5]
+
+
+def test_aged_items_matches_top_items_when_fewer_than_five():
+    payloads, params = _full_fixture()
+    report = ia.compute(payloads, params)
+    # Globex only has 1 aged item — aged_items and top_items agree exactly.
+    assert report.aged_items["Globex"] == report.top_items["Globex"]
+    assert len(report.aged_items["Globex"]) == 1
+
+
+# ---------------------------------------------------------------------------
 # Watch-item threshold rules — fire exactly AT the threshold, not below it
 # ---------------------------------------------------------------------------
 def test_watch_item_share_threshold_fires_at_exactly_one_point_not_below():

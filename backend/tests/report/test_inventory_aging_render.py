@@ -243,15 +243,81 @@ def test_bucket_table_has_current_and_aged_subtotals_and_on_hand_total(html):
 # Largest aged positions: full list present (collapsed) and complete
 # ---------------------------------------------------------------------------
 def test_full_aged_list_present_collapsed_and_complete(html, report):
-    total_aged = sum(len(items) for items in report.top_items.values())
+    # Sourced from aged_items (the UNBOUNDED field) -- not top_items -- because
+    # top_items is capped at TOP_ITEMS_PER_LOCATION=5 and cannot back a "nothing
+    # truncated" claim on its own (review finding). This fixture's own docstring
+    # guarantees aged_items == top_items here (every location has <= 5 aged
+    # items), which is what makes this assertion honest for THIS fixture; the
+    # truncated-location fixture below is what actually exercises the two
+    # fields diverging.
+    total_aged = sum(len(items) for items in report.aged_items.values())
     assert total_aged == 4  # sanity on the fixture contract (3 Nova + 1 Solace)
     assert f"All {total_aged} aged SKUs" in html
     # collapsed by default -- a bare <details> (no `open` attribute) is closed on load
     assert "<details>" in html
     assert "<details open" not in html
-    for items in report.top_items.values():
+    for items in report.aged_items.values():
         for it in items:
             assert it.sku in html
+
+
+# ---------------------------------------------------------------------------
+# Review finding (blocker): "All N aged SKUs" was built from top_items, which
+# Task 1 caps at TOP_ITEMS_PER_LOCATION=5 -- a location with MORE than 5 aged
+# SKUs got a false-completeness claim (N understated, the details block byte-
+# identical to the top-5 table). This fixture deliberately has 7 aged SKUs in
+# one location to exercise that divergence directly.
+# ---------------------------------------------------------------------------
+def _fixture_with_more_than_five_aged_in_one_location():
+    items = [_item("Solo", f"SOLO-{i}", 100, 10000 - i * 100, 10) for i in range(7)]
+    prior = [
+        _prior_row(
+            "Solo", value=100000, value_90p=50000, value_180p=0, skus=7, skus_90p=7, skus_180p=0, qty=70, qty_90p=70
+        )
+    ]
+    trend = [_trend_row("Solo", SNAPSHOT - timedelta(weeks=w), 100000, 50000, 50.0) for w in (2, 1, 0)]
+    meta = [
+        {
+            "location": "Solo",
+            "first_snapshot_date": (SNAPSHOT - timedelta(days=150)).isoformat(),
+            "last_snapshot_date": SNAPSHOT.isoformat(),
+            "snapshot_count": 150,
+        }
+    ]
+    payloads = {"r_items": items, "r_prior": prior, "r_trend": trend, "r_meta": meta}
+    params = {"locations": ["Solo"], "compare_days": 7, "trend_weeks": 3}
+    return payloads, params
+
+
+def test_full_aged_list_details_block_carries_every_aged_sku_when_top5_truncates():
+    payloads, params = _fixture_with_more_than_five_aged_in_one_location()
+    truncated_report = compute(payloads, params)
+    assert len(truncated_report.top_items["Solo"]) == 5  # sanity: top5 truncates
+    assert len(truncated_report.aged_items["Solo"]) == 7  # sanity: aged_items does not
+    spec = {"title": "t", "sections": build_inventory_aging_sections(truncated_report)}
+    out = render_report_html(spec)
+
+    # The claim must name the TRUE count (7), not the capped one (5).
+    assert "All 7 aged SKUs" in out
+    assert "All 5 aged SKUs" not in out
+
+    # The details block's row count must actually differ from the top-5 table's --
+    # every aged SKU appears somewhere, but the two beyond top5 appear ONLY inside
+    # <details>, never in the top-5 table above it. `<details><summary>` (not bare
+    # "<details>") is the marker: _IA_CSS's own print-media comment contains the
+    # literal substring "<details>" (design rule #15's docstring), which would
+    # otherwise split inside <head> rather than at the real body tag.
+    details_start = out.index("<details><summary>")
+    top5_html, details_html = out[:details_start], out[details_start:]
+    top5_skus = {it.sku for it in truncated_report.top_items["Solo"]}
+    all_skus = {it.sku for it in truncated_report.aged_items["Solo"]}
+    truncated_only_skus = all_skus - top5_skus
+    assert len(truncated_only_skus) == 2
+    for sku in top5_skus:
+        assert sku in top5_html
+    for sku in truncated_only_skus:
+        assert sku not in top5_html
+        assert sku in details_html
 
 
 # ---------------------------------------------------------------------------
