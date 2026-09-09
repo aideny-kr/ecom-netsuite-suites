@@ -193,6 +193,74 @@ async def test_claim_pauses_a_schedule_whose_next_run_at_cannot_be_computed(db: 
 
 
 # ---------------------------------------------------------------------------
+# The claim creates the `jobs` row INSIDE the claim transaction (review
+# finding, MAJOR): `_claim_due_schedules` used to commit `next_run_at`
+# advanced + `running` before any `jobs` row existed -- a worker crash
+# between that commit and `run_schedule_now`'s own insert dropped the
+# occurrence with NO record at all, anywhere.
+# ---------------------------------------------------------------------------
+
+
+async def test_claim_creates_the_jobs_row_before_run_schedule_now_executes_any_step(
+    db: AsyncSession, monkeypatch
+):
+    tenant = await create_test_tenant(db, name="Claim Job Row Co")
+    await set_tenant_context(db, str(tenant.id))
+
+    async def fake_exec(ctx, params):
+        return {"ok": True}
+
+    monkeypatch.setitem(STEP_REGISTRY, "fake.step", _fake_spec("read", fake_exec))
+
+    now = datetime.now(timezone.utc)
+    await _seed_job_schedule(
+        db,
+        tenant,
+        plan_json={"steps": [{"id": "s1", "type": "fake.step", "params": {}}]},
+        next_run_at=now - timedelta(minutes=1),
+        cron_expression="0 6 * * 1",
+    )
+
+    seen_before_run: list[dict] = []
+    real_run_schedule_now = scheduled_jobs.run_schedule_now
+
+    async def spying_run_schedule_now(db_, schedule_id, **kwargs):
+        existing_job_id = kwargs.get("existing_job_id")
+        rows = (await db_.execute(select(Job).where(Job.tenant_id == tenant.id))).scalars().all()
+        seen_before_run.append(
+            {
+                "existing_job_id": existing_job_id,
+                "row_ids": [r.id for r in rows],
+                "statuses": [r.status for r in rows],
+                "parameters": [r.parameters for r in rows],
+            }
+        )
+        return await real_run_schedule_now(db_, schedule_id, **kwargs)
+
+    monkeypatch.setattr(scheduled_jobs, "run_schedule_now", spying_run_schedule_now)
+
+    stats = await run_due_jobs(db, tenant.id, now=now)
+    assert stats["ran"] == 1
+
+    # Exactly one call, and by the time it happened, a jobs row ALREADY
+    # existed (created + committed during the claim, before any step ran).
+    assert len(seen_before_run) == 1
+    snap = seen_before_run[0]
+    assert snap["existing_job_id"] is not None
+    assert snap["row_ids"] == [snap["existing_job_id"]]
+    assert snap["statuses"] == ["pending"]
+    assert snap["parameters"][0]["schedule_id"]
+    assert snap["parameters"][0]["attempt"] == 1
+    assert "due_at" in snap["parameters"][0]
+
+    # No second row -- run_schedule_now must reuse the same one.
+    jobs = (await db.execute(select(Job).where(Job.tenant_id == tenant.id))).scalars().all()
+    assert len(jobs) == 1
+    assert jobs[0].id == snap["existing_job_id"]
+    assert jobs[0].status == "completed"
+
+
+# ---------------------------------------------------------------------------
 # FOR UPDATE SKIP LOCKED prevents a double run
 # ---------------------------------------------------------------------------
 

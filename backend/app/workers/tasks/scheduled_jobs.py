@@ -92,6 +92,14 @@ moved it into the future. Either way, at most one claim succeeds. The run itself
 (`run_schedule_now`, which can take a while — Drive uploads, BigQuery, WeasyPrint)
 then proceeds WITHOUT holding any Postgres row lock, so a slow report never blocks
 the next tenant's sweep tick.
+
+The `jobs` row itself is created in THAT SAME claim transaction, for every
+runnable claim (review finding, MAJOR): before this fix, the claim committed
+`next_run_at` advanced + `running` with no `jobs` row yet, so a worker crash
+between that commit and `run_schedule_now`'s own insert dropped the occurrence
+with no record anywhere. `run_due_jobs` passes the pre-created row's id as
+`existing_job_id` so `run_schedule_now` updates it in place rather than
+inserting a second one.
 """
 
 from __future__ import annotations
@@ -235,6 +243,10 @@ class _Claim:
     plan_version: int
     run: bool  # False only for a catch_up="skip" row whose window was missed
     attempt: int  # 1, or 2 for the one 15-minutes-later retry (spec §B4)
+    # A pre-created `jobs` row (status="pending"), inserted in the SAME
+    # transaction as the claim itself -- see _claim_due_schedules. `None`
+    # only for a `run=False` (skipped) claim, which never runs a job at all.
+    job_id: uuid.UUID | None = None
 
 
 async def _claim_due_schedules(db: AsyncSession, tenant_id: uuid.UUID, now: datetime) -> list[_Claim]:
@@ -272,6 +284,7 @@ async def _claim_due_schedules(db: AsyncSession, tenant_id: uuid.UUID, now: date
     await _claim_sync_hook()
 
     claims: list[_Claim] = []
+    pending_jobs: list[tuple[_Claim, Job]] = []
     for row in rows:
         due_at = row.next_run_at
         # Captured BEFORE `last_run_status` is overwritten below — this is the
@@ -324,11 +337,34 @@ async def _claim_due_schedules(db: AsyncSession, tenant_id: uuid.UUID, now: date
         # retry, silently swallowing the original failure forever.
         skip = row.catch_up == "skip" and missed and attempt == 1
         row.last_run_status = "skipped" if skip else "running"
-        claims.append(
-            _Claim(schedule_id=row.id, due_at=due_at, plan_version=row.plan_version, run=not skip, attempt=attempt)
-        )
+        claim = _Claim(schedule_id=row.id, due_at=due_at, plan_version=row.plan_version, run=not skip, attempt=attempt)
+
+        if claim.run:
+            # The `jobs` row is created HERE, inside the SAME transaction as
+            # the claim (review finding, MAJOR): before this fix, the claim
+            # committed `next_run_at` advanced + `running` with NO `jobs` row
+            # yet -- a worker crash between that commit and `run_schedule_now`'s
+            # own insert dropped the occurrence with no record anywhere. A
+            # crash now leaves a visible `pending` row against a `running`
+            # schedule instead of nothing. `run_due_jobs` passes this id as
+            # `existing_job_id` so `run_schedule_now` reuses it rather than
+            # inserting a second row.
+            pending_job = Job(
+                tenant_id=tenant_id,
+                job_type="scheduled_job",
+                status="pending",
+                parameters={"schedule_id": str(row.id), "attempt": attempt, "due_at": due_at.isoformat()},
+            )
+            db.add(pending_job)
+            pending_jobs.append((claim, pending_job))
+
+        claims.append(claim)
 
     if rows:
+        if pending_jobs:
+            await db.flush()  # need each pending_job.id before COMMIT below
+            for claim, pending_job in pending_jobs:
+                claim.job_id = pending_job.id
         await db.commit()
     return claims
 
@@ -964,7 +1000,13 @@ async def run_due_jobs(db: AsyncSession, tenant_id: uuid.UUID, *, now: datetime 
     """Claim + run every due schedule of one tenant. Per-schedule isolation:
     one schedule's crash does not abort the rest of the tenant's batch
     (matches `sweep_tenant_reports`/`sweep_tenant_series`'s established
-    per-item try/except + rollback pattern)."""
+    per-item try/except + rollback pattern).
+
+    `retry_on_error=True` on every call below: this IS the sweep, the one
+    caller allowed to schedule the 15-minutes-later retry-then-pause cycle
+    (see `run_schedule_now`'s own docstring). `existing_job_id=claim.job_id`
+    reuses the `jobs` row `_claim_due_schedules` already created, in the same
+    transaction as the claim itself, for every runnable claim."""
     now = now or datetime.now(timezone.utc)
     stats = {"tenant_id": str(tenant_id), "due": 0, "ran": 0, "skipped": 0, "failed": 0, "reason": REASON_DONE}
 
@@ -987,6 +1029,7 @@ async def run_due_jobs(db: AsyncSession, tenant_id: uuid.UUID, *, now: datetime 
                 now=now,
                 attempt=claim.attempt,
                 retry_on_error=True,
+                existing_job_id=claim.job_id,
             )
             stats["ran"] += 1
             if outcome.reason == REASON_ERROR:
