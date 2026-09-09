@@ -148,6 +148,29 @@ async def test_deliver_409_when_no_connector(client, db, monkeypatch):
     assert resp.json()["detail"]
 
 
+async def test_deliver_502_on_upstream_failure_never_a_bare_500(client, db, monkeypatch):
+    """A Drive/render failure is an upstream problem, not a client error or an
+    unhandled crash — never a bare 500 with a raw traceback."""
+    tenant = await create_test_tenant(db, name="DeliverUpstreamFail")
+    user, _ = await create_test_user(db, tenant)
+    await set_tenant_context(db, str(tenant.id))
+    report = await _seed_report(db, tenant, user)
+    await _add_sheets_connector(db, tenant.id)
+
+    monkeypatch.setattr(report_delivery, "_render_pdf_bytes", lambda report: b"%PDF-FAKE")
+    monkeypatch.setattr(report_delivery, "_render_xlsx_bytes", lambda report: b"XLSX-FAKE")
+    calls: list[str] = []
+    monkeypatch.setattr(
+        report_delivery,
+        "_build_drive_client",
+        lambda credentials, shared_drive_id: FakeDriveClient(calls, fail_on="upload_new"),
+    )
+
+    resp = await client.post(f"/api/v1/reports/{report.id}/deliver", headers=make_auth_headers(user))
+    assert resp.status_code == 502
+    assert resp.json()["detail"]
+
+
 async def test_get_report_exposes_delivery_json_after_delivery(client, db, monkeypatch):
     tenant = await create_test_tenant(db, name="DeliverExposed")
     user, _ = await create_test_user(db, tenant)
