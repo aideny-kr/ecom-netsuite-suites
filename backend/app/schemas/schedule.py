@@ -129,6 +129,21 @@ class ScheduleCreate(BaseModel):
             raise ValueError(
                 "Either 'instruction' (a Scheduled Job) or 'schedule_type' (a legacy schedule) is required"
             )
+        # Item 4 (gate fix): `schedule_type="job"` with no `instruction` used
+        # to fall through to the legacy direct-create path below (nothing to
+        # compile, and the created row would carry `schedule_type="job"` with
+        # no `plan_json` ever set) — a Scheduled Job with no instruction is
+        # not a valid shape at all.
+        if self.schedule_type == "job" and not self.instruction:
+            raise ValueError("a Scheduled Job needs an instruction")
+        # Item 4 (gate fix): `name` lost its `min_length=1` when it became
+        # optional for the compile path (where a name is derived from the
+        # instruction — see `schedule_service.default_job_name`) — the
+        # legacy branch (`instruction` absent) has no such fallback and must
+        # not be able to reach `schedules.name NOT NULL` with `None` or an
+        # all-whitespace string.
+        if not self.instruction and not (self.name and self.name.strip()):
+            raise ValueError("name is required for a legacy schedule")
         return self
 
 

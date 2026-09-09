@@ -194,6 +194,47 @@ class TestScheduleCompileCreate:
         resp = await client.post("/api/v1/schedules", json={"name": "Nothing useful"}, headers=headers)
         assert resp.status_code == 422
 
+    async def test_create_schedule_type_job_without_instruction_is_422(
+        self, client: AsyncClient, admin_user
+    ):
+        """Item 4 (gate fix): `schedule_type="job"` with no `instruction`
+        used to fall through to the legacy direct-create path — a Scheduled
+        Job with no instruction is meaningless (nothing to compile)."""
+        user, headers = admin_user
+        resp = await client.post(
+            "/api/v1/schedules",
+            json={"name": "A job with no instruction", "schedule_type": "job"},
+            headers=headers,
+        )
+        assert resp.status_code == 422
+        assert "a Scheduled Job needs an instruction" in str(resp.json())
+
+    async def test_create_legacy_schedule_without_name_is_422_not_500(
+        self, client: AsyncClient, admin_user
+    ):
+        """Item 4 (gate fix): `name` lost its `min_length=1` when it became
+        optional (for the compile path, where a name is derived from the
+        instruction) — the legacy branch (`instruction` absent) must not be
+        able to reach `schedules.name NOT NULL` with `None`."""
+        user, headers = admin_user
+        resp = await client.post(
+            "/api/v1/schedules",
+            json={"schedule_type": "sync", "cron_expression": "0 0 * * *"},
+            headers=headers,
+        )
+        assert resp.status_code == 422
+
+    async def test_create_legacy_schedule_with_empty_name_is_422(
+        self, client: AsyncClient, admin_user
+    ):
+        user, headers = admin_user
+        resp = await client.post(
+            "/api/v1/schedules",
+            json={"name": "   ", "schedule_type": "sync"},
+            headers=headers,
+        )
+        assert resp.status_code == 422
+
     async def test_create_job_over_quota_returns_403(self, client: AsyncClient, db: AsyncSession, monkeypatch):
         tenant = await create_test_tenant(db, name="Job Quota Trial", plan="free")
         user, _ = await create_test_user(db, tenant, role_name="admin")
