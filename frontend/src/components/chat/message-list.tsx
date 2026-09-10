@@ -1216,6 +1216,9 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
       : undefined;
   const displayContent = applyDriveCitations(message.content, driveSources);
 
+  // Exact child cards are displayed inside their signed group review.
+  if (structuredOutput?.accounting_group_child) return null;
+
   if (structuredOutput?.type === "write_confirmation") {
     return (
       <div className="flex min-w-0 justify-start gap-3">
@@ -1229,9 +1232,9 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
           </div>
         )}
         <div className="flex min-w-0 flex-1 flex-col">
-          {message.content && (
+          {message.content && !structuredOutput.accounting_review && !structuredOutput.accounting_group && (
             <div className="mb-2 text-[13px] text-foreground">
-              {message.content}
+              <MarkdownRenderer content={message.content} isTerminal={isTerminal} />
             </div>
           )}
           <WriteConfirmationCard

@@ -2554,11 +2554,20 @@ class BaseSpecialistAgent(abc.ABC):
                     # The supported accounting payload is already deterministic. Route it
                     # through the existing validator/HITL card instead of asking the model
                     # to repeat it in another hop (which can hallucinate a card in prose).
-                    if block.name == "transaction_ops_accounting_evidence" and not _had_error:
+                    if (
+                        block.name in {"transaction_ops_accounting_evidence", "transaction_ops_accounting_group"}
+                        and not _had_error
+                    ):
+                        from app.services.transaction_ops.accounting_group import prepare_group_confirmation
                         from app.services.transaction_ops.tax_correction import candidate_confirmation
 
                         try:
-                            prepared = await candidate_confirmation(
+                            prepare_confirmation = (
+                                prepare_group_confirmation
+                                if block.name == "transaction_ops_accounting_group"
+                                else candidate_confirmation
+                            )
+                            prepared = await prepare_confirmation(
                                 db=db,
                                 tenant_id=self.tenant_id,
                                 actor_id=self.user_id,

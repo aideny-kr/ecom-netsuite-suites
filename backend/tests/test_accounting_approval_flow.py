@@ -2,6 +2,7 @@
 
 import json
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -18,6 +19,54 @@ from app.services.chat.write_validator import ValidationResult
 from tests.test_mutation_intercept import _llm_response, _stream_replay
 from tests.test_tax_correction import proposal
 from tests.test_write_confirm_orchestrator import _TENANT_ID, _USER_ID, _make_db, _make_session
+
+
+async def test_group_handoff_emits_one_real_card_without_another_model_hop():
+    from app.services.chat.write_confirmation_service import WriteConfirmationPayload
+    from tests.test_accounting_group import group_fixture
+
+    so, session = group_fixture()
+    card = WriteConfirmationPayload(
+        **{**so, "record_type": "invoice corrections", "proposed_fields": {"eligible_orders": 2}}
+    )
+    db = AsyncMock(spec=AsyncSession)
+    db.info = {}
+    agent = UnifiedAgent(tenant_id=_TENANT_ID, user_id=_USER_ID, correlation_id=str(uuid.uuid4()))
+    adapter = MagicMock()
+    hops = []
+
+    async def stream(**kwargs):
+        hops.append(kwargs)
+        assert len(hops) == 1
+        yield (
+            "response",
+            _llm_response(
+                tool_blocks=[
+                    ToolUseBlock(id="group", name="transaction_ops_accounting_group", input={"group_id": "a" * 32})
+                ]
+            ),
+        )
+
+    adapter.stream_message = stream
+    adapter.build_assistant_message.return_value = {"role": "assistant", "content": []}
+    adapter.build_tool_result_message.return_value = {"role": "user", "content": []}
+    execute = AsyncMock(return_value=json.dumps({"success": True, "case_count": 2, "financial_writes": 0}))
+    prepare = AsyncMock(return_value=(card, "Prepared two exact corrections for approval."))
+    with (
+        patch("app.services.policy_service.get_active_policy", AsyncMock(return_value=None)),
+        patch("app.services.chat.tools.execute_tool_call", execute),
+        patch("app.services.transaction_ops.accounting_group.prepare_group_confirmation", prepare),
+    ):
+        events = [
+            e
+            async for e in BaseSpecialistAgent.run_streaming(
+                agent, task="Fix all orders in this group", context={}, db=db, adapter=adapter, model="test-model"
+            )
+        ]
+    assert len(hops) == 1 and execute.await_count == 1
+    cards = [v for k, v in events if k == "confirmation_required"]
+    assert len(cards) == 1 and len(cards[0]["accounting_group"]["members"]) == 2
+    prepare.assert_awaited_once()
 
 
 def inputs(p):
@@ -102,6 +151,7 @@ async def test_approval_preflight_execution_verification_and_actor_audit(outcome
         created_at=datetime.now(timezone.utc),
     )
     db = _make_db(message)
+    db.info = {}
     session = _make_session(session_id=str(session_id))
     order = []
 
@@ -123,7 +173,17 @@ async def test_approval_preflight_execution_verification_and_actor_audit(outcome
         return {"status": "verified" if outcome == "verified" else "needs_review", "cash_settlement": "not_verified"}
 
     audit = AsyncMock()
+
+    @asynccontextmanager
+    async def locked(_):
+        order.append("lock")
+        try:
+            yield
+        finally:
+            order.append("unlock")
+
     with (
+        patch("app.services.transaction_ops.accounting_group.accounting_write_slot", locked),
         patch("app.services.transaction_ops.tax_correction.validate_approved", preflight),
         patch("app.services.transaction_ops.tax_correction.verify_after", verify),
         patch("app.services.chat.orchestrator.execute_tool_call", execute),
@@ -141,6 +201,8 @@ async def test_approval_preflight_execution_verification_and_actor_audit(outcome
                 write_confirm={"action": "approve", "confirmation_id": str(message.id)},
             )
         ]
+    assert order[0] == "lock" and order[-1] == "unlock"
+    order = order[1:-1]
     if outcome == "stale":
         assert order == ["preflight"]
         assert message.structured_output["status"] == "failed"

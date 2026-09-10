@@ -1988,6 +1988,64 @@ async def run_chat_turn(
                 yield {"type": "error", "error": "Confirmation is not in a pending state."}
                 return
 
+            if _so.get("accounting_group"):
+                from app.services.transaction_ops.accounting_group import run_group_confirmation
+
+                try:
+                    async for event in run_group_confirmation(
+                        db=db,
+                        session=session,
+                        message=_confirm_msg,
+                        so=_so,
+                        action=_wc_action,
+                        user_id=user_id,
+                        tenant_id=tenant_id,
+                        correlation_id=correlation_id,
+                    ):
+                        yield event
+                except ValueError as exc:
+                    yield {"type": "error", "error": str(exc)}
+                return
+
+            # Hold a dedicated account/record lock across the existing CAS,
+            # fresh checks, external write and independent verification. Re-enter
+            # the same approval path once; never duplicate financial execution logic.
+            if (
+                _wc_action == "approve"
+                and _so.get("accounting_review")
+                and db.info.get("accounting_write_lock") != str(_confirm_msg.id)
+            ):
+                from app.services.transaction_ops.accounting_group import accounting_write_slot
+
+                if not validate_and_extract_confirmation(_so, str(session.id))[0]:
+                    yield {"type": "error", "error": "Confirmation token is invalid or tampered."}
+                    return
+                try:
+                    async with accounting_write_slot(_so["accounting_review"]):
+                        db.info["accounting_write_lock"] = str(_confirm_msg.id)
+                        try:
+                            async for event in run_chat_turn(
+                                db=db,
+                                session=session,
+                                user_message=user_message,
+                                user_id=user_id,
+                                tenant_id=tenant_id,
+                                user_msg=user_msg,
+                                wizard_step=wizard_step,
+                                user_timezone=user_timezone,
+                                agent_id=agent_id,
+                                run_id=run_id,
+                                write_confirm=write_confirm,
+                                attached_file_id=attached_file_id,
+                                plan_mode_choice=plan_mode_choice,
+                            ):
+                                yield event
+                        finally:
+                            db.info.pop("accounting_write_lock", None)
+                except ValueError as exc:
+                    yield {"type": "error", "error": str(exc)}
+                return
+
             if _wc_action == "approve":
                 is_valid, tool_name, tool_input = validate_and_extract_confirmation(_so, str(session.id))
                 if not is_valid:
@@ -2650,6 +2708,9 @@ async def run_chat_turn(
                         session_id=session.id,
                         role="assistant",
                         content=_confirm_content,
+                        structured_output={"accounting_group_child": True}
+                        if _so.get("accounting_group_child")
+                        else None,
                         created_at=datetime.now(timezone.utc),
                     )
                     db.add(_assistant_msg)
