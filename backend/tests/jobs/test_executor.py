@@ -1545,6 +1545,104 @@ async def test_sweep_claim_clears_retry_job_id_and_reuses_the_row_no_third_row(d
     assert completed_retry.status == "failed"
 
 
+# ---------------------------------------------------------------------------
+# Item 3 (delta gate fix): one pending retry per schedule, never an orphan.
+# Two overlapping occurrences of the SAME schedule (a run longer than its
+# cron interval) that both fail race to set `retry_job_id` -- the LATER
+# assignment used to orphan the EARLIER occurrence's pending retry row.
+# ---------------------------------------------------------------------------
+
+
+async def test_two_overlapping_failures_never_orphan_the_pending_retry(db: AsyncSession, monkeypatch):
+    """Simulates the race directly: two DIFFERENT attempt=1 occurrences of
+    the same schedule (e.g. a run longer than its cron interval, so the
+    sweep claims a SECOND occurrence before the first one's failure has
+    assigned `retry_job_id`) both fail. The SECOND to finalize must not
+    create a second retry row or touch `next_run_at`/`retry_job_id` -- it
+    writes a `jobs.retry.skipped` audit and leaves `last_run_status="error"`."""
+    tenant = await create_test_tenant(db, name="Overlapping Retry Race Co")
+    tenant_id = tenant.id
+    await set_tenant_context(db, str(tenant_id))
+
+    async def always_fails(ctx, params):
+        raise StepExecutionError("boom: overlapping occurrence fails")
+
+    monkeypatch.setitem(STEP_REGISTRY, "fake.step", _fake_spec("read", always_fails))
+
+    now = datetime.now(timezone.utc)
+    schedule = await _seed_job_schedule(
+        db,
+        tenant,
+        plan_json={"steps": [{"id": "s1", "type": "fake.step", "params": {}}]},
+        next_run_at=now - timedelta(minutes=1),
+        cron_expression="0 6 * * 1",
+    )
+    schedule_id = schedule.id
+
+    # First occurrence -- attempt=1, retry_on_error=True. Both occurrences
+    # here are simulated as direct run_schedule_now calls (not via
+    # run_due_jobs's own claim, which would not naturally produce two
+    # concurrent attempt=1 claims in this single-threaded test) -- exactly
+    # what the sweep itself passes for every occurrence it runs.
+    outcome1 = await run_schedule_now(
+        db,
+        schedule_id,
+        tenant_id=tenant_id,
+        actor_id=None,
+        actor_type="system",
+        due_at=now,
+        now=now,
+        attempt=1,
+        retry_on_error=True,
+    )
+    assert outcome1.reason == REASON_ERROR
+
+    refreshed1 = (await db.execute(select(Schedule).where(Schedule.id == schedule_id))).scalar_one()
+    assert refreshed1.retry_job_id is not None
+    first_retry_job_id = refreshed1.retry_job_id
+    first_retry_at = refreshed1.next_run_at
+
+    # Second, OVERLAPPING occurrence -- also attempt=1 (claimed before the
+    # first occurrence's failure assigned retry_job_id), also fails.
+    now2 = now + timedelta(seconds=5)
+    outcome2 = await run_schedule_now(
+        db,
+        schedule_id,
+        tenant_id=tenant_id,
+        actor_id=None,
+        actor_type="system",
+        due_at=now2,
+        now=now2,
+        attempt=1,
+        retry_on_error=True,
+    )
+    assert outcome2.reason == REASON_ERROR
+
+    refreshed2 = (await db.execute(select(Schedule).where(Schedule.id == schedule_id))).scalar_one()
+    assert refreshed2.retry_job_id == first_retry_job_id  # unchanged -- no second retry row assigned
+    assert refreshed2.next_run_at == first_retry_at  # unchanged
+    assert refreshed2.last_run_status == "error"  # not overwritten back to retry_pending
+
+    jobs = (await db.execute(select(Job).where(Job.tenant_id == tenant_id))).scalars().all()
+    pending_retry_jobs = [j for j in jobs if j.parameters.get("attempt") == 2]
+    assert len(pending_retry_jobs) == 1  # exactly one pending attempt-2 row, never a second
+    assert pending_retry_jobs[0].id == first_retry_job_id
+
+    skipped_events = (
+        (
+            await db.execute(
+                select(AuditEvent).where(AuditEvent.tenant_id == tenant_id, AuditEvent.action == "jobs.retry.skipped")
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(skipped_events) == 1
+    assert skipped_events[0].payload["pending_retry_job_id"] == str(first_retry_job_id)
+    assert skipped_events[0].payload["job_id"] == str(outcome2.jobs_row_id)
+    assert skipped_events[0].status == "error"
+
+
 async def test_period_key_falls_back_to_computed_value_when_not_supplied(db: AsyncSession, monkeypatch):
     """Defensive only -- a caller invoking `run_schedule_now` directly with
     `attempt=2` but no `period_key` (e.g. the MCP tool) must not crash; it
