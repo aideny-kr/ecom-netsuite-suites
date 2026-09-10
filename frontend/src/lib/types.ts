@@ -1058,7 +1058,7 @@ export interface ClarificationOption {
   id: "A" | "B" | "C";
   title: string;
   rationale: string;
-  source: "netsuite" | "bigquery" | "shopify" | "stripe" | "drive";
+  source: "netsuite" | "bigquery" | "metabase" | "shopify" | "stripe" | "drive";
   is_default: boolean;
 }
 

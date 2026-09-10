@@ -1037,9 +1037,9 @@ class BaseSpecialistAgent(abc.ABC):
                     t0 = time.monotonic()
 
                     # Mutation intercept: block writes in non-streaming path too
-                    from app.services.chat.mutation_guard import classify_mutation as _classify_mut
+                    from app.services.chat.mutation_guard import classify_connector_mutation
 
-                    _mut_type = _classify_mut(block.name)
+                    _mut_type = await classify_connector_mutation(block.name, db, self.tenant_id)
                     if _mut_type is not None:
                         result_str = json.dumps(
                             {
@@ -1570,6 +1570,12 @@ class BaseSpecialistAgent(abc.ABC):
                 messages.append(adapter.build_assistant_message(response))
                 tool_results_content = []
                 raw_result_strings: list[str] = []  # Track originals for stop-when-done check
+                from app.services.chat.metabase_context import metabase_tool_names
+
+                # BI queries may return metadata, partial populations, or one
+                # aggregate before the control query. Let that batch complete.
+                _metabase_names = metabase_tool_names(self.tool_definitions)
+                _metabase_analysis = any(block.name in _metabase_names for block in response.tool_use_blocks)
 
                 for i, block in enumerate(response.tool_use_blocks):
                     if block.name.startswith("workspace_"):
@@ -1633,13 +1639,15 @@ class BaseSpecialistAgent(abc.ABC):
                             InterceptResult,
                             intercept_clarify_call,
                         )
-                        from app.services.connection_service import list_connections
 
                         # Active connectors = MCP connectors + REST connections.
                         # REST-only tenants (e.g., NetSuite via REST API without an
                         # MCP connector) would otherwise be excluded from the
                         # canonical-source set and every clarify option would drop.
-                        _mcp_providers = [getattr(c, "provider", "") for c in getattr(self, "_connectors", [])]
+                        from app.services.chat.plan_mode.source_resolver import source_provider_for_connector
+                        from app.services.connection_service import list_connections
+
+                        _mcp_providers = [source_provider_for_connector(c) for c in getattr(self, "_connectors", [])]
                         _rest_connections: list = []
                         try:
                             _rest_connections = await list_connections(db, self.tenant_id)
@@ -2622,6 +2630,7 @@ class BaseSpecialistAgent(abc.ABC):
                     must_run = [b for b in remaining_blocks if b.name in _KNOWLEDGE_TOOLS]
                     if (
                         getattr(self, "_context_need", None) != "full"
+                        and not _metabase_analysis
                         and skippable
                         and _has_successful_data_result([result_str])
                     ):
@@ -2649,6 +2658,7 @@ class BaseSpecialistAgent(abc.ABC):
                 # Soft enforcement: nudge LLM to stop if data was already returned
                 if (
                     getattr(self, "_context_need", None) != "full"
+                    and not _metabase_analysis
                     and step >= 1
                     and _has_successful_data_result(raw_result_strings)
                 ):

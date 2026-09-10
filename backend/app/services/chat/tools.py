@@ -177,6 +177,10 @@ def _connector_tag(connector) -> str:
     NetSuite connectors additionally carry environment and account, because a
     tenant can hold more than one and the difference is production money.
     """
+    from app.services.chat.metabase_context import METABASE_TOOL_TAG, is_metabase_connector
+
+    if is_metabase_connector(connector):
+        return METABASE_TOOL_TAG
     provider = getattr(connector, "provider", "") or "external"
     if not str(provider).startswith("netsuite"):
         return str(provider)
@@ -212,6 +216,7 @@ def build_external_tool_definitions(connectors: list) -> list[dict]:
     for connector in sorted(connectors, key=lambda c: str(c.id)):
         if not connector.discovered_tools:
             continue
+        connector_tag = _connector_tag(connector)
         sorted_discovered = sorted(connector.discovered_tools, key=lambda t: t.get("name", ""))
         for tool in sorted_discovered:
             raw_name = tool.get("name", "unknown")
@@ -224,6 +229,22 @@ def build_external_tool_definitions(connectors: list) -> list[dict]:
 
             anthropic_name = _make_ext_tool_name(connector.id, raw_name)
             desc = tool.get("description", "") or ""
+            if connector_tag == "metabase_mcp":
+                # Generic names like `search` occur on several MCP servers.
+                # Keep the connection label visible alongside the source tag.
+                label = getattr(connector, "label", "")
+                if isinstance(label, str) and label:
+                    desc = f"{label}: {desc}"
+                from app.services.chat.metabase_tool_policy import is_read_only_metabase_tool
+
+                if raw_name in {"query", "construct_query"} and is_read_only_metabase_tool(connector, raw_name):
+                    desc += (
+                        '\nNative query builder: query must be MBQL 5 {"lib/type":"mbql/query","stages":[...]}, '
+                        'with a portable source-table in the first stage. Do not send SQL or {"type":"native"}. '
+                        "Prefer query with the complete object over construct/execute handles. "
+                        "For counts, use server-side aggregation; unique orders require distinct order_id, "
+                        "also when grouping by order state. See the Metabase SQL skill for join syntax."
+                    )
             # Use the tool's input_schema if available, otherwise empty
             input_schema = tool.get("input_schema") or {
                 "type": "object",
@@ -242,7 +263,7 @@ def build_external_tool_definitions(connectors: list) -> list[dict]:
                     # difference — so a model asked to "test in sandbox" chose
                     # between them arbitrarily, and nobody could tell from the
                     # log which one ran.
-                    "description": f"[{_connector_tag(connector)}] {desc}",
+                    "description": f"[{connector_tag}] {desc}",
                     "input_schema": input_schema,
                 }
             )
@@ -641,7 +662,9 @@ async def _execute_external_tool(
         if not connector or not connector.is_enabled:
             return {"error": f"Connector '{connector_id}' not found or disabled"}
 
-        if connector.provider in ("custom", "shopify_mcp", "stripe_mcp") and not human_approved:
+        from app.services.chat.metabase_tool_policy import requires_custom_tool_confirmation
+
+        if requires_custom_tool_confirmation(connector, raw_tool_name) and not human_approved:
             return {
                 "error": "Custom MCP tools require human approval of the exact call before execution.",
                 "hitl_required": True,

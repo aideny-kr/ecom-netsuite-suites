@@ -26,6 +26,7 @@ const _MANUAL_TEXT_MAX = 500;
 const SOURCE_LABEL: Record<string, string> = {
   netsuite: "NetSuite",
   bigquery: "BigQuery",
+  metabase: "Metabase",
   shopify: "Shopify",
   stripe: "Stripe",
   drive: "Drive",

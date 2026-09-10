@@ -26,7 +26,7 @@ CLARIFY_TOOL_SCHEMA: dict = {
                         "rationale": {"type": "string", "maxLength": 200},
                         "source": {
                             "type": "string",
-                            "enum": ["netsuite", "bigquery", "shopify", "stripe", "drive"],
+                            "enum": ["netsuite", "bigquery", "metabase", "shopify", "stripe", "drive"],
                         },
                         "is_default": {"type": "boolean"},
                     },

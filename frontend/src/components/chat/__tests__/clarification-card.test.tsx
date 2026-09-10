@@ -31,6 +31,21 @@ const _BASE: ClarificationData = {
 
 
 describe("ClarificationCard", () => {
+  it("offers Metabase as a source and submits its option", () => {
+    const onChoose = vi.fn();
+    const data: ClarificationData = {
+      ..._BASE,
+      options: [
+        _BASE.options[0],
+        { ..._BASE.options[1], title: "Solidus database", source: "metabase" },
+      ],
+    };
+    render(<ClarificationCard data={data} onChoose={onChoose} />);
+    expect(screen.getByText("Metabase")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("radio", { name: /Solidus database/ }));
+    expect(onChoose).toHaveBeenCalledWith("B");
+  });
+
   it("renders ambiguity summary", () => {
     render(<ClarificationCard data={_BASE} onChoose={() => {}} />);
     expect(screen.getByText(/Revenue can mean two things/)).toBeInTheDocument();
