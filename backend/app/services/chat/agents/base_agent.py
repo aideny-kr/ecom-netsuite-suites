@@ -2099,7 +2099,7 @@ class BaseSpecialistAgent(abc.ABC):
                         # blocking the SSE stream on slow MCP calls)
                         current_record: dict[str, Any] | None = None
                         accounting_card = None
-                        if _is_netsuite_write and mutation_type == "update":
+                        if _is_netsuite_write and mutation_type in ("update", "create"):
                             from app.services.chat.write_payload import normalize_write_payload
                             from app.services.transaction_ops.tax_correction import review_for_card
 

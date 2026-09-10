@@ -2,6 +2,7 @@
 
 import type { WriteConfirmationData } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { SalesCreditConfirmationCard } from "./sales-credit-confirmation-card";
 
 function label(value: unknown): string {
   if (value && typeof value === "object") {
@@ -41,6 +42,9 @@ export function AccountingConfirmationCard({
   groupState?: WriteConfirmationData["status"];
 }) {
   const p = data.accounting_review!;
+  if (p.kind === "sales_adjustment_credit") {
+    return <SalesCreditConfirmationCard key={data.confirmation_token} data={data} proposal={p} onConfirm={onConfirm} onReject={onReject} disabled={disabled} readOnly={readOnly} groupState={groupState} />;
+  }
   const awaitingGroup =
     data.status === "pending" && groupState && groupState !== "pending";
   const pending = data.status === "pending" && !awaitingGroup;

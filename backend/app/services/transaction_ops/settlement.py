@@ -74,6 +74,10 @@ async def queue(db, tenant_id, operation, proposal, *, now):
 
 async def record_outcome(db, tenant_id, run, reason, *, now):
     """Runs before the terminal transition, atomically with the run's audit."""
+    if run.params_json.get("approval_message_id"):
+        from app.services.transaction_ops.accounting_recheck import record_outcome as record_chat_outcome
+
+        return await record_chat_outcome(db, tenant_id, run, reason, now=now)
     from app.services.transaction_ops import state_service as state
 
     operation = await state._one(db, tenant_id, TransactionOperation, UUID(run.params_json["operation_id"]))

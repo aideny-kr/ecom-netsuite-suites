@@ -48,7 +48,7 @@ export function WriteConfirmationCard({
     return <AccountingGroupCard data={data} onConfirm={() => onConfirm({})} onReject={onReject} disabled={disabled} />;
   }
 
-  if (data.accounting_review && !data.editable_slots?.length) {
+  if (data.accounting_review && (data.accounting_review.kind === "sales_adjustment_credit" || !data.editable_slots?.length)) {
     return <AccountingConfirmationCard data={data} onConfirm={() => onConfirm({})} onReject={onReject} disabled={disabled} />;
   }
 

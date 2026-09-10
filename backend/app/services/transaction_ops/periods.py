@@ -1,6 +1,7 @@
 """Calendar review cohorts and bounded daily catch-up; no external calls."""
 
 from datetime import date, datetime, time, timedelta, timezone
+from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -12,6 +13,7 @@ class ReconciliationPolicy(BaseModel):
     daily_check_hour: int = Field(default=9, ge=0, le=23, strict=True)
     overlap_minutes: int = Field(default=1440, ge=0, le=10080, strict=True)
     max_slice_days: int = Field(default=1, ge=1, le=7, strict=True)
+    review_basis: Literal["updated_at", "completed_at"] = "updated_at"
 
     @field_validator("timezone_name")
     @classmethod
@@ -36,8 +38,10 @@ def _midnight(day, zone):
     return datetime.combine(day, time.min, zone).astimezone(timezone.utc)
 
 
-def review_window(kind, now, timezone_name, *, start_date=None, end_date=None):
+def review_window(kind, now, timezone_name, *, start_date=None, end_date=None, basis="updated_at"):
     _clock(now)
+    if basis not in ("updated_at", "completed_at"):
+        raise ValueError("The source date basis must be verified before use")
     zone = _zone(timezone_name)
     today = now.astimezone(zone).date()
     if kind == "yesterday":
@@ -54,7 +58,7 @@ def review_window(kind, now, timezone_name, *, start_date=None, end_date=None):
         raise ValueError("Choose yesterday, last week, last month or a bounded custom period")
     if end > today or not timedelta(0) < end - start <= timedelta(days=31):
         raise ValueError("Choose a completed period of at most 31 calendar days")
-    return {"window_start": _midnight(start, zone), "window_end": _midnight(end, zone), "window_basis": "completed_at"}
+    return {"window_start": _midnight(start, zone), "window_end": _midnight(end, zone), "window_basis": basis}
 
 
 def scheduled_window(policy, now, successful_end=None):

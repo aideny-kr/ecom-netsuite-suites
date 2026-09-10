@@ -102,7 +102,6 @@ class RunCreate(InputModel):
     def exact_scope(self):
         if self.review and (
             self.order_references
-            or self.window_basis != "completed_at"
             or self.window_start is None
             or self.window_end is None
             or not self.review.start <= self.window_start < self.window_end <= self.review.end

@@ -715,7 +715,11 @@ async def run_investigation(
                     raise
                 except Exception:
                     report = {**report, "automation": {"status": "blocked", "code": "action_evidence_unavailable"}}
-            await state.record_finding(db, tenant_id, run_id, reference, report, lease_token=token, now=clock())
+            finding = await state.record_finding(
+                db, tenant_id, run_id, reference, report, lease_token=token, now=clock()
+            )
+            if settlement and run.params_json.get("approval_message_id"):
+                report = finding.report_json
             progress["processed"] += 1
             balance_status = report["balance"]["status"]
             group = (

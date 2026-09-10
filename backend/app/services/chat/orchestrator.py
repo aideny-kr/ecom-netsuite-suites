@@ -2333,7 +2333,7 @@ async def run_chat_turn(
                 # NetSuite record and resolve it manually.
                 # Accounting tax corrections carry server-built source and native preconditions.
                 # Check again after the single-use approval claim, immediately before any write.
-                if _so.get("mutation_type") == "update":
+                if _so.get("mutation_type") in ("update", "create"):
                     from app.services.transaction_ops.tax_correction import validate_approved
 
                     try:
@@ -2393,6 +2393,7 @@ async def run_chat_turn(
                 # Defaults to the SAFE value — an outcome we have not
                 # established is unknown, never success.
                 _write_outcome: str = "indeterminate"
+                _exec_result = None
                 try:
                     _exec_result = json.loads(_exec_result_str)
                     # T2 gate round-2 finding: `.get("error")` alone missed a
@@ -2510,13 +2511,29 @@ async def run_chat_turn(
                         "now risks creating it twice."
                     )
 
-                if _exec_succeeded and _so.get("accounting_review"):
+                _credit_recovery = (
+                    _write_outcome == "indeterminate"
+                    and (_so.get("accounting_review") or {}).get("kind") == "sales_adjustment_credit"
+                )
+                if (_exec_succeeded or _credit_recovery) and _so.get("accounting_review"):
                     from app.services.transaction_ops.tax_correction import verify_after
 
                     try:
-                        _verification = await verify_after(db, tenant_id, _so["accounting_review"])
+                        if _so["accounting_review"].get("kind") == "sales_adjustment_credit":
+                            async with asyncio.timeout(90):
+                                _verification = await verify_after(
+                                    db, tenant_id, _so["accounting_review"], receipt=_exec_result
+                                )
+                        else:
+                            _verification = await verify_after(db, tenant_id, _so["accounting_review"])
                     except Exception as exc:
                         _verification = {"status": "needs_review", "reason": type(exc).__name__}
+                    if _credit_recovery:
+                        _verification = {
+                            **_verification,
+                            "receipt_outcome": "indeterminate",
+                            "recovered_by_read": _verification.get("status") == "verified",
+                        }
                     await log_event(
                         db=db,
                         tenant_id=tenant_id,
@@ -2536,13 +2553,20 @@ async def run_chat_turn(
                         status="success" if _verification["status"] == "verified" else "error",
                     )
                     if _verification["status"] == "verified":
+                        if _credit_recovery:
+                            _exec_succeeded = True
+                            _exec_error = None
+                            _confirm_content = "The credit was located using its unique posting reference."
                         _confirm_content += (
-                            "\n\nInvoice total, tax and GL were independently re-read and verified. "
+                            "\n\nThe Sales Adjustments credit, exact invoice application and GL entries were "
+                            "independently re-read and verified. No cash refund was issued."
+                            if _so["accounting_review"].get("kind") == "sales_adjustment_credit"
+                            else "\n\nInvoice total, tax and GL were independently re-read and verified. "
                             "Sales-order reconciliation and deposit/cash settlement remain separate checks; no additional money was moved."
                         )
                     else:
                         _confirm_content = (
-                            "NetSuite returned a response, but the invoice/GL correction is not verified. "
+                            "The accounting correction and its general ledger impact are not verified. "
                             "The case still needs review. Do not repeat this write."
                         )
                     _so = {**_so, "accounting_verification": json.loads(json.dumps(_verification, default=str))}
@@ -2715,6 +2739,43 @@ async def run_chat_turn(
                         logger.warning("post-merge label resolution failed", exc_info=True)
                 _confirm_msg.structured_output = _updated_so
                 _wc_flag_modified(_confirm_msg, "structured_output")
+
+                if (
+                    _updated_so.get("status") == "approved"
+                    and (_updated_so.get("accounting_review") or {}).get("kind") == "sales_adjustment_credit"
+                    and (_updated_so.get("accounting_verification") or {}).get("status") == "verified"
+                ):
+                    from app.services.transaction_ops.accounting_recheck import queue as queue_accounting_recheck
+
+                    try:
+                        _recheck_run = await queue_accounting_recheck(
+                            db, tenant_id, _confirm_msg, user_id, now=datetime.now(timezone.utc)
+                        )
+                        _recheck = {"status": "queued", "run_id": str(_recheck_run.id)}
+                        _confirm_content += (
+                            "\n\nA read-only order, tax and refund recheck is queued. "
+                            "The case is marked matched only if that reconciliation succeeds."
+                        )
+                    except Exception as exc:
+                        _recheck = {"status": "not_queued", "reason": type(exc).__name__}
+                        _confirm_content += (
+                            "\n\nThe full case recheck could not be queued; the case still needs review."
+                        )
+                        await log_event(
+                            db=db,
+                            tenant_id=tenant_id,
+                            actor_id=user_id,
+                            category="transaction_ops",
+                            action="accounting_recheck.queue_failed",
+                            resource_type="chat_message",
+                            resource_id=str(_confirm_msg.id),
+                            correlation_id=correlation_id,
+                            payload={"reason": type(exc).__name__, "financial_writes": 0},
+                            status="error",
+                        )
+                    _updated_so = {**_updated_so, "accounting_recheck": _recheck}
+                    _confirm_msg.structured_output = _updated_so
+                    _wc_flag_modified(_confirm_msg, "structured_output")
 
                 await log_event(
                     db=db,

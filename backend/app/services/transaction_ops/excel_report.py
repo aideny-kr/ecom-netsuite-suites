@@ -156,7 +156,8 @@ def build_workbook(rows, scopes, *, status, search, generated_at, report_id):
         info.append(
             [
                 config.get("name") or f"Entity {config.get('subsidiary_id')}",
-                f"{scope['period']['start']} to {scope['period']['end']} (exclusive); review run {scope['run_id']}",
+                f"{scope['period']['start']} to {scope['period']['end']} (exclusive); "
+                f"source date basis: {scope.get('window_basis', 'completed_at')}; review run {scope['run_id']}",
             ]
         )
     overview = _sheet(wb, "Report", ["Field", "Value"], info, numeric_columns=(2,))

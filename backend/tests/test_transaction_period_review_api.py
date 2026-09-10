@@ -60,7 +60,7 @@ async def test_review_queues_exact_calendar_cohort_and_idempotent_retry(client, 
     assert datetime.fromisoformat(data["params_json"]["window_start"]) == datetime(2026, 8, 1, 7, tzinfo=timezone.utc)
     assert datetime.fromisoformat(data["params_json"]["window_end"]) == datetime(2026, 8, 2, 7, tzinfo=timezone.utc)
     assert datetime.fromisoformat(data["params_json"]["review"]["end"]) == datetime(2026, 9, 1, 7, tzinfo=timezone.utc)
-    assert data["params_json"]["window_basis"] == "completed_at"
+    assert data["params_json"]["window_basis"] == "updated_at"
     assert (await client.post(url, json=body, headers=headers)).json()["id"] == data["id"]
 
 

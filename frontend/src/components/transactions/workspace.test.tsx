@@ -281,16 +281,15 @@ it("preserves source-order browsing when reconciliation access is unavailable", 
 
 it("launches one group investigation with all-member pagination and exact scope", async () => {
   mount();
-  const link = await screen.findByRole("link", { name: "Investigate group →" });
+  const link = await screen.findByRole("link", { name: "Prepare group fixes →" });
   const prompt = new URL(
     link.getAttribute("href")!,
     "https://example.test",
   ).searchParams.get("compose")!;
-  expect(prompt).toContain("transaction_ops.groups");
-  expect(prompt).toContain("every has_next page");
-  expect(prompt).toContain("scope-a");
-  expect(prompt).toContain("Split".toLowerCase());
-  expect(prompt).toContain("Do not approve or execute");
+  expect(prompt).toContain("transaction_ops.accounting_group");
+  expect(prompt).toContain("show every unsupported case separately");
+  expect(prompt).toContain("bounded concurrency and per-order verification and audit");
+  expect(prompt).toContain("Do not treat this request or the group ID as financial approval");
   expect(prompt).toContain('"review_run_ids":["review-a"]');
   expect(prompt).toContain('"status":"needs_review"');
   expect(apiClient.get).toHaveBeenCalledWith(

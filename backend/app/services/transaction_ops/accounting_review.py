@@ -254,6 +254,7 @@ async def accounting_context(db, tenant_id, scope, report=None):
     context.update(
         configuration_status="scoped_configuration_found",
         config_id=str(config.id),
+        sales_credit_profile=mapping.get("sales_credit_profile"),
         netsuite_connection_id=str(config.netsuite_connection_id),
         query_scope_params={
             "connection_id": str(config.netsuite_connection_id),

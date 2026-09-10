@@ -443,6 +443,23 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
 
             await collect_commercial_credits(db, tenant_id, review, case.latest_report_json, source, evidence)
             correction = candidate(evidence, case.latest_report_json, review, source)
+            if correction is None and review.get("sales_credit_profile"):
+                from app.services.transaction_ops.sales_credit import build_candidate, collect_support
+
+                try:
+                    support = await collect_support(db, tenant_id, source, case.latest_report_json, review, evidence)
+                    if support:
+                        correction = build_candidate(
+                            tenant_id=tenant_id,
+                            case_id=case.id,
+                            source=source,
+                            report=case.latest_report_json,
+                            review=review,
+                            support=support,
+                        )
+                        evidence["sales_credit_support"] = support
+                except (ValueError, NetSuiteEvidenceError, SourceReadError) as exc:
+                    evidence["blockers"].append(f"sales_credit:{exc}")
             if correction:
                 evidence["assessment"]["correction_ready"] = "ready_for_exact_human_approval"
                 evidence["blockers"] = [
@@ -455,10 +472,15 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
                 db.info["accounting_correction_candidate"] = correction
                 evidence["correction_candidate"] = {
                     "next_action": "Call this tool to DISPLAY an approval card. Execution requires human approval.",
-                    "tool_name": f"ext__{uuid.UUID(correction['connector_id']).hex}__ns_updateRecord",
+                    "tool_name": f"ext__{uuid.UUID(correction['connector_id']).hex}__"
+                    + ("ns_createRecord" if correction.get("kind") == "sales_adjustment_credit" else "ns_updateRecord"),
                     "params": {
                         "recordType": correction["record_type"],
-                        "recordId": correction["record_id"],
+                        **(
+                            {}
+                            if correction.get("kind") == "sales_adjustment_credit"
+                            else {"recordId": correction["record_id"]}
+                        ),
                         "data": json.dumps(correction["proposed_fields"]),
                     },
                     "expected_after": correction["expected_after"],

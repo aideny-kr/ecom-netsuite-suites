@@ -57,6 +57,12 @@ const runLink = (id: string) =>
 function span(run: TransactionRun) {
   return objectValue(run.params_json.review);
 }
+function dateBasis(run: TransactionRun) {
+  return run.params_json.window_basis ?? (span(run).id ? "completed_at" : "updated_at");
+}
+function dateBasisLabel(run: TransactionRun) {
+  return dateBasis(run) === "updated_at" ? "Source update date (updated_at)" : "Order completion date (completed_at)";
+}
 export function TransactionWorkspace() {
   const access = useTransactionAccess();
   if (!access.allowed && !access.loading && !access.error)
@@ -126,7 +132,8 @@ function Workspace() {
           (r) =>
             currentConfig(r)?.id === c.id &&
             span(r).start === (anchor && span(anchor).start) &&
-            span(r).end === (anchor && span(anchor).end),
+            span(r).end === (anchor && span(anchor).end) &&
+            dateBasis(r) === (anchor && dateBasis(anchor)),
         );
         return found ? [found] : [];
       });
@@ -344,8 +351,9 @@ function Workspace() {
           </Button>
         </div>
         <p className="mt-4 text-[13px] text-muted-foreground">
-          Orders completed in the selected period, compared with current
-          NetSuite records. Refund activity also checks older orders. Calendar
+          Source activity in the selected period, compared with current
+          NetSuite records. Each review records its source date basis.
+          Refund activity also checks older orders. Calendar
           boundaries use the configured business timezone.
         </p>
         <p className="mt-2 text-[13px]">
@@ -359,7 +367,7 @@ function Workspace() {
         {anchor && (
           <p className="mt-2 text-[13px] text-muted-foreground">
             Viewing {dateLabel(span(anchor).start)} →{" "}
-            {dateLabel(span(anchor).end)} (end exclusive). Results available for{" "}
+            {dateLabel(span(anchor).end)} (end exclusive). {dateBasisLabel(anchor)}. Results available for{" "}
             {selectedRuns.length} of{" "}
             {Math.max(scopes.length, selectedRuns.length)} selected entities.
           </p>
@@ -742,6 +750,7 @@ function Workspace() {
                     </td>
                     <td className="p-4">
                       {runState(r.status, r.termination_reason)}
+                      <p className="mt-1 text-xs text-muted-foreground">{dateBasisLabel(r)}</p>
                     </td>
                     <td className="space-x-4 p-4">
                       <Link

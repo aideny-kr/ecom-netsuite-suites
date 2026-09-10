@@ -69,15 +69,34 @@ async def test_group_handoff_emits_one_real_card_without_another_model_hop():
     prepare.assert_awaited_once()
 
 
+def kind_proposal(kind):
+    if kind == "tax":
+        return proposal()
+    from app.services.transaction_ops.sales_credit import build_candidate
+    from tests.test_sales_credit import inputs as credit_inputs
+
+    data = credit_inputs()
+    data["review"]["native_mcp_connector_id"] = proposal()["connector_id"]
+    p = build_candidate(**data)
+    p["observed_at"] = datetime.now(timezone.utc).isoformat()
+    return p
+
+
 def inputs(p):
+    if p.get("kind") == "sales_adjustment_credit":
+        return (
+            f"ext__{p['connector_id'].replace('-', '')}__ns_createRecord",
+            {"recordType": "creditmemo", "data": json.dumps(p["proposed_fields"])},
+        )
     return (
         f"ext__{p['connector_id'].replace('-', '')}__ns_updateRecord",
         {"recordType": "invoice", "recordId": p["record_id"], "data": json.dumps(p["proposed_fields"])},
     )
 
 
-async def test_agent_emits_exact_accounting_card_without_executing_or_duplicate_prefetch():
-    p = proposal()
+@pytest.mark.parametrize("kind", ["tax", "credit"])
+async def test_agent_emits_exact_accounting_card_without_executing_or_duplicate_prefetch(kind):
+    p = kind_proposal(kind)
     p["tenant_id"] = str(_TENANT_ID)
     name, params = inputs(p)
     db = AsyncMock(spec=AsyncSession)
@@ -95,6 +114,7 @@ async def test_agent_emits_exact_accounting_card_without_executing_or_duplicate_
     execute = AsyncMock()
     with (
         patch("app.services.policy_service.get_active_policy", AsyncMock(return_value=None)),
+        patch("app.services.chat.agents.base_agent._metadata_fetched_this_turn", return_value=True),
         patch(
             "app.services.chat.agents.base_agent.validate_mutation", AsyncMock(return_value=ValidationResult(ok=True))
         ),
@@ -117,24 +137,32 @@ async def test_agent_emits_exact_accounting_card_without_executing_or_duplicate_
         ]
     cards = [v for k, v in events if k == "confirmation_required"]
     assert len(cards) == 1
-    assert cards[0]["record_id"] == p["record_id"]
+    assert cards[0]["record_id"] == (None if kind == "credit" else p["record_id"])
     assert cards[0]["accounting_review"] == p
     assert cards[0]["proposed_fields"] == p["proposed_fields"]
     assert not cards[0].get("invariant_errors")
     execute.assert_not_awaited()
     text = " ".join(v for k, v in events if k == "text")
-    assert "7030.02" in text and "7046.00" in text and "Posting period" in text
+    if kind == "tax":
+        assert "7030.02" in text and "7046.00" in text and "Posting period" in text
+    else:
+        assert "Sales Adjustments credit" in text
 
 
-@pytest.mark.parametrize("outcome", ["stale", "verified", "unverified", "rejected"])
-async def test_approval_preflight_execution_verification_and_actor_audit(outcome):
-    p = proposal()
+@pytest.mark.parametrize(
+    "kind,outcome",
+    [(kind, outcome) for kind in ("tax", "credit") for outcome in ("stale", "verified", "unverified", "rejected")]
+    + [("credit", outcome) for outcome in ("unknown_verified", "unknown_missing", "unreadable_verified")],
+)
+async def test_approval_preflight_execution_verification_and_actor_audit(outcome, kind):
+    p = kind_proposal(kind)
     p["tenant_id"] = str(_TENANT_ID)
+    verified_outcome = outcome in {"verified", "unknown_verified", "unreadable_verified"}
     name, params = inputs(p)
     session_id = uuid.uuid4()
     card = build_confirmation_payload(
-        mutation_type="update",
-        record_type="invoice",
+        mutation_type="create" if kind == "credit" else "update",
+        record_type="creditmemo" if kind == "credit" else "invoice",
         tool_name=name,
         tool_input=params,
         session_id=str(session_id),
@@ -164,15 +192,22 @@ async def test_approval_preflight_execution_verification_and_actor_audit(outcome
         order.append("write")
         assert kwargs["human_approved"] is True
         assert kwargs["tool_input"] == params
+        if outcome == "unreadable_verified":
+            return "unreadable receipt"
+        if outcome.startswith("unknown"):
+            return json.dumps({"outcome_indeterminate": True, "error": "timeout"})
         return json.dumps(
             {"error": "Period locked"} if outcome == "rejected" else {"success": True, "id": p["record_id"]}
         )
 
-    async def verify(*args):
+    async def verify(*args, **kwargs):
+        if kind == "credit" and outcome in ("verified", "unverified"):
+            assert kwargs["receipt"]["success"] is True
         order.append("verify")
-        return {"status": "verified" if outcome == "verified" else "needs_review", "cash_settlement": "not_verified"}
+        return {"status": "verified" if verified_outcome else "needs_review", "cash_settlement": "not_verified"}
 
     audit = AsyncMock()
+    recheck = AsyncMock(return_value=MagicMock(id="recheck-run"))
 
     @asynccontextmanager
     async def locked(_):
@@ -187,6 +222,7 @@ async def test_approval_preflight_execution_verification_and_actor_audit(outcome
         patch("app.services.transaction_ops.accounting_group.authorize_accounting_write", AsyncMock()),
         patch("app.services.transaction_ops.tax_correction.validate_approved", preflight),
         patch("app.services.transaction_ops.tax_correction.verify_after", verify),
+        patch("app.services.transaction_ops.accounting_recheck.queue", recheck),
         patch("app.services.chat.orchestrator.execute_tool_call", execute),
         patch("app.services.chat.orchestrator.log_event", audit),
         patch("app.services.mcp_connector_service.get_mcp_connector", AsyncMock(return_value=None)),
@@ -214,7 +250,7 @@ async def test_approval_preflight_execution_verification_and_actor_audit(outcome
     else:
         assert order == ["preflight", "write", "verify"]
         so = message.structured_output
-        assert so["accounting_verification"]["status"] == ("verified" if outcome == "verified" else "needs_review")
+        assert so["accounting_verification"]["status"] == ("verified" if verified_outcome else "needs_review")
         verification = next(
             c.kwargs
             for c in audit.await_args_list
@@ -223,14 +259,23 @@ async def test_approval_preflight_execution_verification_and_actor_audit(outcome
         assert verification["payload"]["approved_by"] == str(_USER_ID)
         assert verification["payload"]["before"] == p["before"]
         content = " ".join(e["message"]["content"] for e in events if e.get("type") == "message")
-        assert ("independently re-read and verified" in content) == (outcome == "verified")
-        if outcome == "unverified":
+        assert ("independently re-read and verified" in content) == verified_outcome
+        if not verified_outcome:
             assert "executed successfully" not in content
+        if outcome.startswith("unknown") or outcome == "unreadable_verified":
+            assert so["status"] == ("approved" if verified_outcome else "indeterminate")
+            assert so["accounting_verification"]["recovered_by_read"] is verified_outcome
+        if kind == "credit" and verified_outcome:
+            recheck.assert_awaited_once()
+            assert so["accounting_recheck"] == {"status": "queued", "run_id": "recheck-run"}
+        else:
+            recheck.assert_not_awaited()
 
 
+@pytest.mark.parametrize("kind", ["tax", "credit"])
 @pytest.mark.parametrize("blocked", [None, "validation", "policy", "tenant", "unavailable_tool"])
-async def test_fresh_evidence_generates_real_card_without_second_model_hop(blocked):
-    p = proposal()
+async def test_fresh_evidence_generates_real_card_without_second_model_hop(blocked, kind):
+    p = kind_proposal(kind)
     p["tenant_id"] = str(_TENANT_ID if blocked != "tenant" else uuid.uuid4())
     name, params = inputs(p)
     db = AsyncMock(spec=AsyncSession)
@@ -296,7 +341,7 @@ async def test_fresh_evidence_generates_real_card_without_second_model_hop(block
         assert next(v for k, v in events if k == "response").success is False
     else:
         assert len(cards) == 1
-        assert cards[0]["record_id"] == p["record_id"]
+        assert cards[0]["record_id"] == (None if kind == "credit" else p["record_id"])
         assert cards[0]["tool_input"] == params
         assert cards[0]["accounting_review"] == p
         result = next(v for k, v in events if k == "response")

@@ -129,8 +129,8 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
     targets = [
         (
             m["card"]["accounting_review"]["scope"]["netsuite_account_id"],
-            m["card"]["record_type"],
-            m["card"]["record_id"],
+            m["card"]["accounting_review"].get("lock_record_type", m["card"]["record_type"]),
+            m["card"]["accounting_review"]["record_id"],
         )
         for m in eligible
     ]
@@ -288,7 +288,9 @@ def validate_manifest(so, session_id):
             or p.get("case_id") != member["case_id"]
         ):
             raise ValueError("A group member is not an exact supported pending correction.")
-        targets.append((p["scope"]["netsuite_account_id"], card["record_type"], card["record_id"]))
+        targets.append(
+            (p["scope"]["netsuite_account_id"], p.get("lock_record_type", card["record_type"]), p["record_id"])
+        )
     if len(set(targets)) != len(targets):
         raise ValueError("Overlapping invoice writes cannot be approved together.")
     return members
@@ -309,7 +311,8 @@ async def accounting_write_slot(proposal):
 
     async with engine.connect() as connection:
         try:
-            record = key(f"accounting-write:{account}:{proposal['record_type']}:{proposal['record_id']}")
+            record_type = "invoice" if proposal.get("kind") == "sales_adjustment_credit" else proposal["record_type"]
+            record = key(f"accounting-write:{account}:{record_type}:{proposal['record_id']}")
             if not await connection.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": record}):
                 raise ValueError("Another approved correction is checking this invoice. No additional update was sent.")
             keys.append(record)

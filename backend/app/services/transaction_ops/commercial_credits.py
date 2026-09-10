@@ -144,7 +144,10 @@ def verify_applied_credit(basis, invoice, applications, invoice_gl):
         if (
             amount != credit
             or _money(cm["taxTotal"]) != 0
-            or str(cm["createdFrom"]["id"]) != invoice_id
+            # Standalone credits legitimately have a blank native CreatedFrom.
+            # Exact apply rows above establish the invoice binding. A conflicting
+            # nonempty origin is still rejected. Oracle section_N1312521.html.
+            or str((cm.get("createdFrom") or {}).get("id") or invoice_id) != invoice_id
             or basis["order_reference"] not in cm.get("memo", "")
             or cm.get("lines_complete") is not True
             or len(cm["line_items"]) != 1
@@ -205,6 +208,7 @@ def verify_applied_credit(basis, invoice, applications, invoice_gl):
             "credit_amount": str(credit),
             "tax_amount": "0.00",
             "net_invoice_total": str(total),
+            "remaining_variance": "0.00",
             "invoice_application_status": "verified",
             "bank_processor_clearance": "not_verified",
             "sales_adjustment_account": str(debit[0]["account"]),

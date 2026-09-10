@@ -221,3 +221,35 @@ async def test_group_uses_existing_human_approval_path_and_persists_per_order_re
         assert events[-1]["message"]["structured_output"] == parent.structured_output
         per_order = [c.kwargs for c in audit.await_args_list if c.kwargs["action"] == "accounting_group.case.completed"]
         assert len(per_order) == 4 and all(c["payload"]["approved_by"] == str(session.user_id) for c in per_order)
+
+
+@pytest.mark.parametrize("same_invoice", [False, True])
+def test_credit_group_targets_invoice_identity_instead_of_unallocated_credit_id(same_invoice):
+    from tests.test_accounting_approval_flow import inputs, kind_proposal
+
+    so, session = group_fixture()
+    for index, member in enumerate(so["accounting_group"]["members"]):
+        p = kind_proposal("credit")
+        invoice_id = str(20 if same_invoice else 20 + index)
+        p.update(tenant_id=str(session.tenant_id), case_id=member["case_id"], record_id=invoice_id)
+        p["proposed_fields"]["apply"]["items"][0]["doc"]["id"] = invoice_id
+        p["proposed_fields"]["externalId"] += str(index)
+        name, params = inputs(p)
+        card = build_confirmation_payload(
+            mutation_type="create",
+            record_type="creditmemo",
+            tool_name=name,
+            tool_input=params,
+            session_id=str(session.id),
+            current_record=None,
+        )
+        card.accounting_review = p
+        member["card"] = {**card.model_dump(mode="json"), "accounting_group_child": True}
+        assert member["card"]["record_id"] is None
+    so["tool_input"]["manifest_digest"] = mod.digest(so["accounting_group"])
+    so["confirmation_token"] = mint_confirmation_token(mod.GROUP_TOOL, so["tool_input"], [], str(session.id))
+    if same_invoice:
+        with pytest.raises(ValueError, match="Overlapping"):
+            mod.validate_manifest(so, str(session.id))
+    else:
+        assert len(mod.validate_manifest(so, str(session.id))) == 2

@@ -339,3 +339,13 @@ def test_matching_credit_does_not_hide_a_refund_variance():
     r["source"]["amount"] = "0.01"
     result = reconcile_order(s, t, c, refunds=r)
     assert result["status"] == "difference" and result["amounts"]["refunds"]["delta"] == "0.01"
+
+
+@pytest.mark.parametrize("origin", [None, {}])
+def test_standalone_credit_requires_exact_invoice_application_even_without_created_from(origin):
+    source, invoice, applications, gl = fixture()
+    applications["documents"]["30"]["createdFrom"] = origin
+    basis = source_adjustment_basis(source)
+    assert verify_applied_credit(basis, invoice, applications, gl)
+    applications["documents"]["30"]["applications"][0]["doc"] = {"id": "999"}
+    assert verify_applied_credit(basis, invoice, applications, gl) is None

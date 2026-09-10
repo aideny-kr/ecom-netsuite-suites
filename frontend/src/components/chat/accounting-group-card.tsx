@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type { WriteConfirmationData } from "@/lib/types";
 import { AccountingConfirmationCard } from "./accounting-confirmation-card";
+import { creditAmount } from "./sales-credit-confirmation-card";
 
 export function AccountingGroupCard({
   data,
@@ -63,8 +64,8 @@ export function AccountingGroupCard({
         <p className="text-[13px] leading-relaxed text-muted-foreground">
           {eligible.length > 0 ? (
             <>
-              Each eligible invoice has the same supported tax-rate calculation
-              issue, with its own verified source evidence. After approval, up
+              Each correction has its own verified source evidence and exact
+              accounting treatment shown below. After approval, up
               to {group.concurrency} corrections run simultaneously. Each
               invoice is checked again before writing and independently verified
               afterward.
@@ -88,7 +89,7 @@ export function AccountingGroupCard({
         {pending && eligible.length > 0 && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4 text-xs leading-relaxed">
             <strong>Before you approve:</strong> Review each order’s exact
-            amounts, retained tax account / agency and posting period below.
+            amounts, accounts, tax treatment, application and posting period below.
             Approval confirms those accounting choices. A changed record is
             stopped; an unconfirmed outcome stops further queued writes. Orders
             already running may finish.
@@ -123,7 +124,11 @@ export function AccountingGroupCard({
                   <span className="ml-3 text-xs text-muted-foreground">
                     {result}
                   </span>
-                  {p && (
+                  {p?.kind === "sales_adjustment_credit" ? (
+                    <span className="mt-1 block text-xs text-muted-foreground">
+                      {p.profile.currency} · Sales Adjustments credit {creditAmount(p.expected_after.credit_total, p.profile.currency)} · Net invoice {creditAmount(p.expected_after.net_invoice_total, p.profile.currency)} · Tax impact {creditAmount(p.expected_after.credit_tax, p.profile.currency)}
+                    </span>
+                  ) : p && (
                     <span className="mt-1 block text-xs text-muted-foreground">
                       {String(p.before.currency_code || "Currency unknown")} ·
                       Tax {Number(p.before.taxTotal).toFixed(2)} →{" "}
@@ -171,7 +176,7 @@ export function AccountingGroupCard({
         ))}
         <p className="text-xs leading-relaxed text-muted-foreground">
           {eligible.length > 0
-            ? "This approves only the exact invoice changes shown."
+            ? "This approves only the exact corrections and credit applications shown."
             : "Any correction requires its own exact proposal and human approval."}{" "}
           Each order retains its own approver, execution receipt and
           verification audit. Sales-order and cash settlement remain separate

@@ -852,23 +852,51 @@ export interface EditableSlot {
   allowed?: { value: string; label: string }[] | null;
 }
 
-export interface AccountingReview {
+interface AccountingReviewBase {
   order_reference: string;
   record_id: string;
   case_id: string;
   before: Record<string, unknown>;
-  expected_after: { total: string; taxTotal: string };
   proposed_fields: Record<string, unknown>;
   scope: { netsuite_account_id: string; subsidiary_id: string };
   period: Record<string, unknown>;
-  tax_item: Record<string, unknown>;
-  tax_account: string;
-  tax_account_name?: string;
   ar_account: string;
   ar_account_name?: string;
   accounting_book: string;
   approval_basis: string;
 }
+
+export interface InvoiceTaxReview extends AccountingReviewBase {
+  kind?: "invoice_tax";
+  expected_after: { total: string; taxTotal: string };
+  tax_item: Record<string, unknown>;
+  tax_account: string;
+  tax_account_name?: string;
+}
+
+export interface SalesCreditReview extends AccountingReviewBase {
+  kind: "sales_adjustment_credit";
+  source: Record<string, unknown>;
+  profile: {
+    currency: string;
+    item_id: string;
+    adjustment_account_id: string;
+    source_adjustment_label: string;
+  };
+  expected_after: {
+    credit_total: string;
+    credit_tax: string;
+    net_invoice_total: string;
+    invoice_total: string;
+    invoice_tax: string;
+    invoice_remaining: string;
+    remaining_variance: string;
+  };
+  sales_adjustment_account: string;
+  sales_adjustment_account_name?: string;
+}
+
+export type AccountingReview = InvoiceTaxReview | SalesCreditReview;
 
 export interface AccountingGroup {
   group_id: string;
@@ -894,9 +922,16 @@ export interface WriteConfirmationData {
   proposed_lines?: Record<string, unknown>[];
   current_record: Record<string, unknown> | null;
   accounting_review?: AccountingReview | null;
-  accounting_verification?: { status: string; reason?: string; invoice?: Record<string, unknown> } | null;
+  accounting_verification?: {
+    status: string;
+    reason?: string;
+    invoice?: Record<string, unknown>;
+    credit_memo_id?: string;
+    resolution?: Record<string, unknown>;
+  } | null;
   accounting_group?: AccountingGroup | null;
   accounting_group_child?: boolean;
+  accounting_recheck?: { status: "queued" | "not_queued"; run_id?: string; reason?: string };
   tool_name: string;
   tool_input: Record<string, unknown>;
   confirmation_token: string;
