@@ -757,6 +757,12 @@ class UnifiedAgent(BaseSpecialistAgent):
                 + ", ".join(self._selected_user_sources)
                 + ". Honor this verified user choice even when older conversation text has been compacted."
             )
+        if getattr(self, "_request_kind", None) in {"operations", "conversation"}:
+            parts.append(
+                "\nThis turn continues an operation or non-analytics conversation. "
+                "Do not interrupt it with the analytics data-source question. "
+                "Use the operation's authorized connection context; all execution and approval checks still apply."
+            )
         if getattr(self, "_transaction_workflow", False):
             parts.append(
                 "\nThis request selects a transaction case/group workflow, not a standalone database query. "
@@ -875,6 +881,65 @@ class UnifiedAgent(BaseSpecialistAgent):
 
         return task
 
+    def _reset_source_routing(self):
+        from app.services.chat.llm_adapter import TokenUsage
+
+        self._routing_usage = TokenUsage()
+        self._routing_error = False
+        self._request_kind = None
+        self._selected_user_sources = ()
+        self._transaction_workflow = False
+
+    def _plan_source_selection(self, source):
+        from app.services.chat.request_routing import RequestContext
+        from app.services.chat.source_selection import SourceSelection
+
+        # The orchestrator has already validated the signed card and connector.
+        self._request_kind = "analytics"
+        state = RequestContext(kind="analytics", sources=[source] if source else [], pending_source=not bool(source))
+        return SourceSelection(selected_sources=tuple(state.sources), request_context=state.model_dump())
+
+    async def _select_analytics_source(self, task, context, adapter, model, history=None):
+        from app.services.chat.request_routing import RequestRoute, classify_request
+        from app.services.chat.source_selection import SourceSelection, resolve_source_selection
+        from app.services.chat.tool_inventory import available_data_sources
+
+        history = context.get("source_selection_history", history) or []
+        task = context.get("source_selection_task", task)
+        if len(available_data_sources(self._tool_defs or [])) < 2:
+            return SourceSelection()
+        if self._context_need.lower() in {"docs", "workspace"}:
+            route = RequestRoute(kind="conversation", continuation=True)
+        else:
+            try:
+                routing = await classify_request(task=task, history=history, adapter=adapter, model=model)
+                route = routing.route
+                self._routing_usage = routing.usage
+            except Exception:
+                # A failed routing call cannot release an unresolved analytics query.
+                # Cancellation still propagates; no data or operational tool has run.
+                self._routing_error = True
+                return SourceSelection(question="I couldn't determine the request context. Please retry your message.")
+        self._request_kind = route.kind
+        return resolve_source_selection(
+            task=task,
+            tool_definitions=self._tool_defs or [],
+            conversation_history=history,
+            context_need=self._context_need,
+            route=route,
+        )
+
+    def _finish_source_routing(self, result, selection):
+        result.request_context = selection.request_context
+        usage = getattr(self, "_routing_usage", None)
+        if usage:
+            for field in ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"):
+                setattr(result.tokens_used, field, getattr(result.tokens_used, field) + getattr(usage, field))
+        if getattr(self, "_routing_error", False):
+            result.success = False
+            result.error = "request_routing_failed"
+        return result
+
     async def run(
         self,
         task: str,
@@ -900,6 +965,7 @@ class UnifiedAgent(BaseSpecialistAgent):
         after the user picks a clarification option. Applied AFTER
         ``_setup_context`` and the ``plan_mode_clarify_only`` filter.
         """
+        self._reset_source_routing()
         task = await self._setup_context(task, context, db)
         if financial_mode:
             self._tool_defs = self.financial_tool_definitions
@@ -922,23 +988,18 @@ class UnifiedAgent(BaseSpecialistAgent):
                 plan_mode_resume_source,
                 active_connectors=self._connectors,
             )
-        from app.services.chat.source_selection import SourceSelection, resolve_source_selection
-
         selection = (
-            resolve_source_selection(
-                task=context.get("source_selection_task", task),
-                tool_definitions=self._tool_defs or [],
-                conversation_history=context.get("source_selection_history"),
-                context_need=self._context_need,
-            )
+            await self._select_analytics_source(task, context, adapter, model)
             if not (plan_mode_clarify_only or plan_mode_resume_source)
-            else SourceSelection()
+            else self._plan_source_selection(plan_mode_resume_source)
         )
         self._selected_user_sources = selection.selected_sources
         self._transaction_workflow = selection.transaction_workflow
         if selection.question:
-            return AgentResult(success=True, data=selection.question, agent_name=self.agent_name)
-        return await super().run(
+            return self._finish_source_routing(
+                AgentResult(success=True, data=selection.question, agent_name=self.agent_name), selection
+            )
+        result = await super().run(
             task,
             context,
             db,
@@ -947,6 +1008,7 @@ class UnifiedAgent(BaseSpecialistAgent):
             tool_choice=tool_choice,
             thinking_level=thinking_level,
         )
+        return self._finish_source_routing(result, selection)
 
     async def run_streaming(
         self,
@@ -976,6 +1038,7 @@ class UnifiedAgent(BaseSpecialistAgent):
         after the user picks a clarification option. Applied AFTER
         ``_setup_context`` and the ``plan_mode_clarify_only`` filter.
         """
+        self._reset_source_routing()
         task = await self._setup_context(task, context, db)
         if financial_mode:
             self._tool_defs = self.financial_tool_definitions
@@ -996,23 +1059,21 @@ class UnifiedAgent(BaseSpecialistAgent):
                 plan_mode_resume_source,
                 active_connectors=self._connectors,
             )
-        from app.services.chat.source_selection import SourceSelection, resolve_source_selection
-
         selection = (
-            resolve_source_selection(
-                task=context.get("source_selection_task", task),
-                tool_definitions=self._tool_defs or [],
-                conversation_history=context.get("source_selection_history", conversation_history),
-                context_need=self._context_need,
-            )
+            await self._select_analytics_source(task, context, adapter, model, conversation_history)
             if not (plan_mode_clarify_only or plan_mode_resume_source)
-            else SourceSelection()
+            else self._plan_source_selection(plan_mode_resume_source)
         )
         self._selected_user_sources = selection.selected_sources
         self._transaction_workflow = selection.transaction_workflow
         if selection.question:
             yield "text", selection.question
-            yield "response", AgentResult(success=True, data=selection.question, agent_name=self.agent_name)
+            yield (
+                "response",
+                self._finish_source_routing(
+                    AgentResult(success=True, data=selection.question, agent_name=self.agent_name), selection
+                ),
+            )
             return
         async for event in super().run_streaming(
             task,
@@ -1027,4 +1088,6 @@ class UnifiedAgent(BaseSpecialistAgent):
             run_id=run_id,
             thinking_level=thinking_level,
         ):
+            if event[0] == "response":
+                self._finish_source_routing(event[1], selection)
             yield event
