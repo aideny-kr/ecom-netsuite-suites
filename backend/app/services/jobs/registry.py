@@ -752,18 +752,20 @@ def validate_plan(plan: dict) -> ValidatedPlan:
         step_errors: list[str] = []
 
         # Item 1b (live-run defect fix): report.compose mode="tracking" for a
-        # playbook with no accounting period to track (PLAYBOOKS[key]
-        # ["period_based"] is False -- inventory_aging today) fails at RUN
-        # time inside compose_playbook_report; catching it here means a plan
-        # that can never succeed is never persisted. Local import: jobs ->
-        # report is a one-way dependency (report/playbooks.py imports
-        # nothing from jobs), so no cycle -- same lazy-import convention this
-        # module's own executors already use.
+        # playbook with no accounting period to track (period_based=False --
+        # inventory_aging today) fails at RUN time inside
+        # compose_playbook_report; catching it here means a plan that can
+        # never succeed is never persisted. Item 3 (brief H): the predicate
+        # itself (playbooks.supports_tracking_mode) is the ONE place that
+        # reads PLAYBOOKS[key]["period_based"] -- compose_playbook_report
+        # calls the SAME function, so the two checks can never drift. Local
+        # import: jobs -> report is a one-way dependency (report/playbooks.py
+        # imports nothing from jobs), so no cycle -- same lazy-import
+        # convention this module's own executors already use.
         if step_type == "report.compose" and "playbook_key" in params and params.get("mode") == "tracking":
-            from app.services.report.playbooks import PLAYBOOKS
+            from app.services.report.playbooks import supports_tracking_mode
 
-            playbook_meta = PLAYBOOKS.get(params["playbook_key"])
-            if playbook_meta is not None and not playbook_meta.get("period_based", True):
+            if not supports_tracking_mode(params["playbook_key"]):
                 step_errors.append(
                     f"{prefix} ({step_id}): report.compose mode='tracking' is not supported for playbook "
                     f"{params['playbook_key']!r} (period_based=False — it has no accounting period to track)"

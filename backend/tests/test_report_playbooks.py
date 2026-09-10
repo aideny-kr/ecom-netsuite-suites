@@ -25,6 +25,7 @@ from app.services.report.playbooks import (
     normalize_period,
     prior_period,
     rebuild_playbook_spec,
+    supports_tracking_mode,
     trailing_periods,
     yoy_period,
 )
@@ -61,6 +62,21 @@ def test_catalog_declares_period_based_flag_per_playbook():
     for key in ("income_statement", "balance_sheet", "trial_balance"):
         assert PLAYBOOKS[key]["period_based"] is True
     assert PLAYBOOKS["inventory_aging"]["period_based"] is False
+
+
+def test_supports_tracking_mode_is_the_one_predicate_for_period_based(monkeypatch):
+    """Brief H, item 3: `supports_tracking_mode` is the SINGLE predicate both
+    `compose_playbook_report` (run time) and `registry.validate_plan` (compile
+    time) call — it must read straight off `PLAYBOOKS[key]["period_based"]`
+    (default True for an entry that omits the flag) and treat an UNKNOWN
+    playbook_key as "supported" (True) — the "Unknown playbook" error belongs
+    to whichever caller looks the key up next, not to this predicate."""
+    assert supports_tracking_mode("income_statement") is True
+    assert supports_tracking_mode("inventory_aging") is False
+    assert supports_tracking_mode("not-a-real-playbook-key") is True
+
+    monkeypatch.setitem(PLAYBOOKS, "no_flag_playbook", {"name": "x", "description": "x", "params": []})
+    assert supports_tracking_mode("no_flag_playbook") is True
 
 
 def test_build_playbook_recipe_for_inventory_aging_uses_bigquery_sources():
