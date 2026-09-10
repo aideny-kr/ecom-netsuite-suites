@@ -73,6 +73,36 @@ def compute_next_run(cron: str, tz: str, after: datetime) -> datetime:
     return next_local.astimezone(timezone.utc)
 
 
+def recompute_next_run_at(schedule: Schedule, *, now: datetime) -> bool:
+    """Item 4 (delta gate fix): the ONE place `approve_schedule`,
+    `resume_schedule`, and `PATCH /schedules/{id}`'s cron/timezone recompute
+    each used to inline their own copy of "recompute `next_run_at` when the
+    schedule's preconditions hold" -- all three unconditionally overwrote
+    `next_run_at` even when a retry was PENDING (`schedule.retry_job_id`
+    still pointing at that row's 15-minutes-later due time), silently
+    rescheduling it to the schedule's normal next occurrence; the retry then
+    ran as attempt 2 with the wrong period the next time it fired.
+
+    Returns `False` (changes NOTHING) when `schedule.retry_job_id is not
+    None`, or when the schedule is not all of: `plan_status == "approved"`,
+    `is_active`, `paused_at is None`, and `cron_expression` truthy.
+    Otherwise sets `schedule.next_run_at` via `compute_next_run` and returns
+    `True`. Every caller applies this unconditionally now -- the callers'
+    OWN preconditions (e.g. `PATCH`'s own `cron_or_tz_changed` gate on
+    whether to call this at all) stay external to this function."""
+    if schedule.retry_job_id is not None:
+        return False
+    if not (
+        schedule.plan_status == "approved"
+        and schedule.is_active
+        and schedule.paused_at is None
+        and schedule.cron_expression
+    ):
+        return False
+    schedule.next_run_at = compute_next_run(schedule.cron_expression, schedule.timezone, after=now)
+    return True
+
+
 async def create_schedule(
     db: AsyncSession,
     tenant_id: uuid.UUID,

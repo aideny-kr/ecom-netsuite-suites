@@ -707,6 +707,44 @@ class TestScheduleUpdate:
         assert resp.status_code == 200
         assert resp.json()["next_run_at"] is None
 
+    async def test_patch_cron_with_a_pending_retry_leaves_next_run_at_untouched(
+        self, client: AsyncClient, admin_user, db: AsyncSession
+    ):
+        """Item 4 (delta gate fix): same rule as approve/resume -- a PATCH
+        changing cron/timezone on a schedule with a pending retry must not
+        overwrite that retry's 15-minutes-later due time (`retry_job_id`
+        still points at the pending row)."""
+        user, headers = admin_user
+        tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
+        retry_job = Job(tenant_id=tenant.id, job_type="scheduled_job", status="pending", parameters={})
+        db.add(retry_job)
+        await db.flush()
+        pending_retry_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+        schedule = await _seed_job_schedule(
+            db,
+            tenant,
+            plan_json=_INVENTORY_AGING_PLAN,
+            plan_status="approved",
+            cron_expression="0 6 * * 1",
+            tz="UTC",
+        )
+        schedule.retry_job_id = retry_job.id
+        schedule.next_run_at = pending_retry_at
+        await db.commit()
+
+        resp = await client.patch(
+            f"/api/v1/schedules/{schedule.id}",
+            json={"cron_expression": "0 6 * * *"},
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["cron_expression"] == "0 6 * * *"  # the direct field edit itself still applies
+        assert datetime.fromisoformat(data["next_run_at"].replace("Z", "+00:00")) == pending_retry_at
+
+        refreshed = (await db.execute(select(Schedule).where(Schedule.id == schedule.id))).scalar_one()
+        assert refreshed.retry_job_id == retry_job.id  # untouched
+
     async def test_patch_discard_pending_clears_pending_plan_without_touching_live_plan(
         self, client: AsyncClient, admin_user, db: AsyncSession
     ):
@@ -853,6 +891,38 @@ class TestScheduleApprove:
         assert data["plan_status"] == "approved"
         assert data["plan_version"] == 1
         assert data["next_run_at"] is not None
+
+    async def test_approve_with_a_pending_retry_leaves_next_run_at_and_retry_job_id_untouched(
+        self, client: AsyncClient, admin_user, db: AsyncSession
+    ):
+        """Item 4 (delta gate fix): `approve` unconditionally recomputing
+        `next_run_at` used to overwrite a pending retry's 15-minutes-later
+        due time while `retry_job_id` still pointed at that pending row --
+        the next NORMAL occurrence then ran as attempt 2 with the stale
+        period. `recompute_next_run_at` returns `False` (changes nothing)
+        whenever `retry_job_id` is set."""
+        user, headers = admin_user
+        tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
+        retry_job = Job(tenant_id=tenant.id, job_type="scheduled_job", status="pending", parameters={})
+        db.add(retry_job)
+        await db.flush()
+        pending_retry_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+        schedule = await _seed_job_schedule(
+            db, tenant, plan_json=_INVENTORY_AGING_PLAN, plan_status="pending_approval", plan_version=0
+        )
+        schedule.retry_job_id = retry_job.id
+        schedule.next_run_at = pending_retry_at
+        await db.commit()
+
+        resp = await client.post(f"/api/v1/schedules/{schedule.id}/approve", headers=headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["plan_status"] == "approved"  # approve itself still applies
+        assert data["plan_version"] == 1
+        assert datetime.fromisoformat(data["next_run_at"].replace("Z", "+00:00")) == pending_retry_at
+
+        refreshed = (await db.execute(select(Schedule).where(Schedule.id == schedule.id))).scalar_one()
+        assert refreshed.retry_job_id == retry_job.id  # untouched
 
     async def test_approve_promotes_pending_plan_and_clears_it(self, client: AsyncClient, admin_user, db: AsyncSession):
         user, headers = admin_user

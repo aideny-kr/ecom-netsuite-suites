@@ -387,17 +387,12 @@ async def update_schedule(
     # edit on an already-approved, active, unpaused schedule must mirror that,
     # or the schedule keeps firing at the STALE fire time until the next
     # approve/resume happens to touch it (which may be never, for a schedule
-    # nobody re-approves after this edit).
-    if (
-        cron_or_tz_changed
-        and schedule.plan_status == "approved"
-        and schedule.is_active
-        and schedule.paused_at is None
-        and schedule.cron_expression
-    ):
-        schedule.next_run_at = schedule_service.compute_next_run(
-            schedule.cron_expression, schedule.timezone, datetime.now(timezone.utc)
-        )
+    # nobody re-approves after this edit). Item 4 (delta gate fix): the
+    # shared `recompute_next_run_at` also refuses to touch `next_run_at`
+    # while a retry is pending (`retry_job_id` set) — `cron_or_tz_changed`
+    # stays the trigger for whether to call it at all.
+    if cron_or_tz_changed:
+        schedule_service.recompute_next_run_at(schedule, now=datetime.now(timezone.utc))
 
     await audit_service.log_event(
         db=db,
@@ -451,10 +446,11 @@ async def approve_schedule(
     schedule.plan_status = "approved"
     schedule.plan_version += 1
 
-    if schedule.cron_expression:
-        schedule.next_run_at = schedule_service.compute_next_run(
-            schedule.cron_expression, schedule.timezone, datetime.now(timezone.utc)
-        )
+    # Item 4 (delta gate fix): the shared helper refuses to touch
+    # `next_run_at` while a retry is pending (`retry_job_id` set) — approving
+    # (or re-approving) a schedule must not clobber that 15-minutes-later due
+    # time with the schedule's normal next occurrence.
+    schedule_service.recompute_next_run_at(schedule, now=datetime.now(timezone.utc))
 
     await audit_service.log_event(
         db=db,
@@ -585,10 +581,11 @@ async def resume_schedule(
     if schedule.last_run_status == "paused":
         schedule.last_run_status = None
 
-    if schedule.plan_status == "approved" and schedule.cron_expression:
-        schedule.next_run_at = schedule_service.compute_next_run(
-            schedule.cron_expression, schedule.timezone, datetime.now(timezone.utc)
-        )
+    # Item 4 (delta gate fix): the shared helper refuses to touch
+    # `next_run_at` while a retry is pending (`retry_job_id` set) — resuming
+    # a schedule must not clobber that 15-minutes-later due time with the
+    # schedule's normal next occurrence.
+    schedule_service.recompute_next_run_at(schedule, now=datetime.now(timezone.utc))
 
     await audit_service.log_event(
         db=db,
