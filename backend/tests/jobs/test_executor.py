@@ -1051,17 +1051,31 @@ async def test_tenant_context_set_before_every_step_read_and_write(db: AsyncSess
             f"events around it: {events[max(0, exec_idx - 3) : exec_idx + 1]}"
         )
 
-    # The write step's audit-before-call commit must ALSO sit between two ctx
-    # events within its own iteration (top-of-loop, then re-established after
-    # the commit) -- this half already worked before the fix; kept here as a
-    # regression guard against ever dropping it while fixing the read-step gap.
-    s2_idx = events.index("exec:s2")
+    # Item 2 (delta gate fix E): every step -- read or write -- must ALSO be
+    # immediately FOLLOWED by a commit the moment it succeeds, so a LATER
+    # step's failure can never roll back an earlier step's own success (this
+    # is the fix under test here: before it, a read step had no commit of
+    # its own at all).
+    for label in ("s1", "s2", "s3"):
+        exec_idx = events.index(f"exec:{label}")
+        assert events[exec_idx + 1] == "commit", (
+            f"step {label}'s success must be committed immediately, before the next step runs; "
+            f"events around it: {events[exec_idx : exec_idx + 3]}"
+        )
+
+    # The write step's OWN audit-before-call commit must ALSO sit between two
+    # ctx events strictly BEFORE its own exec (top-of-loop ctx, the
+    # audit-before-call commit, then re-established ctx) -- this half already
+    # worked before the fix; kept here as a regression guard against ever
+    # dropping it while adding the post-success commit above. Skip PAST s1's
+    # own post-success commit (item 2) to isolate the write step's iteration.
     s1_idx = events.index("exec:s1")
-    between = events[s1_idx + 1 : s2_idx]
-    assert "commit" in between, "the write step's audit-before-call commit must run inside its own iteration"
-    commit_idx = between.index("commit")
-    assert "ctx" in between[:commit_idx], "context must be set before the write step's audit log + commit"
-    assert "ctx" in between[commit_idx:], "context must be re-set after the audit-before-call commit"
+    s2_idx = events.index("exec:s2")
+    between = events[s1_idx + 2 : s2_idx]
+    assert between == ["ctx", "commit", "ctx"], (
+        "expected exactly [ctx, commit, ctx] between s1's post-success commit and s2's own exec "
+        f"(top-of-loop ctx, the write step's audit-before-call commit, re-established ctx); got {between}"
+    )
 
 
 async def test_recon_run_as_lone_first_step_runs_with_tenant_context_set(db: AsyncSession, monkeypatch):
@@ -1198,6 +1212,65 @@ async def test_compose_stamped_delivery_identity_survives_a_later_drive_upload_f
     assert identity["idempotency_prefix"] == f"job-delivery:{schedule.id}:compose"
 
 
+async def test_a_successful_steps_writes_survive_a_later_read_steps_failure(db: AsyncSession, monkeypatch):
+    """Item 2 (delta gate fix E): a successful step's writes were only
+    FLUSHED, not committed -- a plan whose steps after `report.compose` are
+    all READS (no `drive.upload`/other write step to cover it with its own
+    audit-before-call commit) had NOTHING durable at all. A later read step
+    (`report.build_xlsx`, here faked to raise) rolling the transaction back
+    therefore undid `report.compose`'s own identity stamp too, even though
+    compose itself had already succeeded. Fixed in `_run_steps`: commit
+    after EVERY successful step (not just before a write step's call)."""
+    from app.models.report import Report
+    from tests.test_report_playbooks import _patch_bigquery_executor
+
+    tenant = await create_test_tenant(db, name="StepCommitSurvivesCo")
+    tenant_id = tenant.id
+    await set_tenant_context(db, str(tenant_id))
+    _, _, params = _patch_bigquery_executor(monkeypatch)
+
+    async def raising_build_xlsx(ctx, step_params):
+        raise StepExecutionError("simulated build_xlsx failure -- a pure read step, no write step involved")
+
+    monkeypatch.setitem(
+        STEP_REGISTRY, "report.build_xlsx", _fake_spec("read", raising_build_xlsx, step_type="report.build_xlsx")
+    )
+
+    now = datetime.now(timezone.utc)
+    schedule = await _seed_job_schedule(
+        db,
+        tenant,
+        plan_json={
+            "steps": [
+                {
+                    "id": "compose",
+                    "type": "report.compose",
+                    "params": {"playbook_key": "inventory_aging", "params": params},
+                },
+                {"id": "build_xlsx", "type": "report.build_xlsx", "params": {"report_step": "compose"}},
+            ]
+        },
+        next_run_at=now - timedelta(minutes=1),
+        cron_expression="0 6 * * 1",
+    )
+
+    stats = await run_due_jobs(db, tenant_id, now=now)
+    assert stats["failed"] == 1
+
+    jobs = (await db.execute(select(Job).where(Job.tenant_id == tenant_id))).scalars().all()
+    attempt1_job = next(j for j in jobs if j.parameters["attempt"] == 1)
+    assert attempt1_job.result_summary["reason"] == REASON_ERROR
+
+    # Re-read the Report row FRESH -- `report.compose`'s own identity stamp
+    # must be durable even though the only step after it (a pure read, no
+    # write step ever ran) raised and rolled its own attempt back.
+    report_row = (
+        await db.execute(select(Report).where(Report.tenant_id == tenant_id, Report.title == "Inventory Aging Weekly"))
+    ).scalar_one()
+    assert report_row.delivery_json is not None
+    assert "identity" in report_row.delivery_json
+
+
 # ---------------------------------------------------------------------------
 # `_finalize_run`'s OWN retry (the one after a first finalize crash) must
 # itself be guarded (review finding, MINOR): if it ALSO fails, the exception
@@ -1230,7 +1303,15 @@ async def test_finalize_double_failure_does_not_leave_the_job_row_running(db: As
     async def always_flaky_finalize(*args, **kwargs):
         # BOTH calls fail -- the first attempt AND its retry -- simulating
         # whatever broke the first time (a stale row, a connectivity blip)
-        # still being broken on the retry.
+        # still being broken on the retry. Mirrors the REAL `_finalize_run`'s
+        # own first action (re-establish tenant context) before failing
+        # deeper in -- item 2 (delta gate fix E) now commits after
+        # `_run_steps`'s lone read step succeeds, clearing `SET LOCAL
+        # app.current_tenant_id`; a fake that skipped this (unlike the real
+        # function) would leave the eventual raw-SQL fallback below running
+        # with no tenant context at all, and its RLS-scoped UPDATE would
+        # silently affect zero rows.
+        await set_tenant_context(db, str(tenant_id))
         raise RuntimeError("simulated crash re-fetching Schedule/Job (never recovers)")
 
     monkeypatch.setattr(scheduled_jobs, "_finalize_run", always_flaky_finalize)

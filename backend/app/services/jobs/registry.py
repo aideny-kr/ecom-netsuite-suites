@@ -196,13 +196,17 @@ async def _report_compose_executor(ctx: StepContext, params: dict) -> dict:
     the run loop owns commits). A later ``drive.upload`` step references this
     SAME compose step by id (``params["report_step"]``), so the identity
     stamped here is byte-identical to the one ``_drive_upload_executor``
-    would build for it — a failure in that (or any later) step can never
-    leave the report without a recoverable identity, because the run loop
-    commits BEFORE the next step's executor runs (module docstring's
-    "Idempotency + audit-before-call"; for the common
-    ``compose -> ... -> drive.upload`` shape, that next step's own
-    audit-before-call commit is what makes THIS flush durable, before
-    ``drive.upload``'s own executor ever gets a chance to fail)."""
+    would build for it.
+
+    Item 2 (delta gate fix E): a failure in ``drive.upload`` — or in ANY
+    later step, including a pure-read one like ``report.render_pdf``/
+    ``report.build_xlsx`` that carries no audit-before-call commit of its
+    own — can never leave the report without a recoverable identity: the
+    run loop (``_run_steps``) commits after EVERY successful step, this one
+    included, not merely before a write step's own call. Before this fix,
+    a plan whose only steps after compose were reads (never reaching
+    ``drive.upload`` at all) had NOTHING covering this flush, so a later
+    read step raising rolled back this stamp along with everything else."""
     if "report_id" in params:
         from app.services.report.refresh_service import refresh_report
 

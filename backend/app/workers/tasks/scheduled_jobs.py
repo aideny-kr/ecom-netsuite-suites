@@ -566,6 +566,21 @@ async def _run_steps(
         ctx.artifacts[step_id] = artifact
         outputs[step_id] = _distill_artifact(artifact)
 
+        # Item 2 (delta gate fix E): a successful step's writes are durable
+        # BEFORE the next step runs -- only flushed until this commit, so a
+        # LATER step raising (a `kind="read"` step like `report.render_pdf`/
+        # `report.build_xlsx` has no audit-before-call commit of its own to
+        # cover it) rolled back the WHOLE open transaction, including this
+        # step's own successful writes (e.g. `_report_compose_executor`'s
+        # identity stamp). The existing pre-write-step commit above is kept
+        # unchanged (durability BEFORE an external call still matters on its
+        # own); this one covers every step, write or read, the moment it
+        # succeeds. The next iteration's own `set_tenant_context` call at the
+        # top of this loop re-establishes context after this commit clears
+        # it; a step that is the LAST one in the plan needs no further
+        # re-establishment -- `_finalize_run` does that itself.
+        await db.commit()
+
         usage["bytes_scanned"] += int(artifact.get("bytes_processed") or 0)
         usage["seconds"] = time.monotonic() - started_at
         usage["usd"] = usage["bytes_scanned"] * _BIGQUERY_USD_PER_BYTE

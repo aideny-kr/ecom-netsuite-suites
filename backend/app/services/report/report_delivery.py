@@ -126,10 +126,13 @@ class DeliveryIdentity:
     writes this identity anywhere — the only place one is persisted onto
     `report.delivery_json["identity"]` is `_report_compose_executor`
     (`app.services.jobs.registry`), immediately after a compose/refresh step
-    returns, via `schedule_delivery_identity`. That is durable BEFORE any
-    later step (e.g. `drive.upload`) can run — see the run loop's own
-    commit-before-each-step convention — so a partial-upload failure can
-    never lose it. `deliver_report_to_drive` only ever RECOVERS this stored
+    returns, via `schedule_delivery_identity`. Item 2 (delta gate fix E):
+    that stamp is durable BEFORE any later step (e.g. `drive.upload`, or a
+    pure-read step like `report.build_xlsx`) can run — the run loop
+    (`_run_steps`) commits after EVERY successful step, not merely before a
+    write step's own call — so a partial-upload failure, or any later step
+    raising at all, can never lose it. `deliver_report_to_drive` only ever
+    RECOVERS this stored
     identity (when `identity=None` and one is present) rather than writing
     it — see that function's own docstring for why a LATER call with
     `identity=None` (the manual re-delivery endpoint's own call shape) needs
