@@ -1,0 +1,209 @@
+{
+  "deployed_code_commit": "97e8436ae7ea820d0a73152ccfaa7502a14e38a7",
+  "environment": "staging",
+  "session_id": "89299286-e88f-4ac1-a7ae-ddb739395d78",
+  "source_question": {
+    "content": "Which data source should I use for this question: BigQuery, Metabase or NetSuite?",
+    "data_tool_calls": 0
+  },
+  "selected_source": "Metabase (Solidus database)",
+  "analysis_tool_calls": 7,
+  "analysis_recoveries": [
+    "SQL-shaped query was rejected; recovered to structured MBQL.",
+    "Expired construction handle was replaced with direct structured-object execution."
+  ],
+  "follow_up": {
+    "user_question": "Verify the total and status breakdown with server-side distinct order-ID aggregates, using the same filters. Return only the counts.",
+    "answer": "Verified via server-side `COUNT(DISTINCT orders.id)` with identical batch/SKU filters:\n\n| Order Status | Distinct Orders |\n|---|---|\n| complete | 41 |\n| canceled | 24 |\n| **Total** | **65** |\n\nMatches the prior manual count exactly.",
+    "data_tool_calls": 1,
+    "query": {
+      "lib/type": "mbql/query",
+      "stages": [
+        {
+          "lib/type": "mbql.stage/mbql",
+          "source-table": [
+            "Solidus (Reporting Copy)",
+            "public",
+            "spree_line_items"
+          ],
+          "joins": [
+            {
+              "alias": "orders",
+              "strategy": "inner-join",
+              "stages": [
+                {
+                  "lib/type": "mbql.stage/mbql",
+                  "source-table": [
+                    "Solidus (Reporting Copy)",
+                    "public",
+                    "spree_orders"
+                  ]
+                }
+              ],
+              "conditions": [
+                [
+                  "=",
+                  {},
+                  [
+                    "field",
+                    {},
+                    [
+                      "Solidus (Reporting Copy)",
+                      "public",
+                      "spree_line_items",
+                      "order_id"
+                    ]
+                  ],
+                  [
+                    "field",
+                    {
+                      "join-alias": "orders"
+                    },
+                    [
+                      "Solidus (Reporting Copy)",
+                      "public",
+                      "spree_orders",
+                      "id"
+                    ]
+                  ]
+                ]
+              ]
+            },
+            {
+              "alias": "variants",
+              "strategy": "inner-join",
+              "stages": [
+                {
+                  "lib/type": "mbql.stage/mbql",
+                  "source-table": [
+                    "Solidus (Reporting Copy)",
+                    "public",
+                    "spree_variants"
+                  ]
+                }
+              ],
+              "conditions": [
+                [
+                  "=",
+                  {},
+                  [
+                    "field",
+                    {},
+                    [
+                      "Solidus (Reporting Copy)",
+                      "public",
+                      "spree_line_items",
+                      "variant_id"
+                    ]
+                  ],
+                  [
+                    "field",
+                    {
+                      "join-alias": "variants"
+                    },
+                    [
+                      "Solidus (Reporting Copy)",
+                      "public",
+                      "spree_variants",
+                      "id"
+                    ]
+                  ]
+                ]
+              ]
+            }
+          ],
+          "filters": [
+            [
+              "=",
+              {},
+              [
+                "field",
+                {},
+                [
+                  "Solidus (Reporting Copy)",
+                  "public",
+                  "spree_line_items",
+                  "batch_id"
+                ]
+              ],
+              395
+            ],
+            [
+              "in",
+              {},
+              [
+                "field",
+                {
+                  "join-alias": "variants"
+                },
+                [
+                  "Solidus (Reporting Copy)",
+                  "public",
+                  "spree_variants",
+                  "sku"
+                ]
+              ],
+              "FRANVW0016",
+              "FRANVW0017",
+              "FRANVW0027",
+              "FRANVW0057",
+              "FRANVW0077",
+              "FRANVY0015",
+              "FRANVY0017",
+              "FRANVY0027",
+              "FRANVY0057",
+              "FRANVY0077"
+            ]
+          ],
+          "aggregation": [
+            [
+              "distinct",
+              {},
+              [
+                "field",
+                {
+                  "join-alias": "orders"
+                },
+                [
+                  "Solidus (Reporting Copy)",
+                  "public",
+                  "spree_orders",
+                  "id"
+                ]
+              ]
+            ]
+          ],
+          "breakout": [
+            [
+              "field",
+              {
+                "join-alias": "orders"
+              },
+              [
+                "Solidus (Reporting Copy)",
+                "public",
+                "spree_orders",
+                "state"
+              ]
+            ]
+          ]
+        }
+      ]
+    },
+    "result_summary": "Returned 2 rows",
+    "created_at": "2026-09-10T03:49:47.756564+00:00"
+  },
+  "checks": {
+    "no_query_before_source_choice": true,
+    "only_selected_metabase_connector_used": true,
+    "persisted_mbql_history_replayed": true,
+    "follow_up_did_not_reask_source": true,
+    "server_side_distinct_order_id_aggregation": true
+  },
+  "verified_counts": {
+    "complete": 41,
+    "canceled": 24,
+    "total": 65
+  },
+  "temporary_login": "Short-lived test JWT revoked; local token file removed; browser access-token storage and cookie cleared."
+}
