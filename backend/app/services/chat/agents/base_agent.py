@@ -2109,9 +2109,10 @@ class BaseSpecialistAgent(abc.ABC):
                                 )
                             except ValueError as exc:
                                 if validation is None:
-                                    validation = ValidationResult(ok=False)
-                                validation.invariant_errors.append(str(exc))
-                                validation.ok = False
+                                    validation = ValidationResult(ok=False, invariant_errors=[str(exc)])
+                                else:
+                                    validation.invariant_errors.append(str(exc))
+                                    validation.ok = False
                             if accounting_card:
                                 current_record = accounting_card["before"]
                         if mutation_type in ("update", "upsert") and accounting_card is None:

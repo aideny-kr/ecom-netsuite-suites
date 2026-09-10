@@ -50,7 +50,8 @@ async def test_run_streaming_passes_thinking_level_to_adapter():
     )
     adapter = _RecordingAdapter()
 
-    # Drive a single no-tool turn; assert the level we passed reached the adapter.
+    # Select the source explicitly so the separate source-selection gate does
+    # not short-circuit this test of the adapter's thinking-level carrier.
     with (
         patch(
             "app.services.policy_service.get_active_policy",
@@ -64,7 +65,7 @@ async def test_run_streaming_passes_thinking_level_to_adapter():
         ),
     ):
         gen = agent.run_streaming(
-            task="hello",
+            task="Explain NetSuite invoice terms.",
             context={},
             db=None,
             adapter=adapter,
