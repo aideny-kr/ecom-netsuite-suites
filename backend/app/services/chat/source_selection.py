@@ -15,11 +15,29 @@ _SOURCE_NAMES = {
     "stripe": re.compile(r"\bstripe\b", re.I),
 }
 
+_CASE_ID = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
+_SCOPED_TRANSACTION = re.compile(rf"\b(?:transaction\s+case\s+{_CASE_ID}|issue\s+group\s+[0-9a-f]{{32}})\b", re.I)
+
+
+def _is_transaction_workflow(task: str, tool_definitions: list[dict]) -> bool:
+    """Recognize an explicit case/group request, not an arbitrary order lookup.
+
+    The case tools resolve and authorize the stored connector scope themselves.
+    This only removes a conversational source-choice gate; IDs grant no access.
+    """
+    names = {tool.get("name", "").replace(".", "_") for tool in tool_definitions}
+    return bool(
+        names & {"transaction_ops_status", "transaction_ops_accounting_group"}
+        and _SCOPED_TRANSACTION.search(task)
+        and re.search(r"\b(?:investigate|prepare|fix|resolve|review|reconcile)\b", task, re.I)
+    )
+
 
 @dataclass(frozen=True)
 class SourceSelection:
     question: str | None = None
     selected_sources: tuple[str, ...] = ()
+    transaction_workflow: bool = False
 
 
 def resolve_source_selection(
@@ -37,6 +55,8 @@ def resolve_source_selection(
     """
     if context_need in {"docs", "workspace"}:
         return SourceSelection()
+    if _is_transaction_workflow(task, tool_definitions):
+        return SourceSelection(transaction_workflow=True)
     sources = available_data_sources(tool_definitions)
     if len(sources) < 2:
         return SourceSelection()

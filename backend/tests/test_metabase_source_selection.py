@@ -30,6 +30,72 @@ def inventory():
     ]
 
 
+CASE_TASK = (
+    "Investigate transaction case 47e48949-6610-4acf-8467-3187035c521e using "
+    "transaction_ops.status with case_id. Explain the evidence and prepare supported exact fixes "
+    "for my approval. Do not execute an unapproved change."
+)
+GROUP_TASK = (
+    "Prepare fixes for all orders in issue group d55f9ecb054529c6a66a4a102e069d5b (tax difference). "
+    'Call transaction_ops.accounting_group with group_id "d55f9ecb054529c6a66a4a102e069d5b". '
+    "Prepare supported exact invoice corrections together for human approval."
+)
+
+
+@pytest.mark.parametrize("task", [CASE_TASK, GROUP_TASK])
+@pytest.mark.parametrize("streaming", [True, False])
+async def test_scoped_transaction_workflow_reaches_agent_without_database_question(task, streaming):
+    from app.services.chat.agents.base_agent import AgentResult, BaseSpecialistAgent
+
+    agent = UnifiedAgent(
+        tenant_id=uuid.uuid4(), user_id=uuid.uuid4(), correlation_id="case-routing", context_need="data"
+    )
+    agent._tool_defs = inventory() + [
+        {"name": "transaction_ops_status"},
+        {"name": "transaction_ops_accounting_group"},
+    ]
+    reached = []
+
+    async def stream(*args, **kwargs):
+        reached.append(True)
+        yield "response", AgentResult(success=True, data="case evidence")
+
+    with (
+        patch.object(agent, "_setup_context", new=AsyncMock(return_value=task)),
+        patch.object(BaseSpecialistAgent, "run_streaming", new=stream),
+        patch.object(
+            BaseSpecialistAgent, "run", new=AsyncMock(return_value=AgentResult(success=True, data="case evidence"))
+        ) as run,
+    ):
+        if streaming:
+            events = [event async for event in agent.run_streaming(task, {}, None, AsyncMock(), "test")]
+            result = events[-1][1]
+            assert reached == [True]
+        else:
+            result = await agent.run(task, {}, None, AsyncMock(), "test")
+            run.assert_awaited_once()
+    assert result.data == "case evidence"
+    assert "do not ask which data source" in agent.system_prompt
+    assert "this request is not financial approval" in agent.system_prompt
+
+
+@pytest.mark.parametrize(
+    "task",
+    ["Investigate order R123", "Review transaction case invalid-id", "Count orders"],
+)
+def test_transaction_tools_do_not_remove_gate_for_unscoped_questions(task):
+    assert source_selection_question(task=task, tool_definitions=inventory() + [{"name": "transaction_ops_status"}])
+
+
+def test_scoped_workflow_requires_available_tools_and_is_not_inherited_from_assistant():
+    assert source_selection_question(task=CASE_TASK, tool_definitions=inventory())
+    assert source_selection_question(
+        task="Count orders",
+        tool_definitions=inventory() + [{"name": "transaction_ops_status"}],
+        conversation_history=[{"role": "assistant", "content": CASE_TASK}],
+    )
+
+
 @pytest.mark.parametrize(
     "question",
     [

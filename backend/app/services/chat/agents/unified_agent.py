@@ -757,6 +757,15 @@ class UnifiedAgent(BaseSpecialistAgent):
                 + ", ".join(self._selected_user_sources)
                 + ". Honor this verified user choice even when older conversation text has been compacted."
             )
+        if getattr(self, "_transaction_workflow", False):
+            parts.append(
+                "\nThis request selects a transaction case/group workflow, not a standalone database query. "
+                "Start with transaction_ops_status for the exact case or transaction_ops_accounting_group "
+                "for the exact group and supplied scope. Resolve connections from that authorized evidence; "
+                "do not ask which data source to use. Continue targeted read-only investigation when evidence "
+                "is incomplete without asking discretionary permission. Prepare only supported exact changes "
+                "for human approval; this request is not financial approval."
+            )
         # Write-repair directive last — the most specific, most recent
         # instruction on a repair turn, so it must be able to override
         # anything framed above it (mirrors the Plan Mode ordering rule).
@@ -924,6 +933,7 @@ class UnifiedAgent(BaseSpecialistAgent):
             else SourceSelection()
         )
         self._selected_user_sources = selection.selected_sources
+        self._transaction_workflow = selection.transaction_workflow
         if selection.question:
             return AgentResult(success=True, data=selection.question, agent_name=self.agent_name)
         return await super().run(
@@ -997,6 +1007,7 @@ class UnifiedAgent(BaseSpecialistAgent):
             else SourceSelection()
         )
         self._selected_user_sources = selection.selected_sources
+        self._transaction_workflow = selection.transaction_workflow
         if selection.question:
             yield "text", selection.question
             yield "response", AgentResult(success=True, data=selection.question, agent_name=self.agent_name)
