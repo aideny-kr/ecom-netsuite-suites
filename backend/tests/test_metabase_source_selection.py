@@ -1,6 +1,6 @@
 import uuid
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -16,6 +16,7 @@ from app.services.chat.tools import build_external_tool_definitions
 
 def routing_adapter(kind="analytics", continuation=True):
     adapter = AsyncMock()
+    adapter.force_tool_choice = Mock(return_value={"type": "tool", "name": "route_request"})
     adapter.create_message.return_value = LLMResponse(
         tool_use_blocks=[
             ToolUseBlock(id="route", name="route_request", input={"kind": kind, "continuation": continuation})
@@ -50,7 +51,7 @@ CASE_TASK = (
 )
 GROUP_TASK = (
     "Prepare fixes for all orders in issue group d55f9ecb054529c6a66a4a102e069d5b (tax difference). "
-    'Call transaction_ops.accounting_group with group_id "d55f9ecb054529c6a66a4a102e069d5b". '
+    'Call transaction_ops.groups with group_id "d55f9ecb054529c6a66a4a102e069d5b". '
     "Prepare supported exact invoice corrections together for human approval."
 )
 
@@ -65,7 +66,7 @@ async def test_scoped_transaction_workflow_reaches_agent_without_database_questi
     )
     agent._tool_defs = inventory() + [
         {"name": "transaction_ops_status"},
-        {"name": "transaction_ops_accounting_group"},
+        {"name": "transaction_ops_groups"},
     ]
     reached = []
 

@@ -80,8 +80,8 @@ def _resolve_analytics_choice(
             if source in sources
             and any(
                 not re.search(
-                    r"\b(?:not|don't|do not|avoid)\s+(?:use\s+)?$",
-                    message[max(0, match.start() - 20) : match.start()],
+                    r"\b(?:not|don't|do not|avoid|other than|except)\s+(?:(?:use|want|from|using)\s+)*$",
+                    message[max(0, match.start() - 45) : match.start()],
                     re.I,
                 )
                 for match in matches
@@ -127,7 +127,9 @@ def resolve_source_selection(
         tool_names = {t.get("name", "").replace(".", "_") for t in tool_definitions}
         return SourceSelection(
             transaction_workflow=route.kind == "transaction"
-            and bool(tool_names & {"transaction_ops_status", "transaction_ops_accounting_group"}),
+            and bool(
+                tool_names & {"transaction_ops_status", "transaction_ops_groups", "transaction_ops_accounting_evidence"}
+            ),
             request_context=state.model_dump(),
         )
 

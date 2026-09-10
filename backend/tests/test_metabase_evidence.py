@@ -104,6 +104,25 @@ def test_feedback_identifies_scope_literals_without_requiring_a_new_query():
     assert '"5"' in feedback and '"395"' in feedback and "do not need to be requeried" in feedback
 
 
+def test_grounded_chart_values_render_before_json_is_parsed():
+    evidence = MetabaseEvidence({TOOL})
+    total = observed(evidence, [[65]])
+    answer = '<chart>{"type":"bar","data":[{"label":"Orders","value":' + total["rows"][0][0] + "}]}</chart>"
+    assert evidence.feedback(answer) is None
+    rendered = evidence.resolve(answer)
+    assert json.loads(rendered.removeprefix("<chart>").removesuffix("</chart>"))["data"][0]["value"] == 65
+
+
+def test_unknown_reference_in_stripped_reasoning_does_not_crash_rendering():
+    from app.services.chat.agents.base_agent import strip_confidence_tag
+
+    evidence = MetabaseEvidence({TOOL})
+    total = observed(evidence, [[65]])
+    answer = "Orders: " + total["rows"][0][0] + "\n<reasoning>{{mb_ref:unknown}}</reasoning>"
+    assert evidence.feedback(strip_confidence_tag(answer)) is None
+    assert strip_confidence_tag(evidence.resolve(answer)) == "Orders: 65"
+
+
 def test_distinct_groups_may_overlap_but_cannot_exceed_total():
     evidence = MetabaseEvidence({TOOL})
     grouped = observed(evidence, [["SKU-A", 41], ["SKU-B", 30]], grouped=True)
@@ -255,3 +274,22 @@ async def test_budget_exhaustion_never_releases_unverified_numeric_text(streamin
         else:
             answer = await BaseSpecialistAgent.run(agent, "Count orders", {}, AsyncMock(), adapter, "test")
     assert answer.data == UNVERIFIED and agent._numeric_verification_failed
+
+
+def test_native_saved_question_can_render_its_actual_result_without_scalar_proof():
+    name = TOOL.replace("__query", "__execute_question")
+    evidence = MetabaseEvidence({name})
+    raw = {
+        "status": "completed",
+        "json_query": {
+            "lib/type": "mbql/query",
+            "stages": [{"lib/type": "mbql.stage/native", "native": "SELECT COUNT(*) AS count FROM orders"}],
+        },
+        "data": {"cols": [{"name": "count", "source": "native"}], "rows": [[65]]},
+    }
+    output = json.loads(evidence.observe(name, {"id": 5248}, json.dumps(raw)))
+    assert not output["server_aggregate"]
+    answer = "Saved question result:\n" + output["table_reference"]
+    assert evidence.feedback(answer) is None
+    assert "| count |" in evidence.resolve(answer) and "| 65 |" in evidence.resolve(answer)
+    assert evidence.feedback("There are 65 matching orders.")

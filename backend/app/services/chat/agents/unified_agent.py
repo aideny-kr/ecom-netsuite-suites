@@ -766,8 +766,8 @@ class UnifiedAgent(BaseSpecialistAgent):
         if getattr(self, "_transaction_workflow", False):
             parts.append(
                 "\nThis request selects a transaction case/group workflow, not a standalone database query. "
-                "Start with transaction_ops_status for the exact case or transaction_ops_accounting_group "
-                "for the exact group and supplied scope. Resolve connections from that authorized evidence; "
+                "Start with transaction_ops_status for the exact case or transaction_ops_groups "
+                "for the exact group and supplied scope, then transaction_ops_accounting_evidence for a case. Resolve connections from that authorized evidence; "
                 "do not ask which data source to use. Continue targeted read-only investigation when evidence "
                 "is incomplete without asking discretionary permission. Prepare only supported exact changes "
                 "for human approval; this request is not financial approval."
@@ -863,9 +863,11 @@ class UnifiedAgent(BaseSpecialistAgent):
             self._tool_defs = await build_all_tool_definitions(db, self.tenant_id)
         except Exception:
             _logger.warning("unified_agent.tool_discovery_failed", exc_info=True)
-            # Fallback: at least populate local tools so basic queries still work.
+            # Do not offer disconnected query sources after discovery fails.
             if self._tool_defs is None:
-                self._tool_defs = build_local_tool_definitions()
+                from app.services.chat.tools import build_discovery_fallback_tools
+
+                self._tool_defs = build_discovery_fallback_tools()
 
         # Extract NetSuite account slug for record deep links
         try:
@@ -931,7 +933,8 @@ class UnifiedAgent(BaseSpecialistAgent):
                 routing = await classify_request(task=task, history=history, adapter=adapter, model=model)
                 route = routing.route
                 self._routing_usage = routing.usage
-            except Exception:
+            except Exception as exc:
+                self._routing_usage = getattr(exc, "usage", self._routing_usage)
                 # A failed routing call cannot release an unresolved analytics query.
                 # Cancellation still propagates; no data or operational tool has run.
                 self._routing_error = True

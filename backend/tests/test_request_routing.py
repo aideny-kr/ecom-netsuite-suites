@@ -166,14 +166,14 @@ async def test_router_uses_only_classification_tool_and_bounded_history():
     ],
 )
 async def test_invalid_routing_decisions_cannot_become_an_execution_decision(response):
-    adapter = AsyncMock()
+    adapter = routing_adapter()
     adapter.create_message.return_value = response
     with pytest.raises(RequestRoutingError):
         await classify_request(task="Count Solidus orders", history=[], adapter=adapter, model="test")
 
 
 async def test_cancellation_propagates_without_becoming_a_source_question():
-    adapter = AsyncMock()
+    adapter = routing_adapter()
     adapter.create_message.side_effect = asyncio.CancelledError
     with pytest.raises(asyncio.CancelledError):
         await classify_request(task="Count Solidus orders", history=[], adapter=adapter, model="test")
@@ -228,7 +228,7 @@ async def test_failed_router_never_reaches_operational_or_data_execution(streami
 
     agent = UnifiedAgent(tenant_id=uuid.uuid4(), user_id=uuid.uuid4(), correlation_id="routing", context_need="data")
     agent._tool_defs = inventory()
-    adapter = AsyncMock()
+    adapter = routing_adapter()
     adapter.create_message.side_effect = RuntimeError("provider unavailable")
     with (
         patch.object(agent, "_setup_context", new=AsyncMock(return_value="Count Solidus orders")),
@@ -243,3 +243,44 @@ async def test_failed_router_never_reaches_operational_or_data_execution(streami
     assert result.tool_calls_log == []
     run.assert_not_called()
     stream.assert_not_called()
+
+
+async def test_transient_routing_failure_retries_without_interrupting_operation():
+    adapter = routing_adapter("operations")
+    response = adapter.create_message.return_value
+    adapter.create_message.side_effect = [TimeoutError("temporary provider timeout"), response]
+    result = await classify_request(task="Check flow health", history=[], adapter=adapter, model="configured-model")
+    assert result.route.kind == "operations"
+    assert adapter.create_message.await_count == 2
+    adapter.force_tool_choice.assert_called_once_with("route_request", model="configured-model")
+
+
+async def test_provider_without_forced_tools_uses_validated_json_routing():
+    from app.services.chat.plan_mode.errors import PlanModeUnsupportedError
+
+    adapter = routing_adapter()
+    adapter.force_tool_choice.side_effect = PlanModeUnsupportedError("gemini")
+    adapter.create_message.return_value = LLMResponse(text_blocks=['{"kind":"operations","continuation":true}'])
+    result = await classify_request(task="Check the connection", history=[], adapter=adapter, model="older-model")
+    assert result.route.kind == "operations"
+    assert adapter.create_message.call_args.kwargs["tools"] is None
+    assert adapter.create_message.call_args.kwargs["tool_choice"] is None
+
+
+async def test_invalid_then_valid_routing_accounts_for_both_responses():
+    from app.services.chat.llm_adapter import TokenUsage
+
+    adapter = routing_adapter("transaction")
+    valid = adapter.create_message.return_value
+    adapter.create_message.side_effect = [
+        LLMResponse(text_blocks=["invalid"], usage=TokenUsage(input_tokens=10)),
+        valid,
+    ]
+    result = await classify_request(task="Show this case evidence", history=[], adapter=adapter, model="test")
+    assert result.route.kind == "transaction" and result.usage.input_tokens == 27
+
+
+@pytest.mark.parametrize("utterance", ["I don't want Metabase", "not from Metabase", "anything other than Metabase"])
+def test_explicit_source_rejections_do_not_select_the_rejected_source(utterance):
+    choice = select(utterance, history=[stored_context(sources=["metabase"])])
+    assert choice.question and not choice.selected_sources

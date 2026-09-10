@@ -1112,6 +1112,9 @@ class BaseSpecialistAgent(abc.ABC):
                         else None
                     )
 
+                    if grounded_result == result_str:
+                        grounded_result = None
+
                     # Truncate error payloads to prevent token bloat on retries
                     result_str = _truncate_error_payload(result_str)
 
@@ -2570,9 +2573,9 @@ class BaseSpecialistAgent(abc.ABC):
                     llm_result_str = _suppress_metric_value_for_llm(llm_result_str)
                     evidence = getattr(self, "_metabase_evidence", None)
                     if evidence is not None and block.name in evidence.tool_names:
-                        llm_result_str = _suppress_metric_value_for_llm(
-                            evidence.observe(block.name, block.input, full_result_str)
-                        )
+                        grounded_result = evidence.observe(block.name, block.input, full_result_str)
+                        if grounded_result != full_result_str:
+                            llm_result_str = _suppress_metric_value_for_llm(grounded_result)
 
                     tool_calls_log.append(
                         build_tool_call_log_entry(

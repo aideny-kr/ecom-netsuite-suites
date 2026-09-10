@@ -514,6 +514,8 @@ def _coerce_assistant_content(
       final text. Use the spiral-specific wording so the user doesn't read
       this as "I don't remember anything we just discussed".
     """
+    if error in {"request_routing_failed", "metabase_numeric_verification_failed"} and final_text:
+        return final_text
     if error:
         if "credit balance is too low" in error.lower() or "insufficient_quota" in error.lower():
             notice = (

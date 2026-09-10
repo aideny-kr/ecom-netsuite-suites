@@ -110,7 +110,11 @@ Distinct counts can overlap between groups; do not sum SKU counts into orders.
 For reconciliation/overlap commentary, copy control_reference from control_checks.
 Possible overlap is not evidence of actual overlap; use the returned comparison.
 Use returned value references for headline figures and table_reference for
-tables. Keep the final explanation qualitative. Omit unrequested numeric scope
+tables. Chart JSON may use unquoted numeric references: they resolve before
+chart parsing. Saved native SQL results can be shown via table_reference; if
+scalar aggregate references are unavailable, reconstruct a verified MBQL
+aggregate instead of calculating a headline from those rows.
+Keep the final explanation qualitative. Omit unrequested numeric scope
 restatements, numbered lists and SQL snippets. Say "the requested batch" rather
 than changing its name or inserting bracketed placeholders. Preserve SKUs.
 If a value or control is missing, query it; if verification fails, say so.
@@ -314,6 +318,10 @@ These reference requirements apply to the final answer, not tool arguments.
 
     def resolve(self, text: str) -> str:
         def render(match):
+            if match[0] not in self.bindings:
+                # References inside reasoning metadata are stripped from the
+                # user answer, and must not make rendering the answer fail.
+                return match[0]
             table_id, value = self.bindings[match[0]]
             if match[0].endswith(":control}}"):
                 return self._control_statement(self.tables[table_id])

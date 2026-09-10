@@ -97,7 +97,9 @@ class RoutingResult:
 
 
 class RequestRoutingError(RuntimeError):
-    pass
+    def __init__(self, message: str, usage: TokenUsage):
+        super().__init__(message)
+        self.usage = usage
 
 
 def _history_excerpt(history: list[dict]) -> list[dict]:
@@ -124,6 +126,8 @@ def _history_excerpt(history: list[dict]) -> list[dict]:
 
 
 async def classify_request(*, task: str, history: list[dict], adapter, model: str) -> RoutingResult:
+    from app.services.chat.plan_mode.errors import PlanModeUnsupportedError
+
     previous = previous_request_context(history)
     payload = {
         "active_context": previous.model_dump() if previous else None,
@@ -131,21 +135,43 @@ async def classify_request(*, task: str, history: list[dict], adapter, model: st
         "current_request": task,
     }
     try:
-        response = await asyncio.wait_for(
-            adapter.create_message(
-                model=model,
-                max_tokens=256,
-                system=_SYSTEM,
-                messages=[{"role": "user", "content": json.dumps(payload)}],
-                tools=[_TOOL],
-                tool_choice={"type": "tool", "name": "route_request"},
-                thinking_level="none",
-            ),
-            timeout=20,
-        )
-        if len(response.tool_use_blocks) != 1 or response.tool_use_blocks[0].name != "route_request":
-            raise ValueError("Missing routing decision")
-        route = RequestRoute.model_validate(response.tool_use_blocks[0].input)
-        return RoutingResult(route=route, usage=response.usage)
-    except (ValueError, TypeError, AttributeError, TimeoutError) as exc:
-        raise RequestRoutingError("Unable to classify request") from exc
+        choice = adapter.force_tool_choice("route_request", model=model)
+    except (PlanModeUnsupportedError, AttributeError, NotImplementedError):
+        choice = None
+    system = _SYSTEM
+    if choice is None:
+        system = system.replace("Call route_request exactly once.", "Return only a JSON object.")
+        system += "\nRequired JSON schema: " + json.dumps(RequestRoute.model_json_schema())
+    usage = TokenUsage()
+    for attempt in range(2):
+        try:
+            response = await asyncio.wait_for(
+                adapter.create_message(
+                    model=model,
+                    max_tokens=256,
+                    system=system,
+                    messages=[{"role": "user", "content": json.dumps(payload)}],
+                    tools=[_TOOL] if choice is not None else None,
+                    tool_choice=choice,
+                    thinking_level="none",
+                ),
+                timeout=20,
+            )
+            for name in ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"):
+                setattr(usage, name, getattr(usage, name) + getattr(response.usage, name))
+            if choice is None:
+                if response.tool_use_blocks:
+                    raise ValueError("Unexpected routing tool call")
+                decision = json.loads("\n".join(response.text_blocks))
+            else:
+                if len(response.tool_use_blocks) != 1 or response.tool_use_blocks[0].name != "route_request":
+                    raise ValueError("Missing routing decision")
+                decision = response.tool_use_blocks[0].input
+            return RoutingResult(route=RequestRoute.model_validate(decision), usage=usage)
+        except Exception as exc:
+            # Cancellation is a BaseException and must still propagate. Retry a
+            # transient provider/format failure once; never infer the current
+            # request from an older operation after classification fails.
+            if attempt:
+                raise RequestRoutingError("Unable to classify request", usage) from exc
+            await asyncio.sleep(0.25)
