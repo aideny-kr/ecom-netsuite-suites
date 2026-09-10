@@ -125,9 +125,18 @@ async def _compiled_audit_events(db, tenant_id) -> list[AuditEvent]:
     return list(rows)
 
 
-async def test_instruction_echoing_the_mock_compiles_into_the_five_steps_in_order(db, tenant_a, monkeypatch):
+async def test_instruction_echoing_the_mock_compiles_into_the_four_correct_steps_in_order(db, tenant_a, monkeypatch):
+    """Brief H, item 2a: registry.validate_plan now rejects a bigquery_sql
+    step alongside a playbook-keyed report.compose (nothing in the registry
+    ever consumes a bigquery_sql step's rows, and the playbook already owns
+    its own dataset-qualified sources) — the mock's original five-step
+    illustration (query -> compose -> ...) is therefore no longer a valid
+    compiled shape for a playbook-covered instruction; the CORRECT plan the
+    compiler must produce is the four-step one (see
+    _correct_four_step_playbook_plan / test_the_correct_four_step_playbook_plan_compiles_successfully
+    below for the same shape, tested there for the item 2 rules specifically)."""
     monkeypatch.setattr(compiler, "_tenant_locations", lambda *_a, **_kw: _async_list(["Dimerco", "Fedex", "Panurgy"]))
-    fake = FakeAdapter([_compile_plan_response(_inventory_aging_plan())])
+    fake = FakeAdapter([_compile_plan_response(_correct_four_step_playbook_plan())])
 
     result = await compile_instruction(
         db,
@@ -139,7 +148,6 @@ async def test_instruction_echoing_the_mock_compiles_into_the_five_steps_in_orde
 
     assert isinstance(result, CompiledPlan)
     assert [s["type"] for s in result.plan_json["steps"]] == [
-        "bigquery_sql",
         "report.compose",
         "report.render_pdf",
         "report.build_xlsx",
@@ -366,7 +374,7 @@ async def test_tenant_locations_are_fed_to_the_compiler_prompt(db, tenant_a, mon
     monkeypatch.setattr(
         compiler, "_tenant_locations", lambda *_a, **_kw: _async_list(["Dimerco", "Fedex", "Panurgy", "Virtual"])
     )
-    fake = FakeAdapter([_compile_plan_response(_inventory_aging_plan())])
+    fake = FakeAdapter([_compile_plan_response(_correct_four_step_playbook_plan())])
 
     await compile_instruction(
         db,
@@ -434,7 +442,7 @@ async def test_tenant_connections_and_reports_are_fed_to_the_compiler_prompt(db,
         "_tenant_reports",
         lambda *_a, **_kw: _async_list([{"id": "rpt-123", "title": "Sales Weekly", "playbook_key": None}]),
     )
-    fake = FakeAdapter([_compile_plan_response(_inventory_aging_plan())])
+    fake = FakeAdapter([_compile_plan_response(_correct_four_step_playbook_plan())])
 
     await compile_instruction(
         db,
@@ -505,7 +513,7 @@ async def test_compile_audit_payload_carries_the_plan_version(db, tenant_a, monk
     hash, plan version, model)." — plan_version correlates the audit row back
     to the schedule row a Task 3 caller is compiling for."""
     monkeypatch.setattr(compiler, "_tenant_locations", lambda *_a, **_kw: _async_list([]))
-    fake = FakeAdapter([_compile_plan_response(_inventory_aging_plan())])
+    fake = FakeAdapter([_compile_plan_response(_correct_four_step_playbook_plan())])
 
     await compile_instruction(
         db,
@@ -523,7 +531,7 @@ async def test_compile_audit_payload_carries_the_plan_version(db, tenant_a, monk
 
 async def test_compile_writes_one_audit_event(db, tenant_a, monkeypatch):
     monkeypatch.setattr(compiler, "_tenant_locations", lambda *_a, **_kw: _async_list([]))
-    fake = FakeAdapter([_compile_plan_response(_inventory_aging_plan())])
+    fake = FakeAdapter([_compile_plan_response(_correct_four_step_playbook_plan())])
 
     before = await _compiled_audit_events(db, tenant_a.id)
     assert before == []
@@ -577,7 +585,7 @@ async def test_compile_instruction_never_commits_leaving_the_transaction_to_the_
     `db` test fixture's SAVEPOINT-based isolation makes ``SET LOCAL`` survive
     an inner commit regardless — that would be a false green either way."""
     monkeypatch.setattr(compiler, "_tenant_locations", lambda *_a, **_kw: _async_list([]))
-    fake = FakeAdapter([_compile_plan_response(_inventory_aging_plan())])
+    fake = FakeAdapter([_compile_plan_response(_correct_four_step_playbook_plan())])
 
     commits: list[bool] = []
     real_commit = db.commit

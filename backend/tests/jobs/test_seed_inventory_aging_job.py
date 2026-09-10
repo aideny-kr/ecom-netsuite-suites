@@ -4,7 +4,10 @@ Spec: docs/superpowers/specs/2026-09-08-scheduled-jobs-and-inventory-aging-desig
 §B7. ``main(tenant_id, *, db, owner_id=None, llm=None)`` creates (or, on a rerun,
 returns) the **Inventory Aging Weekly** Scheduled Job from the mock's instruction
 text, compiled via the real compiler (``app.services.jobs.compiler.compile_instruction``)
-into the mock's five-step plan, left ``plan_status = "pending_approval"`` —
+into the CORRECT four-step plan (brief H, item 2a: registry.validate_plan
+now rejects a bigquery_sql step alongside a playbook-keyed report.compose —
+the mock's original five-step illustration is no longer a valid compiled
+shape), left ``plan_status = "pending_approval"`` —
 approving it, running it, and going live are a human's actions on the Scheduled
 jobs page, not this script's.
 
@@ -64,11 +67,15 @@ def _clarify_response(question: str, tool_use_id: str = "tu_1") -> LLMResponse:
 
 
 def _five_step_plan() -> dict:
-    """The mock's five-step Inventory Aging Weekly plan — reuses
-    ``test_compiler._inventory_aging_plan``'s exact fixture (query -> compose ->
-    render PDF -> build Excel -> upload to Drive) so this test and the compiler's
-    own tests agree on what "the mock's plan" looks like."""
-    return compiler_fixtures._inventory_aging_plan()
+    """The CORRECT compiled Inventory Aging Weekly plan (compose -> render PDF
+    -> build Excel -> upload to Drive, no free-form bigquery_sql step
+    alongside the playbook compose) — reuses
+    ``test_compiler._correct_four_step_playbook_plan``'s exact fixture so this
+    test and the compiler's own tests agree on what a valid compiled plan
+    looks like. Kept under its original name (still "the mock's plan" this
+    seed script compiles) even though the mock's own five-step illustration
+    is no longer a validate_plan-legal shape — see brief H, item 2a."""
+    return compiler_fixtures._correct_four_step_playbook_plan()
 
 
 async def _schedule_rows(db, tenant_id) -> list[Schedule]:
@@ -136,7 +143,6 @@ async def test_main_seeds_a_pending_approval_schedule_from_the_mocks_instruction
     }
     assert schedule.budget_json == {"bytes_scanned": 5_000_000_000, "seconds": 600, "usd": 2.0}
     assert [s["type"] for s in schedule.plan_json["steps"]] == [
-        "bigquery_sql",
         "report.compose",
         "report.render_pdf",
         "report.build_xlsx",

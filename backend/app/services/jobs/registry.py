@@ -813,6 +813,50 @@ def validate_plan(plan: dict) -> ValidatedPlan:
 
         steps.append(PlanStep(id=step_id, type=step_type, params=params))
 
+    # Item 2 (brief H): two whole-plan invariants the compiler's own system
+    # prompt only STEERS the model toward — a plan can still slip past the
+    # model's judgment and reach validate_plan with either shape, so these
+    # run as a POST-pass over the already-validated `steps` (never the raw,
+    # per-step loop above): both need to see steps that may come BEFORE or
+    # AFTER the one they interact with, in either order.
+
+    # Item 2a: a plan whose report.compose step carries playbook_key must
+    # contain no bigquery_sql step — the playbook already owns its own
+    # dataset-qualified sources, and no step's params schema ever step-refs a
+    # bigquery_sql step (see _step_ref_specs / plan_schema's "$defs"), so a
+    # free-form SQL step alongside a playbook compose is always dead weight
+    # at best and an unvetted parallel data path at worst.
+    has_playbook_compose = any(s.type == "report.compose" and "playbook_key" in s.params for s in steps)
+    if has_playbook_compose:
+        for s in steps:
+            if s.type == "bigquery_sql":
+                errors.append(
+                    f"step {s.id}: bigquery_sql is not allowed in a plan that composes a playbook report; "
+                    "the playbook owns its sources"
+                )
+
+    # Item 2b: deliver_report_to_drive uploads BOTH the PDF and the Excel
+    # workbook in a single call, so a SECOND drive.upload step naming the
+    # SAME report.compose step would deliver (and advisory-lock) that same
+    # report twice. Grouped by each drive.upload's OWN report_step value —
+    # only steps already in `steps` reach this point, i.e. ones whose
+    # report_step already passed the x-step-ref-type check above (genuinely
+    # names a report.compose step); a report_step naming the WRONG step type
+    # is already caught above and must not also produce this message.
+    upload_targets: dict[str, list[str]] = {}
+    for s in steps:
+        if s.type == "drive.upload":
+            target = s.params.get("report_step")
+            if target is not None:
+                upload_targets.setdefault(target, []).append(s.id)
+    for target, upload_ids in upload_targets.items():
+        if len(upload_ids) > 1:
+            errors.append(
+                f"drive.upload steps {', '.join(upload_ids)} all target the same report.compose step "
+                f"{target!r} — deliver_report_to_drive already uploads the PDF and the Excel workbook "
+                "in one call"
+            )
+
     if errors:
         raise PlanInvalid(errors)
 
