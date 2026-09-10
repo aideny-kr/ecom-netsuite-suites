@@ -80,6 +80,29 @@ async def _schedule_rows(db, tenant_id) -> list[Schedule]:
     return list(rows)
 
 
+def test_instruction_keeps_the_mocks_original_text_and_adds_the_build_fresh_clarification():
+    """Live-run defect (brief G, item 4): on staging the seed's compile asked
+    whether to reuse an existing "Dimerco Inventory Aging Report" from an
+    August chat, so the non-interactive seed created nothing — the compiler
+    had a genuine question (refresh-or-reuse) the instruction never answered.
+    INSTRUCTION now ends with an explicit "build a brand-new report" answer
+    to that exact question, so the compiler never has a reason to clarify;
+    the mock's own text (verbatim) stays untouched before it."""
+    mock_text = (
+        "Every Monday at 6am Pacific, build the inventory aging report for Dimerco, Fedex and "
+        "Panurgy from the BigQuery inventory snapshot. Age each SKU by days since its last "
+        "restock, bucket 0–30 / 31–60 / 61–90 / 91–180 / 180+, compare with the prior week "
+        "and show the nine-week trend of aged share. Save a PDF of the report and an Excel "
+        "workbook with every SKU per location to Google Drive under Reports / Inventory aging. "
+        "If a run fails, retry once and then pause and tell me."
+    )
+    assert seed_inventory_aging_job.INSTRUCTION.startswith(mock_text)
+    assert (
+        "Build a brand-new report each run with the inventory_aging playbook covering all "
+        "three locations; do not refresh or extend any existing report."
+    ) in seed_inventory_aging_job.INSTRUCTION
+
+
 async def test_main_seeds_a_pending_approval_schedule_from_the_mocks_instruction(db, monkeypatch):
     monkeypatch.setattr(
         "app.services.jobs.compiler._tenant_locations",
