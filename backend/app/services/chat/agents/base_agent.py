@@ -779,6 +779,7 @@ class AgentResult:
     tokens_used: TokenUsage = field(default_factory=TokenUsage)
     agent_name: str = ""
     confidence_score: float | None = None
+    request_context: dict | None = None
 
 
 def _compute_confidence(
