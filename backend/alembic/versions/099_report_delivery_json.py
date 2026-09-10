@@ -16,7 +16,13 @@ from sqlalchemy.dialects import postgresql
 from alembic import op
 
 revision = "099_report_delivery_json"
-down_revision = "098_celigo_flow_errors_checked"
+# Re-parented 2026-09-10 from 098_celigo_flow_errors_checked onto the transaction-ops
+# lineage head (PR #225): staging had 099_transaction_ops_state … 107_tx_settlement_queue
+# applied while this chain (099 → 102_schedule_retry_json) was applied on no real DB, so the
+# scheduled-jobs chain is the one that moves. One linear history — never a merge revision,
+# because the deploy migration-safety check runs `downgrade -1` from head and a merge node
+# fails it with "Ambiguous walk" (memory: feedback_merge_migration_breaks_downgrade).
+down_revision = "107_tx_settlement_queue"
 branch_labels = None
 depends_on = None
 
