@@ -80,6 +80,8 @@ ACCOUNTING_CHECKS = [
         "Negative SuiteQL line signs alone do not establish a return, credit or reversal. Decode lifecycle using "
         "native status display/metadata. On a failed query inspect schema/permissions and try a supported alternate "
         "read; do not label an unexplained 500 transient or repeat an unchanged invalid query. "
+        "A parser error near FETCH does not prove a limit-generation defect: first try a minimal qualified SELECT "
+        "of native ID/status with a small limit and scoped ID/subsidiary; then add metadata-confirmed fields. "
         "Discover linked-document "
         "fields on the actual transaction/transaction-line schema rather than guessing a header createdfrom field.",
     },

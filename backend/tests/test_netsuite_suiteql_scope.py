@@ -1,5 +1,6 @@
 """Explicit accounting reads cannot drift to another tenant/connection/environment."""
 
+import json
 from unittest.mock import AsyncMock
 from uuid import uuid4
 
@@ -13,10 +14,14 @@ from app.models.connection import Connection
 async def test_bound_query_checks_exact_connection_and_environment_before_network(
     db, admin_user, admin_user_b, monkeypatch
 ):
+    from app.services.chat.tools import execute_tool_call
+    from tests.conftest import enable_feature_flag
     from tests.test_transaction_ops_state_db import seed_config
 
     actor = admin_user[0]
     config = await seed_config(db, actor.tenant_id, actor)
+    await enable_feature_flag(db, actor.tenant_id, "mcp_tools")
+    monkeypatch.setattr("app.mcp.governance.check_rate_limit", lambda *args: True)
     connection = await db.scalar(select(Connection).where(Connection.id == config.netsuite_connection_id))
     connection.encrypted_credentials = "bound-credential"
     other = Connection(
@@ -54,12 +59,22 @@ async def test_bound_query_checks_exact_connection_and_environment_before_networ
     assert result["verified_connection_scope"] == {"connection_id": str(connection.id), "account_id": "123-sb1"}
     assert token.call_args.args[1].id == connection.id
     assert network.call_args.args[1] == "123-sb1"
+    governed = json.loads(
+        await execute_tool_call("netsuite_suiteql", params, actor.tenant_id, actor.id, "scoped-accounting-test", db)
+    )
+    assert governed["verified_connection_scope"] == result["verified_connection_scope"]
     network.reset_mock()
     token.reset_mock()
     for changes in ({"expected_account_id": "123"}, {"connection_id": str(other.id)}, {"connection_id": str(uuid4())}):
         result = await tool.execute({**params, **changes}, context)
         assert result["error"] is True
         assert "verified_connection_scope" not in result
+        governed = json.loads(
+            await execute_tool_call(
+                "netsuite_suiteql", {**params, **changes}, actor.tenant_id, actor.id, "scoped-accounting-test", db
+            )
+        )
+        assert governed.get("error")
     foreign = await tool.execute(params, {"tenant_id": admin_user_b[0].tenant_id, "db": db})
     assert foreign["error"] is True
     connection.status = "inactive"
@@ -91,3 +106,8 @@ def test_scoped_parameters_are_exposed_to_agent():
 
     schema = next(t for t in build_local_tool_definitions() if t["name"] == "netsuite_suiteql")["input_schema"]
     assert {"connection_id", "expected_account_id"} <= schema["properties"].keys()
+
+
+def test_createdfrom_column_is_not_misidentified_as_a_from_clause():
+    query = "SELECT t.createdfrom FROM transaction t JOIN transactionline tl ON tl.transaction = t.id"
+    assert tool.parse_tables(query) == {"transaction", "transactionline"}

@@ -93,7 +93,7 @@ TOOL_CONFIGS = {
         "timeout_seconds": 30,
         "rate_limit_per_minute": 60,
         "requires_entitlement": "mcp_tools",
-        "allowlisted_params": ["query", "limit"],
+        "allowlisted_params": ["query", "limit", "connection_id", "expected_account_id"],
     },
     "netsuite.suiteql_stub": {
         "default_limit": 100,

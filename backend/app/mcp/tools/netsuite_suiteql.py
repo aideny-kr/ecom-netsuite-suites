@@ -42,7 +42,7 @@ def is_read_only_sql(query: str) -> bool:
 def parse_tables(query: str) -> set[str]:
     """Extract table names referenced in FROM and JOIN clauses."""
     normalized = re.sub(r"\s+", " ", query.strip())
-    pattern = r"(?:FROM|JOIN)\s+([A-Za-z_][A-Za-z0-9_]*)"
+    pattern = r"\b(?:FROM|JOIN)\s+([A-Za-z_][A-Za-z0-9_]*)"
     matches = re.findall(pattern, normalized, re.IGNORECASE)
     return {m.lower() for m in matches}
 
