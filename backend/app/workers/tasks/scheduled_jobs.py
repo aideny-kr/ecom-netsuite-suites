@@ -618,8 +618,18 @@ async def _finalize_run(
     leaving the `jobs` row it's about to update stuck at status="running"
     forever with no retry-then-pause bookkeeping ever applied."""
     await set_tenant_context(db, str(tenant_id))
+    # Item 3 (delta gate fix E): a PLAIN `.with_for_update()` (never
+    # `skip_locked=True`) -- the one-pending-retry guard just below
+    # (`run_schedule_now`'s own retry-then-pause block, which reads
+    # `row.retry_job_id` off THIS row) is check-then-act; two overlapping
+    # occurrences of the SAME schedule finalizing concurrently must
+    # serialize on this row so the SECOND one WAITS and then observes the
+    # FIRST one's committed `retry_job_id`, rather than both reading NULL
+    # and both scheduling a retry.
     row = (
-        await db.execute(select(Schedule).where(Schedule.id == schedule_id, Schedule.tenant_id == tenant_id))
+        await db.execute(
+            select(Schedule).where(Schedule.id == schedule_id, Schedule.tenant_id == tenant_id).with_for_update()
+        )
     ).scalar_one()
     job = await db.get(Job, job_id_value)
 

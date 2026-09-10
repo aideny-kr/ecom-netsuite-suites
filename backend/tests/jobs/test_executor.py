@@ -1626,6 +1626,76 @@ async def test_sweep_claim_clears_retry_job_id_and_reuses_the_row_no_third_row(d
     assert completed_retry.status == "failed"
 
 
+async def test_finalize_run_schedule_select_carries_for_update_lock(db: AsyncSession, monkeypatch):
+    """Item 3 (delta gate fix E): the one-pending-retry guard
+    (`if row.retry_job_id is not None: skip`) is check-then-act on a
+    Schedule row `_finalize_run` selects -- without a row lock, two
+    overlapping failing occurrences can both read NULL and both create a
+    retry. The SELECT must carry a PLAIN `FOR UPDATE` (never SKIP LOCKED --
+    the second occurrence must WAIT, then see the first's `retry_job_id`).
+    Intercepts `db.execute` to capture the statement `_finalize_run` issues,
+    compiles it against the PostgreSQL dialect, and asserts `FOR UPDATE`
+    appears -- the same technique test_metric_authoring_db.py's own
+    test_update_metric_select_carries_for_update_lock uses for the
+    identical class of lost-update race."""
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.sql import Select
+
+    tenant = await create_test_tenant(db, name="FinalizeLockCheckCo")
+    tenant_id = tenant.id
+    await set_tenant_context(db, str(tenant_id))
+    now = datetime.now(timezone.utc)
+    schedule = await _seed_job_schedule(
+        db,
+        tenant,
+        plan_json={"steps": [{"id": "s1", "type": "fake.step", "params": {}}]},
+        next_run_at=now,
+        cron_expression="0 6 * * 1",
+    )
+    job = Job(
+        tenant_id=tenant_id,
+        job_type="scheduled_job",
+        status="running",
+        parameters={"schedule_id": str(schedule.id), "attempt": 1},
+    )
+    db.add(job)
+    await db.flush()
+    await db.commit()
+    await set_tenant_context(db, str(tenant_id))
+
+    captured_stmts: list = []
+    real_execute = db.execute
+
+    async def intercepting_execute(stmt, *args, **kwargs):
+        captured_stmts.append(stmt)
+        return await real_execute(stmt, *args, **kwargs)
+
+    monkeypatch.setattr(db, "execute", intercepting_execute)
+
+    await scheduled_jobs._finalize_run(
+        db,
+        schedule_id=schedule.id,
+        tenant_id=tenant_id,
+        job_id_value=job.id,
+        reason=REASON_DONE,
+        outputs={},
+        detail=None,
+        now=now,
+    )
+
+    # `_finalize_run`'s FIRST `db.execute` call is its own `set_tenant_context`
+    # (a raw `text(...)` SET LOCAL) -- filter to the actual Schedule SELECT
+    # rather than relying on call position.
+    select_stmts = [s for s in captured_stmts if isinstance(s, Select)]
+    assert select_stmts, f"_finalize_run did not issue any SELECT; captured: {captured_stmts}"
+    first_stmt = select_stmts[0]
+    compiled = first_stmt.compile(dialect=postgresql.dialect())
+    sql_text = str(compiled)
+    assert "FOR UPDATE" in sql_text.upper(), (
+        f"Expected the Schedule SELECT inside _finalize_run to carry FOR UPDATE, got:\n{sql_text}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Item 3 (delta gate fix): one pending retry per schedule, never an orphan.
 # Two overlapping occurrences of the SAME schedule (a run longer than its
