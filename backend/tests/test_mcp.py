@@ -309,9 +309,7 @@ class TestGovernedExecuteReestablishesTenantContext:
                 assert "error" not in result
 
                 try:
-                    row = (
-                        await db.execute(text("SELECT current_setting('app.current_tenant_id', true)"))
-                    ).scalar_one()
+                    row = (await db.execute(text("SELECT current_setting('app.current_tenant_id', true)"))).scalar_one()
                 except Exception as exc:
                     pytest.fail(f"tenant context was not usable after governed_execute: {exc}")
                 assert row == str(tenant_id)

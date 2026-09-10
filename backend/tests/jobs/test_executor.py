@@ -1237,7 +1237,7 @@ async def test_a_successful_steps_writes_survive_a_later_read_steps_failure(db: 
     )
 
     now = datetime.now(timezone.utc)
-    schedule = await _seed_job_schedule(
+    await _seed_job_schedule(
         db,
         tenant,
         plan_json={
@@ -1860,7 +1860,11 @@ async def test_attempt_exhaustion_pauses_even_when_another_occurrence_has_a_pend
     assert refreshed.last_run_status == "paused"
 
     pause_events = (
-        (await db.execute(select(AuditEvent).where(AuditEvent.tenant_id == tenant_id, AuditEvent.action == "jobs.paused")))
+        (
+            await db.execute(
+                select(AuditEvent).where(AuditEvent.tenant_id == tenant_id, AuditEvent.action == "jobs.paused")
+            )
+        )
         .scalars()
         .all()
     )
