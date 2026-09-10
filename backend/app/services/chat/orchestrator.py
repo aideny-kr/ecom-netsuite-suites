@@ -530,6 +530,25 @@ def _coerce_assistant_content(
     if final_text:
         return final_text
     if tool_calls:
+        case_calls = [
+            call
+            for call in tool_calls
+            if call.get("tool") in {"transaction_ops_accounting_evidence", "transaction_ops.accounting_evidence"}
+        ]
+        if case_calls:
+            evidence_summary = str(case_calls[-1].get("result_summary", ""))
+            if "ambiguous_reconciliation_configuration" in evidence_summary:
+                return (
+                    "More than one reconciliation configuration matches this "
+                    "case, so its NetSuite connection could not be uniquely resolved. That configuration must "
+                    "be resolved before native accounting verification and an exact correction proposal. "
+                    "This result does not establish an approved or verified correction."
+                )
+            return (
+                "The accounting investigation did not complete. "
+                "The accounting-evidence tool records the missing evidence or blocker. "
+                "This result does not establish an approved or verified correction."
+            )
         return _TOOL_SPIRAL_FALLBACK
     return _NO_RESULT_FALLBACK
 

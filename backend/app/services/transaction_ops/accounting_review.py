@@ -209,6 +209,16 @@ async def accounting_context(db, tenant_id, scope, report=None):
     ]
     context["configuration_status"] = "ambiguous" if len(matches) > 1 else "unavailable"
     if len(matches) != 1:
+        context["read_only_next_step"] = (
+            "The case has multiple matching reconciliation configurations. Resolve their NetSuite connection "
+            "binding before native accounting reads."
+            if matches
+            else "No enabled reconciliation configuration matches this case scope. Resolve that configuration first."
+        ) + (
+            " query_scope_params is unavailable. Never substitute scope.source_connection_id for a NetSuite "
+            "connection_id; it identifies the e-commerce source. Do not guess a default connection or ask the "
+            "user which database to query. Report this configuration blocker with the known case findings."
+        )
         return context
     config = matches[0]
     mapping = config.mapping_json or {}

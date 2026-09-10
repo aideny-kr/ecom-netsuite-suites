@@ -74,6 +74,10 @@ async def collect_accounting_evidence(db, tenant_id, review, report):
             "permission; do not repeat successful sections or failed guessed SQL fields."
         ),
     }
+    if review.get("configuration_status") == "ambiguous":
+        result["blockers"].append("ambiguous_reconciliation_configuration")
+        result["interpretation"] = review["read_only_next_step"]
+        return result
     if (
         review.get("configuration_status") != "scoped_configuration_found"
         or not review.get("connection_active")

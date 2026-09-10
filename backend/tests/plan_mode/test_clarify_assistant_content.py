@@ -89,6 +89,33 @@ def test_helper_handles_none_persisted_output_gracefully():
     assert _coerce_assistant_content("Real text.", None) == "Real text."
 
 
+def test_case_evidence_survives_empty_model_answer_after_failed_follow_up_query():
+    from app.services.chat.orchestrator import _coerce_assistant_content
+
+    calls = [
+        {"tool": "transaction_ops_status", "result_summary": "Returned 3 rows"},
+        {
+            "tool": "transaction_ops_accounting_evidence",
+            "result_summary": '{"blockers": ["ambiguous_reconciliation_configuration"]}',
+        },
+        {"tool": "netsuite_suiteql", "result_summary": "No active NetSuite connection found for this tenant."},
+    ]
+    text = _coerce_assistant_content("", {"type": "data_table"}, tool_calls=calls)
+    assert "More than one reconciliation configuration" in text
+    assert "try rephrasing" not in text
+    assert _coerce_assistant_content("Specific findings", None, tool_calls=calls) == "Specific findings"
+
+
+def test_other_incomplete_case_investigation_does_not_claim_no_evidence_found():
+    from app.services.chat.orchestrator import _coerce_assistant_content
+
+    text = _coerce_assistant_content(
+        "", None, tool_calls=[{"tool": "transaction_ops_accounting_evidence", "result_summary": "incomplete"}]
+    )
+    assert "investigation did not complete" in text
+    assert "does not establish an approved or verified correction" in text
+
+
 @pytest.mark.parametrize("falsy", [None, ""])
 def test_helper_returns_fallback_for_falsy_text_no_structured_output(falsy):
     from app.services.chat.orchestrator import _coerce_assistant_content
