@@ -99,10 +99,19 @@ TOOL_REGISTRY = {
         "params_schema": {},
     },
     "netsuite.suiteql": {
-        "description": "Execute a SuiteQL query against NetSuite",
+        "description": "Execute a read-only SuiteQL query. For accounting investigations, pass both connection_id "
+        "and expected_account_id from accounting_review to bind the query to the exact account/environment.",
         "execute": netsuite_suiteql.execute,
         "params_schema": {
             "query": {"type": "string", "required": True, "description": "SuiteQL query to execute"},
+            "connection_id": {
+                "type": "string",
+                "description": "Exact NetSuite connection UUID; requires expected_account_id",
+            },
+            "expected_account_id": {
+                "type": "string",
+                "description": "Expected NetSuite account/environment; requires connection_id",
+            },
             "limit": {"type": "integer", "required": False, "default": 100, "description": "Max rows to return"},
             "user_question": {
                 "type": "string",

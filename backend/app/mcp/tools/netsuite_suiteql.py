@@ -361,15 +361,30 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
             "message": "Context must include tenant_id and db.",
         }
 
+    # Bind accounting reads to an exact connection and environment. A failed
+    # binding must never fall back to another active tenant connection.
+    scoped = "connection_id" in params or "expected_account_id" in params
+    connection_id = expected_account = None
+    if scoped:
+        try:
+            connection_id = uuid.UUID(str(params["connection_id"]))
+            expected_account = params["expected_account_id"]
+            if not isinstance(expected_account, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,255}", expected_account):
+                raise ValueError
+            expected_account = expected_account.replace("_", "-").lower()
+        except (KeyError, TypeError, ValueError):
+            return {"error": True, "message": "Both a valid connection_id and expected_account_id are required."}
+
     # --- Look up the active NetSuite connection for this tenant ---
     try:
-        result = await db.execute(
-            select(Connection).where(
-                Connection.tenant_id == tenant_id,
-                Connection.provider == "netsuite",
-                Connection.status == "active",
-            )
+        statement = select(Connection).where(
+            Connection.tenant_id == tenant_id,
+            Connection.provider == "netsuite",
+            Connection.status == "active",
         )
+        if scoped:
+            statement = statement.where(Connection.id == connection_id)
+        result = await db.execute(statement)
         connection = result.scalars().first()
         if not connection:
             return {
@@ -384,6 +399,9 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
         credentials = decrypt_credentials(connection.encrypted_credentials)
     except Exception as exc:
         return {"error": True, "message": f"Failed to decrypt credentials: {exc}"}
+
+    if scoped and str(credentials.get("account_id", "")).replace("_", "-").lower() != expected_account:
+        return {"error": True, "message": "NetSuite connection account/environment does not match the requested scope."}
 
     # --- Validate query ---
     allowed_tables = {t.strip().lower() for t in settings.NETSUITE_SUITEQL_ALLOWED_TABLES.split(",")}
@@ -438,6 +456,8 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
             return {"error": True, "message": f"NetSuite query failed: {error_msg}{hint}"}
 
         result = {**result, "query": query, "limit": max_rows}
+        if scoped:
+            result["verified_connection_scope"] = {"connection_id": str(connection.id), "account_id": account_id}
 
         return await _maybe_judge(
             result,
@@ -488,6 +508,9 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
         "query": query,
         "limit": max_rows,
     }
+
+    if scoped:
+        result["verified_connection_scope"] = {"connection_id": str(connection.id), "account_id": account_id}
 
     return await _maybe_judge(
         result,

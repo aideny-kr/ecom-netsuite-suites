@@ -69,14 +69,19 @@ ACCOUNTING_CHECKS = [
         "account binding; "
         "never infer it from a browser, generated link, default account or matching record ID in another environment. "
         "Do not combine cross-account/subsidiary/currency evidence. Stop dependent investigation on ambiguous "
-        "identity.",
+        "identity. Use netsuite_suiteql with BOTH connection_id and expected_account_id from query_scope_params. "
+        "Unscoped query success does not prove this account binding. Restrict SQL to the scoped subsidiary and IDs.",
     },
     {
         "check": "lifecycle_and_posted_documents",
         "required_evidence": "Read current native sales order, linked invoice/cash sale, fulfillment, credit memos, "
         "refunds, applications and relevant custom refund requests. Sales orders are non-posting: a billed SO header "
         "difference does not establish a posted ledger or invoice error. Trace actual posting documents and GL impact. "
-        "Negative SuiteQL line signs alone do not establish a return, credit or reversal.",
+        "Negative SuiteQL line signs alone do not establish a return, credit or reversal. Decode lifecycle using "
+        "native status display/metadata. On a failed query inspect schema/permissions and try a supported alternate "
+        "read; do not label an unexplained 500 transient or repeat an unchanged invalid query. "
+        "Discover linked-document "
+        "fields on the actual transaction/transaction-line schema rather than guessing a header createdfrom field.",
     },
     {
         "check": "tax_and_integration_configuration",
@@ -208,6 +213,10 @@ async def accounting_context(db, tenant_id, scope, report=None):
         configuration_status="scoped_configuration_found",
         config_id=str(config.id),
         netsuite_connection_id=str(config.netsuite_connection_id),
+        query_scope_params={
+            "connection_id": str(config.netsuite_connection_id),
+            "expected_account_id": scope["netsuite_account_id"],
+        },
         connection_active=connection is not None,
         action_mode=mapping.get("action_mode", "detect_only"),
         create_profile_configured=bool(mapping.get("netsuite_create")),
