@@ -2892,6 +2892,7 @@ async def run_chat_turn(
 
         max_turns = settings.CHAT_MAX_HISTORY_TURNS
         all_messages: list[dict] = []
+        msg_dicts: list[dict] = []
         summarised = 0
         # Self-sufficient history load: a freshly-created session (onboarding /
         # integration chat) never query-loaded its lazy="selectin" `messages`, so
@@ -3707,6 +3708,7 @@ async def run_chat_turn(
 
                     # Augment task for financial report queries or transform requests
                     context["source_selection_task"] = sanitized_input
+                    context["source_selection_history"] = msg_dicts
                     unified_task = sanitized_input
                     if not _is_chitchat and is_financial:
                         unified_task = _build_financial_mode_task(sanitized_input)

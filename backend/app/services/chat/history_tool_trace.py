@@ -95,7 +95,11 @@ def _extract_sql(params: dict[str, Any]) -> str:
     """
     if not isinstance(params, dict):
         return ""
-    return params.get("query") or params.get("sqlQuery") or ""
+    for key in ("query", "sqlQuery"):
+        value = params.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
 
 
 def _extract_failure_reason(result_summary: str) -> str:
@@ -188,7 +192,7 @@ def _compact_params(params: dict[str, Any]) -> str:
         return ""
     parts: list[str] = []
     for k, v in params.items():
-        if k in ("query", "sqlQuery", "description", "user_question"):
+        if k in ("description", "user_question") or (k in ("query", "sqlQuery") and isinstance(v, str)):
             continue
         if isinstance(v, (dict, list)):
             value_str = json.dumps(v, default=str, separators=(",", ":"))
@@ -282,6 +286,12 @@ def render_clarification_summary(structured_output: dict[str, Any] | None) -> st
         lines.append(f"  - Option {opt_id}: {title} (source: {source})")
     if len(lines) == 1:
         return ""
+    if structured_output.get("status") == "chosen":
+        chosen_id = structured_output.get("chosen_id")
+        chosen = [opt for opt in options if isinstance(opt, dict) and opt.get("id") == chosen_id]
+        if len(chosen) == 1 and chosen_id in ("A", "B", "C"):
+            source = str(chosen[0].get("source", "?"))[:32]
+            lines.append(f"User selected option {chosen_id} (source: {source}).")
     return "\n".join(lines)
 
 
