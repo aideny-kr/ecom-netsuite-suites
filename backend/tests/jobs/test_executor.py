@@ -1794,6 +1794,90 @@ async def test_two_overlapping_failures_never_orphan_the_pending_retry(db: Async
     assert skipped_events[0].status == "error"
 
 
+async def test_attempt_exhaustion_pauses_even_when_another_occurrence_has_a_pending_retry(
+    db: AsyncSession, monkeypatch
+):
+    """Item 4 (delta gate fix E): the pending-retry guard used to sit AHEAD
+    of the `attempt >= RETRY_MAX_ATTEMPTS` check, so an occurrence that has
+    ITSELF exhausted its retry silently skipped the pause + `jobs.paused`
+    audit whenever some OTHER occurrence's `retry_job_id` happened to be
+    set. Simulated directly: seed a schedule whose `retry_job_id` already
+    points at some OTHER occurrence's pending retry job, then run THIS
+    occurrence at attempt=2 (its own final retry) and let it fail too -- it
+    must still pause, never silently emit `jobs.retry.skipped` instead."""
+    tenant = await create_test_tenant(db, name="ExhaustionPausesAnywayCo")
+    tenant_id = tenant.id
+    await set_tenant_context(db, str(tenant_id))
+
+    async def always_fails(ctx, params):
+        raise StepExecutionError("boom: attempt 2 fails too")
+
+    monkeypatch.setitem(STEP_REGISTRY, "fake.step", _fake_spec("read", always_fails))
+
+    now = datetime.now(timezone.utc)
+    schedule = await _seed_job_schedule(
+        db,
+        tenant,
+        plan_json={"steps": [{"id": "s1", "type": "fake.step", "params": {}}]},
+        next_run_at=now - timedelta(minutes=1),
+        cron_expression="0 6 * * 1",
+    )
+    schedule_id = schedule.id
+
+    # Simulate: some OTHER occurrence's retry is already pending -- a real
+    # pending Job row, with `retry_job_id` pointing at it directly (never
+    # created via THIS occurrence's own run).
+    other_pending = Job(
+        tenant_id=tenant_id,
+        job_type="scheduled_job",
+        status="pending",
+        parameters={"schedule_id": str(schedule_id), "attempt": 2, "period_key": "2026-09-01"},
+    )
+    db.add(other_pending)
+    await db.flush()
+    schedule.retry_job_id = other_pending.id
+    await db.commit()
+    await set_tenant_context(db, str(tenant_id))
+
+    # THIS occurrence is itself attempt=2 -- its OWN final retry, exhausted
+    # on failure -- and must pause regardless of `retry_job_id` pointing at
+    # the (unrelated) other_pending row.
+    outcome = await run_schedule_now(
+        db,
+        schedule_id,
+        tenant_id=tenant_id,
+        actor_id=None,
+        actor_type="system",
+        due_at=now,
+        now=now,
+        attempt=2,
+        retry_on_error=True,
+    )
+    assert outcome.reason == REASON_ERROR
+
+    refreshed = (await db.execute(select(Schedule).where(Schedule.id == schedule_id))).scalar_one()
+    assert refreshed.paused_at is not None
+    assert refreshed.last_run_status == "paused"
+
+    pause_events = (
+        (await db.execute(select(AuditEvent).where(AuditEvent.tenant_id == tenant_id, AuditEvent.action == "jobs.paused")))
+        .scalars()
+        .all()
+    )
+    assert len(pause_events) == 1
+
+    skipped_events = (
+        (
+            await db.execute(
+                select(AuditEvent).where(AuditEvent.tenant_id == tenant_id, AuditEvent.action == "jobs.retry.skipped")
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert skipped_events == []  # must NOT silently skip -- this occurrence's own attempts are exhausted
+
+
 async def test_period_key_falls_back_to_computed_value_when_not_supplied(db: AsyncSession, monkeypatch):
     """Defensive only -- a caller invoking `run_schedule_now` directly with
     `attempt=2` but no `period_key` (e.g. the MCP tool) must not crash; it

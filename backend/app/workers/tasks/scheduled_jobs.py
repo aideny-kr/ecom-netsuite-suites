@@ -1060,37 +1060,15 @@ async def run_schedule_now(
             return RunOutcome(reason=REASON_ERROR, jobs_row_id=job_id_value, outputs=outputs)
 
     if reason == REASON_ERROR and retry_on_error:
-        if row.retry_job_id is not None:
-            # Item 3 (delta gate fix): one pending retry per schedule, never
-            # an orphan. Two overlapping occurrences of the SAME schedule (a
-            # run longer than its cron interval) can both be claimed at
-            # attempt=1 before either has failed -- if both then fail, they
-            # race to set this same column, and the LATER assignment
-            # orphans the EARLIER occurrence's already-pending retry row
-            # (nothing ever claims it; `retry_job_id` no longer points at
-            # it). `row` was just re-fetched fresh by `_finalize_run` above,
-            # so this reads the CURRENT committed value -- if some other
-            # occurrence already has a retry pending, do NOT create a
-            # second one and do NOT touch `next_run_at`/`retry_job_id`;
-            # leave `last_run_status` exactly as `_finalize_run` set it
-            # ("error") rather than overwriting it back to
-            # "retry_pending" for a retry THIS occurrence isn't the owner
-            # of.
-            await audit_service.log_event(
-                db,
-                tenant_id=tenant_id,
-                category="jobs",
-                action="jobs.retry.skipped",
-                actor_id=None,
-                actor_type="system",
-                resource_type="schedule",
-                resource_id=str(schedule_id),
-                correlation_id=correlation_id,
-                job_id=job.id,
-                payload={"pending_retry_job_id": str(row.retry_job_id), "job_id": str(job.id)},
-                status="error",
-            )
-        elif attempt >= RETRY_MAX_ATTEMPTS:
+        if attempt >= RETRY_MAX_ATTEMPTS:
+            # Item 4 (delta gate fix E): attempt exhaustion is checked FIRST,
+            # unconditionally -- an occurrence that has ITSELF exhausted its
+            # retry must pause + emit the `jobs.paused` owner-notification
+            # audit regardless of whether some OTHER occurrence's
+            # `retry_job_id` happens to be set on this row right now. This
+            # guard used to sit BEHIND the pending-retry check below, so
+            # THIS occurrence silently emitted `jobs.retry.skipped` instead
+            # of pausing whenever it raced with an unrelated pending retry.
             row.paused_at = datetime.now(timezone.utc)
             row.pause_reason = f"paused after {attempt} failed attempts: {detail}"[:1000]
             row.last_run_status = "paused"
@@ -1109,6 +1087,37 @@ async def run_schedule_now(
                     "reason": row.pause_reason,
                     "owner_id": str(row.owner_id) if row.owner_id else None,
                 },
+                status="error",
+            )
+        elif row.retry_job_id is not None:
+            # Item 3 (delta gate fix): one pending retry per schedule, never
+            # an orphan. Two overlapping occurrences of the SAME schedule (a
+            # run longer than its cron interval) can both be claimed at
+            # attempt=1 before either has failed -- if both then fail, they
+            # race to set this same column, and the LATER assignment
+            # orphans the EARLIER occurrence's already-pending retry row
+            # (nothing ever claims it; `retry_job_id` no longer points at
+            # it). `row` was just re-fetched fresh by `_finalize_run` above,
+            # so this reads the CURRENT committed value -- if some other
+            # occurrence already has a retry pending, do NOT create a
+            # second one and do NOT touch `next_run_at`/`retry_job_id`;
+            # leave `last_run_status` exactly as `_finalize_run` set it
+            # ("error") rather than overwriting it back to
+            # "retry_pending" for a retry THIS occurrence isn't the owner
+            # of. Only reached once THIS occurrence's own attempt count
+            # (checked above) is not yet exhausted.
+            await audit_service.log_event(
+                db,
+                tenant_id=tenant_id,
+                category="jobs",
+                action="jobs.retry.skipped",
+                actor_id=None,
+                actor_type="system",
+                resource_type="schedule",
+                resource_id=str(schedule_id),
+                correlation_id=correlation_id,
+                job_id=job.id,
+                payload={"pending_retry_job_id": str(row.retry_job_id), "job_id": str(job.id)},
                 status="error",
             )
         else:
