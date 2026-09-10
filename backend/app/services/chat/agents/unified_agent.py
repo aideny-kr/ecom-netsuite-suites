@@ -15,7 +15,8 @@ import uuid
 from typing import TYPE_CHECKING, Any, Callable
 from xml.sax.saxutils import escape as _xml_escape
 
-from app.services.chat.agents.base_agent import BaseSpecialistAgent
+from app.services.chat.agents.base_agent import AgentResult, BaseSpecialistAgent
+from app.services.chat.metabase_context import is_metabase_connector
 from app.services.chat.tools import build_local_tool_definitions
 
 if TYPE_CHECKING:
@@ -32,6 +33,12 @@ _logger = logging.getLogger(__name__)
 # Provider descriptions for connected systems awareness
 # ---------------------------------------------------------------------------
 _PROVIDER_DESCRIPTIONS: dict[str, str | None] = {
+    "metabase_mcp": (
+        "Metabase BI — discover connected databases, business metrics, models, and saved questions; "
+        "query and analyze their data using the available MCP tools. For Solidus commerce analysis, "
+        "verify the database schema and metric definitions first. SQL uses the underlying database's "
+        "dialect, not SuiteQL. Native SQL availability depends on the connected user's permissions."
+    ),
     "netsuite_mcp": (
         "NetSuite ERP — financial reports, saved searches, SuiteQL queries, "
         "record CRUD, and subsidiary management. Primary source of truth for "
@@ -73,7 +80,9 @@ def _build_role_prompt(connectors: list | None, brand_name: str) -> str:
 
     providers = set()
     for c in connectors:
-        if c.provider == "netsuite_mcp":
+        if is_metabase_connector(c):
+            providers.add("Metabase")
+        elif c.provider == "netsuite_mcp":
             providers.add("NetSuite")
         elif c.provider == "shopify_mcp":
             providers.add("Shopify")
@@ -108,7 +117,8 @@ def _build_connected_systems_block(connectors: list | None) -> str:
 
         tool_names = [t.get("name", "unknown") for t in connector.discovered_tools]
         tool_count = len(tool_names)
-        provider_desc = _PROVIDER_DESCRIPTIONS.get(connector.provider)
+        provider = "metabase_mcp" if is_metabase_connector(connector) else connector.provider
+        provider_desc = _PROVIDER_DESCRIPTIONS.get(provider)
         if provider_desc is None:
             provider_desc = f"{connector.label} — custom integration."
         tool_list = ", ".join(tool_names[:15])
@@ -191,6 +201,7 @@ needs and use the right tools to get the answer efficiently.
 {{TOOL_INVENTORY}}
 
 <tool_selection>
+Choose the user's requested connected source first. NetSuite-specific tools, schema, SQL rules, and workflows below apply only to NetSuite data.
 FINANCIAL STATEMENTS → netsuite_financial_report (local) or ns_runReport (MCP, call ns_listAllReports first).
   Parameters: report_type ("income_statement"|"balance_sheet"|"trial_balance"|"income_statement_trend"|"balance_sheet_trend"), period ("Feb 2026"), subsidiary_id (optional). ALWAYS use accounting period names, NEVER date ranges.
 SAVED SEARCHES → ns_runSavedSearch (call ns_listSavedSearches to discover).
@@ -231,7 +242,7 @@ CHANGE REQUEST DISCIPLINE:
 You are an AGENT. Run tools in a loop until you have the answer.
 
 DATA FRESHNESS RULES:
-1. USER-PROVIDED SQL → execute via netsuite_suiteql. NEVER answer from memory.
+1. USER-PROVIDED SQL → use the requested source's available query tool and dialect; netsuite_suiteql is only for NetSuite SuiteQL. NEVER answer from memory or claim unexecuted SQL ran.
 2. NEW DATA QUESTIONS → MUST call a tool. NEVER make up numbers.
 3. TRANSFORMATION REQUESTS (chart, pivot, export existing data) → use reference_previous_result if [CACHED DATA AVAILABLE].
 4. When in doubt, re-query (always safe).
@@ -894,6 +905,19 @@ class UnifiedAgent(BaseSpecialistAgent):
                 plan_mode_resume_source,
                 active_connectors=self._connectors,
             )
+        from app.services.chat.source_selection import source_selection_question
+
+        question = (
+            source_selection_question(
+                task=context.get("source_selection_task", task),
+                tool_definitions=self._tool_defs or [],
+                context_need=self._context_need,
+            )
+            if not (plan_mode_clarify_only or plan_mode_resume_source)
+            else None
+        )
+        if question:
+            return AgentResult(success=True, data=question, agent_name=self.agent_name)
         return await super().run(
             task,
             context,
@@ -952,6 +976,22 @@ class UnifiedAgent(BaseSpecialistAgent):
                 plan_mode_resume_source,
                 active_connectors=self._connectors,
             )
+        from app.services.chat.source_selection import source_selection_question
+
+        question = (
+            source_selection_question(
+                task=context.get("source_selection_task", task),
+                tool_definitions=self._tool_defs or [],
+                conversation_history=conversation_history,
+                context_need=self._context_need,
+            )
+            if not (plan_mode_clarify_only or plan_mode_resume_source)
+            else None
+        )
+        if question:
+            yield "text", question
+            yield "response", AgentResult(success=True, data=question, agent_name=self.agent_name)
+            return
         async for event in super().run_streaming(
             task,
             context,
