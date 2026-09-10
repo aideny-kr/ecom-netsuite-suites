@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Optional
 from zoneinfo import ZoneInfo
 
 import structlog
+from celery.schedules import crontab
 from croniter import croniter
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -417,3 +418,100 @@ async def owner_names(db: AsyncSession, owner_ids: list[Optional[uuid.UUID]]) ->
         return {}
     result = await db.execute(select(User.id, User.full_name).where(User.id.in_(ids)))
     return {row.id: row.full_name for row in result.all()}
+
+
+# ---------------------------------------------------------------------------
+# format_beat_schedule (live-run defect, brief G item 5): a human phrase for a
+# Celery Beat entry's `schedule` config value — `GET /jobs/schedules`
+# (app/api/v1/jobs.py) used to render this with a bare `str()`, showing raw
+# text like "60.0", "3600.0", "21600", or "<crontab: 0 3 * * * (m/h/dM/MY/d)>"
+# for the platform's system jobs. Pure function: no DB, no Celery app
+# instance, so it is unit-testable with a bare crontab object and with plain
+# ints/floats/timedeltas exactly as `celery_app.py`'s own `beat_schedule`
+# dict stores them.
+# ---------------------------------------------------------------------------
+
+_ALL_MINUTE = set(range(60))
+_ALL_HOUR = set(range(24))
+_ALL_DAY_OF_MONTH = set(range(1, 32))
+_ALL_MONTH_OF_YEAR = set(range(1, 13))
+_ALL_DAY_OF_WEEK = set(range(7))
+
+
+def _format_interval_seconds(seconds: float) -> str:
+    """A plain numeric interval (int/float seconds, or a `timedelta` already
+    converted to seconds by the caller) as "every ..." — whole hours and
+    whole minutes get the friendly singular/plural phrase from the mock
+    ("every minute", "every hour", "every 6 h", "every 5 min"); anything else
+    (not a whole number of minutes) falls back to raw seconds."""
+    if seconds and seconds % 3600 == 0:
+        hours = int(seconds // 3600)
+        return "every hour" if hours == 1 else f"every {hours} h"
+    if seconds and seconds % 60 == 0:
+        minutes = int(seconds // 60)
+        return "every minute" if minutes == 1 else f"every {minutes} min"
+    return f"every {seconds:g} sec"
+
+
+def _cron_field(values: set[int], full_range: set[int]) -> str:
+    """One crontab field rendered back to text: `"*"` for the full wildcard
+    range, else its values comma-joined in order — the same convention a
+    person would type when authoring the cron expression by hand."""
+    if values == full_range:
+        return "*"
+    return ",".join(str(v) for v in sorted(values))
+
+
+def _format_crontab(schedule: crontab) -> str:
+    """A `celery.schedules.crontab`'s five fields (`minute`, `hour`,
+    `day_of_month`, `month_of_year`, `day_of_week`) are each normalized by
+    Celery into a `set[int]` — a single-element set means that field is
+    pinned to one value; the full range (e.g. `set(range(24))` for `hour`)
+    means "every value", i.e. what a hand-written cron expression spells
+    `*`. Two named shapes cover the platform's actual entries
+    (`app/workers/celery_app.py`): "daily HH:MM" when minute AND hour are
+    both pinned and every day field is a wildcard, "hourly at :MM" when only
+    the minute is pinned (hour is NOT — a single pinned hour together with a
+    day restriction must NOT collapse into "daily" and silently drop that
+    restriction, so days must ALSO be wildcard for the daily shape). Anything
+    else — including a fixed hour with a restricted day-of-week, e.g. "every
+    Monday at midnight" — falls back to the raw `cron m h dM MY d` rendering
+    so no restriction is ever silently dropped from the phrase."""
+    minute, hour = schedule.minute, schedule.hour
+    day_of_month, month_of_year, day_of_week = (
+        schedule.day_of_month,
+        schedule.month_of_year,
+        schedule.day_of_week,
+    )
+    days_are_wildcard = (
+        day_of_month == _ALL_DAY_OF_MONTH and month_of_year == _ALL_MONTH_OF_YEAR and day_of_week == _ALL_DAY_OF_WEEK
+    )
+
+    if len(minute) == 1 and len(hour) == 1 and days_are_wildcard:
+        (m,) = minute
+        (h,) = hour
+        return f"daily {h:02d}:{m:02d}"
+    if len(minute) == 1 and len(hour) != 1:
+        (m,) = minute
+        return f"hourly at :{m:02d}"
+    return (
+        f"cron {_cron_field(minute, _ALL_MINUTE)} {_cron_field(hour, _ALL_HOUR)} "
+        f"{_cron_field(day_of_month, _ALL_DAY_OF_MONTH)} {_cron_field(month_of_year, _ALL_MONTH_OF_YEAR)} "
+        f"{_cron_field(day_of_week, _ALL_DAY_OF_WEEK)}"
+    )
+
+
+def format_beat_schedule(schedule: crontab | timedelta | int | float | object) -> str:
+    """A human phrase for a Celery Beat entry's `schedule` config value —
+    either a `crontab`, a plain numeric interval in seconds (`int`/`float`),
+    or a `timedelta`. Anything else (unexpected today, but Celery's own
+    `schedule` type accepts custom subclasses) falls back to `str()`, the
+    same behaviour the endpoint had before this function existed — never a
+    hard failure over a schedule shape this function does not recognize."""
+    if isinstance(schedule, crontab):
+        return _format_crontab(schedule)
+    if isinstance(schedule, timedelta):
+        return _format_interval_seconds(schedule.total_seconds())
+    if isinstance(schedule, (int, float)):
+        return _format_interval_seconds(float(schedule))
+    return str(schedule)
