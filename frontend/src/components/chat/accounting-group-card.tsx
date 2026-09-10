@@ -36,7 +36,7 @@ export function AccountingGroupCard({
         <div className="flex flex-wrap justify-between gap-3">
           <div>
             <h3 className="text-xl font-semibold">
-              {pending
+              {pending && eligible.length > 0
                 ? "Review group corrections"
                 : "Group correction results"}
             </h3>
@@ -48,7 +48,9 @@ export function AccountingGroupCard({
           </div>
           <span role="status" className="text-xs font-medium">
             {pending
-              ? "Awaiting approval"
+              ? blocked || !eligible.length
+                ? "Needs review"
+                : "Awaiting approval"
               : data.status === "executing"
                 ? "Running · awaiting results"
                 : data.status === "rejected"
@@ -57,12 +59,19 @@ export function AccountingGroupCard({
           </span>
         </div>
         <p className="text-[13px] leading-relaxed text-muted-foreground">
-          Each eligible invoice has the same supported tax-rate calculation
-          issue, with its own verified source evidence. After approval, up to{" "}
-          {group.concurrency} corrections run simultaneously. Each invoice is
-          checked again before writing and independently verified afterward.
+          {eligible.length > 0 ? (
+            <>
+              Each eligible invoice has the same supported tax-rate calculation
+              issue, with its own verified source evidence. After approval, up
+              to {group.concurrency} corrections run simultaneously. Each
+              invoice is checked again before writing and independently verified
+              afterward.
+            </>
+          ) : (
+            "No supported invoice changes are ready. These orders need individual investigation before an exact correction can be proposed for approval."
+          )}
         </p>
-        {pending && (
+        {pending && eligible.length > 0 && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4 text-xs leading-relaxed">
             <strong>Before you approve:</strong> Review each order’s exact
             amounts, retained tax account / agency and posting period below.
@@ -114,6 +123,14 @@ export function AccountingGroupCard({
                       {member.reason}
                     </p>
                   )}
+                  {!card && (
+                    <a
+                      className="text-xs text-primary underline"
+                      href={`/chat?${new URLSearchParams({ compose: `Investigate case ${member.case_id} for order ${member.order_reference}. Review the saved case and accounting evidence, explain why the group could not prepare an exact correction, and fetch only missing evidence. Propose a supported fix for human approval; do not execute changes.`, new_session: "true" })}`}
+                    >
+                      Investigate this order →
+                    </a>
+                  )}
                   {card && (
                     <AccountingConfirmationCard
                       data={card}
@@ -133,12 +150,15 @@ export function AccountingGroupCard({
           </p>
         ))}
         <p className="text-xs leading-relaxed text-muted-foreground">
-          This approves only the exact invoice changes shown. Each order retains
-          its own approver, execution receipt and verification audit.
-          Sales-order and cash settlement remain separate checks.
+          {eligible.length > 0
+            ? "This approves only the exact invoice changes shown."
+            : "Any correction requires its own exact proposal and human approval."}{" "}
+          Each order retains its own approver, execution receipt and
+          verification audit. Sales-order and cash settlement remain separate
+          checks.
         </p>
       </div>
-      {pending && (
+      {pending && eligible.length > 0 && (
         <div className="space-y-4 border-t bg-muted/20 p-5 sm:px-6">
           <label className="flex items-start gap-2 text-xs">
             <input

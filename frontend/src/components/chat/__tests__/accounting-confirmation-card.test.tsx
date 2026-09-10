@@ -172,4 +172,36 @@ describe("Accounting review", () => {
     expect(approve).toHaveBeenCalledOnce();
     expect(approve).toHaveBeenCalledWith({});
   });
+  it("does not ask for approval when a group has no supported correction", () => {
+    const group: WriteConfirmationData = {
+      ...card,
+      accounting_review: null,
+      invariant_errors: ["No supported corrections are ready for approval."],
+      accounting_group: {
+        group_id: "group",
+        concurrency: 3,
+        members: [
+          {
+            case_id: "other",
+            order_reference: "R999",
+            reason: "Order identity requires verification",
+          },
+        ],
+      },
+    };
+    render(
+      <WriteConfirmationCard
+        data={group}
+        onConfirm={vi.fn()}
+        onReject={vi.fn()}
+      />,
+    );
+    expect(
+      screen.queryByRole("button", { name: /Approve/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Awaiting approval")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Investigate this order →" }),
+    ).toHaveAttribute("href", expect.stringContaining("case+other"));
+  });
 });

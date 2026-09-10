@@ -230,7 +230,7 @@ export function AccountingConfirmationCard({
             <summary className="cursor-pointer font-medium">
               Exact field change
             </summary>
-            <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-xs">
+            <dl className="mt-3 grid grid-cols-1 sm:grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-xs">
               <dt>Effective tax rate (taxRate)</dt>
               <dd className="font-mono">
                 {label(p.before.taxRate)}% →{" "}
@@ -251,7 +251,7 @@ export function AccountingConfirmationCard({
             <summary className="cursor-pointer font-medium">
               Accounting details and evidence
             </summary>
-            <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-xs">
+            <dl className="mt-3 grid grid-cols-1 sm:grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-xs">
               <dt>Tax account / agency</dt>
               <dd>
                 {p.tax_account_name || p.tax_account} /{" "}
