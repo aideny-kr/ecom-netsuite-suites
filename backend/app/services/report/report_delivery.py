@@ -94,6 +94,59 @@ class DeliveryFailed(Exception):  # noqa: N818 — interface name from spec §A5
 
 
 @dataclass(frozen=True)
+class DeliveryIdentity:
+    """Item 9 (gate fix): overrides `deliver_report_to_drive`'s DEFAULT
+    identity (report/series-keyed) with caller-supplied identity — for a
+    scheduled job, the SCHEDULE, not the `Report` row it happens to compose
+    each run. `_report_compose_executor` composes a NEW `Report` every run
+    (inventory_aging is `period_based: False`, so tracking/series mode is
+    refused and `mode="period"` is what runs) — the default identity would
+    create a NEW Drive folder every Monday and duplicate files on any retry
+    after a partial upload.
+
+    `folder_props` / `file_props` are Drive `appProperties` dicts
+    (`_drive_upload_executor` merges `"kind"` into a COPY of `file_props` per
+    file — this dataclass does not carry `kind` itself, since one identity
+    covers both the pdf and the xlsx file). `file_props` must NEVER carry
+    `period_key` (item 1, delta gate fix #2) — `deliver_report_to_drive`
+    always merges the CURRENT call's `period_key` in itself, so a period
+    baked into a RECOVERED identity can never go stale (see that function's
+    own docstring). `lock_key` replaces `report_id` as the
+    `pg_advisory_xact_lock(hashtext(...))` key. `idempotency_prefix` (item 1,
+    delta gate fix #2 — was `idempotency_key`) is combined with the CURRENT
+    call's `period_key` as `f"{idempotency_prefix}:{period_key}"`, replacing
+    `report-delivery:<report_id>:<period_key>` in the `report.delivery.*`
+    audit events — never a period baked in at construction time, for the
+    same reason `file_props` cannot carry one.
+
+    `None` (the default everywhere this parameter is threaded) means exactly
+    today's behaviour — report/series-keyed — unchanged.
+
+    Item 1 (delta gate fix #2): `deliver_report_to_drive` itself never
+    writes this identity anywhere — the only place one is persisted onto
+    `report.delivery_json["identity"]` is `_report_compose_executor`
+    (`app.services.jobs.registry`), immediately after a compose/refresh step
+    returns, via `schedule_delivery_identity`. Item 2 (delta gate fix E):
+    that stamp is durable BEFORE any later step (e.g. `drive.upload`, or a
+    pure-read step like `report.build_xlsx`) can run — the run loop
+    (`_run_steps`) commits after EVERY successful step, not merely before a
+    write step's own call — so a partial-upload failure, or any later step
+    raising at all, can never lose it. `deliver_report_to_drive` only ever
+    RECOVERS this stored
+    identity (when `identity=None` and one is present) rather than writing
+    it — see that function's own docstring for why a LATER call with
+    `identity=None` (the manual re-delivery endpoint's own call shape) needs
+    to recover it rather than falling back to the default report/series
+    -keyed identity, which would create a SECOND Drive folder for a report a
+    scheduled job already delivered."""
+
+    folder_props: dict[str, str]
+    file_props: dict[str, str]
+    lock_key: str
+    idempotency_prefix: str
+
+
+@dataclass(frozen=True)
 class DeliveryResult:
     pdf_file_id: str
     pdf_url: str
@@ -325,6 +378,36 @@ class _GoogleDriveClient:
         return {"file_id": result["id"], "url": result.get("webViewLink", "")}
 
 
+def _recover_identity(stored: object) -> DeliveryIdentity | None:
+    """Item 1 (delta gate fix E): `stored` is whatever
+    `report.delivery_json.get("identity")` happens to hold -- direct dict
+    indexing (the previous shape of this recovery) raised `KeyError` on
+    ANY stored shape missing one of the four required keys, including the
+    pre-rename shape (commit 4cd65721) that stored `idempotency_key`
+    instead of `idempotency_prefix`. Returns `None` (never raises) unless
+    `stored` is a `dict` carrying all four required keys with the right
+    types (`folder_props`/`file_props` as `dict`, `lock_key`/
+    `idempotency_prefix` as `str`) -- the caller falls back to the default
+    report-keyed identity on `None`, exactly as if nothing had been stored
+    at all."""
+    if not isinstance(stored, dict):
+        return None
+    folder_props = stored.get("folder_props")
+    file_props = stored.get("file_props")
+    lock_key = stored.get("lock_key")
+    idempotency_prefix = stored.get("idempotency_prefix")
+    if not isinstance(folder_props, dict) or not isinstance(file_props, dict):
+        return None
+    if not isinstance(lock_key, str) or not isinstance(idempotency_prefix, str):
+        return None
+    return DeliveryIdentity(
+        folder_props=folder_props,
+        file_props=file_props,
+        lock_key=lock_key,
+        idempotency_prefix=idempotency_prefix,
+    )
+
+
 def _build_drive_client(credentials: dict, shared_drive_id: str | None) -> DriveClient:
     """Patched wholesale by tests (``monkeypatch.setattr(report_delivery,
     "_build_drive_client", fake_factory)``) to hand back an in-memory fake."""
@@ -444,12 +527,52 @@ async def deliver_report_to_drive(
     actor_type: str,
     actor_id: uuid.UUID | None,
     period_key: str,
+    identity: DeliveryIdentity | None = None,
 ) -> DeliveryResult:
     """Upload ``report_id``'s PDF + Excel to
     ``<tenant Drive>/Reports/<report title>/``, idempotently keyed by ``period_key``.
 
     ``actor_id=None`` is valid ONLY with ``actor_type="system"`` (A6's headless
-    compose script) — same convention ``refresh_service.refresh_report`` enforces."""
+    compose script) — same convention ``refresh_service.refresh_report`` enforces.
+
+    ``identity`` (item 9, gate fix): ``None`` (the default) is exactly today's
+    behaviour — the folder/file Drive identity, the advisory-lock key, and
+    the audit idempotency key are all keyed on ``report_id``/``report.
+    series_id``. A caller that passes a ``DeliveryIdentity`` overrides ALL
+    FOUR of those with its own values instead — see that dataclass's own
+    docstring for why a scheduled job needs this (its `Report` row is
+    recomposed fresh every run). The folder name stays ``report.title`` and
+    the file names stay ``<title> — <period_key>.<ext>`` either way — only
+    the appProperties identity that find/create actually keys on changes.
+
+    Item 5 (delta gate fix): ``POST /reports/{id}/deliver`` (the manual
+    re-delivery endpoint) always calls this with ``identity=None`` — it has
+    no notion of "which schedule delivered this before". Re-delivering a
+    report a SCHEDULED JOB already uploaded (under its own schedule-keyed
+    identity) therefore fell back to the DEFAULT report-keyed identity,
+    creating a second Drive folder/file set for the same report. Fixed here,
+    not at the endpoint: when ``identity`` is ``None`` and this report's own
+    ``delivery_json["identity"]`` already holds one (persisted elsewhere —
+    see below), THAT identity is recovered and used instead of the default.
+    A caller that DOES pass ``identity`` explicitly is unaffected — its
+    value always wins.
+
+    Item 1 (delta gate fix #2): the identity used to be persisted HERE, by
+    this function, only after both uploads succeeded — a PDF-ok/XLSX-fail
+    run left nothing durable, so the NEXT manual re-delivery fell back to
+    the default report-keyed identity anyway (a second folder). Worse, the
+    recovered identity was used VERBATIM, including whatever ``period_key``
+    happened to be baked into ``file_props``/the audit idempotency key at
+    the time it was first stored — a later re-delivery with a DIFFERENT
+    ``period_key`` uploaded under the OLD period's appProperties while the
+    filename and audit said the new one. Fixed by moving both concerns: this
+    function no longer WRITES the identity at all (only
+    ``_report_compose_executor`` does, right after compose/refresh, durable
+    before any later step can fail); and the CURRENT call's own
+    ``period_key`` is always what gets merged into the recovered (or
+    explicit) identity's file appProperties and idempotency key below —
+    never a value carried inside the identity itself.
+    """
     if actor_id is None and actor_type == "user":
         raise ValueError("deliver_report_to_drive: actor_id=None requires a non-user actor_type")
 
@@ -460,6 +583,16 @@ async def deliver_report_to_drive(
     if report is None:
         raise LookupError(f"report {report_id} not found for tenant {tenant_id}")
 
+    if identity is None and isinstance(report.delivery_json, dict):
+        stored_identity = report.delivery_json.get("identity")
+        if stored_identity:
+            identity = _recover_identity(stored_identity)
+            if identity is None:
+                logger.warning(
+                    "report_delivery.identity.unrecognised",
+                    extra={"report_id": str(report_id), "tenant_id": str(tenant_id)},
+                )
+
     connector = await _sheets_connector(db, tenant_id)
     if connector is None:
         raise DeliveryUnavailable("Connect a Google Sheets service account before delivering reports to Drive.")
@@ -469,7 +602,15 @@ async def deliver_report_to_drive(
     shared_drive_id = (connector.metadata_json or {}).get("shared_drive_id")
     client = _build_drive_client(credentials, shared_drive_id)
 
-    idempotency_key = f"report-delivery:{report_id}:{period_key}"
+    # Item 1 (delta gate fix #2): the CURRENT call's period_key, always —
+    # never a value carried inside `identity` itself (which must not carry
+    # one; see DeliveryIdentity's own docstring) — so a recovered identity
+    # can never go stale across a later delivery with a different period.
+    idempotency_key = (
+        f"{identity.idempotency_prefix}:{period_key}"
+        if identity is not None
+        else f"report-delivery:{report_id}:{period_key}"
+    )
 
     # ---- Phase 1: durable "started" record BEFORE any Drive call ----------------
     await audit_service.log_event(
@@ -500,7 +641,16 @@ async def deliver_report_to_drive(
         # both upload — duplicating every Drive artifact instead of one updating
         # in place. A genuinely concurrent second caller now cannot even START its
         # own folder lookup until this one's Drive work has fully landed.
-        await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:report_id))"), {"report_id": str(report_id)})
+        #
+        # Item 9 (gate fix): an `identity` override serializes on ITS OWN
+        # `lock_key`, never `report_id` — two different report rows sharing
+        # the same schedule identity (a scheduled job's weekly re-compose)
+        # must serialize against EACH OTHER, which a report_id-keyed lock
+        # cannot do (they are different reports every run).
+        if identity is not None:
+            await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"), {"lock_key": identity.lock_key})
+        else:
+            await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:report_id))"), {"report_id": str(report_id)})
 
         reports_folder_id = await _find_or_create_folder(client, name=_REPORTS_FOLDER_NAME, parent_id=shared_drive_id)
         # Gate fix #5: the per-report folder is keyed by the report's SERIES (or the
@@ -509,11 +659,16 @@ async def deliver_report_to_drive(
         # reports can share a title (two series with the same name, a recomposed
         # report reusing a common name) and must never collide on the same Drive
         # folder. `name` stays the human-readable title; only the appProperties
-        # identity is load-bearing for find/create.
+        # identity is load-bearing for find/create. Item 9 (gate fix): `identity`,
+        # when given, replaces this entirely with the caller's own folder_props.
         folder_app_properties = (
-            {"report_series_id": str(report.series_id)}
-            if report.series_id is not None
-            else {"report_id": str(report_id)}
+            identity.folder_props
+            if identity is not None
+            else (
+                {"report_series_id": str(report.series_id)}
+                if report.series_id is not None
+                else {"report_id": str(report_id)}
+            )
         )
         series_folder_id = await _find_or_create_folder(
             client, name=report.title, parent_id=reports_folder_id, app_properties=folder_app_properties
@@ -530,13 +685,28 @@ async def deliver_report_to_drive(
         pdf_name = f"{report.title} — {period_key}.pdf"
         xlsx_name = f"{report.title} — {period_key}.xlsx"
 
+        # Item 9 (gate fix): `identity.file_props`, when given, replaces the
+        # default report/period-keyed appProperties entirely — `"kind"` is
+        # still merged in per file here (never carried by `identity` itself,
+        # since one identity covers both files). Item 1 (delta gate fix #2):
+        # `period_key` is ALWAYS merged in from THIS call's own argument —
+        # `identity.file_props` itself must never carry one (see
+        # DeliveryIdentity's own docstring) — so a recovered identity's file
+        # appProperties can never go stale across a later delivery with a
+        # different period.
+        base_file_properties = (
+            {**identity.file_props, "period_key": period_key}
+            if identity is not None
+            else {"report_id": str(report_id), "period_key": period_key}
+        )
+
         pdf_result = await _upload_or_update(
             client,
             name=pdf_name,
             parent_id=series_folder_id,
             content=pdf_bytes,
             mime_type=_PDF_MIME,
-            app_properties={"report_id": str(report_id), "period_key": period_key, "kind": "pdf"},
+            app_properties={**base_file_properties, "kind": "pdf"},
         )
         xlsx_result = await _upload_or_update(
             client,
@@ -544,7 +714,7 @@ async def deliver_report_to_drive(
             parent_id=series_folder_id,
             content=xlsx_bytes,
             mime_type=_XLSX_MIME,
-            app_properties={"report_id": str(report_id), "period_key": period_key, "kind": "xlsx"},
+            app_properties={**base_file_properties, "kind": "xlsx"},
         )
 
         delivered_at = datetime.now(timezone.utc)
@@ -559,13 +729,23 @@ async def deliver_report_to_drive(
 
         report.published_drive_url = result.pdf_url
         report.published_at = delivered_at
-        report.delivery_json = {
-            "pdf": {"file_id": result.pdf_file_id, "url": result.pdf_url},
-            "xlsx": {"file_id": result.xlsx_file_id, "url": result.xlsx_url},
-            "folder_id": result.folder_id,
-            "period_key": period_key,
-            "delivered_at": delivered_at.isoformat(),
-        }
+        # Item 5 (delta gate fix): MERGE onto whatever delivery_json already
+        # holds (never overwrite wholesale) — this preserves an "identity"
+        # key a compose step may already have stamped (item 1, delta gate
+        # fix #2: `_report_compose_executor` is the ONLY writer of that key
+        # now; this function never writes it, only reads it back via the
+        # recovery path above).
+        merged_delivery_json = dict(report.delivery_json or {})
+        merged_delivery_json.update(
+            {
+                "pdf": {"file_id": result.pdf_file_id, "url": result.pdf_url},
+                "xlsx": {"file_id": result.xlsx_file_id, "url": result.xlsx_url},
+                "folder_id": result.folder_id,
+                "period_key": period_key,
+                "delivered_at": delivered_at.isoformat(),
+            }
+        )
+        report.delivery_json = merged_delivery_json
         await audit_service.log_event(
             db=db,
             tenant_id=tenant_id,

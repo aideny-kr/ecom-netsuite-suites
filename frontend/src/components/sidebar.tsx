@@ -27,6 +27,7 @@ import {
   Network,
   FileBarChart,
   Sparkles,
+  CalendarClock,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { NAV_ITEMS, CANONICAL_TABLES } from "@/lib/constants";
@@ -53,6 +54,7 @@ const iconMap = {
   Network,
   FileBarChart,
   Sparkles,
+  CalendarClock,
 } as const;
 
 const agentIconMap: Record<string, typeof Tag> = {

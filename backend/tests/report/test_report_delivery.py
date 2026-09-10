@@ -310,6 +310,359 @@ async def test_redelivery_of_the_same_report_and_period_still_updates_in_place(d
     assert second.xlsx_file_id == first.xlsx_file_id
 
 
+async def test_identity_override_finds_the_same_folder_and_files_across_different_reports(db, monkeypatch):
+    """Item 9 (gate fix): a scheduled job's Drive identity is the SCHEDULE,
+    not the report row it happens to compose each run — inventory_aging
+    composes a NEW `Report` every run (`mode="period"` always, since
+    `period_based=False` refuses tracking/series mode), so the DEFAULT
+    report/series-keyed identity created a new Drive folder every Monday and
+    duplicated files on any retry. Passing `identity` overrides that default
+    entirely: two DIFFERENT report ids sharing the same `identity` must
+    resolve to the SAME folder and the SAME files (find, then update in
+    place), never a duplicate."""
+    tenant = await create_test_tenant(db, name="ScheduleIdentityCorp")
+    user, _ = await create_test_user(db, tenant)
+    await set_tenant_context(db, str(tenant.id))
+    report_a = await _seed_report(db, tenant, user, title="Inventory Aging Weekly")
+    report_b = await _seed_report(db, tenant, user, title="Inventory Aging Weekly")
+    await _add_sheets_connector(db, tenant.id)
+
+    calls: list[str] = []
+    _patch_renderers(monkeypatch, calls)
+    client = FakeDriveClient(calls)
+    _patch_drive_client(monkeypatch, client)
+
+    schedule_id = "11111111-1111-1111-1111-111111111111"
+    identity = report_delivery.DeliveryIdentity(
+        folder_props={"schedule_id": schedule_id},
+        file_props={"schedule_id": schedule_id},
+        lock_key=f"schedule:{schedule_id}",
+        idempotency_prefix=f"job-delivery:{schedule_id}",
+    )
+
+    result_a = await report_delivery.deliver_report_to_drive(
+        db,
+        tenant_id=tenant.id,
+        report_id=report_a.id,
+        actor_type="user",
+        actor_id=user.id,
+        period_key="2026-09-08",
+        identity=identity,
+    )
+    await set_tenant_context(db, str(tenant.id))
+    result_b = await report_delivery.deliver_report_to_drive(
+        db,
+        tenant_id=tenant.id,
+        report_id=report_b.id,
+        actor_type="user",
+        actor_id=user.id,
+        period_key="2026-09-08",
+        identity=identity,
+    )
+
+    assert result_a.folder_id == result_b.folder_id
+    assert result_a.pdf_file_id == result_b.pdf_file_id
+    assert result_a.xlsx_file_id == result_b.xlsx_file_id
+    # Folder name stays the report's own title (cosmetic only); file names
+    # stay "<title> — <period_key>.<ext>" — only the appProperties identity
+    # changes. Two deliveries, but only ONE folder actually created (the
+    # second finds it by identity) — "Reports" itself is also created once.
+    assert client.calls.count("create_folder") == 2
+
+
+async def test_identity_override_uses_its_own_lock_key_not_report_id(db, monkeypatch):
+    """Item 9 (gate fix): the per-delivery advisory lock must serialize on
+    the SCHEDULE's identity when `identity` is given, not `report_id` — two
+    different reports delivered under the SAME schedule identity must
+    serialize against EACH OTHER, which a report_id-keyed lock cannot do."""
+    tenant = await create_test_tenant(db, name="ScheduleLockCorp")
+    user, _ = await create_test_user(db, tenant)
+    await set_tenant_context(db, str(tenant.id))
+    report = await _seed_report(db, tenant, user)
+    await _add_sheets_connector(db, tenant.id)
+
+    calls: list[str] = []
+    _patch_renderers(monkeypatch, calls)
+    client = FakeDriveClient(calls)
+    _patch_drive_client(monkeypatch, client)
+
+    schedule_id = "22222222-2222-2222-2222-222222222222"
+    identity = report_delivery.DeliveryIdentity(
+        folder_props={"schedule_id": schedule_id},
+        file_props={"schedule_id": schedule_id},
+        lock_key=f"schedule:{schedule_id}",
+        idempotency_prefix=f"job-delivery:{schedule_id}",
+    )
+
+    real_execute = db.execute
+    lock_params: list[dict] = []
+
+    async def spy_execute(stmt, *args, **kwargs):
+        sql_text = str(getattr(stmt, "text", stmt))
+        if "pg_advisory_xact_lock" in sql_text:
+            params = args[0] if args else kwargs.get("parameters") or {}
+            lock_params.append(dict(params))
+        return await real_execute(stmt, *args, **kwargs)
+
+    monkeypatch.setattr(db, "execute", spy_execute)
+
+    await report_delivery.deliver_report_to_drive(
+        db,
+        tenant_id=tenant.id,
+        report_id=report.id,
+        actor_type="user",
+        actor_id=user.id,
+        period_key="2026-09-08",
+        identity=identity,
+    )
+
+    assert len(lock_params) == 1
+    assert lock_params[0].get("report_id") is None
+    assert identity.lock_key in lock_params[0].values()
+
+
+async def test_manual_redelivery_with_no_identity_reuses_the_schedule_identity_from_delivery_json(db, monkeypatch):
+    """Item 5 (delta gate fix), item 1 (delta gate fix #2): `POST
+    /reports/{id}/deliver` always calls `deliver_report_to_drive` with
+    `identity=None` -- re-delivering a report a SCHEDULED JOB already
+    uploaded (under its own schedule-keyed `DeliveryIdentity`) must not
+    create a SECOND Drive folder/file set under the default report-keyed
+    identity. The identity actually used is persisted onto
+    `report.delivery_json["identity"]` by `_report_compose_executor` at
+    COMPOSE time (item 1, delta gate fix #2) -- `deliver_report_to_drive`
+    itself no longer writes this key at all (see the recovery test below for
+    that half of the fix), so this test seeds it directly on the row, the
+    same shape the compose executor persists."""
+    tenant = await create_test_tenant(db, name="ManualRedeliverCorp")
+    user, _ = await create_test_user(db, tenant)
+    await set_tenant_context(db, str(tenant.id))
+    report = await _seed_report(db, tenant, user, title="Inventory Aging Weekly")
+    await _add_sheets_connector(db, tenant.id)
+
+    calls: list[str] = []
+    _patch_renderers(monkeypatch, calls)
+    client = FakeDriveClient(calls)
+    _patch_drive_client(monkeypatch, client)
+
+    schedule_id = "33333333-3333-3333-3333-333333333333"
+    identity = report_delivery.DeliveryIdentity(
+        folder_props={"schedule_id": schedule_id},
+        file_props={"schedule_id": schedule_id},
+        lock_key=f"schedule:{schedule_id}",
+        idempotency_prefix=f"job-delivery:{schedule_id}",
+    )
+
+    # Seed the identity directly onto the row -- this is what
+    # `_report_compose_executor` persists at compose time (item 1, delta
+    # gate fix #2); `deliver_report_to_drive` itself never writes this key,
+    # only reads it back via the recovery path below.
+    report.delivery_json = {
+        "identity": {
+            "folder_props": identity.folder_props,
+            "file_props": identity.file_props,
+            "lock_key": identity.lock_key,
+            "idempotency_prefix": identity.idempotency_prefix,
+        }
+    }
+    await db.flush()
+
+    # A scheduled delivery -- passes the identity explicitly, exactly like
+    # `_drive_upload_executor` does.
+    first = await report_delivery.deliver_report_to_drive(
+        db,
+        tenant_id=tenant.id,
+        report_id=report.id,
+        actor_type="system",
+        actor_id=None,
+        period_key="2026-09-08",
+        identity=identity,
+    )
+    await set_tenant_context(db, str(tenant.id))
+    calls.clear()
+
+    # The manual endpoint's own call shape -- identity=None, exactly what
+    # POST /reports/{id}/deliver always passes. `deliver_report_to_drive`
+    # never persisted the identity itself (only a compose step does that,
+    # elsewhere) -- so nothing has changed `report.delivery_json["identity"]`
+    # since we passed it in explicitly above; recovery reads that back.
+    second = await report_delivery.deliver_report_to_drive(
+        db,
+        tenant_id=tenant.id,
+        report_id=report.id,
+        actor_type="user",
+        actor_id=user.id,
+        period_key="2026-09-08",
+        identity=None,
+    )
+
+    assert second.folder_id == first.folder_id
+    assert second.pdf_file_id == first.pdf_file_id
+    assert second.xlsx_file_id == first.xlsx_file_id
+    assert calls.count("create_folder") == 0  # found by the recovered identity, never re-created
+    assert calls.count("find_folder") == 2  # "Reports" + the schedule-identity folder
+
+    # `deliver_report_to_drive` itself never writes "identity" -- it is
+    # exactly what we seeded via the explicit `identity=` call above, MERGED
+    # onto (not overwritten by) the pdf/xlsx/folder bookkeeping both calls
+    # write.
+    row = (await db.execute(select(Report).where(Report.id == report.id))).scalar_one()
+    assert row.delivery_json["identity"]["lock_key"] == identity.lock_key
+    assert row.delivery_json["identity"]["file_props"] == identity.file_props
+    assert row.delivery_json["identity"]["idempotency_prefix"] == identity.idempotency_prefix
+
+
+async def test_manual_redelivery_recovers_identity_and_uses_the_current_period_not_a_stale_one(db, monkeypatch):
+    """Item 1 (delta gate fix): an identity recovered from
+    `report.delivery_json["identity"]` used to be used VERBATIM -- so a later
+    manual re-delivery with a DIFFERENT `period_key` uploaded under the OLD
+    period's appProperties/idempotency key while the filename and audit said
+    the new one. `DeliveryIdentity.file_props` must not carry `period_key` at
+    all; `deliver_report_to_drive` merges the CURRENT call's `period_key`
+    into a copy of the recovered `file_props`, and the idempotency key is
+    `f"{identity.idempotency_prefix}:{period_key}"` -- always THIS call's
+    period, never whichever one happened to be live when the identity was
+    first written."""
+    tenant = await create_test_tenant(db, name="RecoveredPeriodCorp")
+    user, _ = await create_test_user(db, tenant)
+    await set_tenant_context(db, str(tenant.id))
+    report = await _seed_report(db, tenant, user, title="Inventory Aging Weekly")
+    await _add_sheets_connector(db, tenant.id)
+
+    schedule_id = "66666666-6666-6666-6666-666666666666"
+    report.delivery_json = {
+        "identity": {
+            "folder_props": {"schedule_id": schedule_id},
+            "file_props": {"schedule_id": schedule_id},  # never carries period_key
+            "lock_key": f"schedule:{schedule_id}",
+            "idempotency_prefix": f"job-delivery:{schedule_id}",
+        }
+    }
+    await db.flush()
+
+    calls: list[str] = []
+    _patch_renderers(monkeypatch, calls)
+    client = FakeDriveClient(calls)
+    _patch_drive_client(monkeypatch, client)
+
+    from app.services import audit_service as audit_service_module
+
+    real_log_event = audit_service_module.log_event
+    started_payloads: list[dict] = []
+
+    async def wrapped_log_event(*args, **kwargs):
+        if kwargs.get("action") == "report.delivery.started":
+            started_payloads.append(kwargs.get("payload"))
+        return await real_log_event(*args, **kwargs)
+
+    monkeypatch.setattr(report_delivery.audit_service, "log_event", wrapped_log_event)
+
+    # The manual endpoint's own call shape -- identity=None -- with a NEW
+    # period each time; the seeded identity itself is never rewritten by
+    # deliver_report_to_drive, so both calls recover the SAME stored row.
+    first = await report_delivery.deliver_report_to_drive(
+        db,
+        tenant_id=tenant.id,
+        report_id=report.id,
+        actor_type="user",
+        actor_id=user.id,
+        period_key="2026-09-08",
+        identity=None,
+    )
+    await set_tenant_context(db, str(tenant.id))
+    second = await report_delivery.deliver_report_to_drive(
+        db,
+        tenant_id=tenant.id,
+        report_id=report.id,
+        actor_type="user",
+        actor_id=user.id,
+        period_key="2026-09-15",
+        identity=None,
+    )
+
+    assert started_payloads[0]["idempotency_key"] == f"job-delivery:{schedule_id}:2026-09-08"
+    assert started_payloads[1]["idempotency_key"] == f"job-delivery:{schedule_id}:2026-09-15"
+
+    # A genuinely NEW file for the new period -- proves the appProperties
+    # actually carried the new period (a stale-period bug would have kept
+    # finding/updating the SAME file every time, or worse, never varied).
+    assert second.pdf_file_id != first.pdf_file_id
+    new_period_keys = [k for k in client._files if ("period_key", "2026-09-15") in k[0]]
+    assert new_period_keys, "expected a file keyed on the CURRENT call's period"
+    stale_period_keys = [
+        k for k in client._files if any(prop == "period_key" and val == "2026-09-08" for prop, val in k[0])
+    ]
+    assert stale_period_keys, "the FIRST call's file (period 2026-09-08) should still exist, untouched by the second"
+
+
+async def test_unrecognised_stored_identity_shapes_fall_back_without_raising(db, monkeypatch):
+    """Item 1 (delta gate fix E): `deliver_report_to_drive` used to rebuild
+    `DeliveryIdentity` from `report.delivery_json["identity"]` with direct
+    dict indexing -- a stored shape missing any of the four required keys
+    raised `KeyError` on the manual re-delivery endpoint. This covers the
+    PRE-RENAME shape (commit 4cd65721) that stored `idempotency_key` instead
+    of `idempotency_prefix`, and a partial dict missing `lock_key` entirely
+    -- both must fall back to the DEFAULT report-keyed identity instead of
+    raising. `test_manual_redelivery_with_no_identity_reuses_the_schedule_
+    identity_from_delivery_json` above already covers "the current shape
+    still recovers"."""
+    tenant = await create_test_tenant(db, name="LegacyShapeCorp")
+    user, _ = await create_test_user(db, tenant)
+    await set_tenant_context(db, str(tenant.id))
+    await _add_sheets_connector(db, tenant.id)
+
+    calls: list[str] = []
+    _patch_renderers(monkeypatch, calls)
+    client = FakeDriveClient(calls)
+    _patch_drive_client(monkeypatch, client)
+
+    # The pre-rename shape (commit 4cd65721): `idempotency_key`, not
+    # `idempotency_prefix` -- and no `folder_props`/`file_props` at all.
+    legacy_report = await _seed_report(db, tenant, user, title="Legacy Shaped Report")
+    legacy_report.delivery_json = {
+        "identity": {
+            "lock_key": f"report:{legacy_report.id}",
+            "idempotency_key": f"report-delivery:{legacy_report.id}",
+        }
+    }
+    await db.flush()
+
+    result = await report_delivery.deliver_report_to_drive(
+        db,
+        tenant_id=tenant.id,
+        report_id=legacy_report.id,
+        actor_type="user",
+        actor_id=user.id,
+        period_key="2026-09-08",
+        identity=None,
+    )
+    assert result.folder_id  # falls back to the default identity -- no KeyError
+
+    await set_tenant_context(db, str(tenant.id))
+    calls.clear()
+
+    # A partial dict of the CURRENT shape -- missing `idempotency_prefix` entirely.
+    partial_report = await _seed_report(db, tenant, user, title="Partially Shaped Report")
+    partial_report.delivery_json = {
+        "identity": {
+            "folder_props": {"report_id": str(partial_report.id)},
+            "file_props": {"report_id": str(partial_report.id)},
+            "lock_key": f"report:{partial_report.id}",
+        }
+    }
+    await db.flush()
+
+    result2 = await report_delivery.deliver_report_to_drive(
+        db,
+        tenant_id=tenant.id,
+        report_id=partial_report.id,
+        actor_type="user",
+        actor_id=user.id,
+        period_key="2026-09-08",
+        identity=None,
+    )
+    assert result2.folder_id  # falls back to the default identity -- no KeyError
+
+
 async def test_deliver_report_to_drive_takes_a_per_report_advisory_lock_before_any_drive_call(db, monkeypatch):
     """Gate fix #7: two concurrent deliveries of the SAME report can each run
     _upload_or_update's find-then-create sequence for the folder and both files —
