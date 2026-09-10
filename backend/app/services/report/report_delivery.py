@@ -375,6 +375,36 @@ class _GoogleDriveClient:
         return {"file_id": result["id"], "url": result.get("webViewLink", "")}
 
 
+def _recover_identity(stored: object) -> DeliveryIdentity | None:
+    """Item 1 (delta gate fix E): `stored` is whatever
+    `report.delivery_json.get("identity")` happens to hold -- direct dict
+    indexing (the previous shape of this recovery) raised `KeyError` on
+    ANY stored shape missing one of the four required keys, including the
+    pre-rename shape (commit 4cd65721) that stored `idempotency_key`
+    instead of `idempotency_prefix`. Returns `None` (never raises) unless
+    `stored` is a `dict` carrying all four required keys with the right
+    types (`folder_props`/`file_props` as `dict`, `lock_key`/
+    `idempotency_prefix` as `str`) -- the caller falls back to the default
+    report-keyed identity on `None`, exactly as if nothing had been stored
+    at all."""
+    if not isinstance(stored, dict):
+        return None
+    folder_props = stored.get("folder_props")
+    file_props = stored.get("file_props")
+    lock_key = stored.get("lock_key")
+    idempotency_prefix = stored.get("idempotency_prefix")
+    if not isinstance(folder_props, dict) or not isinstance(file_props, dict):
+        return None
+    if not isinstance(lock_key, str) or not isinstance(idempotency_prefix, str):
+        return None
+    return DeliveryIdentity(
+        folder_props=folder_props,
+        file_props=file_props,
+        lock_key=lock_key,
+        idempotency_prefix=idempotency_prefix,
+    )
+
+
 def _build_drive_client(credentials: dict, shared_drive_id: str | None) -> DriveClient:
     """Patched wholesale by tests (``monkeypatch.setattr(report_delivery,
     "_build_drive_client", fake_factory)``) to hand back an in-memory fake."""
@@ -553,12 +583,12 @@ async def deliver_report_to_drive(
     if identity is None and isinstance(report.delivery_json, dict):
         stored_identity = report.delivery_json.get("identity")
         if stored_identity:
-            identity = DeliveryIdentity(
-                folder_props=stored_identity["folder_props"],
-                file_props=stored_identity["file_props"],
-                lock_key=stored_identity["lock_key"],
-                idempotency_prefix=stored_identity["idempotency_prefix"],
-            )
+            identity = _recover_identity(stored_identity)
+            if identity is None:
+                logger.warning(
+                    "report_delivery.identity.unrecognised",
+                    extra={"report_id": str(report_id), "tenant_id": str(tenant_id)},
+                )
 
     connector = await _sheets_connector(db, tenant_id)
     if connector is None:

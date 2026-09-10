@@ -594,6 +594,75 @@ async def test_manual_redelivery_recovers_identity_and_uses_the_current_period_n
     assert stale_period_keys, "the FIRST call's file (period 2026-09-08) should still exist, untouched by the second"
 
 
+async def test_unrecognised_stored_identity_shapes_fall_back_without_raising(db, monkeypatch):
+    """Item 1 (delta gate fix E): `deliver_report_to_drive` used to rebuild
+    `DeliveryIdentity` from `report.delivery_json["identity"]` with direct
+    dict indexing -- a stored shape missing any of the four required keys
+    raised `KeyError` on the manual re-delivery endpoint. This covers the
+    PRE-RENAME shape (commit 4cd65721) that stored `idempotency_key` instead
+    of `idempotency_prefix`, and a partial dict missing `lock_key` entirely
+    -- both must fall back to the DEFAULT report-keyed identity instead of
+    raising. `test_manual_redelivery_with_no_identity_reuses_the_schedule_
+    identity_from_delivery_json` above already covers "the current shape
+    still recovers"."""
+    tenant = await create_test_tenant(db, name="LegacyShapeCorp")
+    user, _ = await create_test_user(db, tenant)
+    await set_tenant_context(db, str(tenant.id))
+    await _add_sheets_connector(db, tenant.id)
+
+    calls: list[str] = []
+    _patch_renderers(monkeypatch, calls)
+    client = FakeDriveClient(calls)
+    _patch_drive_client(monkeypatch, client)
+
+    # The pre-rename shape (commit 4cd65721): `idempotency_key`, not
+    # `idempotency_prefix` -- and no `folder_props`/`file_props` at all.
+    legacy_report = await _seed_report(db, tenant, user, title="Legacy Shaped Report")
+    legacy_report.delivery_json = {
+        "identity": {
+            "lock_key": f"report:{legacy_report.id}",
+            "idempotency_key": f"report-delivery:{legacy_report.id}",
+        }
+    }
+    await db.flush()
+
+    result = await report_delivery.deliver_report_to_drive(
+        db,
+        tenant_id=tenant.id,
+        report_id=legacy_report.id,
+        actor_type="user",
+        actor_id=user.id,
+        period_key="2026-09-08",
+        identity=None,
+    )
+    assert result.folder_id  # falls back to the default identity -- no KeyError
+
+    await set_tenant_context(db, str(tenant.id))
+    calls.clear()
+
+    # A partial dict of the CURRENT shape -- missing `idempotency_prefix` entirely.
+    partial_report = await _seed_report(db, tenant, user, title="Partially Shaped Report")
+    partial_report.delivery_json = {
+        "identity": {
+            "folder_props": {"report_id": str(partial_report.id)},
+            "file_props": {"report_id": str(partial_report.id)},
+            "lock_key": f"report:{partial_report.id}",
+        }
+    }
+    await db.flush()
+
+    result2 = await report_delivery.deliver_report_to_drive(
+        db,
+        tenant_id=tenant.id,
+        report_id=partial_report.id,
+        actor_type="user",
+        actor_id=user.id,
+        period_key="2026-09-08",
+        identity=None,
+    )
+    assert result2.folder_id  # falls back to the default identity -- no KeyError
+
+
 async def test_deliver_report_to_drive_takes_a_per_report_advisory_lock_before_any_drive_call(db, monkeypatch):
     """Gate fix #7: two concurrent deliveries of the SAME report can each run
     _upload_or_update's find-then-create sequence for the folder and both files —
