@@ -7,6 +7,7 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.database import set_tenant_context
 from app.core.rate_limit import check_mcp_tool_limit, reset_rate_limits
 from app.mcp.metrics import record_call, record_duration, record_rate_limit_rejection
 from app.services import audit_service
@@ -557,17 +558,41 @@ async def governed_execute(
             return {"error": "VALIDATION_FAILED", "message": error_msg, "tool": tool_name}
 
     # 3. Execute
+    context = {
+        "tenant_id": tenant_id,
+        "actor_id": actor_id,
+        "db": db,
+        "correlation_id": correlation_id,
+        "context_need": context_need,
+        "conversation_id": session_id,
+    }
+    execution_error: Exception | None = None
+    result: dict[str, Any] | None = None
     try:
-        context = {
-            "tenant_id": tenant_id,
-            "actor_id": actor_id,
-            "db": db,
-            "correlation_id": correlation_id,
-            "context_need": context_need,
-            "conversation_id": session_id,
-        }
         result = await execute_fn(validated_params, context=context)
     except Exception as e:
+        execution_error = e
+
+    # Item 5 (delta gate fix E): re-establish tenant context HERE, right
+    # after `execute_fn` returns (success or error path) -- the ONE choke
+    # point every tool call passes through, regardless of which handler ran.
+    # A handler that commits mid-call (e.g. schedule_ops.py's
+    # execute_create/execute_run, both of which snapshot a plan or enqueue a
+    # Celery task before dispatching) clears `SET LOCAL app.current_tenant_id`
+    # on this SAME shared session -- without this, the audit writes below
+    # (both the success `tool.executed` and the failure `tool.failed` event)
+    # silently fail their RLS `WITH CHECK` and are dropped. This used to be
+    # pasted into every handler that needed it (three call sites in
+    # schedule_ops.py); centralising it here means no future handler can
+    # forget it.
+    if db is not None and tenant_id:
+        try:
+            await set_tenant_context(db, str(tenant_id))
+        except Exception:
+            logger.warning("mcp.tenant_context_reset_failed", tool=tool_name, exc_info=True)
+
+    if execution_error is not None:
+        e = execution_error
         duration_ms = (time.monotonic() - start) * 1000
         logger.error(
             "mcp.tool_call",

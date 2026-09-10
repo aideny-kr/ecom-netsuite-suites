@@ -2,6 +2,8 @@
 
 import uuid
 
+import pytest
+
 from app.mcp.governance import (
     TOOL_CONFIGS,
     check_rate_limit,
@@ -249,6 +251,72 @@ class TestGovernedExecute:
         )
         assert "error" in result
         assert "Tool broke" in result["error"]
+
+
+class TestGovernedExecuteReestablishesTenantContext:
+    """Item 5 (delta gate fix E): the "re-set tenant context after commit"
+    block used to be pasted into each MCP handler that commits mid-call
+    (schedule_ops.py's execute_create/execute_run, each carrying its own
+    identical comment) -- moved to the ONE choke point every tool call
+    passes through, `governed_execute`, immediately after `execute_fn`
+    returns (success or error path). A REAL commit is needed to exercise
+    this (the shared test `db` fixture's own commit is a RELEASE SAVEPOINT,
+    which does NOT clear `SET LOCAL` GUCs -- see
+    tests/test_schedule_ops_tool.py's own `_spy_commit_then_ctx` docstring),
+    so this opens its own engine/session exactly like
+    tests/jobs/test_executor.py::test_skip_locked_prevents_double_run does,
+    skipping the same way against a non-local database."""
+
+    async def test_a_handler_that_commits_leaves_tenant_context_set_afterward(self):
+        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+
+        from app.core.config import settings
+        from app.core.database import set_tenant_context
+        from tests.conftest import create_test_tenant
+
+        reset_rate_limit()
+        db_url = settings.DATABASE_URL_DIRECT or settings.DATABASE_URL
+        if "supabase" in db_url:
+            pytest.skip("real-commit tenant-context test runs against LOCAL docker only")
+
+        engine = create_async_engine(db_url, echo=False)
+        try:
+            async with AsyncSession(engine, expire_on_commit=False) as db:
+                tenant = await create_test_tenant(
+                    db, name="GovernedExecuteCtxCo", slug=f"gov-ctx-{uuid.uuid4().hex[:8]}"
+                )
+                await db.commit()
+                tenant_id = tenant.id
+                await set_tenant_context(db, str(tenant_id))
+
+                async def commits_mid_call(params, **kwargs):
+                    ctx = kwargs["context"]
+                    inner_db = ctx["db"]
+                    # Mirrors a real handler (schedule_ops.py's execute_create/
+                    # execute_run): a REAL commit mid-call clears SET LOCAL.
+                    await inner_db.commit()
+                    return {"status": "ok"}
+
+                result = await governed_execute(
+                    tool_name="schedule.run",
+                    params={"schedule_id": str(uuid.uuid4())},
+                    tenant_id=str(tenant_id),
+                    actor_id=None,
+                    execute_fn=commits_mid_call,
+                    db=db,
+                )
+                assert "error" not in result
+
+                try:
+                    row = (
+                        await db.execute(text("SELECT current_setting('app.current_tenant_id', true)"))
+                    ).scalar_one()
+                except Exception as exc:
+                    pytest.fail(f"tenant context was not usable after governed_execute: {exc}")
+                assert row == str(tenant_id)
+        finally:
+            await engine.dispose()
 
 
 class TestToolConfigs:

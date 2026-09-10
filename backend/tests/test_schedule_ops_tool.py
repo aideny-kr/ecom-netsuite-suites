@@ -117,7 +117,14 @@ def _spy_commit_then_ctx(monkeypatch, db) -> list[str]:
     (`commit` then `ctx`) rather than querying `current_setting(...)`
     afterward, which would false-pass in this fixture regardless of whether
     the fix is applied — see `tests/test_report_refresh.py`'s own
-    `_spy_events` for the same established pattern."""
+    `_spy_events` for the same established pattern.
+
+    Item 5 (delta gate fix E): the re-establish-context call this spies on
+    moved from each handler (`schedule_ops.py`) to the ONE choke point every
+    tool call passes through, `governance.governed_execute` — so this now
+    spies `app.mcp.governance.set_tenant_context`, and the caller must
+    dispatch through `mcp_server.call_tool` (not call the handler directly)
+    for `governed_execute` to run at all."""
     events: list[str] = []
     real_commit = db.commit
 
@@ -129,7 +136,7 @@ def _spy_commit_then_ctx(monkeypatch, db) -> list[str]:
         events.append("ctx")
 
     monkeypatch.setattr(db, "commit", spy_commit)
-    monkeypatch.setattr("app.mcp.tools.schedule_ops.set_tenant_context", spy_ctx)
+    monkeypatch.setattr("app.mcp.governance.set_tenant_context", spy_ctx)
     return events
 
 
@@ -176,13 +183,18 @@ class TestExecuteRun:
     async def test_execute_run_reestablishes_tenant_context_after_its_commit(
         self, db: AsyncSession, admin_user, monkeypatch
     ):
-        """Item 2 (delta gate fix): `execute_run` commits on the chat turn's
-        shared session before dispatching the Celery task -- that commit
-        clears `SET LOCAL app.current_tenant_id`, so `governed_execute`'s own
-        `tool.executed` audit write (and the rest of the chat turn) then ran
-        with NO tenant context -- the audit insert silently failed its RLS
-        `WITH CHECK` and was dropped. A `set_tenant_context` call must
-        immediately follow the commit."""
+        """Item 5 (delta gate fix E): the "re-set tenant context after
+        commit" block moved out of `execute_run` itself and into
+        `governance.governed_execute` -- the ONE choke point every tool call
+        passes through, right after `execute_fn` returns -- so `execute_run`
+        commits on the chat turn's shared session before dispatching the
+        Celery task, and `governed_execute` must reset `SET LOCAL
+        app.current_tenant_id` immediately afterward so its own
+        `tool.executed` audit write (and the rest of the chat turn) does not
+        silently fail its RLS `WITH CHECK`. Must be routed through the REAL
+        dispatch path (`mcp_server.call_tool`), not a direct
+        `schedule_ops.execute_run()` call, since the handler no longer calls
+        `set_tenant_context` itself."""
         _capture_send_task(monkeypatch)
 
         user, _ = admin_user
@@ -193,9 +205,12 @@ class TestExecuteRun:
 
         events = _spy_commit_then_ctx(monkeypatch, db)
 
-        result = await schedule_ops.execute_run(
-            {"schedule_id": str(schedule.id)},
-            context={"db": db, "tenant_id": str(user.tenant_id), "actor_id": str(user.id)},
+        result = await mcp_server.call_tool(
+            tool_name="schedule.run",
+            params={"schedule_id": str(schedule.id)},
+            tenant_id=str(user.tenant_id),
+            actor_id=str(user.id),
+            db=db,
         )
         assert not result.get("error"), result
         assert "commit" in events
@@ -487,12 +502,15 @@ class TestExecuteCreate:
     async def test_execute_create_instruction_branch_reestablishes_tenant_context_after_commit(
         self, db: AsyncSession, admin_user, monkeypatch
     ):
-        """Item 2 (delta gate fix): `execute_create`'s instruction branch
-        commits on the chat turn's shared session, which clears `SET LOCAL
-        app.current_tenant_id` -- `governed_execute`'s `tool.executed` audit
-        write and the rest of the chat turn then ran with no tenant context
-        (the audit insert silently fails its RLS `WITH CHECK`). A
-        `set_tenant_context` call must immediately follow the commit."""
+        """Item 5 (delta gate fix E): the "re-set tenant context after
+        commit" block moved out of `execute_create` itself and into
+        `governance.governed_execute` -- so `execute_create`'s instruction
+        branch commits on the chat turn's shared session (clearing `SET
+        LOCAL app.current_tenant_id`), and `governed_execute` must reset it
+        immediately afterward so its own `tool.executed` audit write does
+        not silently fail its RLS `WITH CHECK`. Routed through the REAL
+        dispatch path (`mcp_server.call_tool`) since the handler no longer
+        calls `set_tenant_context` itself."""
         user, _ = admin_user
 
         async def fake_compile(db, *, tenant_id, instruction, actor_id, llm=None, plan_version=None):
@@ -501,9 +519,12 @@ class TestExecuteCreate:
         monkeypatch.setattr("app.services.schedule_service.compile_instruction", fake_compile)
         events = _spy_commit_then_ctx(monkeypatch, db)
 
-        result = await schedule_ops.execute_create(
-            {"instruction": "weekly inventory aging report"},
-            context={"db": db, "tenant_id": str(user.tenant_id), "actor_id": str(user.id)},
+        result = await mcp_server.call_tool(
+            tool_name="schedule.create",
+            params={"instruction": "weekly inventory aging report"},
+            tenant_id=str(user.tenant_id),
+            actor_id=str(user.id),
+            db=db,
         )
         assert not result.get("error")
         assert "commit" in events
@@ -515,15 +536,19 @@ class TestExecuteCreate:
     async def test_execute_create_legacy_branch_reestablishes_tenant_context_after_commit(
         self, db: AsyncSession, admin_user, monkeypatch
     ):
-        """Item 2 (delta gate fix): the legacy direct-create branch's commit
-        must be followed by a `set_tenant_context` call too -- both branches
-        share the same trap."""
+        """Item 5 (delta gate fix E): the legacy direct-create branch's
+        commit must ALSO be followed by `governed_execute`'s re-established
+        tenant context -- both branches share the same trap, and both are
+        now covered by the ONE dispatcher-level fix rather than two pasted
+        blocks. Routed through the REAL dispatch path for the same reason."""
         user, _ = admin_user
         events = _spy_commit_then_ctx(monkeypatch, db)
 
-        result = await schedule_ops.execute_create(
-            {"name": "Legacy MCP Sync", "schedule_type": "sync", "cron": "0 0 * * *"},
-            context={"db": db, "tenant_id": str(user.tenant_id)},
+        result = await mcp_server.call_tool(
+            tool_name="schedule.create",
+            params={"name": "Legacy MCP Sync", "schedule_type": "sync", "cron": "0 0 * * *"},
+            tenant_id=str(user.tenant_id),
+            db=db,
         )
         assert not result.get("error")
         assert "commit" in events
