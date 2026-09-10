@@ -121,3 +121,9 @@ async def test_non_netsuite_providers_are_not_allow_listed():
 
     out = await _dispatch(_ext("list_flows"), connector=_Celigo())
     assert "hitl_required" not in out
+
+
+@pytest.fixture(autouse=True)
+def isolate_durable_audit_storage(monkeypatch):
+    # These dispatcher unit tests use synthetic actors/DBs. Audit persistence is tested separately.
+    monkeypatch.setattr("app.services.chat.external_tool_audit.append_event", AsyncMock())

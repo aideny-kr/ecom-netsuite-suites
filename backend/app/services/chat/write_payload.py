@@ -222,7 +222,12 @@ def normalize_write_payload(tool_input: dict[str, Any]) -> NormalizedPayload:
         else:
             fields[line_key] = value
 
-    record_id = tool_input.get("id") or record.get("id")
+    identifiers = [
+        str(v) for v in (tool_input.get("recordId"), tool_input.get("id"), record.get("id")) if v is not None
+    ]
+    if len(set(identifiers)) > 1:
+        raise PayloadParseError("Conflicting record identifiers; supply one exact target record")
+    record_id = identifiers[0] if identifiers else None
     return NormalizedPayload(
         fields=fields,
         lines=lines,

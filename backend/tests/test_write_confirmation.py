@@ -298,7 +298,7 @@ class TestBuildConfirmationPayloadUpdate:
         )
         assert result.record_id == "SO-9999"
 
-    def test_tool_level_id_takes_precedence_over_body_id(self):
+    def test_conflicting_record_ids_never_produce_an_approvable_card(self):
         tool_name = _ext("ns_updateRecord")
         tool_input = {
             "recordType": "salesOrder",
@@ -312,7 +312,7 @@ class TestBuildConfirmationPayloadUpdate:
             tool_input=tool_input,
             session_id=_SESSION_ID,
         )
-        assert result.record_id == "SO-TOP-LEVEL"
+        assert result is None
 
     def test_mutation_type_is_update(self):
         tool_name = _ext("ns_updateRecord")

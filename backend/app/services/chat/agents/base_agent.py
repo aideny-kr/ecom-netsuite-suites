@@ -2098,8 +2098,28 @@ class BaseSpecialistAgent(abc.ABC):
                         # before/after diff display (capped at 5s to avoid
                         # blocking the SSE stream on slow MCP calls)
                         current_record: dict[str, Any] | None = None
-                        if mutation_type in ("update", "upsert"):
-                            record_id = block.input.get("id") or (block.input.get("body") or {}).get("id")
+                        accounting_card = None
+                        if _is_netsuite_write and mutation_type == "update":
+                            from app.services.chat.write_payload import normalize_write_payload
+                            from app.services.transaction_ops.tax_correction import review_for_card
+
+                            try:
+                                accounting_card = review_for_card(
+                                    db, self.tenant_id, block.name, record_type, normalize_write_payload(block.input)
+                                )
+                            except ValueError as exc:
+                                if validation is None:
+                                    validation = ValidationResult(ok=False)
+                                validation.invariant_errors.append(str(exc))
+                                validation.ok = False
+                            if accounting_card:
+                                current_record = accounting_card["before"]
+                        if mutation_type in ("update", "upsert") and accounting_card is None:
+                            record_id = (
+                                block.input.get("recordId")
+                                or block.input.get("id")
+                                or (block.input.get("body") or {}).get("id")
+                            )
                             if record_id:
                                 from app.services.chat.tools import _make_ext_tool_name, parse_external_tool_name
 
@@ -2117,7 +2137,7 @@ class BaseSpecialistAgent(abc.ABC):
                                         get_result_str = await _aio.wait_for(
                                             execute_tool_call(
                                                 tool_name=get_tool_name,
-                                                tool_input={"recordType": record_type, "id": str(record_id)},
+                                                tool_input={"recordType": record_type, "recordId": str(record_id)},
                                                 tenant_id=self.tenant_id,
                                                 actor_id=self.user_id,
                                                 correlation_id=self.correlation_id,
@@ -2127,6 +2147,10 @@ class BaseSpecialistAgent(abc.ABC):
                                             timeout=5.0,
                                         )
                                         current_record = json.loads(get_result_str)
+                                        if isinstance(current_record, dict) and isinstance(
+                                            current_record.get("data"), dict
+                                        ):
+                                            current_record = current_record["data"]
                                     except Exception:
                                         logger.warning(
                                             "mutation_intercept: failed to pre-fetch %s/%s",
@@ -2242,6 +2266,24 @@ class BaseSpecialistAgent(abc.ABC):
                             # — not "a write tool was called" — is what stands
                             # the prose guard down; see _write_reached_the_human.
                             self._write_confirmation_emitted = True
+                            if accounting_card:
+                                payload.accounting_review = accounting_card
+                                yield (
+                                    "text",
+                                    "\n\n**Accounting correction for approval**\n\n"
+                                    f"Invoice {accounting_card['record_id']} — "
+                                    f"total {accounting_card['before']['total']} → {accounting_card['expected_after']['total']}; "
+                                    f"tax {accounting_card['before']['taxTotal']} → {accounting_card['expected_after']['taxTotal']}. "
+                                    f"Currency: {accounting_card['source']['currency']}; ship-to country: {accounting_card['before'].get('shipCountry', 'not verified')}. "
+                                    f"Tax agency: {(accounting_card['tax_item'].get('taxAgency') or {}).get('refName', 'not verified')}. "
+                                    f"Tax account: {accounting_card['tax_account']} ({accounting_card.get('tax_account_name')}); "
+                                    f"AR account: {accounting_card['ar_account']} ({accounting_card.get('ar_account_name')}); "
+                                    f"book: {accounting_card['accounting_book']}. "
+                                    f"Posting period: {accounting_card['period'].get('periodName', accounting_card['period']['id'])}; "
+                                    f"AR locked: {accounting_card['period']['arLocked']}; all locked: {accounting_card['period']['allLocked']}. "
+                                    + accounting_card["approval_basis"]
+                                    + "\n\n",
+                                )
                             yield ("confirmation_required", payload.model_dump())
                             _confirmation_result: dict[str, Any] = {
                                 "confirmation_required": True,

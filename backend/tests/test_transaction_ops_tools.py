@@ -472,3 +472,25 @@ async def test_real_dispatch_reads_case_history_and_preserves_scope(db, admin_us
     assert "investigation_guidance" not in foreign
     mixed = await dispatch(actor, {"case_id": str(case.id), "run_id": str(proposal.run_id)})
     assert mixed["error"] == "invalid_parameters"
+
+
+@pytest.mark.parametrize("blocked", ["permission", "actor", "case_scope", "extra_parameter"])
+async def test_accounting_evidence_authorizes_before_native_reads(ctx, monkeypatch, blocked):
+    from app.services.transaction_ops.state_service import StateError
+
+    native = AsyncMock()
+    get_case = AsyncMock(side_effect=StateError("case_not_found", 404))
+    monkeypatch.setattr("app.services.transaction_ops.accounting_evidence.collect_accounting_evidence", native)
+    monkeypatch.setattr("app.services.transaction_ops.case_service.get_case", get_case)
+    params = {"case_id": str(uuid.uuid4())}
+    if blocked == "permission":
+        monkeypatch.setattr(mod, "has_permission", AsyncMock(return_value=False))
+    elif blocked == "actor":
+        ctx["db"].execute.return_value.scalar_one_or_none.return_value = None
+    elif blocked == "extra_parameter":
+        params["account_id"] = "other-account"
+    result = await mod.execute_accounting_evidence(params, context=ctx)
+    assert result["success"] is False
+    native.assert_not_awaited()
+    if blocked == "case_scope":
+        assert get_case.await_args.args[1] == TENANT

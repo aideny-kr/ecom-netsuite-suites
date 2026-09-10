@@ -66,6 +66,7 @@ class WriteConfirmationPayload(BaseModel):
     target_environment: str | None = None
     proposed_lines: list[dict[str, Any]] = []
     current_record: dict[str, Any] | None = None
+    accounting_review: dict[str, Any] | None = None
     tool_name: str
     tool_input: dict[str, Any]
     confirmation_token: str

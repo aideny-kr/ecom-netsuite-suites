@@ -359,3 +359,91 @@ async def execute_status(params: dict, **kwargs) -> dict:
 
 async def execute_groups(params: dict, **kwargs) -> dict:
     return await _with_deadline("groups", params, kwargs.get("context") or {})
+
+
+async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
+    """Exact-case native reads; caller cannot choose another account or inject SQL."""
+    from app.services.transaction_ops import case_service
+    from app.services.transaction_ops.accounting_evidence import collect_accounting_evidence
+    from app.services.transaction_ops.accounting_review import accounting_context
+    from app.services.transaction_ops.netsuite_reader import NetSuiteEvidenceError
+    from app.services.transaction_ops.state_service import StateError
+
+    context = kwargs.get("context") or {}
+    try:
+        if set(params) != {"case_id"}:
+            raise _ToolError("invalid_parameters")
+        db, tenant_id, actor = await _authorize(context, create=False)
+        case = await case_service.get_case(db, tenant_id, uuid.UUID(str(params["case_id"])))
+        review = await accounting_context(db, tenant_id, case.scope_json, case.latest_report_json)
+        import json
+
+        evidence = json.loads(
+            json.dumps(await collect_accounting_evidence(db, tenant_id, review, case.latest_report_json), default=str)
+        )
+        from app.models.audit import AuditEvent
+        from app.services.audit_service import log_event
+        from app.services.transaction_ops.source_reader import SourceReadError
+        from app.services.transaction_ops.tax_correction import candidate, refresh_source
+
+        integration = await db.scalar(
+            select(AuditEvent)
+            .where(
+                AuditEvent.tenant_id == tenant_id,
+                AuditEvent.resource_type == "transaction_case",
+                AuditEvent.resource_id == str(case.id),
+                AuditEvent.action == "accounting_correction.integration.observed",
+                AuditEvent.actor_type == "system",
+            )
+            .order_by(AuditEvent.timestamp.desc(), AuditEvent.id.desc())
+            .limit(1)
+        )
+        if integration:
+            evidence["saved_integration_observation"] = {
+                "audit_id": str(integration.id),
+                "observed_at": integration.timestamp.isoformat(),
+                "evidence": integration.payload,
+                "freshness": "Stored current-definition observation; not proof of historical execution.",
+            }
+        db.info.pop("accounting_correction_candidate", None)
+        try:
+            source = await refresh_source(db, tenant_id, review["scope"], case.order_reference)
+            evidence["source_refresh"] = source
+            correction = candidate(evidence, case.latest_report_json, review, source)
+            if correction:
+                evidence["assessment"]["correction_ready"] = "ready_for_exact_human_approval"
+                evidence["blockers"] = [
+                    b
+                    for b in evidence["blockers"]
+                    if b != "accounting_treatment_and_supported_posted_adjustment_not_established"
+                ]
+                correction["case_id"] = str(case.id)
+                correction["tenant_id"] = str(tenant_id)
+                db.info["accounting_correction_candidate"] = correction
+                evidence["correction_candidate"] = {
+                    "next_action": "Call this tool to DISPLAY an approval card. Execution requires human approval.",
+                    "tool_name": f"ext__{uuid.UUID(correction['connector_id']).hex}__ns_updateRecord",
+                    "params": {
+                        "recordType": correction["record_type"],
+                        "recordId": correction["record_id"],
+                        "data": json.dumps(correction["proposed_fields"]),
+                    },
+                    "expected_after": correction["expected_after"],
+                    "approval_basis": correction["approval_basis"],
+                }
+        except SourceReadError as exc:
+            evidence["blockers"].append(f"source_refresh:{exc}")
+        await log_event(
+            db,
+            tenant_id,
+            category="transaction_ops",
+            action="accounting.evidence.observed",
+            actor_id=actor.id,
+            resource_type="transaction_case",
+            resource_id=str(case.id),
+            correlation_id=context.get("correlation_id"),
+            payload={"evidence": evidence},
+        )
+        return {"success": True, "case_id": str(case.id), "accounting_evidence": evidence}
+    except (ValueError, _ToolError, StateError, NetSuiteEvidenceError) as exc:
+        return {"success": False, "error": "Accounting case or scoped configuration unavailable.", "reason": str(exc)}
