@@ -528,7 +528,9 @@ def _coerce_assistant_content(
     if _is_pricing_task_output(persisted_output):
         return _PRICING_TASK_OUTPUT_MESSAGE
     if final_text:
-        return final_text
+        from app.services.transaction_ops.record_links import correct_record_links
+
+        return correct_record_links(final_text, tool_calls)
     if tool_calls:
         case_calls = [
             call

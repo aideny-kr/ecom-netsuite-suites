@@ -396,3 +396,47 @@ async def test_oversize_evidence_is_flagged_without_stalling_the_scan():
     assert report["evidence_limits"]["code"] == "evidence_size_limit"
     assert report["source"]["lines_complete"] is False
     assert state.run.progress_json["processed"] == 1
+
+
+@pytest.mark.parametrize("budget", [15, 1000])
+async def test_commercial_credit_read_reserves_budget_before_native_access(monkeypatch, budget):
+    from app.services.transaction_ops import commercial_credits
+    from tests.test_transaction_balance_report import evidence
+
+    state = State(budget=budget)
+    source, target, config, _, _ = evidence()
+    state.run.config_snapshot.update(config)
+    source["orders"][0].update(
+        state="complete",
+        completed_at=NOW.isoformat(),
+        item_total="100",
+        ship_total="0",
+        total="115",
+        adjustment_total="15",
+        adjustments=[
+            {
+                "id": "9",
+                "adjustable_type": "Spree::Order",
+                "adjustable_id": "100",
+                "finalized": True,
+                "label": "Reseller adjustment",
+                "amount": "-5",
+            }
+        ],
+    )
+    target["orders"][0]["header"].update(total="120", taxTotal="20")
+
+    async def read(*args):
+        assert state.events[-1] == ("reserve", 20, 0)
+        return None  # An unverified credit must retain the real difference.
+
+    reader = AsyncMock(side_effect=read)
+    monkeypatch.setattr(commercial_credits, "read_commercial_credit_for_order", reader)
+    await execute(state, source=source, target=target)
+    assert state.reports[REF]["balance"]["amounts"]["order_total"]["delta"] == "-5.00"
+    if budget == 15:
+        reader.assert_not_awaited()
+        assert state.run.termination_reason == "budget"
+        assert state.run.progress_json["pending_refs"] == [REF]
+    else:
+        reader.assert_awaited_once()

@@ -24,6 +24,10 @@ SOURCE_FIELDS = (
     "adjustment_total",
     "item_total",
     "line_items",
+    "adjustments",
+    "payment_total",
+    "payment_state",
+    "payments",
 )
 
 

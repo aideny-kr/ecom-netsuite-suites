@@ -588,6 +588,25 @@ async def run_investigation(
                 )
             )
             report = limit_report(build_report(source, targets, config, mapping, now=clock()), now=clock())
+            from app.services.transaction_ops.commercial_credits import (
+                read_commercial_credit_for_order,
+                source_adjustment_basis,
+            )
+
+            if source_adjustment_basis(orders[0]) and report.get("balance", {}).get("status") == "difference":
+                # At most 4 invoice reads +12 application reads, plus OAuth maintenance.
+                # Reserve before the optional proof, preserving the runner's hard budget.
+                if not await reserve(20):
+                    await state.record_finding(
+                        db, tenant_id, run_id, reference, report, lease_token=token, now=clock(), final=False
+                    )
+                    return await finish("budget")
+                commercial = await bounded_read(
+                    read_commercial_credit_for_order(db, tenant_id, config, orders[0], targets, report)
+                )
+                if commercial:
+                    targets["commercial_credit_evidence"] = commercial
+                    report["balance"] = reconcile_order(source, targets, config)
             if mapping.solidus_refund_step_id:
                 # Preserve known amounts before extra reads. An exhausted refund
                 # budget must not discard the already-collected order evidence.

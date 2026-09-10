@@ -439,6 +439,9 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
         try:
             source = await refresh_source(db, tenant_id, review["scope"], case.order_reference)
             evidence["source_refresh"] = source
+            from app.services.transaction_ops.commercial_credits import collect_commercial_credits
+
+            await collect_commercial_credits(db, tenant_id, review, case.latest_report_json, source, evidence)
             correction = candidate(evidence, case.latest_report_json, review, source)
             if correction:
                 evidence["assessment"]["correction_ready"] = "ready_for_exact_human_approval"
@@ -463,6 +466,10 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
                 }
         except SourceReadError as exc:
             evidence["blockers"].append(f"source_refresh:{exc}")
+        from app.services.transaction_ops.record_links import evidence_record_links
+
+        evidence = json.loads(json.dumps(evidence, default=str))
+        evidence["record_links"] = evidence_record_links(evidence)
         await log_event(
             db,
             tenant_id,

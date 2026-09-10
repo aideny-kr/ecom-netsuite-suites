@@ -560,7 +560,7 @@ class UnifiedAgent(BaseSpecialistAgent):
             parts.append(pp_block)
 
         # NetSuite record deep links
-        if self._netsuite_account_slug:
+        if self._netsuite_account_slug and not getattr(self, "_transaction_workflow", False):
             parts.append(
                 f"\n<record_links>\n"
                 f"When referencing NetSuite records, include a clickable link using this pattern:\n"
@@ -765,6 +765,8 @@ class UnifiedAgent(BaseSpecialistAgent):
                 "do not ask which data source to use. Continue targeted read-only investigation when evidence "
                 "is incomplete without asking discretionary permission. Prepare only supported exact changes "
                 "for human approval; this request is not financial approval."
+                " Use only exact record_links returned by the accounting-evidence tool. Never build a case link "
+                "from the default connector: production and sandbox may both be connected."
             )
         # Write-repair directive last — the most specific, most recent
         # instruction on a repair turn, so it must be able to override
