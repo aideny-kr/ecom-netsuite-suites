@@ -93,6 +93,26 @@ def test_crontab_fallback_renders_every_field_verbatim():
     assert result == "cron 30 14 1 * *"
 
 
+def test_crontab_with_only_minute_fixed_but_a_restricted_day_of_week_is_not_hourly():
+    """Brief H, item 4: the OLD `_format_crontab` decided "hourly" from
+    `len(hour) != 1` alone -- true for a full wildcard hour field (24
+    elements) but ALSO true for `hour` left untouched at its wildcard default
+    while day_of_week is restricted, silently reporting "hourly at :00" and
+    dropping the "Monday only" restriction entirely. `hour` must be the FULL
+    wildcard set AND every day field must be wildcard for the hourly shape."""
+    result = format_beat_schedule(crontab(minute=0, day_of_week=1))
+    assert result == "cron 0 * * * 1"
+
+
+def test_crontab_with_only_minute_fixed_but_a_restricted_hour_set_is_not_hourly():
+    """A `hour` field restricted to a SUBSET of hours (not a single value, but
+    also not every hour) must not be reported as "hourly" either -- the old
+    `len(hour) != 1` check treated any multi-value hour set as "not pinned",
+    therefore "hourly", when it is really neither daily nor hourly."""
+    result = format_beat_schedule(crontab(minute=5, hour="0,12"))
+    assert result == "cron 5 0,12 * * *"
+
+
 # ---------------------------------------------------------------------------
 # Defensive fallback for anything unexpected.
 # ---------------------------------------------------------------------------

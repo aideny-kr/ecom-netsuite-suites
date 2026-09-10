@@ -476,7 +476,15 @@ def _format_crontab(schedule: crontab) -> str:
     restriction, so days must ALSO be wildcard for the daily shape). Anything
     else — including a fixed hour with a restricted day-of-week, e.g. "every
     Monday at midnight" — falls back to the raw `cron m h dM MY d` rendering
-    so no restriction is ever silently dropped from the phrase."""
+    so no restriction is ever silently dropped from the phrase.
+
+    Brief H, item 4 (gate fix): "hourly at :MM" requires `hour` to be the
+    FULL wildcard set (`_ALL_HOUR`) AND every day field wildcard too — the
+    previous check (`len(hour) != 1`) was true for BOTH a genuinely wildcard
+    hour field and a `hour` restricted to some proper subset of hours (e.g.
+    `"0,12"`, two elements) or a wildcard hour left untouched while a day
+    field was restricted (`crontab(minute=0, day_of_week=1)`), silently
+    reporting "hourly at :00" for a schedule that only fires on Mondays."""
     minute, hour = schedule.minute, schedule.hour
     day_of_month, month_of_year, day_of_week = (
         schedule.day_of_month,
@@ -491,7 +499,7 @@ def _format_crontab(schedule: crontab) -> str:
         (m,) = minute
         (h,) = hour
         return f"daily {h:02d}:{m:02d}"
-    if len(minute) == 1 and len(hour) != 1:
+    if len(minute) == 1 and hour == _ALL_HOUR and days_are_wildcard:
         (m,) = minute
         return f"hourly at :{m:02d}"
     return (
