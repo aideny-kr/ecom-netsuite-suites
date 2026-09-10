@@ -37,6 +37,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from io import BytesIO
 
 import pytest
 from openpyxl import load_workbook
@@ -161,6 +162,19 @@ def wb(report):
     return load_workbook(buf)
 
 
+def _workbook_cells(data: bytes) -> dict[str, list[list]]:
+    """Item 6 (delta gate fix E): sheet name -> every cell's VALUE, row by
+    row -- CI failed this test's old byte-equality assertion on a one-byte
+    difference inside `docProps` (openpyxl stamps a creation/modified
+    timestamp on every workbook it writes, so two workbooks built moments
+    apart are never byte-identical even when every cell matches). Comparing
+    CONTENT instead of raw zip bytes is what the "byte-identical" claim in
+    this test's own docstring actually means -- cell values, not an
+    incidental metadata timestamp."""
+    wb = load_workbook(BytesIO(data))
+    return {name: [[cell.value for cell in row] for row in wb[name].iter_rows()] for name in wb.sheetnames}
+
+
 # ---------------------------------------------------------------------------
 # Gate fix #6/#4: build_inventory_aging_workbook must accept the JSON-safe dict
 # form a report's persisted spec_json already carries -- the SAME single boundary-
@@ -176,7 +190,11 @@ def test_workbook_from_json_round_tripped_report_matches_fresh_compute(report):
     stored = json.loads(json.dumps(json_safe(report)))
     fresh_bytes = build_inventory_aging_workbook(report).getvalue()
     stored_bytes = build_inventory_aging_workbook(stored).getvalue()
-    assert stored_bytes == fresh_bytes
+
+    fresh_cells = _workbook_cells(fresh_bytes)
+    stored_cells = _workbook_cells(stored_bytes)
+    assert stored_cells.keys() == fresh_cells.keys()
+    assert stored_cells == fresh_cells
 
 
 # ---------------------------------------------------------------------------
