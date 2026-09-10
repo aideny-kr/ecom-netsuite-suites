@@ -24,7 +24,9 @@ from app.services.chat.write_confirmation_service import (
 )
 
 CONCURRENCY = 3
+PREPARATION_TIMEOUT = 450  # Leave time to publish an explicit result within the chat budget.
 GROUP_TOOL = "transaction_ops_accounting_group_apply"  # Not exposed to model/MCP dispatch.
+_authorization_session_factory = async_session_factory
 
 
 def digest(value):
@@ -93,17 +95,11 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
                     if prepared:
                         card, _note = prepared
                         value = {**card.model_dump(mode="json"), "accounting_group_child": True}
-                        message = ChatMessage(
-                            id=uuid.uuid4(),
-                            tenant_id=tenant_id,
-                            session_id=uuid.UUID(session_id),
-                            role="assistant",
-                            content=f"Invoice correction for {member['order_reference']}; review in its group card.",
-                            structured_output=value,
-                        )
-                        child_db.add(message)
+                        # Publish children only in the parent's transaction. A cancelled
+                        # preparation must never leave independently actionable orphans.
+                        # Keep the per-case evidence/candidate audit, without a ChatMessage.
                         await child_db.commit()
-                        return {**member, "confirmation_id": str(message.id), "card": value}
+                        return {**member, "confirmation_id": str(uuid.uuid4()), "card": value}
                     reason = "No supported invoice correction; individual investigation required."
             except Exception as exc:
                 await child_db.rollback()
@@ -123,7 +119,12 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
             await child_db.commit()
             return {**member, "reason": reason}
 
-    members = await bounded_map(selection["members"], prepare)
+    try:
+        async with asyncio.timeout(PREPARATION_TIMEOUT):
+            members = await bounded_map(selection["members"], prepare)
+    except (asyncio.CancelledError, TimeoutError):
+        await asyncio.shield(record_preparation_interrupted(tenant_id, actor_id, session_id, correlation_id, selection))
+        raise
     eligible = [m for m in members if m.get("card")]
     targets = [
         (
@@ -170,6 +171,93 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
         },
     )
     return card, f"Prepared {len(eligible)} exact invoice corrections for review across {len(members)} orders."
+
+
+def stage_group_children(db, parent):
+    """Stage exact children with their parent, without an intervening await/commit."""
+    so = parent.structured_output
+    members = validate_manifest(so, str(parent.session_id))
+    for member in members:
+        if member.get("confirmation_id"):
+            db.add(
+                ChatMessage(
+                    id=uuid.UUID(member["confirmation_id"]),
+                    tenant_id=parent.tenant_id,
+                    session_id=parent.session_id,
+                    role="assistant",
+                    content=f"Invoice correction for {member['order_reference']}; review in its group card.",
+                    structured_output=member["card"],
+                )
+            )
+
+
+async def record_preparation_interrupted(tenant_id, actor_id, session_id, correlation_id, selection):
+    """A visible, durable result without publishing any partial financial proposal."""
+    async with async_session_factory() as db:
+        await set_tenant_context(db, str(tenant_id))
+        db.add(
+            ChatMessage(
+                tenant_id=tenant_id,
+                session_id=uuid.UUID(session_id),
+                role="assistant",
+                content=(
+                    "Group preparation was interrupted before the complete review was ready. "
+                    "No corrections were submitted or made available for approval. "
+                    "Prepare the group again, or narrow the period to reduce its size."
+                ),
+            )
+        )
+        await log_event(
+            db,
+            tenant_id,
+            category="transaction_ops",
+            action="accounting_group.preparation_interrupted",
+            actor_id=actor_id,
+            resource_type="chat_session",
+            resource_id=session_id,
+            correlation_id=correlation_id,
+            payload={
+                "group_id": selection["group_id"],
+                "scope": selection["scope"],
+                "case_count": len(selection["members"]),
+                "financial_writes": 0,
+                "published_corrections": 0,
+            },
+            status="error",
+        )
+        await db.commit()
+
+
+def group_child_context(db, so, confirmation_id, session_id, tenant_id, action):
+    """Only the server's claimed-parent runner may dispatch a grouped child."""
+    if not so.get("accounting_group_child"):
+        return {}
+    context = db.info.get("accounting_group_execution") or {}
+    if (
+        context.get("confirmation_id") != str(confirmation_id)
+        or context.get("session_id") != str(session_id)
+        or context.get("tenant_id") != str(tenant_id)
+        or context.get("action") != action
+        or context.get("card_digest") != digest(so)
+        or not context.get("group_approval_id")
+        or not context.get("manifest_digest")
+    ):
+        raise ValueError("This correction belongs to a group. Review and approve or reject its exact group card.")
+    return {k: context[k] for k in ("group_approval_id", "manifest_digest")}
+
+
+async def authorize_accounting_write(db, tenant_id, actor_id, tool_name, tool_input):
+    from app.mcp.tools.transaction_ops_tools import _authorize
+    from app.services.policy_service import evaluate_tool_call, get_active_policy
+
+    # Long-running workers can retain stale policy objects and role relationships.
+    # An independent session plus uncached flags reads the current persisted grants.
+    async with _authorization_session_factory() as auth_db:
+        await set_tenant_context(auth_db, str(tenant_id))
+        await _authorize({"db": auth_db, "tenant_id": tenant_id, "actor_id": actor_id}, create=True, fresh=True)
+        policy = await get_active_policy(auth_db, tenant_id)
+        if not evaluate_tool_call(policy, tool_name, tool_input)["allowed"]:
+            raise ValueError("Current policy blocks this correction. No update was sent.")
 
 
 def validate_manifest(so, session_id):
@@ -281,7 +369,7 @@ async def run_group_confirmation(*, db, session, message, so, action, user_id, t
             "confirmation_ids": so["tool_input"]["confirmation_ids"],
         },
     )
-    if not await _cas_claim_write_confirmation(db, message, so, "executing" if action == "approve" else "rejected"):
+    if not await _cas_claim_write_confirmation(db, message, so, "executing"):
         raise ValueError("This group approval was already claimed.")
     stop = asyncio.Event()
 
@@ -305,6 +393,15 @@ async def run_group_confirmation(*, db, session, message, so, action, user_id, t
                 ):
                     raise ValueError("Current policy blocks this correction.")
                 errors = []
+                child_db.info["accounting_group_execution"] = {
+                    "group_approval_id": str(message.id),
+                    "manifest_digest": so["tool_input"]["manifest_digest"],
+                    "confirmation_id": member["confirmation_id"],
+                    "card_digest": digest(card),
+                    "session_id": str(session.id),
+                    "tenant_id": str(tenant_id),
+                    "action": action,
+                }
                 async with asyncio.timeout(150):
                     async for event in run_chat_turn(
                         db=child_db,
@@ -320,6 +417,8 @@ async def run_group_confirmation(*, db, session, message, so, action, user_id, t
             except Exception as exc:
                 reason = f"Correction needs review ({type(exc).__name__}); check its persisted outcome before retrying."
                 stop.set()
+            finally:
+                child_db.info.pop("accounting_group_execution", None)
             await child_db.rollback()
             await set_tenant_context(child_db, str(tenant_id))
             child_db.expire_all()
@@ -365,7 +464,14 @@ async def run_group_confirmation(*, db, session, message, so, action, user_id, t
         (m.get("card", {}).get("accounting_verification") or {}).get("status") == "verified" for m in outcomes
     )
     eligible_count = len(so["tool_input"]["confirmation_ids"])
-    status = "rejected" if action == "reject" else "approved" if verified == eligible_count else "indeterminate"
+    rejected = sum(m.get("card", {}).get("status") == "rejected" for m in outcomes)
+    status = (
+        ("rejected" if rejected == eligible_count else "indeterminate")
+        if action == "reject"
+        else "approved"
+        if verified == eligible_count
+        else "indeterminate"
+    )
     final = {**so, "status": status, "accounting_group": {**so["accounting_group"], "members": outcomes}}
     await set_tenant_context(db, str(tenant_id))
     message.structured_output = final
@@ -373,7 +479,12 @@ async def run_group_confirmation(*, db, session, message, so, action, user_id, t
         f"Verified {verified} of {eligible_count} approved invoice corrections. "
         "Each order retains its approval and execution audit. Full case and cash settlement remain separate."
         if action == "approve"
-        else f"Rejected {eligible_count} proposed corrections."
+        else f"Rejected {rejected} of {eligible_count} proposed corrections."
+        + (
+            " Rejection is incomplete. Review each recorded outcome; no automatic retry."
+            if rejected != eligible_count
+            else ""
+        )
     )
     message.content = note
     await log_event(
@@ -388,6 +499,7 @@ async def run_group_confirmation(*, db, session, message, so, action, user_id, t
         payload={
             "status": status,
             "verified": verified,
+            "rejected": rejected,
             "eligible": eligible_count,
             "confirmation_ids": so["tool_input"]["confirmation_ids"],
         },

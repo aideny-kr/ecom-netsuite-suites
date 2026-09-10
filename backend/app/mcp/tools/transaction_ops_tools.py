@@ -40,7 +40,7 @@ def _state_dependencies():
     return state_service, RunCreate
 
 
-async def _authorize(context, *, create):
+async def _authorize(context, *, create, fresh=False):
     db = context.get("db")
     if db is None:
         raise _ToolError("missing_context")
@@ -67,8 +67,12 @@ async def _authorize(context, *, create):
     for permission in ("connections.view", "recon.run") if create else ("connections.view",):
         if not await has_permission(db, actor_id, permission):
             raise _ToolError("permission_denied")
+    flags = await feature_flag_service.get_all_flags(db, tenant_id) if fresh else None
     for flag in ("celigo", "reconciliation"):
-        if not await feature_flag_service.is_enabled(db, tenant_id, flag):
+        enabled = (
+            flags.get(flag, False) if flags is not None else await feature_flag_service.is_enabled(db, tenant_id, flag)
+        )
+        if not enabled:
             raise _ToolError("feature_disabled")
     return db, tenant_id, actor
 

@@ -2007,6 +2007,17 @@ async def run_chat_turn(
                     yield {"type": "error", "error": str(exc)}
                 return
 
+            from app.services.transaction_ops.accounting_group import group_child_context
+
+            try:
+                _approval_context = {
+                    "confirmation_id": str(_confirm_msg.id),
+                    **group_child_context(db, _so, _confirm_msg.id, session.id, tenant_id, _wc_action),
+                }
+            except ValueError as exc:
+                yield {"type": "error", "error": str(exc)}
+                return
+
             # Hold a dedicated account/record lock across the existing CAS,
             # fresh checks, external write and independent verification. Re-enter
             # the same approval path once; never duplicate financial execution logic.
@@ -2267,6 +2278,14 @@ async def run_chat_turn(
                 # in plan_mode/short_circuit.py. Shared with the reject
                 # branch below via `_cas_claim_write_confirmation` — see its
                 # docstring for why this is a helper, not an inline block.
+                if _so.get("accounting_review"):
+                    from app.services.transaction_ops.accounting_group import authorize_accounting_write
+
+                    try:
+                        await authorize_accounting_write(db, tenant_id, user_id, tool_name, tool_input)
+                    except Exception as exc:
+                        yield {"type": "error", "error": f"No update was sent: {exc}"}
+                        return
                 _claimed = await _cas_claim_write_confirmation(db, _confirm_msg, _so, "executing")
                 if not _claimed:
                     yield {
@@ -2298,6 +2317,8 @@ async def run_chat_turn(
 
                     try:
                         await validate_approved(db, tenant_id, tool_name, tool_input, _so.get("accounting_review"))
+                        if _so.get("accounting_review"):
+                            await authorize_accounting_write(db, tenant_id, user_id, tool_name, tool_input)
                     except Exception as exc:
                         _confirm_msg.structured_output = {**_so, "status": "failed", "error": str(exc)}
                         await log_event(
@@ -2324,6 +2345,7 @@ async def run_chat_turn(
                     # caller of execute_tool_call leaves it default-False and
                     # is refused at the dispatcher.
                     human_approved=True,
+                    approval_context=_approval_context,
                     tool_name=tool_name,
                     tool_input=tool_input,
                     tenant_id=tenant_id,
@@ -4210,6 +4232,10 @@ async def run_chat_turn(
                         created_at=datetime.now(timezone.utc),
                     )
                     db.add(assistant_msg)
+                    if (assistant_msg.structured_output or {}).get("accounting_group"):
+                        from app.services.transaction_ops.accounting_group import stage_group_children
+
+                        stage_group_children(db, assistant_msg)
 
                     # Plan Mode telemetry — clarification_pending event row.
                     # The chat_disclosure_events table survives chat history compaction
@@ -4669,6 +4695,10 @@ async def run_chat_turn(
             created_at=datetime.now(timezone.utc),
         )
         db.add(assistant_msg)
+        if (assistant_msg.structured_output or {}).get("accounting_group"):
+            from app.services.transaction_ops.accounting_group import stage_group_children
+
+            stage_group_children(db, assistant_msg)
 
         # Auto-title from first message
         if not session.title:

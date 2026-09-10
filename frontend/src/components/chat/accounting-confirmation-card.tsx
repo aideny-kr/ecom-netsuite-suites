@@ -31,15 +31,19 @@ export function AccountingConfirmationCard({
   onReject,
   disabled = false,
   readOnly = false,
+  groupState,
 }: {
   data: WriteConfirmationData;
   onConfirm: () => void;
   onReject: () => void;
   disabled?: boolean;
   readOnly?: boolean;
+  groupState?: WriteConfirmationData["status"];
 }) {
   const p = data.accounting_review!;
-  const pending = data.status === "pending";
+  const awaitingGroup =
+    data.status === "pending" && groupState && groupState !== "pending";
+  const pending = data.status === "pending" && !awaitingGroup;
   const verified =
     data.status === "approved" &&
     data.accounting_verification?.status === "verified";
@@ -52,16 +56,20 @@ export function AccountingConfirmationCard({
     typeof p.before.currency_code === "string"
       ? p.before.currency_code
       : "Currency unknown";
-  const state = verified
-    ? "Executed · verified"
-    : {
-        pending: blocked ? "Needs review" : "Awaiting approval",
-        executing: "Executing · checking results",
-        approved: "Executed · verification needed",
-        rejected: "Rejected",
-        failed: "Needs review",
-        indeterminate: "Outcome unconfirmed",
-      }[data.status];
+  const state = awaitingGroup
+    ? groupState === "executing"
+      ? "Awaiting result"
+      : "Not submitted"
+    : verified
+      ? "Executed · verified"
+      : {
+          pending: blocked ? "Needs review" : "Awaiting approval",
+          executing: "Executing · checking results",
+          approved: "Executed · verification needed",
+          rejected: "Rejected",
+          failed: "Needs review",
+          indeterminate: "Outcome unconfirmed",
+        }[data.status];
   const after = verified
     ? data.accounting_verification?.invoice
     : p.expected_after;
@@ -196,11 +204,15 @@ export function AccountingConfirmationCard({
         )}
         {!pending && !verified && (
           <p role="status" className="rounded-lg border p-3 leading-relaxed">
-            {data.status === "executing"
-              ? "The approved update is in progress. Wait for independent verification."
-              : data.status === "rejected"
-                ? "This proposal was rejected."
-                : "The invoice correction is not verified. Check the recorded outcome before attempting another write."}
+            {awaitingGroup
+              ? groupState === "executing"
+                ? "Group processing is in progress. This order has not recorded an execution result yet."
+                : "This correction was not submitted. Review the group’s recorded results before preparing further changes."
+              : data.status === "executing"
+                ? "The approved update is in progress. Wait for independent verification."
+                : data.status === "rejected"
+                  ? "This proposal was rejected."
+                  : "The invoice correction is not verified. Check the recorded outcome before attempting another write."}
             {data.error && ` ${data.error}`}
             {data.accounting_verification?.reason &&
               ` ${data.accounting_verification.reason}`}

@@ -55,7 +55,9 @@ export function AccountingGroupCard({
                 ? "Running · awaiting results"
                 : data.status === "rejected"
                   ? "Rejected"
-                  : `${verified} / ${eligible.length} verified`}
+                  : data.status === "indeterminate"
+                    ? "Incomplete · review recorded outcomes"
+                    : `${verified} / ${eligible.length} verified`}
           </span>
         </div>
         <p className="text-[13px] leading-relaxed text-muted-foreground">
@@ -71,6 +73,18 @@ export function AccountingGroupCard({
             "No supported invoice changes are ready. These orders need individual investigation before an exact correction can be proposed for approval."
           )}
         </p>
+        {data.status === "indeterminate" && (
+          <div
+            role="alert"
+            className="rounded-lg border border-amber-500/40 bg-amber-500/5 p-4 text-[13px] leading-relaxed"
+          >
+            <strong>Group processing is incomplete.</strong> {verified} of{" "}
+            {eligible.length} corrections are verified. Some changes may already
+            have reached NetSuite. Review each recorded outcome before preparing
+            another write. Queued work may have stopped; there is no automatic
+            retry. A rejection is complete only for items marked Rejected.
+          </div>
+        )}
         {pending && eligible.length > 0 && (
           <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-4 text-xs leading-relaxed">
             <strong>Before you approve:</strong> Review each order’s exact
@@ -88,15 +102,18 @@ export function AccountingGroupCard({
               card?.accounting_verification?.status === "verified" &&
               card.status === "approved"
                 ? "Verified"
-                : member.reason
-                  ? "Needs review"
+                : card?.status === "indeterminate" ||
+                    card?.status === "executing"
+                  ? "Outcome unconfirmed"
                   : card?.status === "pending"
                     ? pending
                       ? "Ready for review"
                       : data.status === "executing"
                         ? "Awaiting result"
                         : "Not submitted"
-                    : card?.status || "Needs investigation";
+                    : member.reason
+                      ? "Needs review"
+                      : card?.status || "Needs investigation";
             return (
               <details key={member.case_id} className="rounded-lg border p-3">
                 <summary className="cursor-pointer text-[13px]">
@@ -139,6 +156,7 @@ export function AccountingGroupCard({
                       onConfirm={() => {}}
                       onReject={() => {}}
                       readOnly
+                      groupState={data.status}
                     />
                   )}
                 </div>

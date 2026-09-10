@@ -184,6 +184,7 @@ async def test_approval_preflight_execution_verification_and_actor_audit(outcome
 
     with (
         patch("app.services.transaction_ops.accounting_group.accounting_write_slot", locked),
+        patch("app.services.transaction_ops.accounting_group.authorize_accounting_write", AsyncMock()),
         patch("app.services.transaction_ops.tax_correction.validate_approved", preflight),
         patch("app.services.transaction_ops.tax_correction.verify_after", verify),
         patch("app.services.chat.orchestrator.execute_tool_call", execute),

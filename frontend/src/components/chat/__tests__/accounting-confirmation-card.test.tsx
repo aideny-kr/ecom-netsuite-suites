@@ -229,7 +229,7 @@ describe("Accounting review", () => {
         onReject={vi.fn()}
       />,
     );
-    expect(screen.getByText("Awaiting result")).toBeVisible();
+    expect(screen.getAllByText("Awaiting result")[0]).toBeVisible();
     expect(screen.queryByText("Not submitted")).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /Approve/ }),

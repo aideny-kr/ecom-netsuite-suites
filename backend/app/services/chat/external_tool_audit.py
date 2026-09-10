@@ -46,6 +46,7 @@ async def audited_external_call(
     tool_name,
     params,
     human_approved,
+    approval_context=None,
 ):
     call_id = str(uuid.uuid4())
     common = dict(
@@ -65,6 +66,7 @@ async def audited_external_call(
         "params": redact(params),
         "human_approved": human_approved,
         "approved_by": str(actor_id) if human_approved and actor_id else None,
+        "approval": approval_context if human_approved else None,
     }
     # Fail closed before invoking an external system if the durable request cannot be recorded.
     await append_event(**common, action="tool.requested", payload=payload, status="pending")

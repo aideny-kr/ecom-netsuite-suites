@@ -376,6 +376,7 @@ async def execute_tool_call(
     session_id=None,
     actor_type="user",
     human_approved=False,
+    approval_context=None,
 ):
     """Do not spend another RPC/model repair cycle repeating a rejected query in one turn."""
     kwargs = dict(
@@ -387,6 +388,7 @@ async def execute_tool_call(
         session_id=session_id,
         actor_type=actor_type,
         human_approved=human_approved,
+        approval_context=approval_context,
     )
     info = getattr(db, "info", None)
     sql = (
@@ -458,6 +460,7 @@ async def _execute_tool_call_once(
     session_id: str | None = None,
     actor_type: str = "user",
     human_approved: bool = False,
+    approval_context: dict | None = None,
 ) -> str:
     """Execute a tool call and return the result as a JSON string.
 
@@ -561,6 +564,7 @@ async def _execute_tool_call_once(
             tool_name=tool_name,
             params=tool_input,
             human_approved=human_approved,
+            approval_context=approval_context,
         )
         duration_ms = int((time.monotonic() - start) * 1000)
         logger.info(

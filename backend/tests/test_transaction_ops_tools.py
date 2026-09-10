@@ -87,6 +87,16 @@ async def test_group_preparation_checks_permission_before_loading_any_cases(ctx,
     members.assert_not_awaited()
 
 
+@pytest.mark.parametrize("flags", [{"celigo": False, "reconciliation": True}, {"celigo": True}, {}])
+async def test_financial_authorization_does_not_use_cached_enabled_flags(ctx, monkeypatch, flags):
+    cached = AsyncMock(return_value=True)
+    monkeypatch.setattr(mod.feature_flag_service, "is_enabled", cached)
+    monkeypatch.setattr(mod.feature_flag_service, "get_all_flags", AsyncMock(return_value=flags))
+    with pytest.raises(mod._ToolError, match="feature_disabled"):
+        await mod._authorize(ctx, create=True, fresh=True)
+    cached.assert_not_awaited()
+
+
 async def test_group_tool_rejects_model_supplied_approval_or_member_payloads(ctx):
     for extra in ({"human_approved": True}, {"case_ids": [str(uuid.uuid4())]}, {"tool_input": {"amount": 999}}):
         result = await mod.execute_accounting_group({"group_id": "a" * 32, **extra}, context=ctx)

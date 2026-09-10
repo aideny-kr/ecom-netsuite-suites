@@ -958,6 +958,7 @@ export function MessageList({
             onChangesetAction={onChangesetAction}
             onImportanceOverride={onImportanceOverride}
             onWriteConfirm={onWriteConfirm}
+            writeDisabled={isWaitingForReply}
             onClarificationChoose={onClarificationChoose}
             onClarificationManual={onClarificationManual}
             financialReportData={financialReports?.get(message.id) ?? null}
@@ -1026,6 +1027,7 @@ export function MessageList({
           onViewDiff={onViewDiff}
           onChangesetAction={onChangesetAction}
           onWriteConfirm={onWriteConfirm}
+          writeDisabled={isWaitingForReply}
           onClarificationChoose={onClarificationChoose}
           onClarificationManual={onClarificationManual}
           isStreamingPreview
@@ -1169,6 +1171,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   onViewDiff,
   onChangesetAction,
   isStreamingPreview = false,
+  writeDisabled = false,
   onImportanceOverride,
   onWriteConfirm,
   onClarificationChoose,
@@ -1188,6 +1191,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   onViewDiff?: (changesetId: string) => void;
   onChangesetAction?: () => void;
   isStreamingPreview?: boolean;
+  writeDisabled?: boolean;
   onImportanceOverride?: (messageId: string, newTier: number) => void;
   onWriteConfirm?: (messageId: string, action: "approve" | "reject", slotValues?: Record<string, string>) => void;
   onClarificationChoose?: (messageId: string, optionId: "A" | "B" | "C") => void;
@@ -1238,6 +1242,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
             </div>
           )}
           <WriteConfirmationCard
+            disabled={writeDisabled}
             data={structuredOutput as unknown as WriteConfirmationData}
             onConfirm={(slotValues) => onWriteConfirm?.(message.id, "approve", slotValues)}
             onReject={() => onWriteConfirm?.(message.id, "reject")}
