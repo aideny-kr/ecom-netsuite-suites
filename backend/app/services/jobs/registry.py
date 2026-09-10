@@ -56,10 +56,13 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 import jsonschema
 from sqlalchemy.ext.asyncio import AsyncSession
+
+if TYPE_CHECKING:
+    from app.services.report.report_delivery import DeliveryIdentity
 
 StepExecutor = Callable[["StepContext", dict], Awaitable[dict]]
 IdempotencyFn = Callable[["StepContext", dict], str]
@@ -101,6 +104,17 @@ class StepContext:
     written by the run loop after each successful executor call — a step's
     params reference an earlier entry by that same id (see the module
     docstring's "Cross-step artifact references").
+
+    ``current_step_id`` (item 1, delta gate fix #2): the run loop
+    (``_run_steps``, ``app.workers.tasks.scheduled_jobs``) sets this to the
+    plan id of whichever step is ABOUT to run, before calling its executor —
+    ``_report_compose_executor`` reads it to stamp
+    ``schedule_delivery_identity(ctx.job_id, ctx.current_step_id)`` onto the
+    composed/refreshed report's own ``delivery_json["identity"]`` right after
+    compose returns, so a LATER step's failure (e.g. ``drive.upload``) can
+    never lose the identity a re-delivery will need to recover. ``None`` only
+    for a ``StepContext`` built by a test that never goes through the real
+    run loop.
     """
 
     job_id: uuid.UUID
@@ -112,6 +126,7 @@ class StepContext:
     period_key: str | None = None
     actor_type: str = "system"
     actor_id: uuid.UUID | None = None
+    current_step_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -173,7 +188,21 @@ async def _report_compose_executor(ctx: StepContext, params: dict) -> dict:
     fields later steps need (``report_id``, ``rendered_html``, ``period_key``)
     AND the live ``Report`` row itself, so ``report.build_xlsx`` can reuse
     ``report_delivery._inventory_aging_model`` exactly as ``deliver_report_to_drive``
-    does internally, instead of re-deriving that routing logic here."""
+    does internally, instead of re-deriving that routing logic here.
+
+    Item 1 (delta gate fix #2): right after compose/refresh returns, this
+    stamps ``schedule_delivery_identity(ctx.job_id, ctx.current_step_id)``
+    onto ``report.delivery_json["identity"]`` and flushes (never commits —
+    the run loop owns commits). A later ``drive.upload`` step references this
+    SAME compose step by id (``params["report_step"]``), so the identity
+    stamped here is byte-identical to the one ``_drive_upload_executor``
+    would build for it — a failure in that (or any later) step can never
+    leave the report without a recoverable identity, because the run loop
+    commits BEFORE the next step's executor runs (module docstring's
+    "Idempotency + audit-before-call"; for the common
+    ``compose -> ... -> drive.upload`` shape, that next step's own
+    audit-before-call commit is what makes THIS flush durable, before
+    ``drive.upload``'s own executor ever gets a chance to fail)."""
     if "report_id" in params:
         from app.services.report.refresh_service import refresh_report
 
@@ -196,6 +225,26 @@ async def _report_compose_executor(ctx: StepContext, params: dict) -> dict:
             actor_type=ctx.actor_type,
             mode=params.get("mode", "period"),
         )
+
+    # compose/refresh may have committed mid-flight (an OAuth token refresh,
+    # refresh_report's own claim commit, ...) which clears the transaction
+    # -scoped tenant GUC — re-assert before this write, a safe no-op when it
+    # is already set (agent-graph.md / this branch's own repeated trap).
+    from app.core.database import set_tenant_context
+
+    await set_tenant_context(ctx.db, str(ctx.tenant_id))
+    identity = schedule_delivery_identity(ctx.job_id, ctx.current_step_id)
+    report.delivery_json = {
+        **(report.delivery_json or {}),
+        "identity": {
+            "folder_props": identity.folder_props,
+            "file_props": identity.file_props,
+            "lock_key": identity.lock_key,
+            "idempotency_prefix": identity.idempotency_prefix,
+        },
+    }
+    await ctx.db.flush()
+
     return {
         "report": report,
         "report_id": str(report.id),
@@ -203,6 +252,32 @@ async def _report_compose_executor(ctx: StepContext, params: dict) -> dict:
         "title": report.title,
         "version": report.version,
     }
+
+
+def schedule_delivery_identity(schedule_id: uuid.UUID, report_step: str) -> "DeliveryIdentity":
+    """The ONE construction of a schedule-keyed ``DeliveryIdentity`` (item 1,
+    delta gate fix #2) — used by both ``_drive_upload_executor`` (passed
+    explicitly to ``deliver_report_to_drive``) and ``_report_compose_executor``
+    (stamped onto ``report.delivery_json["identity"]`` right after compose, so
+    a later manual re-delivery recovers the SAME identity a scheduled upload
+    would have used). ``folder_props`` stays schedule-only (one Drive folder
+    per schedule); ``file_props``/``lock_key``/``idempotency_prefix`` all also
+    carry the PRODUCING ``report.compose`` step's id (item 3, delta gate fix:
+    a plan with two ``report.compose -> drive.upload`` chains must not
+    collide on the same file identity or advisory lock). ``file_props`` never
+    carries ``period_key`` — ``deliver_report_to_drive`` merges the CURRENT
+    call's period into both ``file_props`` and the idempotency key itself, so
+    a period baked in here could go stale across a later delivery of a
+    different period (item 1's own fix)."""
+    from app.services.report.report_delivery import DeliveryIdentity
+
+    sid = str(schedule_id)
+    return DeliveryIdentity(
+        folder_props={"schedule_id": sid},
+        file_props={"schedule_id": sid, "report_step": report_step},
+        lock_key=f"schedule:{sid}:{report_step}",
+        idempotency_prefix=f"job-delivery:{sid}:{report_step}",
+    )
 
 
 def _resolve_report_step_artifact(ctx: StepContext, params: dict) -> dict:
@@ -299,13 +374,18 @@ async def _drive_upload_executor(ctx: StepContext, params: dict) -> dict:
 
     Item 3 (delta gate fix): the FOLDER stays keyed on ``schedule_id`` alone
     (one Drive folder per schedule is correct), but ``file_props``/
-    ``lock_key``/``idempotency_key`` also carry the PRODUCING
+    ``lock_key``/``idempotency_prefix`` also carry the PRODUCING
     ``report.compose`` step's id (``params["report_step"]``) — a plan with
     TWO ``report.compose -> drive.upload`` chains (two different reports
     delivered by the same schedule run) previously collided on the exact
     same file identity AND the exact same advisory lock, so the second
     upload's find-then-update silently overwrote the first's files instead
-    of each keeping its own.
+    of each keeping its own. Item 1 (delta gate fix #2): the identity is now
+    built via the shared ``schedule_delivery_identity`` helper — the SAME one
+    ``_report_compose_executor`` uses to stamp
+    ``report.delivery_json["identity"]`` right after compose, so a later
+    manual re-delivery recovers byte-identical props to what a scheduled
+    upload would have built here.
 
     Accepted wart: a retry after a partial upload (the pdf lands, the xlsx
     fails, the run retries) composes a SECOND ``Report`` row for that Monday
@@ -315,21 +395,14 @@ async def _drive_upload_executor(ctx: StepContext, params: dict) -> dict:
     SAME files by schedule identity); only the ``reports`` table accumulates
     an extra row for that period. Deduplicating ``reports`` rows across a
     retry is a separate, deliberate non-goal of this fix."""
-    from app.services.report.report_delivery import DeliveryIdentity, deliver_report_to_drive
+    from app.services.report.report_delivery import deliver_report_to_drive
 
     artifact = _resolve_report_step_artifact(ctx, params)
     period_key = ctx.period_key
     if not period_key:
         raise StepExecutionError("drive.upload: the run supplied no period_key")
 
-    schedule_id = str(ctx.job_id)
-    report_step = params["report_step"]
-    identity = DeliveryIdentity(
-        folder_props={"schedule_id": schedule_id},
-        file_props={"schedule_id": schedule_id, "period_key": period_key, "report_step": report_step},
-        lock_key=f"schedule:{schedule_id}:{report_step}",
-        idempotency_key=f"job-delivery:{schedule_id}:{report_step}:{period_key}",
-    )
+    identity = schedule_delivery_identity(ctx.job_id, params["report_step"])
 
     result = await deliver_report_to_drive(
         ctx.db,

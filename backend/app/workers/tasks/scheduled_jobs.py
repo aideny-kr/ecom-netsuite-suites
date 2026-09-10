@@ -513,6 +513,11 @@ async def _run_steps(
             return REASON_ERROR, outputs, f"step {step_id!r}: unknown step type {step_type!r} — not in the registry"
 
         params = step.get("params") or {}
+        # Item 1 (delta gate fix #2): set BEFORE calling this step's executor
+        # — `_report_compose_executor` reads it to stamp
+        # `schedule_delivery_identity(ctx.job_id, ctx.current_step_id)` onto
+        # the report it just composed/refreshed.
+        ctx.current_step_id = step_id
 
         if spec.kind == "write":
             idem_key = spec.idempotency(ctx, params)

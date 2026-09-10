@@ -1113,6 +1113,92 @@ async def test_recon_run_as_lone_first_step_runs_with_tenant_context_set(db: Asy
 
 
 # ---------------------------------------------------------------------------
+# Item 1 (delta gate fix #2): the compose step's own Drive identity stamp
+# must survive a LATER step's failure -- `_run_steps` commits right before
+# each WRITE step's executor runs, so anything the compose step (a read
+# step) flushed is durable BEFORE drive.upload's own executor ever gets a
+# chance to fail.
+# ---------------------------------------------------------------------------
+
+
+async def test_compose_stamped_delivery_identity_survives_a_later_drive_upload_failure(db: AsyncSession, monkeypatch):
+    """A real `report.compose -> report.render_pdf -> report.build_xlsx ->
+    drive.upload` plan where drive.upload raises (no `google_sheets`
+    connector for the tenant -> `DeliveryUnavailable`, a REAL failure mode,
+    not a fake one): after the run, the composed `Report` row's own
+    `delivery_json["identity"]` must already be present -- stamped by
+    `_report_compose_executor` right after compose returns and flushed
+    there, made durable by drive.upload's own audit-before-call commit
+    (the run loop's convention -- module docstring's "Idempotency +
+    audit-before-call") before its executor ever runs (and fails).
+    `report.render_pdf` is faked here (WeasyPrint's native libs are not
+    guaranteed on this machine -- see report_pdf's own skip-probe);
+    `report.compose` and `report.build_xlsx` are the REAL registry
+    executors, composing a real inventory_aging report the same way
+    `tests/test_report_playbooks.py`'s own `_patch_bigquery_executor` does."""
+    from app.models.report import Report
+    from tests.test_report_playbooks import _patch_bigquery_executor
+
+    tenant = await create_test_tenant(db, name="ComposeIdentitySurvivesCo")
+    # Captured now, not read off `tenant.id` after the run: a rollback inside
+    # `_run_steps` (DeliveryUnavailable, here) expires every attribute on
+    # every object in the session INCLUDING `tenant` -- nothing re-selects
+    # Tenant afterward (unlike Schedule/Job, which `_finalize_run` always
+    # re-fetches), so re-reading `tenant.id` post-run outside an awaited call
+    # raises MissingGreenlet (the same failure mode this file's own
+    # `test_step_error_retries_once_then_pauses` avoids the same way).
+    tenant_id = tenant.id
+    await set_tenant_context(db, str(tenant_id))
+    _, _, params = _patch_bigquery_executor(monkeypatch)
+
+    async def fake_render_pdf(ctx, step_params):
+        artifact = ctx.artifacts[step_params["report_step"]]
+        return {"pdf_bytes": b"%PDF-FAKE", "report_id": artifact["report_id"]}
+
+    monkeypatch.setitem(
+        STEP_REGISTRY, "report.render_pdf", _fake_spec("read", fake_render_pdf, step_type="report.render_pdf")
+    )
+
+    now = datetime.now(timezone.utc)
+    schedule = await _seed_job_schedule(
+        db,
+        tenant,
+        plan_json={
+            "steps": [
+                {
+                    "id": "compose",
+                    "type": "report.compose",
+                    "params": {"playbook_key": "inventory_aging", "params": params},
+                },
+                {"id": "render_pdf", "type": "report.render_pdf", "params": {"report_step": "compose"}},
+                {"id": "build_xlsx", "type": "report.build_xlsx", "params": {"report_step": "compose"}},
+                {"id": "upload", "type": "drive.upload", "params": {"report_step": "compose"}},
+            ]
+        },
+        next_run_at=now - timedelta(minutes=1),
+        cron_expression="0 6 * * 1",
+    )
+
+    stats = await run_due_jobs(db, tenant_id, now=now)
+    assert stats["ran"] == 1
+
+    jobs = (await db.execute(select(Job).where(Job.tenant_id == tenant_id))).scalars().all()
+    assert len(jobs) == 1
+    assert jobs[0].result_summary["reason"] == REASON_BLOCKED  # no connector -> DeliveryUnavailable
+    assert schedule.last_run_status == REASON_BLOCKED
+
+    report_row = (
+        await db.execute(select(Report).where(Report.tenant_id == tenant_id, Report.title == "Inventory Aging Weekly"))
+    ).scalar_one()
+    assert report_row.delivery_json is not None
+    identity = report_row.delivery_json["identity"]
+    assert identity["folder_props"] == {"schedule_id": str(schedule.id)}
+    assert identity["file_props"] == {"schedule_id": str(schedule.id), "report_step": "compose"}
+    assert identity["lock_key"] == f"schedule:{schedule.id}:compose"
+    assert identity["idempotency_prefix"] == f"job-delivery:{schedule.id}:compose"
+
+
+# ---------------------------------------------------------------------------
 # `_finalize_run`'s OWN retry (the one after a first finalize crash) must
 # itself be guarded (review finding, MINOR): if it ALSO fails, the exception
 # was propagating straight out of `run_schedule_now`, leaving the `jobs` row

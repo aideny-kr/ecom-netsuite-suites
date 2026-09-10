@@ -255,14 +255,19 @@ async def test_drive_upload_uses_the_runs_period_key_for_delivery_and_idempotenc
     # DeliveryIdentity — inventory_aging composes a NEW Report every run
     # (mode="period"), so keying Drive identity on the report row would
     # create a new Drive folder every Monday and duplicate files on retry.
-    # Item 3 (delta gate fix): file_props/lock_key/idempotency_key also carry
-    # the PRODUCING step's id — a plan with two report.compose -> drive.upload
-    # chains must not overwrite the same files (see the test below).
+    # Item 3 (delta gate fix): file_props/lock_key/idempotency_prefix also
+    # carry the PRODUCING step's id — a plan with two report.compose ->
+    # drive.upload chains must not overwrite the same files (see the test
+    # below). Item 1 (delta gate fix #2): `file_props` never carries
+    # `period_key` any more — `deliver_report_to_drive` merges the CURRENT
+    # call's period in itself (see that function's own docstring), and
+    # `idempotency_prefix` replaces `idempotency_key` for the same reason
+    # (the period is appended by the delivery function, not baked in here).
     identity = captured["identity"]
     assert identity.folder_props == {"schedule_id": str(schedule_id)}
-    assert identity.file_props == {"schedule_id": str(schedule_id), "period_key": "2026-09-14", "report_step": "s2"}
+    assert identity.file_props == {"schedule_id": str(schedule_id), "report_step": "s2"}
     assert identity.lock_key == f"schedule:{schedule_id}:s2"
-    assert identity.idempotency_key == f"job-delivery:{schedule_id}:s2:2026-09-14"
+    assert identity.idempotency_prefix == f"job-delivery:{schedule_id}:s2"
 
 
 @pytest.mark.asyncio
@@ -320,8 +325,32 @@ async def test_two_drive_upload_steps_in_one_run_get_distinct_identities_same_fo
     assert identity_a.file_props != identity_b.file_props
     assert identity_a.lock_key == f"schedule:{schedule_id}:compose_a"
     assert identity_b.lock_key == f"schedule:{schedule_id}:compose_b"
-    assert identity_a.idempotency_key == f"job-delivery:{schedule_id}:compose_a:2026-09-14"
-    assert identity_b.idempotency_key == f"job-delivery:{schedule_id}:compose_b:2026-09-14"
+    # Item 1 (delta gate fix #2): idempotency_prefix carries no period at all
+    # any more — deliver_report_to_drive appends the RUN's period itself.
+    assert identity_a.idempotency_prefix == f"job-delivery:{schedule_id}:compose_a"
+    assert identity_b.idempotency_prefix == f"job-delivery:{schedule_id}:compose_b"
+
+
+def test_schedule_delivery_identity_shape():
+    """Item 1 (delta gate fix #2): the ONE helper both `_drive_upload_executor`
+    and `_report_compose_executor`'s identity stamp use — `folder_props`
+    schedule-only (one Drive folder per schedule), `file_props`/`lock_key`/
+    `idempotency_prefix` all also carry the PRODUCING `report.compose` step's
+    id (item 3's own fix, preserved here), and `file_props` never carries
+    `period_key` (item 1, delta gate fix #2 — `deliver_report_to_drive` merges
+    the CURRENT call's period in itself, so a period baked in here could
+    never go stale)."""
+    import uuid
+
+    from app.services.jobs.registry import schedule_delivery_identity
+
+    schedule_id = uuid.uuid4()
+    identity = schedule_delivery_identity(schedule_id, "compose")
+
+    assert identity.folder_props == {"schedule_id": str(schedule_id)}
+    assert identity.file_props == {"schedule_id": str(schedule_id), "report_step": "compose"}
+    assert identity.lock_key == f"schedule:{schedule_id}:compose"
+    assert identity.idempotency_prefix == f"job-delivery:{schedule_id}:compose"
 
 
 @pytest.mark.asyncio
