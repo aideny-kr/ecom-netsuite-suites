@@ -8,9 +8,9 @@ from tests.conftest import create_test_tenant, create_test_user, make_auth_heade
 
 
 class TestConnectionEntitlements:
-    """Free plan limits connections to 2."""
+    """Connection counts are unlimited on every plan."""
 
-    async def test_free_can_create_up_to_limit(self, client: AsyncClient, db: AsyncSession):
+    async def test_free_can_create_connections(self, client: AsyncClient, db: AsyncSession):
         tenant = await create_test_tenant(db, name="Trial Ent", plan="free")
         user, _ = await create_test_user(db, tenant, role_name="admin")
         await db.commit()
@@ -28,7 +28,7 @@ class TestConnectionEntitlements:
         )
         assert resp1.status_code == 201
 
-        # Create second connection — should succeed (limit is 2)
+        # Create second connection — should succeed
         resp2 = await client.post(
             "/api/v1/connections",
             json={
@@ -40,13 +40,13 @@ class TestConnectionEntitlements:
         )
         assert resp2.status_code == 201
 
-    async def test_free_blocked_beyond_limit(self, client: AsyncClient, db: AsyncSession):
-        tenant = await create_test_tenant(db, name="Trial Block", plan="free")
+    async def test_free_allows_connections_beyond_former_limit(self, client: AsyncClient, db: AsyncSession):
+        tenant = await create_test_tenant(db, name="Trial Unlimited", plan="free")
         user, _ = await create_test_user(db, tenant, role_name="admin")
         await db.commit()
         headers = make_auth_headers(user)
 
-        # Create 2 non-NetSuite connections (the free plan limit)
+        # Create the two connections that previously exhausted the free plan
         for i in range(2):
             resp = await client.post(
                 "/api/v1/connections",
@@ -59,7 +59,7 @@ class TestConnectionEntitlements:
             )
             assert resp.status_code == 201
 
-        # Third non-NetSuite connection should be blocked
+        # A third connection must succeed without an upgrade or deletion
         resp3 = await client.post(
             "/api/v1/connections",
             json={
@@ -69,8 +69,7 @@ class TestConnectionEntitlements:
             },
             headers=headers,
         )
-        assert resp3.status_code == 403
-        assert "limit" in resp3.json()["detail"].lower() or "plan" in resp3.json()["detail"].lower()
+        assert resp3.status_code == 201
 
     async def test_free_netsuite_always_allowed(self, client: AsyncClient, db: AsyncSession):
         """NetSuite is the core product — always allowed even on free plan, doesn't count against limit."""
@@ -104,13 +103,13 @@ class TestConnectionEntitlements:
             )
             assert resp.status_code == 201
 
-    async def test_pro_has_higher_limit(self, client: AsyncClient, db: AsyncSession):
+    async def test_pro_allows_connections(self, client: AsyncClient, db: AsyncSession):
         tenant = await create_test_tenant(db, name="Pro Ent", plan="pro")
         user, _ = await create_test_user(db, tenant, role_name="admin")
         await db.commit()
         headers = make_auth_headers(user)
 
-        # Pro plan allows up to 50 — create 3 and verify all succeed
+        # Pro connections remain available
         for i in range(3):
             resp = await client.post(
                 "/api/v1/connections",
@@ -149,7 +148,7 @@ class TestEntitlementServiceDirect:
         tenant = await create_test_tenant(db, name="Limits", plan="free")
         await db.commit()
         limits = await entitlement_service.get_plan_limits(db, tenant.id)
-        assert limits["max_connections"] == 2
+        assert limits["max_connections"] == -1
         assert limits["mcp_tools"] is False
 
     async def test_inactive_tenant_denied(self, db: AsyncSession):
@@ -211,7 +210,7 @@ class TestPlanInfoAPI:
         assert resp.status_code == 200
         data = resp.json()
         assert data["plan"] == "free"
-        assert data["limits"]["max_connections"] == 2
+        assert data["limits"]["max_connections"] == -1
         assert data["limits"]["max_schedules"] == 5
         assert data["limits"]["mcp_tools"] is False
         assert data["limits"]["chat"] is True
@@ -229,7 +228,7 @@ class TestPlanInfoAPI:
         assert resp.status_code == 200
         data = resp.json()
         assert data["plan"] == "pro"
-        assert data["limits"]["max_connections"] == 50
+        assert data["limits"]["max_connections"] == -1
         assert data["limits"]["mcp_tools"] is True
         assert data["limits"]["byok_ai"] is True
 

@@ -44,6 +44,46 @@ MCP_REBASELINE_FACTOR = 2
 DEFAULT_TOOL_RATE_LIMIT = 60 * MCP_REBASELINE_FACTOR
 
 TOOL_CONFIGS = {
+    "transaction_ops.groups": {
+        "default_limit": 20,
+        "max_limit": 50,
+        "timeout_seconds": 15,
+        "rate_limit_per_minute": 30,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": ["group_id", "limit", "offset", "review_run_ids", "status", "search"],
+    },
+    "transaction_ops.configs": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 10,
+        "rate_limit_per_minute": 30,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": [],
+    },
+    "transaction_ops.run": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 15,
+        "rate_limit_per_minute": 10,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": ["config_id", "order_references", "window_start", "window_end"],
+    },
+    "transaction_ops.accounting_evidence": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 90,
+        "rate_limit_per_minute": 10,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": ["case_id"],
+    },
+    "transaction_ops.status": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 15,
+        "rate_limit_per_minute": 30,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": ["run_id", "case_id"],
+    },
     "health": {
         "default_limit": None,
         "max_limit": None,
@@ -62,7 +102,7 @@ TOOL_CONFIGS = {
         "timeout_seconds": 30,
         "rate_limit_per_minute": 60,
         "requires_entitlement": "mcp_tools",
-        "allowlisted_params": ["query", "limit"],
+        "allowlisted_params": ["query", "limit", "connection_id", "expected_account_id"],
     },
     "netsuite.suiteql_stub": {
         "default_limit": 100,
@@ -633,6 +673,12 @@ async def governed_execute(
 
     # 4. Redact
     redacted = redact_result(result)
+    # Tools can report a handled failure without raising an exception. Preserve
+    # that outcome in telemetry and audit instead of treating every return as success.
+    failed = isinstance(result, dict) and (
+        result.get("success") is False or result.get("isError") is True or bool(result.get("error"))
+    )
+    outcome = "error" if failed else "success"
 
     # 5. Log + metrics
     duration_ms = (time.monotonic() - start) * 1000
@@ -643,9 +689,9 @@ async def governed_execute(
         actor_id=actor_id,
         correlation_id=correlation_id,
         duration_ms=round(duration_ms, 2),
-        status="success",
+        status=outcome,
     )
-    record_call(tool_name, "success")
+    record_call(tool_name, outcome)
     record_duration(tool_name, duration_ms / 1000)
 
     # 6. Audit to DB
@@ -657,14 +703,14 @@ async def governed_execute(
                 db=db,
                 tenant_id=tenant_uuid,
                 category="tool_call",
-                action="tool.executed",
+                action="tool.failed" if failed else "tool.executed",
                 actor_id=actor_uuid,
                 actor_type=actor_type,
                 resource_type="mcp_tool",
                 resource_id=tool_name,
                 correlation_id=correlation_id,
                 payload=create_audit_payload(tool_name, validated_params, result=result),
-                status="success",
+                status=outcome,
             )
         except Exception:
             logger.exception("mcp.audit_write_failed", tool=tool_name)

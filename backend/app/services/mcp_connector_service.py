@@ -1,10 +1,12 @@
+import asyncio
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.encryption import encrypt_credentials, get_current_key_version
+from app.core.encryption import decrypt_credentials, encrypt_credentials, get_current_key_version
 from app.models.mcp_connector import McpConnector
 from app.services.celigo.client import mcp_server_url
 
@@ -41,6 +43,28 @@ async def create_mcp_connector(
     """
     if provider == "celigo_mcp":
         server_url = mcp_server_url(region)
+    if provider in ("custom", "shopify_mcp", "stripe_mcp", "netsuite_mcp"):
+        from app.services.http_connector_service import validate_auth
+        from app.services.public_http import validate_endpoint
+
+        server_url = validate_endpoint(server_url)
+        if provider == "netsuite_mcp":
+            import re
+            from urllib.parse import urlsplit
+
+            endpoint = urlsplit(server_url)
+            if (
+                not re.fullmatch(r"[a-z0-9][a-z0-9-]*\.suitetalk\.api\.netsuite\.com", endpoint.hostname or "")
+                or endpoint.path != "/services/mcp/v1/all"
+            ):
+                raise ValueError("Use the NetSuite account's hosted MCP endpoint")
+        if auth_type != "oauth2":
+            credential = credentials or {}
+            validate_auth(
+                auth_type,
+                credential.get("access_token") or credential.get("token") or credential.get("api_key"),
+                credential.get("header_name") or "X-API-Key",
+            )
     encrypted = encrypt_credentials(credentials) if credentials else None
     connector = McpConnector(
         tenant_id=tenant_id,
@@ -54,6 +78,13 @@ async def create_mcp_connector(
         is_enabled=True,
         created_by=created_by,
     )
+    from app.services.metabase_oauth_service import is_metabase
+
+    if is_metabase(connector) and not encrypted:
+        connector.status = "error"
+        connector.is_enabled = False
+        connector.error_reason = "Authorization required. Use Connect with Metabase to sign in."
+        connector.metadata_json = {"oauth_provider": "metabase", "setup_state": "authorization_required"}
     db.add(connector)
     await db.flush()
     return connector
@@ -130,7 +161,9 @@ async def update_connector_tokens(
 async def list_mcp_connectors(db: AsyncSession, tenant_id: uuid.UUID) -> list[McpConnector]:
     """List all MCP connectors for a tenant."""
     result = await db.execute(
-        select(McpConnector).where(McpConnector.tenant_id == tenant_id).order_by(McpConnector.created_at.desc())
+        select(McpConnector)
+        .where(McpConnector.tenant_id == tenant_id, McpConnector.status != "revoked")
+        .order_by(McpConnector.created_at.desc())
     )
     return list(result.scalars().all())
 
@@ -151,6 +184,10 @@ async def delete_mcp_connector(db: AsyncSession, connector_id: uuid.UUID, tenant
     connector = await get_mcp_connector(db, connector_id, tenant_id)
     if not connector:
         return False
+    if connector.provider == "celigo_mcp":
+        from app.services.celigo_write_guard import CeligoManagedElsewhereError
+
+        raise CeligoManagedElsewhereError("Manage Celigo through its connection card")
     connector.status = "revoked"
     connector.is_enabled = False
     await db.flush()
@@ -213,34 +250,94 @@ async def get_active_connectors_for_tenant(db: AsyncSession, tenant_id: uuid.UUI
 async def test_mcp_connector(db: AsyncSession, connector_id: uuid.UUID, tenant_id: uuid.UUID) -> dict:
     """Test an MCP connector by connecting and discovering tools."""
     connector = await get_mcp_connector(db, connector_id, tenant_id)
-    if not connector:
+    if not connector or connector.status in ("revoked", "superseded"):
         return {
             "connector_id": str(connector_id),
             "status": "error",
             "message": "Connector not found",
         }
 
+    from app.services.metabase_oauth_service import is_metabase
+
+    if is_metabase(connector) and not connector.encrypted_credentials:
+        return {
+            "connector_id": str(connector.id),
+            "status": "error",
+            "message": "Authorization required. Use Connect with Metabase to sign in.",
+        }
+
+    if connector.provider in ("bigquery", "google_sheets"):
+        from app.services.connection_verification import check_google, failure_message
+
+        try:
+            async with asyncio.timeout(45):
+                result = await check_google(
+                    connector.provider,
+                    decrypt_credentials(connector.encrypted_credentials),
+                    connector.metadata_json or {},
+                )
+        except Exception as exc:
+            name = "BigQuery" if connector.provider == "bigquery" else "Google Sheets"
+            result = {"status": "error", "message": failure_message(name, exc)}
+        connector.status = "error" if result["status"] == "error" else "active"
+        connector.error_reason = result["message"] if result["status"] == "error" else None
+        connector.last_health_check_at = datetime.now(timezone.utc)
+        await db.flush()
+        return {"connector_id": str(connector.id), **result}
+
     try:
         from app.services.mcp_client_service import discover_tools
 
         tools = await discover_tools(connector, db)
+        if is_metabase(connector) and (connector.metadata_json or {}).get("setup_state") == "verification_pending":
+            connector.is_enabled = True
+            connector.metadata_json = {**connector.metadata_json, "setup_state": "connected"}
         connector.discovered_tools = tools
+        connector.last_health_check_at = datetime.now(timezone.utc)
+        connector.status = "active"
+        connector.error_reason = None
         await db.flush()
 
+        message = f"Connected successfully. Discovered {len(tools)} tools."
+        replica = (connector.metadata_json or {}).get("transaction_replica")
+        if is_metabase(connector) and replica:
+            from app.services.transaction_ops import metabase_reader
+
+            binding = metabase_reader.ReplicaBinding.model_validate(replica)
+            if binding.connector_id != connector.id or binding.server_url != connector.server_url:
+                raise ValueError("Replica binding does not match this connection")
+            now = datetime.now(timezone.utc)
+            await metabase_reader.read_order_page(
+                db,
+                tenant_id,
+                binding.model_dump(mode="json"),
+                now - timedelta(days=1),
+                now,
+                page_size=1,
+                now=now,
+            )
+            message = "Connected successfully. Transaction replica access verified."
         return {
             "connector_id": str(connector.id),
             "status": "ok",
-            "message": f"Connected successfully. Discovered {len(tools)} tools.",
+            "message": message,
             "discovered_tools": tools,
         }
-    except Exception as exc:
+    except Exception:
+        connector.last_health_check_at = datetime.now(timezone.utc)
+        connector.status = "error"
+        connector.error_reason = (
+            "Metabase connection verification failed. Use Test to retry, or reconnect if authorization has expired."
+            if is_metabase(connector)
+            else "Tool discovery failed. Check the server URL and credential."
+        )
+        await db.flush()
         logger.warning(
             "mcp_connector.test_failed",
             connector_id=str(connector_id),
-            error=str(exc),
         )
         return {
             "connector_id": str(connector.id),
             "status": "error",
-            "message": f"Connection test failed: {exc}",
+            "message": connector.error_reason,
         }

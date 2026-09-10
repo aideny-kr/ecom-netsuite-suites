@@ -9,6 +9,9 @@ paths:
   - frontend/src/app/(dashboard)/skills/**
   - frontend/src/app/(dashboard)/dashboard/**
   - frontend/src/app/(dashboard)/reconciliation/**
+  - frontend/src/app/(dashboard)/transaction-operations/**
+  - frontend/src/components/transaction-ops/**
+  - frontend/src/components/transactions/**
 ---
 
 # Report & dashboard design standard — CFO/CEO-grade

@@ -482,6 +482,7 @@ def _coerce_assistant_content(
     persisted_output: dict | None,
     *,
     tool_calls: list[dict] | None = None,
+    error: str | None = None,
 ) -> str:
     """Decide what string to persist as ``ChatMessage.content``.
 
@@ -499,6 +500,15 @@ def _coerce_assistant_content(
       final text. Use the spiral-specific wording so the user doesn't read
       this as "I don't remember anything we just discussed".
     """
+    if error:
+        if "credit balance is too low" in error.lower() or "insufficient_quota" in error.lower():
+            notice = (
+                "The configured AI provider has insufficient API credit. Add credit or select a funded provider "
+                "in AI provider settings, then retry."
+            )
+        else:
+            notice = "The agent could not complete this request. Please retry or check your AI provider settings."
+        return f"{final_text}\n\n{notice}" if final_text else notice
     if isinstance(persisted_output, dict) and persisted_output.get("type") == "clarification":
         return ""
     if _is_pricing_task_output(persisted_output):
@@ -712,6 +722,10 @@ def _compute_source_pin_update(tool_calls_log: list[dict]) -> str | None:
         name = call.get("tool_name") or call.get("tool", "")
         cat = categorize(name)
 
+        # This evidence joins Framework and NetSuite; it is not a NetSuite source pin.
+        if name in ("transaction_ops.status", "transaction_ops_status"):
+            continue
+
         # M4: metric_compute is categorized as "data_table" but its actual source
         # depends on which backend executed the query (BigQuery vs SuiteQL vs expression).
         # Read source_kind from the result_payload (set by extract_result_payload for
@@ -801,6 +815,26 @@ def _intercept_tool_result(
     metric paths so the model can reference the result in ``report.compose`` and
     the id keys the in-turn full-payload sidecar (gate cluster A).
     """
+
+    # Investigation evidence is rendered deterministically, including currency.
+    # Suppress values even for FULL-context requests; a model cannot approve writes.
+    if tool_name in ("transaction_ops.status", "transaction_ops_status"):
+        invalid = json.dumps({"success": False, "error": "invalid_transaction_result"})
+        try:
+            parsed = json.loads(result_str)
+        except (ValueError, TypeError):
+            return None, None, invalid
+        if not isinstance(parsed, dict) or parsed.get("success") is not True:
+            return None, None, invalid
+        if not isinstance(parsed.get("rows"), list) or not isinstance(parsed.get("columns"), list):
+            return None, None, invalid
+        event = {key: parsed[key] for key in ("columns", "rows", "row_count", "truncated", "query") if key in parsed}
+        event.update(suppress_llm_value=True, source_kind="transaction_ops")
+        from app.services.transaction_ops.chat_evidence import condense_status
+
+        condensed = condense_status(parsed)
+        condensed = _stamp_result_id(condensed, event, result_id)
+        return "data_table", event, condensed
 
     # --- Report card path ---
     if tool_name in ("report_compose", "report.compose"):
@@ -2185,6 +2219,31 @@ async def run_chat_turn(
                 # retry, auto-revert-to-pending) risks a SECOND post for a
                 # write NetSuite already accepted. A human must check the
                 # NetSuite record and resolve it manually.
+                # Accounting tax corrections carry server-built source and native preconditions.
+                # Check again after the single-use approval claim, immediately before any write.
+                if _so.get("mutation_type") == "update":
+                    from app.services.transaction_ops.tax_correction import validate_approved
+
+                    try:
+                        await validate_approved(db, tenant_id, tool_name, tool_input, _so.get("accounting_review"))
+                    except Exception as exc:
+                        _confirm_msg.structured_output = {**_so, "status": "failed", "error": str(exc)}
+                        await log_event(
+                            db=db,
+                            tenant_id=tenant_id,
+                            actor_id=user_id,
+                            category="transaction_ops",
+                            action="accounting_correction.precondition_failed",
+                            resource_type="chat_message",
+                            resource_id=str(_confirm_msg.id),
+                            correlation_id=correlation_id,
+                            payload={"approved_by": str(user_id), "financial_writes": 0, "reason": str(exc)},
+                            status="error",
+                        )
+                        await db.commit()
+                        yield {"type": "error", "error": f"No change was sent to NetSuite: {exc}"}
+                        return
+
                 _exec_result_str = await execute_tool_call(
                     # The ONE place this may be True. `tool_name`/`tool_input`
                     # here came from validate_and_extract_confirmation, which
@@ -2284,6 +2343,8 @@ async def run_chat_turn(
                                 if isinstance(_exec_result, dict)
                                 else None
                             )
+                            if not _new_id and _mutation_type == "update":
+                                _new_id = _so.get("record_id")
                             if _new_id:
                                 # Resolve the account from the CONNECTOR that
                                 # executed this write, not from the tenant's
@@ -2334,6 +2395,43 @@ async def run_chat_turn(
                         "now risks creating it twice."
                     )
 
+                if _exec_succeeded and _so.get("accounting_review"):
+                    from app.services.transaction_ops.tax_correction import verify_after
+
+                    try:
+                        _verification = await verify_after(db, tenant_id, _so["accounting_review"])
+                    except Exception as exc:
+                        _verification = {"status": "needs_review", "reason": type(exc).__name__}
+                    await log_event(
+                        db=db,
+                        tenant_id=tenant_id,
+                        actor_id=user_id,
+                        category="transaction_ops",
+                        action="accounting_correction.verification.completed",
+                        resource_type="transaction_case",
+                        resource_id=_so["accounting_review"]["case_id"],
+                        correlation_id=correlation_id,
+                        payload={
+                            "approval_message_id": str(_confirm_msg.id),
+                            "approved_by": str(user_id),
+                            "before": _so["accounting_review"]["before"],
+                            "receipt": _exec_result,
+                            "verification": json.loads(json.dumps(_verification, default=str)),
+                        },
+                        status="success" if _verification["status"] == "verified" else "error",
+                    )
+                    if _verification["status"] == "verified":
+                        _confirm_content += (
+                            "\n\nInvoice total, tax and GL were independently re-read and verified. "
+                            "Sales-order reconciliation and deposit/cash settlement remain separate checks; no additional money was moved."
+                        )
+                    else:
+                        _confirm_content = (
+                            "NetSuite returned a response, but the invoice/GL correction is not verified. "
+                            "The case still needs review. Do not repeat this write."
+                        )
+                    _so = {**_so, "accounting_verification": json.loads(json.dumps(_verification, default=str))}
+
                 _updated_so = dict(_so)
                 if _exec_succeeded and _updated_so_record_url:
                     # Display-only, like field_labels: never part of the
@@ -2342,8 +2440,29 @@ async def run_chat_turn(
                 _repair_decision = None
                 _repair_root_id: str | None = None
                 _repair_current_attempt = 0
-                if _exec_succeeded:
+                if _mutation_type == "execute":
+                    # Arbitrary connectors do not share NetSuite's record schema
+                    # or repair semantics. Preserve successful data for the user
+                    # and subsequent agent turns; failures require a fresh request.
+                    from app.services.chat.write_confirmation_service import format_external_result
+
+                    _updated_so["status"] = "approved" if _exec_succeeded else _write_outcome
+                    if _exec_succeeded:
+                        _confirm_content = format_external_result(_exec_result)
+                    else:
+                        _updated_so["error"] = _exec_error or "The connected service did not confirm success."
+                        _confirm_content = (
+                            "The connected service did not confirm success. Check its current state before retrying."
+                            if _write_outcome == "indeterminate"
+                            else "The connected service reported a failed request."
+                        )
+                elif _exec_succeeded:
                     _updated_so["status"] = "approved"
+                elif _so.get("accounting_review"):
+                    # Accounting failures need new scoped evidence, never a speculative model repair.
+                    _updated_so["status"] = _write_outcome
+                    _updated_so["error"] = _exec_error
+                    _updated_so["repair_exit_reason"] = "fresh_accounting_evidence_required"
                 elif not may_enter_repair_loop(_write_outcome):
                     # TERMINAL, and deliberately NOT "failed" — calling this a
                     # failure is a claim about NetSuite we cannot support, and
@@ -3991,6 +4110,9 @@ async def run_chat_turn(
                             final_text,
                             _persisted_output,
                             tool_calls=coord_result_tool_calls,
+                            error=(agent_result.error or "agent_failed")
+                            if agent_result is not None and not agent_result.success
+                            else None,
                         ),
                         tool_calls=coord_result_tool_calls if coord_result_tool_calls else None,
                         citations=citations if citations else None,
