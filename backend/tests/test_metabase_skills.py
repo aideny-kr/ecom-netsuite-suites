@@ -243,6 +243,7 @@ async def test_tenant_gated_inventory_drives_skill_isolation():
 
     with (
         patch("app.services.chat.tools.build_local_tool_definitions", return_value=[]),
+        patch("app.services.chat.http_connector_tools.build_definitions", new=AsyncMock(return_value=[])),
         patch(
             "app.services.mcp_connector_service.get_active_connectors_for_tenant",
             new=AsyncMock(side_effect=connectors_for_tenant),

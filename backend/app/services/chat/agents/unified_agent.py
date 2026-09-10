@@ -751,6 +751,12 @@ class UnifiedAgent(BaseSpecialistAgent):
             parts.append("\n\n" + self._plan_mode_augmentation)
         if self._plan_mode_resume_directive:
             parts.append("\n\n" + self._plan_mode_resume_directive)
+        if getattr(self, "_selected_user_sources", ()):
+            parts.append(
+                "\nUser-selected data sources for this turn: "
+                + ", ".join(self._selected_user_sources)
+                + ". Honor this verified user choice even when older conversation text has been compacted."
+            )
         # Write-repair directive last — the most specific, most recent
         # instruction on a repair turn, so it must be able to override
         # anything framed above it (mirrors the Plan Mode ordering rule).
@@ -905,19 +911,21 @@ class UnifiedAgent(BaseSpecialistAgent):
                 plan_mode_resume_source,
                 active_connectors=self._connectors,
             )
-        from app.services.chat.source_selection import source_selection_question
+        from app.services.chat.source_selection import SourceSelection, resolve_source_selection
 
-        question = (
-            source_selection_question(
+        selection = (
+            resolve_source_selection(
                 task=context.get("source_selection_task", task),
                 tool_definitions=self._tool_defs or [],
+                conversation_history=context.get("source_selection_history"),
                 context_need=self._context_need,
             )
             if not (plan_mode_clarify_only or plan_mode_resume_source)
-            else None
+            else SourceSelection()
         )
-        if question:
-            return AgentResult(success=True, data=question, agent_name=self.agent_name)
+        self._selected_user_sources = selection.selected_sources
+        if selection.question:
+            return AgentResult(success=True, data=selection.question, agent_name=self.agent_name)
         return await super().run(
             task,
             context,
@@ -976,21 +984,22 @@ class UnifiedAgent(BaseSpecialistAgent):
                 plan_mode_resume_source,
                 active_connectors=self._connectors,
             )
-        from app.services.chat.source_selection import source_selection_question
+        from app.services.chat.source_selection import SourceSelection, resolve_source_selection
 
-        question = (
-            source_selection_question(
+        selection = (
+            resolve_source_selection(
                 task=context.get("source_selection_task", task),
                 tool_definitions=self._tool_defs or [],
-                conversation_history=conversation_history,
+                conversation_history=context.get("source_selection_history", conversation_history),
                 context_need=self._context_need,
             )
             if not (plan_mode_clarify_only or plan_mode_resume_source)
-            else None
+            else SourceSelection()
         )
-        if question:
-            yield "text", question
-            yield "response", AgentResult(success=True, data=question, agent_name=self.agent_name)
+        self._selected_user_sources = selection.selected_sources
+        if selection.question:
+            yield "text", selection.question
+            yield "response", AgentResult(success=True, data=selection.question, agent_name=self.agent_name)
             return
         async for event in super().run_streaming(
             task,

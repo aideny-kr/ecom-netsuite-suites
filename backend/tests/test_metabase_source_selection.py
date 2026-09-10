@@ -82,6 +82,79 @@ def test_no_query_gate_for_single_source_or_documentation():
     )
 
 
+@pytest.mark.parametrize("status", ["chosen", "pending", "rejected"])
+def test_verified_card_choice_survives_ui_pick_text_and_history_compaction(status):
+    from app.services.chat.history_tool_trace import build_history_dicts
+
+    messages = [
+        {
+            "role": "assistant",
+            "content": "",
+            "structured_output": {
+                "type": "clarification",
+                "status": status,
+                "chosen_id": "B",
+                "options": [{"id": "A", "source": "netsuite"}, {"id": "B", "source": "metabase"}],
+            },
+        },
+        {"role": "user", "content": "Picked option B"},
+        {"role": "assistant", "content": "65 orders"},
+    ]
+    result = source_selection_question(
+        task="Break that down by status", tool_definitions=inventory(), conversation_history=messages
+    )
+    assert (result is None) is (status == "chosen")
+    if status == "chosen":
+        history, _ = build_history_dicts(messages, keep_recent=4)
+        assert "User selected option B (source: metabase)" in history[0]["content"]
+        # A newer refusal supersedes an earlier resolved card.
+        assert source_selection_question(
+            task="Do not use Metabase", tool_definitions=inventory(), conversation_history=messages
+        )
+
+
+async def test_non_streaming_gate_uses_server_history_with_card_selection():
+    from app.services.chat.agents.base_agent import AgentResult, BaseSpecialistAgent
+
+    agent = UnifiedAgent(
+        tenant_id=uuid.uuid4(), user_id=uuid.uuid4(), correlation_id="card-source", context_need="data"
+    )
+    agent._tool_defs = inventory()
+    history = [
+        {
+            "role": "assistant",
+            "structured_output": {
+                "type": "clarification",
+                "status": "chosen",
+                "chosen_id": "B",
+                "options": [{"id": "B", "source": "metabase"}],
+            },
+        }
+    ]
+    with (
+        patch.object(agent, "_setup_context", new=AsyncMock(return_value="Break down orders")),
+        patch.object(
+            BaseSpecialistAgent, "run", new=AsyncMock(return_value=AgentResult(success=True, data="answer"))
+        ) as run,
+    ):
+        result = await agent.run("Break down orders", {"source_selection_history": history}, None, AsyncMock(), "test")
+    assert result.data == "answer"
+    run.assert_awaited_once()
+    assert "User-selected data sources for this turn: metabase" in agent.system_prompt
+
+
+def test_older_user_source_choice_is_resolved_outside_llm_history_window():
+    from app.services.chat.source_selection import resolve_source_selection
+
+    messages = [{"role": "user", "content": "Use Metabase"}]
+    messages.extend({"role": "assistant", "content": "Done"} for _ in range(60))
+    selection = resolve_source_selection(
+        task="Break down the orders", tool_definitions=inventory(), conversation_history=messages
+    )
+    assert selection.question is None
+    assert selection.selected_sources == ("metabase",)
+
+
 @pytest.mark.parametrize("streaming", [True, False])
 async def test_source_gate_never_calls_model_or_data_tools(streaming):
     agent = UnifiedAgent(
