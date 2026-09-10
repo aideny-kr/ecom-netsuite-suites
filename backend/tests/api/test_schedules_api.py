@@ -1249,3 +1249,55 @@ class TestScheduleRunsList:
         user, headers = admin_user
         resp = await client.get(f"/api/v1/schedules/{uuid.uuid4()}/runs", headers=headers)
         assert resp.status_code == 404
+
+    async def test_runs_list_excludes_the_celery_wrappers_own_instrumentation_row(
+        self, client: AsyncClient, admin_user, db: AsyncSession
+    ):
+        """Live-run defect (brief G, item 3): `tasks.scheduled_jobs_run_now`
+        runs as an `InstrumentedTask` (`app/workers/base_task.py`), which
+        auto-creates its OWN `jobs` row — `job_type=self.name` (the task
+        name, not "scheduled_job") with `parameters=kwargs`, and its kwargs
+        include `schedule_id` (the same schedule this endpoint is asking
+        about). Filtering by `parameters["schedule_id"]` alone therefore
+        matches that wrapper row too, appearing as a second "run" with
+        `plan_version`/`attempt` always null. Only the real
+        `job_type="scheduled_job"` row belongs in this list."""
+        user, headers = admin_user
+        tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
+        schedule = await _seed_job_schedule(db, tenant, plan_json=_INVENTORY_AGING_PLAN, plan_status="approved")
+
+        real_run = Job(
+            tenant_id=user.tenant_id,
+            job_type="scheduled_job",
+            status="completed",
+            started_at=datetime.now(timezone.utc),
+            completed_at=datetime.now(timezone.utc),
+            parameters={"schedule_id": str(schedule.id), "plan_version": 1, "attempt": 1},
+            result_summary={"reason": "done"},
+        )
+        db.add(real_run)
+        await db.flush()
+
+        wrapper_row = Job(
+            tenant_id=user.tenant_id,
+            job_type="tasks.scheduled_jobs_run_now",
+            status="completed",
+            started_at=datetime.now(timezone.utc),
+            completed_at=datetime.now(timezone.utc),
+            parameters={
+                "schedule_id": str(schedule.id),
+                "tenant_id": str(user.tenant_id),
+                "use_pending": False,
+                "actor_id": None,
+                "job_id": str(real_run.id),
+            },
+            result_summary=None,
+        )
+        db.add(wrapper_row)
+        await db.commit()
+
+        resp = await client.get(f"/api/v1/schedules/{schedule.id}/runs", headers=headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["id"] == str(real_run.id)

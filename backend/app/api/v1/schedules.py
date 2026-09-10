@@ -618,13 +618,25 @@ async def list_runs(
     row there with `parameters["schedule_id"]` set to this schedule's id
     (`app.workers.tasks.scheduled_jobs.run_schedule_now`); tenant-scoped on
     `Job.tenant_id` too so this can never leak another tenant's row even if
-    a schedule id were guessed."""
+    a schedule id were guessed.
+
+    Item 3 (live-run defect fix): also filters on `Job.job_type ==
+    "scheduled_job"` — `tasks.scheduled_jobs_run_now`'s own `InstrumentedTask`
+    base (`app/workers/base_task.py`) auto-creates a SEPARATE `jobs` row for
+    itself (`job_type=self.name`, i.e. `"tasks.scheduled_jobs_run_now"`, with
+    `parameters=kwargs`), and those kwargs carry the same `schedule_id` this
+    endpoint is asking about. Without this filter, that wrapper row matches
+    the `parameters["schedule_id"]` lookup too and appears as a SECOND run
+    with `plan_version`/`attempt` always null (`schedule_run_stats` and
+    `tenant_run_totals_7d` in `schedule_service.py` already carry this same
+    filter — this endpoint was the one gap)."""
     await _get_or_404(db, schedule_id, user.tenant_id)  # 404s cleanly if not this tenant's
 
     result = await db.execute(
         select(Job)
         .where(
             Job.tenant_id == user.tenant_id,
+            Job.job_type == "scheduled_job",
             Job.parameters["schedule_id"].astext == str(schedule_id),
         )
         .order_by(Job.created_at.desc())
