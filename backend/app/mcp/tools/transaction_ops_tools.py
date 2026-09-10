@@ -131,6 +131,8 @@ def _finding_rows(findings):
 
 
 def _finding_summary(finding):
+    from app.services.transaction_ops.accounting_review import metric_assessment
+
     report = finding.report_json
     balance, comparison = report.get("balance") or {}, report.get("comparison") or {}
     automation = report.get("automation") or {}
@@ -139,6 +141,11 @@ def _finding_summary(finding):
         "case_id": _text(report.get("case_id")),
         "reconciliation_status": _text(balance.get("status")),
         "reason": _text(balance.get("reason")),
+        "reconciliation": metric_assessment(report),
+        "observed_at": {
+            "source": _text(balance.get("source_observed_at") or (report.get("source") or {}).get("observed_at")),
+            "target": _text(balance.get("target_observed_at")),
+        },
         "missing_metrics": [
             key for key in ("order_total", "tax", "refunds") if key in balance.get("missing_metrics", [])
         ],
@@ -228,6 +235,7 @@ async def _execute(operation, params, context):
             raise _ToolError("invalid_parameters")
         if "case_id" in params:
             from app.services.transaction_ops import case_service
+            from app.services.transaction_ops.accounting_review import accounting_context
             from app.services.transaction_ops.resolution_guidance import investigation_guidance
             from app.services.transaction_ops.resolution_history import history
 
@@ -244,6 +252,9 @@ async def _execute(operation, params, context):
                 "last_observed_at": case.last_observed_at.isoformat(),
                 "findings": [_finding_summary(finding)],
                 "investigation_guidance": investigation_guidance(case.latest_report_json),
+                "accounting_review": await accounting_context(
+                    db, tenant_id, getattr(case, "scope_json", None) or {}, case.latest_report_json
+                ),
                 "resolution_history": resolutions["resolutions"],
                 "resolution_examples": resolutions["examples"],
                 "resolution_usage": resolutions["usage"],
@@ -280,6 +291,8 @@ async def _execute(operation, params, context):
             from app.services.transaction_ops.continuation import continuation_result
 
             child, blocked = await continuation_result(db, tenant_id, run_id)
+        from app.services.transaction_ops.accounting_review import accounting_context
+
         return {
             "success": True,
             "run_id": str(run.id),
@@ -290,6 +303,12 @@ async def _execute(operation, params, context):
             "continuation_blocked": blocked,
             "review_url": f"/transaction-operations/runs/{run.id}",
             "findings": [_finding_summary(finding) for finding in findings[:50]],
+            "accounting_review": await accounting_context(
+                db,
+                tenant_id,
+                getattr(run, "config_snapshot", None) or {},
+                findings[0].report_json if len(findings) == 1 else None,
+            ),
             "proposals": [
                 {
                     "id": str(proposal.id),

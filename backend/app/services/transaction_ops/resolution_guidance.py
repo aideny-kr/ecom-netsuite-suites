@@ -15,7 +15,13 @@ def investigation_guidance(report):
     result = {
         "kind": "investigation_guidance",
         "executable": False,
-        "evidence_basis": "stored_observation_requires_refresh",
+        "evidence_basis": "stored_observation",
+        "freshness": "Use source/target observation timestamps. Stored does not mean stale. Reuse recent evidence "
+        "for investigation; refresh missing/changed details and revalidate before preparing or executing a correction.",
+        "accounting_scope": "These routes are investigation steps, not a validated accounting treatment. "
+        "Validate the actual connected NetSuite account/environment, subsidiary, currency, native lifecycle, "
+        "tax regime, posted documents and period before selecting a correction. Header matching and repair "
+        "readiness are distinct; sales orders are non-posting and do not prove invoice or GL impact.",
         "routes": [],
         "execution_requirements": (
             "Refresh scoped source and NetSuite evidence; prepare an exact supported proposal; "
