@@ -159,6 +159,7 @@ async def test_group_uses_existing_human_approval_path_and_persists_per_order_re
     db = MagicMock()
     db.scalar = AsyncMock(side_effect=list(children.values()))
     db.commit = AsyncMock()
+    db.flush = AsyncMock()
     if outcome == "changed":
         next(iter(children.values())).structured_output["status"] = "approved"
     elif outcome == "wrong_tenant":
@@ -199,6 +200,7 @@ async def test_group_uses_existing_human_approval_path_and_persists_per_order_re
     monkeypatch.setattr("app.services.policy_service.get_active_policy", AsyncMock(return_value=None))
     monkeypatch.setattr("app.services.chat.orchestrator._cas_claim_write_confirmation", claim)
     monkeypatch.setattr("app.services.chat.orchestrator.run_chat_turn", original_path)
+    monkeypatch.setattr("app.services.transaction_ops.accounting_recovery.refresh_group", AsyncMock())
     tenant_id = uuid4() if outcome == "wrong_tenant" else session.tenant_id
     iterator = mod.run_group_confirmation(
         db=db,

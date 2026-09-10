@@ -48,7 +48,7 @@ async def test_unknown_is_queued_for_reads_once_and_completed_recovery_does_not_
 
 
 def test_action_workers_are_bounded_without_broker_retries_and_have_a_minute_collector():
-    for name in ("execute", "recover", "collect_actions"):
+    for name in ("execute", "recover", "recover_credit", "collect_actions"):
         task = getattr(workers, f"transaction_ops_{name}")
         assert task.name == f"tasks.transaction_ops_{name}"
         assert isinstance(task, InstrumentedTask) and task.max_retries == 0

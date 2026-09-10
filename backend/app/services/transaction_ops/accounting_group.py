@@ -297,7 +297,7 @@ def validate_manifest(so, session_id):
 
 
 @asynccontextmanager
-async def accounting_write_slot(proposal):
+async def accounting_write_slot(proposal, *, lock_engine=None):
     """Account-wide cap across processes; serialize all cards for the same invoice.
 
     Dedicated connection retains session locks across the existing audit/CAS commits.
@@ -309,7 +309,7 @@ async def accounting_write_slot(proposal):
     def key(value):
         return int.from_bytes(hashlib.sha256(value.encode()).digest()[:8], "big", signed=True)
 
-    async with engine.connect() as connection:
+    async with (lock_engine if lock_engine is not None else engine).connect() as connection:
         try:
             record_type = "invoice" if proposal.get("kind") == "sales_adjustment_credit" else proposal["record_type"]
             record = key(f"accounting-write:{account}:{record_type}:{proposal['record_id']}")
@@ -490,6 +490,19 @@ async def run_group_confirmation(*, db, session, message, so, action, user_id, t
         )
     )
     message.content = note
+    if action == "approve":
+        # A bounded read-only recovery may finish an earlier child while this
+        # batch is still draining. Render durable outcomes, not stale snapshots.
+        from app.services.transaction_ops.accounting_recovery import refresh_group
+
+        await db.flush()
+        await refresh_group(db, tenant_id, session.id, message.id)
+        final, note = message.structured_output, message.content
+        status = final["status"]
+        verified = sum(
+            (m.get("card", {}).get("accounting_verification") or {}).get("status") == "verified"
+            for m in final["accounting_group"]["members"]
+        )
     await log_event(
         db,
         tenant_id,

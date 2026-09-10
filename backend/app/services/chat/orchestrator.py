@@ -1830,6 +1830,20 @@ async def _cas_claim_write_confirmation(
     )
     if cas_result.rowcount == 0:
         return False
+    if new_status == "executing" and so.get("accounting_execution"):
+        from app.services.transaction_ops.accounting_recovery import CLAIM_ACTION
+
+        claim = so["accounting_execution"]
+        await log_event(
+            db,
+            confirm_msg.tenant_id,
+            "transaction_ops",
+            CLAIM_ACTION,
+            actor_id=uuid.UUID(claim["approved_by"]),
+            resource_type="chat_message",
+            resource_id=str(confirm_msg.id),
+            payload={**claim, "financial_writes": 0},
+        )
     await db.commit()
     return True
 
@@ -2307,6 +2321,12 @@ async def run_chat_turn(
                     except Exception as exc:
                         yield {"type": "error", "error": f"No update was sent: {exc}"}
                         return
+                if (_so.get("accounting_review") or {}).get("kind") == "sales_adjustment_credit":
+                    from app.services.transaction_ops.accounting_recovery import execution_claim
+
+                    _so = execution_claim(
+                        _so, _confirm_msg.id, user_id, _approval_context, now=datetime.now(timezone.utc)
+                    )
                 _claimed = await _cas_claim_write_confirmation(db, _confirm_msg, _so, "executing")
                 if not _claimed:
                     yield {
@@ -2323,14 +2343,10 @@ async def run_chat_turn(
                 # final message write below are tenant-scoped writes.
                 await set_tenant_context(db, str(tenant_id))
 
-                # A crash between the claim above and the status write below
-                # (process kill, OOM, deploy) deliberately leaves this row
-                # at status='executing' forever — no automatic recovery.
-                # That is correct, not a bug: we genuinely do not know
-                # whether NetSuite received the write, and guessing (auto-
-                # retry, auto-revert-to-pending) risks a SECOND post for a
-                # write NetSuite already accepted. A human must check the
-                # NetSuite record and resolve it manually.
+                # A crash leaves the claim executing. Credit recovery may only
+                # read its stable external ID and prove the exact application/GL;
+                # it never resubmits a write or restores a pending approval.
+                # Other write types still require manual outcome investigation.
                 # Accounting tax corrections carry server-built source and native preconditions.
                 # Check again after the single-use approval claim, immediately before any write.
                 if _so.get("mutation_type") in ("update", "create"):
@@ -2515,6 +2531,14 @@ async def run_chat_turn(
                     _write_outcome == "indeterminate"
                     and (_so.get("accounting_review") or {}).get("kind") == "sales_adjustment_credit"
                 )
+                if _so.get("accounting_execution") and isinstance(_exec_result, dict):
+                    # Retain a returned native identity even when verification
+                    # fails, so later recovery cannot ignore a conflicting receipt.
+                    _receipt_ids = {k: _exec_result[k] for k in ("recordId", "id", "internalId") if _exec_result.get(k)}
+                    _so = {
+                        **_so,
+                        "accounting_execution": {**_so["accounting_execution"], "receipt": _receipt_ids},
+                    }
                 if (_exec_succeeded or _credit_recovery) and _so.get("accounting_review"):
                     from app.services.transaction_ops.tax_correction import verify_after
 
