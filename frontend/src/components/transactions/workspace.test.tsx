@@ -395,7 +395,9 @@ it("exports the full filter scope without including pagination parameters", asyn
     Object.assign(URL, { createObjectURL: create, revokeObjectURL: revoke }),
   );
   vi.mocked(apiClient.download).mockResolvedValue(
-    new Response(new Blob(["workbook"]), {
+    // A string body, not a jsdom Blob: Node's Response needs a web Blob with
+    // .stream(), which jsdom's Blob lacks ("object.stream is not a function").
+    new Response("workbook", {
       headers: {
         "content-type":
           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

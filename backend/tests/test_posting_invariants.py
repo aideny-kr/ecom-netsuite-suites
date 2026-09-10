@@ -13,6 +13,24 @@ EXT = "ext__" + "a" * 32 + "__ns_createRecord"
 KW = dict(mutation_tool_name=EXT, tenant_id=None, actor_id=None, correlation_id="c", db=None, session_id="s")
 
 
+@pytest.fixture(autouse=True)
+async def _dispose_shared_audit_engine():
+    """The real-dispatcher tests below (test_period_lookup_sends_sqlquery_not_query,
+    test_closed_period_is_detected_through_the_real_dispatcher) route through
+    external_tool_audit.append_event, which opens a session on app.core.database's
+    process-wide `engine` — not this file's isolated per-test `db` fixture. Pytest-asyncio
+    gives each async test its own event loop, and SQLAlchemy's pool checks a still-live
+    asyncpg connection back in at teardown, ready to be handed to whichever test asks
+    next — including one on a LATER, different loop, which asyncpg cannot survive
+    (RuntimeError: ...attached to a different loop; reproduces every time between these
+    two tests in this order). Dispose the shared engine's pool here, in the SAME loop the
+    connection was opened on, before that loop closes, so nothing leaks into a later test."""
+    yield
+    from app.core.database import engine
+
+    await engine.dispose()
+
+
 @pytest.mark.asyncio
 async def test_unbalanced_journal_entry_is_rejected(monkeypatch):
     async def no_period(**kwargs):
@@ -226,12 +244,18 @@ async def test_period_lookup_sends_sqlquery_not_query():
     mock_session.initialize = AsyncMock()
     mock_session.call_tool = AsyncMock(return_value=mock_result)
 
+    # This test goes through the REAL dispatcher (only the MCP wire boundary is
+    # mocked below), which validates tenant_id as an actual UUID (set_tenant_context,
+    # invoked from external_tool_audit.append_event's own DB session) — unlike the
+    # tests above, which monkeypatch pi.execute_tool_call away entirely and so never
+    # reach that validation. KW's tenant_id=None is only safe for those; give this
+    # one real ids.
     tp, sp, cp = _mock_mcp_wire(mock_session)
     with tp, sp, cp:
         errors = await pi.check_posting_invariants(
             payload=NormalizedPayload(fields={"trandate": "2026-08-19"}, lines=[]),
             record_type="invoice",
-            **KW,
+            **{**KW, "tenant_id": uuid.uuid4(), "actor_id": uuid.uuid4()},
         )
 
     assert errors == []
@@ -280,12 +304,15 @@ async def test_closed_period_is_detected_through_the_real_dispatcher():
     mock_session.initialize = AsyncMock()
     mock_session.call_tool = call_tool
 
+    # Real dispatcher again (see test_period_lookup_sends_sqlquery_not_query above) —
+    # tenant_id must be a real UUID or set_tenant_context (inside
+    # external_tool_audit.append_event) raises before call_tool is ever reached.
     tp, sp, cp = _mock_mcp_wire(mock_session)
     with tp, sp, cp:
         errors = await pi.check_posting_invariants(
             payload=NormalizedPayload(fields={"trandate": "2026-07-15"}, lines=[]),
             record_type="invoice",
-            **KW,
+            **{**KW, "tenant_id": uuid.uuid4(), "actor_id": uuid.uuid4()},
         )
 
     assert any("closed" in e.lower() and "jul 2026" in e.lower() for e in errors), errors

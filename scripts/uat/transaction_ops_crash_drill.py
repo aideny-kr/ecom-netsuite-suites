@@ -80,11 +80,18 @@ from tests.test_transaction_ops_planner import planning_case
 from tests.test_transaction_ops_state_db import seed_config
 
 TOKEN = "illustrative-crash-drill-token"
+# Dependency order for DELETE: children before the parents they reference (096_transaction_ops_state
+# through 107_transaction_settlement_queue). Every finished run calls case_service.observe_finding
+# (state_service.py), which upserts transaction_cases/transaction_case_observations against the run —
+# those must be cleared before transaction_ops_runs, or cleanup dies on
+# transaction_case_observations_tenant_id_run_id_fkey.
 TABLES = (
-    "transaction_ops_operations",
-    "transaction_ops_proposals",
-    "transaction_ops_findings",
-    "transaction_ops_runs",
+    "transaction_ops_operations",  # -> transaction_ops_proposals
+    "transaction_case_observations",  # -> transaction_cases, transaction_ops_runs
+    "transaction_ops_proposals",  # -> transaction_ops_configs, transaction_ops_runs
+    "transaction_ops_findings",  # -> transaction_ops_runs
+    "transaction_cases",  # referenced by transaction_case_observations (already cleared above)
+    "transaction_ops_runs",  # -> transaction_ops_configs
     "transaction_ops_configs",
     "audit_events",
     "celigo_flow_steps",
@@ -286,6 +293,14 @@ async def cleanup(factory, tenant_id, slug):
             return
         assert actual == slug and slug.startswith("tx-crash-drill-")
         await set_tenant_context(db, str(tenant_id))
+        # transaction_cases / transaction_case_observations (106_transaction_cases) are
+        # DB-trigger immutable: transaction_case_guard() raises on ANY delete, full stop —
+        # every finished run writes one via case_service.observe_finding (state_service.py),
+        # so this synthetic tenant always has rows there. Since the whole tenant is being
+        # destroyed anyway, bypass trigger + FK-constraint-trigger firing for this cleanup
+        # transaction only (superuser-only GUC; every DELETE below still filters by
+        # tenant_id, so only this tenant's rows are ever touched).
+        await db.execute(text("SET LOCAL session_replication_role = replica"))
         for table in TABLES:
             await db.execute(text(f'DELETE FROM "{table}" WHERE tenant_id=:id'), {"id": tenant_id})
         await db.execute(

@@ -17,6 +17,18 @@ from app.services.chat.tools import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _mock_external_tool_audit(monkeypatch):
+    """external_tool_audit.append_event opens its own async_session_factory() session per
+    call (fail-closed by design, see external_tool_audit.py) — independent of the `db`
+    fixture these tests pass around. That is real DB integration behavior this module does
+    not otherwise exercise, so patch it rather than let it try a real session (which raises
+    'Event loop is closed' once this test's own event loop has torn down)."""
+    mock = AsyncMock()
+    monkeypatch.setattr("app.services.chat.external_tool_audit.append_event", mock)
+    return mock
+
+
 class TestExecuteToolCallRouting:
     """Test that execute_tool_call routes correctly to local vs external."""
 
@@ -53,7 +65,7 @@ class TestExecuteToolCallRouting:
         assert "not allowed" in parsed["error"]
 
     @pytest.mark.asyncio
-    async def test_external_tool_nonexistent_connector(self, db):
+    async def test_external_tool_nonexistent_connector(self, db, _mock_external_tool_audit):
         """External tool with non-existent connector returns error."""
         connector_id = uuid.uuid4()
         tool_name = _make_ext_tool_name(connector_id, "some_tool")
@@ -68,6 +80,8 @@ class TestExecuteToolCallRouting:
         parsed = json.loads(result)
         assert "error" in parsed
         assert "not found or disabled" in parsed["error"]
+        requested = [c for c in _mock_external_tool_audit.await_args_list if c.kwargs["action"] == "tool.requested"]
+        assert requested, "external call never reached external_tool_audit.append_event"
 
 
 class TestToolNameRoundTrip:

@@ -42,6 +42,12 @@ _ALLOWED_OTHER_CHAT_TOOLS: frozenset[str] = frozenset(
         # deterministic server-side (nobody eyeballs 200 rows), which is a
         # recorded precondition of the batch slice, not a hope.
         "task_file.read",
+        # Bounded case-investigation evidence PLUS an `interpretation` narrative the model
+        # must read and reason over (root cause / tax legality / correction readiness) to
+        # decide the next action — not a row dump the model should stop restating; see
+        # accounting_evidence.py's `interpretation` field and collect_accounting_evidence().
+        "transaction_ops.accounting_evidence",
+        "transaction_ops.accounting_group",
         "suitescript.sync",  # control action, no data rows
         "tenant.save_learned_rule",  # write-side control action, no data rows
         "workspace.run_validate",  # validator output the LLM reads

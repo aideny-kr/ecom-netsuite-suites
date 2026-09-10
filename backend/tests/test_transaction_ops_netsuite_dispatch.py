@@ -282,7 +282,25 @@ async def test_dispatch_has_time_for_preflight_and_write_but_never_extends_opera
     actor, _, claim, _ = dispatch_case
     requests, handler = transport(dispatch_case)
     monkeypatch.setattr(mod, "READ_TIMEOUT_SECONDS", 0.05)
-    monkeypatch.setattr(mod, "DISPATCH_TIMEOUT_SECONDS", 1, raising=False)
+    # dispatch_netsuite_operation's ONLY timeout is asyncio.timeout(min(DISPATCH_TIMEOUT_SECONDS,
+    # remaining)) around its whole run() (guard read + write) -- READ_TIMEOUT_SECONDS above is not
+    # consumed on this call path at all (only read_guard_snapshot/read_create_preview/
+    # read_created_snapshot use it) and is a no-op here.
+    #
+    # For near_deadline=True, `remaining` is pinned to ~0.04s by the NearDeadline clock patch
+    # below, and min() picks that regardless of DISPATCH_TIMEOUT_SECONDS as long as it stays
+    # above ~0.04s -- so widening it here does not change that case's behavior.
+    #
+    # For near_deadline=False, `remaining` comes from the real 900s config deadline, so
+    # DISPATCH_TIMEOUT_SECONDS IS the binding budget around real DB round trips (permit
+    # reservation, guard connection/config reads, dispatch reservation) plus the mocked
+    # HTTP guard read and the deliberate 0.10s POST delay below. 1s measured ~8x local
+    # margin (call phase ~0.12s) -- too thin for a loaded CI runner, and CI hit exactly this:
+    # NetSuiteActionError("guard_read_timeout") on [False], reproduced locally by tightening
+    # this same value. 30s keeps the wall-clock budget a well-defined TEST constant (still far
+    # below the real production DISPATCH_TIMEOUT_SECONDS=120) while giving real DB I/O room
+    # under load, without touching any production timeout.
+    monkeypatch.setattr(mod, "DISPATCH_TIMEOUT_SECONDS", 30, raising=False)
     if near_deadline:
         row = (
             await db.execute(select(TransactionOperation).where(TransactionOperation.id == claim.operation_id))

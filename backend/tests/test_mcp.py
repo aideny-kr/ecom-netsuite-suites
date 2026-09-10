@@ -2,6 +2,8 @@
 
 import uuid
 
+import pytest
+
 from app.mcp.governance import (
     TOOL_CONFIGS,
     check_rate_limit,
@@ -52,6 +54,44 @@ class TestParamValidation:
         # schedule.list has empty allowlisted_params
         result = validate_params("schedule.list", {"extra": "value"})
         assert "extra" in result
+
+    def test_schedule_create_allowlist_lets_every_registry_field_through(self):
+        """Item 6 (gate fix): the OLD allowlist (name, schedule_type, cron,
+        params) stripped instruction/timezone/delivery before execute_create
+        ever saw them — a chat-created Scheduled Job silently fell through
+        to the legacy path. Every field the registry's own params_schema
+        declares for schedule.create must survive validate_params."""
+        result = validate_params(
+            "schedule.create",
+            {
+                "instruction": "weekly inventory aging report",
+                "name": "Inventory Aging Weekly",
+                "schedule_type": "job",
+                "cron": "0 6 * * 1",
+                "timezone": "America/Los_Angeles",
+                "delivery": {"drive": True},
+                "params": {"a": 1},
+                "evil_param": "DROP TABLE",
+            },
+        )
+        assert result == {
+            "instruction": "weekly inventory aging report",
+            "name": "Inventory Aging Weekly",
+            "schedule_type": "job",
+            "cron": "0 6 * * 1",
+            "timezone": "America/Los_Angeles",
+            "delivery": {"drive": True},
+            "params": {"a": 1},
+        }
+
+    def test_schedule_run_allowlist_lets_use_pending_through(self):
+        """Item 6 (gate fix): the OLD allowlist (schedule_id only) stripped
+        use_pending before execute_run ever saw it."""
+        result = validate_params(
+            "schedule.run",
+            {"schedule_id": "abc-123", "use_pending": True, "evil_param": "DROP TABLE"},
+        )
+        assert result == {"schedule_id": "abc-123", "use_pending": True}
 
 
 class TestRateLimiting:
@@ -213,6 +253,70 @@ class TestGovernedExecute:
         assert "Tool broke" in result["error"]
 
 
+class TestGovernedExecuteReestablishesTenantContext:
+    """Item 5 (delta gate fix E): the "re-set tenant context after commit"
+    block used to be pasted into each MCP handler that commits mid-call
+    (schedule_ops.py's execute_create/execute_run, each carrying its own
+    identical comment) -- moved to the ONE choke point every tool call
+    passes through, `governed_execute`, immediately after `execute_fn`
+    returns (success or error path). A REAL commit is needed to exercise
+    this (the shared test `db` fixture's own commit is a RELEASE SAVEPOINT,
+    which does NOT clear `SET LOCAL` GUCs -- see
+    tests/test_schedule_ops_tool.py's own `_spy_commit_then_ctx` docstring),
+    so this opens its own engine/session exactly like
+    tests/jobs/test_executor.py::test_skip_locked_prevents_double_run does,
+    skipping the same way against a non-local database."""
+
+    async def test_a_handler_that_commits_leaves_tenant_context_set_afterward(self):
+        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+
+        from app.core.config import settings
+        from app.core.database import set_tenant_context
+        from tests.conftest import create_test_tenant
+
+        reset_rate_limit()
+        db_url = settings.DATABASE_URL_DIRECT or settings.DATABASE_URL
+        if "supabase" in db_url:
+            pytest.skip("real-commit tenant-context test runs against LOCAL docker only")
+
+        engine = create_async_engine(db_url, echo=False)
+        try:
+            async with AsyncSession(engine, expire_on_commit=False) as db:
+                tenant = await create_test_tenant(
+                    db, name="GovernedExecuteCtxCo", slug=f"gov-ctx-{uuid.uuid4().hex[:8]}"
+                )
+                await db.commit()
+                tenant_id = tenant.id
+                await set_tenant_context(db, str(tenant_id))
+
+                async def commits_mid_call(params, **kwargs):
+                    ctx = kwargs["context"]
+                    inner_db = ctx["db"]
+                    # Mirrors a real handler (schedule_ops.py's execute_create/
+                    # execute_run): a REAL commit mid-call clears SET LOCAL.
+                    await inner_db.commit()
+                    return {"status": "ok"}
+
+                result = await governed_execute(
+                    tool_name="schedule.run",
+                    params={"schedule_id": str(uuid.uuid4())},
+                    tenant_id=str(tenant_id),
+                    actor_id=None,
+                    execute_fn=commits_mid_call,
+                    db=db,
+                )
+                assert "error" not in result
+
+                try:
+                    row = (await db.execute(text("SELECT current_setting('app.current_tenant_id', true)"))).scalar_one()
+                except Exception as exc:
+                    pytest.fail(f"tenant context was not usable after governed_execute: {exc}")
+                assert row == str(tenant_id)
+        finally:
+            await engine.dispose()
+
+
 class TestToolConfigs:
     """Verify all expected tools are configured."""
 
@@ -221,6 +325,9 @@ class TestToolConfigs:
             "transaction_ops.configs",
             "transaction_ops.run",
             "transaction_ops.status",
+            "transaction_ops.groups",
+            "transaction_ops.accounting_evidence",
+            "transaction_ops.accounting_group",
             "health",
             "netsuite.suiteql",
             "netsuite.suiteql_stub",
@@ -264,3 +371,24 @@ class TestToolConfigs:
             assert "rate_limit_per_minute" in config, f"{name} missing rate_limit_per_minute"
             assert "requires_entitlement" in config, f"{name} missing requires_entitlement"
             assert "allowlisted_params" in config, f"{name} missing allowlisted_params"
+
+    def test_schedule_tool_allowlists_never_drift_from_the_registry_params_schema(self):
+        """Item 6 (gate fix): governed_execute -> validate_params filters
+        params to `allowlisted_params` BEFORE the tool's own execute() ever
+        sees them — a param the registry's params_schema declares but this
+        allowlist omits silently vanishes rather than raising anywhere.
+        Scoped to schedule.* deliberately (not every TOOL_CONFIGS entry):
+        two pre-existing tools already violate this same invariant —
+        netsuite.suiteql (registry declares `user_question`, not in the
+        allowlist — a prompt-guidance-only field, intentionally stripped)
+        and workspace.list_files (allowlist carries a `limit` the registry
+        schema doesn't declare) — fixing those is a separate, wider change
+        this item does not scope to."""
+        from app.mcp.registry import TOOL_REGISTRY
+
+        for name in ("schedule.create", "schedule.list", "schedule.run"):
+            allow = set(TOOL_CONFIGS[name].get("allowlisted_params") or [])
+            if not allow:
+                continue
+            schema_keys = set((TOOL_REGISTRY[name].get("params_schema") or {}).keys())
+            assert allow == schema_keys, f"{name}: allowlist={sorted(allow)} vs registry={sorted(schema_keys)}"

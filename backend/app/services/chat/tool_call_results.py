@@ -130,6 +130,28 @@ def summarize_tool_result(tool_name: str, result_str: str) -> str:
                 }
             )
 
+        # Scheduled Jobs platform (Slice 2, Task 7) — schedule.create's success
+        # shape (app/mcp/tools/schedule_ops.py::execute_create) carries the
+        # schedule_id the chat hand-off card (schedule-created-card.tsx) needs
+        # to link "Review the plan on Scheduled jobs →" to
+        # /scheduled-jobs/{id}. Same precedent as workspace_propose_patch just
+        # above: allowlist the fields the frontend reads rather than let the
+        # generic result_str[:500] fallback below risk truncating schedule_id
+        # off the end behind an arbitrary-length summary_line. The
+        # clarification shape ({"error": True, "clarification": True,
+        # "message": ...}) has no schedule_id and was already returned above
+        # by the error-message branch, so it never reaches here.
+        if tool_name == "schedule.create" and parsed.get("schedule_id"):
+            return json.dumps(
+                {
+                    "schedule_id": parsed["schedule_id"],
+                    "name": parsed.get("name", ""),
+                    "schedule_type": parsed.get("schedule_type", ""),
+                    "plan_status": parsed.get("plan_status", ""),
+                    "summary_line": parsed.get("summary_line", ""),
+                }
+            )
+
     # Try to compute a row count from any known shape
     row_count: int | None = None
     if isinstance(parsed, dict):

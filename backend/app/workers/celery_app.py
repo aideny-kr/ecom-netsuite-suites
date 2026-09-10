@@ -55,6 +55,7 @@ celery_app.conf.include = [
     "app.workers.tasks.recon_resolution_agent",
     "app.workers.tasks.report_auto_refresh",
     "app.workers.tasks.rolling_period_compose",
+    "app.workers.tasks.scheduled_jobs",
     "app.workers.tasks.suitescript_sync",
     "app.workers.tasks.suiteql_export",
     "app.workers.tasks.workspace_run",
@@ -156,5 +157,15 @@ celery_app.conf.beat_schedule = {
     "metric-catalog-reseed": {
         "task": "tasks.metric_catalog_reseed",
         "schedule": crontab(hour=5, minute=30),  # 05:30 UTC daily
+    },
+    # Scheduled Jobs platform (Slice 2, spec §B4). Every minute — a schedule's
+    # own cron cadence (e.g. weekly) is what actually gates a run; this just
+    # needs to be frequent enough that "Monday 06:00" fires close to 06:00.
+    # Gated by SCHEDULED_JOBS_ENABLED (default true — see config.py's comment
+    # on why default-on is safe here: every schedule additionally needs a
+    # human-approved plan before run_due_jobs will touch it).
+    "scheduled-jobs-sweep": {
+        "task": "tasks.scheduled_jobs_sweep_all",
+        "schedule": 60.0,
     },
 }

@@ -26,6 +26,7 @@ import { TaskOutputCard } from "@/components/chat/task-output-card";
 import { SheetsLinkCard } from "@/components/chat/sheets-link-card";
 import { DocsLinkCard } from "@/components/chat/docs-link-card";
 import { ReportReadyCard } from "@/components/chat/report-ready-card";
+import { ScheduleCreatedCard, parseScheduleCreated } from "@/components/chat/schedule-created-card";
 import { AgentChatHeader } from "@/components/chat/agent-chat-header";
 import { PricingConfigSection } from "@/components/settings/pricing-config-section";
 import { InstructionPanel } from "@/components/chat/instruction-panel";
@@ -1341,6 +1342,15 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
                     onChangesetAction={onChangesetAction}
                   />
                 );
+              }
+              if (tc.tool === "schedule.create") {
+                const scheduleCreated = parseScheduleCreated(tc.result_summary);
+                if (scheduleCreated) {
+                  return <ScheduleCreatedCard key={idx} data={scheduleCreated} />;
+                }
+                // No schedule_id (a clarification, or any other failure) —
+                // nothing was created; fall through to the generic card so
+                // the tool call is still visible if it errored oddly.
               }
               if (tc.tool === "netsuite_suiteql" || tc.result_payload?.kind === "table") {
                 // Skip SuiteQLToolCard when DataFrameTable is handling the display

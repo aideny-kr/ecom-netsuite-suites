@@ -82,7 +82,8 @@ TOOL_REGISTRY = {
         },
     },
     "transaction_ops.accounting_group": {
-        "description": "Prepare exact supported invoice-tax corrections for ALL current members of an issue group. "
+        "description": "Prepare exact supported accounting corrections for ALL current members of an issue group, "
+        "including invoice-tax corrections and configured missing Sales Adjustments credits. "
         "Use for fixing a group together. Supply the exact group_id and the SAME review_run_ids/status/search "
         "used to list it. The server reads each case with bounded concurrency, validates each correction and "
         "displays one human approval card with per-order changes and unsupported cases. No financial writes. "
@@ -446,12 +447,23 @@ TOOL_REGISTRY = {
         },
     },
     "schedule.create": {
-        "description": "Create a scheduled job",
+        "description": (
+            "Create a scheduled job. Give 'instruction' (a plain-language description) to compile "
+            "an allow-listed step plan for approval; otherwise give 'name' + 'schedule_type' for a "
+            "legacy schedule."
+        ),
         "execute": schedule_ops.execute_create,
         "params_schema": {
-            "name": {"type": "string", "required": True},
-            "schedule_type": {"type": "string", "required": True},
+            "instruction": {
+                "type": "string",
+                "required": False,
+                "description": "Plain-language schedule instruction — compiled into a plan pending approval",
+            },
+            "name": {"type": "string", "required": False},
+            "schedule_type": {"type": "string", "required": False},
             "cron": {"type": "string", "required": False},
+            "timezone": {"type": "string", "required": False},
+            "delivery": {"type": "object", "required": False},
             "params": {"type": "object", "required": False},
         },
     },
@@ -461,10 +473,16 @@ TOOL_REGISTRY = {
         "params_schema": {},
     },
     "schedule.run": {
-        "description": "Trigger a scheduled job run",
+        "description": "Trigger a scheduled job run now",
         "execute": schedule_ops.execute_run,
         "params_schema": {
             "schedule_id": {"type": "string", "required": True},
+            "use_pending": {
+                "type": "boolean",
+                "required": False,
+                "default": False,
+                "description": "Run the not-yet-approved pending plan instead of the approved one",
+            },
         },
     },
     "workspace.list_files": {

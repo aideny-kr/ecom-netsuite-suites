@@ -100,6 +100,7 @@ export const NAV_ITEMS = [
   { label: "Transaction Operations", href: "/transaction-operations", icon: "Scale" as const, featureFlag: "reconciliation" },
   { label: "Memory", href: "/memory", icon: "Network" as const, featureFlag: null },
   { label: "Reports", href: "/reports", icon: "FileBarChart" as const, featureFlag: null },
+  { label: "Scheduled jobs", href: "/scheduled-jobs", icon: "CalendarClock" as const, featureFlag: null },
   { label: "Settings", href: "/settings", icon: "Settings" as const, featureFlag: null },
 ] as const;
 
