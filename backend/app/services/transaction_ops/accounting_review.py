@@ -78,7 +78,8 @@ ACCOUNTING_CHECKS = [
         "refunds, applications and relevant custom refund requests. Sales orders are non-posting: a billed SO header "
         "difference does not establish a posted ledger or invoice error. Trace actual posting documents and GL impact. "
         "Negative SuiteQL line signs alone do not establish a return, credit or reversal. Decode lifecycle using "
-        "native status display/metadata. On a failed query inspect schema/permissions and try a supported alternate "
+        "native status display/metadata; never translate a single-letter status from memory. "
+        "On a failed query inspect schema/permissions and try a supported alternate "
         "read; do not label an unexplained 500 transient or repeat an unchanged invalid query. "
         "A parser error near FETCH does not prove a limit-generation defect: first try a minimal qualified SELECT "
         "of native ID/status with a small limit and scoped ID/subsidiary; then add metadata-confirmed fields. "
@@ -92,6 +93,8 @@ ACCOUNTING_CHECKS = [
         "item/shipping/discount "
         "tax allocation, rounding, tax accounts, and applicable Celigo mappings/recalculation/custom scripts. "
         "Compare finalized source evidence with native details; source tax is not automatically legally correct. "
+        "A zero default tax-code rate does not prove pass-through taxation, absence of a tax engine, or an "
+        "integration defect. Read transaction-level rates/overrides and actual mapping evidence. "
         "An app mapping or absent legacy profile does not prove the account tax regime. SuiteTax override requires "
         "native tax-detail references, complete details and appropriate permissions; never assume legacy fields apply.",
     },
@@ -100,6 +103,8 @@ ACCOUNTING_CHECKS = [
         "required_evidence": "Establish which system/document is wrong and whether this is an operational-only, "
         "tax-reporting, AR, revenue or cash issue. Check posting period locks/close, tax filing status, "
         "accounting book, "
+        "all deposit applications and reversals before claiming an unapplied balance. Deposit minus one invoice "
+        "is only a potential residual, not verified available cash. Locked is different from closed. "
         "currency/exchange rate, allowed accounts/segments, roles and approval workflows. Do not default to a journal, "
         "credit/rebill, extra refund, period reopening or an SO edit just to match totals. A journal may fail "
         "to update "
@@ -173,14 +178,18 @@ async def accounting_context(db, tenant_id, scope, report=None):
         "configuration_status": "scope_unavailable",
         "native_accounting_validation": "required_not_performed_by_status_read",
         "checks": ACCOUNTING_CHECKS,
-        "read_only_next_step": "Continue the user's requested investigation with available scoped read tools without "
+        "preferred_evidence_tool": "transaction_ops_accounting_evidence",
+        "read_only_next_step": "For a case, call transaction_ops_accounting_evidence before ad-hoc SQL. "
+        "Continue the user's requested investigation with available scoped read tools without "
         "asking discretionary permission. Reuse recent evidence for triage; refresh changed/missing evidence and "
         "revalidate before a proposal/write. Do not rerun the same header scan to obtain native detail it "
         "cannot return. "
         "Respect an actual tool approval requirement and report the exact blocker if one occurs.",
-        "supported_write_scope": "Conditional existing-line corrections on eligible unfulfilled/unbilled sales orders "
-        "and mapped missing-order creation only. Posted invoice/tax journal/credit-memo/refund adjustments are not "
-        "supported by this workflow. Configuration presence never proves native guard readiness or approval.",
+        "supported_write_scope": "Run adapters support eligible sales-order corrections and missing orders. "
+        "For a posted invoice, use the exact tax-rate correction candidate from transaction_ops_accounting_evidence "
+        "through the native MCP update tool to DISPLAY an approval card. This is not permission to execute. "
+        "No generic journal, credit/rebill or refund is inferred. Candidate preconditions, fresh approval, "
+        "native permissions and independent after/GL verification are required.",
         "references": [
             "https://docs.oracle.com/en/cloud/saas/netsuite/ns-online-help/section_N1452887.html",
             "https://docs.oracle.com/en/cloud/saas/netsuite/ns-online-help/section_N1219162.html",
@@ -211,6 +220,27 @@ async def accounting_context(db, tenant_id, scope, report=None):
             Connection.status.in_(ACTIVE_CONNECTION_STATUSES),
         )
     )
+    from urllib.parse import urlsplit
+
+    from app.models.mcp_connector import McpConnector
+
+    connectors = list(
+        await db.scalars(
+            select(McpConnector).where(
+                McpConnector.tenant_id == tenant_id,
+                McpConnector.is_enabled.is_(True),
+                McpConnector.status == "active",
+                McpConnector.provider.like("netsuite%"),
+            )
+        )
+    )
+    scoped_mcp = [
+        c
+        for c in connectors
+        if urlsplit(c.server_url).hostname == f"{scope['netsuite_account_id']}.suitetalk.api.netsuite.com"
+    ]
+    if len(scoped_mcp) == 1:
+        context["native_mcp_connector_id"] = str(scoped_mcp[0].id)
     context.update(
         configuration_status="scoped_configuration_found",
         config_id=str(config.id),
@@ -225,5 +255,6 @@ async def accounting_context(db, tenant_id, scope, report=None):
         legacy_tax_profile_configured=bool(mapping.get("netsuite_legacy_tax")),
         guard_url_configured=bool(connection and (connection.metadata_json or {}).get("transaction_ops_guard_url")),
         native_tax_regime="not_verified",
+        business_entity_subsidiaries=mapping.get("business_entity_subsidiaries", {}),
     )
     return context

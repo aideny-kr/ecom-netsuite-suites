@@ -81,6 +81,18 @@ TOOL_REGISTRY = {
             "window_end": {"type": "string", "description": "ISO timestamp with timezone; use with window_start"},
         },
     },
+    "transaction_ops.accounting_evidence": {
+        "description": "Read scoped native accounting evidence for a transaction case in one bounded call. "
+        "Use FIRST after investigation status, before ad-hoc SuiteQL. Returns native lifecycle labels, linked "
+        "invoices/cash sales, tax defaults versus transaction rates, posting-period locks, GL and deposits. "
+        "Returns explicit missing evidence; never infers tax legality, root cause or available cash. Read-only. "
+        "If correction_candidate is present, use its exact tool/params to display the human approval card; "
+        "do not execute or substitute another rate. Reuse returned sections and investigate only missing evidence.",
+        "execute": transaction_ops_tools.execute_accounting_evidence,
+        "params_schema": {
+            "case_id": {"type": "string", "required": True, "description": "Durable case UUID from status"}
+        },
+    },
     "transaction_ops.status": {
         "description": (
             "Read investigation status or a durable case and its recent history. "

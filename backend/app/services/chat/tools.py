@@ -345,6 +345,88 @@ async def build_all_tool_definitions(
 
 
 async def execute_tool_call(
+    tool_name,
+    tool_input,
+    tenant_id,
+    actor_id,
+    correlation_id,
+    db,
+    context_need=None,
+    session_id=None,
+    actor_type="user",
+    human_approved=False,
+):
+    """Do not spend another RPC/model repair cycle repeating a rejected query in one turn."""
+    kwargs = dict(
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        correlation_id=correlation_id,
+        db=db,
+        context_need=context_need,
+        session_id=session_id,
+        actor_type=actor_type,
+        human_approved=human_approved,
+    )
+    info = getattr(db, "info", None)
+    sql = (
+        tool_input.get("query")
+        if tool_name == "netsuite_suiteql"
+        else (tool_input.get("sqlQuery") if tool_name.endswith("__ns_runCustomSuiteQL") else None)
+    )
+    state = None
+    key = None
+    if isinstance(info, dict) and kwargs.get("correlation_id"):
+        identity = (str(kwargs.get("tenant_id")), kwargs["correlation_id"])
+        state = info.get("chat_query_failures")
+        if not state or state["turn"] != identity:
+            state = {"turn": identity, "queries": {}}
+            info["chat_query_failures"] = state
+        if isinstance(sql, str):
+            key = (
+                tool_name,
+                str(tool_input.get("connection_id")),
+                str(tool_input.get("expected_account_id")),
+                sql.strip(),
+            )
+            if key in state["queries"]:
+                return json.dumps(
+                    {
+                        "error": "This exact query already failed in this turn; no external retry was made.",
+                        "previous_error": state["queries"][key],
+                        "next_step": "Use native accounting evidence or inspect metadata before changing fields.",
+                    }
+                )
+    result_str = await _execute_tool_call_once(tool_name, tool_input, **kwargs)
+    if state is not None:
+        try:
+            result = json.loads(result_str)
+        except (ValueError, TypeError):
+            return result_str
+        error = ""
+        if isinstance(result, dict) and result.get("error"):
+            error = str(result.get("message") or result["error"])
+        # Do not memoize authentication, network, rate-limit or transient server failures.
+        if (
+            key
+            and error
+            and any(
+                term in error.lower()
+                for term in ("failed to parse", "invalid search query", "unknown identifier", "field was not found")
+            )
+        ):
+            state["queries"][key] = error[:1600]
+            result["query_recovery"] = (
+                "Do not repeat this query or blame FETCH globally. Use transaction_ops_accounting_evidence for cases; "
+                "otherwise inspect metadata and use a minimal qualified query. transactionline.createdfrom links "
+                "documents; do not guess transaction.createdfrom. Preserve status via BUILTIN.DF(t.status)."
+            )
+            result_str = json.dumps(result, default=str)
+        elif not error and "metadata" in tool_name.lower():
+            state["queries"].clear()  # New schema evidence permits a deliberate re-attempt.
+    return result_str
+
+
+async def _execute_tool_call_once(
     tool_name: str,
     tool_input: dict,
     tenant_id: uuid.UUID,
@@ -443,8 +525,21 @@ async def execute_tool_call(
     ext_parsed = parse_external_tool_name(tool_name)
     if ext_parsed is not None:
         connector_id, raw_tool_name = ext_parsed
-        result = await _execute_external_tool(
-            connector_id, raw_tool_name, tool_input, tenant_id, db, human_approved=human_approved
+        from app.services.chat.external_tool_audit import audited_external_call
+
+        result = await audited_external_call(
+            execute=lambda: _execute_external_tool(
+                connector_id, raw_tool_name, tool_input, tenant_id, db, human_approved=human_approved
+            ),
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            actor_type=actor_type,
+            correlation_id=correlation_id,
+            session_id=session_id,
+            connector_id=connector_id,
+            tool_name=tool_name,
+            params=tool_input,
+            human_approved=human_approved,
         )
         duration_ms = int((time.monotonic() - start) * 1000)
         logger.info(
@@ -539,7 +634,6 @@ async def _execute_external_tool(
     human_approved: bool = False,
 ) -> dict:
     """Execute a tool on an external MCP connector."""
-    print(f"[EXT_MCP] Calling {raw_tool_name} with params: {tool_input}", flush=True)
     try:
         from app.services.mcp_connector_service import get_mcp_connector
 
@@ -625,7 +719,29 @@ async def _execute_external_tool(
 
         from app.services.mcp_client_service import call_external_mcp_tool
 
-        return await call_external_mcp_tool(connector, raw_tool_name, tool_input, db=db)
+        result = await call_external_mcp_tool(connector, raw_tool_name, tool_input, db=db)
+        if (
+            raw_tool_name == "ns_runCustomSuiteQL"
+            and isinstance(result, dict)
+            and isinstance(result.get("result"), str)
+            and result["result"].startswith("Error executing SuiteQL query:")
+        ):
+            result = {**result, "error": result["result"]}
+        if isinstance(result, dict) and is_netsuite_provider(connector.provider):
+            from urllib.parse import urlsplit
+
+            host = urlsplit(getattr(connector, "server_url", "") or "").hostname or ""
+            suffix = ".suitetalk.api.netsuite.com"
+            if host.endswith(suffix) and host.removesuffix(suffix):
+                result = {
+                    **result,
+                    "verified_connection_scope": {
+                        "connector_id": str(connector_id),
+                        "account_id": host.removesuffix(suffix).lower(),
+                        "basis": "configured_netsuite_mcp_endpoint",
+                    },
+                }
+        return result
     except Exception as exc:
         logger.warning(
             "External tool %s on connector %s failed",
