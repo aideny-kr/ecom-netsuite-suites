@@ -76,6 +76,26 @@ Order matters: when a step consumes an earlier step's output (for example drive.
 the id of the report.compose step that produced the report it delivers), that earlier step \
 must come first in the steps array, and the later step must name its id in the matching param.
 
+A report_step param (on report.render_pdf, report.build_xlsx, and drive.upload) must always \
+name the report.compose step itself — never a report.render_pdf, report.build_xlsx, or another \
+drive.upload step. In particular, drive.upload's report_step names the SAME compose step that \
+render_pdf/build_xlsx used, not the render_pdf or build_xlsx step id, even though those ran \
+first — a plan needs exactly ONE drive.upload per report.compose, because \
+deliver_report_to_drive uploads both the PDF and the Excel workbook in a single call.
+
+When the instruction maps to a registered playbook (for example inventory_aging), write no \
+free-form bigquery_sql step for it — the playbook already owns its own dataset-qualified data \
+sources. Compose the report with report.compose(playbook_key, params, mode="period") instead. \
+Use mode="tracking" only for a playbook that tracks a real NetSuite accounting period; \
+inventory_aging is a BigQuery snapshot report with no such period, so it always compiles with \
+mode="period", never mode="tracking".
+
+Worked example — an instruction to build the Inventory Aging Weekly report compiles to exactly \
+these four steps, in order, with no bigquery_sql step: report.compose(playbook_key="inventory_aging", \
+params={"locations": [...]}, mode="period") -> report.render_pdf(report_step=<the compose \
+step's id>) -> report.build_xlsx(report_step=<the same compose step's id>) -> \
+drive.upload(report_step=<the same compose step's id>).
+
 Call compile_plan when every required param can be derived from the instruction and the \
 tenant context below. Call ask_clarification with exactly ONE question when a required detail \
 is genuinely missing and cannot be guessed (which of several subsidiaries, which report an \

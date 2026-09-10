@@ -202,6 +202,163 @@ async def test_a_missing_required_param_yields_clarification_with_the_agents_que
     assert len(fake.calls) == 1  # a direct clarification never spends a repair round
 
 
+# ---------------------------------------------------------------------------
+# Live-run defect (brief G, item 2): the compiler must not write a free-form
+# bigquery_sql step when a playbook covers the report, and must never pick
+# mode="tracking" for a non-period playbook -- both stated explicitly in the
+# system prompt, with the correct 4-step plan as the worked example.
+# ---------------------------------------------------------------------------
+
+
+def _live_failing_six_step_plan() -> dict:
+    """The exact plan that ran and failed on staging (brief G's own quote):
+    a free-form bigquery_sql step with an unqualified table, report.compose
+    in mode="tracking" for inventory_aging (period_based=False), and both
+    drive.upload steps naming a render_pdf/build_xlsx step instead of the
+    compose step. Item 1's validate_plan rejects every one of these; this
+    fixture proves compile_instruction never persists the plan even if the
+    model still produces it."""
+    return {
+        "steps": [
+            {
+                "id": "snapshot_query",
+                "type": "bigquery_sql",
+                "params": {
+                    "query": (
+                        "SELECT sku, location, on_hand_qty, last_restock_date, snapshot_date, "
+                        "DATE_DIFF(CURRENT_DATE(), last_restock_date, DAY) AS days_since_restock "
+                        "FROM inventory_snapshot WHERE location IN ('Dimerco','Fedex','Panurgy')"
+                    )
+                },
+            },
+            {
+                "id": "compose_report",
+                "type": "report.compose",
+                "params": {
+                    "playbook_key": "inventory_aging",
+                    "mode": "tracking",
+                    "params": {
+                        "age_basis": "days_since_last_restock",
+                        "locations": ["Dimerco", "Fedex", "Panurgy"],
+                        "comparison": "prior_week",
+                    },
+                },
+            },
+            {"id": "render_pdf", "type": "report.render_pdf", "params": {"report_step": "compose_report"}},
+            {"id": "build_xlsx", "type": "report.build_xlsx", "params": {"report_step": "compose_report"}},
+            {"id": "upload_pdf", "type": "drive.upload", "params": {"report_step": "render_pdf"}},
+            {"id": "upload_xlsx", "type": "drive.upload", "params": {"report_step": "build_xlsx"}},
+        ]
+    }
+
+
+def _correct_four_step_playbook_plan() -> dict:
+    """The CORRECT plan for a playbook-covered instruction: report.compose
+    (mode="period") -> render_pdf -> build_xlsx -> ONE drive.upload naming
+    the compose step directly -- no free-form bigquery_sql step, since the
+    playbook already owns its own dataset-qualified sources."""
+    return {
+        "steps": [
+            {
+                "id": "compose_report",
+                "type": "report.compose",
+                "params": {
+                    "playbook_key": "inventory_aging",
+                    "mode": "period",
+                    "params": {"locations": ["Dimerco", "Fedex", "Panurgy"]},
+                },
+            },
+            {"id": "render_pdf", "type": "report.render_pdf", "params": {"report_step": "compose_report"}},
+            {"id": "build_xlsx", "type": "report.build_xlsx", "params": {"report_step": "compose_report"}},
+            {"id": "upload", "type": "drive.upload", "params": {"report_step": "compose_report"}},
+        ]
+    }
+
+
+async def test_the_live_failing_six_step_plan_never_compiles(db, tenant_a, monkeypatch):
+    """A repair round that resubmits the SAME invalid shape must still end in
+    Clarification, never a silently "fixed" plan — the validator is the
+    guard, not compile_instruction post-processing the model's output."""
+    monkeypatch.setattr(compiler, "_tenant_locations", lambda *_a, **_kw: _async_list(["Dimerco", "Fedex", "Panurgy"]))
+    bad_plan = _live_failing_six_step_plan()
+    fake = FakeAdapter(
+        [
+            _compile_plan_response(bad_plan, tool_use_id="tu_1"),
+            _compile_plan_response(bad_plan, tool_use_id="tu_2"),
+        ]
+    )
+
+    result = await compile_instruction(
+        db,
+        tenant_id=tenant_a.id,
+        instruction=_MOCK_INSTRUCTION,
+        actor_id=None,
+        llm=CompilerLLM(adapter=fake, model="fake-model"),
+    )
+
+    assert isinstance(result, Clarification)
+    assert len(fake.calls) == 2  # exactly one repair round, never a third call
+
+
+async def test_the_correct_four_step_playbook_plan_compiles_successfully(db, tenant_a, monkeypatch):
+    monkeypatch.setattr(compiler, "_tenant_locations", lambda *_a, **_kw: _async_list(["Dimerco", "Fedex", "Panurgy"]))
+    fake = FakeAdapter([_compile_plan_response(_correct_four_step_playbook_plan())])
+
+    result = await compile_instruction(
+        db,
+        tenant_id=tenant_a.id,
+        instruction=_MOCK_INSTRUCTION,
+        actor_id=None,
+        llm=CompilerLLM(adapter=fake, model="fake-model"),
+    )
+
+    assert isinstance(result, CompiledPlan)
+    assert [s["type"] for s in result.plan_json["steps"]] == [
+        "report.compose",
+        "report.render_pdf",
+        "report.build_xlsx",
+        "drive.upload",
+    ]
+    # deliver_report_to_drive uploads both PDF and Excel in one call -- the
+    # correct plan has exactly ONE drive.upload, never two.
+    assert sum(1 for s in result.plan_json["steps"] if s["type"] == "drive.upload") == 1
+    assert len(fake.calls) == 1  # a clean compile never needs a repair round
+
+
+def test_system_prompt_states_the_report_step_rule():
+    """A report_step param (on render_pdf, build_xlsx, and drive.upload) must
+    be steered toward naming the report.compose step directly -- never a
+    render_pdf/build_xlsx/another drive.upload step (item 1a's own rule,
+    now stated as guidance rather than discovered only via the repair
+    round)."""
+    prompt = compiler._SYSTEM_PROMPT
+    assert "report_step" in prompt
+    assert "report.compose" in prompt
+    assert "never a report.render_pdf" in prompt or "never a render_pdf" in prompt
+
+
+def test_system_prompt_states_the_playbook_mode_and_no_free_form_sql_rules():
+    """Item 2's own two rules: mode="period" (not "tracking") for a playbook
+    with no accounting period to track, and no free-form bigquery_sql step
+    when a playbook already covers the report."""
+    prompt = compiler._SYSTEM_PROMPT
+    assert 'mode="period"' in prompt
+    assert 'mode="tracking"' in prompt
+    assert "no free-form bigquery_sql step" in prompt or "without a separate bigquery_sql step" in prompt
+
+
+def test_system_prompt_includes_the_four_step_inventory_aging_worked_example():
+    """The correct 4-step plan as the worked example for the Inventory Aging
+    instruction (item 2, binding) -- report.compose -> report.render_pdf ->
+    report.build_xlsx -> ONE drive.upload, naming inventory_aging."""
+    prompt = compiler._SYSTEM_PROMPT
+    assert "inventory_aging" in prompt
+    assert prompt.count("report.compose") >= 1
+    assert "report.render_pdf" in prompt
+    assert "report.build_xlsx" in prompt
+    assert "drive.upload" in prompt
+
+
 async def test_tenant_locations_are_fed_to_the_compiler_prompt(db, tenant_a, monkeypatch):
     """Spec §B3: "plus the tenant's context (connections available, locations
     known from the snapshot, existing reports)" — via the registry-provided
