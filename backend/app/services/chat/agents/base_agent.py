@@ -967,15 +967,24 @@ class BaseSpecialistAgent(abc.ABC):
                             {
                                 "role": "user",
                                 "content": (
-                                    "You MUST execute the query using netsuite_suiteql — do NOT answer from memory "
-                                    "or prior conversation. The user needs fresh, live data from NetSuite. "
-                                    "Call the tool NOW."
+                                    "Execute the requested query using the available tools for the user's selected "
+                                    "data source. Do not answer from memory or switch sources. Obtain completed "
+                                    "server aggregates for counts and calculated summaries."
                                 ),
                             }
                         )
                         continue
 
                     final_text = "\n".join(response.text_blocks) if response.text_blocks else ""
+
+                    evidence = getattr(self, "_metabase_evidence", None)
+                    if evidence is not None:
+                        feedback = evidence.feedback(strip_confidence_tag(final_text))
+                        if feedback:
+                            messages.append(adapter.build_assistant_message(response))
+                            messages.append({"role": "user", "content": feedback})
+                            continue
+                        final_text = evidence.resolve(final_text)
 
                     # Extract confidence BEFORE stripping tag so agent self-score is used
                     # (Haiku fallback only fires when tag is missing)
@@ -1096,6 +1105,13 @@ class BaseSpecialistAgent(abc.ABC):
                             except (json.JSONDecodeError, TypeError):
                                 pass
 
+                    evidence = getattr(self, "_metabase_evidence", None)
+                    grounded_result = (
+                        evidence.observe(block.name, block.input, result_str)
+                        if evidence is not None and block.name in evidence.tool_names
+                        else None
+                    )
+
                     # Truncate error payloads to prevent token bloat on retries
                     result_str = _truncate_error_payload(result_str)
 
@@ -1104,6 +1120,8 @@ class BaseSpecialistAgent(abc.ABC):
                     # from the LLM-facing content directly (anti-hallucination invariant).
                     # The full result_str is still recorded in the audit log below.
                     llm_result_str = _suppress_metric_value_for_llm(result_str)
+                    if grounded_result is not None:
+                        llm_result_str = _suppress_metric_value_for_llm(grounded_result)
 
                     elapsed_ms = int((time.monotonic() - t0) * 1000)
                     tool_calls_log.append(
@@ -1156,6 +1174,16 @@ class BaseSpecialistAgent(abc.ABC):
             total_cache_creation += response.usage.cache_creation_input_tokens
             total_cache_read += response.usage.cache_read_input_tokens
             final_text = "\n".join(response.text_blocks) if response.text_blocks else ""
+
+            evidence = getattr(self, "_metabase_evidence", None)
+            if evidence is not None:
+                from app.services.chat.metabase_evidence import UNVERIFIED
+
+                if evidence.feedback(strip_confidence_tag(final_text)):
+                    self._numeric_verification_failed = True
+                    final_text = UNVERIFIED
+                else:
+                    final_text = evidence.resolve(final_text)
 
             # Extract confidence BEFORE stripping tag so agent self-score is used
             # (Haiku fallback only fires when tag is missing)
@@ -1381,7 +1409,7 @@ class BaseSpecialistAgent(abc.ABC):
                     tool_choice=step_tool_choice,
                     thinking_level=current_thinking_level,
                 ):
-                    if event_type == "text":
+                    if event_type == "text" and getattr(self, "_metabase_evidence", None) is None:
                         yield "text", payload
                     elif event_type == "response":
                         response = payload
@@ -1471,9 +1499,9 @@ class BaseSpecialistAgent(abc.ABC):
                             {
                                 "role": "user",
                                 "content": (
-                                    "You MUST execute the query using netsuite_suiteql — do NOT answer from memory "
-                                    "or prior conversation. The user needs fresh, live data from NetSuite. "
-                                    "Call the tool NOW."
+                                    "Execute the requested query using the available tools for the user's selected "
+                                    "data source. Do not answer from memory or switch sources. Obtain completed "
+                                    "server aggregates for counts and calculated summaries."
                                 ),
                             }
                         )
@@ -1528,6 +1556,15 @@ class BaseSpecialistAgent(abc.ABC):
                     # ── End prose-instead-of-proposing guard ──
                     final_text = "\n".join(response.text_blocks) if response.text_blocks else ""
 
+                    evidence = getattr(self, "_metabase_evidence", None)
+                    if evidence is not None:
+                        feedback = evidence.feedback(strip_confidence_tag(final_text))
+                        if feedback:
+                            messages.append(adapter.build_assistant_message(response))
+                            messages.append({"role": "user", "content": feedback})
+                            continue
+                        final_text = evidence.resolve(final_text)
+
                     # Extract confidence BEFORE stripping tag so agent self-score is used
                     # (Haiku fallback only fires when tag is missing)
                     tools_used = [c.get("tool", "") for c in tool_calls_log]
@@ -1552,6 +1589,8 @@ class BaseSpecialistAgent(abc.ABC):
 
                     await _maybe_store_query_pattern(db, self.tenant_id, task, tool_calls_log)
 
+                    if evidence is not None:
+                        yield "text", final_text
                     yield (
                         "response",
                         AgentResult(
@@ -2529,6 +2568,11 @@ class BaseSpecialistAgent(abc.ABC):
                     # idempotent over an interceptor that already condensed a metric (the
                     # condensed string carries no suppress_llm_value flag).
                     llm_result_str = _suppress_metric_value_for_llm(llm_result_str)
+                    evidence = getattr(self, "_metabase_evidence", None)
+                    if evidence is not None and block.name in evidence.tool_names:
+                        llm_result_str = _suppress_metric_value_for_llm(
+                            evidence.observe(block.name, block.input, full_result_str)
+                        )
 
                     tool_calls_log.append(
                         build_tool_call_log_entry(
@@ -2701,7 +2745,7 @@ class BaseSpecialistAgent(abc.ABC):
                 messages=messages,
                 thinking_level=current_thinking_level,
             ):
-                if event_type == "text":
+                if event_type == "text" and getattr(self, "_metabase_evidence", None) is None:
                     yield "text", payload
                 elif event_type == "response":
                     response = payload
@@ -2713,6 +2757,16 @@ class BaseSpecialistAgent(abc.ABC):
                 total_cache_read += response.usage.cache_read_input_tokens
 
             final_text = "\n".join(response.text_blocks) if response and response.text_blocks else ""
+
+            evidence = getattr(self, "_metabase_evidence", None)
+            if evidence is not None:
+                from app.services.chat.metabase_evidence import UNVERIFIED
+
+                if evidence.feedback(strip_confidence_tag(final_text)):
+                    self._numeric_verification_failed = True
+                    final_text = UNVERIFIED
+                else:
+                    final_text = evidence.resolve(final_text)
 
             # Extract confidence BEFORE stripping tag so agent self-score is used
             # (Haiku fallback only fires when tag is missing)
@@ -2736,6 +2790,8 @@ class BaseSpecialistAgent(abc.ABC):
 
             await _maybe_store_query_pattern(db, self.tenant_id, task, tool_calls_log)
 
+            if evidence is not None:
+                yield "text", final_text
             yield (
                 "response",
                 AgentResult(

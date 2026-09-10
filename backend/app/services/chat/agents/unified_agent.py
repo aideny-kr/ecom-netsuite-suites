@@ -774,6 +774,8 @@ class UnifiedAgent(BaseSpecialistAgent):
                 " Use only exact record_links returned by the accounting-evidence tool. Never build a case link "
                 "from the default connector: production and sandbox may both be connected."
             )
+        if getattr(self, "_metabase_evidence", None) is not None:
+            parts.append(self._metabase_evidence.prompt)
         # Write-repair directive last — the most specific, most recent
         # instruction on a repair turn, so it must be able to override
         # anything framed above it (mirrors the Plan Mode ordering rule).
@@ -889,6 +891,19 @@ class UnifiedAgent(BaseSpecialistAgent):
         self._request_kind = None
         self._selected_user_sources = ()
         self._transaction_workflow = False
+        self._metabase_evidence = None
+        self._numeric_verification_failed = False
+
+    def _configure_metabase_evidence(self, selection):
+        from app.services.chat.metabase_context import metabase_tool_names
+        from app.services.chat.metabase_evidence import MetabaseEvidence
+        from app.services.chat.tool_inventory import available_data_sources
+
+        selected = set(selection.selected_sources) or set(available_data_sources(self._tool_defs or []))
+        if self._request_kind == "analytics" and selected == {"metabase"}:
+            names = metabase_tool_names(self._tool_defs or [])
+            if names:
+                self._metabase_evidence = MetabaseEvidence(names)
 
     def _plan_source_selection(self, source):
         from app.services.chat.request_routing import RequestContext
@@ -900,13 +915,14 @@ class UnifiedAgent(BaseSpecialistAgent):
         return SourceSelection(selected_sources=tuple(state.sources), request_context=state.model_dump())
 
     async def _select_analytics_source(self, task, context, adapter, model, history=None):
+        from app.services.chat.metabase_context import metabase_tool_names
         from app.services.chat.request_routing import RequestRoute, classify_request
         from app.services.chat.source_selection import SourceSelection, resolve_source_selection
         from app.services.chat.tool_inventory import available_data_sources
 
         history = context.get("source_selection_history", history) or []
         task = context.get("source_selection_task", task)
-        if len(available_data_sources(self._tool_defs or [])) < 2:
+        if len(available_data_sources(self._tool_defs or [])) < 2 and not metabase_tool_names(self._tool_defs or []):
             return SourceSelection()
         if self._context_need.lower() in {"docs", "workspace"}:
             route = RequestRoute(kind="conversation", continuation=True)
@@ -938,6 +954,9 @@ class UnifiedAgent(BaseSpecialistAgent):
         if getattr(self, "_routing_error", False):
             result.success = False
             result.error = "request_routing_failed"
+        if getattr(self, "_numeric_verification_failed", False):
+            result.success = False
+            result.error = "metabase_numeric_verification_failed"
         return result
 
     async def run(
@@ -995,6 +1014,7 @@ class UnifiedAgent(BaseSpecialistAgent):
         )
         self._selected_user_sources = selection.selected_sources
         self._transaction_workflow = selection.transaction_workflow
+        self._configure_metabase_evidence(selection)
         if selection.question:
             return self._finish_source_routing(
                 AgentResult(success=True, data=selection.question, agent_name=self.agent_name), selection
@@ -1066,6 +1086,7 @@ class UnifiedAgent(BaseSpecialistAgent):
         )
         self._selected_user_sources = selection.selected_sources
         self._transaction_workflow = selection.transaction_workflow
+        self._configure_metabase_evidence(selection)
         if selection.question:
             yield "text", selection.question
             yield (
