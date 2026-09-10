@@ -204,4 +204,35 @@ describe("Accounting review", () => {
       screen.getByRole("link", { name: "Investigate this order →" }),
     ).toHaveAttribute("href", expect.stringContaining("case+other"));
   });
+  it("does not describe in-flight group members as not submitted", () => {
+    const group: WriteConfirmationData = {
+      ...card,
+      status: "executing",
+      accounting_review: null,
+      accounting_group: {
+        group_id: "group",
+        concurrency: 3,
+        members: [
+          {
+            case_id: "case",
+            order_reference: "R123",
+            confirmation_id: "child",
+            card,
+          },
+        ],
+      },
+    };
+    render(
+      <WriteConfirmationCard
+        data={group}
+        onConfirm={vi.fn()}
+        onReject={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Awaiting result")).toBeVisible();
+    expect(screen.queryByText("Not submitted")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Approve/ }),
+    ).not.toBeInTheDocument();
+  });
 });

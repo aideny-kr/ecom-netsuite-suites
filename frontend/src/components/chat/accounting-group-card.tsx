@@ -93,7 +93,9 @@ export function AccountingGroupCard({
                   : card?.status === "pending"
                     ? pending
                       ? "Ready for review"
-                      : "Not submitted"
+                      : data.status === "executing"
+                        ? "Awaiting result"
+                        : "Not submitted"
                     : card?.status || "Needs investigation";
             return (
               <details key={member.case_id} className="rounded-lg border p-3">
