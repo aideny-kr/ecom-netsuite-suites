@@ -96,6 +96,21 @@ def test_scoped_workflow_requires_available_tools_and_is_not_inherited_from_assi
     )
 
 
+@pytest.mark.parametrize("task", ["continue", "try again", "should we fix?", "can you investigate this case?"])
+def test_follow_up_resumes_blocked_case_without_reasking_source(task):
+    from app.services.chat.source_selection import resolve_source_selection
+
+    tools = inventory() + [{"name": "transaction_ops_status"}]
+    history = [
+        {"role": "user", "content": CASE_TASK},
+        {"role": "assistant", "content": "Which data source should I use?"},
+    ]
+    result = resolve_source_selection(task=task, tool_definitions=tools, conversation_history=history)
+    assert result.question is None and result.transaction_workflow
+    history.append({"role": "user", "content": "Count all orders"})
+    assert source_selection_question(task=task, tool_definitions=tools, conversation_history=history)
+
+
 @pytest.mark.parametrize(
     "question",
     [
