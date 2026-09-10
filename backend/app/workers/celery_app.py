@@ -33,6 +33,7 @@ celery_app.conf.include = [
     "app.workers.tasks.auto_query_improvement",
     "app.workers.tasks.billing_sync",
     "app.workers.tasks.celigo_flow_map_sync",
+    "app.workers.tasks.transaction_ops",
     "app.workers.tasks.connection_health",
     "app.workers.tasks.example_sync",
     "app.workers.tasks.knowledge_crawler",
@@ -42,6 +43,7 @@ celery_app.conf.include = [
     "app.workers.tasks.oracle_skill_reseed",
     "app.workers.tasks.proactive_token_refresh",
     "app.workers.tasks.shopify_sync",
+    "app.workers.tasks.solidus_sync",
     "app.workers.tasks.stripe_health_check",
     "app.workers.tasks.stripe_sync",
     "app.workers.tasks.stripe_sync_all",
@@ -62,6 +64,14 @@ celery_app.conf.include = [
 ]
 
 celery_app.conf.beat_schedule = {
+    "transaction-operations-actions-minute": {
+        "task": "tasks.transaction_ops_collect_actions",
+        "schedule": 60.0,
+    },
+    "transaction-operations-minute": {
+        "task": "tasks.transaction_ops_collect_due",
+        "schedule": 60.0,
+    },
     "sync-metered-billing": {
         "task": "tasks.billing_sync",
         "schedule": 3600.0,  # hourly

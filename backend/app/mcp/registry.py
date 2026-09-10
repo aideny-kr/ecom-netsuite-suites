@@ -26,21 +26,104 @@ from app.mcp.tools import (
     sheets_tools,
     suitescript_sync_tool,
     task_file_tools,
+    transaction_ops_tools,
     web_search,
     workspace_tools,
 )
 
 TOOL_REGISTRY = {
+    "transaction_ops.groups": {
+        "description": (
+            "Group reconciliation cases by entity, source, currency, variance direction and credit context. "
+            "Supply review_run_ids for the selected period; otherwise lists all open historical cases. "
+            "Repeat the exact review_run_ids, status and search on every member request. "
+            "Groups describe symptoms, not a verified shared cause. "
+            "Supply group_id to read exact case members. "
+            "Follow has_next with offset+limit. Investigate cases before exact proposal approval; "
+            "a group never authorizes writes."
+        ),
+        "execute": transaction_ops_tools.execute_groups,
+        "params_schema": {
+            "group_id": {"type": "string", "description": "Group ID from the group list; omit to list groups"},
+            "review_run_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Selected period run UUIDs, 1 to 20. Preserve on every page/member request.",
+            },
+            "status": {
+                "type": "string",
+                "description": "Category: needs_review (default), matched, not_verified. Requires review_run_ids.",
+            },
+            "search": {
+                "type": "string",
+                "description": "Exact order-reference search text, at most 200 characters. Requires review_run_ids.",
+            },
+            "limit": {"type": "integer", "description": "Page size, 1 to 50; default 20"},
+            "offset": {"type": "integer", "description": "Page offset; default 0"},
+        },
+    },
+    "transaction_ops.configs": {
+        "description": "List configured Framework transaction investigation scopes before choosing a scope to inspect.",
+        "execute": transaction_ops_tools.execute_configs,
+        "params_schema": {},
+    },
+    "transaction_ops.run": {
+        "description": (
+            "Investigate missing or incorrect Framework orders against NetSuite in a configured scope. "
+            "Provide exact order references OR an aware time window of at most 31 days. "
+            "Creates a durable read-only investigation; proposed corrections require human approval in the review page."
+        ),
+        "execute": transaction_ops_tools.execute_run,
+        "params_schema": {
+            "config_id": {"type": "string", "required": True, "description": "Configured investigation scope UUID"},
+            "order_references": {"type": "array", "description": "Exact Framework order references, at most 200"},
+            "window_start": {"type": "string", "description": "ISO timestamp with timezone; use with window_end"},
+            "window_end": {"type": "string", "description": "ISO timestamp with timezone; use with window_start"},
+        },
+    },
+    "transaction_ops.accounting_evidence": {
+        "description": "Read scoped native accounting evidence for a transaction case in one bounded call. "
+        "Use FIRST after investigation status, before ad-hoc SuiteQL. Returns native lifecycle labels, linked "
+        "invoices/cash sales, tax defaults versus transaction rates, posting-period locks, GL and deposits. "
+        "Returns explicit missing evidence; never infers tax legality, root cause or available cash. Read-only. "
+        "If correction_candidate is present, use its exact tool/params to display the human approval card; "
+        "do not execute or substitute another rate. Reuse returned sections and investigate only missing evidence.",
+        "execute": transaction_ops_tools.execute_accounting_evidence,
+        "params_schema": {
+            "case_id": {"type": "string", "required": True, "description": "Durable case UUID from status"}
+        },
+    },
+    "transaction_ops.status": {
+        "description": (
+            "Read investigation status or a durable case and its recent history. "
+            "Provide exactly one run_id or case_id. The evidence table renders automatically; "
+            "do not restate or recompute its amounts. Human decisions are made on the linked review page."
+        ),
+        "execute": transaction_ops_tools.execute_status,
+        "params_schema": {
+            "run_id": {"type": "string", "description": "Investigation run UUID; omit when case_id is supplied"},
+            "case_id": {"type": "string", "description": "Durable transaction case UUID; omit when run_id is supplied"},
+        },
+    },
     "health": {
         "description": "Health check — returns server status and registered tool count",
         "execute": health.execute,
         "params_schema": {},
     },
     "netsuite.suiteql": {
-        "description": "Execute a SuiteQL query against NetSuite",
+        "description": "Execute a read-only SuiteQL query. For accounting investigations, pass both connection_id "
+        "and expected_account_id from accounting_review to bind the query to the exact account/environment.",
         "execute": netsuite_suiteql.execute,
         "params_schema": {
             "query": {"type": "string", "required": True, "description": "SuiteQL query to execute"},
+            "connection_id": {
+                "type": "string",
+                "description": "Exact NetSuite connection UUID; requires expected_account_id",
+            },
+            "expected_account_id": {
+                "type": "string",
+                "description": "Expected NetSuite account/environment; requires connection_id",
+            },
             "limit": {"type": "integer", "required": False, "default": 100, "description": "Max rows to return"},
             "user_question": {
                 "type": "string",

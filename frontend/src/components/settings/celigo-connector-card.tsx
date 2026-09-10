@@ -110,7 +110,7 @@ export default function CeligoConnectorCard() {
 
   if (isLoading) {
     return (
-      <div className="rounded-xl border bg-card p-5 shadow-soft animate-pulse">
+      <div id="celigo" className="scroll-mt-6 rounded-xl border bg-card p-5 shadow-soft animate-pulse">
         <div className="h-6 w-40 bg-muted rounded" />
         <div className="mt-3 h-4 w-64 bg-muted rounded" />
       </div>
@@ -118,7 +118,7 @@ export default function CeligoConnectorCard() {
   }
 
   return (
-    <div className="rounded-xl border bg-card p-5 shadow-soft space-y-4">
+    <div id="celigo" className="scroll-mt-6 rounded-xl border bg-card p-5 shadow-soft space-y-4">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <Plug className="h-4 w-4 text-violet-500" />

@@ -521,6 +521,10 @@ def _suppress_metric_value_for_llm(result_str: str) -> str:
     except (json.JSONDecodeError, TypeError):
         return result_str
     if is_suppressed_metric_payload(parsed):
+        if parsed.get("source_kind") == "transaction_ops":
+            from app.services.transaction_ops.chat_evidence import condense_status
+
+            return condense_status(parsed)
         return condense_metric_for_llm(parsed)
     return result_str
 
@@ -1733,9 +1737,9 @@ class BaseSpecialistAgent(abc.ABC):
                     # ── End Plan Mode clarify intercept ──
 
                     # ── Mutation intercept: HITL write confirmation ──
-                    from app.services.chat.mutation_guard import classify_mutation
+                    from app.services.chat.mutation_guard import classify_connector_mutation
 
-                    mutation_type = classify_mutation(block.name)
+                    mutation_type = await classify_connector_mutation(block.name, db, self.tenant_id)
                     if mutation_type is not None:
                         record_type = block.input.get("recordType", "unknown")
 
@@ -1748,7 +1752,7 @@ class BaseSpecialistAgent(abc.ABC):
                         # server-executed fetch (slot_option_sources.py),
                         # resolved below once validation/the repair loop have
                         # decided this attempt is the one shown as a card.
-                        _ask_user_hint = block.input.pop("ask_user", None)
+                        _ask_user_hint = block.input.pop("ask_user", None) if mutation_type != "execute" else None
 
                         # Is this write headed for NetSuite at all? Everything
                         # the agentic write loop adds below — the investigation
@@ -1768,7 +1772,15 @@ class BaseSpecialistAgent(abc.ABC):
                         )
 
                         _parsed_write = _parse_write_tool_name(block.name)
-                        _is_netsuite_write = bool(_parsed_write and _parsed_write[1].startswith("ns_"))
+                        _is_netsuite_write = bool(
+                            mutation_type != "execute" and _parsed_write and _parsed_write[1].startswith("ns_")
+                        )
+                        if mutation_type == "execute" and _parsed_write:
+                            record_type = f"external tool {_parsed_write[1]}"
+                        elif mutation_type == "execute":
+                            from app.services.chat.http_connector_tools import describe_target
+
+                            record_type = await describe_target(block.name, db, self.tenant_id)
 
                         # ── Investigation gate (requirement A) — mechanism,
                         # not prompt (the write profile's metadata-first
@@ -2078,8 +2090,28 @@ class BaseSpecialistAgent(abc.ABC):
                         # before/after diff display (capped at 5s to avoid
                         # blocking the SSE stream on slow MCP calls)
                         current_record: dict[str, Any] | None = None
-                        if mutation_type in ("update", "upsert"):
-                            record_id = block.input.get("id") or (block.input.get("body") or {}).get("id")
+                        accounting_card = None
+                        if _is_netsuite_write and mutation_type == "update":
+                            from app.services.chat.write_payload import normalize_write_payload
+                            from app.services.transaction_ops.tax_correction import review_for_card
+
+                            try:
+                                accounting_card = review_for_card(
+                                    db, self.tenant_id, block.name, record_type, normalize_write_payload(block.input)
+                                )
+                            except ValueError as exc:
+                                if validation is None:
+                                    validation = ValidationResult(ok=False)
+                                validation.invariant_errors.append(str(exc))
+                                validation.ok = False
+                            if accounting_card:
+                                current_record = accounting_card["before"]
+                        if mutation_type in ("update", "upsert") and accounting_card is None:
+                            record_id = (
+                                block.input.get("recordId")
+                                or block.input.get("id")
+                                or (block.input.get("body") or {}).get("id")
+                            )
                             if record_id:
                                 from app.services.chat.tools import _make_ext_tool_name, parse_external_tool_name
 
@@ -2097,7 +2129,7 @@ class BaseSpecialistAgent(abc.ABC):
                                         get_result_str = await _aio.wait_for(
                                             execute_tool_call(
                                                 tool_name=get_tool_name,
-                                                tool_input={"recordType": record_type, "id": str(record_id)},
+                                                tool_input={"recordType": record_type, "recordId": str(record_id)},
                                                 tenant_id=self.tenant_id,
                                                 actor_id=self.user_id,
                                                 correlation_id=self.correlation_id,
@@ -2107,6 +2139,10 @@ class BaseSpecialistAgent(abc.ABC):
                                             timeout=5.0,
                                         )
                                         current_record = json.loads(get_result_str)
+                                        if isinstance(current_record, dict) and isinstance(
+                                            current_record.get("data"), dict
+                                        ):
+                                            current_record = current_record["data"]
                                     except Exception:
                                         logger.warning(
                                             "mutation_intercept: failed to pre-fetch %s/%s",
@@ -2222,6 +2258,11 @@ class BaseSpecialistAgent(abc.ABC):
                             # — not "a write tool was called" — is what stands
                             # the prose guard down; see _write_reached_the_human.
                             self._write_confirmation_emitted = True
+                            if accounting_card:
+                                payload.accounting_review = accounting_card
+                                from app.services.transaction_ops.tax_correction import approval_text
+
+                                yield "text", "\n\n" + approval_text(accounting_card) + "\n\n"
                             yield ("confirmation_required", payload.model_dump())
                             _confirmation_result: dict[str, Any] = {
                                 "confirmation_required": True,
@@ -2501,6 +2542,77 @@ class BaseSpecialistAgent(abc.ABC):
                             "content": llm_result_str,
                         }
                     )
+
+                    # The supported accounting payload is already deterministic. Route it
+                    # through the existing validator/HITL card instead of asking the model
+                    # to repeat it in another hop (which can hallucinate a card in prose).
+                    if block.name == "transaction_ops_accounting_evidence" and not _had_error:
+                        from app.services.transaction_ops.tax_correction import candidate_confirmation
+
+                        try:
+                            prepared = await candidate_confirmation(
+                                db=db,
+                                tenant_id=self.tenant_id,
+                                actor_id=self.user_id,
+                                correlation_id=self.correlation_id,
+                                session_id=session_id or str(self.tenant_id),
+                                task=task,
+                                tools=self.tool_definitions,
+                                policy=active_policy,
+                                case_id=block.input.get("case_id"),
+                            )
+                        except ValueError as exc:
+                            prepared = None
+                            note = f"The correction needs review before an approval card can be created: {exc}"
+                            yield "text", "\n\n" + note
+                            yield (
+                                "response",
+                                AgentResult(
+                                    success=False,
+                                    data=note,
+                                    error=str(exc),
+                                    tool_calls_log=tool_calls_log,
+                                    tokens_used=TokenUsage(
+                                        total_input_tokens, total_output_tokens, total_cache_creation, total_cache_read
+                                    ),
+                                    agent_name=self.agent_name,
+                                ),
+                            )
+                            return
+                        if prepared:
+                            card, note = prepared
+                            self._write_confirmation_emitted = True
+                            tool_calls_log.append(
+                                build_tool_call_log_entry(
+                                    step=step,
+                                    agent_name=self.agent_name,
+                                    tool_name=card.tool_name,
+                                    params=card.tool_input,
+                                    duration_ms=0,
+                                    result_str=json.dumps(
+                                        {
+                                            "confirmation_required": True,
+                                            "proposal_origin": "verified_accounting_evidence",
+                                            "financial_writes": 0,
+                                        }
+                                    ),
+                                )
+                            )
+                            yield "text", "\n\n" + note
+                            yield "confirmation_required", card.model_dump()
+                            yield (
+                                "response",
+                                AgentResult(
+                                    success=True,
+                                    data=note,
+                                    tool_calls_log=tool_calls_log,
+                                    tokens_used=TokenUsage(
+                                        total_input_tokens, total_output_tokens, total_cache_creation, total_cache_read
+                                    ),
+                                    agent_name=self.agent_name,
+                                ),
+                            )
+                            return
 
                     # Early exit: if this tool returned data and there are more
                     # tools queued, skip redundant DATA tools — but always allow

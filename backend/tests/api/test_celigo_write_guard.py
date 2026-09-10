@@ -196,7 +196,7 @@ class TestGap2GenericMcpDeleteOrphansThePair:
         r = await client.delete(f"/api/v1/mcp-connectors/{connector_id}", headers=headers)
 
         assert r.status_code == 400, f"expected the guard to refuse, got {r.status_code}: {r.text}"
-        assert "Settings" in r.json()["detail"]
+        assert "connection card" in r.json()["detail"]
 
         await db.rollback()
         row = (await db.execute(select(McpConnector).where(McpConnector.id == connector_id))).scalar_one()

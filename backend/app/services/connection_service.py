@@ -1,4 +1,7 @@
+import asyncio
+import re
 import uuid
+from datetime import datetime, timezone
 
 import httpx
 import structlog
@@ -6,8 +9,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.encryption import decrypt_credentials, encrypt_credentials, get_current_key_version
-from app.models.connection import Connection
+from app.models.connection import RETIRED_CONNECTION_STATUSES, Connection
 from app.services.celigo_write_guard import CeligoManagedElsewhereError
+from app.services.http_connector_service import HTTP_PROVIDERS, public_metadata, validate_credentials, verify_connection
 
 logger = structlog.get_logger()
 
@@ -30,12 +34,16 @@ async def create_connection(
     created_by: uuid.UUID | None = None,
 ) -> Connection:
     """Create a new connection with encrypted credentials."""
+    if provider in HTTP_PROVIDERS:
+        credentials = validate_credentials(provider, credentials)
     encrypted = encrypt_credentials(credentials)
     connection = Connection(
         tenant_id=tenant_id,
         provider=provider,
         label=label,
-        status="active",
+        status="pending" if provider in HTTP_PROVIDERS else "active",
+        auth_type=credentials["auth_type"] if provider in HTTP_PROVIDERS else "oauth2",
+        metadata_json=public_metadata(credentials) if provider in HTTP_PROVIDERS else None,
         encrypted_credentials=encrypted,
         encryption_key_version=get_current_key_version(),
         created_by=created_by,
@@ -56,7 +64,9 @@ async def get_connection(db: AsyncSession, connection_id: uuid.UUID, tenant_id: 
 async def list_connections(db: AsyncSession, tenant_id: uuid.UUID) -> list[Connection]:
     """List connections for a tenant (no secrets exposed)."""
     result = await db.execute(
-        select(Connection).where(Connection.tenant_id == tenant_id).order_by(Connection.created_at.desc())
+        select(Connection)
+        .where(Connection.tenant_id == tenant_id, Connection.status != "revoked")
+        .order_by(Connection.created_at.desc())
     )
     return list(result.scalars().all())
 
@@ -103,110 +113,71 @@ async def test_connection(db: AsyncSession, connection_id: uuid.UUID, tenant_id:
         select(Connection).where(Connection.id == connection_id, Connection.tenant_id == tenant_id)
     )
     connection = result.scalar_one_or_none()
-    if not connection:
+    if not connection or connection.status in RETIRED_CONNECTION_STATUSES:
         return {"connection_id": str(connection_id), "status": "error", "message": "Connection not found"}
 
-    if connection.provider == "netsuite":
-        return await _test_netsuite_connection(db, connection)
+    if connection.provider in HTTP_PROVIDERS:
+        return await verify_connection(db, connection)
 
-    # Other providers: stub for now
+    if connection.provider in ("netsuite", "stripe"):
+        from app.services.connection_verification import check_stripe, failure_message
+
+        try:
+            async with asyncio.timeout(30):
+                if connection.provider == "netsuite":
+                    outcome = await _test_netsuite_connection(db, connection)
+                else:
+                    outcome = await check_stripe(decrypt_credentials(connection.encrypted_credentials))
+        except Exception as exc:
+            outcome = {"status": "error", "message": failure_message(connection.provider.title(), exc)}
+        connection.last_health_check_at = datetime.now(timezone.utc)
+        connection.status = "active" if outcome["status"] == "ok" else "error"
+        connection.error_reason = None if outcome["status"] == "ok" else outcome["message"]
+        await db.flush()
+        return {"connection_id": str(connection_id), **outcome}
+
     return {
         "connection_id": str(connection_id),
-        "status": "ok",
-        "message": f"{connection.provider} connection test passed",
+        "status": "unsupported",
+        "message": "Use this provider's dedicated setup to verify read access",
     }
 
 
 async def _test_netsuite_connection(db: AsyncSession, connection: Connection) -> dict:
-    """Test a NetSuite connection by running a lightweight SuiteQL query."""
-    try:
-        credentials = decrypt_credentials(connection.encrypted_credentials)
-    except Exception as exc:
-        return {
-            "connection_id": str(connection.id),
-            "status": "error",
-            "message": f"Failed to decrypt credentials: {exc}",
-        }
+    """Verify the selected account's SuiteQL read access, independently of File Cabinet setup."""
+    from app.services.http_connector_service import ConnectorReadError
 
-    auth_type = credentials.get("auth_type", "oauth1")
+    credentials = decrypt_credentials(connection.encrypted_credentials)
     account_id = credentials.get("account_id", "")
+    if not isinstance(account_id, str) or not re.fullmatch(r"[0-9]+(?:[-_](?:SB[0-9]+|RP))?", account_id, re.I):
+        raise ValueError("Invalid account")
+    query = "SELECT id FROM transaction WHERE ROWNUM <= 1"
+    try:
+        if credentials.get("auth_type", "oauth1") == "oauth2":
+            from app.services.netsuite_client import execute_suiteql_via_rest
+            from app.services.netsuite_oauth_service import get_valid_token
 
-    if auth_type == "oauth2":
-        from app.services.netsuite_client import execute_suiteql_via_rest
-        from app.services.netsuite_oauth_service import get_valid_token
+            access_token = await get_valid_token(db, connection)
+            if not access_token:
+                raise ConnectorReadError("authentication_failed")
+            await execute_suiteql_via_rest(access_token, account_id, query, 1, timeout_seconds=20)
+        else:
+            from app.mcp.tools.netsuite_suiteql import build_oauth1_header
 
-        access_token = await get_valid_token(db, connection)
-        if not access_token:
-            return {
-                "connection_id": str(connection.id),
-                "status": "error",
-                "message": "OAuth 2.0 token expired and refresh failed.",
-            }
-
-        # Test OAuth / SuiteQL
-        oauth_ok = False
-        oauth_error = None
-        try:
-            await execute_suiteql_via_rest(access_token, account_id, "SELECT id FROM transaction WHERE ROWNUM <= 1", 1)
-            oauth_ok = True
-        except Exception as exc:
-            oauth_error = str(exc)
-
-        if not oauth_ok:
-            return {
-                "connection_id": str(connection.id),
-                "status": "error",
-                "message": f"NetSuite query failed: {oauth_error}",
-            }
-
-        # Test RESTlet availability
-        restlet_ok = False
-        restlet_error = None
-        try:
-            from app.services.netsuite_restlet_client import restlet_read_file
-
-            await restlet_read_file(access_token, account_id, file_id=1)
-            restlet_ok = True
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 403:
-                restlet_error = "RESTlet not deployed or role lacks access"
-            elif e.response.status_code == 404:
-                restlet_error = "RESTlet script not found — install the Ecom bundle"
-            else:
-                restlet_error = f"RESTlet HTTP {e.response.status_code}"
-        except Exception as e:
-            # RESTlet may return a controlled error for file ID 1 — that's still OK
-            err_msg = str(e)
-            if "RESTlet error" in err_msg:
-                restlet_ok = True  # Got a response from the RESTlet, it's deployed
-            else:
-                restlet_error = err_msg[:200]
-
-        return {
-            "connection_id": str(connection.id),
-            "status": "ok" if (oauth_ok and restlet_ok) else "partial",
-            "message": f"NetSuite account {account_id} connected successfully."
-            + ("" if restlet_ok else " RESTlet not available."),
-            "oauth_status": "valid",
-            "restlet_status": "available" if restlet_ok else "not_available",
-            "restlet_error": restlet_error,
-        }
-
-    # OAuth 1.0 test — delegate to the suiteql tool's execute
-    from app.mcp.tools.netsuite_suiteql import execute as suiteql_execute
-
-    test_result = await suiteql_execute(
-        {"query": "SELECT id FROM transaction WHERE ROWNUM <= 1", "limit": 1},
-        context={"tenant_id": connection.tenant_id, "db": db},
-    )
-    if test_result.get("error"):
-        return {
-            "connection_id": str(connection.id),
-            "status": "error",
-            "message": test_result.get("message", "Unknown error"),
-        }
-    return {
-        "connection_id": str(connection.id),
-        "status": "ok",
-        "message": f"NetSuite account {account_id} connected successfully.",
-    }
+            slug = account_id.replace("_", "-").lower()
+            url = f"https://{slug}.suitetalk.api.netsuite.com/services/rest/query/v1/suiteql"
+            headers = {**build_oauth1_header(credentials, "POST", url), "Prefer": "transient"}
+            async with httpx.AsyncClient(timeout=20, follow_redirects=False, trust_env=False) as client:
+                response = await client.post(url, headers=headers, json={"q": query})
+                response.raise_for_status()
+                data = response.json()
+                if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+                    raise ConnectorReadError("invalid_response")
+    except httpx.HTTPStatusError as exc:
+        code = (
+            "authentication_failed"
+            if exc.response.status_code in (401, 403)
+            else ("rate_limited" if exc.response.status_code == 429 else "http_error")
+        )
+        raise ConnectorReadError(code) from None
+    return {"connection_id": str(connection.id), "status": "ok", "message": "NetSuite SuiteQL read access verified."}

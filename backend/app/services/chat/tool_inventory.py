@@ -36,7 +36,7 @@ _CELIGO_HINT = (
 def build_tool_inventory_block(tool_definitions: list[dict]) -> str:
     """Render the tool schema as a prompt block the LLM can trust.
 
-    Format: an XML block listing every tool's name and description, followed
+    Format: an XML block indexing tool names (full descriptions remain in API schemas), followed
     by an optional BigQuery dialect hint when BigQuery tools are present, and
     an optional Celigo hint when celigo.* tools are present. Returns "" for an
     empty tool list so callers can unconditionally inject the result into a
@@ -45,11 +45,10 @@ def build_tool_inventory_block(tool_definitions: list[dict]) -> str:
     if not tool_definitions:
         return ""
 
-    lines: list[str] = ["<available_tools>"]
+    lines: list[str] = ["<available_tools>", "Full descriptions and parameters are in the supplied tool definitions."]
     for td in tool_definitions:
         name = td.get("name", "")
-        description = td.get("description", "")
-        lines.append(f"- {name}: {description}")
+        lines.append(f"- {name}")
     lines.append("</available_tools>")
 
     has_bigquery = any(td.get("name", "").startswith("bigquery_") for td in tool_definitions)
@@ -78,8 +77,8 @@ _MCP_TOOL_PATTERNS = {
     "runsavedsearch": "SAVED_SEARCHES",
     "listallreports": "REPORT_DISCOVERY",
     "listsavedsearches": "SEARCH_DISCOVERY",
-    "suiteql": "SUITEQL",
     "getsuiteqlmetadata": "METADATA",
+    "suiteql": "SUITEQL",
     "getsubsidiaries": "SUBSIDIARIES",
 }
 
@@ -181,7 +180,8 @@ def build_mcp_execution_guidance(tool_definitions: list[dict]) -> str:
             "\n  Financial statements → ns_runReport"
             "\n  Pre-built business reports → ns_runSavedSearch"
             "\n  Ad-hoc data queries → ns_runCustomSuiteQL (MCP) → netsuite_suiteql (local fallback)"
-            "\n  Schema verification → ns_getSuiteQLMetadata + netsuite_get_metadata (use both)"
+            "\n  Accounting cases → transaction_ops_accounting_evidence first; reuse its scoped native reads."
+            "\n  Schema verification → one applicable metadata tool; do not fetch duplicate schemas."
             "\n  Documentation/how-to → rag_search → web_search"
             "\n"
             "\nIMPORTANT: MCP tools handle EXECUTION. But you still have rich tenant context"
@@ -194,7 +194,7 @@ def build_mcp_execution_guidance(tool_definitions: list[dict]) -> str:
     if other_ext_tools:
         sections.append("\n\nOTHER CONNECTED SYSTEM TOOLS:")
         for td in other_ext_tools:
-            sections.append(f"\n- {td.get('name', '')}: {td.get('description', '')}")
+            sections.append(f"\n- {td.get('name', '')}")
         sections.append(
             "\nUse these tools when the user's question relates to the system they belong to. "
             "Check the tool description prefix (e.g., [shopify_mcp]) to identify which system."
