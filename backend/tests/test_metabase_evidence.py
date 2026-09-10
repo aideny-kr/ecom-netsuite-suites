@@ -113,6 +113,18 @@ def test_distinct_groups_may_overlap_but_cannot_exceed_total():
     assert evidence.feedback(impossible["table_reference"])
 
 
+@pytest.mark.parametrize("second, expected", [(24, "sum to"), (30, "overlap")])
+def test_reconciliation_narrative_comes_from_actual_control(second, expected):
+    evidence = MetabaseEvidence({TOOL})
+    grouped = observed(evidence, [["SKU-A", 41], ["SKU-B", second]], grouped=True)
+    reference = grouped["control_checks"][0]["control_reference"]
+    assert evidence.feedback(reference)
+    total = observed(evidence, [[65]])
+    assert evidence.feedback(reference) is None
+    assert expected in evidence.resolve(reference)
+    assert total["control_checks"][0]["result"] == evidence.resolve(reference)
+
+
 def test_additive_counts_must_reconcile_exactly():
     evidence = MetabaseEvidence({TOOL})
     grouped = observed(

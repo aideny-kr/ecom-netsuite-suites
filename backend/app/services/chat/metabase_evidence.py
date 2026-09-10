@@ -107,9 +107,12 @@ filters, joins and aggregate expressions (remove breakout/order-by/limit).
 When a result supplies control_query, copy that query object verbatim to the
 same connector's query tool; do not reconstruct or simplify its joins/measure.
 Distinct counts can overlap between groups; do not sum SKU counts into orders.
+For reconciliation/overlap commentary, copy control_reference from control_checks.
+Possible overlap is not evidence of actual overlap; use the returned comparison.
 Use returned value references for headline figures and table_reference for
 tables. Keep the final explanation qualitative. Omit unrequested numeric scope
-restatements, numbered lists and SQL snippets. Preserve identifiers such as SKUs.
+restatements, numbered lists and SQL snippets. Say "the requested batch" rather
+than changing its name or inserting bracketed placeholders. Preserve SKUs.
 If a value or control is missing, query it; if verification fails, say so.
 These reference requirements apply to the final answer, not tool arguments.
 </metabase_numeric_evidence>"""
@@ -215,6 +218,15 @@ These reference requirements apply to the final answer, not tool arguments.
                 ),
                 "control_required": bool(grouped and measures),
                 "control_query": control_query or None,
+                "control_checks": [
+                    {
+                        "columns": candidate.columns,
+                        "control_reference": self._reference(index, "control", None),
+                        "result": self._control_error(candidate) or self._control_statement(candidate),
+                    }
+                    for index, candidate in enumerate(self.tables)
+                    if candidate.grouped and candidate.measures
+                ],
                 "display_limited": len(rows) > 100,
             },
             default=str,
@@ -253,6 +265,30 @@ These reference requirements apply to the final answer, not tool arguments.
                 return "Distinct group counts contradict their control. Requery both before answering."
         return None
 
+    def _control_statement(self, table: EvidenceTable) -> str:
+        statements = []
+        for column, (key, operation) in table.measures.items():
+            controls = [
+                candidate.rows[0][index]
+                for candidate in self.tables
+                if candidate.complete and not candidate.grouped and len(candidate.rows) == 1
+                for index, (candidate_key, _) in candidate.measures.items()
+                if candidate_key == key
+            ]
+            total = _decimal(controls[-1]) if controls else None
+            values = [_decimal(row[column]) for row in table.rows]
+            if total is None or any(value is None for value in values):
+                continue
+            if operation == "distinct":
+                statements.append(
+                    "The grouped distinct counts sum to the overall distinct count for this result."
+                    if sum(values, Decimal(0)) == total
+                    else "The distinct groups overlap; adding their counts would overstate the overall population."
+                )
+            elif operation in {"count", "count-where", "sum", "sum-where"}:
+                statements.append("The grouped totals reconcile with the overall control.")
+        return " ".join(dict.fromkeys(statements)) or "A matching ungrouped control was returned."
+
     def feedback(self, text: str) -> str | None:
         references = _REFERENCE.findall(text)
         if any(reference not in self.bindings for reference in references):
@@ -277,4 +313,10 @@ These reference requirements apply to the final answer, not tool arguments.
         return "\n".join(dict.fromkeys(errors)) or None
 
     def resolve(self, text: str) -> str:
-        return _REFERENCE.sub(lambda match: str(self.bindings[match[0]][1]), text)
+        def render(match):
+            table_id, value = self.bindings[match[0]]
+            if match[0].endswith(":control}}"):
+                return self._control_statement(self.tables[table_id])
+            return str(value)
+
+        return _REFERENCE.sub(render, text)
