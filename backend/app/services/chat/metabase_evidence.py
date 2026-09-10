@@ -23,6 +23,11 @@ _SPELLED_NUMBER = re.compile(
     r"sixty|seventy|eighty|ninety|hundred|thousand|million|billion|dozen)\b",
     re.I,
 )
+_MATHEMATICAL_PROSE = re.compile(
+    r"\b(?:sum(?:s|med|ming)?|overlap(?:s|ped|ping)?|reconcil(?:e|es|ed|ing)|"
+    r"multiple|more than one|double[- ]count(?:ed|ing)?)\b",
+    re.I,
+)
 UNVERIFIED = "I couldn't verify the requested figures from completed Metabase aggregates. Please retry the analysis."
 
 
@@ -109,6 +114,9 @@ same connector's query tool; do not reconstruct or simplify its joins/measure.
 Distinct counts can overlap between groups; do not sum SKU counts into orders.
 For reconciliation/overlap commentary, copy control_reference from control_checks.
 Possible overlap is not evidence of actual overlap; use the returned comparison.
+Do not surround a control reference with your own statements about sums,
+overlap, reconciliation, or orders containing multiple matching SKUs. These
+mathematical claims must appear only in the application-rendered control text.
 Use returned value references for headline figures and table_reference for
 tables. Chart JSON may use unquoted numeric references: they resolve before
 chart parsing. Saved native SQL results can be shown via table_reference; if
@@ -313,6 +321,14 @@ These reference requirements apply to the final answer, not tool arguments.
                 f"Remove these literal numbers/number words: {json.dumps(literals[:20])}. "
                 "Omit numeric scope labels and use value/table references for findings. "
                 "Existing references do not need to be requeried just to fix wording."
+            )
+        if _MATHEMATICAL_PROSE.search(prose):
+            errors.append(
+                "Remove your own sum, overlap, reconciliation and multiplicity commentary. "
+                "Use only the supplied control_reference for mathematical relationships, "
+                "without additional membership claims or hypothetical caveats. "
+                "Keep the requested figures and breakdown in the final answer. No new query is needed "
+                "when the completed control is already available."
             )
         return "\n".join(dict.fromkeys(errors)) or None
 

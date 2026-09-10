@@ -144,6 +144,22 @@ def test_reconciliation_narrative_comes_from_actual_control(second, expected):
     assert total["control_checks"][0]["result"] == evidence.resolve(reference)
 
 
+def test_model_cannot_append_contradictory_membership_claim_to_verified_control():
+    evidence = MetabaseEvidence({TOOL})
+    grouped = observed(evidence, [["SKU-A", 41], ["SKU-B", 24]], grouped=True)
+    observed(evidence, [[65]])
+    reference = grouped["control_checks"][0]["control_reference"]
+    for claim in (
+        "Some orders contain multiple matching SKUs.",
+        "These counts do not sum to the headline.",
+        "There is overlap across SKUs.",
+    ):
+        assert evidence.feedback(reference + " " + claim)
+    answer = grouped["table_reference"] + "\n\n" + reference
+    assert evidence.feedback(answer) is None
+    assert "sum to the overall distinct count" in evidence.resolve(answer)
+
+
 def test_additive_counts_must_reconcile_exactly():
     evidence = MetabaseEvidence({TOOL})
     grouped = observed(
