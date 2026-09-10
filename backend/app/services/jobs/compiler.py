@@ -373,6 +373,74 @@ def _repair_tool_result_content(errors: list[str]) -> str:
     )
 
 
+async def _bigquery_preflight(db: AsyncSession, tenant_id: uuid.UUID, plan: dict) -> list[str]:
+    """Brief H, item 1: compile-time BigQuery dry run for every ``bigquery_sql``
+    step in a structurally-valid plan — replaces the deleted regex heuristic
+    in ``app.services.jobs.registry`` (``_bigquery_unqualified_tables``), which
+    had both false positives (``EXTRACT(DAY FROM created_at)``, ``FROM UNNEST
+    (...)`` with a space) and false negatives (``FROM a, b`` never checking
+    ``b``). A BigQuery dry run (``app.services.bigquery_service.dry_run_query``
+    — the SAME ``QueryJobConfig(dry_run=True, use_query_cache=False)``
+    ``estimate_query_cost`` already builds, reused rather than a second client)
+    round-trips through BigQuery's OWN parser, so it raises BigQuery's real
+    error for an unqualified table, an unknown column, or a syntax error —
+    without a regex ever reimplementing BigQuery's SQL grammar.
+
+    Runs through the SAME tenant BigQuery connector ``bigquery_sql_execute``
+    (``app.mcp.tools.bigquery_tools``) resolves from ``{tenant_id, db}`` — no
+    second credential-resolution path. Only builds a client at all when the
+    plan actually has a ``bigquery_sql`` step (every playbook-only Inventory
+    Aging Weekly plan has none); a tenant with no active BigQuery connection
+    fails CLOSED rather than silently skipping the check for the step(s) it
+    cannot validate."""
+    steps = plan.get("steps") if isinstance(plan, dict) else None
+    bq_steps = [
+        s
+        for s in (steps or [])
+        if isinstance(s, dict) and s.get("type") == "bigquery_sql" and isinstance(s.get("params"), dict)
+    ]
+    if not bq_steps:
+        return []
+
+    from app.mcp.tools.bigquery_tools import _extract_credentials, _get_bigquery_connector
+    from app.services.bigquery_service import dry_run_query
+
+    connector = await _get_bigquery_connector({"tenant_id": tenant_id, "db": db})
+    if connector is None:
+        return [f"bigquery_sql step {s.get('id')}: preflight needs a BigQuery connection" for s in bq_steps]
+
+    sa_json, project_id, location = _extract_credentials(connector)
+    errors: list[str] = []
+    for step in bq_steps:
+        query = step["params"].get("query", "")
+        try:
+            await dry_run_query(sa_json, project_id, query, location=location)
+        except Exception as exc:
+            errors.append(f"bigquery_sql step {step.get('id')}: {exc}")
+    return errors
+
+
+async def _validate_and_preflight(
+    db: AsyncSession, tenant_id: uuid.UUID, tool_input: dict
+) -> tuple[ValidatedPlan | None, list[str]]:
+    """``registry.validate_plan``, then — only for a structurally valid plan —
+    the BigQuery preflight above (item 1, brief H): a plan can satisfy every
+    JSON Schema and cross-reference rule and still name a table BigQuery
+    itself would reject at run time, so both gates decide whether a plan is
+    ever persisted. Returns ``(validated, [])`` for a clean plan or
+    ``(None, errors)`` otherwise, mirroring ``PlanInvalid``'s own "every
+    problem in one shot" contract so a repair round sees everything wrong at
+    once, from either gate."""
+    try:
+        validated = validate_plan(tool_input)
+    except PlanInvalid as exc:
+        return None, exc.errors
+    preflight_errors = await _bigquery_preflight(db, tenant_id, tool_input)
+    if preflight_errors:
+        return None, preflight_errors
+    return validated, []
+
+
 async def compile_instruction(
     db: AsyncSession,
     *,
@@ -400,14 +468,12 @@ async def compile_instruction(
 
     errors: list[str]
     if tool_name == _COMPILE_TOOL_NAME:
-        try:
-            validated = validate_plan(tool_input)
-        except PlanInvalid as exc:
-            errors = exc.errors
-        else:
+        validated, plan_errors = await _validate_and_preflight(db, tenant_id, tool_input)
+        if validated is not None:
             compiled = _build_compiled_plan(tool_input, validated, llm.model)
             await _audit_compile(db, tenant_id, actor_id, instruction, llm.model, plan_version, outcome="compiled")
             return compiled
+        errors = plan_errors
     else:
         errors = ["the model did not call compile_plan or ask_clarification"]
 
@@ -434,14 +500,12 @@ async def compile_instruction(
             return Clarification(question=question)
 
         if tool_name == _COMPILE_TOOL_NAME:
-            try:
-                validated = validate_plan(tool_input)
-            except PlanInvalid as exc:
-                errors = exc.errors
-            else:
+            validated, plan_errors = await _validate_and_preflight(db, tenant_id, tool_input)
+            if validated is not None:
                 compiled = _build_compiled_plan(tool_input, validated, llm.model)
                 await _audit_compile(db, tenant_id, actor_id, instruction, llm.model, plan_version, outcome="compiled")
                 return compiled
+            errors = plan_errors
 
     question = "I couldn't compile a valid plan for this instruction: " + "; ".join(errors)
     await _audit_compile(db, tenant_id, actor_id, instruction, llm.model, plan_version, outcome="clarification")

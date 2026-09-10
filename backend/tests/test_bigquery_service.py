@@ -319,6 +319,53 @@ class TestEstimateQueryCost:
         assert result["estimated_cost_usd"] == 5.0
 
 
+class TestDryRunQuery:
+    """Brief H, item 1: the compile-time preflight (app.services.jobs.compiler)
+    validates a bigquery_sql step by dry-running it through BigQuery's own
+    parser, rather than a regex heuristic over the SQL text. `dry_run_query`
+    is the one function both the preflight and `estimate_query_cost` share --
+    same client, same QueryJobConfig(dry_run=True, use_query_cache=False)."""
+
+    @pytest.mark.asyncio
+    async def test_raises_bigquerys_own_error_for_an_invalid_query(self):
+        from app.services.bigquery_service import dry_run_query
+
+        with patch("app.services.bigquery_service._get_client") as m:
+            m.return_value.query.side_effect = ValueError('Table "inventory_snapshot" must be qualified with a dataset')
+            with pytest.raises(ValueError, match="must be qualified with a dataset"):
+                await dry_run_query({"type": "service_account"}, "p", "SELECT * FROM inventory_snapshot")
+
+    @pytest.mark.asyncio
+    async def test_returns_none_and_raises_nothing_for_a_valid_query(self):
+        from app.services.bigquery_service import dry_run_query
+
+        mock_job = MagicMock()
+        mock_job.total_bytes_processed = 12345
+
+        with patch("app.services.bigquery_service._get_client") as m:
+            m.return_value.query.return_value = mock_job
+            result = await dry_run_query(
+                {"type": "service_account"}, "p", "SELECT EXTRACT(DAY FROM created_at) FROM dataset.events"
+            )
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_uses_a_dry_run_job_config_with_no_query_cache(self):
+        from app.services.bigquery_service import dry_run_query
+
+        with patch("app.services.bigquery_service._get_client") as m:
+            mock_client = MagicMock()
+            m.return_value = mock_client
+            await dry_run_query({"type": "service_account"}, "p", "SELECT 1", location="US")
+
+            mock_client.query.assert_called_once()
+            _, kwargs = mock_client.query.call_args
+            job_config = kwargs["job_config"]
+            assert job_config.dry_run is True
+            assert job_config.use_query_cache is False
+
+
 class TestServiceAccountCredentials:
     @pytest.mark.asyncio
     async def test_uses_service_account_info(self):

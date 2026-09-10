@@ -333,6 +333,165 @@ async def test_the_correct_four_step_playbook_plan_compiles_successfully(db, ten
     assert len(fake.calls) == 1  # a clean compile never needs a repair round
 
 
+# ---------------------------------------------------------------------------
+# Brief H, item 1: the compiler's compile-time BigQuery preflight. Replaces
+# the deleted regex heuristic in registry.py (`_bigquery_unqualified_tables`)
+# with a real BigQuery dry run (QueryJobConfig(dry_run=True,
+# use_query_cache=False) -- app.services.bigquery_service.dry_run_query,
+# reusing the SAME client-building path `estimate_query_cost` already uses)
+# through the tenant's OWN BigQuery connector -- the same one
+# `bigquery_sql_execute` resolves from {tenant_id, db}.
+# ---------------------------------------------------------------------------
+
+
+def _bigquery_only_plan(query: str) -> dict:
+    """A minimal one-step plan -- just enough to exercise the preflight in
+    isolation, without also tripping item 2a's "no bigquery_sql alongside a
+    playbook compose" rule."""
+    return {"steps": [{"id": "s1", "type": "bigquery_sql", "params": {"query": query}}]}
+
+
+async def _add_bigquery_connector(db, tenant_id) -> None:
+    from app.core.encryption import encrypt_credentials, get_current_key_version
+    from app.models.mcp_connector import McpConnector
+
+    db.add(
+        McpConnector(
+            tenant_id=tenant_id,
+            provider="bigquery",
+            label="BigQuery",
+            server_url="",
+            auth_type="none",
+            encrypted_credentials=encrypt_credentials({"service_account_json": {}, "project_id": "test-project"}),
+            encryption_key_version=get_current_key_version(),
+            status="active",
+        )
+    )
+    await db.flush()
+
+
+def _fake_get_client_raising_for(needle: str):
+    from unittest.mock import MagicMock
+
+    def fake_get_client(credentials, project_id, location=None):
+        client = MagicMock()
+
+        def fake_query(query, job_config=None):
+            if needle in query:
+                raise ValueError(f'Table "{needle}" must be qualified with a dataset')
+            job = MagicMock()
+            job.total_bytes_processed = 100
+            return job
+
+        client.query.side_effect = fake_query
+        return client
+
+    return fake_get_client
+
+
+async def test_bigquery_preflight_rejects_a_step_whose_dry_run_raises(db, tenant_a, monkeypatch):
+    monkeypatch.setattr(compiler, "_tenant_locations", lambda *_a, **_kw: _async_list([]))
+    await _add_bigquery_connector(db, tenant_a.id)
+    monkeypatch.setattr("app.services.bigquery_service._get_client", _fake_get_client_raising_for("inventory_snapshot"))
+
+    bad_plan = _bigquery_only_plan("SELECT sku FROM inventory_snapshot")
+    fake = FakeAdapter(
+        [_compile_plan_response(bad_plan, tool_use_id="tu_1"), _compile_plan_response(bad_plan, tool_use_id="tu_2")]
+    )
+
+    result = await compile_instruction(
+        db,
+        tenant_id=tenant_a.id,
+        instruction="run a bigquery query",
+        actor_id=None,
+        llm=CompilerLLM(adapter=fake, model="fake-model"),
+    )
+
+    assert isinstance(result, Clarification)
+    assert len(fake.calls) == 2  # exactly one repair round, never a third call
+
+
+async def test_bigquery_preflight_accepts_a_step_whose_dry_run_succeeds(db, tenant_a, monkeypatch):
+    """`EXTRACT(DAY FROM created_at)` — a regex heuristic's exact false
+    positive (a bare-word scan of FROM/JOIN would misread this as a table
+    reference) — must compile cleanly through a real dry run, which only
+    ever sees `dataset.events` as the actual FROM target."""
+    monkeypatch.setattr(compiler, "_tenant_locations", lambda *_a, **_kw: _async_list([]))
+    await _add_bigquery_connector(db, tenant_a.id)
+
+    from unittest.mock import MagicMock
+
+    def fake_get_client(credentials, project_id, location=None):
+        client = MagicMock()
+        job = MagicMock()
+        job.total_bytes_processed = 100
+        client.query.return_value = job
+        return client
+
+    monkeypatch.setattr("app.services.bigquery_service._get_client", fake_get_client)
+
+    good_plan = _bigquery_only_plan("SELECT EXTRACT(DAY FROM created_at) AS d FROM dataset.events")
+    fake = FakeAdapter([_compile_plan_response(good_plan)])
+
+    result = await compile_instruction(
+        db,
+        tenant_id=tenant_a.id,
+        instruction="run a bigquery query",
+        actor_id=None,
+        llm=CompilerLLM(adapter=fake, model="fake-model"),
+    )
+
+    assert isinstance(result, CompiledPlan)
+    assert len(fake.calls) == 1  # a clean compile never needs a repair round
+
+
+async def test_bigquery_preflight_fails_closed_with_no_connector(db, tenant_a, monkeypatch):
+    """No active BigQuery connector for the tenant at all -- the preflight
+    must fail CLOSED (never silently skip the check just because it cannot
+    reach a client)."""
+    monkeypatch.setattr(compiler, "_tenant_locations", lambda *_a, **_kw: _async_list([]))
+
+    plan = _bigquery_only_plan("SELECT 1 FROM dataset.events")
+    fake = FakeAdapter(
+        [_compile_plan_response(plan, tool_use_id="tu_1"), _compile_plan_response(plan, tool_use_id="tu_2")]
+    )
+
+    result = await compile_instruction(
+        db,
+        tenant_id=tenant_a.id,
+        instruction="run a bigquery query",
+        actor_id=None,
+        llm=CompilerLLM(adapter=fake, model="fake-model"),
+    )
+
+    assert isinstance(result, Clarification)
+    assert "s1" in result.question
+    assert "preflight needs a BigQuery connection" in result.question
+
+
+async def test_bigquery_preflight_is_skipped_when_the_plan_has_no_bigquery_sql_step(db, tenant_a, monkeypatch):
+    """No connector lookup at all -- and therefore no client ever built --
+    for a plan with zero bigquery_sql steps (every playbook-only Inventory
+    Aging Weekly plan)."""
+    monkeypatch.setattr(compiler, "_tenant_locations", lambda *_a, **_kw: _async_list([]))
+
+    async def _fail_if_called(*_a, **_kw):
+        raise AssertionError("_get_bigquery_connector must not be called for a plan with no bigquery_sql step")
+
+    monkeypatch.setattr("app.mcp.tools.bigquery_tools._get_bigquery_connector", _fail_if_called)
+
+    fake = FakeAdapter([_compile_plan_response(_correct_four_step_playbook_plan())])
+    result = await compile_instruction(
+        db,
+        tenant_id=tenant_a.id,
+        instruction=_MOCK_INSTRUCTION,
+        actor_id=None,
+        llm=CompilerLLM(adapter=fake, model="fake-model"),
+    )
+
+    assert isinstance(result, CompiledPlan)
+
+
 def test_system_prompt_states_the_report_step_rule():
     """A report_step param (on render_pdf, build_xlsx, and drive.upload) must
     be steered toward naming the report.compose step directly -- never a

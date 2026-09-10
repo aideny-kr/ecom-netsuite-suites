@@ -157,6 +157,39 @@ async def validate_connection(
         return {"valid": False, "error": str(exc)}
 
 
+def _sync_dry_run_job(credentials: dict, project_id: str, query: str, location: str | None = None):
+    """Submit ``query`` to BigQuery as a dry run (no bytes billed, no
+    execution) and return the resulting job. A dry run round-trips through
+    BigQuery's OWN parser/planner, so an invalid query raises BigQuery's real
+    error (an unqualified table name, an unknown column, a syntax error) —
+    without a regex ever having to reimplement BigQuery's SQL grammar.
+
+    The ONE place that builds a dry-run client + job config — both
+    ``estimate_query_cost`` (below, needs ``total_bytes_processed``) and
+    ``dry_run_query`` (needs only "did this raise") call this, so there is
+    exactly one BigQuery client construction path for a dry run, never two."""
+    client = _get_client(credentials, project_id, location=location)
+    job_config = bigquery.QueryJobConfig(dry_run=True, use_query_cache=False)
+    return client.query(query, job_config=job_config)
+
+
+async def dry_run_query(
+    credentials: dict,
+    project_id: str,
+    query: str,
+    location: str | None = None,
+) -> None:
+    """Validate ``query`` against BigQuery without running it or billing any
+    bytes (brief H, item 1 — the compiler's compile-time preflight over a
+    ``bigquery_sql`` step, replacing the deleted regex heuristic in
+    ``app.services.jobs.registry`` that had both false positives
+    — e.g. ``EXTRACT(DAY FROM created_at)`` or ``FROM UNNEST (...)`` with a
+    space — and false negatives — e.g. ``FROM a, b`` never checking ``b``).
+    Raises on an invalid query (BigQuery's own error); returns ``None`` on a
+    valid one — a caller only ever cares whether this raised."""
+    await asyncio.to_thread(_sync_dry_run_job, credentials, project_id, query, location)
+
+
 async def estimate_query_cost(
     credentials: dict,
     project_id: str,
@@ -169,13 +202,8 @@ async def estimate_query_cost(
     """
     _validate_read_only(query)
 
-    def _sync_estimate():
-        client = _get_client(credentials, project_id, location=location)
-        job_config = bigquery.QueryJobConfig(dry_run=True, use_query_cache=False)
-        job = client.query(query, job_config=job_config)
-        return job.total_bytes_processed
-
-    estimated_bytes = await asyncio.to_thread(_sync_estimate)
+    job = await asyncio.to_thread(_sync_dry_run_job, credentials, project_id, query, location)
+    estimated_bytes = job.total_bytes_processed
     estimated_cost = estimated_bytes / 1_000_000_000_000 * 5
 
     return {

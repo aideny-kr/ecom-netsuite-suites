@@ -460,87 +460,17 @@ def test_validate_plan_accepts_tracking_mode_compose_for_a_period_based_playbook
     assert [s.id for s in validated.steps] == ["compose_report"]
 
 
-def test_validate_plan_rejects_bigquery_sql_with_an_unqualified_from_table():
-    """The exact live-run failure: `FROM inventory_snapshot` with no dataset —
-    BigQuery needs `dataset.table` or `project.dataset.table`."""
-    plan = {
-        "steps": [
-            {
-                "id": "snapshot_query",
-                "type": "bigquery_sql",
-                "params": {"query": "SELECT sku FROM inventory_snapshot WHERE location IN ('Dimerco')"},
-            }
-        ]
-    }
-    with pytest.raises(PlanInvalid) as exc_info:
-        validate_plan(plan)
-    assert any(
-        "snapshot_query" in msg and "inventory_snapshot" in msg and "unqualified" in msg
-        for msg in exc_info.value.errors
-    )
-
-
-def test_validate_plan_rejects_bigquery_sql_with_an_unqualified_join_table():
-    plan = {
-        "steps": [
-            {
-                "id": "s1",
-                "type": "bigquery_sql",
-                "params": {
-                    "query": (
-                        "SELECT a.sku FROM `frameworkreporting.inventory_snapshot` a "
-                        "JOIN restock_events b ON a.sku = b.sku"
-                    )
-                },
-            }
-        ]
-    }
-    with pytest.raises(PlanInvalid) as exc_info:
-        validate_plan(plan)
-    assert any("restock_events" in msg and "unqualified" in msg for msg in exc_info.value.errors)
-
-
-def test_validate_plan_accepts_bigquery_sql_with_a_dataset_qualified_from_table():
-    plan = {
-        "steps": [
-            {
-                "id": "s1",
-                "type": "bigquery_sql",
-                "params": {"query": "SELECT sku FROM `frameworkreporting.inventory_snapshot` WHERE sku = 'X'"},
-            }
-        ]
-    }
-    validated = validate_plan(plan)
-    assert [s.id for s in validated.steps] == ["s1"]
-
-
-def test_validate_plan_does_not_flag_a_ctes_own_name_as_an_unqualified_table():
-    """A CTE alias (`WITH recent AS (...)`) is not a real BigQuery table — only
-    the CTE body's OWN `FROM` (which must still be dataset-qualified) is
-    checked; referencing the CTE by name afterward must not be flagged."""
-    plan = {
-        "steps": [
-            {
-                "id": "s1",
-                "type": "bigquery_sql",
-                "params": {
-                    "query": (
-                        "WITH recent AS (SELECT sku FROM `frameworkreporting.inventory_snapshot`) "
-                        "SELECT sku FROM recent"
-                    )
-                },
-            }
-        ]
-    }
-    validated = validate_plan(plan)
-    assert [s.id for s in validated.steps] == ["s1"]
-
-
 def test_validate_plan_rejects_the_exact_live_failing_six_step_plan_for_every_reason():
     """Regression pin for the staging incident this item exists for
     (brief G): the compiled plan that actually ran and failed step 1, and
-    would have failed steps 2 and 5 too. Every one of the three new rules
-    must fire on it, collected together (never just the first)."""
+    would have failed steps 2 and 5 too. Both of the remaining
+    validate_plan-level rules must fire on it, collected together (never just
+    the first). Step 1's own unqualified-table problem (`FROM
+    inventory_snapshot`) is no longer caught HERE — brief H, item 1 replaced
+    that regex heuristic with a real BigQuery dry run at COMPILE time in
+    app.services.jobs.compiler (`_bigquery_preflight`), which validate_plan
+    itself has no way to run (it is a pure, synchronous, no-I/O function) —
+    see tests/jobs/test_compiler.py's own preflight tests for that coverage."""
     plan = {
         "steps": [
             {
@@ -576,7 +506,6 @@ def test_validate_plan_rejects_the_exact_live_failing_six_step_plan_for_every_re
     with pytest.raises(PlanInvalid) as exc_info:
         validate_plan(plan)
     errors = exc_info.value.errors
-    assert any("inventory_snapshot" in msg and "unqualified" in msg for msg in errors)
     assert any("tracking" in msg and "inventory_aging" in msg for msg in errors)
     assert any("upload_pdf" in msg and "render_pdf" in msg for msg in errors)
     assert any("upload_xlsx" in msg and "build_xlsx" in msg for msg in errors)

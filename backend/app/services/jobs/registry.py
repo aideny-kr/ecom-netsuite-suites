@@ -54,7 +54,6 @@ guarantee from ONE place (the loop) rather than reimplementing it per step.
 
 from __future__ import annotations
 
-import re
 import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -665,39 +664,6 @@ def _step_ref_specs(params_schema: dict) -> list[tuple[str, str | None]]:
     return specs
 
 
-# Item 1c (live-run defect fix): a lightweight heuristic (not a full SQL
-# parser) that catches exactly the shape that failed on staging —
-# `FROM inventory_snapshot` with no dataset. `_CTE_NAME_RE` collects a
-# query's own `WITH name AS (...)` aliases so a LATER `FROM name` referencing
-# one is never flagged (it names the CTE, not a real BigQuery table); the
-# CTE's own body is still scanned by `_FROM_JOIN_RE` like any other FROM/JOIN.
-_CTE_NAME_RE = re.compile(r"(?:\bWITH\b|,)\s*([A-Za-z_]\w*)\s+AS\s*\(", re.IGNORECASE)
-_FROM_JOIN_RE = re.compile(r"\b(?:FROM|JOIN)\s+(`[^`]+`|[A-Za-z_][\w.]*)", re.IGNORECASE)
-
-
-def _bigquery_unqualified_tables(query: str) -> list[str]:
-    """Table names following ``FROM``/``JOIN`` in ``query`` that carry no dataset
-    (no ``.``) and are not one of the query's own CTE names. Skips a subquery
-    (``FROM (SELECT ...``, which the identifier regex never matches to begin
-    with) and a function call (``FROM UNNEST(...)``, ``FROM foo(...)``) by
-    checking whether the character immediately after the matched name is
-    ``(`` with no separating space — a real table/CTE reference is always
-    followed by whitespace, a comma, ``AS``, an alias, ``)``, ``;``, or the
-    end of the query."""
-    cte_names = {m.group(1).lower() for m in _CTE_NAME_RE.finditer(query)}
-    unqualified: list[str] = []
-    for match in _FROM_JOIN_RE.finditer(query):
-        raw = match.group(1)
-        end = match.end(1)
-        if end < len(query) and query[end] == "(":
-            continue  # a function call, e.g. FROM UNNEST(...) -- never a table name
-        name = raw.strip("`")
-        if "." in name or name.lower() in cte_names:
-            continue
-        unqualified.append(name)
-    return unqualified
-
-
 def validate_plan(plan: dict) -> ValidatedPlan:
     """Validate a compiled plan against the registry (spec §B3): every step's
     ``type`` must be a registry key, its ``params`` must satisfy that type's
@@ -771,17 +737,16 @@ def validate_plan(plan: dict) -> ValidatedPlan:
                     f"{params['playbook_key']!r} (period_based=False — it has no accounting period to track)"
                 )
 
-        # Item 1c (live-run defect fix): a bigquery_sql query whose FROM/JOIN
-        # targets are unqualified -- BigQuery rejects these at RUN time
-        # ("Table ... must be qualified with a dataset"), so catch it before
-        # the plan is ever persisted.
-        if step_type == "bigquery_sql":
-            unqualified = _bigquery_unqualified_tables(params["query"])
-            if unqualified:
-                step_errors.append(
-                    f"{prefix} ({step_id}): bigquery_sql query references unqualified table(s) "
-                    f"{unqualified!r} — BigQuery table names must be dataset.table or project.dataset.table"
-                )
+        # Item 1c (live-run defect fix) used to catch an unqualified bigquery_sql
+        # FROM/JOIN table here via a regex heuristic. Brief H, item 1: deleted --
+        # the heuristic had both false positives (e.g. `EXTRACT(DAY FROM
+        # created_at)`, `FROM UNNEST (...)` with a space) and false negatives
+        # (`FROM a, b` never checking `b`). Replaced by a real BigQuery dry run
+        # at COMPILE time in `app.services.jobs.compiler` (`_bigquery_preflight`,
+        # run after `validate_plan` succeeds) — a dry run round-trips through
+        # BigQuery's own parser, so it catches an unqualified table (and any
+        # other BigQuery-rejected query) without a regex ever reimplementing
+        # BigQuery's SQL grammar.
 
         for ref_key, required_type in _step_ref_specs(spec.params_schema):
             ref_value = params.get(ref_key)
