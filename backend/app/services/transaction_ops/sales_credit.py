@@ -159,16 +159,18 @@ def build_candidate(*, tenant_id, case_id, source, report, review, support, now=
             gross, total, credit, tax = (
                 _money(basis[k]) for k in ("gross_before_order_adjustments", "source_total", "credit_amount", "tax")
             )
+            paid = _money(source["payment_total"])
+            remaining = total - paid
             if (
                 _money(invoice["total"]) != gross
                 or _money(invoice["subtotal"]) != _money(source["item_total"])
                 or _money(invoice["taxTotal"]) != tax
-                or _money(invoice["amountRemaining"]) != credit
-                or _money(invoice["amountPaid"]) != total
+                or _money(invoice["amountRemaining"]) != gross - paid
+                or _money(invoice["amountPaid"]) != paid
                 or _money(invoice["shippingCost"]) != 0
                 or _money(invoice["discountTotal"]) != 0
-                or _money(source["payment_total"]) != total
-                or source["payment_state"] != "paid"
+                or not 0 <= paid <= total
+                or source["payment_state"] != ("paid" if remaining == 0 else "balance_due")
                 or support["duplicates"].get("complete") is not True
                 or support["duplicates"]["rows"]
             ):
@@ -192,7 +194,7 @@ def build_candidate(*, tenant_id, case_id, source, report, review, support, now=
                 return None
             links = applications["links"]
             payments = [r for r in links if r.get("linktype") == "Payment"]
-            if not payments or any(r.get("type") != "DepAppl" for r in links):
+            if len(payments) != len(links) or any(r.get("type") != "DepAppl" for r in links):
                 return None
             if len({str(r["nextdoc"]) for r in payments}) != len(payments):
                 return None
@@ -214,7 +216,7 @@ def build_candidate(*, tenant_id, case_id, source, report, review, support, now=
                 ):
                     return None
                 applied += amount
-            if applied != total:
+            if applied != paid:
                 return None
             gl = support["invoice_gl"]
             if gl.get("complete") is not True or not gl["rows"]:
@@ -292,7 +294,7 @@ def build_candidate(*, tenant_id, case_id, source, report, review, support, now=
                         "net_invoice_total": str(total),
                         "invoice_total": str(gross),
                         "invoice_tax": str(tax),
-                        "invoice_remaining": "0.00",
+                        "invoice_remaining": f"{remaining:.2f}",
                         "remaining_variance": "0.00",
                     },
                     "observed_at": support["observed_at"],
@@ -335,7 +337,7 @@ async def collect_support(db, tenant_id, source, report, review, evidence, *, no
     if not basis or evidence.get("commercial_credit_resolution") or len(docs) != 1:
         return None
     invoice = docs[0]
-    if invoice.get("record_type") != "invoice" or _money(invoice.get("amountRemaining")) != _money(
+    if invoice.get("record_type") != "invoice" or _money(invoice.get("amountRemaining")) < _money(
         basis["credit_amount"]
     ):
         return None
@@ -635,6 +637,7 @@ async def verify_after(db, tenant_id, proposal, receipt):
         and resolution.get("ar_account") == profile.ar_account_id
         and resolution.get("accounting_book") == profile.accounting_book_id
         and resolution.get("item_id") == profile.item_id
+        and _money(resolution.get("invoice_remaining")) == _money(proposal["expected_after"]["invoice_remaining"])
         and invoice_gl_signature(evidence["sections"]["gl"][invoice_id]["rows"])
         == invoice_gl_signature(proposal["before_gl"])
         and str((cm.get("postingPeriod") or {}).get("id")) == str(proposal["period"]["id"])

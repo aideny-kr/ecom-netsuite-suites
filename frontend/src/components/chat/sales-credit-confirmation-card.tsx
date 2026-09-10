@@ -111,6 +111,7 @@ export function SalesCreditConfirmationCard({
             <dt>Credit</dt><dd>{p.ar_account_name || `Accounts Receivable account ${p.ar_account}`} · {creditAmount(credit, currency)}</dd>
             <dt>Item</dt><dd>Sales Adjustments ({p.profile.item_id}) · Non-taxable</dd>
             <dt>Apply only to</dt><dd>Invoice {label(p.before.tranId)} (#{p.record_id}) · {creditAmount(credit, currency)}</dd>
+            <dt>Invoice balance after credit</dt><dd>{creditAmount(verified ? resolution?.invoice_remaining : p.expected_after.invoice_remaining, currency)} · Remaining receivable; separate from reconciliation variance</dd>
             <dt>Posting date / period</dt><dd>{label(p.proposed_fields.tranDate)} · {label(p.period.periodName ?? p.period.id)} · Book {p.accounting_book}</dd>
           </dl>
           <p className="mt-3 text-xs leading-relaxed text-muted-foreground">{p.approval_basis}</p>

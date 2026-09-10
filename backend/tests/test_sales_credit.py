@@ -1,5 +1,6 @@
 from copy import deepcopy
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import pytest
 
@@ -9,9 +10,14 @@ from tests.test_commercial_credits import fixture
 NOW = datetime(2026, 9, 10, 12, tzinfo=timezone.utc)
 
 
-def inputs():
+def inputs(*, paid="101"):
     source, invoice, applications, gl = fixture()
-    source.update(number="R123456789", business_entity="Framework Inc", payment_total="101", payment_state="paid")
+    source.update(
+        number="R123456789",
+        business_entity="Framework Inc",
+        payment_total=paid,
+        payment_state="paid" if Decimal(paid) == 101 else "balance_due",
+    )
     invoice.update(
         entity={"id": "70"},
         account={"id": "100"},
@@ -19,8 +25,8 @@ def inputs():
         subtotal="100",
         shippingCost="0",
         discountTotal="0",
-        amountPaid="101",
-        amountRemaining="5",
+        amountPaid=paid,
+        amountRemaining=str(Decimal(106) - Decimal(paid)),
     )
     profile = dict(
         schema_version=1,
@@ -54,6 +60,14 @@ def inputs():
     ref.update(shippingCost="0", discountTotal="0")
     applications["links"] = [r for r in applications["links"] if r["type"] == "DepAppl"]
     applications["documents"].pop("30")
+    if Decimal(paid) == 0:
+        applications["links"] = []
+        applications["documents"] = {}
+    else:
+        deposit = applications["documents"]["40"]
+        deposit.update(total=paid, applied=paid)
+        deposit["applications"][0]["amount"] = paid
+        applications["links"][0]["foreignamount"] = paid
     support = dict(
         invoice=invoice,
         linked_documents={"complete": True, "rows": [{"id": "20", "type": "CustInvc"}]},
@@ -103,6 +117,19 @@ def test_exact_missing_credit_candidate_has_one_invoice_application_and_no_clone
     assert f["entity"] == {"id": "70"} and p["lock_record_type"] == "invoice"
     assert p["expected_after"]["credit_tax"] == "0.00"
     assert p["record_type"] == "creditmemo" and p["mutation_type"] == "create"
+
+
+@pytest.mark.parametrize("paid,remaining", [("0", "101.00"), ("25", "76.00"), ("101", "0.00")])
+def test_credit_preserves_unpaid_and_partially_paid_receivables(paid, remaining):
+    p = build_candidate(**inputs(paid=paid))
+    assert p["expected_after"]["invoice_remaining"] == remaining
+    assert p["expected_after"]["remaining_variance"] == "0.00"
+    assert p["proposed_fields"]["apply"]["items"] == [{"doc": {"id": "20"}, "apply": True, "amount": 5.0}]
+
+
+@pytest.mark.parametrize("paid", ["-1", "102"])
+def test_credit_rejects_negative_payments_and_overpayments(paid):
+    assert build_candidate(**inputs(paid=paid)) is None
 
 
 @pytest.mark.parametrize(

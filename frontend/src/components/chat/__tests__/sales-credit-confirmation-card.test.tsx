@@ -33,6 +33,15 @@ describe("Sales Adjustments approval", () => {
     expect(screen.queryByText("Executed · verified")).not.toBeInTheDocument();
     expect(screen.getByText("Proposed result")).toBeVisible();
   });
+  it("keeps an unpaid invoice balance distinct from zero reconciliation variance", () => {
+    const review = creditCard.accounting_review!;
+    if (review.kind !== "sales_adjustment_credit") throw new Error("Expected credit fixture");
+    mount({ ...creditCard, accounting_review: { ...review, expected_after: { ...review.expected_after, invoice_remaining: "101.00" } } });
+    const balance = screen.getByText(/Remaining receivable; separate from reconciliation variance/);
+    expect(balance).toHaveTextContent("$101.00");
+    const table = screen.getByRole("table", { name: "Invoice reconciliation" });
+    expect(within(table).getByRole("row", { name: "Remaining variance $0.00" })).toBeInTheDocument();
+  });
   it("uses verified evidence and keeps bank clearance separate", () => {
     mount({ ...creditCard, status: "approved", accounting_verification: { status: "verified", credit_memo_id: "30", resolution: {
       credit_memo_number: "CM30", credit_amount: "5.00", tax_amount: "0.00", net_invoice_total: "101.00", remaining_variance: "0.00",

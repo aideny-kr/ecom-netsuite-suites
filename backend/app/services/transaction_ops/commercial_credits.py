@@ -137,8 +137,9 @@ def verify_applied_credit(basis, invoice, applications, invoice_gl):
                 return None
             (credits if r["type"] == "CustCred" else deposits).append((doc, amount))
         # The supported recipe is one existing commercial credit and verified
-        # deposit applications. Split/refunded/reversed credits stay in review.
-        if len(credits) != 1 or not deposits:
+        # deposit applications, if any. An unpaid invoice can legitimately have
+        # no deposit. Split/refunded/reversed credits stay in review.
+        if len(credits) != 1:
             return None
         cm, amount = credits[0]
         if (
@@ -155,9 +156,11 @@ def verify_applied_credit(basis, invoice, applications, invoice_gl):
             or _money(cm["line_items"][0]["amount"]) != credit
         ):
             return None
-        if sum((a for _, a in deposits), Decimal(0)) != total:
+        deposit_total = sum((a for _, a in deposits), Decimal(0))
+        remaining = total - deposit_total
+        if not 0 <= deposit_total <= total:
             return None
-        if _money(invoice["amountPaid"]) != gross or _money(invoice["amountRemaining"]) != 0:
+        if _money(invoice["amountPaid"]) != deposit_total + credit or _money(invoice["amountRemaining"]) != remaining:
             return None
         ar_rows = [r for r in invoice_gl["rows"] if _money(r.get("debit") or "0") == gross]
         if len(ar_rows) != 1:
@@ -209,6 +212,7 @@ def verify_applied_credit(basis, invoice, applications, invoice_gl):
             "tax_amount": "0.00",
             "net_invoice_total": str(total),
             "remaining_variance": "0.00",
+            "invoice_remaining": f"{remaining:.2f}",
             "invoice_application_status": "verified",
             "bank_processor_clearance": "not_verified",
             "sales_adjustment_account": str(debit[0]["account"]),

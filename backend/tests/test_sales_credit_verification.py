@@ -2,6 +2,7 @@
 
 from contextlib import asynccontextmanager
 from copy import deepcopy
+from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -15,6 +16,8 @@ from tests.test_sales_credit import inputs
     "variant",
     [
         "valid",
+        "unpaid",
+        "partial_payment",
         "lost_receipt",
         "receipt_conflict",
         "missing_credit",
@@ -30,11 +33,20 @@ from tests.test_sales_credit import inputs
     ],
 )
 async def test_credit_readback_requires_exact_native_application_and_gl(variant):
-    data = inputs()
+    paid = "0" if variant == "unpaid" else "25" if variant == "partial_payment" else "101"
+    data = inputs(paid=paid)
     proposal = build_candidate(**data)
     source = deepcopy(data["source"])
     _, _, applications, gl = fixture()
-    invoice = {**proposal["before"], "amountPaid": "106", "amountRemaining": "0"}
+    invoice = {**proposal["before"], "amountPaid": str(Decimal(paid) + 5), "amountRemaining": str(101 - Decimal(paid))}
+    if variant == "unpaid":
+        applications["documents"].pop("40")
+        applications["links"] = [row for row in applications["links"] if row["type"] == "CustCred"]
+    elif variant == "partial_payment":
+        deposit = applications["documents"]["40"]
+        deposit.update(applied=paid, total=paid)
+        deposit["applications"][0]["amount"] = paid
+        next(row for row in applications["links"] if row["type"] == "DepAppl")["foreignamount"] = paid
     credit = applications["documents"].pop("30")
     credit.update(
         id="31",
@@ -117,7 +129,9 @@ async def test_credit_readback_requires_exact_native_application_and_gl(variant)
         patch("app.services.transaction_ops.tax_correction.refresh_source", AsyncMock(return_value=source)),
     ):
         result = await verify_after(None, "tenant", proposal, receipt)
-    assert result["status"] == ("verified" if variant in {"valid", "lost_receipt"} else "needs_review"), (
+    assert result["status"] == (
+        "verified" if variant in {"valid", "lost_receipt", "unpaid", "partial_payment"} else "needs_review"
+    ), (
         result.get("reason"),
         result.get("resolution"),
         result.get("evidence", {}).get("blockers"),
@@ -128,3 +142,4 @@ async def test_credit_readback_requires_exact_native_application_and_gl(variant)
     if result["status"] == "verified":
         assert result["credit_memo_id"] == "31"
         assert result["cash_settlement"] == "not_verified"
+        assert Decimal(result["resolution"]["invoice_remaining"]) == 101 - Decimal(paid)
