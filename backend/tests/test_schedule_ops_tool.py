@@ -107,6 +107,32 @@ def _capture_send_task(monkeypatch) -> list[tuple[str, dict]]:
     return sent
 
 
+def _spy_commit_then_ctx(monkeypatch, db) -> list[str]:
+    """Item 2 (delta gate fix): `db.commit()` on a chat turn's shared session
+    clears `SET LOCAL app.current_tenant_id`, but the test fixture's own
+    savepoint-based commit does NOT (`tests/conftest.py`'s own documented
+    caveat: "a service-level commit here is RELEASE SAVEPOINT, which --
+    unlike a real COMMIT -- does NOT clear SET LOCAL GUCs... assert the
+    set_tenant_context CALL ORDERING instead"). So this spies call order
+    (`commit` then `ctx`) rather than querying `current_setting(...)`
+    afterward, which would false-pass in this fixture regardless of whether
+    the fix is applied — see `tests/test_report_refresh.py`'s own
+    `_spy_events` for the same established pattern."""
+    events: list[str] = []
+    real_commit = db.commit
+
+    async def spy_commit():
+        events.append("commit")
+        await real_commit()
+
+    async def spy_ctx(session, tenant_id):
+        events.append("ctx")
+
+    monkeypatch.setattr(db, "commit", spy_commit)
+    monkeypatch.setattr("app.mcp.tools.schedule_ops.set_tenant_context", spy_ctx)
+    return events
+
+
 class TestExecuteRun:
     """Item 7 (gate fix): `execute_run` now ENQUEUES via Celery, mirroring
     `POST /schedules/{id}/run` exactly, instead of running the plan's steps
@@ -146,6 +172,37 @@ class TestExecuteRun:
         assert kwargs["schedule_id"] == str(schedule.id)
         assert kwargs["job_id"] == result["jobs_id"]
         assert kwargs["use_pending"] is False
+
+    async def test_execute_run_reestablishes_tenant_context_after_its_commit(
+        self, db: AsyncSession, admin_user, monkeypatch
+    ):
+        """Item 2 (delta gate fix): `execute_run` commits on the chat turn's
+        shared session before dispatching the Celery task -- that commit
+        clears `SET LOCAL app.current_tenant_id`, so `governed_execute`'s own
+        `tool.executed` audit write (and the rest of the chat turn) then ran
+        with NO tenant context -- the audit insert silently failed its RLS
+        `WITH CHECK` and was dropped. A `set_tenant_context` call must
+        immediately follow the commit."""
+        _capture_send_task(monkeypatch)
+
+        user, _ = admin_user
+        tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
+        plan_json = {"steps": [{"id": "s1", "type": "bigquery_sql", "params": {"query": "SELECT 1"}}]}
+        schedule = await _seed_job_schedule(db, tenant, plan_json=plan_json)
+        await db.commit()
+
+        events = _spy_commit_then_ctx(monkeypatch, db)
+
+        result = await schedule_ops.execute_run(
+            {"schedule_id": str(schedule.id)},
+            context={"db": db, "tenant_id": str(user.tenant_id), "actor_id": str(user.id)},
+        )
+        assert not result.get("error"), result
+        assert "commit" in events
+        commit_idx = events.index("commit")
+        assert events[commit_idx + 1] == "ctx", (
+            f"set_tenant_context must immediately follow execute_run's commit; events={events}"
+        )
 
     async def test_execute_run_rejects_a_never_approved_plan(self, db: AsyncSession, admin_user, monkeypatch):
         """HITL gate (review finding): the chat agent must not be able to
@@ -426,6 +483,54 @@ class TestExecuteCreate:
         )
         assert not result.get("error")
         commit_spy.assert_awaited_once()
+
+    async def test_execute_create_instruction_branch_reestablishes_tenant_context_after_commit(
+        self, db: AsyncSession, admin_user, monkeypatch
+    ):
+        """Item 2 (delta gate fix): `execute_create`'s instruction branch
+        commits on the chat turn's shared session, which clears `SET LOCAL
+        app.current_tenant_id` -- `governed_execute`'s `tool.executed` audit
+        write and the rest of the chat turn then ran with no tenant context
+        (the audit insert silently fails its RLS `WITH CHECK`). A
+        `set_tenant_context` call must immediately follow the commit."""
+        user, _ = admin_user
+
+        async def fake_compile(db, *, tenant_id, instruction, actor_id, llm=None, plan_version=None):
+            return _compiled_plan()
+
+        monkeypatch.setattr("app.services.schedule_service.compile_instruction", fake_compile)
+        events = _spy_commit_then_ctx(monkeypatch, db)
+
+        result = await schedule_ops.execute_create(
+            {"instruction": "weekly inventory aging report"},
+            context={"db": db, "tenant_id": str(user.tenant_id), "actor_id": str(user.id)},
+        )
+        assert not result.get("error")
+        assert "commit" in events
+        commit_idx = events.index("commit")
+        assert events[commit_idx + 1] == "ctx", (
+            f"set_tenant_context must immediately follow the instruction branch's commit; events={events}"
+        )
+
+    async def test_execute_create_legacy_branch_reestablishes_tenant_context_after_commit(
+        self, db: AsyncSession, admin_user, monkeypatch
+    ):
+        """Item 2 (delta gate fix): the legacy direct-create branch's commit
+        must be followed by a `set_tenant_context` call too -- both branches
+        share the same trap."""
+        user, _ = admin_user
+        events = _spy_commit_then_ctx(monkeypatch, db)
+
+        result = await schedule_ops.execute_create(
+            {"name": "Legacy MCP Sync", "schedule_type": "sync", "cron": "0 0 * * *"},
+            context={"db": db, "tenant_id": str(user.tenant_id)},
+        )
+        assert not result.get("error")
+        assert "commit" in events
+        commit_idx = events.index("commit")
+        assert events[commit_idx + 1] == "ctx", (
+            f"set_tenant_context must immediately follow the legacy branch's commit; events={events}"
+        )
 
     async def test_execute_create_does_not_commit_on_clarification(self, db: AsyncSession, admin_user, monkeypatch):
         """Item 2 (delta gate fix): a Clarification creates NOTHING -- commit

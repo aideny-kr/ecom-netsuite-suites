@@ -4,6 +4,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.database import set_tenant_context
 from app.models.pipeline import Schedule
 from app.workers.celery_app import celery_app
 
@@ -114,6 +115,12 @@ async def execute_create(params: dict, **kwargs) -> dict:
         # never became durable past the request (consistent with
         # `execute_run`/`recon_approve.py`, which DO commit).
         await db.commit()
+        # Item 2 (delta gate fix, this round): the commit above clears
+        # `SET LOCAL app.current_tenant_id` on the chat turn's shared
+        # session — `governed_execute`'s own `tool.executed` audit write and
+        # the rest of the turn ran with no tenant context, so that audit
+        # insert silently failed its RLS `WITH CHECK` and was dropped.
+        await set_tenant_context(db, str(tenant_id))
         logger.info("mcp.schedule.created", schedule_id=str(schedule.id), tenant_id=str(tenant_id), job=True)
         return {
             "schedule_id": str(schedule.id),
@@ -150,6 +157,10 @@ async def execute_create(params: dict, **kwargs) -> dict:
     # committed either -- add it here too, consistent with the compile path
     # above and with `execute_run`/`recon_approve.py`'s own convention.
     await db.commit()
+    # Item 2 (delta gate fix, this round): re-establish tenant context after
+    # the commit above clears it -- same trap as the compile branch's own
+    # commit just above.
+    await set_tenant_context(db, str(tenant_id))
 
     logger.info("mcp.schedule.created", schedule_id=str(schedule.id), tenant_id=str(tenant_id))
     return {
@@ -256,6 +267,12 @@ async def execute_run(params: dict, **kwargs) -> dict:
     # own docstring); `recon_approve.py` already commits inside an MCP
     # handler for the same reason (agent-graph.md #10, accepted convention).
     await db.commit()
+    # Item 2 (delta gate fix): the commit above clears `SET LOCAL
+    # app.current_tenant_id` on the chat turn's shared session --
+    # `governed_execute`'s own `tool.executed` audit write and the rest of
+    # the turn ran with no tenant context, so that audit insert silently
+    # failed its RLS `WITH CHECK` and was dropped.
+    await set_tenant_context(db, str(tenant_id))
 
     celery_app.send_task(
         "tasks.scheduled_jobs_run_now",
