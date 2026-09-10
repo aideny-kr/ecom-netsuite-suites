@@ -2260,22 +2260,9 @@ class BaseSpecialistAgent(abc.ABC):
                             self._write_confirmation_emitted = True
                             if accounting_card:
                                 payload.accounting_review = accounting_card
-                                yield (
-                                    "text",
-                                    "\n\n**Accounting correction for approval**\n\n"
-                                    f"Invoice {accounting_card['record_id']} — "
-                                    f"total {accounting_card['before']['total']} → {accounting_card['expected_after']['total']}; "
-                                    f"tax {accounting_card['before']['taxTotal']} → {accounting_card['expected_after']['taxTotal']}. "
-                                    f"Currency: {accounting_card['source']['currency']}; ship-to country: {accounting_card['before'].get('shipCountry', 'not verified')}. "
-                                    f"Tax agency: {(accounting_card['tax_item'].get('taxAgency') or {}).get('refName', 'not verified')}. "
-                                    f"Tax account: {accounting_card['tax_account']} ({accounting_card.get('tax_account_name')}); "
-                                    f"AR account: {accounting_card['ar_account']} ({accounting_card.get('ar_account_name')}); "
-                                    f"book: {accounting_card['accounting_book']}. "
-                                    f"Posting period: {accounting_card['period'].get('periodName', accounting_card['period']['id'])}; "
-                                    f"AR locked: {accounting_card['period']['arLocked']}; all locked: {accounting_card['period']['allLocked']}. "
-                                    + accounting_card["approval_basis"]
-                                    + "\n\n",
-                                )
+                                from app.services.transaction_ops.tax_correction import approval_text
+
+                                yield "text", "\n\n" + approval_text(accounting_card) + "\n\n"
                             yield ("confirmation_required", payload.model_dump())
                             _confirmation_result: dict[str, Any] = {
                                 "confirmation_required": True,
@@ -2555,6 +2542,77 @@ class BaseSpecialistAgent(abc.ABC):
                             "content": llm_result_str,
                         }
                     )
+
+                    # The supported accounting payload is already deterministic. Route it
+                    # through the existing validator/HITL card instead of asking the model
+                    # to repeat it in another hop (which can hallucinate a card in prose).
+                    if block.name == "transaction_ops_accounting_evidence" and not _had_error:
+                        from app.services.transaction_ops.tax_correction import candidate_confirmation
+
+                        try:
+                            prepared = await candidate_confirmation(
+                                db=db,
+                                tenant_id=self.tenant_id,
+                                actor_id=self.user_id,
+                                correlation_id=self.correlation_id,
+                                session_id=session_id or str(self.tenant_id),
+                                task=task,
+                                tools=self.tool_definitions,
+                                policy=active_policy,
+                                case_id=block.input.get("case_id"),
+                            )
+                        except ValueError as exc:
+                            prepared = None
+                            note = f"The correction needs review before an approval card can be created: {exc}"
+                            yield "text", "\n\n" + note
+                            yield (
+                                "response",
+                                AgentResult(
+                                    success=False,
+                                    data=note,
+                                    error=str(exc),
+                                    tool_calls_log=tool_calls_log,
+                                    tokens_used=TokenUsage(
+                                        total_input_tokens, total_output_tokens, total_cache_creation, total_cache_read
+                                    ),
+                                    agent_name=self.agent_name,
+                                ),
+                            )
+                            return
+                        if prepared:
+                            card, note = prepared
+                            self._write_confirmation_emitted = True
+                            tool_calls_log.append(
+                                build_tool_call_log_entry(
+                                    step=step,
+                                    agent_name=self.agent_name,
+                                    tool_name=card.tool_name,
+                                    params=card.tool_input,
+                                    duration_ms=0,
+                                    result_str=json.dumps(
+                                        {
+                                            "confirmation_required": True,
+                                            "proposal_origin": "verified_accounting_evidence",
+                                            "financial_writes": 0,
+                                        }
+                                    ),
+                                )
+                            )
+                            yield "text", "\n\n" + note
+                            yield "confirmation_required", card.model_dump()
+                            yield (
+                                "response",
+                                AgentResult(
+                                    success=True,
+                                    data=note,
+                                    tool_calls_log=tool_calls_log,
+                                    tokens_used=TokenUsage(
+                                        total_input_tokens, total_output_tokens, total_cache_creation, total_cache_read
+                                    ),
+                                    agent_name=self.agent_name,
+                                ),
+                            )
+                            return
 
                     # Early exit: if this tool returned data and there are more
                     # tools queued, skip redundant DATA tools — but always allow

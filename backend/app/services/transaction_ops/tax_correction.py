@@ -341,3 +341,98 @@ async def validate_approved(db, tenant_id, tool_name, tool_input, proposal):
     ):
         raise ValueError("The approved NetSuite connector/account binding changed.")
     await revalidate(db, tenant_id, proposal)
+
+
+def approval_text(p):
+    return (
+        f"**Accounting correction for approval — {p['order_reference']}**\n\n"
+        f"Invoice {p['record_id']}: total {p['before']['total']} → {p['expected_after']['total']}; "
+        f"tax {p['before']['taxTotal']} → {p['expected_after']['taxTotal']} {p['source']['currency']}. "
+        f"Ship-to country: {p['before'].get('shipCountry', 'not verified')}. "
+        f"Tax agency: {(p['tax_item'].get('taxAgency') or {}).get('refName', 'not verified')}. "
+        f"Tax account: {p['tax_account']} ({p.get('tax_account_name')}); "
+        f"AR account: {p['ar_account']} ({p.get('ar_account_name')}); book: {p['accounting_book']}. "
+        f"Posting period: {p['period'].get('periodName', p['period']['id'])}; "
+        f"AR locked: {p['period']['arLocked']}; all locked: {p['period']['allLocked']}. "
+        + p["approval_basis"]
+        + "\n\nReview the exact change below. Nothing has been sent to NetSuite."
+    )
+
+
+async def candidate_confirmation(*, db, tenant_id, actor_id, correlation_id, session_id, task, tools, policy, case_id):
+    """Present a supported correction through the existing HITL card, without another model hop."""
+    import re
+
+    from app.services.chat.mutation_guard import classify_connector_mutation
+    from app.services.chat.write_confirmation_service import build_confirmation_payload
+    from app.services.chat.write_payload import normalize_write_payload
+    from app.services.chat.write_validation import validate_mutation
+    from app.services.policy_service import evaluate_tool_call
+
+    p = db.info.get("accounting_correction_candidate")
+    # An evidence-only question is not a request to prepare a change.
+    if not re.search(r"\b(?:prepare|propose|fix|correct|resolve|repair|update)\b", task, re.I):
+        return None
+    if re.search(r"\b(?:do not|don't|never)\s+(?:prepare|propose|show|create)\b", task, re.I):
+        return None
+    if not p or p.get("case_id") != case_id:
+        return None
+    name = f"ext__{p['connector_id'].replace('-', '')}__ns_updateRecord"
+    params = {"recordType": p["record_type"], "recordId": p["record_id"], "data": json.dumps(p["proposed_fields"])}
+    if name not in {t.get("name") for t in tools or []}:
+        raise ValueError("The scoped NetSuite update tool is unavailable; no approval card was created.")
+    review_for_card(db, tenant_id, name, p["record_type"], normalize_write_payload(params))
+    if not evaluate_tool_call(policy, name, params)["allowed"]:
+        raise ValueError("The configured policy blocks this correction.")
+    if await classify_connector_mutation(name, db, tenant_id) != "update":
+        raise ValueError("The scoped connector does not expose a verified update operation.")
+    validation = await validate_mutation(
+        tool_name=name,
+        tool_input=params,
+        mutation_type="update",
+        record_type=p["record_type"],
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        correlation_id=correlation_id,
+        db=db,
+        session_id=session_id,
+    )
+    if not validation.ok:
+        raise ValueError("Native write validation needs review: " + json.dumps(validation.as_model_error()))
+    card = build_confirmation_payload(
+        mutation_type="update",
+        record_type=p["record_type"],
+        tool_name=name,
+        tool_input=params,
+        session_id=session_id,
+        current_record=p["before"],
+        validation=validation,
+    )
+    if card is None:
+        raise ValueError("The verified invoice update could not be represented by an approval card.")
+    card.accounting_review = p
+    from app.services.audit_service import log_event
+
+    await log_event(
+        db,
+        tenant_id,
+        actor_id=actor_id,
+        category="transaction_ops",
+        action="accounting_correction.proposed",
+        resource_type="transaction_case",
+        resource_id=case_id,
+        correlation_id=correlation_id,
+        status="pending",
+        payload={
+            "session_id": session_id,
+            "record_id": p["record_id"],
+            "scope": p["scope"],
+            "before": p["before"],
+            "proposed_fields": p["proposed_fields"],
+            "expected_after": p["expected_after"],
+            "approval_basis": p["approval_basis"],
+            "approval_required": True,
+            "financial_writes": 0,
+        },
+    )
+    return card, approval_text(p)

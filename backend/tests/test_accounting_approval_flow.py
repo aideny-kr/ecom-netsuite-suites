@@ -163,3 +163,80 @@ async def test_approval_preflight_execution_verification_and_actor_audit(outcome
         assert ("independently re-read and verified" in content) == (outcome == "verified")
         if outcome == "unverified":
             assert "executed successfully" not in content
+
+
+@pytest.mark.parametrize("blocked", [None, "validation", "policy", "tenant", "unavailable_tool"])
+async def test_fresh_evidence_generates_real_card_without_second_model_hop(blocked):
+    p = proposal()
+    p["tenant_id"] = str(_TENANT_ID if blocked != "tenant" else uuid.uuid4())
+    name, params = inputs(p)
+    db = AsyncMock(spec=AsyncSession)
+    db.info = {}
+    agent = UnifiedAgent(tenant_id=_TENANT_ID, user_id=_USER_ID, correlation_id=str(uuid.uuid4()))
+    read_name = "transaction_ops_accounting_evidence"
+    agent._tool_defs = [{"name": read_name}]
+    if blocked != "unavailable_tool":
+        agent._tool_defs.append({"name": name})
+    adapter = MagicMock()
+    hops = []
+
+    async def stream(**kwargs):
+        hops.append(kwargs)
+        assert len(hops) == 1, "A verified proposal must not spend another model hop composing prose"
+        yield (
+            "response",
+            _llm_response(tool_blocks=[ToolUseBlock(id="read1", name=read_name, input={"case_id": "case"})]),
+        )
+
+    adapter.stream_message = stream
+    adapter.build_assistant_message.return_value = {"role": "assistant", "content": []}
+    adapter.build_tool_result_message.return_value = {"role": "user", "content": []}
+
+    async def read(**kwargs):
+        assert kwargs["tool_name"] == read_name
+        db.info["accounting_correction_candidate"] = p
+        return json.dumps({"success": True, "case_id": "case"})
+
+    execute = AsyncMock(side_effect=read)
+    validation = ValidationResult(
+        ok=blocked != "validation", invariant_errors=["period unavailable"] if blocked == "validation" else []
+    )
+    with (
+        patch("app.services.policy_service.get_active_policy", AsyncMock(return_value=None)),
+        patch("app.services.chat.write_validation.validate_mutation", AsyncMock(return_value=validation)),
+        patch("app.services.chat.tools.execute_tool_call", execute),
+        patch(
+            "app.services.policy_service.evaluate_tool_call",
+            side_effect=lambda _, tool, __: {"allowed": not (blocked == "policy" and tool == name)},
+        ),
+        patch(
+            "app.services.mcp_connector_service.get_mcp_connector",
+            AsyncMock(return_value=MagicMock(provider="netsuite_mcp")),
+        ),
+    ):
+        events = [
+            e
+            async for e in BaseSpecialistAgent.run_streaming(
+                agent,
+                task="Prepare the actual NetSuite correction for approval",
+                context={},
+                db=db,
+                adapter=adapter,
+                model="test-model",
+            )
+        ]
+    assert len(hops) == 1
+    assert execute.await_count == 1
+    cards = [v for k, v in events if k == "confirmation_required"]
+    if blocked:
+        assert not cards
+        assert next(v for k, v in events if k == "response").success is False
+    else:
+        assert len(cards) == 1
+        assert cards[0]["record_id"] == p["record_id"]
+        assert cards[0]["tool_input"] == params
+        assert cards[0]["accounting_review"] == p
+        result = next(v for k, v in events if k == "response")
+        assert result.tokens_used.input_tokens == 10
+        assert len(result.tool_calls_log) == 2
+        assert json.loads(result.tool_calls_log[-1]["result_summary"])["financial_writes"] == 0
