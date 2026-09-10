@@ -54,6 +54,7 @@ guarantee from ONE place (the loop) rather than reimplementing it per step.
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
@@ -519,7 +520,13 @@ _REPORT_COMPOSE_SCHEMA = {
 _REPORT_RENDER_PDF_SCHEMA = {
     "type": "object",
     "properties": {
-        "report_step": {"type": "string", "minLength": 1, "x-step-ref": True},
+        # "x-step-ref-type" (item 1a, live-run defect fix): the referenced
+        # step must be a `report.compose` -- the only step type that ever
+        # produces the `{"report": ...}` artifact this executor's
+        # `_resolve_report_step_artifact` needs. A vendor JSON Schema
+        # keyword, same convention as "x-step-ref" itself (a real validator
+        # ignores unknown keywords); `validate_plan` walks it generically.
+        "report_step": {"type": "string", "minLength": 1, "x-step-ref": True, "x-step-ref-type": "report.compose"},
         "appendix_html": {"type": "string"},
     },
     "required": ["report_step"],
@@ -529,7 +536,7 @@ _REPORT_RENDER_PDF_SCHEMA = {
 _REPORT_BUILD_XLSX_SCHEMA = {
     "type": "object",
     "properties": {
-        "report_step": {"type": "string", "minLength": 1, "x-step-ref": True},
+        "report_step": {"type": "string", "minLength": 1, "x-step-ref": True, "x-step-ref-type": "report.compose"},
     },
     "required": ["report_step"],
     "additionalProperties": False,
@@ -542,7 +549,7 @@ _REPORT_BUILD_XLSX_SCHEMA = {
 _DRIVE_UPLOAD_SCHEMA = {
     "type": "object",
     "properties": {
-        "report_step": {"type": "string", "minLength": 1, "x-step-ref": True},
+        "report_step": {"type": "string", "minLength": 1, "x-step-ref": True, "x-step-ref-type": "report.compose"},
     },
     "required": ["report_step"],
     "additionalProperties": False,
@@ -634,17 +641,61 @@ def plan_schema() -> dict:
     }
 
 
-def _step_ref_keys(params_schema: dict) -> list[str]:
-    """Every property key marked ``"x-step-ref": true`` in ``params_schema`` —
-    walks both a plain object schema and each branch of a ``oneOf``, since a
-    step-ref param can live inside either shape."""
-    keys: list[str] = []
+def _step_ref_specs(params_schema: dict) -> list[tuple[str, str | None]]:
+    """Every property key marked ``"x-step-ref": true`` in ``params_schema``,
+    paired with its optional ``"x-step-ref-type"`` constraint (the step TYPE
+    the referenced step must be, or ``None`` for no constraint) — walks both
+    a plain object schema and each branch of a ``oneOf``, since a step-ref
+    param can live inside either shape.
+
+    Item 1a (live-run defect fix): ``report.render_pdf``/``report.build_xlsx``/
+    ``drive.upload`` all name ``report.compose`` via ``"x-step-ref-type"`` —
+    the executor's ``_resolve_report_step_artifact`` needs a ``report.compose``
+    artifact specifically (it looks for ``artifact["report"]``), so a
+    ``report_step`` naming any other step type is invalid at compile time,
+    not just a run-time "produced no report artifact"."""
+    specs: list[tuple[str, str | None]] = []
+    seen: set[str] = set()
     branches = [params_schema, *(params_schema.get("oneOf") or [])]
     for branch in branches:
         for key, sub in (branch.get("properties") or {}).items():
-            if isinstance(sub, dict) and sub.get("x-step-ref") and key not in keys:
-                keys.append(key)
-    return keys
+            if isinstance(sub, dict) and sub.get("x-step-ref") and key not in seen:
+                seen.add(key)
+                specs.append((key, sub.get("x-step-ref-type")))
+    return specs
+
+
+# Item 1c (live-run defect fix): a lightweight heuristic (not a full SQL
+# parser) that catches exactly the shape that failed on staging —
+# `FROM inventory_snapshot` with no dataset. `_CTE_NAME_RE` collects a
+# query's own `WITH name AS (...)` aliases so a LATER `FROM name` referencing
+# one is never flagged (it names the CTE, not a real BigQuery table); the
+# CTE's own body is still scanned by `_FROM_JOIN_RE` like any other FROM/JOIN.
+_CTE_NAME_RE = re.compile(r"(?:\bWITH\b|,)\s*([A-Za-z_]\w*)\s+AS\s*\(", re.IGNORECASE)
+_FROM_JOIN_RE = re.compile(r"\b(?:FROM|JOIN)\s+(`[^`]+`|[A-Za-z_][\w.]*)", re.IGNORECASE)
+
+
+def _bigquery_unqualified_tables(query: str) -> list[str]:
+    """Table names following ``FROM``/``JOIN`` in ``query`` that carry no dataset
+    (no ``.``) and are not one of the query's own CTE names. Skips a subquery
+    (``FROM (SELECT ...``, which the identifier regex never matches to begin
+    with) and a function call (``FROM UNNEST(...)``, ``FROM foo(...)``) by
+    checking whether the character immediately after the matched name is
+    ``(`` with no separating space — a real table/CTE reference is always
+    followed by whitespace, a comma, ``AS``, an alias, ``)``, ``;``, or the
+    end of the query."""
+    cte_names = {m.group(1).lower() for m in _CTE_NAME_RE.finditer(query)}
+    unqualified: list[str] = []
+    for match in _FROM_JOIN_RE.finditer(query):
+        raw = match.group(1)
+        end = match.end(1)
+        if end < len(query) and query[end] == "(":
+            continue  # a function call, e.g. FROM UNNEST(...) -- never a table name
+        name = raw.strip("`")
+        if "." in name or name.lower() in cte_names:
+            continue
+        unqualified.append(name)
+    return unqualified
 
 
 def validate_plan(plan: dict) -> ValidatedPlan:
@@ -698,8 +749,39 @@ def validate_plan(plan: dict) -> ValidatedPlan:
             errors.append(f"{prefix} ({step_id}): {exc.message}")
             continue
 
-        step_errors = []
-        for ref_key in _step_ref_keys(spec.params_schema):
+        step_errors: list[str] = []
+
+        # Item 1b (live-run defect fix): report.compose mode="tracking" for a
+        # playbook with no accounting period to track (PLAYBOOKS[key]
+        # ["period_based"] is False -- inventory_aging today) fails at RUN
+        # time inside compose_playbook_report; catching it here means a plan
+        # that can never succeed is never persisted. Local import: jobs ->
+        # report is a one-way dependency (report/playbooks.py imports
+        # nothing from jobs), so no cycle -- same lazy-import convention this
+        # module's own executors already use.
+        if step_type == "report.compose" and "playbook_key" in params and params.get("mode") == "tracking":
+            from app.services.report.playbooks import PLAYBOOKS
+
+            playbook_meta = PLAYBOOKS.get(params["playbook_key"])
+            if playbook_meta is not None and not playbook_meta.get("period_based", True):
+                step_errors.append(
+                    f"{prefix} ({step_id}): report.compose mode='tracking' is not supported for playbook "
+                    f"{params['playbook_key']!r} (period_based=False — it has no accounting period to track)"
+                )
+
+        # Item 1c (live-run defect fix): a bigquery_sql query whose FROM/JOIN
+        # targets are unqualified -- BigQuery rejects these at RUN time
+        # ("Table ... must be qualified with a dataset"), so catch it before
+        # the plan is ever persisted.
+        if step_type == "bigquery_sql":
+            unqualified = _bigquery_unqualified_tables(params["query"])
+            if unqualified:
+                step_errors.append(
+                    f"{prefix} ({step_id}): bigquery_sql query references unqualified table(s) "
+                    f"{unqualified!r} — BigQuery table names must be dataset.table or project.dataset.table"
+                )
+
+        for ref_key, required_type in _step_ref_specs(spec.params_schema):
             ref_value = params.get(ref_key)
             if ref_value is None:
                 continue
@@ -708,9 +790,20 @@ def validate_plan(plan: dict) -> ValidatedPlan:
                 # Steps SEEN so far are only the ones already appended to `steps`
                 # (this step's own id was added to seen_ids above for the
                 # duplicate check, but must not count as "produced earlier").
-                if target not in {s.id for s in steps}:
+                target_step = next((s for s in steps if s.id == target), None)
+                if target_step is None:
                     step_errors.append(
                         f"{prefix} ({step_id}): {ref_key!r} references step {target!r}, which no earlier step produces"
+                    )
+                elif required_type is not None and target_step.type != required_type:
+                    # Item 1a (live-run defect fix): the referenced step exists
+                    # but is the wrong TYPE -- e.g. drive.upload's report_step
+                    # naming a report.render_pdf step instead of the
+                    # report.compose step both render_pdf and build_xlsx
+                    # themselves consume (the exact live-run shape).
+                    step_errors.append(
+                        f"{prefix} ({step_id}): {ref_key!r} references step {target!r} of type "
+                        f"{target_step.type!r}, but must reference a {required_type!r} step"
                     )
         if step_errors:
             errors.extend(step_errors)
