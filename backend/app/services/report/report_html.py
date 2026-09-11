@@ -1755,6 +1755,27 @@ def _ia_top_item_row_html(it: dict, loc: dict) -> str:
     )
 
 
+def _ia_aged_item_rows_html(report: dict) -> tuple[str, int]:
+    """Group header + every aged item row, per location — the FULL (unbounded)
+    aged-SKU list, sourced from ``aged_items`` (never the capped ``top_items`` the
+    "Largest aged positions" table above uses). Shared by ``_ia_top_positions_html``'s
+    in-body "All N" `<details>` block (a screen-only affordance since item 1 hides it
+    in print) and ``render_inventory_aging_appendix``'s PDF appendix pages, so the two
+    can never drift on the row markup. Returns ``(rows_html, total_aged)``."""
+    rows: list[str] = []
+    total_aged = 0
+    for loc in report["locations"]:
+        aged_items = report["aged_items"].get(loc["location"], ())
+        total_aged += len(aged_items)
+        rows.append(
+            f'<tr class="group"><td class="lbl" colspan="7">{escape(loc["location"])} · aged '
+            f"{_ia_dollar_money(Decimal(loc['aged90_value']))} · {len(aged_items)} SKUs</td></tr>"
+        )
+        for it in aged_items:
+            rows.append(_ia_top_item_row_html(it, loc))
+    return "".join(rows), total_aged
+
+
 def _ia_top_positions_html(report: dict) -> str:
     """The top-5 table draws from ``top_items`` (capped); the collapsible "All N"
     details block draws from ``aged_items`` — the UNBOUNDED per-location list — so
@@ -1763,8 +1784,6 @@ def _ia_top_positions_html(report: dict) -> str:
     SKUs (review finding: this used to source both from ``top_items``, which
     made "All N aged SKUs" false-complete for any location with > 5 aged items)."""
     top_rows: list[str] = []
-    all_rows: list[str] = []
-    total_aged = 0
     for loc in report["locations"]:
         items = report["top_items"].get(loc["location"], ())
         top_rows.append(
@@ -1774,21 +1793,12 @@ def _ia_top_positions_html(report: dict) -> str:
         for it in items:
             top_rows.append(_ia_top_item_row_html(it, loc))
 
-    for loc in report["locations"]:
-        aged_items = report["aged_items"].get(loc["location"], ())
-        total_aged += len(aged_items)
-        all_rows.append(
-            f'<tr class="group"><td class="lbl" colspan="7">{escape(loc["location"])} · aged '
-            f"{_ia_dollar_money(Decimal(loc['aged90_value']))} · {len(aged_items)} SKUs</td></tr>"
-        )
-        for it in aged_items:
-            all_rows.append(_ia_top_item_row_html(it, loc))
-
+    all_rows_html, total_aged = _ia_aged_item_rows_html(report)
     details = (
         f"<details><summary>All {total_aged} aged SKUs (collapsed here; the Excel file "
         "carries every SKU)</summary>"
         f'<div class="tblcard"><table class="tnum"><thead>{_IA_TOP_HEADER}</thead>'
-        f"<tbody>{''.join(all_rows)}</tbody></table></div></details>"
+        f"<tbody>{all_rows_html}</tbody></table></div></details>"
     )
     return (
         '<div class="ia-section"><h2>Largest aged positions '
@@ -1796,6 +1806,44 @@ def _ia_top_positions_html(report: dict) -> str:
         "carries every SKU</span></h2>"
         f'<div class="tblcard"><table class="tnum"><thead>{_IA_TOP_HEADER}</thead>'
         f"<tbody>{''.join(top_rows)}</tbody></table>{details}</div></div>"
+    )
+
+
+def render_inventory_aging_appendix(ia_model: dict) -> str:
+    """A complete standalone HTML document carrying the FULL (unbounded) aged-SKU
+    list as its own PDF appendix pages (spec §A4: "the appendix (full aged list)
+    is appended as its own pages") — since item 1's print stylesheet now HIDES the
+    in-body collapsible "All N aged SKUs" block instead of force-opening it, this
+    is where that content lives on paper. ``render_report_pdf`` renders
+    ``appendix_html`` as an entirely separate WeasyPrint document and appends its
+    pages after the main one (see report_pdf.py), so it ships the same ``_CSS`` +
+    ``_IA_CSS`` stylesheet — the ``@page`` landscape rule and the table print rules
+    — as its own `<style>` rather than relying on anything from the main document.
+
+    ``ia_model`` is the JSON-safe dict form ``report_delivery._inventory_aging_model``
+    / ``build_inventory_aging_workbook`` already consume (``inventory_aging.json_safe``
+    — gate fix #4's "one representation for the rendered model" applies here too:
+    render from the dict, never the live ``AgingReport`` dataclass).
+
+    One `table.tnum` (``_IA_TOP_HEADER`` header, group row + every item row per
+    location via the shared ``_ia_aged_item_rows_html`` — reused, not duplicated,
+    from ``_ia_top_positions_html``'s own "All N" block)."""
+    rows_html, total_aged = _ia_aged_item_rows_html(ia_model)
+    loc_count = len(ia_model["locations"])
+    loc_word = "location" if loc_count == 1 else "locations"
+    accent_hsl = "240 6% 10%"  # render_report_html's own default — no tenant accent in play here
+    css = _CSS % {"accent": escape(accent_hsl), "accent_ink": _accent_ink(accent_hsl)} + _IA_CSS
+    return (
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        "<title>Appendix — All aged SKUs</title>"
+        f'<style>{css}</style></head><body><div class="report">'
+        '<div class="ia-section"><h2>Appendix · All aged SKUs '
+        f"<span>· {total_aged} SKUs older than 90 days across {loc_count} {loc_word} "
+        "· same columns as the report</span></h2>"
+        f'<div class="tblcard"><table class="tnum"><thead>{_IA_TOP_HEADER}</thead>'
+        f"<tbody>{rows_html}</tbody></table></div></div>"
+        "</div></body></html>"
     )
 
 

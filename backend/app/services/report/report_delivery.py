@@ -417,11 +417,19 @@ def _build_drive_client(credentials: dict, shared_drive_id: str | None) -> Drive
 def _render_pdf_bytes(report: Report) -> bytes:
     """Patched by tests that don't need real WeasyPrint output — see module
     docstring. Production default: Task 4's ``render_report_pdf`` over the report's
-    already-rendered, self-contained HTML (inline SVG, no external fetches — the full
-    aged list, if any, is already inlined by the report renderer per Task 2)."""
+    already-rendered, self-contained HTML (inline SVG, no external fetches). Item 1
+    (brief M)'s print stylesheet now HIDES the in-body "All N aged SKUs" collapsible
+    instead of force-opening it — an inventory_aging report's full aged list
+    therefore rides along as a separate ``appendix_html`` document instead (item 2),
+    built from the same JSON-safe model ``_inventory_aging_model`` already exposes
+    for ``_render_xlsx_bytes`` below. Every other report type is unaffected
+    (``appendix_html=None``, ``render_report_pdf``'s own default)."""
+    from app.services.report.report_html import render_inventory_aging_appendix
     from app.services.report.report_pdf import render_report_pdf
 
-    return render_report_pdf(report.rendered_html)
+    ia_model = _inventory_aging_model(report)
+    appendix_html = render_inventory_aging_appendix(ia_model) if ia_model is not None else None
+    return render_report_pdf(report.rendered_html, appendix_html=appendix_html)
 
 
 def _inventory_aging_model(report: Report) -> dict | None:

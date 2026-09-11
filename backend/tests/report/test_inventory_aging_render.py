@@ -491,6 +491,64 @@ def test_render_report_html_deterministic(spec):
 
 
 # ---------------------------------------------------------------------------
+# Item 2 -- the PDF appendix: a standalone document carrying the FULL (unbounded)
+# aged-SKU list, since print now hides the in-body collapsible block (item 1).
+# Renders from the SAME JSON-safe dict form `report_delivery._inventory_aging_model`
+# / `build_inventory_aging_workbook` already consume, never the live dataclass
+# (gate fix #4's "one representation for the rendered model").
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def ia_model(report):
+    from app.services.report.inventory_aging import json_safe as ia_json_safe
+
+    return ia_json_safe(report)
+
+
+def test_appendix_is_a_standalone_document_carrying_the_page_rule(ia_model):
+    from app.services.report.report_html import render_inventory_aging_appendix
+
+    appendix = render_inventory_aging_appendix(ia_model)
+    assert appendix.startswith("<!DOCTYPE html>")
+    assert "@page { size: letter landscape" in appendix
+
+
+def test_appendix_heading_and_group_row_per_location(ia_model, report):
+    from app.services.report.report_html import render_inventory_aging_appendix
+
+    appendix = render_inventory_aging_appendix(ia_model)
+    assert "Appendix" in appendix
+    assert "All aged SKUs" in appendix
+    assert appendix.count('<tr class="group"') == len(report.locations)
+    for loc in report.locations:
+        assert loc.location in appendix
+
+
+def test_appendix_contains_every_aged_item_row_not_just_top_five(ia_model, report):
+    """The appendix draws from `aged_items` (the UNBOUNDED per-location list), not
+    `top_items` (capped at 5) -- same distinction `_ia_top_positions_html`'s own
+    "All N aged SKUs" details block already makes (see its docstring)."""
+    from app.services.report.report_html import render_inventory_aging_appendix
+
+    appendix = render_inventory_aging_appendix(ia_model)
+    total_aged = sum(len(items) for items in report.aged_items.values())
+    assert total_aged == 4  # sanity on the fixture contract (3 Nova + 1 Solace)
+    group_rows = appendix.count('<tr class="group"')
+    header_rows = 1  # _IA_TOP_HEADER's own bare <tr>, also matched by "<tr"
+    assert appendix.count("<tr") - group_rows - header_rows == total_aged
+    for items in report.aged_items.values():
+        for it in items:
+            assert it.sku in appendix
+
+
+def test_appendix_reuses_the_top_header_and_item_row_markup(ia_model):
+    from app.services.report.report_html import _IA_TOP_HEADER, render_inventory_aging_appendix
+
+    appendix = render_inventory_aging_appendix(ia_model)
+    assert _IA_TOP_HEADER in appendix
+    assert appendix.count("<table") == 1
+
+
+# ---------------------------------------------------------------------------
 # Report head (spec §A1: "report head (title `Inventory Aging — Week of {snapshot
 # date}`, sub-line, meta block incl. 'no model generated a figure')"). Found at the
 # readiness gate by rendering the fixture and comparing it with the mock's

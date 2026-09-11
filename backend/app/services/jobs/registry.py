@@ -303,11 +303,24 @@ async def _report_render_pdf_executor(ctx: StepContext, params: dict) -> dict:
     """Wraps Task 4 (Slice 1)'s ``render_report_pdf`` over the referenced
     ``report.compose`` step's ``rendered_html``. WeasyPrint is imported lazily
     INSIDE ``render_report_pdf`` itself (see that module's docstring), so this
-    module stays importable everywhere regardless of native libs."""
+    module stays importable everywhere regardless of native libs.
+
+    Item 2 (brief M): an inventory_aging report's full aged-SKU list rides along
+    as a separate ``appendix_html`` document — item 1's print stylesheet now
+    HIDES the in-body "All N aged SKUs" collapsible instead of force-opening it,
+    so this is the only place that content still reaches the PDF. Mirrors
+    ``report_delivery._render_pdf_bytes``'s identical wiring for the manual
+    ``POST /reports/{id}/deliver`` path. A compiled ``params["appendix_html"])``
+    is still honoured for any OTHER report type (unchanged — no compiler on this
+    branch ever produces one, but the schema still allows it)."""
+    from app.services.report.report_delivery import _inventory_aging_model
+    from app.services.report.report_html import render_inventory_aging_appendix
     from app.services.report.report_pdf import render_report_pdf
 
     artifact = _resolve_report_step_artifact(ctx, params)
-    pdf_bytes = render_report_pdf(artifact["rendered_html"], appendix_html=params.get("appendix_html"))
+    ia_model = _inventory_aging_model(artifact["report"])
+    appendix_html = render_inventory_aging_appendix(ia_model) if ia_model is not None else params.get("appendix_html")
+    pdf_bytes = render_report_pdf(artifact["rendered_html"], appendix_html=appendix_html)
     return {"pdf_bytes": pdf_bytes, "report_id": artifact["report_id"]}
 
 
