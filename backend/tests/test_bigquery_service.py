@@ -365,6 +365,22 @@ class TestDryRunQuery:
             assert job_config.dry_run is True
             assert job_config.use_query_cache is False
 
+    @pytest.mark.asyncio
+    async def test_rejects_a_dml_query_with_the_read_only_message(self):
+        """Delta gate (brief I, item 2): before this fix, `dry_run_query`
+        never called `_validate_read_only` -- an `INSERT INTO dataset.t ...`
+        step passed the compiler's compile-time preflight cleanly and only
+        ever failed at RUN time. It must be rejected here, exactly like
+        `execute_query`/`estimate_query_cost` already reject it, and WITHOUT
+        ever reaching `_get_client` (no client/job is built for a query that
+        never had a chance to run)."""
+        from app.services.bigquery_service import dry_run_query
+
+        with patch("app.services.bigquery_service._get_client") as m:
+            with pytest.raises(ValueError, match="[Rr]ead.only"):
+                await dry_run_query({"type": "service_account"}, "p", "INSERT INTO dataset.t VALUES (1)")
+            m.assert_not_called()
+
 
 class TestServiceAccountCredentials:
     @pytest.mark.asyncio

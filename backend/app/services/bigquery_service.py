@@ -186,7 +186,13 @@ async def dry_run_query(
     — e.g. ``EXTRACT(DAY FROM created_at)`` or ``FROM UNNEST (...)`` with a
     space — and false negatives — e.g. ``FROM a, b`` never checking ``b``).
     Raises on an invalid query (BigQuery's own error); returns ``None`` on a
-    valid one — a caller only ever cares whether this raised."""
+    valid one — a caller only ever cares whether this raised.
+
+    Delta gate (brief I, item 2): calls ``_validate_read_only`` first, exactly
+    like ``execute_query``/``estimate_query_cost`` already do — without this,
+    an ``INSERT``/``UPDATE``/``DELETE`` step passed the compiler's
+    compile-time preflight cleanly and only ever failed at RUN time."""
+    _validate_read_only(query)
     await asyncio.to_thread(_sync_dry_run_job, credentials, project_id, query, location)
 
 
