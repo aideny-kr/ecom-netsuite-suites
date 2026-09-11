@@ -221,11 +221,11 @@ async def _execute(operation, params, context):
                 try:
                     from app.services.transaction_ops.scheduler import publish_investigation
 
-                    await asyncio.wait_for(
+                    published = await asyncio.wait_for(
                         asyncio.to_thread(publish_investigation, tenant_id, run.id, app=celery_app),
                         timeout=_PUBLISH_TIMEOUT,
                     )
-                    dispatch_status = "queued"
+                    dispatch_status = "pending_scheduler" if published is False else "queued"
                 except Exception:
                     dispatch_status = "pending_scheduler"
             return {

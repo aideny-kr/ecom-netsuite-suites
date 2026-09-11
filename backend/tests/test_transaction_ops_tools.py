@@ -23,6 +23,9 @@ def ctx(monkeypatch):
     db.execute.return_value.scalar_one_or_none.return_value = actor
     monkeypatch.setattr(mod, "has_permission", AsyncMock(return_value=True))
     monkeypatch.setattr(mod.feature_flag_service, "is_enabled", AsyncMock(return_value=True))
+    # The unit context reuses a fixed run ID. Keep Redis state out of these
+    # request/authorization tests; publication reservations have real-Redis tests.
+    monkeypatch.setattr("app.services.transaction_ops.scheduler._reserve_publication", MagicMock(return_value=True))
     return {
         "db": db,
         "tenant_id": str(TENANT),
@@ -174,11 +177,23 @@ async def test_creation_is_durable_before_queue_and_never_accepts_approval(ctx, 
 
 
 async def test_broker_failure_keeps_committed_pending_run_for_beat(ctx, state, monkeypatch):
-    monkeypatch.setattr(mod.celery_app, "send_task", MagicMock(side_effect=ConnectionError("secret broker URL")))
+    send = MagicMock(side_effect=ConnectionError("secret broker URL"))
+    monkeypatch.setattr(mod.celery_app, "send_task", send)
     result = await mod.execute_run({"config_id": str(CONFIG), "order_references": [ORDER]}, context=ctx)
     assert result["run_id"] == str(RUN)
     assert result["dispatch_status"] == "pending_scheduler"
     assert "secret" not in json.dumps(result)
+    ctx["db"].rollback.assert_not_awaited()
+    send.assert_called_once()
+
+
+async def test_suppressed_publication_does_not_claim_the_review_was_queued(ctx, state, monkeypatch):
+    publish = MagicMock(return_value=False)
+    monkeypatch.setattr("app.services.transaction_ops.scheduler.publish_investigation", publish)
+    result = await mod.execute_run({"config_id": str(CONFIG), "order_references": [ORDER]}, context=ctx)
+    assert result["success"] and result["run_id"] == str(RUN)
+    assert result["dispatch_status"] == "pending_scheduler"
+    publish.assert_called_once()
     ctx["db"].rollback.assert_not_awaited()
 
 
