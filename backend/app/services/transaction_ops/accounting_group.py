@@ -447,7 +447,12 @@ async def run_group_confirmation(*, db, session, message, so, action, user_id, t
                 )
             )
             value = child.structured_output if child else member["card"]
-            if value.get("status") in {"executing", "indeterminate"}:
+            # A successful provider response can leave an approved child whose
+            # accounting outcome is still unverified. Only verified outcomes
+            # permit further queued writes; approval status alone is insufficient.
+            if value.get("status") in {"executing", "indeterminate"} or (
+                action == "approve" and (value.get("accounting_verification") or {}).get("status") != "verified"
+            ):
                 stop.set()
             await log_event(
                 child_db,

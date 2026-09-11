@@ -148,7 +148,7 @@ async def test_real_postgres_locks_protect_same_invoice_and_cap_account_across_c
         await engine.dispose()
 
 
-@pytest.mark.parametrize("outcome", ["verified", "unverified", "changed", "duplicate", "wrong_tenant"])
+@pytest.mark.parametrize("outcome", ["verified", "unverified", "missing_verification", "changed", "duplicate", "wrong_tenant"])
 async def test_group_uses_existing_human_approval_path_and_persists_per_order_results(monkeypatch, outcome):
     so, session = group_fixture(4)
     parent = SimpleNamespace(id=uuid4(), structured_output=so)
@@ -188,6 +188,8 @@ async def test_group_uses_existing_human_approval_path_and_persists_per_order_re
             "status": "approved",
             "accounting_verification": {"status": "needs_review" if outcome == "unverified" else "verified"},
         }
+        if outcome == "missing_verification":
+            child.structured_output.pop("accounting_verification")
         kwargs["db"].scalar.return_value = child
         yield {"type": "done"}
 
@@ -218,11 +220,17 @@ async def test_group_uses_existing_human_approval_path_and_persists_per_order_re
         assert not approved
     else:
         events = [v async for v in iterator]
-        assert len(approved) == 4 and len({id(d) for d in child_sessions}) == 4
+        assert len({id(d) for d in child_sessions}) == len(approved)
+        if outcome == "verified":
+            assert len(approved) == 4
+        else:
+            assert 1 <= len(approved) <= mod.CONCURRENCY
+            assert list(children.values())[-1].structured_output["status"] == "pending"
         assert parent.structured_output["status"] == ("approved" if outcome == "verified" else "indeterminate")
         assert events[-1]["message"]["structured_output"] == parent.structured_output
         per_order = [c.kwargs for c in audit.await_args_list if c.kwargs["action"] == "accounting_group.case.completed"]
-        assert len(per_order) == 4 and all(c["payload"]["approved_by"] == str(session.user_id) for c in per_order)
+        assert len(per_order) == len(approved)
+        assert all(c["payload"]["approved_by"] == str(session.user_id) for c in per_order)
 
 
 @pytest.mark.parametrize("same_invoice", [False, True])
