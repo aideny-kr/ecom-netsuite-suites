@@ -68,6 +68,14 @@ TOOL_CONFIGS = {
         "requires_entitlement": "mcp_tools",
         "allowlisted_params": ["config_id", "order_references", "window_start", "window_end"],
     },
+    "transaction_ops.accounting_group": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 45,
+        "rate_limit_per_minute": 5,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": ["group_id", "review_run_ids", "status", "search"],
+    },
     "transaction_ops.accounting_evidence": {
         "default_limit": None,
         "max_limit": None,

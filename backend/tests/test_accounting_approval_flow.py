@@ -2,6 +2,7 @@
 
 import json
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -20,15 +21,87 @@ from tests.test_tax_correction import proposal
 from tests.test_write_confirm_orchestrator import _TENANT_ID, _USER_ID, _make_db, _make_session
 
 
+async def test_group_handoff_emits_one_real_card_without_another_model_hop():
+    from app.services.chat.write_confirmation_service import WriteConfirmationPayload
+    from tests.test_accounting_group import group_fixture
+
+    so, session = group_fixture()
+    card = WriteConfirmationPayload(
+        **{**so, "record_type": "invoice corrections", "proposed_fields": {"eligible_orders": 2}}
+    )
+    db = AsyncMock(spec=AsyncSession)
+    db.info = {}
+    agent = UnifiedAgent(tenant_id=_TENANT_ID, user_id=_USER_ID, correlation_id=str(uuid.uuid4()))
+    adapter = MagicMock()
+    hops = []
+
+    async def stream(**kwargs):
+        hops.append(kwargs)
+        assert len(hops) == 1
+        yield (
+            "response",
+            _llm_response(
+                tool_blocks=[
+                    ToolUseBlock(id="group", name="transaction_ops_accounting_group", input={"group_id": "a" * 32})
+                ]
+            ),
+        )
+
+    adapter.stream_message = stream
+    adapter.build_assistant_message.return_value = {"role": "assistant", "content": []}
+    adapter.build_tool_result_message.return_value = {"role": "user", "content": []}
+    execute = AsyncMock(return_value=json.dumps({"success": True, "case_count": 2, "financial_writes": 0}))
+    prepare = AsyncMock(return_value=(card, "Prepared two exact corrections for approval."))
+    with (
+        patch("app.services.policy_service.get_active_policy", AsyncMock(return_value=None)),
+        patch("app.services.chat.tools.execute_tool_call", execute),
+        patch("app.services.transaction_ops.accounting_group.prepare_group_confirmation", prepare),
+    ):
+        events = [
+            e
+            async for e in BaseSpecialistAgent.run_streaming(
+                agent, task="Fix all orders in this group", context={}, db=db, adapter=adapter, model="test-model"
+            )
+        ]
+    assert len(hops) == 1 and execute.await_count == 1
+    cards = [v for k, v in events if k == "confirmation_required"]
+    assert len(cards) == 1 and len(cards[0]["accounting_group"]["members"]) == 2
+    prepare.assert_awaited_once()
+
+
+def kind_proposal(kind):
+    if kind == "tax":
+        return proposal()
+    from app.services.transaction_ops.sales_credit import build_candidate
+    from tests.test_sales_credit import inputs as credit_inputs
+
+    if kind == "discount":
+        from tests.test_invoice_discount import unpaid_inputs
+
+        data = unpaid_inputs()
+    else:
+        data = credit_inputs()
+    data["review"]["native_mcp_connector_id"] = proposal()["connector_id"]
+    p = build_candidate(**data)
+    p["observed_at"] = datetime.now(timezone.utc).isoformat()
+    return p
+
+
 def inputs(p):
+    if p.get("kind") == "sales_adjustment_credit":
+        return (
+            f"ext__{p['connector_id'].replace('-', '')}__ns_createRecord",
+            {"recordType": "creditmemo", "data": json.dumps(p["proposed_fields"])},
+        )
     return (
         f"ext__{p['connector_id'].replace('-', '')}__ns_updateRecord",
         {"recordType": "invoice", "recordId": p["record_id"], "data": json.dumps(p["proposed_fields"])},
     )
 
 
-async def test_agent_emits_exact_accounting_card_without_executing_or_duplicate_prefetch():
-    p = proposal()
+@pytest.mark.parametrize("kind", ["tax", "credit", "discount"])
+async def test_agent_emits_exact_accounting_card_without_executing_or_duplicate_prefetch(kind):
+    p = kind_proposal(kind)
     p["tenant_id"] = str(_TENANT_ID)
     name, params = inputs(p)
     db = AsyncMock(spec=AsyncSession)
@@ -46,6 +119,7 @@ async def test_agent_emits_exact_accounting_card_without_executing_or_duplicate_
     execute = AsyncMock()
     with (
         patch("app.services.policy_service.get_active_policy", AsyncMock(return_value=None)),
+        patch("app.services.chat.agents.base_agent._metadata_fetched_this_turn", return_value=True),
         patch(
             "app.services.chat.agents.base_agent.validate_mutation", AsyncMock(return_value=ValidationResult(ok=True))
         ),
@@ -68,24 +142,42 @@ async def test_agent_emits_exact_accounting_card_without_executing_or_duplicate_
         ]
     cards = [v for k, v in events if k == "confirmation_required"]
     assert len(cards) == 1
-    assert cards[0]["record_id"] == p["record_id"]
+    assert cards[0]["record_id"] == (None if kind == "credit" else p["record_id"])
     assert cards[0]["accounting_review"] == p
     assert cards[0]["proposed_fields"] == p["proposed_fields"]
     assert not cards[0].get("invariant_errors")
     execute.assert_not_awaited()
     text = " ".join(v for k, v in events if k == "text")
-    assert "7030.02" in text and "7046.00" in text and "Posting period" in text
+    if kind == "tax":
+        assert "7030.02" in text and "7046.00" in text and "Posting period" in text
+    elif kind == "credit":
+        assert "Sales Adjustments credit" in text
+    else:
+        assert "Sales Adjustment for unpaid invoice" in text
 
 
-@pytest.mark.parametrize("outcome", ["stale", "verified", "unverified", "rejected"])
-async def test_approval_preflight_execution_verification_and_actor_audit(outcome):
-    p = proposal()
+@pytest.mark.parametrize(
+    "kind,outcome",
+    [
+        (kind, outcome)
+        for kind in ("tax", "credit", "discount")
+        for outcome in ("stale", "verified", "unverified", "rejected")
+    ]
+    + [
+        (kind, outcome)
+        for kind in ("credit", "discount")
+        for outcome in ("unknown_verified", "unknown_missing", "unreadable_verified")
+    ],
+)
+async def test_approval_preflight_execution_verification_and_actor_audit(outcome, kind):
+    p = kind_proposal(kind)
     p["tenant_id"] = str(_TENANT_ID)
+    verified_outcome = outcome in {"verified", "unknown_verified", "unreadable_verified"}
     name, params = inputs(p)
     session_id = uuid.uuid4()
     card = build_confirmation_payload(
-        mutation_type="update",
-        record_type="invoice",
+        mutation_type="create" if kind == "credit" else "update",
+        record_type="creditmemo" if kind == "credit" else "invoice",
         tool_name=name,
         tool_input=params,
         session_id=str(session_id),
@@ -102,6 +194,7 @@ async def test_approval_preflight_execution_verification_and_actor_audit(outcome
         created_at=datetime.now(timezone.utc),
     )
     db = _make_db(message)
+    db.info = {}
     session = _make_session(session_id=str(session_id))
     order = []
 
@@ -114,18 +207,37 @@ async def test_approval_preflight_execution_verification_and_actor_audit(outcome
         order.append("write")
         assert kwargs["human_approved"] is True
         assert kwargs["tool_input"] == params
+        if outcome == "unreadable_verified":
+            return "unreadable receipt"
+        if outcome.startswith("unknown"):
+            return json.dumps({"outcome_indeterminate": True, "error": "timeout"})
         return json.dumps(
             {"error": "Period locked"} if outcome == "rejected" else {"success": True, "id": p["record_id"]}
         )
 
-    async def verify(*args):
+    async def verify(*args, **kwargs):
+        if kind in {"credit", "discount"} and outcome in ("verified", "unverified"):
+            assert kwargs["receipt"]["success"] is True
         order.append("verify")
-        return {"status": "verified" if outcome == "verified" else "needs_review", "cash_settlement": "not_verified"}
+        return {"status": "verified" if verified_outcome else "needs_review", "cash_settlement": "not_verified"}
 
     audit = AsyncMock()
+    recheck = AsyncMock(return_value=MagicMock(id="recheck-run"))
+
+    @asynccontextmanager
+    async def locked(_):
+        order.append("lock")
+        try:
+            yield
+        finally:
+            order.append("unlock")
+
     with (
+        patch("app.services.transaction_ops.accounting_group.accounting_write_slot", locked),
+        patch("app.services.transaction_ops.accounting_group.authorize_accounting_write", AsyncMock()),
         patch("app.services.transaction_ops.tax_correction.validate_approved", preflight),
         patch("app.services.transaction_ops.tax_correction.verify_after", verify),
+        patch("app.services.transaction_ops.accounting_recheck.queue", recheck),
         patch("app.services.chat.orchestrator.execute_tool_call", execute),
         patch("app.services.chat.orchestrator.log_event", audit),
         patch("app.services.mcp_connector_service.get_mcp_connector", AsyncMock(return_value=None)),
@@ -141,6 +253,8 @@ async def test_approval_preflight_execution_verification_and_actor_audit(outcome
                 write_confirm={"action": "approve", "confirmation_id": str(message.id)},
             )
         ]
+    assert order[0] == "lock" and order[-1] == "unlock"
+    order = order[1:-1]
     if outcome == "stale":
         assert order == ["preflight"]
         assert message.structured_output["status"] == "failed"
@@ -148,10 +262,16 @@ async def test_approval_preflight_execution_verification_and_actor_audit(outcome
     elif outcome == "rejected":
         assert order == ["preflight", "write"]
         assert message.structured_output["repair_exit_reason"] == "fresh_accounting_evidence_required"
+        failed = next(
+            c.kwargs
+            for c in audit.await_args_list
+            if c.kwargs.get("action") in {"record.create.failed", "record.update.failed"}
+        )
+        assert failed["status"] == "error"
     else:
         assert order == ["preflight", "write", "verify"]
         so = message.structured_output
-        assert so["accounting_verification"]["status"] == ("verified" if outcome == "verified" else "needs_review")
+        assert so["accounting_verification"]["status"] == ("verified" if verified_outcome else "needs_review")
         verification = next(
             c.kwargs
             for c in audit.await_args_list
@@ -160,14 +280,23 @@ async def test_approval_preflight_execution_verification_and_actor_audit(outcome
         assert verification["payload"]["approved_by"] == str(_USER_ID)
         assert verification["payload"]["before"] == p["before"]
         content = " ".join(e["message"]["content"] for e in events if e.get("type") == "message")
-        assert ("independently re-read and verified" in content) == (outcome == "verified")
-        if outcome == "unverified":
+        assert ("independently re-read and verified" in content) == verified_outcome
+        if not verified_outcome:
             assert "executed successfully" not in content
+        if outcome.startswith("unknown") or outcome == "unreadable_verified":
+            assert so["status"] == ("approved" if verified_outcome else "indeterminate")
+            assert so["accounting_verification"]["recovered_by_read"] is verified_outcome
+        if kind in {"credit", "discount"} and verified_outcome:
+            recheck.assert_awaited_once()
+            assert so["accounting_recheck"] == {"status": "queued", "run_id": "recheck-run"}
+        else:
+            recheck.assert_not_awaited()
 
 
+@pytest.mark.parametrize("kind", ["tax", "credit", "discount"])
 @pytest.mark.parametrize("blocked", [None, "validation", "policy", "tenant", "unavailable_tool"])
-async def test_fresh_evidence_generates_real_card_without_second_model_hop(blocked):
-    p = proposal()
+async def test_fresh_evidence_generates_real_card_without_second_model_hop(blocked, kind):
+    p = kind_proposal(kind)
     p["tenant_id"] = str(_TENANT_ID if blocked != "tenant" else uuid.uuid4())
     name, params = inputs(p)
     db = AsyncMock(spec=AsyncSession)
@@ -204,6 +333,7 @@ async def test_fresh_evidence_generates_real_card_without_second_model_hop(block
     with (
         patch("app.services.policy_service.get_active_policy", AsyncMock(return_value=None)),
         patch("app.services.chat.write_validation.validate_mutation", AsyncMock(return_value=validation)),
+        patch("app.services.chat.record_metadata_service.prefetch_scoped_invoice_metadata", AsyncMock()),
         patch("app.services.chat.tools.execute_tool_call", execute),
         patch(
             "app.services.policy_service.evaluate_tool_call",
@@ -233,7 +363,7 @@ async def test_fresh_evidence_generates_real_card_without_second_model_hop(block
         assert next(v for k, v in events if k == "response").success is False
     else:
         assert len(cards) == 1
-        assert cards[0]["record_id"] == p["record_id"]
+        assert cards[0]["record_id"] == (None if kind == "credit" else p["record_id"])
         assert cards[0]["tool_input"] == params
         assert cards[0]["accounting_review"] == p
         result = next(v for k, v in events if k == "response")

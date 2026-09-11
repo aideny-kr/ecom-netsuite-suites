@@ -196,7 +196,7 @@ jobs:
             docker pull "${IMG}:sha-${SHORT_SHA}"
             docker tag "${IMG}:sha-${SHORT_SHA}" "${IMG}:latest"
             PULLED_DIGEST=$(docker inspect --format '{{.Id}}' "${IMG}:sha-${SHORT_SHA}")
-            docker compose -f docker-compose.prod.yml up -d --no-deps backend worker beat
+            docker compose -f docker-compose.prod.yml up -d --no-deps backend worker worker-collectors beat
             # Verify the running container advances to the freshly-pulled image. Container
             # recreation can lag `up -d`, so poll instead of a single check after a fixed
             # sleep — that race false-failed deploys that had actually succeeded. Still
@@ -221,6 +221,21 @@ jobs:
               sleep 5
             done
             [ -n "$health_ok" ] || { echo "::error::backend health check never passed after 60s"; exit 1; }
+            # All background consumers must advance too: a healthy API cannot
+            # prove that collectors or Beat are running the reviewed code.
+            for service in backend worker worker-collectors beat; do
+              expected_state="${PULLED_DIGEST} running"
+              runtime_state=""
+              for _ in $(seq 1 12); do
+                runtime_state=$(docker inspect --format '{{.Image}} {{.State.Status}}' "ecom-netsuite-${service}-1" 2>/dev/null || true)
+                [ "$runtime_state" = "$expected_state" ] && break
+                sleep 5
+              done
+              if [ "$runtime_state" != "$expected_state" ]; then
+                echo "::error::${service} is stale or not running: expected $expected_state; got $runtime_state"
+                exit 1
+              fi
+            done
 
   # ── Deploy to Production (manual approval required) ─────────
   deploy-production:
@@ -291,7 +306,22 @@ jobs:
               sleep 5
             done
             [ -n "$health_ok" ] || { echo "::error::backend health check never passed after 60s"; exit 1; }
-            docker compose -f docker-compose.prod.yml up -d --no-deps worker
+            docker compose -f docker-compose.prod.yml up -d --no-deps worker worker-collectors beat
+            # All background consumers must advance too: a healthy API cannot
+            # prove that collectors or Beat are running the reviewed code.
+            for service in backend worker worker-collectors beat; do
+              expected_state="${PULLED_DIGEST} running"
+              runtime_state=""
+              for _ in $(seq 1 12); do
+                runtime_state=$(docker inspect --format '{{.Image}} {{.State.Status}}' "ecom-netsuite-${service}-1" 2>/dev/null || true)
+                [ "$runtime_state" = "$expected_state" ] && break
+                sleep 5
+              done
+              if [ "$runtime_state" != "$expected_state" ]; then
+                echo "::error::${service} is stale or not running: expected $expected_state; got $runtime_state"
+                exit 1
+              fi
+            done
 
       - name: Production health verification
         run: |

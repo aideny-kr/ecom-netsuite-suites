@@ -588,6 +588,25 @@ async def run_investigation(
                 )
             )
             report = limit_report(build_report(source, targets, config, mapping, now=clock()), now=clock())
+            from app.services.transaction_ops.commercial_credits import (
+                read_commercial_credit_for_order,
+                source_adjustment_basis,
+            )
+
+            if source_adjustment_basis(orders[0]) and report.get("balance", {}).get("status") == "difference":
+                # At most 4 invoice reads +12 application reads, plus OAuth maintenance.
+                # Reserve before the optional proof, preserving the runner's hard budget.
+                if not await reserve(20):
+                    await state.record_finding(
+                        db, tenant_id, run_id, reference, report, lease_token=token, now=clock(), final=False
+                    )
+                    return await finish("budget")
+                commercial = await bounded_read(
+                    read_commercial_credit_for_order(db, tenant_id, config, orders[0], targets, report)
+                )
+                if commercial:
+                    targets["commercial_credit_evidence"] = commercial
+                    report["balance"] = reconcile_order(source, targets, config)
             if mapping.solidus_refund_step_id:
                 # Preserve known amounts before extra reads. An exhausted refund
                 # budget must not discard the already-collected order evidence.
@@ -696,7 +715,11 @@ async def run_investigation(
                     raise
                 except Exception:
                     report = {**report, "automation": {"status": "blocked", "code": "action_evidence_unavailable"}}
-            await state.record_finding(db, tenant_id, run_id, reference, report, lease_token=token, now=clock())
+            finding = await state.record_finding(
+                db, tenant_id, run_id, reference, report, lease_token=token, now=clock()
+            )
+            if settlement and run.params_json.get("approval_message_id"):
+                report = finding.report_json
             progress["processed"] += 1
             balance_status = report["balance"]["status"]
             group = (
@@ -723,6 +746,17 @@ async def run_investigation(
         return await finish("budget" if clock() >= run.deadline_at else "error")
     except state_service.StateError as exc:
         if exc.code == "run_lease_lost":
+            if clock() >= run.deadline_at:
+                try:
+                    # A progress write can meet the deadline before the next
+                    # budget reservation. Keep this row lock through finish:
+                    # its idempotent terminal-row path does not check ownership.
+                    current = await state.get_run(db, tenant_id, run_id, lock=True)
+                    if current.status == "running" and current.lease_token == token:
+                        return await finish("budget")
+                except state_service.StateError as finish_exc:
+                    if finish_exc.code != "run_lease_lost":
+                        raise
             return {"run_id": str(run_id), "status": "yielded", "termination_reason": "stall"}
         raise
     except Exception:

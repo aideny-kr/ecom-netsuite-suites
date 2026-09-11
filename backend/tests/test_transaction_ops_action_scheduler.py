@@ -48,11 +48,12 @@ async def test_unknown_is_queued_for_reads_once_and_completed_recovery_does_not_
 
 
 def test_action_workers_are_bounded_without_broker_retries_and_have_a_minute_collector():
-    for name in ("execute", "recover", "collect_actions"):
+    for name in ("execute", "recover", "recover_credit", "collect_actions"):
         task = getattr(workers, f"transaction_ops_{name}")
         assert task.name == f"tasks.transaction_ops_{name}"
         assert isinstance(task, InstrumentedTask) and task.max_retries == 0
-        assert task.queue == "recon" and task.time_limit <= 340
+        expected_queue = "recon-control" if name == "collect_actions" else "recon"
+        assert task.queue == expected_queue and task.time_limit <= 340
     entries = [
         e
         for e in workers.celery_app.conf.beat_schedule.values()

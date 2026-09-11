@@ -209,6 +209,16 @@ async def accounting_context(db, tenant_id, scope, report=None):
     ]
     context["configuration_status"] = "ambiguous" if len(matches) > 1 else "unavailable"
     if len(matches) != 1:
+        context["read_only_next_step"] = (
+            "The case has multiple matching reconciliation configurations. Resolve their NetSuite connection "
+            "binding before native accounting reads."
+            if matches
+            else "No enabled reconciliation configuration matches this case scope. Resolve that configuration first."
+        ) + (
+            " query_scope_params is unavailable. Never substitute scope.source_connection_id for a NetSuite "
+            "connection_id; it identifies the e-commerce source. Do not guess a default connection or ask the "
+            "user which database to query. Report this configuration blocker with the known case findings."
+        )
         return context
     config = matches[0]
     mapping = config.mapping_json or {}
@@ -241,9 +251,18 @@ async def accounting_context(db, tenant_id, scope, report=None):
     ]
     if len(scoped_mcp) == 1:
         context["native_mcp_connector_id"] = str(scoped_mcp[0].id)
+    from app.services.transaction_ops.accounting_profiles import sales_credit_profile
+
+    try:
+        profile = await sales_credit_profile(db, tenant_id, config)
+        context["sales_credit_profile_status"] = "configured" if profile else "not_configured"
+    except (ValueError, TypeError):
+        profile = None
+        context["sales_credit_profile_status"] = "invalid_configuration"
     context.update(
         configuration_status="scoped_configuration_found",
         config_id=str(config.id),
+        sales_credit_profile=profile,
         netsuite_connection_id=str(config.netsuite_connection_id),
         query_scope_params={
             "connection_id": str(config.netsuite_connection_id),

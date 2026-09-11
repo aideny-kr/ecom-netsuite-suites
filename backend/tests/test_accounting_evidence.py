@@ -122,7 +122,11 @@ async def test_invalid_case_scope_never_contacts_netsuite(native, conflict):
     else:
         scope["observed_scope"]["target_records"][0]["record_id"] = "10 OR 1=1"
     result = await collect(scope)
-    assert result["blockers"] == ["verified_unique_sales_order_scope_required"]
+    assert result["blockers"] == [
+        "ambiguous_reconciliation_configuration"
+        if conflict == "ambiguous"
+        else "verified_unique_sales_order_scope_required"
+    ]
     assert not native[2]
 
 

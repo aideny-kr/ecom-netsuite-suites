@@ -1,10 +1,11 @@
 from datetime import datetime, timezone
-from uuid import uuid4
+from unittest.mock import Mock
+from uuid import UUID, uuid4
 
 import pytest
 
 from app.api.v1.transaction_ops import router
-from app.services.transaction_ops import period_review
+from app.services.transaction_ops import period_review, scheduler, state_service
 from tests.conftest import enable_feature_flag
 from tests.test_metabase_replica_reader import BINDING
 from tests.test_transaction_ops_state_db import seed_config
@@ -13,6 +14,13 @@ from tests.test_transaction_ops_state_db import seed_config
 @pytest.fixture(autouse=True)
 async def routes(app):
     app.include_router(router, prefix="/api/v1")
+
+
+@pytest.fixture(autouse=True)
+def publisher(monkeypatch):
+    publish = Mock(return_value=True)
+    monkeypatch.setattr(scheduler, "publish_investigation", publish)
+    return publish
 
 
 async def ready(db, actor, monkeypatch):
@@ -48,7 +56,7 @@ async def ready(db, actor, monkeypatch):
     )
 
 
-async def test_review_queues_exact_calendar_cohort_and_idempotent_retry(client, db, admin_user, monkeypatch):
+async def test_review_queues_exact_calendar_cohort_and_idempotent_retry(client, db, admin_user, monkeypatch, publisher):
     actor, headers = admin_user
     c = await ready(db, actor, monkeypatch)
     body = {"period": "last_month", "evaluation_key": str(uuid4())}
@@ -60,8 +68,57 @@ async def test_review_queues_exact_calendar_cohort_and_idempotent_retry(client, 
     assert datetime.fromisoformat(data["params_json"]["window_start"]) == datetime(2026, 8, 1, 7, tzinfo=timezone.utc)
     assert datetime.fromisoformat(data["params_json"]["window_end"]) == datetime(2026, 8, 2, 7, tzinfo=timezone.utc)
     assert datetime.fromisoformat(data["params_json"]["review"]["end"]) == datetime(2026, 9, 1, 7, tzinfo=timezone.utc)
-    assert data["params_json"]["window_basis"] == "completed_at"
+    assert data["params_json"]["window_basis"] == "updated_at"
+    publisher.assert_called_once_with(actor.tenant_id, UUID(data["id"]))
     assert (await client.post(url, json=body, headers=headers)).json()["id"] == data["id"]
+    assert publisher.call_count == 2  # Shared publisher deduplicates a retried pending run.
+
+
+async def test_review_broker_failure_keeps_durable_run_for_recovery(client, db, admin_user, monkeypatch, publisher):
+    actor, headers = admin_user
+    config = await ready(db, actor, monkeypatch)
+    publisher.side_effect = RuntimeError("broker unavailable")
+    body = {"period": "yesterday", "evaluation_key": str(uuid4())}
+    url = f"/api/v1/transaction-ops/configs/{config.id}/review"
+    response = await client.post(url, json=body, headers=headers)
+    assert response.status_code == 202, response.text
+    run = await state_service.get_run(db, actor.tenant_id, UUID(response.json()["id"]))
+    assert run.status == "pending"
+    assert run.api_calls_used == run.orders_used == 0
+    assert (await client.post(url, json=body, headers=headers)).json()["id"] == str(run.id)
+
+
+async def test_review_terminal_retry_does_not_publish_or_restart(client, db, admin_user, monkeypatch, publisher):
+    actor, headers = admin_user
+    config = await ready(db, actor, monkeypatch)
+    body = {"period": "yesterday", "evaluation_key": str(uuid4())}
+    url = f"/api/v1/transaction-ops/configs/{config.id}/review"
+    response = await client.post(url, json=body, headers=headers)
+    run_id = UUID(response.json()["id"])
+    token = await state_service.claim_run(db, actor.tenant_id, run_id)
+    await state_service.finish_run(db, actor.tenant_id, run_id, "done", lease_token=token)
+    publisher.reset_mock()
+    retry = await client.post(url, json=body, headers=headers)
+    assert retry.status_code == 202
+    assert retry.json()["id"] == str(run_id)
+    assert retry.json()["status"] == "finished"
+    publisher.assert_not_called()
+
+
+async def test_review_requires_authorized_tenant_before_publication(
+    client, db, admin_user, admin_user_b, monkeypatch, publisher
+):
+    actor, headers = admin_user
+    config = await ready(db, actor, monkeypatch)
+    for flag in ("celigo", "reconciliation"):
+        await enable_feature_flag(db, admin_user_b[0].tenant_id, flag)
+    body = {"period": "yesterday", "evaluation_key": str(uuid4())}
+    url = f"/api/v1/transaction-ops/configs/{config.id}/review"
+    assert (await client.post(url, json=body)).status_code == 401
+    assert (await client.post(url, json=body, headers=admin_user_b[1])).status_code == 404
+    await enable_feature_flag(db, actor.tenant_id, "reconciliation", False)
+    assert (await client.post(url, json=body, headers=headers)).status_code == 403
+    publisher.assert_not_called()
 
 
 @pytest.mark.parametrize(

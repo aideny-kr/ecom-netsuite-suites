@@ -348,7 +348,7 @@ async def create_run(
     if request.window_basis == "completed_at" and not (config.mapping_json or {}).get("metabase_replica"):
         raise StateError("period_reader_unavailable", 422)
     # Preserve idempotency for requests made before calendar cohorts were added.
-    excluded = {"window_basis"} if request.window_basis == "updated_at" else set()
+    excluded = {"window_basis"} if request.window_basis == "updated_at" and request.review is None else set()
     if request.review is None:
         excluded.add("review")
     elif request.review.end > now:
@@ -621,6 +621,12 @@ async def record_finding(db, tenant_id, run_id, order_reference, report_json, *,
     )
     run = await get_run(db, tenant_id, run_id, lock=True)
     _lease(run, lease_token, now)
+    if run.origin == "recovery" and run.params_json.get("approval_message_id"):
+        from app.services.transaction_ops.accounting_recheck import bound_report
+
+        request = request.model_copy(
+            update={"report_json": await bound_report(db, tenant_id, run, request.report_json, now=now)}
+        )
     row = (
         await db.execute(
             select(TransactionFinding).where(

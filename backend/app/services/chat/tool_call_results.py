@@ -808,6 +808,14 @@ def build_tool_call_log_entry(
     }
     if agent_name:
         entry["agent"] = agent_name
+    if tool_name in {"transaction_ops_accounting_evidence", "transaction_ops.accounting_evidence"}:
+        try:
+            parsed = json.loads(result_str)
+            links = parsed.get("accounting_evidence", {}).get("record_links", [])
+            if parsed.get("success") is True and links:
+                entry["record_links"] = links
+        except (ValueError, TypeError, AttributeError):
+            pass
 
     # UNIFIED SLOT CRITERION (re-gate r3, findings #1/#2): persist result_payload
     # IFF the result is extractable (condition a) AND it is a STAMPED data tool

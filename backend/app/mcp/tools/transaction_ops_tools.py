@@ -40,7 +40,7 @@ def _state_dependencies():
     return state_service, RunCreate
 
 
-async def _authorize(context, *, create):
+async def _authorize(context, *, create, fresh=False):
     db = context.get("db")
     if db is None:
         raise _ToolError("missing_context")
@@ -67,8 +67,12 @@ async def _authorize(context, *, create):
     for permission in ("connections.view", "recon.run") if create else ("connections.view",):
         if not await has_permission(db, actor_id, permission):
             raise _ToolError("permission_denied")
+    flags = await feature_flag_service.get_all_flags(db, tenant_id) if fresh else None
     for flag in ("celigo", "reconciliation"):
-        if not await feature_flag_service.is_enabled(db, tenant_id, flag):
+        enabled = (
+            flags.get(flag, False) if flags is not None else await feature_flag_service.is_enabled(db, tenant_id, flag)
+        )
+        if not enabled:
             raise _ToolError("feature_disabled")
     return db, tenant_id, actor
 
@@ -217,11 +221,11 @@ async def _execute(operation, params, context):
                 try:
                     from app.services.transaction_ops.scheduler import publish_investigation
 
-                    await asyncio.wait_for(
+                    published = await asyncio.wait_for(
                         asyncio.to_thread(publish_investigation, tenant_id, run.id, app=celery_app),
                         timeout=_PUBLISH_TIMEOUT,
                     )
-                    dispatch_status = "queued"
+                    dispatch_status = "pending_scheduler" if published is False else "queued"
                 except Exception:
                     dispatch_status = "pending_scheduler"
             return {
@@ -361,6 +365,32 @@ async def execute_groups(params: dict, **kwargs) -> dict:
     return await _with_deadline("groups", params, kwargs.get("context") or {})
 
 
+async def execute_accounting_group(params: dict, **kwargs) -> dict:
+    """Freeze scoped membership for the server-side proposal handoff; no writes."""
+    from app.services.transaction_ops.case_groups import group_members
+    from app.services.transaction_ops.state_service import StateError
+
+    context = kwargs.get("context") or {}
+    try:
+        if "group_id" not in params or set(params) - {"group_id", "review_run_ids", "status", "search"}:
+            raise _ToolError("invalid_parameters")
+        db, tenant_id, _ = await _authorize(context, create=True)
+        members = []
+        for offset in range(0, 500, 50):
+            page = await group_members(db, tenant_id, **params, limit=50, offset=offset)
+            members.extend(page["cases"])
+            if not page["has_next"]:
+                break
+        else:
+            raise _ToolError("Group exceeds 500 cases; narrow the period or entity. No partial group was prepared.")
+        if not members or len({m["case_id"] for m in members}) != len(members):
+            raise _ToolError("Group is empty or changed; refresh the exact scoped group.")
+        db.info["accounting_group_selection"] = {"group_id": params["group_id"], "scope": params, "members": members}
+        return {"success": True, "group_id": params["group_id"], "case_count": len(members), "financial_writes": 0}
+    except (ValueError, _ToolError, StateError) as exc:
+        return {"success": False, "error": str(exc)}
+
+
 async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
     """Exact-case native reads; caller cannot choose another account or inject SQL."""
     from app.services.transaction_ops import case_service
@@ -409,7 +439,27 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
         try:
             source = await refresh_source(db, tenant_id, review["scope"], case.order_reference)
             evidence["source_refresh"] = source
+            from app.services.transaction_ops.commercial_credits import collect_commercial_credits
+
+            await collect_commercial_credits(db, tenant_id, review, case.latest_report_json, source, evidence)
             correction = candidate(evidence, case.latest_report_json, review, source)
+            if correction is None and review.get("sales_credit_profile"):
+                from app.services.transaction_ops.sales_credit import build_candidate, collect_support
+
+                try:
+                    support = await collect_support(db, tenant_id, source, case.latest_report_json, review, evidence)
+                    if support:
+                        correction = build_candidate(
+                            tenant_id=tenant_id,
+                            case_id=case.id,
+                            source=source,
+                            report=case.latest_report_json,
+                            review=review,
+                            support=support,
+                        )
+                        evidence["sales_credit_support"] = support
+                except (ValueError, NetSuiteEvidenceError, SourceReadError) as exc:
+                    evidence["blockers"].append(f"sales_credit:{exc}")
             if correction:
                 evidence["assessment"]["correction_ready"] = "ready_for_exact_human_approval"
                 evidence["blockers"] = [
@@ -422,10 +472,15 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
                 db.info["accounting_correction_candidate"] = correction
                 evidence["correction_candidate"] = {
                     "next_action": "Call this tool to DISPLAY an approval card. Execution requires human approval.",
-                    "tool_name": f"ext__{uuid.UUID(correction['connector_id']).hex}__ns_updateRecord",
+                    "tool_name": f"ext__{uuid.UUID(correction['connector_id']).hex}__"
+                    + ("ns_createRecord" if correction.get("kind") == "sales_adjustment_credit" else "ns_updateRecord"),
                     "params": {
                         "recordType": correction["record_type"],
-                        "recordId": correction["record_id"],
+                        **(
+                            {}
+                            if correction.get("kind") == "sales_adjustment_credit"
+                            else {"recordId": correction["record_id"]}
+                        ),
                         "data": json.dumps(correction["proposed_fields"]),
                     },
                     "expected_after": correction["expected_after"],
@@ -433,6 +488,13 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
                 }
         except SourceReadError as exc:
             evidence["blockers"].append(f"source_refresh:{exc}")
+        from app.services.transaction_ops.record_links import evidence_record_links
+
+        evidence = json.loads(json.dumps(evidence, default=str))
+        evidence["record_links"] = evidence_record_links(evidence)
+        from app.services.transaction_ops.resolution_guidance import investigation_guidance
+
+        evidence["investigation_routes"] = investigation_guidance(case.latest_report_json)["routes"]
         await log_event(
             db,
             tenant_id,

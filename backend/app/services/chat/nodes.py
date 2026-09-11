@@ -43,6 +43,7 @@ ALLOWED_CHAT_TOOLS: frozenset[str] = frozenset(
         "transaction_ops.run",
         "transaction_ops.status",
         "transaction_ops.accounting_evidence",
+        "transaction_ops.accounting_group",
         "netsuite.suiteql",
         "pivot.query_result",
         "cross_source.query",

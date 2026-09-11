@@ -560,7 +560,7 @@ class UnifiedAgent(BaseSpecialistAgent):
             parts.append(pp_block)
 
         # NetSuite record deep links
-        if self._netsuite_account_slug:
+        if self._netsuite_account_slug and not getattr(self, "_transaction_workflow", False):
             parts.append(
                 f"\n<record_links>\n"
                 f"When referencing NetSuite records, include a clickable link using this pattern:\n"
@@ -766,8 +766,9 @@ class UnifiedAgent(BaseSpecialistAgent):
         if getattr(self, "_transaction_workflow", False):
             parts.append(
                 "\nThis request selects a transaction case/group workflow, not a standalone database query. "
-                "Start with transaction_ops_status for the exact case or transaction_ops_groups "
-                "for the exact group and supplied scope, then transaction_ops_accounting_evidence for a case. Resolve connections from that authorized evidence; "
+                "Start with transaction_ops_status for the exact case or transaction_ops_accounting_group "
+                "for the exact group and supplied scope. Use transaction_ops_accounting_evidence for case evidence. "
+                "Resolve connections from that authorized evidence; "
                 "do not ask which data source to use. Continue targeted read-only investigation when evidence "
                 "is incomplete without asking discretionary permission. Prepare only supported exact changes "
                 "for human approval; this request is not financial approval."

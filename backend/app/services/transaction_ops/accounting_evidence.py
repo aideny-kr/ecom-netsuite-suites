@@ -46,6 +46,15 @@ DOCUMENT_FIELDS = (
     "payment",
     "salesOrder",
     "taxDetailsOverride",
+    "discountTotal",
+    "discountRate",
+    "discountItem",
+    "shippingCost",
+    "entity",
+    "account",
+    "location",
+    "department",
+    "class",
 )
 
 
@@ -72,8 +81,19 @@ async def collect_accounting_evidence(db, tenant_id, review, report):
             "Do not mark matched or settled from a historical mapping hypothesis. Reconciliation and exact-change "
             "human approval remain required. Continue targeted missing-evidence reads without asking discretionary "
             "permission; do not repeat successful sections or failed guessed SQL fields."
+            " Line totals need not sum to the order header: order-level discounts, shipping and adjustments "
+            "must be included. An internally balanced invoice/GL or Paid In Full status does not prove the "
+            "invoice amount is economically correct. Inspect applied credits and payment applications. "
+            "No supported automated correction candidate is a capability limit, not proof that no error exists."
         ),
     }
+    if review.get("configuration_status") == "ambiguous":
+        result["blockers"].append("ambiguous_reconciliation_configuration")
+        result["interpretation"] = review.get("read_only_next_step") or (
+            "Multiple reconciliation configurations match this case. Resolve the exact connection scope "
+            "before native reads or any correction proposal."
+        )
+        return result
     if (
         review.get("configuration_status") != "scoped_configuration_found"
         or not review.get("connection_active")

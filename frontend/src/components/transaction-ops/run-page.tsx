@@ -14,7 +14,7 @@ import {
 } from "@/hooks/use-transaction-ops";
 import { TransactionAccessBoundary } from "./access-boundary";
 import { cardClass, EvidenceJson, FindingCard, Status } from "./evidence";
-import { dateLabel, runState, safeError } from "./format";
+import { dateLabel, objectValue, runState, safeError } from "./format";
 import { ProposalCard } from "./proposal-card";
 
 export function TransactionRunPage({ id }: { id: string }) {
@@ -97,6 +97,8 @@ function RunContent({ id }: { id: string }) {
     );
   const config = run.config_snapshot;
   const progress = run.progress_json;
+  const accountingRecheck = typeof run.params_json.approval_message_id === "string";
+  const reconciliation = objectValue(progress.settlement);
   const count = (key: string) =>
     typeof progress[key] === "number"
       ? String(progress[key])
@@ -170,6 +172,20 @@ function RunContent({ id }: { id: string }) {
           </p>
         )}
       </section>
+      {accountingRecheck && (
+        <section className={cardClass} aria-label="Post-credit reconciliation">
+          <h2 className="font-semibold">
+            {reconciliation.status === "succeeded" ? "Order, tax and refunds matched"
+              : reconciliation.status === "difference" ? "Differences remain"
+                : run.status === "finished" ? "Reconciliation not verified" : "Reconciliation pending"}
+          </h2>
+          <p className="mt-2 text-[13px] text-muted-foreground">
+            This read-only check compares fresh source and ERP evidence after the approved credit.
+            The approval, approver and result are linked in the audit log.
+            Bank and processor clearance remain separate checks.
+          </p>
+        </section>
+      )}
       <div className="grid gap-4 md:grid-cols-3">
         <div className={cardClass}>
           <p className="text-[13px] text-muted-foreground">Orders examined</p>

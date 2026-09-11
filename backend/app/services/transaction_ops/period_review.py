@@ -5,7 +5,7 @@ from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, model_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.models.transaction_ops import TransactionRun
 from app.models.user import User
@@ -45,7 +45,12 @@ async def create_review(db, tenant_id, config_id, request, *, actor):
         mapping = TransactionMapping.model_validate(config.mapping_json)
         policy = mapping.reconciliation_policy or ReconciliationPolicy()
         scope = review_window(
-            request.period, utc_now(), policy.timezone_name, start_date=request.start_date, end_date=request.end_date
+            request.period,
+            utc_now(),
+            policy.timezone_name,
+            start_date=request.start_date,
+            end_date=request.end_date,
+            basis=policy.review_basis,
         )
     except ValueError:
         raise state.StateError("invalid_review_period", 422) from None
@@ -56,6 +61,7 @@ async def create_review(db, tenant_id, config_id, request, *, actor):
         TransactionRun.config_id == config_id,
         TransactionRun.params_json["review"]["start"].astext == contract["start"],
         TransactionRun.params_json["review"]["end"].astext == contract["end"],
+        func.coalesce(TransactionRun.params_json["window_basis"].astext, "updated_at") == scope["window_basis"],
     )
     # A retried HTTP request must return the same attempt even after it finishes.
     existing = await db.scalar(
@@ -123,7 +129,7 @@ async def continue_review(db, tenant_id, run_id):
         evaluation_key=f"review:{span.id}:{start.isoformat()}",
         window_start=start,
         window_end=end,
-        window_basis="completed_at",
+        window_basis=previous.params_json.get("window_basis", "completed_at"),
         review=span,
     )
     child = await db.scalar(
@@ -211,6 +217,7 @@ async def review_status(db, tenant_id, run_id):
         "review_id": str(span.id),
         "period_start": span.model_dump(mode="json")["start"],
         "period_end": span.model_dump(mode="json")["end"],
+        "window_basis": root.params_json.get("window_basis", "completed_at"),
         "completed_until": completed_until.isoformat().replace("+00:00", "Z"),
         "complete": complete,
         # A finished scan is neither a replica watermark nor an accounting sign-off.

@@ -74,7 +74,7 @@ jobs:
             docker pull "${IMG}:sha-${IMAGE_SHA}"
             docker tag "${IMG}:sha-${IMAGE_SHA}" "${IMG}:latest"
             PULLED_DIGEST=$(docker inspect --format '{{.Id}}' "${IMG}:sha-${IMAGE_SHA}")
-            docker compose -f docker-compose.prod.yml up -d --no-deps backend worker beat
+            docker compose -f docker-compose.prod.yml up -d --no-deps backend worker worker-collectors beat
             # Poll until the backend container advances to the rollback image (recreation
             # lags `up -d`); fail loud if it never matches instead of false-passing green.
             RUNNING_DIGEST=""
@@ -96,3 +96,18 @@ jobs:
               sleep 5
             done
             [ -n "$health_ok" ] || { echo "::error::backend health check never passed after 60s"; exit 1; }
+            # All background consumers must advance too: a healthy API cannot
+            # prove that collectors or Beat are running the reviewed code.
+            for service in backend worker worker-collectors beat; do
+              expected_state="${PULLED_DIGEST} running"
+              runtime_state=""
+              for _ in $(seq 1 12); do
+                runtime_state=$(docker inspect --format '{{.Image}} {{.State.Status}}' "ecom-netsuite-${service}-1" 2>/dev/null || true)
+                [ "$runtime_state" = "$expected_state" ] && break
+                sleep 5
+              done
+              if [ "$runtime_state" != "$expected_state" ]; then
+                echo "::error::${service} is stale or not running: expected $expected_state; got $runtime_state"
+                exit 1
+              fi
+            done

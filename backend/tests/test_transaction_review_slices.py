@@ -36,11 +36,13 @@ async def test_month_starts_with_a_bounded_day_and_resumes_next_day_idempotently
     child = await period_review.continue_review(db, actor.tenant_id, run.id)
     assert child.params_json["window_start"] == params["window_end"]
     assert child.params_json["review"] == params["review"]
+    assert child.params_json["window_basis"] == params["window_basis"] == "updated_at"
     assert child.progress_json == {} and child.initiated_by == actor.id
     assert (await period_review.continue_review(db, actor.tenant_id, run.id)).id == child.id
     summary = await period_review.review_status(db, actor.tenant_id, run.id)
     assert summary["status"] == "running" and summary["complete"] is False
     assert summary["completed_until"] == params["window_end"]
+    assert summary["window_basis"] == "updated_at"
 
 
 @pytest.mark.asyncio
@@ -179,3 +181,47 @@ async def test_coverage_prefers_final_continuation_over_query_order(monkeypatch)
     db.scalars.return_value = SimpleNamespace(all=lambda: [final, prior])
     summary = await period_review.review_status(db, uuid4(), prior.id)
     assert summary["completed_until"] == params["window_end"]
+
+
+@pytest.mark.asyncio
+async def test_existing_completion_review_keeps_its_basis_when_policy_default_changes(db, admin_user, monkeypatch):
+    actor = admin_user[0]
+    _, run = await legacy_completion_review(db, actor, monkeypatch)
+    await finish(db, run)
+    child = await period_review.continue_review(db, actor.tenant_id, run.id)
+    assert child.params_json["window_basis"] == "completed_at"
+    assert (await period_review.review_status(db, actor.tenant_id, run.id))["window_basis"] == "completed_at"
+
+
+@pytest.mark.asyncio
+async def test_new_update_date_review_does_not_resume_old_completion_date_review(db, admin_user, monkeypatch):
+    actor = admin_user[0]
+    config, run = await legacy_completion_review(db, actor, monkeypatch)
+    await finish(db, run, "budget")
+    request = period_review.PeriodReview(evaluation_key=uuid4(), period="last_month")
+    fresh = await period_review.create_review(db, actor.tenant_id, config.id, request, actor=actor)
+    assert fresh.params_json["window_basis"] == "updated_at"
+    assert fresh.params_json["review"]["id"] != run.params_json["review"]["id"]
+    assert fresh.progress_json == {}
+
+
+async def legacy_completion_review(db, actor, monkeypatch):
+    from app.schemas.transaction_runs import ReviewSpan, RunCreate
+
+    config = await ready(db, actor, monkeypatch)
+    start = datetime(2026, 8, 1, 7, tzinfo=timezone.utc)
+    end = datetime(2026, 9, 1, 7, tzinfo=timezone.utc)
+    run = await state.create_run(
+        db,
+        actor.tenant_id,
+        config.id,
+        RunCreate(
+            evaluation_key=str(uuid4()),
+            window_start=start,
+            window_end=start + timedelta(days=1),
+            window_basis="completed_at",
+            review=ReviewSpan(id=uuid4(), start=start, end=end),
+        ),
+        actor=actor,
+    )
+    return config, run

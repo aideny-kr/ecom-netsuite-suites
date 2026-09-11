@@ -81,6 +81,22 @@ TOOL_REGISTRY = {
             "window_end": {"type": "string", "description": "ISO timestamp with timezone; use with window_start"},
         },
     },
+    "transaction_ops.accounting_group": {
+        "description": "Prepare exact supported accounting corrections for ALL current members of an issue group, "
+        "including invoice-tax corrections and configured missing Sales Adjustments credits. "
+        "Use for fixing a group together. Supply the exact group_id and the SAME review_run_ids/status/search "
+        "used to list it. The server reads each case with bounded concurrency, validates each correction and "
+        "displays one human approval card with per-order changes and unsupported cases. No financial writes. "
+        "Do not loop through individual accounting_evidence calls for this task. Human-approved changes execute "
+        "up to three at a time with independent invoice/GL verification and per-order approval audits.",
+        "execute": transaction_ops_tools.execute_accounting_group,
+        "params_schema": {
+            "group_id": {"type": "string", "required": True},
+            "review_run_ids": {"type": "array", "items": {"type": "string"}},
+            "status": {"type": "string"},
+            "search": {"type": "string"},
+        },
+    },
     "transaction_ops.accounting_evidence": {
         "description": "Read scoped native accounting evidence for a transaction case in one bounded call. "
         "Use FIRST after investigation status, before ad-hoc SuiteQL. Returns native lifecycle labels, linked "

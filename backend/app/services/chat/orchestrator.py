@@ -530,8 +530,29 @@ def _coerce_assistant_content(
     if _is_pricing_task_output(persisted_output):
         return _PRICING_TASK_OUTPUT_MESSAGE
     if final_text:
-        return final_text
+        from app.services.transaction_ops.record_links import correct_record_links
+
+        return correct_record_links(final_text, tool_calls)
     if tool_calls:
+        case_calls = [
+            call
+            for call in tool_calls
+            if call.get("tool") in {"transaction_ops_accounting_evidence", "transaction_ops.accounting_evidence"}
+        ]
+        if case_calls:
+            evidence_summary = str(case_calls[-1].get("result_summary", ""))
+            if "ambiguous_reconciliation_configuration" in evidence_summary:
+                return (
+                    "More than one reconciliation configuration matches this "
+                    "case, so its NetSuite connection could not be uniquely resolved. That configuration must "
+                    "be resolved before native accounting verification and an exact correction proposal. "
+                    "This result does not establish an approved or verified correction."
+                )
+            return (
+                "The accounting investigation did not complete. "
+                "The accounting-evidence tool records the missing evidence or blocker. "
+                "This result does not establish an approved or verified correction."
+            )
         return _TOOL_SPIRAL_FALLBACK
     return _NO_RESULT_FALLBACK
 
@@ -1811,6 +1832,20 @@ async def _cas_claim_write_confirmation(
     )
     if cas_result.rowcount == 0:
         return False
+    if new_status == "executing" and so.get("accounting_execution"):
+        from app.services.transaction_ops.accounting_recovery import CLAIM_ACTION
+
+        claim = so["accounting_execution"]
+        await log_event(
+            db,
+            confirm_msg.tenant_id,
+            "transaction_ops",
+            CLAIM_ACTION,
+            actor_id=uuid.UUID(claim["approved_by"]),
+            resource_type="chat_message",
+            resource_id=str(confirm_msg.id),
+            payload={**claim, "financial_writes": 0},
+        )
     await db.commit()
     return True
 
@@ -1988,6 +2023,75 @@ async def run_chat_turn(
             _so = _confirm_msg.structured_output
             if not isinstance(_so, dict) or _so.get("type") != "write_confirmation" or _so.get("status") != "pending":
                 yield {"type": "error", "error": "Confirmation is not in a pending state."}
+                return
+
+            if _so.get("accounting_group"):
+                from app.services.transaction_ops.accounting_group import run_group_confirmation
+
+                try:
+                    async for event in run_group_confirmation(
+                        db=db,
+                        session=session,
+                        message=_confirm_msg,
+                        so=_so,
+                        action=_wc_action,
+                        user_id=user_id,
+                        tenant_id=tenant_id,
+                        correlation_id=correlation_id,
+                    ):
+                        yield event
+                except ValueError as exc:
+                    yield {"type": "error", "error": str(exc)}
+                return
+
+            from app.services.transaction_ops.accounting_group import group_child_context
+
+            try:
+                _approval_context = {
+                    "confirmation_id": str(_confirm_msg.id),
+                    **group_child_context(db, _so, _confirm_msg.id, session.id, tenant_id, _wc_action),
+                }
+            except ValueError as exc:
+                yield {"type": "error", "error": str(exc)}
+                return
+
+            # Hold a dedicated account/record lock across the existing CAS,
+            # fresh checks, external write and independent verification. Re-enter
+            # the same approval path once; never duplicate financial execution logic.
+            if (
+                _wc_action == "approve"
+                and _so.get("accounting_review")
+                and db.info.get("accounting_write_lock") != str(_confirm_msg.id)
+            ):
+                from app.services.transaction_ops.accounting_group import accounting_write_slot
+
+                if not validate_and_extract_confirmation(_so, str(session.id))[0]:
+                    yield {"type": "error", "error": "Confirmation token is invalid or tampered."}
+                    return
+                try:
+                    async with accounting_write_slot(_so["accounting_review"]):
+                        db.info["accounting_write_lock"] = str(_confirm_msg.id)
+                        try:
+                            async for event in run_chat_turn(
+                                db=db,
+                                session=session,
+                                user_message=user_message,
+                                user_id=user_id,
+                                tenant_id=tenant_id,
+                                user_msg=user_msg,
+                                wizard_step=wizard_step,
+                                user_timezone=user_timezone,
+                                agent_id=agent_id,
+                                run_id=run_id,
+                                write_confirm=write_confirm,
+                                attached_file_id=attached_file_id,
+                                plan_mode_choice=plan_mode_choice,
+                            ):
+                                yield event
+                        finally:
+                            db.info.pop("accounting_write_lock", None)
+                except ValueError as exc:
+                    yield {"type": "error", "error": str(exc)}
                 return
 
             if _wc_action == "approve":
@@ -2211,6 +2315,23 @@ async def run_chat_turn(
                 # in plan_mode/short_circuit.py. Shared with the reject
                 # branch below via `_cas_claim_write_confirmation` — see its
                 # docstring for why this is a helper, not an inline block.
+                if _so.get("accounting_review"):
+                    from app.services.transaction_ops.accounting_group import authorize_accounting_write
+
+                    try:
+                        await authorize_accounting_write(db, tenant_id, user_id, tool_name, tool_input)
+                    except Exception as exc:
+                        yield {"type": "error", "error": f"No update was sent: {exc}"}
+                        return
+                if (_so.get("accounting_review") or {}).get("kind") in {
+                    "sales_adjustment_credit",
+                    "invoice_sales_adjustment",
+                }:
+                    from app.services.transaction_ops.accounting_recovery import execution_claim
+
+                    _so = execution_claim(
+                        _so, _confirm_msg.id, user_id, _approval_context, now=datetime.now(timezone.utc)
+                    )
                 _claimed = await _cas_claim_write_confirmation(db, _confirm_msg, _so, "executing")
                 if not _claimed:
                     yield {
@@ -2227,21 +2348,19 @@ async def run_chat_turn(
                 # final message write below are tenant-scoped writes.
                 await set_tenant_context(db, str(tenant_id))
 
-                # A crash between the claim above and the status write below
-                # (process kill, OOM, deploy) deliberately leaves this row
-                # at status='executing' forever — no automatic recovery.
-                # That is correct, not a bug: we genuinely do not know
-                # whether NetSuite received the write, and guessing (auto-
-                # retry, auto-revert-to-pending) risks a SECOND post for a
-                # write NetSuite already accepted. A human must check the
-                # NetSuite record and resolve it manually.
+                # A crash leaves the claim executing. Credit recovery may only
+                # read its stable external ID and prove the exact application/GL;
+                # it never resubmits a write or restores a pending approval.
+                # Other write types still require manual outcome investigation.
                 # Accounting tax corrections carry server-built source and native preconditions.
                 # Check again after the single-use approval claim, immediately before any write.
-                if _so.get("mutation_type") == "update":
+                if _so.get("mutation_type") in ("update", "create"):
                     from app.services.transaction_ops.tax_correction import validate_approved
 
                     try:
                         await validate_approved(db, tenant_id, tool_name, tool_input, _so.get("accounting_review"))
+                        if _so.get("accounting_review"):
+                            await authorize_accounting_write(db, tenant_id, user_id, tool_name, tool_input)
                     except Exception as exc:
                         _confirm_msg.structured_output = {**_so, "status": "failed", "error": str(exc)}
                         await log_event(
@@ -2268,6 +2387,7 @@ async def run_chat_turn(
                     # caller of execute_tool_call leaves it default-False and
                     # is refused at the dispatcher.
                     human_approved=True,
+                    approval_context=_approval_context,
                     tool_name=tool_name,
                     tool_input=tool_input,
                     tenant_id=tenant_id,
@@ -2294,6 +2414,7 @@ async def run_chat_turn(
                 # Defaults to the SAFE value — an outcome we have not
                 # established is unknown, never success.
                 _write_outcome: str = "indeterminate"
+                _exec_result = None
                 try:
                     _exec_result = json.loads(_exec_result_str)
                     # T2 gate round-2 finding: `.get("error")` alone missed a
@@ -2411,13 +2532,39 @@ async def run_chat_turn(
                         "now risks creating it twice."
                     )
 
-                if _exec_succeeded and _so.get("accounting_review"):
+                _credit_recovery = _write_outcome == "indeterminate" and (_so.get("accounting_review") or {}).get(
+                    "kind"
+                ) in {"sales_adjustment_credit", "invoice_sales_adjustment"}
+                if _so.get("accounting_execution") and isinstance(_exec_result, dict):
+                    # Retain a returned native identity even when verification
+                    # fails, so later recovery cannot ignore a conflicting receipt.
+                    _receipt_ids = {k: _exec_result[k] for k in ("recordId", "id", "internalId") if _exec_result.get(k)}
+                    _so = {
+                        **_so,
+                        "accounting_execution": {**_so["accounting_execution"], "receipt": _receipt_ids},
+                    }
+                if (_exec_succeeded or _credit_recovery) and _so.get("accounting_review"):
                     from app.services.transaction_ops.tax_correction import verify_after
 
                     try:
-                        _verification = await verify_after(db, tenant_id, _so["accounting_review"])
+                        if _so["accounting_review"].get("kind") in {
+                            "sales_adjustment_credit",
+                            "invoice_sales_adjustment",
+                        }:
+                            async with asyncio.timeout(90):
+                                _verification = await verify_after(
+                                    db, tenant_id, _so["accounting_review"], receipt=_exec_result
+                                )
+                        else:
+                            _verification = await verify_after(db, tenant_id, _so["accounting_review"])
                     except Exception as exc:
                         _verification = {"status": "needs_review", "reason": type(exc).__name__}
+                    if _credit_recovery:
+                        _verification = {
+                            **_verification,
+                            "receipt_outcome": "indeterminate",
+                            "recovered_by_read": _verification.get("status") == "verified",
+                        }
                     await log_event(
                         db=db,
                         tenant_id=tenant_id,
@@ -2437,13 +2584,20 @@ async def run_chat_turn(
                         status="success" if _verification["status"] == "verified" else "error",
                     )
                     if _verification["status"] == "verified":
+                        if _credit_recovery:
+                            _exec_succeeded = True
+                            _exec_error = None
+                            _confirm_content = "The approved accounting change was verified using fresh NetSuite reads."
                         _confirm_content += (
-                            "\n\nInvoice total, tax and GL were independently re-read and verified. "
+                            "\n\nThe Sales Adjustments credit, exact invoice application and GL entries were "
+                            "independently re-read and verified. No cash refund was issued."
+                            if _so["accounting_review"].get("kind") == "sales_adjustment_credit"
+                            else "\n\nInvoice total, tax and GL were independently re-read and verified. "
                             "Sales-order reconciliation and deposit/cash settlement remain separate checks; no additional money was moved."
                         )
                     else:
                         _confirm_content = (
-                            "NetSuite returned a response, but the invoice/GL correction is not verified. "
+                            "The accounting correction and its general ledger impact are not verified. "
                             "The case still needs review. Do not repeat this write."
                         )
                     _so = {**_so, "accounting_verification": json.loads(json.dumps(_verification, default=str))}
@@ -2617,6 +2771,44 @@ async def run_chat_turn(
                 _confirm_msg.structured_output = _updated_so
                 _wc_flag_modified(_confirm_msg, "structured_output")
 
+                if (
+                    _updated_so.get("status") == "approved"
+                    and (_updated_so.get("accounting_review") or {}).get("kind")
+                    in {"sales_adjustment_credit", "invoice_sales_adjustment"}
+                    and (_updated_so.get("accounting_verification") or {}).get("status") == "verified"
+                ):
+                    from app.services.transaction_ops.accounting_recheck import queue as queue_accounting_recheck
+
+                    try:
+                        _recheck_run = await queue_accounting_recheck(
+                            db, tenant_id, _confirm_msg, user_id, now=datetime.now(timezone.utc)
+                        )
+                        _recheck = {"status": "queued", "run_id": str(_recheck_run.id)}
+                        _confirm_content += (
+                            "\n\nA read-only order, tax and refund recheck is queued. "
+                            "The case is marked matched only if that reconciliation succeeds."
+                        )
+                    except Exception as exc:
+                        _recheck = {"status": "not_queued", "reason": type(exc).__name__}
+                        _confirm_content += (
+                            "\n\nThe full case recheck could not be queued; the case still needs review."
+                        )
+                        await log_event(
+                            db=db,
+                            tenant_id=tenant_id,
+                            actor_id=user_id,
+                            category="transaction_ops",
+                            action="accounting_recheck.queue_failed",
+                            resource_type="chat_message",
+                            resource_id=str(_confirm_msg.id),
+                            correlation_id=correlation_id,
+                            payload={"reason": type(exc).__name__, "financial_writes": 0},
+                            status="error",
+                        )
+                    _updated_so = {**_updated_so, "accounting_recheck": _recheck}
+                    _confirm_msg.structured_output = _updated_so
+                    _wc_flag_modified(_confirm_msg, "structured_output")
+
                 await log_event(
                     db=db,
                     tenant_id=tenant_id,
@@ -2626,6 +2818,7 @@ async def run_chat_turn(
                     resource_type="chat_session",
                     resource_id=str(session.id),
                     payload={"tool_name": tool_name, "tool_input": tool_input, "result": _exec_result_str[:1000]},
+                    status="success" if _exec_succeeded else "error",
                 )
                 if _repair_decision is not None and _repair_decision.reason != "reenter":
                     # Terminal exit — a SEPARATE audit event naming WHY the
@@ -2652,6 +2845,9 @@ async def run_chat_turn(
                         session_id=session.id,
                         role="assistant",
                         content=_confirm_content,
+                        structured_output={"accounting_group_child": True}
+                        if _so.get("accounting_group_child")
+                        else None,
                         created_at=datetime.now(timezone.utc),
                     )
                     db.add(_assistant_msg)
@@ -4157,6 +4353,10 @@ async def run_chat_turn(
                         created_at=datetime.now(timezone.utc),
                     )
                     db.add(assistant_msg)
+                    if (assistant_msg.structured_output or {}).get("accounting_group"):
+                        from app.services.transaction_ops.accounting_group import stage_group_children
+
+                        stage_group_children(db, assistant_msg)
 
                     # Plan Mode telemetry — clarification_pending event row.
                     # The chat_disclosure_events table survives chat history compaction
@@ -4616,6 +4816,10 @@ async def run_chat_turn(
             created_at=datetime.now(timezone.utc),
         )
         db.add(assistant_msg)
+        if (assistant_msg.structured_output or {}).get("accounting_group"):
+            from app.services.transaction_ops.accounting_group import stage_group_children
+
+            stage_group_children(db, assistant_msg)
 
         # Auto-title from first message
         if not session.title:

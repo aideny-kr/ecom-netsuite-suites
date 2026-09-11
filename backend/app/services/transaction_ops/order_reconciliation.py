@@ -133,6 +133,21 @@ def _reconcile(source_evidence, target_evidence, config, refunds):
                 values[key] = (left, right - adjustment)
         if values != original_values:
             adjustments.extend(credits)
+    if not credits:
+        from app.services.transaction_ops.commercial_credits import verified_commercial_adjustment
+
+        commercial = verified_commercial_adjustment(source, target_evidence, config)
+        if commercial:
+            left, right = values["order_total"]
+            amount = _amount(
+                commercial["discount_amount"]
+                if commercial["kind"] == "posted_invoice_discount"
+                else commercial["credit_amount"],
+                precision,
+            )
+            if left is not None and right is not None and amount is not None and right - amount == left:
+                values["order_total"] = (left, right - amount)
+                adjustments.append(commercial)
     if adjustments:
         result["adjustments"] = adjustments
         result["original_amounts"] = {

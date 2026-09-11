@@ -36,6 +36,7 @@ async def selected_evidence(db, tenant_id, run_ids):
                 "run_id": str(run_id),
                 "config_id": str(run.config_id),
                 "period": span.model_dump(mode="json"),
+                "window_basis": run.params_json.get("window_basis", "completed_at"),
                 "config": run.config_snapshot,
             }
         )

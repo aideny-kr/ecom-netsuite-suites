@@ -959,6 +959,7 @@ export function MessageList({
             onChangesetAction={onChangesetAction}
             onImportanceOverride={onImportanceOverride}
             onWriteConfirm={onWriteConfirm}
+            writeDisabled={isWaitingForReply}
             onClarificationChoose={onClarificationChoose}
             onClarificationManual={onClarificationManual}
             financialReportData={financialReports?.get(message.id) ?? null}
@@ -1027,6 +1028,7 @@ export function MessageList({
           onViewDiff={onViewDiff}
           onChangesetAction={onChangesetAction}
           onWriteConfirm={onWriteConfirm}
+          writeDisabled={isWaitingForReply}
           onClarificationChoose={onClarificationChoose}
           onClarificationManual={onClarificationManual}
           isStreamingPreview
@@ -1170,6 +1172,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   onViewDiff,
   onChangesetAction,
   isStreamingPreview = false,
+  writeDisabled = false,
   onImportanceOverride,
   onWriteConfirm,
   onClarificationChoose,
@@ -1189,6 +1192,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   onViewDiff?: (changesetId: string) => void;
   onChangesetAction?: () => void;
   isStreamingPreview?: boolean;
+  writeDisabled?: boolean;
   onImportanceOverride?: (messageId: string, newTier: number) => void;
   onWriteConfirm?: (messageId: string, action: "approve" | "reject", slotValues?: Record<string, string>) => void;
   onClarificationChoose?: (messageId: string, optionId: "A" | "B" | "C") => void;
@@ -1217,6 +1221,9 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
       : undefined;
   const displayContent = applyDriveCitations(message.content, driveSources);
 
+  // Exact child cards are displayed inside their signed group review.
+  if (structuredOutput?.accounting_group_child) return null;
+
   if (structuredOutput?.type === "write_confirmation") {
     return (
       <div className="flex min-w-0 justify-start gap-3">
@@ -1230,12 +1237,13 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
           </div>
         )}
         <div className="flex min-w-0 flex-1 flex-col">
-          {message.content && (
+          {message.content && !structuredOutput.accounting_review && !structuredOutput.accounting_group && (
             <div className="mb-2 text-[13px] text-foreground">
-              {message.content}
+              <MarkdownRenderer content={message.content} isTerminal={isTerminal} />
             </div>
           )}
           <WriteConfirmationCard
+            disabled={writeDisabled}
             data={structuredOutput as unknown as WriteConfirmationData}
             onConfirm={(slotValues) => onWriteConfirm?.(message.id, "approve", slotValues)}
             onReject={() => onWriteConfirm?.(message.id, "reject")}

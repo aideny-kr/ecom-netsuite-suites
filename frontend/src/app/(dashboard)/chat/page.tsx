@@ -527,12 +527,9 @@ export default function ChatPage() {
 
   const handleWriteConfirm = useCallback(
     async (messageId: string, action: "approve" | "reject", slotValues?: Record<string, string>) => {
-      if (abortRef.current) {
-        abortRef.current.abort();
-        abortRef.current = null;
-      }
-      isStreamingRef.current = false;
-      setIsStreaming(false);
+      // handleSend claims isStreamingRef synchronously before its first await.
+      // A repeated approval must not cancel observation of an active write.
+      if (isStreamingRef.current) return;
       await handleSend("", undefined, {
         write_confirm: { action, confirmation_id: messageId, slot_values: slotValues },
       });

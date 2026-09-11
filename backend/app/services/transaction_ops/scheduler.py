@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
+from uuid import UUID
 
 from sqlalchemy import DateTime, String, and_, cast, exists, extract, func, literal, or_, select
 from sqlalchemy.orm import aliased
@@ -19,6 +20,7 @@ _DISPATCH_TIMEOUT = 5
 _BROKER_IO_TIMEOUT = 1
 _TICK_TIMEOUT = 40
 _MAX_WINDOW = timedelta(days=31)
+_PUBLICATION_COOLDOWN = 300
 
 
 def _dependencies():
@@ -205,6 +207,11 @@ def _scope(config, latest, now):
     return {"window_start": start, "window_end": now}, None, None
 
 
+def _reserve_publication(connection, tenant_id, run_id):
+    key = f"transaction-investigation:published:{UUID(str(tenant_id))}:{UUID(str(run_id))}"
+    return connection.default_channel.client.set(key, "1", nx=True, ex=_PUBLICATION_COOLDOWN)
+
+
 def publish_investigation(tenant_id, run_id, *, app=celery_app):
     # wait_for cannot cancel a blocking thread, and asyncio.run waits for its
     # executor during shutdown. Bound the real Redis sockets and connection
@@ -219,6 +226,14 @@ def publish_investigation(tenant_id, run_id, *, app=celery_app):
             "max_retries": 0,
         },
     ) as connection:
+        # Repeated Beat ticks and replayed finished parents can all rediscover
+        # the same pending run. Its DB lease prevents duplicate investigation,
+        # but does not prevent thousands of redundant broker deliveries.
+        # Reserve on this bounded private Redis connection before publishing.
+        # Retain the reservation on ambiguous send failures; it expires so a
+        # lost publication cannot strand the durable pending run indefinitely.
+        if not _reserve_publication(connection, tenant_id, run_id):
+            return False
         app.send_task(
             "tasks.transaction_ops_run",
             kwargs={"tenant_id": str(tenant_id), "run_id": str(run_id)},
@@ -228,15 +243,19 @@ def publish_investigation(tenant_id, run_id, *, app=celery_app):
             connection=connection,
             ignore_result=True,
         )
+        return True
 
 
 async def _dispatch(tenant_id, run_id, stats):
     try:
-        await asyncio.wait_for(
+        published = await asyncio.wait_for(
             asyncio.to_thread(publish_investigation, tenant_id, run_id),
             timeout=_DISPATCH_TIMEOUT,
         )
-        stats["dispatched"] += 1
+        if published is False:
+            stats["deduplicated"] = stats.get("deduplicated", 0) + 1
+        else:
+            stats["dispatched"] += 1
     except Exception:
         # A timeout may still have published. The durable run lease makes a
         # repeated publication safe; never remove a pending run here.

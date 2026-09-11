@@ -23,6 +23,9 @@ def ctx(monkeypatch):
     db.execute.return_value.scalar_one_or_none.return_value = actor
     monkeypatch.setattr(mod, "has_permission", AsyncMock(return_value=True))
     monkeypatch.setattr(mod.feature_flag_service, "is_enabled", AsyncMock(return_value=True))
+    # The unit context reuses a fixed run ID. Keep Redis state out of these
+    # request/authorization tests; publication reservations have real-Redis tests.
+    monkeypatch.setattr("app.services.transaction_ops.scheduler._reserve_publication", MagicMock(return_value=True))
     return {
         "db": db,
         "tenant_id": str(TENANT),
@@ -60,6 +63,47 @@ def state(monkeypatch):
 
     monkeypatch.setattr(mod, "_state_dependencies", lambda: (state, Request))
     return state
+
+
+async def test_group_preparation_preserves_scope_and_collects_every_membership_page(ctx, monkeypatch):
+    ctx["db"].info = {}
+    scope = {"group_id": "a" * 32, "review_run_ids": [str(uuid.uuid4())], "status": "needs_review", "search": "R"}
+    members = [{"case_id": str(uuid.uuid4()), "order_reference": f"R{i}"} for i in range(53)]
+    get_members = AsyncMock(
+        side_effect=[{"cases": members[:50], "has_next": True}, {"cases": members[50:], "has_next": False}]
+    )
+    monkeypatch.setattr("app.services.transaction_ops.case_groups.group_members", get_members)
+    result = await mod.execute_accounting_group(scope, context=ctx)
+    assert result["case_count"] == 53 and result["financial_writes"] == 0
+    assert ctx["db"].info["accounting_group_selection"]["members"] == members
+    for index, call in enumerate(get_members.await_args_list):
+        assert call.args[1] == TENANT
+        assert call.kwargs == {**scope, "limit": 50, "offset": index * 50}
+
+
+async def test_group_preparation_checks_permission_before_loading_any_cases(ctx, monkeypatch):
+    members = AsyncMock()
+    monkeypatch.setattr(mod, "has_permission", AsyncMock(return_value=False))
+    monkeypatch.setattr("app.services.transaction_ops.case_groups.group_members", members)
+    result = await mod.execute_accounting_group({"group_id": "a" * 32}, context=ctx)
+    assert result["success"] is False
+    members.assert_not_awaited()
+
+
+@pytest.mark.parametrize("flags", [{"celigo": False, "reconciliation": True}, {"celigo": True}, {}])
+async def test_financial_authorization_does_not_use_cached_enabled_flags(ctx, monkeypatch, flags):
+    cached = AsyncMock(return_value=True)
+    monkeypatch.setattr(mod.feature_flag_service, "is_enabled", cached)
+    monkeypatch.setattr(mod.feature_flag_service, "get_all_flags", AsyncMock(return_value=flags))
+    with pytest.raises(mod._ToolError, match="feature_disabled"):
+        await mod._authorize(ctx, create=True, fresh=True)
+    cached.assert_not_awaited()
+
+
+async def test_group_tool_rejects_model_supplied_approval_or_member_payloads(ctx):
+    for extra in ({"human_approved": True}, {"case_ids": [str(uuid.uuid4())]}, {"tool_input": {"amount": 999}}):
+        result = await mod.execute_accounting_group({"group_id": "a" * 32, **extra}, context=ctx)
+        assert result["success"] is False
 
 
 async def test_configs_project_scope_without_mapping_payload(ctx, state):
@@ -133,11 +177,23 @@ async def test_creation_is_durable_before_queue_and_never_accepts_approval(ctx, 
 
 
 async def test_broker_failure_keeps_committed_pending_run_for_beat(ctx, state, monkeypatch):
-    monkeypatch.setattr(mod.celery_app, "send_task", MagicMock(side_effect=ConnectionError("secret broker URL")))
+    send = MagicMock(side_effect=ConnectionError("secret broker URL"))
+    monkeypatch.setattr(mod.celery_app, "send_task", send)
     result = await mod.execute_run({"config_id": str(CONFIG), "order_references": [ORDER]}, context=ctx)
     assert result["run_id"] == str(RUN)
     assert result["dispatch_status"] == "pending_scheduler"
     assert "secret" not in json.dumps(result)
+    ctx["db"].rollback.assert_not_awaited()
+    send.assert_called_once()
+
+
+async def test_suppressed_publication_does_not_claim_the_review_was_queued(ctx, state, monkeypatch):
+    publish = MagicMock(return_value=False)
+    monkeypatch.setattr("app.services.transaction_ops.scheduler.publish_investigation", publish)
+    result = await mod.execute_run({"config_id": str(CONFIG), "order_references": [ORDER]}, context=ctx)
+    assert result["success"] and result["run_id"] == str(RUN)
+    assert result["dispatch_status"] == "pending_scheduler"
+    publish.assert_called_once()
     ctx["db"].rollback.assert_not_awaited()
 
 
