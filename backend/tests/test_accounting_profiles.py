@@ -4,6 +4,7 @@ from copy import deepcopy
 
 import pytest
 from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit import AuditEvent
 from app.models.connection import Connection
@@ -61,10 +62,14 @@ async def test_explicit_disable_overrides_legacy_and_fresh_read_ignores_orm_cach
     await profiles.configure_sales_credit_profile(db, actor.tenant_id, config.id, None, actor=actor)
     assert await profiles.sales_credit_profile(db, actor.tenant_id, config) is None
     await profiles.configure_sales_credit_profile(db, actor.tenant_id, config.id, profile, actor=actor)
-    await db.execute(
-        text("UPDATE connections SET status='revoked' WHERE id=:id AND tenant_id=:tenant"),
-        {"id": connection.id, "tenant": actor.tenant_id},
-    )
+    # A second ORM identity map simulates revocation while the caller retains
+    # its cached connection. Use normal guarded per-row writes, not bulk DML.
+    async with AsyncSession(
+        bind=await db.connection(), expire_on_commit=False, join_transaction_mode="create_savepoint"
+    ) as other_db:
+        current = await other_db.get(Connection, connection.id)
+        current.status = "revoked"
+        await other_db.commit()
     assert connection.status == "active"
     assert await profiles.sales_credit_profile(db, actor.tenant_id, config) is None
 
