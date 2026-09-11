@@ -33,7 +33,10 @@ financial writes as part of this rollout.
 To roll back, stop Beat and the collector worker, restore the previous image pins
 and backed-up compose, and restart the previous services. Any remaining control
 queue envelopes are stateless and expire; the previous Beat rediscovers durable
-work on its original queue. No migration or financial compensation is needed.
+work on its original queue. No migration or financial compensation is needed. The automated rollback workflow
+advances all four backend services to the selected rollback image and verifies
+each image ID and running state. With a pre-isolation image, the dedicated worker
+is idle after stale ticks expire; the old Beat publishes collectors on `recon`.
 
 ## Verification
 
