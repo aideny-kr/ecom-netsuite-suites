@@ -24,6 +24,17 @@ celery_app.conf.update(
         "recon": {"exchange": "recon", "routing_key": "recon"},
         "export": {"exchange": "export", "routing_key": "export"},
     },
+    # Redis transport supports per-message priority with no new queues and no
+    # worker flags. On staging the single shared worker was flooded by
+    # another feature's batch task (hundreds of messages on `sync`/`recon`),
+    # starving a human's "Run now" and the Beat sweep behind the flood — see
+    # `app.workers.tasks.scheduled_jobs`'s SCHEDULED_JOBS_*_PRIORITY
+    # constants for who actually publishes at an elevated priority.
+    broker_transport_options={
+        "priority_steps": list(range(10)),
+        "sep": ":",
+        "queue_order_strategy": "priority",
+    },
 )
 
 celery_app.conf.include = [

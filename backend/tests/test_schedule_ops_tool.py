@@ -88,19 +88,22 @@ def test_registry_still_wires_the_same_tool_names():
 # ---------------------------------------------------------------------------
 
 
-def _capture_send_task(monkeypatch) -> list[tuple[str, dict]]:
+def _capture_send_task(monkeypatch) -> list[tuple[str, dict, int | None]]:
     """Fakes `celery_app.send_task` at the point `schedule_ops.py` calls it —
     the SAME technique `tests/api/test_schedules_api.py`'s `_capture_send_task`
     already established for the API route's identical enqueue-then-dispatch
-    shape (item 7, gate fix: the two must not drift)."""
+    shape (item 7, gate fix: the two must not drift). `priority` is broken
+    out from `**_kw` so tests can assert the broker-priority fix
+    (`SCHEDULED_JOBS_RUN_NOW_PRIORITY`) without changing every existing call
+    site's 2-tuple unpack (there's exactly one, updated below)."""
 
     class _FakeResult:
         id = "fake-celery-task-id"
 
-    sent: list[tuple[str, dict]] = []
+    sent: list[tuple[str, dict, int | None]] = []
 
     def fake_send_task(name, kwargs=None, **_kw):
-        sent.append((name, kwargs or {}))
+        sent.append((name, kwargs or {}, _kw.get("priority")))
         return _FakeResult()
 
     monkeypatch.setattr("app.mcp.tools.schedule_ops.celery_app.send_task", fake_send_task)
@@ -174,11 +177,17 @@ class TestExecuteRun:
         assert job.parameters["plan"] == plan_json  # the plan THIS call validated, snapshotted
 
         assert len(sent) == 1
-        task_name, kwargs = sent[0]
+        task_name, kwargs, priority = sent[0]
         assert task_name == "tasks.scheduled_jobs_run_now"
         assert kwargs["schedule_id"] == str(schedule.id)
         assert kwargs["job_id"] == result["jobs_id"]
         assert kwargs["use_pending"] is False
+        # Broker priority (fix/jobs-live-run-defects): a person is waiting on
+        # this chat turn, so it must not sit behind a batch-task flood on the
+        # shared `sync` queue.
+        from app.workers.tasks.scheduled_jobs import SCHEDULED_JOBS_RUN_NOW_PRIORITY
+
+        assert priority == SCHEDULED_JOBS_RUN_NOW_PRIORITY == 9
 
     async def test_execute_run_reestablishes_tenant_context_after_its_commit(
         self, db: AsyncSession, admin_user, monkeypatch

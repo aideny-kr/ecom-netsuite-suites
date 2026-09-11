@@ -43,6 +43,7 @@ from app.services import audit_service, entitlement_service, schedule_service
 from app.services.jobs.compiler import Clarification, compile_instruction, plan_diff
 from app.services.jobs.registry import STEP_REGISTRY
 from app.workers.celery_app import celery_app
+from app.workers.tasks.scheduled_jobs import SCHEDULED_JOBS_RUN_NOW_PRIORITY
 
 router = APIRouter(prefix="/schedules", tags=["schedules"])
 
@@ -531,6 +532,10 @@ async def run_schedule(
             "job_id": str(job_id),
         },
         queue="sync",
+        # Broker priority (fix/jobs-live-run-defects): a person is waiting on
+        # this request, so it must not sit behind a batch-task flood on the
+        # shared `sync` queue (celery_app.py's own broker_transport_options).
+        priority=SCHEDULED_JOBS_RUN_NOW_PRIORITY,
     )
 
     return ScheduleRunResponse(jobs_id=str(job_id), status="queued", reason=None, outputs={})

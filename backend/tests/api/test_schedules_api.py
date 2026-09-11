@@ -993,20 +993,24 @@ class TestScheduleApprove:
 # ---------------------------------------------------------------------------
 
 
-def _capture_send_task(monkeypatch) -> list[tuple[str, dict]]:
+def _capture_send_task(monkeypatch) -> list[tuple[str, dict, int | None]]:
     """Fakes `celery_app.send_task` at the point `schedules.py` calls it —
     this repo's established convention (`tests/workers/test_report_auto_
     refresh.py`'s `monkeypatch.setattr(mod.celery_app, "send_task", ...)`) —
     so `/run` never actually touches a broker; returns the list of
-    `(task_name, kwargs)` calls captured."""
+    `(task_name, kwargs, priority)` calls captured. `priority` is broken out
+    from `**_kw` (alongside `queue`) so tests can assert the broker-priority
+    fix (`SCHEDULED_JOBS_RUN_NOW_PRIORITY`, `celery_app.py`'s own
+    `broker_transport_options`) without changing every existing call site's
+    2-tuple unpack (there's exactly one, updated below)."""
 
     class _FakeResult:
         id = "fake-celery-task-id"
 
-    sent: list[tuple[str, dict]] = []
+    sent: list[tuple[str, dict, int | None]] = []
 
     def fake_send_task(name, kwargs=None, **_kw):
-        sent.append((name, kwargs or {}))
+        sent.append((name, kwargs or {}, _kw.get("priority")))
         return _FakeResult()
 
     monkeypatch.setattr("app.api.v1.schedules.celery_app.send_task", fake_send_task)
@@ -1045,13 +1049,19 @@ class TestScheduleRun:
         assert job_row.status == "pending"  # not executed by this request — the task hasn't run
 
         assert len(sent) == 1
-        task_name, kwargs = sent[0]
+        task_name, kwargs, priority = sent[0]
         assert task_name == "tasks.scheduled_jobs_run_now"
         assert kwargs["schedule_id"] == str(schedule.id)
         assert kwargs["tenant_id"] == str(user.tenant_id)
         assert kwargs["use_pending"] is False
         assert kwargs["actor_id"] == str(user.id)
         assert kwargs["job_id"] == data["jobs_id"]
+        # Broker priority (fix/jobs-live-run-defects): a person is waiting on
+        # this request, so it must not sit behind a batch-task flood on the
+        # shared `sync` queue.
+        from app.workers.tasks.scheduled_jobs import SCHEDULED_JOBS_RUN_NOW_PRIORITY
+
+        assert priority == SCHEDULED_JOBS_RUN_NOW_PRIORITY == 9
 
     async def test_run_now_snapshots_the_plan_it_saw_onto_the_pre_created_jobs_row(
         self, client: AsyncClient, admin_user, db: AsyncSession, monkeypatch
