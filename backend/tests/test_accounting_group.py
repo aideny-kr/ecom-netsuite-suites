@@ -148,7 +148,9 @@ async def test_real_postgres_locks_protect_same_invoice_and_cap_account_across_c
         await engine.dispose()
 
 
-@pytest.mark.parametrize("outcome", ["verified", "unverified", "missing_verification", "changed", "duplicate", "wrong_tenant"])
+@pytest.mark.parametrize(
+    "outcome", ["verified", "unverified", "missing_verification", "changed", "duplicate", "wrong_tenant"]
+)
 async def test_group_uses_existing_human_approval_path_and_persists_per_order_results(monkeypatch, outcome):
     so, session = group_fixture(4)
     parent = SimpleNamespace(id=uuid4(), structured_output=so)
