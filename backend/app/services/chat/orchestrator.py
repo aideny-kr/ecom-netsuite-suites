@@ -2048,6 +2048,39 @@ async def run_chat_turn(
                     yield {"type": "error", "error": str(exc)}
                 return
 
+            # A transaction investigation cannot use an older generic card to
+            # bypass the supported treatment/preflight/native verification path.
+            if (
+                _wc_action == "approve"
+                and (_so.get("request_context") or {}).get("kind") == "transaction"
+                and not _so.get("accounting_review")
+            ):
+                _confirm_msg.structured_output = {
+                    **_so,
+                    "status": "failed",
+                    "error": "accounting_adapter_required",
+                    "repair_exit_reason": "fresh_accounting_evidence_required",
+                }
+                await log_event(
+                    db=db,
+                    tenant_id=tenant_id,
+                    actor_id=user_id,
+                    category="transaction_ops",
+                    action="accounting_correction.unsupported_confirmation",
+                    resource_type="chat_message",
+                    resource_id=str(_confirm_msg.id),
+                    correlation_id=correlation_id,
+                    payload={"financial_writes": 0, "reason": "accounting_adapter_required"},
+                    status="error",
+                )
+                await db.commit()
+                yield {
+                    "type": "error",
+                    "error": "No change was sent. Refresh the case to prepare a supported "
+                    "accounting approval; this generic card has no verified treatment.",
+                }
+                return
+
             from app.services.transaction_ops.accounting_group import group_child_context
 
             try:
@@ -2327,10 +2360,7 @@ async def run_chat_turn(
                     except Exception as exc:
                         yield {"type": "error", "error": f"No update was sent: {exc}"}
                         return
-                if (_so.get("accounting_review") or {}).get("kind") in {
-                    "sales_adjustment_credit",
-                    "invoice_sales_adjustment",
-                }:
+                if _so.get("accounting_review"):
                     from app.services.transaction_ops.accounting_recovery import execution_claim
 
                     _so = execution_claim(
@@ -2560,7 +2590,9 @@ async def run_chat_turn(
                                     db, tenant_id, _so["accounting_review"], receipt=_exec_result
                                 )
                         else:
-                            _verification = await verify_after(db, tenant_id, _so["accounting_review"])
+                            _verification = await verify_after(
+                                db, tenant_id, _so["accounting_review"], receipt=_exec_result
+                            )
                     except Exception as exc:
                         _verification = {"status": "needs_review", "reason": type(exc).__name__}
                     if _credit_recovery:
@@ -2777,8 +2809,7 @@ async def run_chat_turn(
 
                 if (
                     _updated_so.get("status") == "approved"
-                    and (_updated_so.get("accounting_review") or {}).get("kind")
-                    in {"sales_adjustment_credit", "invoice_sales_adjustment"}
+                    and _updated_so.get("accounting_review")
                     and (_updated_so.get("accounting_verification") or {}).get("status") == "verified"
                 ):
                     from app.services.transaction_ops.accounting_recheck import queue as queue_accounting_recheck

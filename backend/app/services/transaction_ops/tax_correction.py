@@ -279,6 +279,11 @@ async def verify_after(db, tenant_id, proposal, receipt=None):
         return await verify_credit(db, tenant_id, proposal, receipt or {})
     from app.services.transaction_ops.netsuite_reader import _collection, authenticated_reader
 
+    if isinstance(receipt, dict) and any(
+        str(receipt[k]) != proposal["record_id"] for k in ("id", "recordId", "internalId") if receipt.get(k)
+    ):
+        return {"status": "needs_review", "reason": "invoice_receipt_identity_conflict", "retry_allowed": False}
+
     async with authenticated_reader(
         db, tenant_id, proposal["connection_id"], proposal["scope"]["netsuite_account_id"]
     ) as reader:

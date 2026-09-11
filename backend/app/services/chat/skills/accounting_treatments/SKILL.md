@@ -21,6 +21,8 @@ Consider these alternatives, then distinguish a supported exact proposal from fu
 
 Credit creation from an invoice may inherit fields through a native transform, but a REST transform can save the new record; it is not a preview/read. Use it only if an implemented guarded adapter supports the exact human-approved operation. Never duplicate a reference credit's customer, tax, applications or classifications without current evidence.
 
+Keep API surfaces distinct: Oracle's [REST Transforming Records](https://docs.oracle.com/en/cloud/saas/netsuite/ns-online-help/section_157901123882.html) describes POST `!transform` as one request that creates the target transaction. SOAP `initialize` or SuiteScript `record.transform` behavior does not establish REST preview semantics. Read documentation for the actual connected surface before interpreting a transform.
+
 Oracle distinguishes posting/nonposting Discount items and credit applications:
 - https://docs.oracle.com/en/cloud/saas/netsuite/ns-online-help/section_N2248474.html
 - https://docs.oracle.com/en/cloud/saas/netsuite/ns-online-help/section_N1312521.html

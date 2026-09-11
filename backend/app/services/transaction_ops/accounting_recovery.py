@@ -1,4 +1,4 @@
-"""Bounded read-only recovery of a durably approved, interrupted credit posting.
+"""Bounded read-only recovery of a durably approved, interrupted accounting correction.
 
 Uses the existing minute scheduler and invoice lock. Never dispatches a write,
 resets an approval, or asks a model to infer whether posting succeeded.
@@ -10,7 +10,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
-from sqlalchemy import Integer, cast, or_, select
+from sqlalchemy import Integer, and_, cast, or_, select
 
 from app.core.database import set_tenant_context
 from app.models.audit import AuditEvent
@@ -49,10 +49,12 @@ def execution_claim(so, confirmation_id, actor_id, context, *, now):
 
 
 def eligible(so, now):
+    from app.services.transaction_ops.accounting_recheck import supports
+
     p, claim = so.get("accounting_review") or {}, so.get("accounting_execution") or {}
     try:
         return (
-            p.get("kind") in {"sales_adjustment_credit", "invoice_sales_adjustment"}
+            supports(p)
             and claim.get("version") == 1
             and so.get("status") in {"executing", "indeterminate", "approved"}
             and (so.get("accounting_recheck") or {}).get("status") != "queued"
@@ -72,7 +74,18 @@ async def candidates(db, tenant_id, now, *, limit):
                 select(ChatMessage.id)
                 .where(
                     ChatMessage.tenant_id == tenant_id,
-                    so["accounting_review"]["kind"].astext.in_(("sales_adjustment_credit", "invoice_sales_adjustment")),
+                    or_(
+                        so["accounting_review"]["kind"].astext.in_(
+                            ("sales_adjustment_credit", "invoice_sales_adjustment")
+                        ),
+                        and_(
+                            so["accounting_review"]["record_type"].astext == "invoice",
+                            or_(
+                                so["accounting_review"]["kind"].astext.is_(None),
+                                so["accounting_review"]["kind"].astext == "invoice_tax",
+                            ),
+                        ),
+                    ),
                     so["accounting_execution"]["version"].astext == "1",
                     so["status"].astext.in_(("executing", "indeterminate", "approved")),
                     cast(so["accounting_execution"]["attempts"].astext, Integer) < MAX_ATTEMPTS,
@@ -214,16 +227,20 @@ async def recover(db, tenant_id, message_id, *, now=None, lock_engine=None):
             try:
                 async with asyncio.timeout(90):
                     actor = await _authorize_read(db, tenant_id, message, claim)
-                    if so["accounting_review"]["kind"] == "invoice_sales_adjustment":
+                    if so["accounting_review"].get("kind") == "invoice_sales_adjustment":
                         from app.services.transaction_ops.invoice_discount import verify_after as verify_discount
 
                         verification = await verify_discount(
                             db, tenant_id, so["accounting_review"], claim.get("receipt")
                         )
-                    else:
+                    elif so["accounting_review"].get("kind") == "sales_adjustment_credit":
                         verification = await sales_credit.verify_after(
                             db, tenant_id, so["accounting_review"], claim.get("receipt")
                         )
+                    else:
+                        from app.services.transaction_ops.tax_correction import verify_after as verify_tax
+
+                        verification = await verify_tax(db, tenant_id, so["accounting_review"], claim.get("receipt"))
             except Exception as exc:
                 verification = {"status": "needs_review", "reason": type(exc).__name__, "retry_allowed": False}
             verified = verification.get("status") == "verified"

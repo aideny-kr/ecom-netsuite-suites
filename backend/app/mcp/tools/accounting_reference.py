@@ -12,7 +12,11 @@ async def execute(params, context=None, **kwargs):
 
     context = context or {}
     if set(params) != {"case_id", "topic"} or not isinstance(params.get("topic"), str) or params["topic"] not in TOPICS:
-        return {"success": False, "error": "Provide an exact case_id and supported reference topic."}
+        return {
+            "success": False,
+            "error": "Provide an exact case_id and supported reference topic.",
+            "supported_topics": list(TOPICS),
+        }
     try:
         case_id = UUID(str(params["case_id"]))
         db, tenant_id, actor = await _authorize(context, create=False)

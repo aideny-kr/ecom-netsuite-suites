@@ -56,6 +56,10 @@ def test_skill_is_available_through_actual_chat_inventory():
     tools = build_local_tool_definitions()
     assert any(t["name"] == "agent_skill" for t in tools)
     assert match_skill("Investigate transaction case abc")["slug"] == "accounting_operations"
+    from app.services.transaction_ops.accounting_references import TOPICS
+
+    reference = next(t for t in tools if t["name"] == "transaction_ops_accounting_reference")
+    assert reference["input_schema"]["properties"]["topic"]["enum"] == list(TOPICS)
 
 
 def test_transaction_prompt_loads_accounting_core_without_eager_metabase_manuals():

@@ -79,6 +79,27 @@ async def test_unavailable_research_does_not_manufacture_references(monkeypatch)
     assert result["sources"] == []
 
 
+@pytest.mark.parametrize("available", [True, False])
+async def test_rest_transform_uses_current_rest_document_not_soap_search_result(monkeypatch, available):
+    from app.mcp.tools import web_search
+
+    search = AsyncMock(side_effect=AssertionError("Known REST documentation should not be rediscovered"))
+    read = AsyncMock(return_value={"excerpt": "REST transformation", "document_sha256": "hash"})
+    if not available:
+        read.side_effect = httpx.ConnectError("offline")
+    monkeypatch.setattr(web_search, "execute", search)
+    monkeypatch.setattr(mod, "_read", read)
+    result = await mod.research("invoice_transform")
+    search.assert_not_awaited()
+    read.assert_awaited_once_with(mod._MAINTAINED["invoice_transform"][0]["url"])
+    assert result["sources"][0]["product_surface"] == "REST Web Services"
+    assert result["query"] is None
+    assert result["status"] == ("references_found" if available else "reference_unavailable")
+    if not available:
+        assert result["sources"][0]["evidence_kind"] == "document_unavailable"
+        assert "document_sha256" not in result["sources"][0]
+
+
 @pytest.mark.asyncio
 async def test_case_authorization_precedes_public_research(monkeypatch):
     research = AsyncMock()
