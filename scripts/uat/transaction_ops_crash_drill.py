@@ -49,7 +49,9 @@ if (
     or parsed.port != 5432
     or parsed.database not in {"ecom_netsuite", "ecom_netsuite_test"}
 ):
-    raise SystemExit("Crash drill requires a loopback database on port 5432 named ecom_netsuite or ecom_netsuite_test")
+    raise SystemExit(
+        "Crash drill requires a loopback database on port 5432 named ecom_netsuite or ecom_netsuite_test"
+    )
 if sys.argv[1:] == ["--check-database-only"]:
     print("Local database guard passed")
     raise SystemExit(0)
@@ -119,9 +121,13 @@ async def cleanup_journal(path):
     assert data["database"] == parsed.database and data["host"] == parsed.host
     assert re.fullmatch(r"tx-crash-drill-[a-f0-9]{32}", data["slug"])
     tenant_id = UUID(data["tenant_id"])
-    engine = create_async_engine(DATABASE, echo=False, connect_args={"timeout": 5, "command_timeout": 15})
+    engine = create_async_engine(
+        DATABASE, echo=False, connect_args={"timeout": 5, "command_timeout": 15}
+    )
     try:
-        factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        factory = async_sessionmaker(
+            engine, class_=AsyncSession, expire_on_commit=False
+        )
         await cleanup(factory, tenant_id, data["slug"])
     finally:
         await engine.dispose()
@@ -143,7 +149,9 @@ def install_providers(stack, data, port, *, saved=None):
     async def forward(request):
         assert request.url.host == "6738075-sb1.restlets.api.netsuite.com"
         assert request.method in {"GET", "POST"}
-        async with httpx.AsyncClient(trust_env=False, timeout=15, follow_redirects=False) as client:
+        async with httpx.AsyncClient(
+            trust_env=False, timeout=15, follow_redirects=False
+        ) as client:
             response = await client.request(
                 request.method,
                 f"http://127.0.0.1:{port}{request.url.raw_path.decode()}",
@@ -153,7 +161,9 @@ def install_providers(stack, data, port, *, saved=None):
             return httpx.Response(response.status_code, content=response.content)
 
     async def read_target(*args, **kwargs):
-        evidence = deepcopy(data["after"] if saved and saved.is_set() else data["before"])
+        evidence = deepcopy(
+            data["after"] if saved and saved.is_set() else data["before"]
+        )
         evidence["observed_at"] = datetime.now(timezone.utc).isoformat()
         return evidence
 
@@ -175,12 +185,18 @@ def install_providers(stack, data, port, *, saved=None):
 
     def wrapped_read(original):
         async def read(*args, **kwargs):
-            async with httpx.AsyncClient(transport=httpx.MockTransport(forward)) as client:
+            async with httpx.AsyncClient(
+                transport=httpx.MockTransport(forward)
+            ) as client:
                 return await original(*args, **kwargs, client=client)
 
         return read
 
-    stack.enter_context(patch.object(netsuite_transport, "get_valid_token", AsyncMock(return_value=TOKEN)))
+    stack.enter_context(
+        patch.object(
+            netsuite_transport, "get_valid_token", AsyncMock(return_value=TOKEN)
+        )
+    )
     stack.enter_context(patch.object(netsuite_transport, "read_guard_snapshot", guard))
     for module in (source_reader, executor, recovery):
         stack.enter_context(patch.object(module, "read_framework_order", read_source))
@@ -232,7 +248,9 @@ def provider_server(data, saved, release, counts):
                     "success": True,
                     "account_id": "6738075_SB1",
                     "actions_enabled": True,
-                    "snapshot": data["after_guard"] if saved.is_set() else data["guard"],
+                    "snapshot": data["after_guard"]
+                    if saved.is_set()
+                    else data["guard"],
                 }
             )
 
@@ -260,8 +278,14 @@ def provider_server(data, saved, release, counts):
                 if data["action"] == "sync_missing_order"
                 else data["guard"]
             )
-            assert payload["before"] == expected_before and payload["after"] == data["intent"]
-            assert payload["work_key"] == data["work_key"] and payload["action"] == data["action"]
+            assert (
+                payload["before"] == expected_before
+                and payload["after"] == data["intent"]
+            )
+            assert (
+                payload["work_key"] == data["work_key"]
+                and payload["action"] == data["action"]
+            )
             counts["writes"] += 1
             saved.set()
             release.wait(timeout=30)
@@ -287,7 +311,9 @@ async def cleanup(factory, tenant_id, slug):
         return
     async with factory() as db:
         actual = (
-            await db.execute(text("SELECT slug FROM tenants WHERE id=:id"), {"id": tenant_id})
+            await db.execute(
+                text("SELECT slug FROM tenants WHERE id=:id"), {"id": tenant_id}
+            )
         ).scalar_one_or_none()
         if actual is None:
             return
@@ -302,7 +328,9 @@ async def cleanup(factory, tenant_id, slug):
         # tenant_id, so only this tenant's rows are ever touched).
         await db.execute(text("SET LOCAL session_replication_role = replica"))
         for table in TABLES:
-            await db.execute(text(f'DELETE FROM "{table}" WHERE tenant_id=:id'), {"id": tenant_id})
+            await db.execute(
+                text(f'DELETE FROM "{table}" WHERE tenant_id=:id'), {"id": tenant_id}
+            )
         await db.execute(
             text("DELETE FROM tenants WHERE id=:id AND slug=:slug"),
             {"id": tenant_id, "slug": slug},
@@ -317,19 +345,25 @@ async def cleanup(factory, tenant_id, slug):
                 )
             ).scalar_one() == 0
         assert (
-            await db.execute(text("SELECT count(*) FROM tenants WHERE id=:id"), {"id": tenant_id})
+            await db.execute(
+                text("SELECT count(*) FROM tenants WHERE id=:id"), {"id": tenant_id}
+            )
         ).scalar_one() == 0
 
 
 async def parent(output, action):
     settings.ENCRYPTION_KEY = Fernet.generate_key().decode()
-    engine = create_async_engine(DATABASE, echo=False, connect_args={"timeout": 5, "command_timeout": 15})
+    engine = create_async_engine(
+        DATABASE, echo=False, connect_args={"timeout": 5, "command_timeout": 15}
+    )
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     tenant_id = child = server = server_thread = None
     slug = "tx-crash-drill-" + uuid4().hex
     journal = Path(str(output) + ".state.json")
     if journal.exists():
-        raise RuntimeError("An unfinished cleanup journal exists; run --cleanup-state after stopping its worker")
+        raise RuntimeError(
+            "An unfinished cleanup journal exists; run --cleanup-state after stopping its worker"
+        )
     journal_data = {
         "slug": slug,
         "database": parsed.database,
@@ -348,7 +382,9 @@ async def parent(output, action):
         creating = action == "sync_missing_order"
         case = missing_case() if creating else planning_case()
         async with factory() as db:
-            tenant = await create_test_tenant(db, name="Ephemeral transaction crash drill", slug=slug)
+            tenant = await create_test_tenant(
+                db, name="Ephemeral transaction crash drill", slug=slug
+            )
             tenant_id = tenant.id
             journal_data["tenant_id"] = str(tenant_id)
             write_journal(journal, journal_data)
@@ -363,16 +399,30 @@ async def parent(output, action):
             for flag in ("celigo", "reconciliation"):
                 await enable_feature_flag(db, tenant_id, flag)
             connection = (
-                await db.execute(select(Connection).where(Connection.id == config.netsuite_connection_id))
+                await db.execute(
+                    select(Connection).where(
+                        Connection.id == config.netsuite_connection_id
+                    )
+                )
             ).scalar_one()
-            connection.encrypted_credentials = encrypt_credentials({"account_id": "6738075_SB1", "access_token": TOKEN})
+            connection.encrypted_credentials = encrypt_credentials(
+                {"account_id": "6738075_SB1", "access_token": TOKEN}
+            )
             connection.metadata_json = {"transaction_ops_guard_url": URL}
             await db.commit()
             headers, config_id = make_auth_headers(actor), config.id
         case.source["celigo_step_id"] = str(config.source_step_id)
-        after = planning_case(inventory=True, assessment=True).targets if creating else deepcopy(case.targets)
+        after = (
+            planning_case(inventory=True, assessment=True).targets
+            if creating
+            else deepcopy(case.targets)
+        )
         after_guard = {} if creating else deepcopy(case.guard["snapshot"])
-        version = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        version = (
+            datetime.now(timezone.utc)
+            .isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z")
+        )
         after["orders"][0]["version"] = version
         after["orders"][0]["header"].update(
             total="100",
@@ -406,7 +456,9 @@ async def parent(output, action):
                 custbody_fw_solidus_order_total="120",
                 custbody_fw_solidus_tax_amount="20",
             )
-            native["lines"][0].update(quantity="2", rate="50", custcol_fw_vat_amount="20", tax1Amt="20")
+            native["lines"][0].update(
+                quantity="2", rate="50", custcol_fw_vat_amount="20", tax1Amt="20"
+            )
             data.update(
                 create_input=case.prepared.payload_json,
                 preview=case.preview,
@@ -432,7 +484,9 @@ async def parent(output, action):
             ExitStack() as stack,
             tempfile.TemporaryDirectory(prefix="tx-crash-drill-") as directory,
         ):
-            journal_data.update(directory=str(Path(directory).resolve()), phase="investigating")
+            journal_data.update(
+                directory=str(Path(directory).resolve()), phase="investigating"
+            )
             write_journal(journal, journal_data)
             install_providers(stack, data, port, saved=saved)
             async with httpx.AsyncClient(
@@ -450,14 +504,22 @@ async def parent(output, action):
                 )
                 assert response.status_code == 202, response.text
                 run_id = response.json()["id"]
-                await asyncio.to_thread(workers.transaction_ops_run.run, str(tenant_id), run_id)
-                response = await api.get("/api/v1/transaction-ops/proposals", params={"run_id": run_id})
-                assert response.status_code == 200 and len(response.json()) == 1, response.text
+                await asyncio.to_thread(
+                    workers.transaction_ops_run.run, str(tenant_id), run_id
+                )
+                response = await api.get(
+                    "/api/v1/transaction-ops/proposals", params={"run_id": run_id}
+                )
+                assert response.status_code == 200 and len(response.json()) == 1, (
+                    response.text
+                )
                 proposal = response.json()[0]
                 assert proposal["status"] == "pending" and proposal["currency"] == "EUR"
                 assert proposal["action"] == action
                 proposal_id = proposal["id"]
-                waiting = await asyncio.to_thread(workers.transaction_ops_execute.run, str(tenant_id), proposal_id)
+                waiting = await asyncio.to_thread(
+                    workers.transaction_ops_execute.run, str(tenant_id), proposal_id
+                )
                 assert waiting["status"] == "pending" and counts["writes"] == 0
                 response = await api.post(
                     f"/api/v1/transaction-ops/proposals/{proposal_id}/decision",
@@ -466,7 +528,9 @@ async def parent(output, action):
                         "evidence_fingerprint": proposal["evidence_fingerprint"],
                     },
                 )
-                assert response.status_code == 200 and response.json()["decided_by"] == str(actor.id), response.text
+                assert response.status_code == 200 and response.json()[
+                    "decided_by"
+                ] == str(actor.id), response.text
                 data.update(
                     tenant_id=str(tenant_id),
                     proposal_id=proposal_id,
@@ -498,7 +562,9 @@ async def parent(output, action):
                     )
                     journal_data.update(child_pid=child.pid, phase="executing")
                     write_journal(journal, journal_data)
-                    assert await asyncio.to_thread(saved.wait, 20), "Worker never reached the provider save"
+                    assert await asyncio.to_thread(saved.wait, 20), (
+                        "Worker never reached the provider save"
+                    )
                     os.kill(child.pid, signal.SIGKILL)
                     assert await asyncio.to_thread(child.wait, 10) == -signal.SIGKILL
                     result["real_process_kill"] = True
@@ -506,10 +572,15 @@ async def parent(output, action):
                         await set_tenant_context(db, str(tenant_id))
                         row = (
                             await db.execute(
-                                select(TransactionOperation).where(TransactionOperation.tenant_id == tenant_id)
+                                select(TransactionOperation).where(
+                                    TransactionOperation.tenant_id == tenant_id
+                                )
                             )
                         ).scalar_one()
-                        assert row.status == "executing" and row.result_json["dispatch_reserved"] is True
+                        assert (
+                            row.status == "executing"
+                            and row.result_json["dispatch_reserved"] is True
+                        )
                         operation_id, original_spend, original_deadline = (
                             row.id,
                             row.api_calls_used,
@@ -533,26 +604,45 @@ async def parent(output, action):
                                 )
                             ).scalar_one_or_none()
                         assert outcome["status"] == "verified", outcome
-                        row = await state._one(db, tenant_id, TransactionOperation, operation_id)
-                        assert row.api_calls_used == original_spend and row.deadline_at == original_deadline
+                        row = await state._one(
+                            db, tenant_id, TransactionOperation, operation_id
+                        )
+                        assert (
+                            row.api_calls_used == original_spend
+                            and row.deadline_at == original_deadline
+                        )
                         assert (
                             row.result_json["dispatch_reserved"] is True
-                            and row.result_json["verification"]["source_unchanged"] is True
+                            and row.result_json["verification"]["source_unchanged"]
+                            is True
                         )
                         if creating:
                             proof = row.result_json["verification"]
                             result.update(
-                                native_state=proof["creation_policy"]["native_order_status"],
-                                native_quantity=proof["report"]["targets"][0]["lines"][0]["quantity"],
-                                source_quantity=proof["report"]["source"]["lines"][0]["quantity"],
-                                private_source_unchanged=proof["private_source_unchanged"],
+                                native_state=proof["creation_policy"][
+                                    "native_order_status"
+                                ],
+                                native_quantity=proof["report"]["targets"][0]["lines"][
+                                    0
+                                ]["quantity"],
+                                source_quantity=proof["report"]["source"]["lines"][0][
+                                    "quantity"
+                                ],
+                                private_source_unchanged=proof[
+                                    "private_source_unchanged"
+                                ],
                             )
                     duplicate = await asyncio.to_thread(
                         workers.transaction_ops_execute.run, str(tenant_id), proposal_id
                     )
                     assert duplicate["status"] == "verified" and counts["writes"] == 1
-                    response = await api.get(f"/api/v1/transaction-ops/proposals/{proposal_id}/operation")
-                    assert response.status_code == 200 and response.json()["status"] == "verified", response.text
+                    response = await api.get(
+                        f"/api/v1/transaction-ops/proposals/{proposal_id}/operation"
+                    )
+                    assert (
+                        response.status_code == 200
+                        and response.json()["status"] == "verified"
+                    ), response.text
                     result.update(
                         passed=True,
                         http_human_approval=True,
@@ -615,6 +705,8 @@ if __name__ == "__main__":
         fixture_data = json.loads(args.worker.read_text())
         with ExitStack() as providers:
             install_providers(providers, fixture_data, args.port)
-            workers.transaction_ops_execute.run(fixture_data["tenant_id"], fixture_data["proposal_id"])
+            workers.transaction_ops_execute.run(
+                fixture_data["tenant_id"], fixture_data["proposal_id"]
+            )
     else:
         asyncio.run(supervised_parent(args.output, args.action))

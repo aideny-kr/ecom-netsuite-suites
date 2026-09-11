@@ -1120,3 +1120,58 @@ async def test_system_actor_writes_null_actor_id_audit(db, monkeypatch):
     assert row is not None
     assert row[0] is None
     assert row[1] == "system"
+
+
+# ---------------------------------------------------------------------------
+# Item 2 (brief M) — `_render_pdf_bytes` wires the PDF appendix (the full
+# aged-SKU list, since item 1's print stylesheet now hides the in-body
+# collapsible block) for an inventory_aging report, and passes none for any
+# other report type.
+# ---------------------------------------------------------------------------
+async def test_render_pdf_bytes_passes_the_inventory_aging_appendix(db, monkeypatch):
+    from app.services.report import report_pdf
+
+    tenant = await create_test_tenant(db, name="AppendixCorp")
+    user, _ = await create_test_user(db, tenant)
+    await set_tenant_context(db, str(tenant.id))
+    report = await _seed_inventory_aging_report(db, tenant, user)
+
+    captured: dict = {}
+
+    def fake_render(rendered_html, *, appendix_html=None):
+        captured["rendered_html"] = rendered_html
+        captured["appendix_html"] = appendix_html
+        return b"%PDF-FAKE"
+
+    monkeypatch.setattr(report_pdf, "render_report_pdf", fake_render)
+
+    out = report_delivery._render_pdf_bytes(report)
+
+    assert out == b"%PDF-FAKE"
+    assert captured["rendered_html"] == report.rendered_html
+    assert captured["appendix_html"]
+    assert "Appendix" in captured["appendix_html"]
+    assert "All aged SKUs" in captured["appendix_html"]
+
+
+async def test_render_pdf_bytes_passes_no_appendix_for_a_generic_report(db, monkeypatch):
+    """Companion: a report with no inventory_aging playbook recipe must pass
+    appendix_html=None — the routing must not misfire on every report type."""
+    from app.services.report import report_pdf
+
+    tenant = await create_test_tenant(db, name="NoAppendixCorp")
+    user, _ = await create_test_user(db, tenant)
+    await set_tenant_context(db, str(tenant.id))
+    report = await _seed_report(db, tenant, user, title="Cash report")
+
+    captured: dict = {}
+
+    def fake_render(rendered_html, *, appendix_html=None):
+        captured["appendix_html"] = appendix_html
+        return b"%PDF-FAKE"
+
+    monkeypatch.setattr(report_pdf, "render_report_pdf", fake_render)
+
+    report_delivery._render_pdf_bytes(report)
+
+    assert captured["appendix_html"] is None
