@@ -117,6 +117,7 @@ async def test_credit_readback_requires_exact_native_application_and_gl(variant)
                 return deepcopy(payloads[path])
             q = body["q"]
             if "externalid=" in q:
+                assert "SELECT t.id FROM transaction t WHERE t.type='CustCred' AND t.subsidiary=1 " in q
                 assert proposal["proposed_fields"]["externalId"] in q
                 rows = [] if variant == "missing_credit" else [{"id": "31"}]
                 if variant == "multiple_credits":

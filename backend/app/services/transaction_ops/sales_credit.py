@@ -615,8 +615,8 @@ async def verify_after(db, tenant_id, proposal, receipt):
             "/query/v1/suiteql",
             params={"limit": 2, "offset": 0},
             body={
-                "q": f"SELECT id FROM transaction WHERE type='CustCred' AND subsidiary={profile.subsidiary_id} "
-                f"AND externalid='{key}'"
+                "q": f"SELECT t.id FROM transaction t WHERE t.type='CustCred' AND t.subsidiary={profile.subsidiary_id} "
+                f"AND t.externalid='{key}'"
             },
         )
         rows, complete = _collection(raw)
