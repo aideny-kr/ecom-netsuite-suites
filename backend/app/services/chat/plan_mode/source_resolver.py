@@ -43,6 +43,8 @@ PROVIDER_TO_CANONICAL_SOURCE: dict[str, str] = {
     "netsuite": "netsuite",
     # BigQuery — MCP only (no REST analogue).
     "bigquery": "bigquery",
+    "metabase": "metabase",
+    "metabase_mcp": "metabase",
     # Shopify — MCP only. REST 'shopify' has no chat tools (Round 8 Bug 2).
     "shopify_mcp": "shopify",
     # Stripe — MCP only. REST 'stripe' is reconciliation-only, no chat
@@ -52,6 +54,13 @@ PROVIDER_TO_CANONICAL_SOURCE: dict[str, str] = {
     "google_sheets": "drive",
     "drive": "drive",
 }
+
+
+def source_provider_for_connector(connector) -> str:
+    """Recognize native Metabase connections stored under the custom provider."""
+    from app.services.chat.metabase_context import is_metabase_connector
+
+    return "metabase_mcp" if is_metabase_connector(connector) else getattr(connector, "provider", "")
 
 
 def canonicalize_connector_providers(active_connectors: list[str]) -> set[str]:

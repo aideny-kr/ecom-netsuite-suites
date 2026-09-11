@@ -12,6 +12,60 @@ from __future__ import annotations
 
 from app.services.chat.tool_categories import is_celigo_source
 
+
+def available_data_sources(tool_definitions: list[dict]) -> dict[str, str]:
+    """Canonical query sources present in this turn's connector-gated inventory."""
+    sources: dict[str, str] = {}
+    provider_labels = {
+        "netsuite_mcp": ("netsuite", "NetSuite"),
+        "metabase_mcp": ("metabase", "Metabase"),
+        "shopify_mcp": ("shopify", "Shopify"),
+        "stripe_mcp": ("stripe", "Stripe"),
+    }
+    for tool in tool_definitions:
+        name = tool.get("name", "")
+        if name in {"netsuite_suiteql", "netsuite_financial_report"}:
+            sources["netsuite"] = "NetSuite"
+        elif name == "bigquery_sql":
+            sources["bigquery"] = "BigQuery"
+        elif name.startswith("ext__"):
+            description = tool.get("description", "") or ""
+            for provider, (source, label) in provider_labels.items():
+                if description.startswith(f"[{provider}]") or description.startswith(f"[{provider} ·"):
+                    sources[source] = label
+    return sources
+
+
+def build_source_selection_guidance(tool_definitions: list[dict]) -> str:
+    """Ask for a source before ambiguous data work, using this turn's inventory."""
+    sources = available_data_sources(tool_definitions)
+    if len(sources) < 2:
+        return ""
+    return (
+        "\n<source_selection>\n"
+        f"Available data sources: {', '.join(sorted(sources.values()))}.\n"
+        "For a standalone ANALYTICS question without an explicit source choice, ASK the user which source "
+        "they want BEFORE calling any tools. Ask one concise question naming the available sources "
+        "and wait for the next user message. Do not query a default source while waiting. "
+        "A batch name, SKU, business metric, or the name Solidus is not a connection choice. "
+        "Solidus identifies the business dataset; clarify which connected source to query.\n"
+        "This clarification applies ONLY to analytics. Transaction investigations and their follow-ups, "
+        "integration operations, jobs, edits, and other workflows use their existing connection context. "
+        "Use transaction_ops tools to resolve a case/group's stored source and target connections; "
+        "do not interrupt operations with a database-choice question. "
+        "Keep connector authorization and exact-change human approval checks.\n"
+        "If the user already named a source in this request, explicitly selected one earlier in "
+        "the active analysis, or chose a clarification option, use that source and do not ask again "
+        "for its follow-up questions. An automatic source pin or the agent's own previous choice "
+        "is not an analytics source choice. A source used in an unrelated operation must not silently "
+        "become the source for a new analysis. An explicit comparison selects the named sources.\n"
+        "Use the clarification tool if available; otherwise ask in ordinary text. "
+        "This source-selection step precedes schema discovery and overrides default-source and "
+        "data-freshness instructions. It does not apply to non-data conversation or when only "
+        "one source is available.\n</source_selection>"
+    )
+
+
 _BIGQUERY_HINT = (
     "\nBIGQUERY DATA WAREHOUSE:\n"
     "This tenant has BigQuery connected. Use `bigquery_sql` for ad-hoc queries, "
@@ -176,7 +230,7 @@ def build_mcp_execution_guidance(tool_definitions: list[dict]) -> str:
             )
 
         sections.append(
-            "\n\nEXECUTION PRIORITY (pick the first that fits):"
+            "\n\nEXECUTION PRIORITY FOR NETSUITE (after selecting the user's requested source):"
             "\n  Financial statements → ns_runReport"
             "\n  Pre-built business reports → ns_runSavedSearch"
             "\n  Ad-hoc data queries → ns_runCustomSuiteQL (MCP) → netsuite_suiteql (local fallback)"

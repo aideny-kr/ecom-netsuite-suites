@@ -177,6 +177,10 @@ def _connector_tag(connector) -> str:
     NetSuite connectors additionally carry environment and account, because a
     tenant can hold more than one and the difference is production money.
     """
+    from app.services.chat.metabase_context import METABASE_TOOL_TAG, is_metabase_connector
+
+    if is_metabase_connector(connector):
+        return METABASE_TOOL_TAG
     provider = getattr(connector, "provider", "") or "external"
     if not str(provider).startswith("netsuite"):
         return str(provider)
@@ -212,9 +216,20 @@ def build_external_tool_definitions(connectors: list) -> list[dict]:
     for connector in sorted(connectors, key=lambda c: str(c.id)):
         if not connector.discovered_tools:
             continue
+        connector_tag = _connector_tag(connector)
         sorted_discovered = sorted(connector.discovered_tools, key=lambda t: t.get("name", ""))
+        from app.services.chat.metabase_tool_policy import is_read_only_metabase_tool
+
+        direct_metabase_query = is_read_only_metabase_tool(connector, "query") and any(
+            tool.get("name") == "query" for tool in sorted_discovered
+        )
         for tool in sorted_discovered:
             raw_name = tool.get("name", "unknown")
+            # This client opens a fresh MCP session per call. Native construction
+            # handles do not survive that boundary; direct MBQL preserves the
+            # same read capability without issuing a predictably expired handle.
+            if direct_metabase_query and raw_name in {"construct_query", "execute_query"}:
+                continue
 
             # Celigo is exposed READ-ONLY. Write tools never enter the model's
             # inventory. This is layer 1 of 2 — see _execute_external_tool for
@@ -224,6 +239,20 @@ def build_external_tool_definitions(connectors: list) -> list[dict]:
 
             anthropic_name = _make_ext_tool_name(connector.id, raw_name)
             desc = tool.get("description", "") or ""
+            if connector_tag == "metabase_mcp":
+                # Generic names like `search` occur on several MCP servers.
+                # Keep the connection label visible alongside the source tag.
+                label = getattr(connector, "label", "")
+                if isinstance(label, str) and label:
+                    desc = f"{label}: {desc}"
+                if raw_name in {"query", "construct_query"} and is_read_only_metabase_tool(connector, raw_name):
+                    desc += (
+                        '\nNative query builder: query must be MBQL 5 {"lib/type":"mbql/query","stages":[...]}, '
+                        'with a portable source-table in the first stage. Do not send SQL or {"type":"native"}. '
+                        "Prefer query with the complete object over construct/execute handles. "
+                        "For counts, use server-side aggregation; unique orders require distinct order_id, "
+                        "also when grouping by order state. See the Metabase SQL skill for join syntax."
+                    )
             # Use the tool's input_schema if available, otherwise empty
             input_schema = tool.get("input_schema") or {
                 "type": "object",
@@ -242,7 +271,7 @@ def build_external_tool_definitions(connectors: list) -> list[dict]:
                     # difference — so a model asked to "test in sandbox" chose
                     # between them arbitrarily, and nobody could tell from the
                     # log which one ran.
-                    "description": f"[{_connector_tag(connector)}] {desc}",
+                    "description": f"[{connector_tag}] {desc}",
                     "input_schema": input_schema,
                 }
             )
@@ -254,6 +283,13 @@ _CONNECTOR_GATED_TOOLS: dict[str, set[str]] = {
     "bigquery": {"bigquery_sql", "bigquery_schema", "bigquery_cost_estimate"},
     "google_sheets": {"sheets_create", "sheets_write_range", "sheets_read_range"},
 }
+_NETSUITE_ANALYTICS_TOOLS = {"netsuite_suiteql", "netsuite_financial_report"}
+
+
+def build_discovery_fallback_tools() -> list[dict]:
+    """Do not advertise live query sources when their connections are unknown."""
+    unavailable = _NETSUITE_ANALYTICS_TOOLS | set().union(*_CONNECTOR_GATED_TOOLS.values())
+    return [tool for tool in build_local_tool_definitions() if tool["name"] not in unavailable]
 
 
 async def build_all_tool_definitions(
@@ -269,6 +305,16 @@ async def build_all_tool_definitions(
     the orchestrator + unified_agent — this builder just registers the tool.
     """
     tools = build_local_tool_definitions()
+    netsuite_connected = False
+    try:
+        from app.services.connection_service import list_connections
+
+        connections = await list_connections(db, tenant_id)
+        netsuite_connected = any(
+            connection.provider == "netsuite" and connection.status == "active" for connection in connections
+        )
+    except Exception:
+        logger.warning("Failed to discover local NetSuite connection", exc_info=True)
 
     # Celigo local tools (spec docs/superpowers/specs/2026-09-04-celigo-chat-access.md
     # §5, task 4A): gated on the tenant's `celigo` feature flag AND its flow-map
@@ -305,6 +351,7 @@ async def build_all_tool_definitions(
 
         # Determine which connector-gated tools to include
         active_providers = {c.provider for c in connectors} if connectors else set()
+        netsuite_connected = netsuite_connected or bool(active_providers & {"netsuite", "netsuite_mcp"})
         gated_tools_to_remove: set[str] = set()
         for provider, tool_names in _CONNECTOR_GATED_TOOLS.items():
             if provider not in active_providers:
@@ -320,6 +367,11 @@ async def build_all_tool_definitions(
             tools.extend(build_external_tool_definitions(external))
     except Exception:
         logger.warning("Failed to fetch external MCP connectors for tools", exc_info=True)
+        unavailable = set().union(*_CONNECTOR_GATED_TOOLS.values())
+        tools = [tool for tool in tools if tool["name"] not in unavailable]
+
+    if not netsuite_connected:
+        tools = [tool for tool in tools if tool["name"] not in _NETSUITE_ANALYTICS_TOOLS]
 
     from app.services.chat.http_connector_tools import build_definitions as build_http_definitions
 
@@ -641,7 +693,13 @@ async def _execute_external_tool(
         if not connector or not connector.is_enabled:
             return {"error": f"Connector '{connector_id}' not found or disabled"}
 
-        if connector.provider in ("custom", "shopify_mcp", "stripe_mcp") and not human_approved:
+        from app.services.chat.metabase_tool_policy import metabase_query_input_error, requires_custom_tool_confirmation
+
+        query_error = metabase_query_input_error(connector, raw_tool_name, tool_input)
+        if query_error:
+            return {"error": query_error}
+
+        if requires_custom_tool_confirmation(connector, raw_tool_name) and not human_approved:
             return {
                 "error": "Custom MCP tools require human approval of the exact call before execution.",
                 "hitl_required": True,

@@ -295,7 +295,11 @@ def _build_connection_warning_block(connection_warnings: list[str]) -> str:
     )
 
 
-from app.services.chat.tool_inventory import build_mcp_execution_guidance, build_tool_inventory_block
+from app.services.chat.tool_inventory import (
+    build_mcp_execution_guidance,
+    build_source_selection_guidance,
+    build_tool_inventory_block,
+)
 
 
 def _assemble_system_prompt(*, template: str, tool_definitions: list[dict]) -> str:
@@ -310,13 +314,23 @@ def _assemble_system_prompt(*, template: str, tool_definitions: list[dict]) -> s
     what it can call AND how to choose between them stays in sync with the
     real schema.
     """
+    from app.services.chat.metabase_context import build_metabase_skill_context
+
     inventory = build_tool_inventory_block(tool_definitions)
     guidance = build_mcp_execution_guidance(tool_definitions)
     combined = inventory + guidance
     if "{{TOOL_INVENTORY}}" in template:
-        return template.replace("{{TOOL_INVENTORY}}", combined)
-    # DB-stored custom templates may lack the placeholder — append at end
-    return template + f"\n\n{combined}" if combined else template
+        prompt = template.replace("{{TOOL_INVENTORY}}", combined)
+    else:
+        # DB-stored custom templates may lack the placeholder — append at end
+        prompt = template + f"\n\n{combined}" if combined else template
+    # UnifiedAgent builds its own prompt; profiles appended to the orchestrator's
+    # local system_prompt do not reach it. Use this shared final assembly seam,
+    # after tool filtering, so both chat paths receive the connected skills.
+    metabase_context = build_metabase_skill_context(tool_definitions, template=template)
+    if metabase_context:
+        prompt += f"\n\n{metabase_context}"
+    return prompt + build_source_selection_guidance(tool_definitions)
 
 
 # ---------------------------------------------------------------------------
@@ -500,6 +514,8 @@ def _coerce_assistant_content(
       final text. Use the spiral-specific wording so the user doesn't read
       this as "I don't remember anything we just discussed".
     """
+    if error in {"request_routing_failed", "metabase_numeric_verification_failed"} and final_text:
+        return final_text
     if error:
         if "credit balance is too low" in error.lower() or "insufficient_quota" in error.lower():
             notice = (
@@ -2947,6 +2963,7 @@ async def run_chat_turn(
 
         max_turns = settings.CHAT_MAX_HISTORY_TURNS
         all_messages: list[dict] = []
+        msg_dicts: list[dict] = []
         summarised = 0
         # Self-sufficient history load: a freshly-created session (onboarding /
         # integration chat) never query-loaded its lazy="selectin" `messages`, so
@@ -3237,6 +3254,7 @@ async def run_chat_turn(
                             correlation_id=correlation_id,
                             metadata=None,
                             policy=active_policy,
+                            context_need=context_need,
                         )
                     else:
                         # Detect financial intent for task augmentation + domain knowledge boost
@@ -3676,6 +3694,7 @@ async def run_chat_turn(
                             # in base_agent.py for clarify_intercept.
                             from app.services.chat.plan_mode.source_resolver import (
                                 canonicalize_connector_providers,
+                                source_provider_for_connector,
                             )
                             from app.services.connection_service import list_connections
                             from app.services.mcp_connector_service import (
@@ -3690,7 +3709,7 @@ async def run_chat_turn(
                                 _rest = await list_connections(db, tenant_id)
                             except Exception:
                                 _rest = []
-                            _raw_providers = [getattr(c, "provider", "") for c in _mcp] + [
+                            _raw_providers = [source_provider_for_connector(c) for c in _mcp] + [
                                 getattr(c, "provider", "") for c in _rest if getattr(c, "status", "active") == "active"
                             ]
                             _plan_mode_connected_sources = sorted(canonicalize_connector_providers(_raw_providers))
@@ -3760,6 +3779,8 @@ async def run_chat_turn(
                             print("[ORCHESTRATOR] TRANSFORM intent — using cached result", flush=True)
 
                     # Augment task for financial report queries or transform requests
+                    context["source_selection_task"] = sanitized_input
+                    context["source_selection_history"] = msg_dicts
                     unified_task = sanitized_input
                     if not _is_chitchat and is_financial:
                         unified_task = _build_financial_mode_task(sanitized_input)
@@ -4096,6 +4117,11 @@ async def run_chat_turn(
 
                     # Persist charts alongside structured_output (backward compatible)
                     _persisted_output = last_structured_output
+                    from app.services.chat.request_routing import persist_request_context
+
+                    _persisted_output = persist_request_context(
+                        _persisted_output, getattr(agent_result, "request_context", None)
+                    )
                     if _charts_output:
                         if _persisted_output:
                             _persisted_output = {**_persisted_output, "charts": _charts_output}

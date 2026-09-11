@@ -1,0 +1,555 @@
+{
+  "scope": "Live backend UnifiedAgent + tenant model + existing authenticated Metabase MCP; isolated staging process, no deployment or browser HTTP session.",
+  "branch": "feat/metabase-bi-sql",
+  "branch_base": "5d340bdb",
+  "staging_base": "d0d2aed7",
+  "model": "claude-sonnet-5",
+  "database": {
+    "id": 2,
+    "name": "Solidus (Reporting Copy)",
+    "engine": "PostgreSQL"
+  },
+  "question": "How many orders in Sakura Batch 5 Laptops (batch id = 395) include at least one of the listed 10 SKUs, and what is the order status?",
+  "source_question": {
+    "answer": "Which data source should I use for this question: BigQuery, Metabase or NetSuite?",
+    "tool_calls": 0
+  },
+  "source_reply": "Use Metabase (the Solidus database).",
+  "analysis": {
+    "answer": "In Sakura Batch 5 Laptops (batch_id = 395), **65 distinct orders** contain at least one of the listed SKUs, broken down by order status:\n\n| Order Status | Distinct Orders |\n|---|---|\n| Complete | 41 |\n| Canceled | 24 |\n| **Total** | **65** |",
+    "tool_calls": 7,
+    "unexpected_source_calls": 0,
+    "recoveries": [
+      "Corrected an extra query wrapper in MBQL construction.",
+      "Missing construction handle recovered by directly executing the structured query."
+    ],
+    "query": {
+      "lib/type": "mbql/query",
+      "stages": [
+        {
+          "lib/type": "mbql.stage/mbql",
+          "source-table": [
+            "Solidus (Reporting Copy)",
+            "public",
+            "spree_line_items"
+          ],
+          "joins": [
+            {
+              "alias": "variants",
+              "strategy": "inner-join",
+              "stages": [
+                {
+                  "lib/type": "mbql.stage/mbql",
+                  "source-table": [
+                    "Solidus (Reporting Copy)",
+                    "public",
+                    "spree_variants"
+                  ]
+                }
+              ],
+              "conditions": [
+                [
+                  "=",
+                  {},
+                  [
+                    "field",
+                    {},
+                    [
+                      "Solidus (Reporting Copy)",
+                      "public",
+                      "spree_line_items",
+                      "variant_id"
+                    ]
+                  ],
+                  [
+                    "field",
+                    {
+                      "join-alias": "variants"
+                    },
+                    [
+                      "Solidus (Reporting Copy)",
+                      "public",
+                      "spree_variants",
+                      "id"
+                    ]
+                  ]
+                ]
+              ]
+            },
+            {
+              "alias": "orders",
+              "strategy": "inner-join",
+              "stages": [
+                {
+                  "lib/type": "mbql.stage/mbql",
+                  "source-table": [
+                    "Solidus (Reporting Copy)",
+                    "public",
+                    "spree_orders"
+                  ]
+                }
+              ],
+              "conditions": [
+                [
+                  "=",
+                  {},
+                  [
+                    "field",
+                    {},
+                    [
+                      "Solidus (Reporting Copy)",
+                      "public",
+                      "spree_line_items",
+                      "order_id"
+                    ]
+                  ],
+                  [
+                    "field",
+                    {
+                      "join-alias": "orders"
+                    },
+                    [
+                      "Solidus (Reporting Copy)",
+                      "public",
+                      "spree_orders",
+                      "id"
+                    ]
+                  ]
+                ]
+              ]
+            }
+          ],
+          "filters": [
+            [
+              "=",
+              {},
+              [
+                "field",
+                {},
+                [
+                  "Solidus (Reporting Copy)",
+                  "public",
+                  "spree_line_items",
+                  "batch_id"
+                ]
+              ],
+              395
+            ],
+            [
+              "in",
+              {},
+              [
+                "field",
+                {
+                  "join-alias": "variants"
+                },
+                [
+                  "Solidus (Reporting Copy)",
+                  "public",
+                  "spree_variants",
+                  "sku"
+                ]
+              ],
+              "FRANVW0016",
+              "FRANVW0017",
+              "FRANVW0027",
+              "FRANVW0057",
+              "FRANVW0077",
+              "FRANVY0015",
+              "FRANVY0017",
+              "FRANVY0027",
+              "FRANVY0057",
+              "FRANVY0077"
+            ]
+          ],
+          "breakout": [
+            [
+              "field",
+              {
+                "join-alias": "orders"
+              },
+              [
+                "Solidus (Reporting Copy)",
+                "public",
+                "spree_orders",
+                "state"
+              ]
+            ]
+          ],
+          "aggregation": [
+            [
+              "distinct",
+              {},
+              [
+                "field",
+                {
+                  "join-alias": "orders"
+                },
+                [
+                  "Solidus (Reporting Copy)",
+                  "public",
+                  "spree_orders",
+                  "id"
+                ]
+              ]
+            ]
+          ]
+        }
+      ]
+    },
+    "started_at": "2026-09-10T02:13:29.451018975Z",
+    "status": "completed",
+    "continuation_token": null,
+    "columns": [
+      "order_state",
+      "distinct_orders"
+    ],
+    "rows": [
+      [
+        "canceled",
+        24
+      ],
+      [
+        "complete",
+        41
+      ]
+    ]
+  },
+  "independent_controls": [
+    {
+      "control": "total",
+      "started_at": "2026-09-10T02:08:33.836567672Z",
+      "status": "completed",
+      "columns": [
+        "count",
+        "count_2"
+      ],
+      "rows": [
+        [
+          65,
+          65
+        ]
+      ],
+      "query": {
+        "lib/type": "mbql/query",
+        "stages": [
+          {
+            "lib/type": "mbql.stage/mbql",
+            "source-table": [
+              "Solidus (Reporting Copy)",
+              "public",
+              "spree_line_items"
+            ],
+            "joins": [
+              {
+                "alias": "variants",
+                "strategy": "inner-join",
+                "stages": [
+                  {
+                    "lib/type": "mbql.stage/mbql",
+                    "source-table": [
+                      "Solidus (Reporting Copy)",
+                      "public",
+                      "spree_variants"
+                    ]
+                  }
+                ],
+                "conditions": [
+                  [
+                    "=",
+                    {},
+                    [
+                      "field",
+                      {},
+                      [
+                        "Solidus (Reporting Copy)",
+                        "public",
+                        "spree_line_items",
+                        "variant_id"
+                      ]
+                    ],
+                    [
+                      "field",
+                      {
+                        "join-alias": "variants"
+                      },
+                      [
+                        "Solidus (Reporting Copy)",
+                        "public",
+                        "spree_variants",
+                        "id"
+                      ]
+                    ]
+                  ]
+                ]
+              }
+            ],
+            "filters": [
+              [
+                "=",
+                {},
+                [
+                  "field",
+                  {},
+                  [
+                    "Solidus (Reporting Copy)",
+                    "public",
+                    "spree_line_items",
+                    "batch_id"
+                  ]
+                ],
+                395
+              ],
+              [
+                "in",
+                {},
+                [
+                  "field",
+                  {
+                    "join-alias": "variants"
+                  },
+                  [
+                    "Solidus (Reporting Copy)",
+                    "public",
+                    "spree_variants",
+                    "sku"
+                  ]
+                ],
+                "FRANVW0016",
+                "FRANVW0017",
+                "FRANVW0027",
+                "FRANVW0057",
+                "FRANVW0077",
+                "FRANVY0015",
+                "FRANVY0017",
+                "FRANVY0027",
+                "FRANVY0057",
+                "FRANVY0077"
+              ]
+            ],
+            "aggregation": [
+              [
+                "distinct",
+                {},
+                [
+                  "field",
+                  {},
+                  [
+                    "Solidus (Reporting Copy)",
+                    "public",
+                    "spree_line_items",
+                    "order_id"
+                  ]
+                ]
+              ],
+              [
+                "count",
+                {}
+              ]
+            ],
+            "limit": 20
+          }
+        ]
+      }
+    },
+    {
+      "control": "status",
+      "started_at": "2026-09-10T02:08:34.512742743Z",
+      "status": "completed",
+      "columns": [
+        "state",
+        "count",
+        "count_2"
+      ],
+      "rows": [
+        [
+          "canceled",
+          24,
+          24
+        ],
+        [
+          "complete",
+          41,
+          41
+        ]
+      ],
+      "query": {
+        "lib/type": "mbql/query",
+        "stages": [
+          {
+            "lib/type": "mbql.stage/mbql",
+            "source-table": [
+              "Solidus (Reporting Copy)",
+              "public",
+              "spree_line_items"
+            ],
+            "joins": [
+              {
+                "alias": "variants",
+                "strategy": "inner-join",
+                "stages": [
+                  {
+                    "lib/type": "mbql.stage/mbql",
+                    "source-table": [
+                      "Solidus (Reporting Copy)",
+                      "public",
+                      "spree_variants"
+                    ]
+                  }
+                ],
+                "conditions": [
+                  [
+                    "=",
+                    {},
+                    [
+                      "field",
+                      {},
+                      [
+                        "Solidus (Reporting Copy)",
+                        "public",
+                        "spree_line_items",
+                        "variant_id"
+                      ]
+                    ],
+                    [
+                      "field",
+                      {
+                        "join-alias": "variants"
+                      },
+                      [
+                        "Solidus (Reporting Copy)",
+                        "public",
+                        "spree_variants",
+                        "id"
+                      ]
+                    ]
+                  ]
+                ]
+              },
+              {
+                "alias": "orders",
+                "strategy": "inner-join",
+                "stages": [
+                  {
+                    "lib/type": "mbql.stage/mbql",
+                    "source-table": [
+                      "Solidus (Reporting Copy)",
+                      "public",
+                      "spree_orders"
+                    ]
+                  }
+                ],
+                "conditions": [
+                  [
+                    "=",
+                    {},
+                    [
+                      "field",
+                      {},
+                      [
+                        "Solidus (Reporting Copy)",
+                        "public",
+                        "spree_line_items",
+                        "order_id"
+                      ]
+                    ],
+                    [
+                      "field",
+                      {
+                        "join-alias": "orders"
+                      },
+                      [
+                        "Solidus (Reporting Copy)",
+                        "public",
+                        "spree_orders",
+                        "id"
+                      ]
+                    ]
+                  ]
+                ]
+              }
+            ],
+            "filters": [
+              [
+                "=",
+                {},
+                [
+                  "field",
+                  {},
+                  [
+                    "Solidus (Reporting Copy)",
+                    "public",
+                    "spree_line_items",
+                    "batch_id"
+                  ]
+                ],
+                395
+              ],
+              [
+                "in",
+                {},
+                [
+                  "field",
+                  {
+                    "join-alias": "variants"
+                  },
+                  [
+                    "Solidus (Reporting Copy)",
+                    "public",
+                    "spree_variants",
+                    "sku"
+                  ]
+                ],
+                "FRANVW0016",
+                "FRANVW0017",
+                "FRANVW0027",
+                "FRANVW0057",
+                "FRANVW0077",
+                "FRANVY0015",
+                "FRANVY0017",
+                "FRANVY0027",
+                "FRANVY0057",
+                "FRANVY0077"
+              ]
+            ],
+            "aggregation": [
+              [
+                "distinct",
+                {},
+                [
+                  "field",
+                  {},
+                  [
+                    "Solidus (Reporting Copy)",
+                    "public",
+                    "spree_line_items",
+                    "order_id"
+                  ]
+                ]
+              ],
+              [
+                "count",
+                {}
+              ]
+            ],
+            "limit": 20,
+            "breakout": [
+              [
+                "field",
+                {
+                  "join-alias": "orders"
+                },
+                [
+                  "Solidus (Reporting Copy)",
+                  "public",
+                  "spree_orders",
+                  "state"
+                ]
+              ]
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

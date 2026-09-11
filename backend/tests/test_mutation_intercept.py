@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -368,6 +369,11 @@ class TestMutationPrefetchGuardSkipsNonNetSuite:
                 "app.services.policy_service.get_active_policy",
                 new_callable=AsyncMock,
                 return_value=None,
+            ),
+            patch(
+                "app.services.mcp_connector_service.get_mcp_connector",
+                new_callable=AsyncMock,
+                return_value=SimpleNamespace(provider="celigo_mcp"),
             ),
             # The pre-fetch reconstructs an ext__<connector>__ns_getRecord tool
             # name and calls the dispatcher via a FRESH

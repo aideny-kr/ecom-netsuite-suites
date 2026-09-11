@@ -27,7 +27,7 @@ from sqlalchemy.orm.attributes import flag_modified
 from app.models.chat import ChatMessage
 from app.models.chat_disclosure_event import ChatDisclosureEvent
 from app.services.chat.mutation_guard import verify_confirmation_token
-from app.services.chat.plan_mode.source_resolver import PROVIDER_TO_CANONICAL_SOURCE
+from app.services.chat.plan_mode.source_resolver import PROVIDER_TO_CANONICAL_SOURCE, source_provider_for_connector
 from app.services.chat.tools import parse_external_tool_name
 
 logger = logging.getLogger(__name__)
@@ -461,7 +461,7 @@ def _build_connector_uuid_to_canonical_source(
     out: dict[_uuid.UUID, str] = {}
     for conn in active_connectors:
         conn_id = getattr(conn, "id", None)
-        provider = getattr(conn, "provider", None)
+        provider = source_provider_for_connector(conn)
         if conn_id is None or provider is None:
             continue
         canonical = PROVIDER_TO_CANONICAL_SOURCE.get(provider)

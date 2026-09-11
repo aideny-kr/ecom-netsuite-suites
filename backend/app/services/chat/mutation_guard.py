@@ -95,8 +95,9 @@ def is_mutation_tool(tool_name: str) -> bool:
 
 
 async def classify_connector_mutation(tool_name: str, db, tenant_id) -> str | None:
-    """Custom MCP names and server hints cannot establish read-only authority."""
+    """Resolve custom-tool authority through the tenant's actual connector."""
     from app.services.chat.http_connector_tools import parse_name as parse_http_name
+    from app.services.chat.metabase_tool_policy import requires_custom_tool_confirmation
     from app.services.chat.tools import parse_external_tool_name
     from app.services.mcp_connector_service import get_mcp_connector
 
@@ -105,7 +106,7 @@ async def classify_connector_mutation(tool_name: str, db, tenant_id) -> str | No
     parsed = parse_external_tool_name(tool_name)
     if parsed:
         connector = await get_mcp_connector(db, parsed[0], tenant_id)
-        if connector is not None and connector.provider in ("custom", "shopify_mcp", "stripe_mcp"):
+        if connector is not None and requires_custom_tool_confirmation(connector, parsed[1]):
             return "execute"
     return classify_mutation(tool_name)
 
