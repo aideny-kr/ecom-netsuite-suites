@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import datetime, timezone
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -116,9 +117,24 @@ def test_discount_guard_requires_exact_scope_and_amount(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "variant", ["valid", "payment", "discount", "item", "location", "tax", "gl", "partial", "period", "application"]
+    "variant",
+    [
+        "valid",
+        "payment",
+        "discount",
+        "item",
+        "line_penny",
+        "quantity",
+        "location",
+        "tax",
+        "gl",
+        "partial",
+        "period",
+        "application",
+    ],
 )
-async def test_native_verification(variant):
+@pytest.mark.parametrize("native_decimals", [False, True])
+async def test_native_verification(variant, native_decimals):
     p = build_candidate(**unpaid_inputs())
     doc = {
         **deepcopy(p["before"]),
@@ -127,6 +143,10 @@ async def test_native_verification(variant):
         "item": {"items": deepcopy(p["support"]["invoice_lines"])},
     }
     doc["discountRate"] = str(doc["discountRate"])
+    if native_decimals:
+        for line in doc["item"]["items"]:
+            for field in ("amount", "rate", "quantity"):
+                line[field] = Decimal(line[field])
     rows = [
         {"account": "100", "accountingbook": "1", "debit": "95"},
         {"account": "200", "accountingbook": "1", "credit": "100"},
@@ -138,6 +158,10 @@ async def test_native_verification(variant):
         doc["discountItem"] = {"id": "99"}
     elif variant == "item":
         doc["item"]["items"][0]["item"]["id"] = "99"
+    elif variant == "line_penny":
+        doc["item"]["items"][0]["amount"] = Decimal("99.99") if native_decimals else "99.99"
+    elif variant == "quantity":
+        doc["item"]["items"][0]["quantity"] = Decimal("2") if native_decimals else "2"
     elif variant == "location":
         doc["location"] = {"id": "99"}
     elif variant == "tax":

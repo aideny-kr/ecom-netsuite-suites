@@ -1,5 +1,6 @@
 """Exact, source-backed discounts on fully unpaid invoices; never write here."""
 
+import json
 from copy import deepcopy
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -284,6 +285,10 @@ async def verify_after(db, tenant_id, p, receipt=None):
         )
         errors = []
         lines = _sublist(raw, "item", "invoice", LINE_FIELDS | frozenset(FIELDS), errors)
+        # collect_support persists native Decimal values as exact strings. Use
+        # that same representation for readback; Decimal('405.0') != '405.0'
+        # otherwise falsely rejects an unchanged, successfully posted invoice.
+        lines = json.loads(json.dumps(lines, default=str))
         matched = (
             str(raw.get("id")) == p["record_id"]
             and not errors
