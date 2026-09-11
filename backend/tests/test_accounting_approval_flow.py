@@ -75,7 +75,12 @@ def kind_proposal(kind):
     from app.services.transaction_ops.sales_credit import build_candidate
     from tests.test_sales_credit import inputs as credit_inputs
 
-    data = credit_inputs()
+    if kind == "discount":
+        from tests.test_invoice_discount import unpaid_inputs
+
+        data = unpaid_inputs()
+    else:
+        data = credit_inputs()
     data["review"]["native_mcp_connector_id"] = proposal()["connector_id"]
     p = build_candidate(**data)
     p["observed_at"] = datetime.now(timezone.utc).isoformat()
@@ -94,7 +99,7 @@ def inputs(p):
     )
 
 
-@pytest.mark.parametrize("kind", ["tax", "credit"])
+@pytest.mark.parametrize("kind", ["tax", "credit", "discount"])
 async def test_agent_emits_exact_accounting_card_without_executing_or_duplicate_prefetch(kind):
     p = kind_proposal(kind)
     p["tenant_id"] = str(_TENANT_ID)
@@ -145,14 +150,24 @@ async def test_agent_emits_exact_accounting_card_without_executing_or_duplicate_
     text = " ".join(v for k, v in events if k == "text")
     if kind == "tax":
         assert "7030.02" in text and "7046.00" in text and "Posting period" in text
-    else:
+    elif kind == "credit":
         assert "Sales Adjustments credit" in text
+    else:
+        assert "Sales Adjustment for unpaid invoice" in text
 
 
 @pytest.mark.parametrize(
     "kind,outcome",
-    [(kind, outcome) for kind in ("tax", "credit") for outcome in ("stale", "verified", "unverified", "rejected")]
-    + [("credit", outcome) for outcome in ("unknown_verified", "unknown_missing", "unreadable_verified")],
+    [
+        (kind, outcome)
+        for kind in ("tax", "credit", "discount")
+        for outcome in ("stale", "verified", "unverified", "rejected")
+    ]
+    + [
+        (kind, outcome)
+        for kind in ("credit", "discount")
+        for outcome in ("unknown_verified", "unknown_missing", "unreadable_verified")
+    ],
 )
 async def test_approval_preflight_execution_verification_and_actor_audit(outcome, kind):
     p = kind_proposal(kind)
@@ -201,7 +216,7 @@ async def test_approval_preflight_execution_verification_and_actor_audit(outcome
         )
 
     async def verify(*args, **kwargs):
-        if kind == "credit" and outcome in ("verified", "unverified"):
+        if kind in {"credit", "discount"} and outcome in ("verified", "unverified"):
             assert kwargs["receipt"]["success"] is True
         order.append("verify")
         return {"status": "verified" if verified_outcome else "needs_review", "cash_settlement": "not_verified"}
@@ -271,14 +286,14 @@ async def test_approval_preflight_execution_verification_and_actor_audit(outcome
         if outcome.startswith("unknown") or outcome == "unreadable_verified":
             assert so["status"] == ("approved" if verified_outcome else "indeterminate")
             assert so["accounting_verification"]["recovered_by_read"] is verified_outcome
-        if kind == "credit" and verified_outcome:
+        if kind in {"credit", "discount"} and verified_outcome:
             recheck.assert_awaited_once()
             assert so["accounting_recheck"] == {"status": "queued", "run_id": "recheck-run"}
         else:
             recheck.assert_not_awaited()
 
 
-@pytest.mark.parametrize("kind", ["tax", "credit"])
+@pytest.mark.parametrize("kind", ["tax", "credit", "discount"])
 @pytest.mark.parametrize("blocked", [None, "validation", "policy", "tenant", "unavailable_tool"])
 async def test_fresh_evidence_generates_real_card_without_second_model_hop(blocked, kind):
     p = kind_proposal(kind)
@@ -318,6 +333,7 @@ async def test_fresh_evidence_generates_real_card_without_second_model_hop(block
     with (
         patch("app.services.policy_service.get_active_policy", AsyncMock(return_value=None)),
         patch("app.services.chat.write_validation.validate_mutation", AsyncMock(return_value=validation)),
+        patch("app.services.chat.record_metadata_service.prefetch_scoped_invoice_metadata", AsyncMock()),
         patch("app.services.chat.tools.execute_tool_call", execute),
         patch(
             "app.services.policy_service.evaluate_tool_call",

@@ -52,7 +52,7 @@ def eligible(so, now):
     p, claim = so.get("accounting_review") or {}, so.get("accounting_execution") or {}
     try:
         return (
-            p.get("kind") == "sales_adjustment_credit"
+            p.get("kind") in {"sales_adjustment_credit", "invoice_sales_adjustment"}
             and claim.get("version") == 1
             and so.get("status") in {"executing", "indeterminate", "approved"}
             and (so.get("accounting_recheck") or {}).get("status") != "queued"
@@ -72,7 +72,7 @@ async def candidates(db, tenant_id, now, *, limit):
                 select(ChatMessage.id)
                 .where(
                     ChatMessage.tenant_id == tenant_id,
-                    so["accounting_review"]["kind"].astext == "sales_adjustment_credit",
+                    so["accounting_review"]["kind"].astext.in_(("sales_adjustment_credit", "invoice_sales_adjustment")),
                     so["accounting_execution"]["version"].astext == "1",
                     so["status"].astext.in_(("executing", "indeterminate", "approved")),
                     cast(so["accounting_execution"]["attempts"].astext, Integer) < MAX_ATTEMPTS,
@@ -214,9 +214,16 @@ async def recover(db, tenant_id, message_id, *, now=None, lock_engine=None):
             try:
                 async with asyncio.timeout(90):
                     actor = await _authorize_read(db, tenant_id, message, claim)
-                    verification = await sales_credit.verify_after(
-                        db, tenant_id, so["accounting_review"], claim.get("receipt")
-                    )
+                    if so["accounting_review"]["kind"] == "invoice_sales_adjustment":
+                        from app.services.transaction_ops.invoice_discount import verify_after as verify_discount
+
+                        verification = await verify_discount(
+                            db, tenant_id, so["accounting_review"], claim.get("receipt")
+                        )
+                    else:
+                        verification = await sales_credit.verify_after(
+                            db, tenant_id, so["accounting_review"], claim.get("receipt")
+                        )
             except Exception as exc:
                 verification = {"status": "needs_review", "reason": type(exc).__name__, "retry_allowed": False}
             verified = verification.get("status") == "verified"
@@ -245,11 +252,11 @@ async def recover(db, tenant_id, message_id, *, now=None, lock_engine=None):
                     claim["termination_reason"] = "budget" if claim["attempts"] >= MAX_ATTEMPTS else "error"
             message.structured_output = so
             message.content = (
-                "The existing Sales Adjustments credit, invoice application and GL were verified "
+                "The approved accounting correction and GL were verified "
                 "by read-only recovery. "
                 "No additional financial write was sent. Full case reconciliation and cash settlement remain separate."
                 if verified
-                else "The interrupted credit posting is not verified. "
+                else "The interrupted accounting correction is not verified. "
                 "The case still needs review. Do not repeat this write."
             )
             await log_event(

@@ -2323,7 +2323,10 @@ async def run_chat_turn(
                     except Exception as exc:
                         yield {"type": "error", "error": f"No update was sent: {exc}"}
                         return
-                if (_so.get("accounting_review") or {}).get("kind") == "sales_adjustment_credit":
+                if (_so.get("accounting_review") or {}).get("kind") in {
+                    "sales_adjustment_credit",
+                    "invoice_sales_adjustment",
+                }:
                     from app.services.transaction_ops.accounting_recovery import execution_claim
 
                     _so = execution_claim(
@@ -2529,10 +2532,9 @@ async def run_chat_turn(
                         "now risks creating it twice."
                     )
 
-                _credit_recovery = (
-                    _write_outcome == "indeterminate"
-                    and (_so.get("accounting_review") or {}).get("kind") == "sales_adjustment_credit"
-                )
+                _credit_recovery = _write_outcome == "indeterminate" and (_so.get("accounting_review") or {}).get(
+                    "kind"
+                ) in {"sales_adjustment_credit", "invoice_sales_adjustment"}
                 if _so.get("accounting_execution") and isinstance(_exec_result, dict):
                     # Retain a returned native identity even when verification
                     # fails, so later recovery cannot ignore a conflicting receipt.
@@ -2545,7 +2547,10 @@ async def run_chat_turn(
                     from app.services.transaction_ops.tax_correction import verify_after
 
                     try:
-                        if _so["accounting_review"].get("kind") == "sales_adjustment_credit":
+                        if _so["accounting_review"].get("kind") in {
+                            "sales_adjustment_credit",
+                            "invoice_sales_adjustment",
+                        }:
                             async with asyncio.timeout(90):
                                 _verification = await verify_after(
                                     db, tenant_id, _so["accounting_review"], receipt=_exec_result
@@ -2582,7 +2587,7 @@ async def run_chat_turn(
                         if _credit_recovery:
                             _exec_succeeded = True
                             _exec_error = None
-                            _confirm_content = "The credit was located using its unique posting reference."
+                            _confirm_content = "The approved accounting change was verified using fresh NetSuite reads."
                         _confirm_content += (
                             "\n\nThe Sales Adjustments credit, exact invoice application and GL entries were "
                             "independently re-read and verified. No cash refund was issued."
@@ -2768,7 +2773,8 @@ async def run_chat_turn(
 
                 if (
                     _updated_so.get("status") == "approved"
-                    and (_updated_so.get("accounting_review") or {}).get("kind") == "sales_adjustment_credit"
+                    and (_updated_so.get("accounting_review") or {}).get("kind")
+                    in {"sales_adjustment_credit", "invoice_sales_adjustment"}
                     and (_updated_so.get("accounting_verification") or {}).get("status") == "verified"
                 ):
                     from app.services.transaction_ops.accounting_recheck import queue as queue_accounting_recheck

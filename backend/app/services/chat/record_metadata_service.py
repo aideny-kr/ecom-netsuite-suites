@@ -120,6 +120,68 @@ def clear_metadata_cache() -> None:
     _cache.clear()
 
 
+async def prefetch_scoped_invoice_metadata(db, tenant_id, actor_id, proposal, correlation_id):
+    """Read the same native schema directly for an evidence-bound invoice update.
+
+    The NetSuite MCP metadata tool can hit its upstream response-time ceiling
+    on large invoice schemas. Use the explicitly selected REST connection;
+    never guess another account or treat a timeout as a permissive schema.
+    Normal curated requirements and write validation still run afterward.
+    """
+    from urllib.parse import urlsplit
+    from uuid import UUID
+
+    from app.services.audit_service import log_event
+    from app.services.mcp_connector_service import get_mcp_connector
+    from app.services.transaction_ops.netsuite_reader import authenticated_reader
+
+    p = proposal or {}
+    if (
+        p.get("tenant_id") != str(tenant_id)
+        or p.get("kind") != "invoice_sales_adjustment"
+        or p.get("record_type") != "invoice"
+    ):
+        raise ValueError("Native invoice metadata requires the current scoped accounting proposal.")
+    connector = await get_mcp_connector(db, UUID(p["connector_id"]), tenant_id)
+    account = p["scope"]["netsuite_account_id"]
+    if (
+        not connector
+        or connector.status != "active"
+        or not connector.is_enabled
+        or urlsplit(connector.server_url).hostname != f"{account}.suitetalk.api.netsuite.com"
+    ):
+        raise ValueError("The invoice metadata connector/account binding changed.")
+    key = (p["connector_id"], "invoice")
+    hit = _cache.get(key)
+    if hit and time.monotonic() - hit[0] < _TTL_SECONDS:
+        return
+    async with authenticated_reader(db, tenant_id, p["connection_id"], account, max_api_calls=1) as reader:
+        raw = await reader.request("GET", "/record/v1/metadata-catalog/invoice")
+    metadata = _parse_properties_shape({"metadata": raw}, "invoice")
+    if metadata is None or not all(metadata.spec_for(k) for k in p["proposed_fields"]):
+        raise ValueError("The connected account did not provide usable invoice discount metadata.")
+    await log_event(
+        db,
+        tenant_id,
+        category="transaction_ops",
+        action="accounting_correction.metadata.read",
+        actor_id=actor_id,
+        resource_type="transaction_case",
+        resource_id=p["case_id"],
+        correlation_id=correlation_id,
+        payload={
+            "account_id": account,
+            "connection_id": p["connection_id"],
+            "connector_id": p["connector_id"],
+            "record_type": "invoice",
+            "source": "native_rest_schema",
+            "requirements_known": metadata.requirements_known,
+            "financial_writes": 0,
+        },
+    )
+    _cache[key] = (time.monotonic(), metadata)
+
+
 def _parse_properties_shape(data: dict[str, Any], record_type: str) -> "RecordMetadata | None":
     """Parse the live `ns_getRecordTypeMetadata` response shape:
     ``{"success": true, "metadata": {"type": "object", "properties": {name:

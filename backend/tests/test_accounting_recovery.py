@@ -16,18 +16,26 @@ from tests.test_accounting_approval_flow import inputs
 from tests.test_accounting_recheck import approved_credit  # noqa: F401
 
 
-@pytest.fixture
-async def interrupted_credit(db, approved_credit):  # noqa: F811
+@pytest.fixture(params=["credit", "discount"])
+async def interrupted_credit(db, approved_credit, request):  # noqa: F811
     from tests.conftest import enable_feature_flag
 
     actor, config, case, message, source, target = approved_credit
     for flag in ("celigo", "reconciliation"):
         await enable_feature_flag(db, actor.tenant_id, flag)
     p = message.structured_output["accounting_review"]
+    if request.param == "discount":
+        p = {
+            **p,
+            "kind": "invoice_sales_adjustment",
+            "record_type": "invoice",
+            "mutation_type": "update",
+            "proposed_fields": {"discountItem": {"id": "50"}, "discountRate": -5},
+        }
     name, params = inputs(p)
     card = build_confirmation_payload(
-        mutation_type="create",
-        record_type="creditmemo",
+        mutation_type="update" if request.param == "discount" else "create",
+        record_type="invoice" if request.param == "discount" else "creditmemo",
         tool_name=name,
         tool_input=params,
         session_id=str(message.session_id),
@@ -52,6 +60,7 @@ def providers(monkeypatch):
     verify = AsyncMock(return_value={"status": "verified", "credit_memo_id": "30"})
     monkeypatch.setattr("app.services.transaction_ops.accounting_group.accounting_write_slot", lock)
     monkeypatch.setattr("app.services.transaction_ops.sales_credit.verify_after", verify)
+    monkeypatch.setattr("app.services.transaction_ops.invoice_discount.verify_after", verify)
     return verify
 
 

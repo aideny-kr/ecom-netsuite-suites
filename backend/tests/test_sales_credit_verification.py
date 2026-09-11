@@ -39,7 +39,11 @@ from tests.test_sales_credit import inputs
 async def test_credit_readback_requires_exact_native_application_and_gl(variant):
     paid = "0" if variant == "unpaid" else "25" if variant == "partial_payment" else "101"
     data = inputs(paid=paid)
-    proposal = build_candidate(**data)
+    # Historical unpaid credit receipts still need read-only recovery, even
+    # though new unpaid invoices now route to invoice discounts.
+    from app.services.transaction_ops.sales_credit import _commercial_candidate
+
+    proposal = _commercial_candidate(**data) if variant == "unpaid" else build_candidate(**data)
     source = deepcopy(data["source"])
     _, _, applications, gl = fixture()
     invoice = {**proposal["before"], "amountPaid": str(Decimal(paid) + 5), "amountRemaining": str(101 - Decimal(paid))}

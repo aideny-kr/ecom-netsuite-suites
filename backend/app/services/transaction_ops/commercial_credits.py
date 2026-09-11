@@ -247,7 +247,8 @@ async def collect_commercial_credits(db, tenant_id, review, report, source, evid
     if len(invoices) != 1 or invoices[0].get("record_type") != "invoice":
         return
     invoice = invoices[0]
-    if _money(invoice["total"]) != _money(basis["gross_before_order_adjustments"]) or _money(
+    discount_invoice = bool(invoice.get("discountItem")) and _money(invoice["total"]) == _money(basis["source_total"])
+    if (not discount_invoice and _money(invoice["total"]) != _money(basis["gross_before_order_adjustments"])) or _money(
         invoice["taxTotal"]
     ) != _money(basis["tax"]):
         return
@@ -331,10 +332,37 @@ async def collect_commercial_credits(db, tenant_id, review, report, source, evid
             ):
                 application["complete"] = False
                 raise NetSuiteEvidenceError("invoice_changed_during_application_read")
-            resolution = verify_applied_credit(basis, invoice, application, sections.get("gl", {}).get(invoice_id, {}))
+            if discount_invoice:
+                from app.services.transaction_ops.invoice_discount import verified_existing_discount
+
+                item_id = _id(invoice["discountItem"].get("id"))
+                if not item_id:
+                    raise NetSuiteEvidenceError("invoice_discount_item_identity_missing")
+                item_raw = await reader.request(
+                    "GET", f"/record/v1/discountItem/{item_id}", params={"expandSubResources": "true"}
+                )
+                sections["invoice_discount_item"] = {
+                    **_project(item_raw, {"id", "account", "isInactive", "nonPosting"}),
+                    "subsidiary": item_raw.get("subsidiary"),
+                }
+                resolution = verified_existing_discount(
+                    basis,
+                    invoice,
+                    application,
+                    sections.get("gl", {}).get(invoice_id, {}),
+                    sections["invoice_discount_item"],
+                )
+            else:
+                resolution = verify_applied_credit(
+                    basis, invoice, application, sections.get("gl", {}).get(invoice_id, {})
+                )
             if resolution:
                 evidence["commercial_credit_resolution"] = resolution
-                evidence["assessment"]["root_cause"] = "source_order_adjustment_already_credited"
+                evidence["assessment"]["root_cause"] = (
+                    "source_order_adjustment_already_discounted"
+                    if discount_invoice
+                    else "source_order_adjustment_already_credited"
+                )
                 evidence["assessment"]["executable_proposal"] = None
                 evidence["assessment"]["correction_ready"] = False
             else:
@@ -450,17 +478,30 @@ def verified_commercial_adjustment(source, target, config):
             or str(invoices[0]["currency"]["id"]) != str(order["currency"]["id"])
         ):
             return None
-        result = verify_applied_credit(
-            basis, invoices[0], section["invoice_applications"], section["gl"][str(invoices[0]["id"])]
-        )
+        discount_invoice = bool(invoices[0].get("discountItem"))
+        if discount_invoice:
+            from app.services.transaction_ops.invoice_discount import verified_existing_discount
+
+            result = verified_existing_discount(
+                basis,
+                invoices[0],
+                section["invoice_applications"],
+                section["gl"][str(invoices[0]["id"])],
+                section.get("invoice_discount_item") or {},
+            )
+        else:
+            result = verify_applied_credit(
+                basis, invoices[0], section["invoice_applications"], section["gl"][str(invoices[0]["id"])]
+            )
         if (
             result
-            and _money(order["total"]) == _money(invoices[0]["total"])
+            and _money(order["total"])
+            == _money(basis["gross_before_order_adjustments"] if discount_invoice else invoices[0]["total"])
             and _money(order["taxTotal"]) == _money(invoices[0]["taxTotal"])
         ):
             return {
                 **result,
-                "kind": "applied_commercial_credit",
+                "kind": "posted_invoice_discount" if discount_invoice else "applied_commercial_credit",
                 "source_adjustment_ids": [str(a["id"]) for a in basis["adjustments"]],
                 "account_id": _account(scope["account_id"]),
                 "subsidiary_id": str(config["subsidiary_id"]),

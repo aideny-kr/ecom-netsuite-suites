@@ -11,23 +11,28 @@ def treatment_batches(members):
             continue
         proposal = card["accounting_review"]
         credit = proposal.get("kind") == "sales_adjustment_credit"
+        commercial = proposal.get("kind") in {"sales_adjustment_credit", "invoice_sales_adjustment"}
         treatment = {
-            "kind": "sales_adjustment_credit" if credit else "invoice_tax",
+            "kind": proposal.get("kind") or "invoice_tax",
             "scope": proposal["scope"],
             "connection_id": proposal.get("connection_id"),
             "connector_id": proposal.get("connector_id"),
             "currency": proposal.get("source", {}).get("currency") or proposal["before"].get("currency_code"),
             "accounting_book": proposal["accounting_book"],
             "ar_account": proposal["ar_account"],
-            "offset_account": proposal.get("sales_adjustment_account") if credit else proposal["tax_account"],
+            "offset_account": proposal.get("sales_adjustment_account") if commercial else proposal["tax_account"],
             "period": {key: proposal["period"].get(key) for key in ("id", "closed", "arLocked", "allLocked")},
-            "profile": proposal["profile"] if credit else {"tax_item_id": proposal["tax_item"].get("id")},
+            "profile": proposal["profile"] if commercial else {"tax_item_id": proposal["tax_item"].get("id")},
         }
         key = business_digest(treatment)
         if key not in batches:
             batches[key] = {
                 "treatment_id": key,
-                "label": "Sales Adjustments credit and invoice application" if credit else "Invoice tax correction",
+                "label": "Sales Adjustments credit and invoice application"
+                if credit
+                else "Sales Adjustment on unpaid invoice"
+                if commercial
+                else "Invoice tax correction",
                 "treatment": treatment,
                 "case_ids": [],
                 "confirmation_ids": [],

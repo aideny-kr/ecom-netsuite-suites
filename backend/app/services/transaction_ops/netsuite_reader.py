@@ -233,14 +233,15 @@ class _Reader:
         if self.calls >= self.max_api_calls:
             raise NetSuiteEvidenceError("api_call_budget")
         self.calls += 1
+        metadata_read = method == "GET" and path == "/record/v1/metadata-catalog/invoice"
         try:
             async with self.client.stream(
                 method,
                 self.base + path,
-                headers=self.headers,
+                headers={**self.headers, **({"Accept": "application/schema+json"} if metadata_read else {})},
                 params=params,
                 json=body,
-                timeout=_TIMEOUT,
+                timeout=httpx.Timeout(120, connect=10, pool=10) if metadata_read else _TIMEOUT,
                 follow_redirects=False,
             ) as response:
                 if response.status_code != 200:

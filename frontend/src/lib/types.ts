@@ -896,7 +896,12 @@ export interface SalesCreditReview extends AccountingReviewBase {
   sales_adjustment_account_name?: string;
 }
 
-export type AccountingReview = InvoiceTaxReview | SalesCreditReview;
+export interface InvoiceDiscountReview extends Omit<SalesCreditReview, "kind" | "expected_after"> {
+  kind: "invoice_sales_adjustment";
+  expected_after: { total: string; taxTotal: string; amountPaid: string; amountRemaining: string; discountTotal: string };
+}
+
+export type AccountingReview = InvoiceTaxReview | SalesCreditReview | InvoiceDiscountReview;
 
 export interface AccountingGroup {
   group_id: string;

@@ -89,7 +89,13 @@ def inputs(*, paid="101"):
         invoice_gl=gl,
         reference_credit=ref,
         reference_gl=deepcopy(applications["credit_gl"]["30"]),
-        item={"id": "50", "isInactive": False, "account": {"id": "500"}},
+        item={
+            "id": "50",
+            "isInactive": False,
+            "account": {"id": "500"},
+            "nonPosting": False,
+            "subsidiary": {"items": [{"id": "1"}], "count": 1, "totalResults": 1, "hasMore": False},
+        },
         currency={"id": "1", "symbol": "USD"},
         posting_date="2026-09-10",
         period=dict(
@@ -133,8 +139,8 @@ def test_exact_missing_credit_candidate_has_one_invoice_application_and_no_clone
     assert p["record_type"] == "creditmemo" and p["mutation_type"] == "create"
 
 
-@pytest.mark.parametrize("paid,remaining", [("0", "101.00"), ("25", "76.00"), ("101", "0.00")])
-def test_credit_preserves_unpaid_and_partially_paid_receivables(paid, remaining):
+@pytest.mark.parametrize("paid,remaining", [("25", "76.00"), ("101", "0.00")])
+def test_credit_preserves_partially_paid_receivables(paid, remaining):
     p = build_candidate(**inputs(paid=paid))
     assert p["expected_after"]["invoice_remaining"] == remaining
     assert p["expected_after"]["remaining_variance"] == "0.00"
@@ -227,3 +233,7 @@ def test_duplicate_search_does_not_hide_old_partial_or_unapplied_credits():
             d["source"]["number"],
             d["support"]["duplicates"]["posting_key"],
         )
+
+
+def test_unpaid_taxable_invoice_does_not_fall_back_to_credit():
+    assert build_candidate(**inputs(paid="0")) is None

@@ -24,7 +24,7 @@ async def queue(db, tenant_id, message, actor_id, *, now):
     if (
         message.tenant_id != tenant_id
         or p.get("tenant_id") != str(tenant_id)
-        or p.get("kind") != "sales_adjustment_credit"
+        or p.get("kind") not in {"sales_adjustment_credit", "invoice_sales_adjustment"}
         or so.get("status") != "approved"
         or verification.get("status") != "verified"
         or not actor_id
@@ -88,7 +88,7 @@ async def approval_for_run(db, tenant_id, run):
         so.get("status") != "approved"
         or (so.get("accounting_verification") or {}).get("status") != "verified"
         or p.get("tenant_id") != str(tenant_id)
-        or p.get("kind") != "sales_adjustment_credit"
+        or p.get("kind") not in {"sales_adjustment_credit", "invoice_sales_adjustment"}
         or str(run.config_id) != p.get("config_id")
         or run.params_json["order_references"] != [p.get("order_reference")]
     ):

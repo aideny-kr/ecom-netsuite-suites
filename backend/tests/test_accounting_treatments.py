@@ -48,7 +48,7 @@ def test_similar_deltas_with_different_accounting_treatments_stay_separate(field
 
 def test_credit_application_and_tax_changes_are_distinct_and_keep_remaining_ar():
     members = same_scope_members()[:1]
-    proposal = build_candidate(**inputs(paid="0"))
+    proposal = build_candidate(**inputs(paid="25"))
     assert proposal is not None
     members.append(
         {"case_id": "credit-case", "confirmation_id": "credit-card", "card": {"accounting_review": proposal}}
@@ -57,7 +57,7 @@ def test_credit_application_and_tax_changes_are_distinct_and_keep_remaining_ar()
     batches = treatment_batches(members)
     assert {b["treatment"]["kind"] for b in batches} == {"invoice_tax", "sales_adjustment_credit"}
     assert members == before
-    assert proposal["expected_after"]["invoice_remaining"] == "101.00"
+    assert proposal["expected_after"]["invoice_remaining"] == "76.00"
 
 
 def test_unresolved_refund_cases_share_investigation_without_financial_approval():
@@ -67,3 +67,18 @@ def test_unresolved_refund_cases_share_investigation_without_financial_approval(
     assert len(result) == 1 and len(result[0]["case_ids"]) == 3
     assert result[0]["executable"] is False
     assert treatment_batches(members) == []
+
+
+def test_invoice_discount_is_a_separate_treatment_from_credit_and_tax():
+    from tests.test_invoice_discount import unpaid_inputs
+
+    members = same_scope_members()[:1]
+    for kind, data in (("discount", unpaid_inputs()), ("credit", inputs(paid="25"))):
+        members.append(
+            {"case_id": kind, "confirmation_id": kind, "card": {"accounting_review": build_candidate(**data)}}
+        )
+    assert {b["treatment"]["kind"] for b in treatment_batches(members)} == {
+        "invoice_tax",
+        "invoice_sales_adjustment",
+        "sales_adjustment_credit",
+    }

@@ -87,6 +87,10 @@ def _gl_proves(gl, debit_account, credit_account, amount, book):
 
 
 def _reference_matches(support, profile):
+    if _money(support["invoice"]["amountPaid"]) == 0:
+        from app.services.transaction_ops.invoice_discount import item_usable
+
+        return item_usable(support["item"], profile)
     cm, item = support["reference_credit"], support["item"]
     amount = _money(cm["total"])
     lines = cm["line_items"]
@@ -117,7 +121,7 @@ def _reference_matches(support, profile):
     )
 
 
-def build_candidate(*, tenant_id, case_id, source, report, review, support, now=None):
+def _commercial_candidate(*, tenant_id, case_id, source, report, review, support, now=None):
     """Return an exact candidate only for a fully evidenced missing reseller credit."""
     now = now or datetime.now(timezone.utc)
     try:
@@ -328,6 +332,15 @@ def build_candidate(*, tenant_id, case_id, source, report, review, support, now=
         return None
 
 
+def build_candidate(**kwargs):
+    candidate = _commercial_candidate(**kwargs)
+    if candidate and _money(candidate["before"]["amountPaid"]) == 0:
+        from app.services.transaction_ops.invoice_discount import from_commercial_candidate
+
+        return from_commercial_candidate(candidate)
+    return candidate
+
+
 async def collect_support(db, tenant_id, source, report, review, evidence, *, now=None):
     """Bounded reads for the supported missing-credit case, before any proposal."""
     from zoneinfo import ZoneInfo
@@ -406,30 +419,35 @@ async def collect_support(db, tenant_id, source, report, review, evidence, *, no
             evidence["sales_credit_existing_records"] = rows
             return None
         support["currency"] = await reader.request("GET", f"/record/v1/currency/{_id(invoice['currency']['id'])}")
-        support["item"] = _project(
-            await reader.request("GET", f"/record/v1/discountItem/{profile.item_id}"),
-            {"id", "itemId", "isInactive", "account"},
+        item_raw = await reader.request(
+            "GET", f"/record/v1/discountItem/{profile.item_id}", params={"expandSubResources": "true"}
         )
-        raw = await reader.request(
-            "GET", f"/record/v1/creditMemo/{profile.reference_credit_id}", params={"expandSubResources": "true"}
-        )
-        cm = _project(raw, CREDIT_FIELDS)
-        errors = []
-        cm["line_items"] = _sublist(raw, "item", "item", LINE_FIELDS, errors)
-        cm["lines_complete"] = not errors
-        support["reference_credit"] = cm
-        raw = await reader.request(
-            "POST",
-            "/query/v1/suiteql",
-            params={"limit": 30, "offset": 0},
-            body={
-                "q": "SELECT tal.account, tal.accountingbook, tal.debit, tal.credit FROM transactionaccountingline tal "
-                "JOIN transaction t ON t.id=tal.transaction "
-                f"WHERE tal.transaction={profile.reference_credit_id} AND t.subsidiary={profile.subsidiary_id}"
-            },
-        )
-        rows, complete = _collection(raw)
-        support["reference_gl"] = {"rows": rows, "complete": complete}
+        support["item"] = {
+            **_project(item_raw, {"id", "itemId", "isInactive", "account", "nonPosting", "applyBeforeTax", "rate"}),
+            "subsidiary": item_raw.get("subsidiary"),
+        }
+        if _money(invoice["amountPaid"]) != 0:
+            raw = await reader.request(
+                "GET", f"/record/v1/creditMemo/{profile.reference_credit_id}", params={"expandSubResources": "true"}
+            )
+            cm = _project(raw, CREDIT_FIELDS)
+            errors = []
+            cm["line_items"] = _sublist(raw, "item", "item", LINE_FIELDS, errors)
+            cm["lines_complete"] = not errors
+            support["reference_credit"] = cm
+            raw = await reader.request(
+                "POST",
+                "/query/v1/suiteql",
+                params={"limit": 30, "offset": 0},
+                body={
+                    "q": "SELECT tal.account, tal.accountingbook, tal.debit, tal.credit "
+                    "FROM transactionaccountingline tal "
+                    "JOIN transaction t ON t.id=tal.transaction "
+                    f"WHERE tal.transaction={profile.reference_credit_id} AND t.subsidiary={profile.subsidiary_id}"
+                },
+            )
+            rows, complete = _collection(raw)
+            support["reference_gl"] = {"rows": rows, "complete": complete}
         raw = await reader.request(
             "POST",
             "/query/v1/suiteql",
@@ -474,6 +492,9 @@ async def collect_support(db, tenant_id, source, report, review, evidence, *, no
             raise ValueError("commercial_credit_invoice_changed_during_read")
         if any(reference(latest, field) != reference(invoice, field) for field in FIELDS):
             raise ValueError("Invoice classifications changed during evidence collection.")
+        line_errors = []
+        support["invoice_lines"] = _sublist(latest, "item", "invoice", LINE_FIELDS | frozenset(FIELDS), line_errors)
+        support["invoice_lines_complete"] = not line_errors
         errors = []
         support["classification_lines"] = _sublist(latest, "item", "classifications", frozenset(FIELDS), errors)
         support["classification_lines_complete"] = not errors
@@ -645,7 +666,8 @@ async def verify_after(db, tenant_id, proposal, receipt):
             "/query/v1/suiteql",
             params={"limit": 30, "offset": 0},
             body={
-                "q": "SELECT tal.account, tal.accountingbook, tal.debit, tal.credit FROM transactionaccountingline tal "
+                "q": "SELECT tal.account, tal.accountingbook, tal.debit, tal.credit "
+                "FROM transactionaccountingline tal "
                 "JOIN transaction t ON t.id=tal.transaction "
                 f"WHERE tal.transaction={invoice_id} AND t.subsidiary={profile.subsidiary_id}"
             },
