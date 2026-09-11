@@ -51,14 +51,15 @@ _GATHER_DRIVE_TIMEOUT_SECONDS = 15.0
 def _build_financial_mode_task(user_message: str) -> str:
     """Build task for financial report queries.
 
-    Always uses the LOCAL netsuite_financial_report tool which uses BUILTIN.CONSOLIDATE
-    for correct multi-currency consolidation at posting-time exchange rates.
-    MCP ns_runReport uses real-time FX rates which diverge from NetSuite UI numbers
-    on multi-currency tenants — not suitable for penny-perfect financial statements.
+    The local templates use the primary book and consolidation target subsidiary 1.
+    Subsidiary filtering does not change that reporting currency. Verify scope
+    before selecting the local or native report path.
     """
     return (
         f"{user_message}\n\n"
-        f"[{_FINANCIAL_MODE_TAG}] Use the LOCAL netsuite_financial_report tool.\n\n"
+        f"[{_FINANCIAL_MODE_TAG}] Verify account, book, period and reporting currency first. "
+        "Use netsuite_financial_report only for its primary-book, subsidiary-1 consolidation scope; "
+        "otherwise inspect the available native report/query tools.\n\n"
         "Parameters:\n"
         '  report_type: "income_statement" | "balance_sheet" | "trial_balance" | "income_statement_trend" | "balance_sheet_trend"\n'
         '  period: "Feb 2026" (single) or "Jan 2026, Feb 2026, Mar 2026" (trend/quarter)\n'
@@ -72,7 +73,7 @@ def _build_financial_mode_task(user_message: str) -> str:
         "3. Comparisons if the user asked for them\n"
         "Reference the pre-computed summary numbers (total_revenue, gross_profit, net_income, etc.) for your analysis.\n"
         "For trend reports, summary.by_period contains per-period breakdowns — compare across periods.\n\n"
-        "FALLBACK: MCP ns_runReport if local tool errors (note: MCP may show slight FX differences)."
+        "FALLBACK: Inspect MCP report parameters and scope before using a native report; explain any basis differences."
     )
 
 
@@ -330,6 +331,15 @@ def _assemble_system_prompt(*, template: str, tool_definitions: list[dict]) -> s
     metabase_context = build_metabase_skill_context(tool_definitions, template=template)
     if metabase_context:
         prompt += f"\n\n{metabase_context}"
+    # This reference tool's accounting contract must also reach UnifiedAgent.
+    # Keep activation tied to the final inventory and avoid duplicating a
+    # fragment already assembled by the legacy template path.
+    tool_names = {tool["name"] for tool in tool_definitions}
+    for profile in _knowledge_profiles:
+        if profile.profile_id == "accounting_context" and profile.matches_tools(tool_names):
+            fragment = profile.prompt_fragment.strip()
+            if fragment and fragment not in prompt:
+                prompt += f"\n\n{fragment}"
     return prompt + build_source_selection_guidance(tool_definitions)
 
 

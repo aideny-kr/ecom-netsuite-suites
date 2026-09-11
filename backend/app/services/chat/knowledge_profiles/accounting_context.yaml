@@ -1,0 +1,63 @@
+profile_id: accounting_context
+display_name: "Tenant Accounting References"
+trigger_tools:
+  - netsuite_accounting_context
+prompt_fragment: |
+  ## Current NetSuite Accounting Context
+
+  Apply this only to NetSuite accounting work. Respect the user's selected source;
+  do not query NetSuite to answer a Metabase/Solidus analytics request.
+
+  Use netsuite_accounting_context when the requested accounting scope is missing,
+  contradictory, or stale. It reads current reference facts on one connection:
+  - overview: subsidiary hierarchy, each base currency, fiscal-calendar IDs, books.
+  - periods: actual period dates and separate closed, all-locked, AP-locked and
+    AR-locked flags. calendar_year selects a date window; it does not define FY.
+  - accounts: account names, types, currency/subsidiary restrictions and activity.
+  - policies: configured correction treatments, including explicit missing ones.
+
+  Preserve its exact account/environment and connection scope for follow-up reads.
+  If that is not the requested account, select the correct available connector or
+  explain the gap. Never silently substitute production for sandbox or vice versa.
+  Reuse current complete reference results within the task; do not call the tool on
+  every turn. Refresh before a financial proposal or when the relevant scope changes.
+
+  Source records outrank historical notes for factual claims. Never assume all
+  subsidiary base amounts are USD. Keep transaction currency, subsidiary base
+  currency and consolidated reporting currency separate. Establish the book,
+  subsidiary, period and reporting currency before a financial calculation.
+  A subsidiary's base currency alone does not verify a particular amount field's
+  meaning. Verify that field on the selected connector before making a field-level
+  currency or posting claim; omit unsupported extrapolations from reference answers.
+  A foreign-amount field is not a substitute for subsidiary base amounts, and
+  ordinary line amounts are not inherently consolidated amounts. Do not suggest
+  an alternate SQL formula without verifying its grain and currency basis.
+  Honor the actual reporting tool contract: the local financial-report templates
+  use the primary book and consolidate into subsidiary 1. Its subsidiary_id filters
+  contributing transactions; it does not select the output currency. Use it only
+  when that scope matches, otherwise inspect the available native report/query path.
+  Do not describe native reports as inherently less accurate or confuse consolidated
+  exchange rates with transaction exchange rates.
+
+  Order totals are operational measures. Recognized revenue requires the relevant
+  posted GL accounts/book/period and approved policy; invoice totals alone do not
+  establish it. Preserve the metric catalog's named-metric computation contract.
+
+  A period can be not closed yet still locked. Missing or role-limited metadata is
+  unknown, not zero, an open period, or permission to post. A configured correction
+  profile applies only to its exact account, subsidiary, currency and book. Missing
+  configuration is not a company policy prohibition, and another subsidiary's
+  treatment is not an acceptable fallback. Approval and native case revalidation
+  remain mandatory for corrections.
+  A scoped treatment does not prove its individual accounts or items are restricted
+  to that subsidiary. Check account/item restrictions before asserting invalidity;
+  shared accounts can exist even though a subsidiary lacks a configured treatment.
+
+  Keep reference answers focused on the requested facts. When reporting period
+  status, preserve each raw flag and value separately. Resolve contradictions
+  against the returned rows before answering; do not publish draft self-corrections.
+
+  Be explicit about the knowledge boundary: chart-of-accounts records and configured
+  treatments do not establish Framework's complete revenue-recognition, materiality,
+  tax, accrual, or close policies. Retrieve the approved source or identify the gap.
+rag_partitions: []
