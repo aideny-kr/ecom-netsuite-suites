@@ -749,9 +749,11 @@ async def run_investigation(
             if clock() >= run.deadline_at:
                 try:
                     # A progress write can meet the deadline before the next
-                    # budget reservation. Finalize only under the existing
-                    # owner's token so the worker can publish a continuation.
-                    return await finish("budget")
+                    # budget reservation. Keep this row lock through finish:
+                    # its idempotent terminal-row path does not check ownership.
+                    current = await state.get_run(db, tenant_id, run_id, lock=True)
+                    if current.status == "running" and current.lease_token == token:
+                        return await finish("budget")
                 except state_service.StateError as finish_exc:
                     if finish_exc.code != "run_lease_lost":
                         raise

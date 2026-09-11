@@ -100,6 +100,7 @@ class State:
         if not self.claimable:
             return None
         self.run.status = "running"
+        self.run.lease_token = self.token
         return self.token
 
     async def reserve_budget(self, *args, api_calls=0, orders=0, lease_token=None, **kwargs):
@@ -198,6 +199,32 @@ async def test_deadline_finalization_does_not_hide_other_state_errors():
     with pytest.raises(StateError) as exc:
         await execute(state)
     assert exc.value.code == "not_found"
+
+
+@pytest.mark.parametrize("replacement_status", ["running", "done", "budget", "error"])
+async def test_expired_worker_cannot_report_or_continue_a_replacement_owners_result(replacement_status):
+    from app.services.transaction_ops.state_service import StateError
+
+    state = State()
+    state.run.deadline_at = NOW
+
+    async def replaced_during_progress(*args, **kwargs):
+        state.run.lease_token = uuid4() if replacement_status == "running" else None
+        state.run.status = "running" if replacement_status == "running" else "finished"
+        state.run.termination_reason = None if replacement_status == "running" else replacement_status
+        raise StateError("run_lease_lost")
+
+    state.update_progress = AsyncMock(side_effect=replaced_during_progress)
+    state.finish_run = AsyncMock(wraps=state.finish_run)
+    state.get_run = AsyncMock(wraps=state.get_run)
+
+    result = await execute(state)
+
+    assert result["status"] == "yielded"
+    assert result["termination_reason"] == "stall"
+    state.finish_run.assert_not_awaited()
+    assert state.get_run.call_args.kwargs == {"lock": True}
+    assert state.events == []
 
 
 async def test_direct_window_filters_other_entities_before_native_reads_and_uses_keyset():
