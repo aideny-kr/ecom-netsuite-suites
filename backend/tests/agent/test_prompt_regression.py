@@ -39,6 +39,7 @@ import pytest
 
 from app.services.chat.agents.unified_agent import UnifiedAgent
 from app.services.chat.llm_adapter import LLMResponse, TokenUsage, ToolUseBlock
+from app.services.chat.request_routing import RequestRoute, RoutingResult
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -102,6 +103,12 @@ def agent():
 
 # Common patches for all tests
 _PATCHES = {
+    # These replay fixed query/tool responses. Request classification has its
+    # own real UnifiedAgent coverage in test_request_routing and source tests.
+    "app.services.chat.request_routing.classify_request": {
+        "new_callable": AsyncMock,
+        "return_value": RoutingResult(RequestRoute(kind="analytics", continuation=False), TokenUsage()),
+    },
     "app.services.chat.tools.execute_tool_call": {"new_callable": AsyncMock},
     "app.services.policy_service.get_active_policy": {"new_callable": AsyncMock, "return_value": None},
     "app.services.confidence_extractor.extract_structured_confidence": {

@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.services.chat.llm_adapter import LLMResponse
+from app.services.chat.llm_adapter import LLMResponse, ToolUseBlock
 from app.services.confidence_extractor import ConfidenceAssessment
 
 
@@ -25,6 +25,19 @@ class _RecordingAdapter:
 
     def __init__(self):
         self.levels: list[str | None] = []
+
+    def force_tool_choice(self, name, model=None):
+        return {"type": "tool", "name": name}
+
+    async def create_message(self, **kwargs):
+        # The real UnifiedAgent now classifies even with one data source when
+        # accounting tools are present; this adapter also models that call.
+        assert kwargs["tools"][0]["name"] == "route_request"
+        return LLMResponse(
+            tool_use_blocks=[
+                ToolUseBlock(id="route", name="route_request", input={"kind": "conversation", "continuation": False})
+            ]
+        )
 
     async def stream_message(self, **kwargs):
         self.levels.append(kwargs.get("thinking_level"))

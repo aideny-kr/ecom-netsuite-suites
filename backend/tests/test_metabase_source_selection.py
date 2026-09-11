@@ -58,13 +58,14 @@ GROUP_TASK = (
 
 @pytest.mark.parametrize("task", [CASE_TASK, GROUP_TASK])
 @pytest.mark.parametrize("streaming", [True, False])
-async def test_scoped_transaction_workflow_reaches_agent_without_database_question(task, streaming):
+@pytest.mark.parametrize("single_source", [True, False])
+async def test_scoped_transaction_workflow_reaches_agent_without_database_question(task, streaming, single_source):
     from app.services.chat.agents.base_agent import AgentResult, BaseSpecialistAgent
 
     agent = UnifiedAgent(
         tenant_id=uuid.uuid4(), user_id=uuid.uuid4(), correlation_id="case-routing", context_need="data"
     )
-    agent._tool_defs = inventory() + [
+    agent._tool_defs = ([{"name": "netsuite_suiteql"}] if single_source else inventory()) + [
         {"name": "transaction_ops_status"},
         {"name": "transaction_ops_groups"},
     ]
@@ -91,6 +92,7 @@ async def test_scoped_transaction_workflow_reaches_agent_without_database_questi
             result = await agent.run(task, {}, None, routing_adapter("transaction"), "test")
             run.assert_awaited_once()
     assert result.data == "case evidence"
+    assert result.request_context["kind"] == "transaction"
     assert "do not ask which data source" in agent.system_prompt
     assert "this request is not financial approval" in agent.system_prompt
 

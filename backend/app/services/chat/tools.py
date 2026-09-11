@@ -51,6 +51,8 @@ def _schema_property_to_anthropic(name: str, spec: dict) -> dict:
         prop["description"] = spec["description"]
     if "default" in spec:
         prop["default"] = spec["default"]
+    if "enum" in spec:
+        prop["enum"] = spec["enum"]
     return prop
 
 

@@ -71,6 +71,8 @@ class MessageResponse(BaseModel):
     citations: list | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
+    cache_creation_tokens: int | None = None
+    cache_read_tokens: int | None = None
     model_used: str | None = None
     provider_used: str | None = None
     is_byok: bool | None = None
@@ -156,6 +158,10 @@ def _serialize_message(msg: ChatMessage) -> dict:
         result["input_tokens"] = msg.input_tokens
     if msg.output_tokens is not None:
         result["output_tokens"] = msg.output_tokens
+    for field in ("cache_creation_tokens", "cache_read_tokens"):
+        value = getattr(msg, field, None)
+        if value is not None:
+            result[field] = value
     if msg.model_used:
         result["model_used"] = msg.model_used
     if msg.provider_used:

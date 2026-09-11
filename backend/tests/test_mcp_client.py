@@ -18,6 +18,8 @@ TENANT_ID = str(uuid.uuid4())
 ACTOR_ID = str(uuid.uuid4())
 
 EXPECTED_TOOLS = {
+    "agent.skill",
+    "transaction_ops.accounting_reference",
     "health",
     "transaction_ops.configs",
     "transaction_ops.run",

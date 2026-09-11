@@ -171,6 +171,8 @@ export function normalizeStreamMessage(raw: Record<string, unknown>): ChatMessag
       typeof raw.created_at === "string" ? raw.created_at : new Date().toISOString(),
     input_tokens: typeof raw.input_tokens === "number" ? raw.input_tokens : undefined,
     output_tokens: typeof raw.output_tokens === "number" ? raw.output_tokens : undefined,
+    cache_creation_tokens: typeof raw.cache_creation_tokens === "number" ? raw.cache_creation_tokens : undefined,
+    cache_read_tokens: typeof raw.cache_read_tokens === "number" ? raw.cache_read_tokens : undefined,
     model_used: typeof raw.model_used === "string" ? raw.model_used : undefined,
     provider_used: typeof raw.provider_used === "string" ? raw.provider_used : undefined,
     is_byok: typeof raw.is_byok === "boolean" ? raw.is_byok : undefined,

@@ -11,6 +11,15 @@ from app.services.chat.write_payload import PayloadParseError, normalize_write_p
 from app.services.transaction_ops import tax_correction as mod
 
 
+@pytest.mark.parametrize("field", ["id", "recordId", "internalId"])
+async def test_conflicting_tax_write_receipt_never_verifies_another_invoice(field, monkeypatch):
+    reader = AsyncMock(side_effect=AssertionError("Conflicting identity is not resolved by reading another invoice"))
+    monkeypatch.setattr("app.services.transaction_ops.netsuite_reader.authenticated_reader", reader)
+    result = await mod.verify_after(None, "tenant", {"record_id": "20"}, {field: "99"})
+    assert result == {"status": "needs_review", "reason": "invoice_receipt_identity_conflict", "retry_allowed": False}
+    reader.assert_not_called()
+
+
 def fixture():
     source = dict(
         id="1",

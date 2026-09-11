@@ -1452,6 +1452,7 @@ class BaseSpecialistAgent(abc.ABC):
                     and getattr(self, "_prose_instead_of_write_bounced", False)
                     and not getattr(self, "_write_proposal_forced", False)
                     and not _write_reached_the_human(self)
+                    and not getattr(self, "_transaction_workflow", False)
                 ):
                     self._write_proposal_forced = True
                     print("[FORCE_WRITE] stage2 triggered", flush=True)
@@ -1530,6 +1531,7 @@ class BaseSpecialistAgent(abc.ABC):
                     _pending_write_type = _last_metadata_record_type(tool_calls_log)
                     if (
                         _pending_write_type
+                        and not getattr(self, "_transaction_workflow", False)
                         and not _write_reached_the_human(self)
                         and not getattr(self, "_prose_instead_of_write_bounced", False)
                     ):
@@ -1793,6 +1795,52 @@ class BaseSpecialistAgent(abc.ABC):
                     mutation_type = await classify_connector_mutation(block.name, db, self.tenant_id)
                     if mutation_type is not None:
                         record_type = block.input.get("recordType", "unknown")
+
+                        # Case/group corrections obtain their exact cards from
+                        # the guarded accounting tools below. Generic metadata
+                        # validation cannot establish treatment eligibility.
+                        if getattr(self, "_transaction_workflow", False):
+                            result_str = json.dumps(
+                                {
+                                    "error": "accounting_adapter_required",
+                                    "financial_writes": 0,
+                                    "instruction": "Use transaction_ops_accounting_evidence for the case or "
+                                    "transaction_ops_accounting_group for the selected group. These tools prepare "
+                                    "supported exact approval cards. If no proposal is available, investigate the "
+                                    "specific missing evidence or capability. Do not retry a generic write or "
+                                    "substitute a journal, credit, refund, replay or arbitrary API operation.",
+                                }
+                            )
+                            elapsed_ms = int((time.monotonic() - t0) * 1000)
+                            yield (
+                                "tool_end",
+                                {
+                                    "tool_name": block.name,
+                                    "step": step,
+                                    "duration_ms": elapsed_ms,
+                                    "success": False,
+                                    "result_summary": "A supported accounting treatment is required.",
+                                },
+                            )
+                            tool_calls_log.append(
+                                build_tool_call_log_entry(
+                                    step=step,
+                                    agent_name=self.agent_name,
+                                    tool_name=block.name,
+                                    params=block.input,
+                                    result_str=result_str,
+                                    duration_ms=elapsed_ms,
+                                )
+                            )
+                            tool_results_content.append(
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": block.id,
+                                    "content": result_str,
+                                    "is_error": True,
+                                }
+                            )
+                            continue
 
                         # ── ask_user hint pop (requirement C) — MUST happen
                         # before anything else touches tool_input: this key
@@ -2603,6 +2651,12 @@ class BaseSpecialistAgent(abc.ABC):
                     # The supported accounting payload is already deterministic. Route it
                     # through the existing validator/HITL card instead of asking the model
                     # to repeat it in another hop (which can hallucinate a card in prose).
+                    if not _had_error and block.name in {
+                        "transaction_ops_status",
+                        "transaction_ops_accounting_evidence",
+                        "transaction_ops_accounting_group",
+                    }:
+                        self._transaction_workflow = True
                     if (
                         block.name in {"transaction_ops_accounting_evidence", "transaction_ops_accounting_group"}
                         and not _had_error
