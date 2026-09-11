@@ -4,6 +4,7 @@ Generic custom servers retain their approval requirement. Neither a tool's
 name nor a server-provided readOnlyHint establishes authority on its own.
 """
 
+from copy import deepcopy
 from urllib.parse import urlsplit
 
 _READ_TOOLS = frozenset({"search", "read_resource", "construct_query", "query", "execute_query", "execute_question"})
@@ -40,6 +41,40 @@ def requires_custom_tool_confirmation(connector, raw_tool_name: str) -> bool:
     return getattr(connector, "provider", None) in {"custom", "shopify_mcp", "stripe_mcp"} and not (
         is_read_only_metabase_tool(connector, raw_tool_name)
     )
+
+
+def constrain_metabase_query_schema(connector, raw_tool_name: str, schema: dict) -> dict:
+    """Advertise the same MBQL-only contract enforced by the dispatcher.
+
+    Native MCP's generic query schema accepts arbitrary objects. In this client
+    that makes SQL look usable even though dispatch rejects it. Preserve all
+    other native parameters, handles, pagination and connector metadata.
+    """
+    if not is_read_only_metabase_tool(connector, raw_tool_name) or raw_tool_name not in {
+        "query",
+        "construct_query",
+        "execute_query",
+        "execute_question",
+    }:
+        return schema
+    properties = schema.get("properties")
+    if not isinstance(properties, dict) or "query" not in properties:
+        return schema
+    constrained = deepcopy(schema)
+    mbql = {
+        "type": "object",
+        "properties": {
+            "lib/type": {"type": "string", "enum": ["mbql/query"]},
+            "stages": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+        },
+        "required": ["lib/type", "stages"],
+    }
+    # query/execute_query also support pagination by opaque handle without a
+    # new query object. The dispatcher validates that the handle accompanies null.
+    constrained["properties"]["query"] = (
+        {"anyOf": [mbql, {"type": "null"}]} if raw_tool_name in {"query", "execute_query"} else mbql
+    )
+    return constrained
 
 
 def metabase_query_input_error(connector, raw_tool_name: str, params: dict) -> str | None:

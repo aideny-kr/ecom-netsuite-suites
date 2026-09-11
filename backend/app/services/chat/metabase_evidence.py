@@ -13,7 +13,10 @@ import json
 import re
 import secrets
 from dataclasses import dataclass, field
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, DecimalException, InvalidOperation, localcontext
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 _REFERENCE = re.compile(r"\{\{mb_ref:[^{}]+\}\}")
 _NUMBER = re.compile(r"(?<![\w])[-+]?(?:\d+(?:[.,]\d+)*|\.\d+)(?:[eE][+-]?\d+)?")
@@ -29,6 +32,29 @@ _MATHEMATICAL_PROSE = re.compile(
     re.I,
 )
 UNVERIFIED = "I couldn't verify the requested figures from completed Metabase aggregates. Please retry the analysis."
+
+
+class Calculation(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    operation: Literal["percentage", "ratio", "difference", "percentage_change"]
+    left_reference: str
+    right_reference: str
+    decimal_places: int = Field(default=2, ge=0, le=6)
+
+
+CALCULATOR_TOOL = {
+    "name": "analytics_calculate",
+    "description": (
+        "Calculate from verified aggregate value references returned in this turn. "
+        "No raw numbers, detail-row counts, SQL or code are accepted. "
+        "percentage = 100 * left / right (part / whole); ratio = left / right; "
+        "difference = left - right; percentage_change = 100 * (left - right) / right "
+        "(current / baseline). Choose compatible populations, grain, currency and units. "
+        "Complete matching controls for grouped inputs first. Returns a verified value_reference "
+        "to copy in the answer; percentages use percent units. Zero denominators are undefined."
+    ),
+    "input_schema": Calculation.model_json_schema(),
+}
 
 
 def _decimal(value) -> Decimal | None:
@@ -100,6 +126,13 @@ class MetabaseEvidence:
     prompt = """\n<metabase_numeric_evidence>
 For the final answer, copy the exact mb_ref placeholders supplied by executed
 Metabase results. The application replaces them with verified values/tables.
+For requested percentages, ratios, differences or percentage changes, use the
+available analytics_calculate tool with aggregate value references. Select the
+correct numerator and denominator from compatible results and complete grouped
+controls first. Copy its value_reference and label percent results with %.
+A fraction or formula is not the requested calculated answer. Never leave
+arithmetic between references for the user to evaluate. Query other derived
+measures on the server when the calculator cannot express them.
 Intermediate text is withheld while tools and controls run. The user has not
 seen any draft: your FINAL response must include the complete requested answer,
 including the headline and every requested breakdown, even if drafted earlier.
@@ -135,6 +168,69 @@ These reference requirements apply to the final answer, not tool arguments.
         self.tables: list[EvidenceTable] = []
         self.bindings: dict[str, tuple[int, object]] = {}
         self.handles: dict[tuple[str, str], dict] = {}
+        self.scalar_references: set[str] = set()
+        self.calculation_dependencies: dict[str, set[int]] = {}
+        self.calculation_values: dict[str, Decimal] = {}
+
+    def calculate(self, params: dict) -> dict:
+        """Pure, turn-local Decimal computation; no connector or database access."""
+        try:
+            calculation = Calculation.model_validate(params)
+        except ValidationError:
+            return {"error": "Use a supported operation, two aggregate value references and a valid decimal precision."}
+        references = (calculation.left_reference, calculation.right_reference)
+        if any(ref not in self.scalar_references for ref in references):
+            return {
+                "error": "Both inputs must be verified aggregate value references from this turn, "
+                "not raw numbers or tables."
+            }
+        dependencies = set()
+        for ref in references:
+            dependencies.update(self.calculation_dependencies.get(ref, {self.bindings[ref][0]}))
+        for table_id in dependencies:
+            error = self._control_error(self.tables[table_id])
+            if error:
+                return {"error": error}
+        left, right = (self.calculation_values.get(ref, _decimal(self.bindings[ref][1])) for ref in references)
+        if left is None or right is None:
+            return {"error": "Both inputs must have finite numeric aggregate values."}
+        if any(value and abs(value.adjusted()) > 40 for value in (left, right)):
+            return {"error": "The input magnitude exceeds the supported calculation range."}
+        operation = calculation.operation
+        if operation != "difference" and right == 0:
+            return {
+                "error": "The denominator is zero, so this result is undefined. Report it as unavailable, not zero."
+            }
+        try:
+            with localcontext() as ctx:
+                ctx.prec = 96
+                if operation == "difference":
+                    value = left - right
+                elif operation == "percentage_change":
+                    value = (left - right) / right * 100
+                else:
+                    value = left / right * (100 if operation == "percentage" else 1)
+                exact_value = value
+                value = value.quantize(Decimal(1).scaleb(-calculation.decimal_places), rounding=ROUND_HALF_UP)
+                if value == 0:
+                    value = abs(value)
+        except DecimalException:
+            return {"error": "The result exceeds the supported calculation precision."}
+        ref = self._reference(min(dependencies), f"calc{len(self.calculation_dependencies)}", format(value, "f"))
+        self.scalar_references.add(ref)
+        self.calculation_dependencies[ref] = dependencies
+        self.calculation_values[ref] = exact_value
+        return {
+            "value_reference": ref,
+            "operation": operation,
+            "inputs": list(references),
+            "decimal_places": calculation.decimal_places,
+            "unit": "percent"
+            if operation in {"percentage", "percentage_change"}
+            else "ratio"
+            if operation == "ratio"
+            else "input units",
+        }
 
     def _reference(self, table_id: int, suffix: str, value) -> str:
         reference = "{{mb_ref:" + self.nonce + f":{table_id}:{suffix}" + "}}"
@@ -212,7 +308,9 @@ These reference requirements apply to the final answer, not tool arguments.
             cells = []
             for column_index, value in enumerate(row):
                 if complete and column_index in measures and _decimal(value) is not None:
-                    cells.append(self._reference(table_id, f"r{row_index}c{column_index}", value))
+                    ref = self._reference(table_id, f"r{row_index}c{column_index}", value)
+                    self.scalar_references.add(ref)
+                    cells.append(ref)
                 else:
                     cells.append(value)
             preview.append(cells)
@@ -309,11 +407,19 @@ These reference requirements apply to the final answer, not tool arguments.
                 "Use only references returned in this turn."
             )
         errors = []
-        for table_id in sorted({self.bindings[reference][0] for reference in references}):
+        dependencies = set()
+        for reference in references:
+            dependencies.update(self.calculation_dependencies.get(reference, {self.bindings[reference][0]}))
+        for table_id in sorted(dependencies):
             error = self._control_error(self.tables[table_id])
             if error:
                 errors.append(error)
         prose = _REFERENCE.sub("", text)
+        if re.search(_REFERENCE.pattern + r"\s*[/+*−-]\s*" + _REFERENCE.pattern, text):
+            errors.append(
+                "An unevaluated calculation was withheld. Use analytics_calculate on those value references "
+                "and report its value_reference with the appropriate unit, rather than a fraction or formula."
+            )
         literals = _NUMBER.findall(prose) + _SPELLED_NUMBER.findall(prose)
         if literals:
             errors.append(

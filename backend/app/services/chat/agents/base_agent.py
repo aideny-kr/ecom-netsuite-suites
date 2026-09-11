@@ -1084,6 +1084,8 @@ class BaseSpecialistAgent(abc.ABC):
                         result_str = json.dumps(
                             {"error": f"Policy blocked: {policy_result.get('reason', 'Not allowed')}"}
                         )
+                    elif block.name == "analytics_calculate" and getattr(self, "_metabase_evidence", None) is not None:
+                        result_str = json.dumps(self._metabase_evidence.calculate(block.input))
                     else:
                         result_str = await execute_tool_call(
                             tool_name=block.name,
@@ -2493,6 +2495,8 @@ class BaseSpecialistAgent(abc.ABC):
                         result_str = json.dumps(
                             {"error": f"Policy blocked: {policy_result.get('reason', 'Not allowed')}"}
                         )
+                    elif block.name == "analytics_calculate" and getattr(self, "_metabase_evidence", None) is not None:
+                        result_str = json.dumps(self._metabase_evidence.calculate(block.input))
                     else:
                         result_str = await execute_tool_call(
                             tool_name=block.name,
