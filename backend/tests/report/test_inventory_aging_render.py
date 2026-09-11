@@ -486,6 +486,61 @@ def test_print_hides_the_in_body_collapsible_aged_list_the_pdf_appendix_carries_
     assert ":not([open])" not in print_block
 
 
+def test_trend_chart_endpoint_labels_are_one_decimal_and_fit_inside_the_svg():
+    """The first live PDF drew endpoint labels as the raw decimal literal
+    (`26.4535567%`) past the SVG's right edge, so they were clipped on the page (and
+    overflow on screen). The y-axis was already formatted to one decimal; the endpoint
+    labels must be too, and must end inside the viewBox given the right padding. The
+    render fixture's shares happen to be one-decimal literals, so this feeds the live
+    run's seven-decimal ones directly."""
+    import re
+
+    from app.services.report.report_html import _IA_TREND_W, _ia_trend_chart_html
+
+    report = {
+        "locations": [{"location": "Dimerco"}, {"location": "Fedex"}],
+        "trend": {
+            "Dimerco": [{"d": "2026-09-03", "pct_90p": "18.7"}, {"d": "2026-09-10", "pct_90p": "15.2583824"}],
+            "Fedex": [{"d": "2026-09-03", "pct_90p": "23.9"}, {"d": "2026-09-10", "pct_90p": "26.4535567"}],
+        },
+    }
+    svg = _ia_trend_chart_html(report)
+    labels = re.findall(r'<text x="([\d.]+)" y="[\d.]+" fill="#[0-9A-Fa-f]{6}" font-weight="700">([^<]*)</text>', svg)
+    assert [text for _x, text in labels] == ["15.3%", "26.5%"]
+    for x, text in labels:
+        assert float(x) + 7 * len(text) <= _IA_TREND_W, (x, text)  # ~7 viewBox units per glyph at 12px
+
+
+def test_print_layout_fits_the_chart_and_table_pair_under_the_kpis():
+    """Page 1 of the first live PDF was half blank: the chart-plus-table pair is kept
+    whole and did not fit under the KPI cards, and the four watch chips took four
+    lines. In print the chart takes 40 percent beside the table, the chart's axis text
+    is sized for that scale, and chips cap at half the row so they pack two per line."""
+    from app.services.report.report_html import _IA_CSS
+
+    print_block = _IA_CSS.split("@media print", 1)[1]
+    assert ".ia-mid > .chart { flex: 0 0 38%" in print_block
+    assert ".ia-mid table.tnum td { font-size: 12px" in print_block  # the by-location table clipped at 14px cells
+    assert ".ia-chip { font-size: 11px; padding: 4px 8px; box-shadow: none; max-width: calc(50% - 3px)" in print_block
+    assert ".chart .ia-grid text, .chart .ia-xaxis text { font-size: 14px" in print_block
+
+
+def test_top_positions_card_is_kept_whole_in_print(html):
+    """The last row of Largest aged positions landed alone on the next page under a
+    repeated header. The SECTION (heading + card; top 5 per location, bounded) is kept
+    on one page, at a cell density that fits one — keeping only the card whole while
+    it was taller than a page stranded the heading alone on a blank page."""
+    from app.services.report.report_html import _IA_CSS
+
+    assert '<div class="ia-section ia-top"><h2>Largest aged positions' in html
+    print_block = _IA_CSS.split("@media print", 1)[1]
+    assert ".ia-section.ia-top { break-inside: avoid; page-break-inside: avoid; }" in print_block
+    assert ".ia-top table.tnum td { font-size: 12px" in print_block
+    # the short computed highlights list is kept whole too (it split five-and-one across pages)
+    assert '<div class="ia-section ia-hl"><h2>Highlights' in html
+    assert ".ia-section.ia-hl { break-inside: avoid; page-break-inside: avoid; }" in print_block
+
+
 def test_render_report_html_deterministic(spec):
     assert render_report_html(spec) == render_report_html(spec)
 

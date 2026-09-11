@@ -390,7 +390,7 @@ _IA_CSS = """
   .ia-meta { text-align: right; }
   .ia-section { margin: 12px 0; }
   .ia-watch { display: flex; flex-wrap: wrap; gap: 6px; }
-  .ia-chip { font-size: 11px; padding: 4px 8px; box-shadow: none; }
+  .ia-chip { font-size: 11px; padding: 4px 8px; box-shadow: none; max-width: calc(50% - 3px); }
   /* KPI row: one line of four cards; the sparkline gets pixel dimensions and is clipped to its
      card (WeasyPrint resolves a percentage svg width against the wrong box) */
   .ia-kpis { display: flex; flex-wrap: nowrap; gap: 10px; margin: 8px 0 4px; }
@@ -402,13 +402,29 @@ _IA_CSS = """
   .ia-kpis .kpi svg { width: 214px; height: 26px; margin-top: 2px; display: block; }
   /* trend chart beside the by-location table */
   .ia-mid { display: flex; gap: 14px; align-items: flex-start; }
-  .ia-mid > .chart { flex: 0 0 32%; min-width: 0; }
+  .ia-mid > .chart { flex: 0 0 38%; min-width: 0; }
   .ia-mid > .tblcard { flex: 1 1 0; min-width: 0; }
+  /* the by-location table's nine columns clip at the base 14px cell size once the chart has its
+     share of the row; the base `th,td` rule sizes cells directly, so the size goes on the cells */
+  .ia-mid table.tnum td { font-size: 12px; padding: 3px 4px; }
+  .ia-mid table.tnum th { font-size: 9px; }
   .chart svg { width: 100%; height: auto; }
+  /* the chart's axis text is in viewBox units; at 40 percent of a landscape page the SVG draws at
+     roughly two-thirds scale, so 15 lands at ~10px on paper */
+  .chart .ia-grid text, .chart .ia-xaxis text { font-size: 14px; }
+  /* highlights are a short computed list; keep it whole so it never splits five-and-one across pages */
+  .ia-section.ia-hl { break-inside: avoid; page-break-inside: avoid; }
   .chart, .tblcard, .nb-card { box-shadow: none; overflow-x: visible; }
   .chart, .ia-mid > .tblcard { break-inside: avoid; }
   /* long tables flow across pages (rows never split, header repeats); wide tables shrink to fit */
   .ia-section > .tblcard { break-inside: auto; page-break-inside: auto; }
+  /* the top-5-per-location section is bounded, so heading and card move to a fresh page together
+     rather than stranding the last row alone under a repeated header; its cells are sized so the
+     whole section fits one landscape page (an unbreakable block taller than a page breaks anyway
+     and leaves the heading behind) */
+  .ia-section.ia-top { break-inside: avoid; page-break-inside: avoid; }
+  .ia-top table.tnum td { font-size: 12px; padding: 3px 4px; line-height: 1.2; }
+  .ia-top table.tnum th { font-size: 9px; }
   .tblcard { padding: 8px 10px; }
   table.tnum { font-size: 9px; }
   table.tnum th, table.tnum td { padding: 3px 4px; }
@@ -1372,7 +1388,7 @@ _IA_BUCKET_SWATCH = {
 
 _IA_SPARK_W, _IA_SPARK_H = 200.0, 34.0
 _IA_TREND_W, _IA_TREND_H = 600.0, 232.0
-_IA_TREND_PAD_L, _IA_TREND_PAD_R, _IA_TREND_PAD_T, _IA_TREND_PAD_B = 52.0, 60.0, 20.0, 26.0
+_IA_TREND_PAD_L, _IA_TREND_PAD_R, _IA_TREND_PAD_T, _IA_TREND_PAD_B = 56.0, 60.0, 20.0, 26.0
 
 _IA_TOP_HEADER = (
     '<tr><th>SKU</th><th class="desc" style="text-align:left">Item</th><th>Category</th>'
@@ -1605,8 +1621,9 @@ def _ia_trend_chart_html(report: dict) -> str:
         endpoint_parts.append(
             f'<circle cx="{ex:.1f}" cy="{ey:.1f}" r="4" fill="{color}"><title>{escape(tip)}</title></circle>'
         )
+        pct_label = f"{float(last['pct_90p']):.1f}%"  # one decimal, same as the y-axis (a raw literal overflowed)
         label_parts.append(
-            f'<text x="{ex + 6:.1f}" y="{ey + 4:.1f}" fill="{color}" font-weight="700">{last["pct_90p"]}%</text>'
+            f'<text x="{ex + 6:.1f}" y="{ey + 4:.1f}" fill="{color}" font-weight="700">{pct_label}</text>'
         )
         dash_note = " (dashed)" if dashed else ""
         legend_items.append(f'<span><i style="background:{color}"></i>{escape(loc_name)}{dash_note}</span>')
@@ -1616,7 +1633,7 @@ def _ia_trend_chart_html(report: dict) -> str:
         'aria-label="Line chart: percent of on-hand value older than 90 days per location over time">'
         f'<g class="ia-grid">{"".join(grid_parts)}</g>'
         f"{''.join(series_parts)}<g>{''.join(endpoint_parts)}</g>"
-        f'<g font-size="11" font-weight="700">{"".join(label_parts)}</g>'
+        f'<g font-size="12" font-weight="700">{"".join(label_parts)}</g>'
         f'<g class="ia-xaxis">{"".join(x_label_parts)}</g></svg>'
     )
     legend = (
@@ -1808,7 +1825,7 @@ def _ia_top_positions_html(report: dict) -> str:
         f"<tbody>{all_rows_html}</tbody></table></div></details>"
     )
     return (
-        '<div class="ia-section"><h2>Largest aged positions '
+        '<div class="ia-section ia-top"><h2>Largest aged positions '
         "<span>· top 5 per location by value, older than 90 days · the Excel file "
         "carries every SKU</span></h2>"
         f'<div class="tblcard"><table class="tnum"><thead>{_IA_TOP_HEADER}</thead>'
@@ -1859,7 +1876,7 @@ def _ia_highlights_html(highlights: list[dict]) -> str:
         return ""
     items = "".join(f"<li>{escape(h['text'])}</li>" for h in highlights)
     return (
-        '<div class="ia-section"><h2>Highlights '
+        '<div class="ia-section ia-hl"><h2>Highlights '
         "<span>· driver attribution, largest movers first, threshold-gated</span></h2>"
         f'<ul class="hl">{items}</ul></div>'
     )
