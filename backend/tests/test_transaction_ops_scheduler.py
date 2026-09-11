@@ -52,6 +52,7 @@ def dependencies(monkeypatch):
     monkeypatch.setattr(mod, "_refresh_sources", AsyncMock(return_value=0))
     monkeypatch.setattr(mod, "_schedule_history", AsyncMock(return_value=(False, None)))
     monkeypatch.setattr(mod.celery_app, "send_task", Mock())
+    monkeypatch.setattr(mod, "_reserve_publication", Mock(return_value=True))
     return state
 
 
@@ -266,6 +267,8 @@ def test_real_broker_socket_timeout_does_not_hold_asyncio_shutdown(monkeypatch):
 
 
 async def test_real_scheduler_persists_opted_in_scope_and_recovers_failed_publish(db, admin_user, monkeypatch):
+    # Isolate durable DB scheduling; real Redis reservation/expiry has separate coverage.
+    monkeypatch.setattr(mod, "_reserve_publication", Mock(return_value=True))
     from app.schemas.transaction_runs import ConfigControl
     from app.services.transaction_ops import state_service as state
     from tests.conftest import enable_feature_flag
@@ -306,6 +309,8 @@ async def test_real_scheduler_persists_opted_in_scope_and_recovers_failed_publis
 
 
 async def test_real_scheduler_resumes_budget_cursor_once_in_next_bucket(db, admin_user, monkeypatch):
+    # Isolate durable DB scheduling; real Redis reservation/expiry has separate coverage.
+    monkeypatch.setattr(mod, "_reserve_publication", Mock(return_value=True))
     from app.schemas.transaction_runs import ConfigControl, ProgressUpdate
     from app.services.transaction_ops import state_service as state
     from tests.conftest import enable_feature_flag
@@ -345,6 +350,8 @@ async def test_real_scheduler_resumes_budget_cursor_once_in_next_bucket(db, admi
 
 
 async def test_real_recovery_includes_expired_deadlines_and_excludes_live_leases(db, admin_user, monkeypatch):
+    # Isolate durable DB scheduling; real Redis reservation/expiry has separate coverage.
+    monkeypatch.setattr(mod, "_reserve_publication", Mock(return_value=True))
     from app.schemas.transaction_runs import RunCreate
     from app.services.transaction_ops import state_service as state
     from tests.conftest import enable_feature_flag
