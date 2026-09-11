@@ -993,20 +993,24 @@ class TestScheduleApprove:
 # ---------------------------------------------------------------------------
 
 
-def _capture_send_task(monkeypatch) -> list[tuple[str, dict]]:
+def _capture_send_task(monkeypatch) -> list[tuple[str, dict, int | None]]:
     """Fakes `celery_app.send_task` at the point `schedules.py` calls it —
     this repo's established convention (`tests/workers/test_report_auto_
     refresh.py`'s `monkeypatch.setattr(mod.celery_app, "send_task", ...)`) —
     so `/run` never actually touches a broker; returns the list of
-    `(task_name, kwargs)` calls captured."""
+    `(task_name, kwargs, priority)` calls captured. `priority` is broken out
+    from `**_kw` (alongside `queue`) so tests can assert the broker-priority
+    fix (`SCHEDULED_JOBS_RUN_NOW_PRIORITY`, `celery_app.py`'s own
+    `broker_transport_options`) without changing every existing call site's
+    2-tuple unpack (there's exactly one, updated below)."""
 
     class _FakeResult:
         id = "fake-celery-task-id"
 
-    sent: list[tuple[str, dict]] = []
+    sent: list[tuple[str, dict, int | None]] = []
 
     def fake_send_task(name, kwargs=None, **_kw):
-        sent.append((name, kwargs or {}))
+        sent.append((name, kwargs or {}, _kw.get("priority")))
         return _FakeResult()
 
     monkeypatch.setattr("app.api.v1.schedules.celery_app.send_task", fake_send_task)
@@ -1045,13 +1049,19 @@ class TestScheduleRun:
         assert job_row.status == "pending"  # not executed by this request — the task hasn't run
 
         assert len(sent) == 1
-        task_name, kwargs = sent[0]
+        task_name, kwargs, priority = sent[0]
         assert task_name == "tasks.scheduled_jobs_run_now"
         assert kwargs["schedule_id"] == str(schedule.id)
         assert kwargs["tenant_id"] == str(user.tenant_id)
         assert kwargs["use_pending"] is False
         assert kwargs["actor_id"] == str(user.id)
         assert kwargs["job_id"] == data["jobs_id"]
+        # Broker priority (fix/jobs-live-run-defects): a person is waiting on
+        # this request, so it must not sit behind a batch-task flood on the
+        # shared `sync` queue.
+        from app.workers.tasks.scheduled_jobs import SCHEDULED_JOBS_RUN_NOW_PRIORITY
+
+        assert priority == SCHEDULED_JOBS_RUN_NOW_PRIORITY == 0
 
     async def test_run_now_snapshots_the_plan_it_saw_onto_the_pre_created_jobs_row(
         self, client: AsyncClient, admin_user, db: AsyncSession, monkeypatch
@@ -1249,3 +1259,55 @@ class TestScheduleRunsList:
         user, headers = admin_user
         resp = await client.get(f"/api/v1/schedules/{uuid.uuid4()}/runs", headers=headers)
         assert resp.status_code == 404
+
+    async def test_runs_list_excludes_the_celery_wrappers_own_instrumentation_row(
+        self, client: AsyncClient, admin_user, db: AsyncSession
+    ):
+        """Live-run defect (brief G, item 3): `tasks.scheduled_jobs_run_now`
+        runs as an `InstrumentedTask` (`app/workers/base_task.py`), which
+        auto-creates its OWN `jobs` row — `job_type=self.name` (the task
+        name, not "scheduled_job") with `parameters=kwargs`, and its kwargs
+        include `schedule_id` (the same schedule this endpoint is asking
+        about). Filtering by `parameters["schedule_id"]` alone therefore
+        matches that wrapper row too, appearing as a second "run" with
+        `plan_version`/`attempt` always null. Only the real
+        `job_type="scheduled_job"` row belongs in this list."""
+        user, headers = admin_user
+        tenant = (await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))).scalar_one()
+        schedule = await _seed_job_schedule(db, tenant, plan_json=_INVENTORY_AGING_PLAN, plan_status="approved")
+
+        real_run = Job(
+            tenant_id=user.tenant_id,
+            job_type="scheduled_job",
+            status="completed",
+            started_at=datetime.now(timezone.utc),
+            completed_at=datetime.now(timezone.utc),
+            parameters={"schedule_id": str(schedule.id), "plan_version": 1, "attempt": 1},
+            result_summary={"reason": "done"},
+        )
+        db.add(real_run)
+        await db.flush()
+
+        wrapper_row = Job(
+            tenant_id=user.tenant_id,
+            job_type="tasks.scheduled_jobs_run_now",
+            status="completed",
+            started_at=datetime.now(timezone.utc),
+            completed_at=datetime.now(timezone.utc),
+            parameters={
+                "schedule_id": str(schedule.id),
+                "tenant_id": str(user.tenant_id),
+                "use_pending": False,
+                "actor_id": None,
+                "job_id": str(real_run.id),
+            },
+            result_summary=None,
+        )
+        db.add(wrapper_row)
+        await db.commit()
+
+        resp = await client.get(f"/api/v1/schedules/{schedule.id}/runs", headers=headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["id"] == str(real_run.id)

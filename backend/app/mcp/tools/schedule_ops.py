@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.pipeline import Schedule
 from app.workers.celery_app import celery_app
+from app.workers.tasks.scheduled_jobs import SCHEDULED_JOBS_RUN_NOW_PRIORITY
 
 logger = structlog.get_logger()
 
@@ -276,6 +277,10 @@ async def execute_run(params: dict, **kwargs) -> dict:
             "job_id": str(job_id),
         },
         queue="sync",
+        # Broker priority (fix/jobs-live-run-defects): a person is waiting on
+        # this chat turn, so it must not sit behind a batch-task flood on the
+        # shared `sync` queue (celery_app.py's own broker_transport_options).
+        priority=SCHEDULED_JOBS_RUN_NOW_PRIORITY,
     )
 
     logger.info(

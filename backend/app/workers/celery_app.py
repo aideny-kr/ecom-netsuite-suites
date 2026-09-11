@@ -9,6 +9,41 @@ celery_app = Celery(
     backend=settings.CELERY_RESULT_BACKEND,
 )
 
+
+def _default_send_task_priority(name, args, kwargs, options, task=None, **kw):
+    """Catch-all `task_routes` entry — MUST stay LAST in the tuple below.
+    `celery.app.routes.Router.lookup_route` tries each router in list order
+    and returns the first non-None result (verified against the installed
+    `celery/app/routes.py`), so the explicit dict ahead of this one always
+    wins for the two names it names, and this callable only ever fires for
+    everything else.
+
+    Round 4 (fix/jobs-live-run-defects): round 3's fix set
+    `task_default_priority = 6` believing it capped unlabeled batch work
+    (e.g. `tasks.transaction_ops_run`) below scheduled-jobs' own elevated
+    sends. It never did: `task_default_priority` only becomes `Task.priority`
+    — a class attribute `celery/app/task.py`'s `from_config` table binds,
+    read ONLY by a BOUND task's own `.apply_async()`/`.delay()`.
+    `celery_app.send_task(name, ...)` — the "send by name" API
+    `app.services.transaction_ops.scheduler.publish_investigation` (and
+    `report_auto_refresh.py`, `solidus_sync.py`, `recon_scheduled_run_all.py`,
+    every other `send_task` caller in this codebase) actually uses — never
+    touches a `Task` object at all, so it never read that default. Without an
+    explicit `priority=` kwarg of its own, such a call published at whatever
+    priority an unset message defaults to on the Redis transport (priority 0
+    — the FIRST bucket kombu's transport polls, same as scheduled-jobs' own
+    elevated "Run now"/sweep sends), silently defeating the whole point of a
+    lower number for them.
+
+    A `task_routes` entry, by contrast, IS consulted by both `send_task` and
+    `Task.apply_async` (`Router.route()` is the one call every dispatch path
+    shares — see `test_celery_config.py`), so this is the correct mechanism.
+    `queue` is left untouched (`None` here means "don't route the queue" —
+    `Router.expand_destination` only touches `queue` when present in the
+    returned dict), so this never overrides a caller's own `queue=` kwarg."""
+    return {"priority": 6}
+
+
 celery_app.conf.update(
     task_serializer="json",
     accept_content=["json"],
@@ -24,6 +59,48 @@ celery_app.conf.update(
         "recon": {"exchange": "recon", "routing_key": "recon"},
         "export": {"exchange": "export", "routing_key": "export"},
     },
+    # Redis transport supports per-message priority with no new queues and no
+    # worker flags. On staging the single shared worker was flooded by
+    # another feature's batch task (hundreds of messages on `sync`/`recon`),
+    # starving a human's "Run now" and the Beat sweep behind the flood — see
+    # `app.workers.tasks.scheduled_jobs`'s SCHEDULED_JOBS_*_PRIORITY
+    # constants for who actually publishes at an elevated priority.
+    #
+    # We rely entirely on kombu's OWN defaults here rather than overriding
+    # `broker_transport_options`: kombu's Redis transport polls priority
+    # buckets in ASCENDING order (`Transport.Channel._brpop_start` builds its
+    # BRPOP key list `for pri in priority_steps for queue in queues`, and
+    # `priority_steps` defaults to `[0, 3, 6, 9]`) — so priority 0 is served
+    # FIRST, 9 LAST. Do NOT set `queue_order_strategy` (it replaces
+    # round-robin fairness across default/sync/recon/export with a fixed
+    # order — an unrelated regression) or `sep` (changes the Redis key names
+    # a worker addresses — old and new workers would talk past each other
+    # during a rolling deploy).
+    #
+    # Round 4: `task_routes` (not `task_default_priority`, see
+    # `_default_send_task_priority`'s docstring) is the actual broker-priority
+    # mechanism. The two literal task names below MUST stay in sync with
+    # `app.workers.tasks.scheduled_jobs.SCHEDULED_JOBS_RUN_NOW_PRIORITY`/
+    # `SCHEDULED_JOBS_SWEEP_PRIORITY` (not imported here — that module already
+    # imports `celery_app` from this one, so importing back would be
+    # circular); `tests/test_celery_config.py` pins the two in sync.
+    # `_default_send_task_priority` (module-level function above, LAST in
+    # this tuple) is the catch-all for every other task name, including
+    # unlabeled batch work like `tasks.transaction_ops_run`.
+    task_routes=(
+        {
+            "tasks.scheduled_jobs_run_now": {"queue": "sync", "priority": 0},
+            "tasks.scheduled_jobs_sweep": {"queue": "sync", "priority": 3},
+        },
+        _default_send_task_priority,
+    ),
+    # Kept ONLY as the `Task.priority` fallback for a bound task's own
+    # `.apply_async()`/`.delay()` call (several call sites in this codebase
+    # do that directly: `app/main.py`, several `mcp/tools/*`,
+    # `api/v1/workspaces.py`, `drive_rag_sync.py`, `onboarding_service.py`).
+    # It is NOT what protects scheduled-jobs' priority any more — see
+    # `_default_send_task_priority`'s docstring above.
+    task_default_priority=6,
 )
 
 celery_app.conf.include = [

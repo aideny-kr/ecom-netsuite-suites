@@ -40,6 +40,7 @@ import logging
 import uuid
 from dataclasses import dataclass
 
+from google.api_core.exceptions import BadRequest, NotFound
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -75,6 +76,26 @@ NetSuite or Celigo write is in this registry; do not invent a step type that res
 Order matters: when a step consumes an earlier step's output (for example drive.upload needs \
 the id of the report.compose step that produced the report it delivers), that earlier step \
 must come first in the steps array, and the later step must name its id in the matching param.
+
+A report_step param (on report.render_pdf, report.build_xlsx, and drive.upload) must always \
+name the report.compose step itself — never a report.render_pdf, report.build_xlsx, or another \
+drive.upload step. In particular, drive.upload's report_step names the SAME compose step that \
+render_pdf/build_xlsx used, not the render_pdf or build_xlsx step id, even though those ran \
+first — a plan needs exactly ONE drive.upload per report.compose, because \
+deliver_report_to_drive uploads both the PDF and the Excel workbook in a single call.
+
+When the instruction maps to a registered playbook (for example inventory_aging), write no \
+free-form bigquery_sql step for it — the playbook already owns its own dataset-qualified data \
+sources. Compose the report with report.compose(playbook_key, params, mode="period") instead. \
+Use mode="tracking" only for a playbook that tracks a real NetSuite accounting period; \
+inventory_aging is a BigQuery snapshot report with no such period, so it always compiles with \
+mode="period", never mode="tracking".
+
+Worked example — an instruction to build the Inventory Aging Weekly report compiles to exactly \
+these four steps, in order, with no bigquery_sql step: report.compose(playbook_key="inventory_aging", \
+params={"locations": [...]}, mode="period") -> report.render_pdf(report_step=<the compose \
+step's id>) -> report.build_xlsx(report_step=<the same compose step's id>) -> \
+drive.upload(report_step=<the same compose step's id>).
 
 Call compile_plan when every required param can be derived from the instruction and the \
 tenant context below. Call ask_clarification with exactly ONE question when a required detail \
@@ -339,7 +360,7 @@ async def _audit_compile(
             "instruction_hash": hashlib.sha256(instruction.encode("utf-8")).hexdigest(),
             "model": model,
             "plan_version": plan_version,
-            "outcome": outcome,  # "compiled" | "clarification"
+            "outcome": outcome,  # "compiled" | "clarification" | "preflight_unavailable"
         },
     )
 
@@ -351,6 +372,181 @@ def _repair_tool_result_content(errors: list[str]) -> str:
         + ". Provide a corrected plan via compile_plan, or call ask_clarification if a "
         "required detail cannot be derived from the instruction."
     )
+
+
+class PreflightUnavailable(Exception):  # noqa: N818 — a preflight OUTCOME (like Clarification/PlanInvalid), not a generic Error
+    """Delta gate (brief I, items 1 + 3; round 3 fix, item 2): raised by
+    ``_bigquery_preflight`` when a ``bigquery_sql`` step's dry run could not
+    be evaluated for a reason that has nothing to do with the plan itself --
+    the tenant's BigQuery connector could not be looked up, its
+    ``encrypted_credentials`` could not be decrypted (item 1), the credentials
+    could not construct a working client (``bigquery_service.
+    BigQueryClientError`` -- round 3 item 4/2: this used to be an
+    indistinguishable ``ValueError`` that could feed the repair round), or the
+    dry run itself failed with anything other than a
+    ``google.api_core.exceptions.BadRequest``/``NotFound`` (auth failure,
+    5xx, timeout, connection error). ``reason`` is the failing exception's
+    CLASS NAME ONLY -- never ``str(exc)`` -- so a credential or
+    connection-string fragment embedded in a driver's error message never
+    reaches an audit payload or a user-facing question.
+
+    A ``BadRequest``/``NotFound`` (or a plan-authoring ``ValueError`` from
+    ``_validate_read_only``, checked explicitly and FIRST -- round 3 item 2)
+    is NOT wrapped here: those are genuine plan defects a repair round can
+    fix by rewriting the query, so they stay in ``_bigquery_preflight``'s
+    ordinary ``list[str]`` return and keep feeding the existing repair-round
+    path. Only a failure a rewritten query could never fix short-circuits
+    straight to this outcome -- ``compile_instruction`` catches it and
+    returns a ``Clarification``-style "could not run" message WITHOUT
+    spending the single repair round on it."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
+async def _bigquery_preflight(db: AsyncSession, tenant_id: uuid.UUID, plan: dict) -> list[str]:
+    """Brief H, item 1: compile-time BigQuery dry run for every ``bigquery_sql``
+    step in a structurally-valid plan — replaces the deleted regex heuristic
+    in ``app.services.jobs.registry`` (``_bigquery_unqualified_tables``), which
+    had both false positives (``EXTRACT(DAY FROM created_at)``, ``FROM UNNEST
+    (...)`` with a space) and false negatives (``FROM a, b`` never checking
+    ``b``). A BigQuery dry run (``app.services.bigquery_service.dry_run_query``
+    — the SAME ``QueryJobConfig(dry_run=True, use_query_cache=False)``
+    ``estimate_query_cost`` already builds, reused rather than a second client)
+    round-trips through BigQuery's OWN parser, so it raises BigQuery's real
+    error for an unqualified table, an unknown column, or a syntax error —
+    without a regex ever reimplementing BigQuery's SQL grammar.
+
+    Runs through the SAME tenant BigQuery connector ``bigquery_sql_execute``
+    (``app.mcp.tools.bigquery_tools``) resolves from ``{tenant_id, db}`` — no
+    second credential-resolution path. Only builds a client at all when the
+    plan actually has a ``bigquery_sql`` step (every playbook-only Inventory
+    Aging Weekly plan has none); a tenant with no active BigQuery connection
+    fails CLOSED rather than silently skipping the check for the step(s) it
+    cannot validate.
+
+    Returns ``list[str]`` (one message per step with a genuine plan defect,
+    feeding the existing repair round) for a structurally-fine plan whose
+    query is simply wrong. Raises ``PreflightUnavailable`` instead (see its
+    own docstring, delta gate items 1 + 3, round 3 item 2) when the failure
+    has nothing to do with the plan -- credential/connector trouble, or any
+    BigQuery error other than ``BadRequest``/``NotFound``/read-only
+    rejection."""
+    steps = plan.get("steps") if isinstance(plan, dict) else None
+    bq_steps = [
+        s
+        for s in (steps or [])
+        if isinstance(s, dict) and s.get("type") == "bigquery_sql" and isinstance(s.get("params"), dict)
+    ]
+    if not bq_steps:
+        return []
+
+    from app.mcp.tools.bigquery_tools import _extract_credentials, _get_bigquery_connector
+    from app.services.bigquery_service import _validate_read_only, dry_run_query
+
+    # Item 1 (delta gate): connector lookup + credential decrypt run inside
+    # ONE try -- previously `_extract_credentials` sat AFTER the `connector
+    # is None` check but BEFORE any try, so a corrupt/undecryptable
+    # `encrypted_credentials` raised straight out of `compile_instruction`
+    # as an unhandled 500. Any failure here fails CLOSED as a
+    # PreflightUnavailable, never a plan defect: the plan was never even
+    # inspected, so repairing it cannot help.
+    try:
+        connector = await _get_bigquery_connector({"tenant_id": tenant_id, "db": db})
+        if connector is None:
+            return [f"bigquery_sql step {s.get('id')}: preflight needs a BigQuery connection" for s in bq_steps]
+        sa_json, project_id, location = _extract_credentials(connector)
+    except Exception as exc:
+        raise PreflightUnavailable(f"bigquery preflight unavailable: {type(exc).__name__}") from exc
+
+    errors: list[str] = []
+    for step in bq_steps:
+        query = step["params"].get("query", "")
+        # Round 3, item 2: `_validate_read_only` runs FIRST and explicitly --
+        # its ValueError IS a plan defect (a rewritten query fixes it), so it
+        # is recorded directly and the step never reaches `dry_run_query`
+        # (which would re-raise the identical ValueError from ITS OWN
+        # internal `_validate_read_only` call, but that path must not be
+        # caught below -- see why immediately after).
+        try:
+            _validate_read_only(query)
+        except ValueError as exc:
+            errors.append(f"bigquery_sql step {step.get('id')}: {exc}")
+            continue
+        try:
+            await dry_run_query(sa_json, project_id, query, location=location)
+        except (BadRequest, NotFound, ValueError) as exc:
+            # A genuine plan defect -- bad SQL BigQuery's own parser rejects
+            # with a 400, a misspelled table/dataset (404), or (round 4,
+            # fix/jobs-live-run-defects) a `ValueError` from `dry_run_query`'s
+            # own `statement_type` check (BigQuery's dry-run job classifies
+            # the ORIGINAL query as something other than "SELECT" -- a
+            # multi-statement script, or DML/DDL hidden past a leading
+            # SELECT that `_validate_read_only`'s cheap leading-keyword check
+            # cannot see). NOTE this `ValueError` is UNAMBIGUOUS: `
+            # _validate_read_only`'s OWN `ValueError` was already checked
+            # explicitly above and `continue`d past before ever reaching
+            # `dry_run_query`, so a `ValueError` this late can only be the
+            # statement_type rejection -- never re-litigates the same
+            # leading-keyword failure. The repair round can fix any of
+            # these by rewriting the query.
+            errors.append(f"bigquery_sql step {step.get('id')}: {exc}")
+        except Exception as exc:
+            # Round 3, item 2: everything else -- an auth failure, a 5xx, a
+            # timeout, a connection error, or `_get_client`'s dedicated
+            # `BigQueryClientError` (malformed/expired credentials) -- is an
+            # INFRA failure, not a plan defect. Note this is now a BARE
+            # `except Exception`, not `except (BadRequest, ValueError)` framed
+            # negatively: a `ValueError` reaching here can ONLY come from
+            # something other than `_validate_read_only` (already handled
+            # above), so it is correctly treated as infra, never leaking
+            # credential text (`type(exc).__name__` only) into a plan
+            # defect message or a wasted repair round.
+            raise PreflightUnavailable(f"bigquery preflight unavailable: {type(exc).__name__}") from exc
+    return errors
+
+
+async def _validate_and_preflight(
+    db: AsyncSession, tenant_id: uuid.UUID, tool_input: dict
+) -> tuple[ValidatedPlan | None, list[str]]:
+    """``registry.validate_plan``, then — only for a structurally valid plan —
+    the BigQuery preflight above (item 1, brief H): a plan can satisfy every
+    JSON Schema and cross-reference rule and still name a table BigQuery
+    itself would reject at run time, so both gates decide whether a plan is
+    ever persisted. Returns ``(validated, [])`` for a clean plan or
+    ``(None, errors)`` otherwise, mirroring ``PlanInvalid``'s own "every
+    problem in one shot" contract so a repair round sees everything wrong at
+    once, from either gate."""
+    try:
+        validated = validate_plan(tool_input)
+    except PlanInvalid as exc:
+        return None, exc.errors
+    preflight_errors = await _bigquery_preflight(db, tenant_id, tool_input)
+    if preflight_errors:
+        return None, preflight_errors
+    return validated, []
+
+
+async def _preflight_unavailable_outcome(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    actor_id: uuid.UUID | None,
+    instruction: str,
+    model: str,
+    plan_version: int | None,
+    exc: PreflightUnavailable,
+) -> Clarification:
+    """Delta gate (item 1): the outcome for a ``PreflightUnavailable``
+    -- short-circuits ``compile_instruction`` WITHOUT spending the repair
+    round, audited under its own ``outcome`` value so it is distinguishable
+    from an ordinary "couldn't compile a valid plan" clarification in the
+    audit trail. Returns (never raises) a ``Clarification`` so every
+    existing caller of ``compile_instruction`` -- which only ever checks
+    ``isinstance(compiled, Clarification)`` -- keeps working unchanged; the
+    message text itself is the "own outcome" brief I asks for."""
+    await _audit_compile(db, tenant_id, actor_id, instruction, model, plan_version, outcome="preflight_unavailable")
+    return Clarification(question=f"BigQuery preflight could not run: {exc.reason}; try again")
 
 
 async def compile_instruction(
@@ -381,13 +577,16 @@ async def compile_instruction(
     errors: list[str]
     if tool_name == _COMPILE_TOOL_NAME:
         try:
-            validated = validate_plan(tool_input)
-        except PlanInvalid as exc:
-            errors = exc.errors
-        else:
+            validated, plan_errors = await _validate_and_preflight(db, tenant_id, tool_input)
+        except PreflightUnavailable as exc:
+            return await _preflight_unavailable_outcome(
+                db, tenant_id, actor_id, instruction, llm.model, plan_version, exc
+            )
+        if validated is not None:
             compiled = _build_compiled_plan(tool_input, validated, llm.model)
             await _audit_compile(db, tenant_id, actor_id, instruction, llm.model, plan_version, outcome="compiled")
             return compiled
+        errors = plan_errors
     else:
         errors = ["the model did not call compile_plan or ask_clarification"]
 
@@ -415,13 +614,16 @@ async def compile_instruction(
 
         if tool_name == _COMPILE_TOOL_NAME:
             try:
-                validated = validate_plan(tool_input)
-            except PlanInvalid as exc:
-                errors = exc.errors
-            else:
+                validated, plan_errors = await _validate_and_preflight(db, tenant_id, tool_input)
+            except PreflightUnavailable as exc:
+                return await _preflight_unavailable_outcome(
+                    db, tenant_id, actor_id, instruction, llm.model, plan_version, exc
+                )
+            if validated is not None:
                 compiled = _build_compiled_plan(tool_input, validated, llm.model)
                 await _audit_compile(db, tenant_id, actor_id, instruction, llm.model, plan_version, outcome="compiled")
                 return compiled
+            errors = plan_errors
 
     question = "I couldn't compile a valid plan for this instruction: " + "; ".join(errors)
     await _audit_compile(db, tenant_id, actor_id, instruction, llm.model, plan_version, outcome="clarification")

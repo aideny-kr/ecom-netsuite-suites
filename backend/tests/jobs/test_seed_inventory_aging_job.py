@@ -4,7 +4,10 @@ Spec: docs/superpowers/specs/2026-09-08-scheduled-jobs-and-inventory-aging-desig
 §B7. ``main(tenant_id, *, db, owner_id=None, llm=None)`` creates (or, on a rerun,
 returns) the **Inventory Aging Weekly** Scheduled Job from the mock's instruction
 text, compiled via the real compiler (``app.services.jobs.compiler.compile_instruction``)
-into the mock's five-step plan, left ``plan_status = "pending_approval"`` —
+into the CORRECT four-step plan (brief H, item 2a: registry.validate_plan
+now rejects a bigquery_sql step alongside a playbook-keyed report.compose —
+the mock's original five-step illustration is no longer a valid compiled
+shape), left ``plan_status = "pending_approval"`` —
 approving it, running it, and going live are a human's actions on the Scheduled
 jobs page, not this script's.
 
@@ -64,11 +67,15 @@ def _clarify_response(question: str, tool_use_id: str = "tu_1") -> LLMResponse:
 
 
 def _five_step_plan() -> dict:
-    """The mock's five-step Inventory Aging Weekly plan — reuses
-    ``test_compiler._inventory_aging_plan``'s exact fixture (query -> compose ->
-    render PDF -> build Excel -> upload to Drive) so this test and the compiler's
-    own tests agree on what "the mock's plan" looks like."""
-    return compiler_fixtures._inventory_aging_plan()
+    """The CORRECT compiled Inventory Aging Weekly plan (compose -> render PDF
+    -> build Excel -> upload to Drive, no free-form bigquery_sql step
+    alongside the playbook compose) — reuses
+    ``test_compiler._correct_four_step_playbook_plan``'s exact fixture so this
+    test and the compiler's own tests agree on what a valid compiled plan
+    looks like. Kept under its original name (still "the mock's plan" this
+    seed script compiles) even though the mock's own five-step illustration
+    is no longer a validate_plan-legal shape — see brief H, item 2a."""
+    return compiler_fixtures._correct_four_step_playbook_plan()
 
 
 async def _schedule_rows(db, tenant_id) -> list[Schedule]:
@@ -78,6 +85,29 @@ async def _schedule_rows(db, tenant_id) -> list[Schedule]:
         .all()
     )
     return list(rows)
+
+
+def test_instruction_keeps_the_mocks_original_text_and_adds_the_build_fresh_clarification():
+    """Live-run defect (brief G, item 4): on staging the seed's compile asked
+    whether to reuse an existing "Dimerco Inventory Aging Report" from an
+    August chat, so the non-interactive seed created nothing — the compiler
+    had a genuine question (refresh-or-reuse) the instruction never answered.
+    INSTRUCTION now ends with an explicit "build a brand-new report" answer
+    to that exact question, so the compiler never has a reason to clarify;
+    the mock's own text (verbatim) stays untouched before it."""
+    mock_text = (
+        "Every Monday at 6am Pacific, build the inventory aging report for Dimerco, Fedex and "
+        "Panurgy from the BigQuery inventory snapshot. Age each SKU by days since its last "
+        "restock, bucket 0–30 / 31–60 / 61–90 / 91–180 / 180+, compare with the prior week "
+        "and show the nine-week trend of aged share. Save a PDF of the report and an Excel "
+        "workbook with every SKU per location to Google Drive under Reports / Inventory aging. "
+        "If a run fails, retry once and then pause and tell me."
+    )
+    assert seed_inventory_aging_job.INSTRUCTION.startswith(mock_text)
+    assert (
+        "Build a brand-new report each run with the inventory_aging playbook covering all "
+        "three locations; do not refresh or extend any existing report."
+    ) in seed_inventory_aging_job.INSTRUCTION
 
 
 async def test_main_seeds_a_pending_approval_schedule_from_the_mocks_instruction(db, monkeypatch):
@@ -113,7 +143,6 @@ async def test_main_seeds_a_pending_approval_schedule_from_the_mocks_instruction
     }
     assert schedule.budget_json == {"bytes_scanned": 5_000_000_000, "seconds": 600, "usd": 2.0}
     assert [s["type"] for s in schedule.plan_json["steps"]] == [
-        "bigquery_sql",
         "report.compose",
         "report.render_pdf",
         "report.build_xlsx",

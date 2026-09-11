@@ -216,6 +216,68 @@ class TestExecuteQuery:
         assert result["cache_hit"] is True
 
 
+class TestValidateReadOnlyAllowsSemicolonInStringLiteral:
+    """Round 4 fix (this branch): the `;`-split multi-statement guard round 3
+    added to `_validate_read_only` false-positived on a semicolon INSIDE a
+    string literal -- `SELECT * FROM t WHERE region = 'us;east'` is one
+    legitimate statement, but `cleaned.rstrip(";").split(";")` saw two and
+    rejected it. It ALSO false-negatived: `SELECT '--'; DELETE FROM d.t` gets
+    comment-stripped (by `_strip_sql_comments`, which does not understand
+    string literals either) down to `SELECT '` -- a single "statement" that
+    passes the guard, while `dry_run_query`/`execute_query` still send the
+    ORIGINAL, un-stripped text to BigQuery. Text heuristics on SQL keep
+    failing this way; the guard is removed. Real multi-statement/script
+    protection now lives in `dry_run_query`'s `statement_type` check
+    (BigQuery's OWN parser classifies the ORIGINAL query -- a string literal
+    or comment can't fool it) -- see `TestDryRunQueryStatementTypeGate`
+    below."""
+
+    def test_allows_a_semicolon_inside_a_string_literal(self):
+        from app.services.bigquery_service import _validate_read_only
+
+        _validate_read_only("SELECT * FROM t WHERE region = 'us;east'")  # must not raise
+
+    def test_allows_a_single_statement_with_a_trailing_semicolon(self):
+        from app.services.bigquery_service import _validate_read_only
+
+        _validate_read_only("SELECT 1;")  # must not raise
+
+    def test_allows_a_single_statement_with_no_trailing_semicolon(self):
+        from app.services.bigquery_service import _validate_read_only
+
+        _validate_read_only("SELECT 1")  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_execute_query_allows_a_semicolon_inside_a_string_literal(self):
+        """execute_query and estimate_query_cost share the behaviour --
+        they both call _validate_read_only, which no longer rejects this."""
+        from app.services.bigquery_service import execute_query
+
+        mock_job = MagicMock()
+        mock_job.total_bytes_processed = 100
+        mock_job.cache_hit = False
+        mock_result = MagicMock()
+        mock_result.schema = []
+        mock_result.total_rows = 0
+        mock_result.__iter__ = lambda self: iter([])
+        mock_job.result.return_value = mock_result
+
+        with patch("app.services.bigquery_service._get_client") as m:
+            m.return_value.query.return_value = mock_job
+            await execute_query({"type": "service_account"}, "p", "SELECT * FROM t WHERE region = 'us;east'")
+
+    @pytest.mark.asyncio
+    async def test_estimate_query_cost_allows_a_semicolon_inside_a_string_literal(self):
+        from app.services.bigquery_service import estimate_query_cost
+
+        mock_job = MagicMock()
+        mock_job.total_bytes_processed = 100
+
+        with patch("app.services.bigquery_service._get_client") as m:
+            m.return_value.query.return_value = mock_job
+            await estimate_query_cost({"type": "service_account"}, "p", "SELECT * FROM t WHERE region = 'us;east'")
+
+
 class TestDiscoverSchema:
     @pytest.mark.asyncio
     async def test_returns_datasets(self):
@@ -319,6 +381,133 @@ class TestEstimateQueryCost:
         assert result["estimated_cost_usd"] == 5.0
 
 
+class TestDryRunQuery:
+    """Brief H, item 1: the compile-time preflight (app.services.jobs.compiler)
+    validates a bigquery_sql step by dry-running it through BigQuery's own
+    parser, rather than a regex heuristic over the SQL text. `dry_run_query`
+    is the one function both the preflight and `estimate_query_cost` share --
+    same client, same QueryJobConfig(dry_run=True, use_query_cache=False)."""
+
+    @pytest.mark.asyncio
+    async def test_raises_bigquerys_own_error_for_an_invalid_query(self):
+        from app.services.bigquery_service import dry_run_query
+
+        with patch("app.services.bigquery_service._get_client") as m:
+            m.return_value.query.side_effect = ValueError('Table "inventory_snapshot" must be qualified with a dataset')
+            with pytest.raises(ValueError, match="must be qualified with a dataset"):
+                await dry_run_query({"type": "service_account"}, "p", "SELECT * FROM inventory_snapshot")
+
+    @pytest.mark.asyncio
+    async def test_returns_none_and_raises_nothing_for_a_valid_query(self):
+        from app.services.bigquery_service import dry_run_query
+
+        mock_job = MagicMock()
+        mock_job.total_bytes_processed = 12345
+        mock_job.statement_type = "SELECT"
+
+        with patch("app.services.bigquery_service._get_client") as m:
+            m.return_value.query.return_value = mock_job
+            result = await dry_run_query(
+                {"type": "service_account"}, "p", "SELECT EXTRACT(DAY FROM created_at) FROM dataset.events"
+            )
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_uses_a_dry_run_job_config_with_no_query_cache(self):
+        from app.services.bigquery_service import dry_run_query
+
+        with patch("app.services.bigquery_service._get_client") as m:
+            mock_client = MagicMock()
+            mock_client.query.return_value.statement_type = "SELECT"
+            m.return_value = mock_client
+            await dry_run_query({"type": "service_account"}, "p", "SELECT 1", location="US")
+
+            mock_client.query.assert_called_once()
+            _, kwargs = mock_client.query.call_args
+            job_config = kwargs["job_config"]
+            assert job_config.dry_run is True
+            assert job_config.use_query_cache is False
+
+
+class TestDryRunQueryStatementTypeGate:
+    """Round 4 fix: the removed `;`-split multi-statement guard is replaced by
+    reading the dry-run job's OWN `statement_type` (`google-cloud-bigquery`'s
+    `QueryJob.statement_type` -- a script reports "SCRIPT", DML reports e.g.
+    "DELETE"/"INSERT", a plain query "SELECT"). This is BigQuery's parser
+    classifying the ORIGINAL query text, so a semicolon inside a string
+    literal or a `--` inside one (which `_strip_sql_comments` cannot tell
+    apart from a real comment) can never fool it the way the removed text
+    heuristic could."""
+
+    @staticmethod
+    def _fake_get_client_returning(statement_type: str):
+        def fake_get_client(credentials, project_id, location=None):
+            client = MagicMock()
+            job = MagicMock()
+            job.total_bytes_processed = 100
+            job.statement_type = statement_type
+            client.query.return_value = job
+            return client
+
+        return fake_get_client
+
+    @pytest.mark.asyncio
+    async def test_rejects_a_script_statement_type(self):
+        """`SELECT '--'; DELETE FROM d.t` -- the exact false negative the old
+        `;`-split guard missed: comment-stripping cleans it to `SELECT '`,
+        which still starts with SELECT, but the ORIGINAL text sent to
+        BigQuery is a two-statement script BigQuery itself classifies as
+        SCRIPT."""
+        from app.services.bigquery_service import dry_run_query
+
+        with patch(
+            "app.services.bigquery_service._get_client",
+            self._fake_get_client_returning("SCRIPT"),
+        ):
+            with pytest.raises(ValueError, match="only SELECT statements"):
+                await dry_run_query({"type": "service_account"}, "p", "SELECT '--'; DELETE FROM d.t")
+
+    @pytest.mark.asyncio
+    async def test_rejects_a_delete_statement_type(self):
+        from app.services.bigquery_service import dry_run_query
+
+        with patch(
+            "app.services.bigquery_service._get_client",
+            self._fake_get_client_returning("DELETE"),
+        ):
+            with pytest.raises(ValueError, match="only SELECT statements"):
+                await dry_run_query({"type": "service_account"}, "p", "SELECT 1")
+
+    @pytest.mark.asyncio
+    async def test_accepts_a_select_statement_type(self):
+        from app.services.bigquery_service import dry_run_query
+
+        with patch(
+            "app.services.bigquery_service._get_client",
+            self._fake_get_client_returning("SELECT"),
+        ):
+            result = await dry_run_query({"type": "service_account"}, "p", "SELECT 1")
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_rejects_a_dml_query_with_the_read_only_message(self):
+        """Delta gate (brief I, item 2): before this fix, `dry_run_query`
+        never called `_validate_read_only` -- an `INSERT INTO dataset.t ...`
+        step passed the compiler's compile-time preflight cleanly and only
+        ever failed at RUN time. It must be rejected here, exactly like
+        `execute_query`/`estimate_query_cost` already reject it, and WITHOUT
+        ever reaching `_get_client` (no client/job is built for a query that
+        never had a chance to run)."""
+        from app.services.bigquery_service import dry_run_query
+
+        with patch("app.services.bigquery_service._get_client") as m:
+            with pytest.raises(ValueError, match="[Rr]ead.only"):
+                await dry_run_query({"type": "service_account"}, "p", "INSERT INTO dataset.t VALUES (1)")
+            m.assert_not_called()
+
+
 class TestServiceAccountCredentials:
     @pytest.mark.asyncio
     async def test_uses_service_account_info(self):
@@ -330,3 +519,19 @@ class TestServiceAccountCredentials:
             with patch("app.services.bigquery_service.bigquery.Client"):
                 _get_client(sa_json, "test")
                 mock_creds.assert_called_once()
+
+    def test_garbage_credentials_raise_a_dedicated_client_error(self):
+        """Delta gate round 3, item 4: `_get_client` previously raised a bare
+        `ValueError` for ANY client-construction failure -- indistinguishable
+        from a plan-authoring `ValueError` (e.g. `_validate_read_only`'s
+        rejection). A dedicated `BigQueryClientError` lets
+        `app.services.jobs.compiler._bigquery_preflight` classify a
+        credential/client failure as an infra problem (`PreflightUnavailable`)
+        without also swallowing a genuine plan defect. Runs through the REAL
+        `_get_client` (no mocking) -- malformed/empty service-account JSON
+        makes `google.oauth2.service_account.Credentials.from_service_account_info`
+        raise offline, with no network call."""
+        from app.services.bigquery_service import BigQueryClientError, _get_client
+
+        with pytest.raises(BigQueryClientError):
+            _get_client({}, "test-project")

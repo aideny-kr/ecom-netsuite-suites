@@ -42,8 +42,10 @@ from app.workers.tasks.scheduled_jobs import (
     REASON_BUDGET,
     REASON_DONE,
     REASON_ERROR,
+    SCHEDULED_JOBS_SWEEP_PRIORITY,
     RunOutcome,
     _distill_artifact,
+    collect_and_dispatch,
     compute_next_run,
     run_due_jobs,
     run_schedule_now,
@@ -1624,6 +1626,38 @@ async def test_sweep_claim_clears_retry_job_id_and_reuses_the_row_no_third_row(d
     assert len(jobs) == 2  # attempt 1 + the retry -- NO third row
     completed_retry = next(j for j in jobs if j.id == retry_job_id)
     assert completed_retry.status == "failed"
+
+
+async def test_sweep_fanout_dispatches_with_broker_priority(db: AsyncSession, monkeypatch):
+    """Broker priority (fix/jobs-live-run-defects): on staging the single
+    Celery worker is flooded by another feature's `tasks.transaction_ops_run`
+    batch (hundreds of messages on `sync`/`recon`), so the Beat sweep
+    fan-out (`tasks.scheduled_jobs_sweep`, per active tenant) must publish at
+    an elevated priority or a due Monday-06:00 occurrence sits behind the
+    flood. Same technique `tests/workers/test_report_auto_refresh.py`'s
+    `test_fanout_dispatches_one_per_active_tenant` uses for the identical
+    fan-out shape."""
+    tenant = await create_test_tenant(db, name="Sweep Priority Co")
+    await db.flush()
+
+    sent: list[dict] = []
+    monkeypatch.setattr(
+        scheduled_jobs.celery_app,
+        "send_task",
+        lambda name, kwargs=None, queue=None, priority=None, **_: sent.append(
+            {"name": name, "kwargs": kwargs, "queue": queue, "priority": priority}
+        ),
+    )
+
+    stats = await collect_and_dispatch(db)
+
+    assert stats["dispatched"] >= 1
+    dispatched = [s for s in sent if s["kwargs"]["tenant_id"] == str(tenant.id)]
+    assert len(dispatched) == 1
+    call = dispatched[0]
+    assert call["name"] == "tasks.scheduled_jobs_sweep"
+    assert call["queue"] == "sync"
+    assert call["priority"] == SCHEDULED_JOBS_SWEEP_PRIORITY == 3
 
 
 async def test_finalize_run_schedule_select_carries_for_update_lock(db: AsyncSession, monkeypatch):

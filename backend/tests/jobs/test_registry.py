@@ -64,7 +64,15 @@ def test_plan_schema_enumerates_only_registry_types():
 
 def _valid_plan() -> dict:
     """A minimal three-step plan that validates cleanly: query -> compose -> upload,
-    with drive.upload correctly referencing the compose step's id."""
+    with drive.upload correctly referencing the compose step's id.
+
+    s2 refreshes an EXISTING report (``report_id``) rather than composing a NEW
+    playbook one — item 2a (brief H) forbids a ``bigquery_sql`` step alongside a
+    ``playbook_key`` compose in the SAME plan (nothing in the registry ever
+    consumes a bigquery_sql step's rows, so that combination is always invalid),
+    and s1's own free-form query is deliberately unrelated to what s2 does — so
+    ``report_id`` keeps this fixture a well-formed baseline without tripping
+    that new rule."""
     return {
         "steps": [
             {
@@ -75,7 +83,7 @@ def _valid_plan() -> dict:
             {
                 "id": "s2",
                 "type": "report.compose",
-                "params": {"playbook_key": "inventory_aging", "params": {"locations": ["Dimerco"]}},
+                "params": {"report_id": "11111111-1111-1111-1111-111111111111"},
             },
             {
                 "id": "s3",
@@ -351,6 +359,275 @@ def test_schedule_delivery_identity_shape():
     assert identity.file_props == {"schedule_id": str(schedule_id), "report_step": "compose"}
     assert identity.lock_key == f"schedule:{schedule_id}:compose"
     assert identity.idempotency_prefix == f"job-delivery:{schedule_id}:compose"
+
+
+# ---------------------------------------------------------------------------
+# Live-run defect (brief G, item 1): validate_plan rejects what the executor
+# cannot run — a report_step not pointing at a report.compose step, a
+# tracking-mode compose for a non-period-based playbook, and an unqualified
+# BigQuery table name. All three are compile-time errors so a bad plan is
+# never persisted (staging's first live run hit all three at once).
+# ---------------------------------------------------------------------------
+
+
+def test_validate_plan_rejects_render_pdf_whose_report_step_is_not_a_compose_step():
+    """The executor's `_resolve_report_step_artifact` needs a `report.compose`
+    artifact (it looks for `artifact["report"]`) — a `report_step` naming any
+    other step type produces "produced no report artifact" at RUN time today.
+    Compile time must catch it instead."""
+    plan = {
+        "steps": [
+            {"id": "s1", "type": "bigquery_sql", "params": {"query": "SELECT 1"}},
+            {"id": "s2", "type": "report.render_pdf", "params": {"report_step": "s1"}},
+        ]
+    }
+    with pytest.raises(PlanInvalid) as exc_info:
+        validate_plan(plan)
+    assert any("s1" in msg and "report.compose" in msg for msg in exc_info.value.errors)
+
+
+def test_validate_plan_rejects_build_xlsx_whose_report_step_is_not_a_compose_step():
+    plan = {
+        "steps": [
+            {"id": "s1", "type": "bigquery_sql", "params": {"query": "SELECT 1"}},
+            {"id": "s2", "type": "report.build_xlsx", "params": {"report_step": "s1"}},
+        ]
+    }
+    with pytest.raises(PlanInvalid) as exc_info:
+        validate_plan(plan)
+    assert any("s1" in msg and "report.compose" in msg for msg in exc_info.value.errors)
+
+
+def test_validate_plan_rejects_drive_upload_whose_report_step_is_a_render_pdf_step():
+    """This is the exact live-run shape: `upload_pdf` (drive.upload) named
+    `render_pdf`'s own id as its `report_step`, instead of the `report.compose`
+    step both render_pdf and build_xlsx themselves consume."""
+    plan = {
+        "steps": [
+            {
+                "id": "compose_report",
+                "type": "report.compose",
+                "params": {"playbook_key": "inventory_aging", "params": {}},
+            },
+            {"id": "render_pdf", "type": "report.render_pdf", "params": {"report_step": "compose_report"}},
+            {"id": "upload_pdf", "type": "drive.upload", "params": {"report_step": "render_pdf"}},
+        ]
+    }
+    with pytest.raises(PlanInvalid) as exc_info:
+        validate_plan(plan)
+    assert any("render_pdf" in msg and "report.compose" in msg and "upload_pdf" in msg for msg in exc_info.value.errors)
+
+
+def test_validate_plan_rejects_tracking_mode_compose_for_a_non_period_based_playbook():
+    """`compose_playbook_report` already refuses `mode="tracking"` at RUN time
+    for a playbook whose `PLAYBOOKS[key]["period_based"]` is False —
+    inventory_aging is one today (no NetSuite accounting period to track).
+    Compile time must catch it instead of persisting a plan that fails every
+    time it runs."""
+    plan = {
+        "steps": [
+            {
+                "id": "compose_report",
+                "type": "report.compose",
+                "params": {
+                    "playbook_key": "inventory_aging",
+                    "mode": "tracking",
+                    "params": {"locations": ["Dimerco", "Fedex", "Panurgy"]},
+                },
+            }
+        ]
+    }
+    with pytest.raises(PlanInvalid) as exc_info:
+        validate_plan(plan)
+    assert any(
+        "compose_report" in msg and "tracking" in msg and "inventory_aging" in msg for msg in exc_info.value.errors
+    )
+
+
+def test_validate_plan_accepts_tracking_mode_compose_for_a_period_based_playbook():
+    """Sanity check the new rule isn't overbroad: income_statement IS
+    period_based, so mode="tracking" for it must still validate cleanly."""
+    plan = {
+        "steps": [
+            {
+                "id": "compose_report",
+                "type": "report.compose",
+                "params": {"playbook_key": "income_statement", "mode": "tracking", "params": {}},
+            }
+        ]
+    }
+    validated = validate_plan(plan)
+    assert [s.id for s in validated.steps] == ["compose_report"]
+
+
+def test_validate_plan_rejects_the_exact_live_failing_six_step_plan_for_every_reason():
+    """Regression pin for the staging incident this item exists for
+    (brief G): the compiled plan that actually ran and failed step 1, and
+    would have failed steps 2 and 5 too. Both of the remaining
+    validate_plan-level rules must fire on it, collected together (never just
+    the first). Step 1's own unqualified-table problem (`FROM
+    inventory_snapshot`) is no longer caught HERE — brief H, item 1 replaced
+    that regex heuristic with a real BigQuery dry run at COMPILE time in
+    app.services.jobs.compiler (`_bigquery_preflight`), which validate_plan
+    itself has no way to run (it is a pure, synchronous, no-I/O function) —
+    see tests/jobs/test_compiler.py's own preflight tests for that coverage."""
+    plan = {
+        "steps": [
+            {
+                "id": "snapshot_query",
+                "type": "bigquery_sql",
+                "params": {
+                    "query": (
+                        "SELECT sku, location, on_hand_qty, last_restock_date, snapshot_date, "
+                        "DATE_DIFF(CURRENT_DATE(), last_restock_date, DAY) AS days_since_restock "
+                        "FROM inventory_snapshot WHERE location IN ('Dimerco','Fedex','Panurgy')"
+                    )
+                },
+            },
+            {
+                "id": "compose_report",
+                "type": "report.compose",
+                "params": {
+                    "playbook_key": "inventory_aging",
+                    "mode": "tracking",
+                    "params": {
+                        "age_basis": "days_since_last_restock",
+                        "locations": ["Dimerco", "Fedex", "Panurgy"],
+                        "comparison": "prior_week",
+                    },
+                },
+            },
+            {"id": "render_pdf", "type": "report.render_pdf", "params": {"report_step": "compose_report"}},
+            {"id": "build_xlsx", "type": "report.build_xlsx", "params": {"report_step": "compose_report"}},
+            {"id": "upload_pdf", "type": "drive.upload", "params": {"report_step": "render_pdf"}},
+            {"id": "upload_xlsx", "type": "drive.upload", "params": {"report_step": "build_xlsx"}},
+        ]
+    }
+    with pytest.raises(PlanInvalid) as exc_info:
+        validate_plan(plan)
+    errors = exc_info.value.errors
+    assert any("tracking" in msg and "inventory_aging" in msg for msg in errors)
+    assert any("upload_pdf" in msg and "render_pdf" in msg for msg in errors)
+    assert any("upload_xlsx" in msg and "build_xlsx" in msg for msg in errors)
+    # Item 2a (brief H) does NOT also fire here: this plan's report.compose
+    # step already fails its OWN, more specific check (mode="tracking" is
+    # unsupported for inventory_aging) and so is never added to the
+    # validated `steps` list the 2a post-pass reads from — one clear error
+    # per step, not a redundant second one layered on top. See the dedicated
+    # 2a/2b fixture below (_playbook_plan_with_orphan_sql_and_double_upload)
+    # for a report.compose step that DOES reach the 2a check.
+
+
+# ---------------------------------------------------------------------------
+# Brief H, item 2: validate_plan enforces two invariants the compiler's own
+# system prompt only STEERS the model toward — a plan can still slip past the
+# model's judgment and reach validate_plan with either shape, so the registry
+# (the actual allow-list) must refuse both itself.
+# ---------------------------------------------------------------------------
+
+
+def _correct_four_step_playbook_plan() -> dict:
+    """The correct shape for a playbook-covered instruction: report.compose
+    (playbook_key, no bigquery_sql alongside it) -> render_pdf -> build_xlsx
+    -> exactly ONE drive.upload naming the compose step."""
+    return {
+        "steps": [
+            {
+                "id": "compose_report",
+                "type": "report.compose",
+                "params": {"playbook_key": "inventory_aging", "params": {"locations": ["Dimerco"]}},
+            },
+            {"id": "render_pdf", "type": "report.render_pdf", "params": {"report_step": "compose_report"}},
+            {"id": "build_xlsx", "type": "report.build_xlsx", "params": {"report_step": "compose_report"}},
+            {"id": "upload", "type": "drive.upload", "params": {"report_step": "compose_report"}},
+        ]
+    }
+
+
+def _playbook_plan_with_orphan_sql_and_double_upload() -> dict:
+    """A 6-step plan that fails BOTH new invariants at once: a bigquery_sql
+    step alongside a report.compose step carrying playbook_key (2a — no step
+    in the registry ever consumes a bigquery_sql step's rows, so this
+    combination is always dead weight once a playbook already owns its own
+    dataset-qualified sources), AND two drive.upload steps that both
+    correctly reference the SAME report.compose step (2b — deliver_report_to_
+    drive already uploads the PDF and the Excel workbook in one call, so a
+    second upload targeting the identical compose step would double-deliver).
+
+    Deliberately a DIFFERENT shape from
+    ``test_validate_plan_rejects_the_exact_live_failing_six_step_plan_for_every_reason``'s
+    fixture above: that plan's two drive.upload steps each name a DIFFERENT
+    wrongly-typed step (render_pdf, build_xlsx) — already caught by the
+    existing x-step-ref-type check — and so never reaches the "two valid
+    refs naming the SAME compose step" case 2b exists for."""
+    return {
+        "steps": [
+            {
+                "id": "snapshot_query",
+                "type": "bigquery_sql",
+                "params": {"query": "SELECT 1 FROM `frameworkreporting.inventory_snapshot`"},
+            },
+            {
+                "id": "compose_report",
+                "type": "report.compose",
+                "params": {"playbook_key": "inventory_aging", "params": {"locations": ["Dimerco"]}},
+            },
+            {"id": "render_pdf", "type": "report.render_pdf", "params": {"report_step": "compose_report"}},
+            {"id": "build_xlsx", "type": "report.build_xlsx", "params": {"report_step": "compose_report"}},
+            {"id": "upload_1", "type": "drive.upload", "params": {"report_step": "compose_report"}},
+            {"id": "upload_2", "type": "drive.upload", "params": {"report_step": "compose_report"}},
+        ]
+    }
+
+
+def test_validate_plan_rejects_bigquery_sql_alongside_a_playbook_compose():
+    plan = _playbook_plan_with_orphan_sql_and_double_upload()
+    with pytest.raises(PlanInvalid) as exc_info:
+        validate_plan(plan)
+    assert any(
+        "snapshot_query" in msg and "bigquery_sql is not allowed" in msg and "playbook" in msg
+        for msg in exc_info.value.errors
+    )
+
+
+def test_validate_plan_rejects_a_second_drive_upload_targeting_the_same_compose_step():
+    plan = _playbook_plan_with_orphan_sql_and_double_upload()
+    with pytest.raises(PlanInvalid) as exc_info:
+        validate_plan(plan)
+    assert any("upload_1" in msg and "upload_2" in msg and "compose_report" in msg for msg in exc_info.value.errors)
+
+
+def test_validate_plan_accepts_the_correct_four_step_playbook_plan():
+    """Sanity check the two new rules aren't overbroad: the correct 4-step
+    plan (one bigquery-sql-free playbook compose, one drive.upload) must
+    still validate cleanly."""
+    validated = validate_plan(_correct_four_step_playbook_plan())
+    assert [s.type for s in validated.steps] == [
+        "report.compose",
+        "report.render_pdf",
+        "report.build_xlsx",
+        "drive.upload",
+    ]
+
+
+def test_validate_plan_accepts_two_drive_uploads_targeting_two_different_compose_steps():
+    """Sanity check 2b isn't overbroad either: a plan with TWO separate
+    report.compose -> drive.upload chains (two different reports delivered by
+    the same schedule run) is a legitimate shape and must still validate."""
+    plan = {
+        "steps": [
+            {"id": "compose_a", "type": "report.compose", "params": {"playbook_key": "inventory_aging", "params": {}}},
+            {"id": "upload_a", "type": "drive.upload", "params": {"report_step": "compose_a"}},
+            {
+                "id": "compose_b",
+                "type": "report.compose",
+                "params": {"report_id": "11111111-1111-1111-1111-111111111111"},
+            },
+            {"id": "upload_b", "type": "drive.upload", "params": {"report_step": "compose_b"}},
+        ]
+    }
+    validated = validate_plan(plan)
+    assert [s.id for s in validated.steps] == ["compose_a", "upload_a", "compose_b", "upload_b"]
 
 
 @pytest.mark.asyncio
