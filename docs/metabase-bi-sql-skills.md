@@ -1,8 +1,5 @@
 # Metabase BI, SQL, and source selection
 
-Deployment update: see the [staging release record](metabase-bi-staging-release.md).
-The release-scope section below records the initial pre-deployment validation.
-
 With multiple query sources connected, the agent asks which source the user wants
 before calling data tools. An explicit source in the request or an earlier user
 message carries into follow-up questions. Assistant guesses and automatic task

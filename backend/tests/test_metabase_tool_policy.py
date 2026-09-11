@@ -128,3 +128,78 @@ def test_custom_write_confirmation_signs_all_arguments_and_rejects_tampering():
     changed["tool_input"]["query"]["nested"].append(3)
     assert validate_and_extract_confirmation(changed, "source-test")[0] is False
     assert validate_and_extract_confirmation(payload.model_dump(), "other-session")[0] is False
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"query": "DELETE FROM orders"},
+        {"query": {"type": "native", "native": {"query": "DELETE FROM orders"}}},
+        {
+            "query": {
+                "lib/type": "mbql/query",
+                "stages": [{"lib/type": "mbql.stage/native", "native": "DELETE FROM orders"}],
+            }
+        },
+        {
+            "query": {
+                "lib/type": "mbql/query",
+                "stages": [{"lib/type": "mbql.stage/mbql", "joins": [{"stages": [{"native": "DELETE FROM orders"}]}]}],
+            }
+        },
+    ],
+)
+@pytest.mark.parametrize("name", ["query", "construct_query", "execute_query", "execute_question"])
+async def test_native_query_passthrough_never_reaches_metabase(name, payload):
+    conn = connector()
+    remote = AsyncMock()
+    with (
+        patch("app.services.mcp_connector_service.get_mcp_connector", new=AsyncMock(return_value=conn)),
+        patch("app.services.mcp_client_service.call_external_mcp_tool", new=remote),
+    ):
+        result = await _execute_external_tool(conn.id, name, payload, conn.tenant_id, AsyncMock())
+    assert "MBQL" in result["error"]
+    assert not result.get("hitl_required")
+    remote.assert_not_awaited()
+
+
+async def test_structured_read_query_runs_without_a_confirmation():
+    conn = connector()
+    remote = AsyncMock(return_value={"status": "completed", "data": {"cols": [], "rows": []}})
+    params = {
+        "query": {
+            "lib/type": "mbql/query",
+            "stages": [{"lib/type": "mbql.stage/mbql", "source-table": ["db", "public", "orders"]}],
+        }
+    }
+    with (
+        patch("app.services.mcp_connector_service.get_mcp_connector", new=AsyncMock(return_value=conn)),
+        patch("app.services.mcp_client_service.call_external_mcp_tool", new=remote),
+    ):
+        result = await _execute_external_tool(conn.id, "query", params, conn.tenant_id, AsyncMock())
+    assert result["status"] == "completed"
+    remote.assert_awaited_once()
+
+
+def test_null_query_with_native_handle_is_not_mistaken_for_sql():
+    from app.services.chat.metabase_tool_policy import metabase_query_input_error
+
+    params = {"query": None, "query_handle": str(uuid.uuid4())}
+    assert metabase_query_input_error(connector(), "execute_query", params) is None
+    assert metabase_query_input_error(connector(), "query", params) is None
+    assert metabase_query_input_error(connector(), "construct_query", params)
+
+
+def test_native_direct_query_inventory_avoids_session_scoped_handles():
+    from app.services.chat.tools import build_external_tool_definitions
+
+    native = connector(
+        discovered_tools=[
+            {"name": name} for name in ["search", "query", "construct_query", "execute_query", "execute_question"]
+        ]
+    )
+    names = {tool["name"].rsplit("__", 1)[-1] for tool in build_external_tool_definitions([native])}
+    assert names == {"search", "query", "execute_question"}
+    native.discovered_tools = [tool for tool in native.discovered_tools if tool["name"] != "query"]
+    names = {tool["name"].rsplit("__", 1)[-1] for tool in build_external_tool_definitions([native])}
+    assert "construct_query" in names and "execute_query" in names

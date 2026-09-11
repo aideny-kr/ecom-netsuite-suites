@@ -1,15 +1,29 @@
 import uuid
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
 from app.services.chat.agents.unified_agent import UnifiedAgent
+from app.services.chat.llm_adapter import LLMResponse, TokenUsage, ToolUseBlock
 from app.services.chat.plan_mode.clarify_intercept import InterceptResult, intercept_clarify_call
 from app.services.chat.plan_mode.short_circuit import filter_tools_for_chosen_source
 from app.services.chat.plan_mode.source_resolver import source_provider_for_connector
+from app.services.chat.request_routing import RequestRoute
 from app.services.chat.source_selection import source_selection_question
 from app.services.chat.tools import build_external_tool_definitions
+
+
+def routing_adapter(kind="analytics", continuation=True):
+    adapter = AsyncMock()
+    adapter.force_tool_choice = Mock(return_value={"type": "tool", "name": "route_request"})
+    adapter.create_message.return_value = LLMResponse(
+        tool_use_blocks=[
+            ToolUseBlock(id="route", name="route_request", input={"kind": kind, "continuation": continuation})
+        ],
+        usage=TokenUsage(input_tokens=17, output_tokens=5),
+    )
+    return adapter
 
 
 def connector():
@@ -37,7 +51,7 @@ CASE_TASK = (
 )
 GROUP_TASK = (
     "Prepare fixes for all orders in issue group d55f9ecb054529c6a66a4a102e069d5b (tax difference). "
-    'Call transaction_ops.accounting_group with group_id "d55f9ecb054529c6a66a4a102e069d5b". '
+    'Call transaction_ops.groups with group_id "d55f9ecb054529c6a66a4a102e069d5b". '
     "Prepare supported exact invoice corrections together for human approval."
 )
 
@@ -52,7 +66,7 @@ async def test_scoped_transaction_workflow_reaches_agent_without_database_questi
     )
     agent._tool_defs = inventory() + [
         {"name": "transaction_ops_status"},
-        {"name": "transaction_ops_accounting_group"},
+        {"name": "transaction_ops_groups"},
     ]
     reached = []
 
@@ -68,11 +82,13 @@ async def test_scoped_transaction_workflow_reaches_agent_without_database_questi
         ) as run,
     ):
         if streaming:
-            events = [event async for event in agent.run_streaming(task, {}, None, AsyncMock(), "test")]
+            events = [
+                event async for event in agent.run_streaming(task, {}, None, routing_adapter("transaction"), "test")
+            ]
             result = events[-1][1]
             assert reached == [True]
         else:
-            result = await agent.run(task, {}, None, AsyncMock(), "test")
+            result = await agent.run(task, {}, None, routing_adapter("transaction"), "test")
             run.assert_awaited_once()
     assert result.data == "case evidence"
     assert "do not ask which data source" in agent.system_prompt
@@ -96,7 +112,17 @@ def test_scoped_workflow_requires_available_tools_and_is_not_inherited_from_assi
     )
 
 
-@pytest.mark.parametrize("task", ["continue", "try again", "should we fix?", "can you investigate this case?"])
+@pytest.mark.parametrize(
+    "task",
+    [
+        "continue",
+        "try again",
+        "fix it",
+        "continue investigating this case",
+        "show me the evidence for this case",
+        "go ahead and investigate",
+    ],
+)
 def test_follow_up_resumes_blocked_case_without_reasking_source(task):
     from app.services.chat.source_selection import resolve_source_selection
 
@@ -105,7 +131,12 @@ def test_follow_up_resumes_blocked_case_without_reasking_source(task):
         {"role": "user", "content": CASE_TASK},
         {"role": "assistant", "content": "Which data source should I use?"},
     ]
-    result = resolve_source_selection(task=task, tool_definitions=tools, conversation_history=history)
+    result = resolve_source_selection(
+        task=task,
+        tool_definitions=tools,
+        conversation_history=history,
+        route=RequestRoute(kind="transaction", continuation=True),
+    )
     assert result.question is None and result.transaction_workflow
     history.append({"role": "user", "content": "Count all orders"})
     assert source_selection_question(task=task, tool_definitions=tools, conversation_history=history)
@@ -117,6 +148,8 @@ def test_follow_up_resumes_blocked_case_without_reasking_source(task):
         "How many orders in Sakura Batch 5 Laptops (batch id = 395) include FRANVW0016?",
         "How much revenue did we generate?",
         "What is the status of order R123?",
+        "Solidus",
+        "How many Solidus orders are in batch 395?",
         "Do not use NetSuite",
         "Which source should we use, NetSuite or Metabase?",
     ],
@@ -130,7 +163,6 @@ def test_data_without_a_choice_asks_before_querying(question):
     "question",
     [
         "Use Metabase",
-        "Solidus",
         "In NetSuite, count orders",
         "Compare Metabase and NetSuite",
         "Use Metabase, not NetSuite",
@@ -218,7 +250,9 @@ async def test_non_streaming_gate_uses_server_history_with_card_selection():
             BaseSpecialistAgent, "run", new=AsyncMock(return_value=AgentResult(success=True, data="answer"))
         ) as run,
     ):
-        result = await agent.run("Break down orders", {"source_selection_history": history}, None, AsyncMock(), "test")
+        result = await agent.run(
+            "Break down orders", {"source_selection_history": history}, None, routing_adapter(), "test"
+        )
     assert result.data == "answer"
     run.assert_awaited_once()
     assert "User-selected data sources for this turn: metabase" in agent.system_prompt
@@ -237,12 +271,12 @@ def test_older_user_source_choice_is_resolved_outside_llm_history_window():
 
 
 @pytest.mark.parametrize("streaming", [True, False])
-async def test_source_gate_never_calls_model_or_data_tools(streaming):
+async def test_source_gate_only_classifies_before_returning_without_data_tools(streaming):
     agent = UnifiedAgent(
         tenant_id=uuid.uuid4(), user_id=uuid.uuid4(), correlation_id="source-test", context_need="data"
     )
     agent._tool_defs = inventory()
-    adapter = AsyncMock()
+    adapter = routing_adapter(continuation=False)
     with patch.object(agent, "_setup_context", new=AsyncMock(return_value="Count batch 395 orders")):
         if streaming:
             events = [event async for event in agent.run_streaming("Count batch 395 orders", {}, None, adapter, "test")]
@@ -251,7 +285,10 @@ async def test_source_gate_never_calls_model_or_data_tools(streaming):
             result = await agent.run("Count batch 395 orders", {}, None, adapter, "test")
     assert result.success and "Which data source" in result.data
     assert result.tool_calls_log == []
-    assert adapter.mock_calls == []
+    adapter.create_message.assert_awaited_once()
+    assert [t["name"] for t in adapter.create_message.call_args.kwargs["tools"]] == ["route_request"]
+    assert result.tokens_used.input_tokens == 17
+    assert result.request_context["pending_source"] is True
 
 
 def test_metabase_selection_preserves_its_tools_and_drops_other_connectors():

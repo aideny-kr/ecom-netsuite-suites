@@ -122,11 +122,13 @@ class TestCeligoInventoryGating:
 
     async def test_other_local_tools_unaffected_by_the_celigo_gate(self, db):
         tenant = await create_test_tenant(db, slug=f"celigo-inv-other-{uuid.uuid4().hex[:6]}")
-        # No celigo flag, no connection -- celigo tools must be gone, everything else present.
+        # No Celigo connection: independent local tools remain available.
+        # Live NetSuite query tools require their own connection.
 
         tools = await build_all_tool_definitions(db, tenant.id)
         names = _names(tools)
 
-        assert "netsuite_suiteql" in names
+        assert "netsuite_connectivity" in names
+        assert "netsuite_suiteql" not in names
         assert "reference_previous_result" in names
         assert _names(tools).isdisjoint(_CELIGO_LOCAL_NAMES)
