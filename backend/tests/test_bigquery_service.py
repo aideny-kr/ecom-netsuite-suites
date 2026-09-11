@@ -216,6 +216,46 @@ class TestExecuteQuery:
         assert result["cache_hit"] is True
 
 
+class TestValidateReadOnlyRejectsMultiStatement:
+    """Delta gate round 3, item 3: `_validate_read_only` only inspected the
+    FIRST keyword -- `SELECT 1; DELETE FROM dataset.t` passed cleanly.
+    BigQuery scripts (multiple `;`-separated statements) are never
+    legitimate for this read-only tool, regardless of what the first
+    statement is."""
+
+    def test_rejects_a_multi_statement_query(self):
+        from app.services.bigquery_service import _validate_read_only
+
+        with pytest.raises(ValueError, match="multi-statement"):
+            _validate_read_only("SELECT 1; DELETE FROM dataset.t")
+
+    def test_allows_a_single_statement_with_a_trailing_semicolon(self):
+        from app.services.bigquery_service import _validate_read_only
+
+        _validate_read_only("SELECT 1;")  # must not raise
+
+    def test_allows_a_single_statement_with_no_trailing_semicolon(self):
+        from app.services.bigquery_service import _validate_read_only
+
+        _validate_read_only("SELECT 1")  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_execute_query_rejects_a_multi_statement_query(self):
+        """execute_query and estimate_query_cost share the behaviour --
+        they both call _validate_read_only."""
+        from app.services.bigquery_service import execute_query
+
+        with pytest.raises(ValueError, match="multi-statement"):
+            await execute_query({"type": "service_account"}, "p", "SELECT 1; DELETE FROM dataset.t")
+
+    @pytest.mark.asyncio
+    async def test_estimate_query_cost_rejects_a_multi_statement_query(self):
+        from app.services.bigquery_service import estimate_query_cost
+
+        with pytest.raises(ValueError, match="multi-statement"):
+            await estimate_query_cost({"type": "service_account"}, "p", "SELECT 1; DELETE FROM dataset.t")
+
+
 class TestDiscoverSchema:
     @pytest.mark.asyncio
     async def test_returns_datasets(self):

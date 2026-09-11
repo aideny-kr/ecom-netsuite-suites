@@ -57,12 +57,20 @@ def _strip_sql_comments(query: str) -> str:
 
 
 def _validate_read_only(query: str) -> None:
-    """Reject DML/DDL. Raises ValueError for non-SELECT queries."""
-    cleaned = _strip_sql_comments(query).strip().upper()
+    """Reject DML/DDL and multi-statement scripts. Raises ValueError."""
+    cleaned = _strip_sql_comments(query).strip()
     # Allow SELECT and WITH (CTEs)
-    if cleaned.startswith("SELECT") or cleaned.startswith("WITH"):
-        return
-    raise ValueError("Read-only queries only — SELECT and WITH/CTE are allowed")
+    if not (cleaned.upper().startswith("SELECT") or cleaned.upper().startswith("WITH")):
+        raise ValueError("Read-only queries only — SELECT and WITH/CTE are allowed")
+    # Delta gate round 3, item 3: the check above only inspects the FIRST
+    # keyword -- `SELECT 1; DELETE FROM dataset.t` passed cleanly. BigQuery
+    # scripts (multiple `;`-separated statements) are never legitimate for
+    # this read-only tool. Split on `;` after stripping a single optional
+    # trailing separator (so `SELECT 1;` still passes); reject if any
+    # non-empty statement follows the first.
+    statements = cleaned.rstrip(";").split(";")
+    if any(stmt.strip() for stmt in statements[1:]):
+        raise ValueError("Read-only queries only — multi-statement scripts are not allowed")
 
 
 async def execute_query(
