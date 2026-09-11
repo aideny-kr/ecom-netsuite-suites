@@ -75,12 +75,18 @@ async def list_schedules(
     user: Annotated[User, Depends(require_permission("tenant.manage"))],
 ):
     """List all Celery Beat schedules."""
+    from app.services.schedule_service import format_beat_schedule
     from app.workers.celery_app import celery_app
 
     schedules = []
     for name, config in (celery_app.conf.beat_schedule or {}).items():
         schedule = config.get("schedule")
-        schedule_str = str(schedule) if schedule else "unknown"
+        # Live-run defect (brief G item 5): a bare str() of the Beat entry's
+        # schedule object showed raw text ("60.0", "21600", "<crontab: 0 3
+        # * * * (m/h/dM/MY/d)>") for every system job in this list —
+        # format_beat_schedule renders the same value as a human phrase
+        # ("every hour", "every 6 h", "daily 03:00") instead.
+        schedule_str = format_beat_schedule(schedule) if schedule else "unknown"
         schedules.append(
             {
                 "name": name,

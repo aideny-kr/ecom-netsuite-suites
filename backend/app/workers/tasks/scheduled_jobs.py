@@ -134,6 +134,8 @@ __all__ = [
     "REASON_STALL",
     "REASON_ERROR",
     "REASON_BLOCKED",
+    "SCHEDULED_JOBS_RUN_NOW_PRIORITY",
+    "SCHEDULED_JOBS_SWEEP_PRIORITY",
     "RunOutcome",
     "compute_next_run",
     "run_due_jobs",
@@ -156,6 +158,35 @@ REASON_BUDGET = "budget"
 REASON_STALL = "stall"
 REASON_ERROR = "error"
 REASON_BLOCKED = "blocked"
+
+#: Broker priority (Celery + Redis transport). On staging the single shared
+#: worker (`-Q default,sync,recon,export`, concurrency 2) is flooded by
+#: another feature's `tasks.transaction_ops_run` batch (hundreds of messages
+#: queued on `sync`/`recon`), so a user's "Run now" and the Beat sweep
+#: fan-out must publish BELOW that batch work's priority to win against the
+#: flood.
+#:
+#: Redis transport: LOWER number = served first (kombu's Redis transport
+#: polls priority buckets in ASCENDING order — verified against
+#: `kombu.transport.redis.Transport.Channel._brpop_start`, `priority_steps`
+#: defaults to `[0, 3, 6, 9]`).
+#:
+#: Round 4 (fix/jobs-live-run-defects): the mechanism that keeps unlabeled
+#: batch work (e.g. `tasks.transaction_ops_run`) BELOW these two is
+#: `celery_app.py`'s `task_routes` catch-all entry — NOT `task_default_priority`.
+#: `task_default_priority` only becomes `Task.priority`, read by a bound
+#: task's own `.apply_async()`/`.delay()`; `celery_app.send_task(name, ...)`
+#: — what `transaction_ops.scheduler.publish_investigation` and every other
+#: `send_task` caller in this codebase actually use — never touches a `Task`
+#: object and never read that setting, so round 3's fix silently did
+#: nothing for the flood it was meant to stop. `task_routes` IS consulted by
+#: both dispatch styles (`Router.route()`), so it is the correct mechanism —
+#: see `celery_app.py`'s `_default_send_task_priority` and
+#: `tests/test_celery_config.py`. Both constants below still sit BELOW the
+#: catch-all's priority 6: 0 a person is waiting on this request/chat-turn
+#: right now, 3 a due occurrence fired by the minute-tick sweep.
+SCHEDULED_JOBS_RUN_NOW_PRIORITY = 0
+SCHEDULED_JOBS_SWEEP_PRIORITY = 3
 
 #: Spec §B4: the run budget is "(bytes scanned, seconds, usd) enforced between
 #: steps", but no v1 step type (registry.py) reports a `cost_usd` figure
@@ -1238,7 +1269,12 @@ async def collect_and_dispatch(db: AsyncSession) -> dict:
     stats = {"enabled": True, "dispatched": 0, "failed": 0}
     for tenant_id in tenant_ids:
         try:
-            celery_app.send_task("tasks.scheduled_jobs_sweep", kwargs={"tenant_id": str(tenant_id)}, queue="sync")
+            celery_app.send_task(
+                "tasks.scheduled_jobs_sweep",
+                kwargs={"tenant_id": str(tenant_id)},
+                queue="sync",
+                priority=SCHEDULED_JOBS_SWEEP_PRIORITY,
+            )
             stats["dispatched"] += 1
         except Exception:
             stats["failed"] += 1

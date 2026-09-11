@@ -61,14 +61,22 @@ from app.services.jobs.compiler import Clarification, CompilerLLM, compile_instr
 # the module docstring.
 NAME = "Inventory Aging Weekly"
 
-# Verbatim from the mock's Instruction panel.
+# Verbatim from the mock's Instruction panel, plus one appended sentence
+# (live-run defect, brief G item 4): on staging the seed's compile asked
+# whether to reuse an existing "Dimerco Inventory Aging Report" from an
+# August chat instead of compiling -- a genuine clarifying question the mock's
+# own text never answered, so the non-interactive seed created nothing. The
+# appended sentence answers it explicitly so the compiler has no reason left
+# to ask.
 INSTRUCTION = (
     "Every Monday at 6am Pacific, build the inventory aging report for Dimerco, Fedex and "
     "Panurgy from the BigQuery inventory snapshot. Age each SKU by days since its last "
     "restock, bucket 0–30 / 31–60 / 61–90 / 91–180 / 180+, compare with the prior week "
     "and show the nine-week trend of aged share. Save a PDF of the report and an Excel "
     "workbook with every SKU per location to Google Drive under Reports / Inventory aging. "
-    "If a run fails, retry once and then pause and tell me."
+    "If a run fails, retry once and then pause and tell me. "
+    "Build a brand-new report each run with the inventory_aging playbook covering all three "
+    "locations; do not refresh or extend any existing report."
 )
 
 # Verbatim from the mock's Schedule panel: weekly, Monday, 06:00 America/Los_Angeles.
