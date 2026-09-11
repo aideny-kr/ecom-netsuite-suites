@@ -248,5 +248,6 @@ celery_app.conf.beat_schedule = {
     "scheduled-jobs-sweep": {
         "task": "tasks.scheduled_jobs_sweep_all",
         "schedule": 60.0,
+        "options": {"expires": 120},
     },
 }

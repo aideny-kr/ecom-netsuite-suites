@@ -1260,12 +1260,18 @@ async def run_due_jobs(db: AsyncSession, tenant_id: uuid.UUID, *, now: datetime 
 # --- Celery glue -------------------------------------------------------------------------
 
 
-async def collect_and_dispatch(db: AsyncSession) -> dict:
-    """Fan-out: one `tasks.scheduled_jobs_sweep` per ACTIVE tenant — the same
-    shape as `report_auto_refresh_all`/`rolling_period_compose_all`."""
+async def collect_and_dispatch(db: AsyncSession, *, now: datetime | None = None) -> dict:
+    """Queue active tenants with due schedules; the tenant worker still claims them.
+
+    This global collector uses the existing trusted worker database role. Reuse
+    the claim predicate so paused, unapproved, and future schedules do not create
+    high-priority empty sweeps. EXISTS emits one tenant even with many due jobs.
+    """
     if not settings.SCHEDULED_JOBS_ENABLED:
         return {"enabled": False, "dispatched": 0}
-    tenant_ids = (await db.execute(select(Tenant.id).where(Tenant.is_active.is_(True)))).scalars().all()
+    now = now or datetime.now(timezone.utc)
+    due_schedule = select(Schedule.id).where(*_due_predicate(Tenant.id, now)).exists()
+    tenant_ids = (await db.execute(select(Tenant.id).where(Tenant.is_active.is_(True), due_schedule))).scalars().all()
     stats = {"enabled": True, "dispatched": 0, "failed": 0}
     for tenant_id in tenant_ids:
         try:
@@ -1274,6 +1280,9 @@ async def collect_and_dispatch(db: AsyncSession) -> dict:
                 kwargs={"tenant_id": str(tenant_id)},
                 queue="sync",
                 priority=SCHEDULED_JOBS_SWEEP_PRIORITY,
+                # This is a replaceable sweep, not an individual job occurrence.
+                # An expired delivery leaves the schedule due for the next tick.
+                expires=120,
             )
             stats["dispatched"] += 1
         except Exception:
