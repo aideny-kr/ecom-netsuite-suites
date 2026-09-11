@@ -15,13 +15,26 @@ from google.cloud import bigquery
 from google.oauth2 import service_account
 
 
+class BigQueryClientError(RuntimeError):
+    """Delta gate round 3, item 4: raised by ``_get_client`` when the
+    service-account credentials cannot construct a working BigQuery client
+    (malformed/expired JSON, bad project). A dedicated type — rather than
+    the bare ``ValueError`` this used to raise — so a caller can distinguish
+    "the client/credentials themselves are broken" (an infra problem) from a
+    plan-authoring ``ValueError`` such as ``_validate_read_only``'s
+    rejection (a genuine plan defect). See
+    ``app.services.jobs.compiler._bigquery_preflight``, which classifies a
+    ``BigQueryClientError`` as ``PreflightUnavailable``, never a plan
+    defect."""
+
+
 def _get_client(credentials: dict, project_id: str, location: str | None = None) -> bigquery.Client:
     """Create a BigQuery client from service account JSON."""
     try:
         creds = service_account.Credentials.from_service_account_info(credentials)
         return bigquery.Client(credentials=creds, project=project_id, location=location or "US")
     except Exception as e:
-        raise ValueError(f"Failed to initialize BigQuery client: {e}")
+        raise BigQueryClientError(f"Failed to initialize BigQuery client: {e}") from e
 
 
 def _strip_sql_comments(query: str) -> str:

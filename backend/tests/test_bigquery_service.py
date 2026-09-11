@@ -393,3 +393,19 @@ class TestServiceAccountCredentials:
             with patch("app.services.bigquery_service.bigquery.Client"):
                 _get_client(sa_json, "test")
                 mock_creds.assert_called_once()
+
+    def test_garbage_credentials_raise_a_dedicated_client_error(self):
+        """Delta gate round 3, item 4: `_get_client` previously raised a bare
+        `ValueError` for ANY client-construction failure -- indistinguishable
+        from a plan-authoring `ValueError` (e.g. `_validate_read_only`'s
+        rejection). A dedicated `BigQueryClientError` lets
+        `app.services.jobs.compiler._bigquery_preflight` classify a
+        credential/client failure as an infra problem (`PreflightUnavailable`)
+        without also swallowing a genuine plan defect. Runs through the REAL
+        `_get_client` (no mocking) -- malformed/empty service-account JSON
+        makes `google.oauth2.service_account.Credentials.from_service_account_info`
+        raise offline, with no network call."""
+        from app.services.bigquery_service import BigQueryClientError, _get_client
+
+        with pytest.raises(BigQueryClientError):
+            _get_client({}, "test-project")
