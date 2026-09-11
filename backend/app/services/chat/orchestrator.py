@@ -514,6 +514,8 @@ def _coerce_assistant_content(
       final text. Use the spiral-specific wording so the user doesn't read
       this as "I don't remember anything we just discussed".
     """
+    if error in {"request_routing_failed", "metabase_numeric_verification_failed"} and final_text:
+        return final_text
     if error:
         if "credit balance is too low" in error.lower() or "insufficient_quota" in error.lower():
             notice = (
@@ -3441,6 +3443,7 @@ async def run_chat_turn(
                             correlation_id=correlation_id,
                             metadata=None,
                             policy=active_policy,
+                            context_need=context_need,
                         )
                     else:
                         # Detect financial intent for task augmentation + domain knowledge boost
@@ -4303,6 +4306,11 @@ async def run_chat_turn(
 
                     # Persist charts alongside structured_output (backward compatible)
                     _persisted_output = last_structured_output
+                    from app.services.chat.request_routing import persist_request_context
+
+                    _persisted_output = persist_request_context(
+                        _persisted_output, getattr(agent_result, "request_context", None)
+                    )
                     if _charts_output:
                         if _persisted_output:
                             _persisted_output = {**_persisted_output, "charts": _charts_output}

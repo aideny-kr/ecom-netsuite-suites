@@ -243,6 +243,7 @@ async def test_tenant_gated_inventory_drives_skill_isolation():
 
     with (
         patch("app.services.chat.tools.build_local_tool_definitions", return_value=[]),
+        patch("app.services.connection_service.list_connections", new=AsyncMock(return_value=[])),
         patch("app.services.chat.http_connector_tools.build_definitions", new=AsyncMock(return_value=[])),
         patch(
             "app.services.mcp_connector_service.get_active_connectors_for_tenant",
@@ -282,3 +283,43 @@ def test_methodology_covers_solidus_metric_and_sql_failure_modes():
         '"aggregation": [["distinct"',
     ]:
         assert phrase in sql
+
+
+@pytest.mark.parametrize("rest_netsuite", [False, True])
+async def test_source_options_reflect_connected_databases_not_ungated_local_stubs(rest_netsuite):
+    from app.services.chat.tool_inventory import available_data_sources
+    from app.services.chat.tools import build_local_tool_definitions
+
+    connectors = [_connector(names=["query"])]
+    rest = [SimpleNamespace(provider="netsuite", status="active")] if rest_netsuite else []
+    with (
+        patch(
+            "app.services.mcp_connector_service.get_active_connectors_for_tenant",
+            new=AsyncMock(return_value=connectors),
+        ),
+        patch("app.services.connection_service.list_connections", new=AsyncMock(return_value=rest)),
+        patch("app.services.feature_flag_service.is_enabled", new=AsyncMock(return_value=False)),
+        patch("app.services.chat.http_connector_tools.build_definitions", new=AsyncMock(return_value=[])),
+    ):
+        tools = await build_all_tool_definitions(AsyncMock(), uuid.uuid4())
+    sources = available_data_sources(tools)
+    assert set(sources) == ({"metabase", "netsuite"} if rest_netsuite else {"metabase"})
+    assert "netsuite_suiteql" in {tool["name"] for tool in build_local_tool_definitions()}
+
+
+async def test_discovery_failure_does_not_offer_unverified_query_sources():
+    from app.services.chat.tool_inventory import available_data_sources
+    from app.services.chat.tools import build_discovery_fallback_tools
+
+    with (
+        patch(
+            "app.services.mcp_connector_service.get_active_connectors_for_tenant",
+            new=AsyncMock(side_effect=TimeoutError),
+        ),
+        patch("app.services.connection_service.list_connections", new=AsyncMock(side_effect=TimeoutError)),
+        patch("app.services.feature_flag_service.is_enabled", new=AsyncMock(return_value=False)),
+        patch("app.services.chat.http_connector_tools.build_definitions", new=AsyncMock(return_value=[])),
+    ):
+        tools = await build_all_tool_definitions(AsyncMock(), uuid.uuid4())
+    assert available_data_sources(tools) == {}
+    assert available_data_sources(build_discovery_fallback_tools()) == {}

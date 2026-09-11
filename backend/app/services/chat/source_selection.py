@@ -5,59 +5,16 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from app.services.chat.request_routing import RequestContext, RequestRoute, previous_request_context
 from app.services.chat.tool_inventory import available_data_sources
 
 _SOURCE_NAMES = {
-    "metabase": re.compile(r"\b(?:metabase|solidus)\b", re.I),
+    "metabase": re.compile(r"\bmetabase\b", re.I),
     "netsuite": re.compile(r"\bnet\s*suite\b", re.I),
     "bigquery": re.compile(r"\bbig\s*query\b", re.I),
     "shopify": re.compile(r"\bshopify\b", re.I),
     "stripe": re.compile(r"\bstripe\b", re.I),
 }
-
-_CASE_ID = r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
-_SCOPED_TRANSACTION = re.compile(rf"\b(?:transaction\s+case\s+{_CASE_ID}|issue\s+group\s+[0-9a-f]{{32}})\b", re.I)
-_WORKFLOW_FOLLOW_UP = re.compile(
-    r"\s*(?:continue|try again|retry|go ahead|proceed|"
-    r"(?:should we|can you|please)\s+(?:fix|resolve|investigate|continue)"
-    r"(?:\s+(?:it|this|that|this case|this group))?)\s*[.!?]*\s*",
-    re.I,
-)
-
-
-def _is_transaction_workflow(task: str, tool_definitions: list[dict]) -> bool:
-    """Recognize an explicit case/group request, not an arbitrary order lookup.
-
-    The case tools resolve and authorize the stored connector scope themselves.
-    This only removes a conversational source-choice gate; IDs grant no access.
-    """
-    names = {tool.get("name", "").replace(".", "_") for tool in tool_definitions}
-    return bool(
-        names & {"transaction_ops_status", "transaction_ops_accounting_group"}
-        and _SCOPED_TRANSACTION.search(task)
-        and re.search(r"\b(?:investigate|prepare|fix|resolve|review|reconcile)\b", task, re.I)
-    )
-
-
-def _continues_transaction_workflow(task: str, history: list[dict], tool_definitions: list[dict]) -> bool:
-    if not _WORKFLOW_FOLLOW_UP.fullmatch(task):
-        return False
-    for message in reversed(history):
-        if message.get("role") != "user":
-            continue
-        content = message.get("content", "")
-        if isinstance(content, list):
-            content = " ".join(
-                block["text"]
-                for block in content
-                if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
-            )
-        if not isinstance(content, str) or _WORKFLOW_FOLLOW_UP.fullmatch(content):
-            continue
-        # A new independent user request ends the workflow; never infer it
-        # from assistant prose or revive an older case across a topic change.
-        return _is_transaction_workflow(content, tool_definitions)
-    return False
 
 
 @dataclass(frozen=True)
@@ -65,9 +22,10 @@ class SourceSelection:
     question: str | None = None
     selected_sources: tuple[str, ...] = ()
     transaction_workflow: bool = False
+    request_context: dict | None = None
 
 
-def resolve_source_selection(
+def _resolve_analytics_choice(
     *,
     task: str,
     tool_definitions: list[dict],
@@ -80,12 +38,6 @@ def resolve_source_selection(
     conversational gate, not authorization to access a connector: the ordinary
     tenant, policy, and mutation checks still govern subsequent execution.
     """
-    if context_need in {"docs", "workspace"}:
-        return SourceSelection()
-    if _is_transaction_workflow(task, tool_definitions) or _continues_transaction_workflow(
-        task, conversation_history or [], tool_definitions
-    ):
-        return SourceSelection(transaction_workflow=True)
     sources = available_data_sources(tool_definitions)
     if len(sources) < 2:
         return SourceSelection()
@@ -128,8 +80,8 @@ def resolve_source_selection(
             if source in sources
             and any(
                 not re.search(
-                    r"\b(?:not|don't|do not|avoid)\s+(?:use\s+)?$",
-                    message[max(0, match.start() - 20) : match.start()],
+                    r"\b(?:not|don't|do not|avoid|other than|except)\s+(?:(?:use|want|from|using)\s+)*$",
+                    message[max(0, match.start() - 45) : match.start()],
                     re.I,
                 )
                 for match in matches
@@ -145,6 +97,80 @@ def resolve_source_selection(
     labels = sorted(sources.values())
     choices = ", ".join(labels[:-1]) + " or " + labels[-1]
     return SourceSelection(question=f"Which data source should I use for this question: {choices}?")
+
+
+def resolve_source_selection(
+    *,
+    task: str,
+    tool_definitions: list[dict],
+    conversation_history: list[dict] | None = None,
+    context_need: str = "full",
+    route: RequestRoute | None = None,
+) -> SourceSelection:
+    """Apply source choice only to analytics; preserve a task-scoped decision.
+
+    The caller classifies purpose/continuity before this deterministic gate.
+    Context hints describe prompt size, not whether an operation needs analytics.
+    """
+    history = conversation_history or []
+    previous = previous_request_context(history)
+    route = route or RequestRoute(kind="analytics", continuation=True)
+    if context_need.lower() in {"docs", "workspace"}:
+        route = RequestRoute(kind="conversation", continuation=True)
+    if route.kind != "analytics":
+        if route.kind == "conversation" and route.continuation and previous is None:
+            # An acknowledgment in a legacy chat must not erase its explicit
+            # user choice before that analysis has acquired persisted context.
+            return SourceSelection()
+        state = previous if route.kind == "conversation" and route.continuation else None
+        state = state or RequestContext(kind=route.kind)
+        tool_names = {t.get("name", "").replace(".", "_") for t in tool_definitions}
+        return SourceSelection(
+            transaction_workflow=route.kind == "transaction"
+            and bool(
+                tool_names & {"transaction_ops_status", "transaction_ops_groups", "transaction_ops_accounting_evidence"}
+            ),
+            request_context=state.model_dump(),
+        )
+
+    choice_history = []
+    if route.continuation:
+        if previous is None:
+            # Existing sessions from before task-context persistence.
+            has_marker = any(
+                m.get("role") == "assistant"
+                and isinstance(m.get("structured_output"), dict)
+                and "request_context" in m["structured_output"]
+                for m in history
+            )
+            choice_history = [] if has_marker else history
+        else:
+            for index in range(len(history) - 1, -1, -1):
+                output = history[index].get("structured_output")
+                if (
+                    history[index].get("role") == "assistant"
+                    and isinstance(output, dict)
+                    and "request_context" in output
+                ):
+                    choice_history = history[index:]
+                    break
+            if previous.kind == "analytics" and previous.sources:
+                choice_history = [
+                    {"role": "user", "content": "Compare " + " and ".join(previous.sources)}
+                ] + choice_history
+    choice = _resolve_analytics_choice(
+        task=task,
+        tool_definitions=tool_definitions,
+        conversation_history=choice_history,
+    )
+    state = RequestContext(
+        kind="analytics", sources=list(choice.selected_sources), pending_source=bool(choice.question)
+    )
+    return SourceSelection(
+        question=choice.question,
+        selected_sources=choice.selected_sources,
+        request_context=state.model_dump(),
+    )
 
 
 def source_selection_question(**kwargs) -> str | None:
