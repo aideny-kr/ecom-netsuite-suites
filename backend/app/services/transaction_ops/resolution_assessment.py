@@ -16,6 +16,8 @@ def _money(value):
 
 
 def assess(evidence, report, review, correction=None, references=None):
+    from app.services.transaction_ops.resolution_history import _issue
+
     sections = evidence.get("sections") or {}
     documents = sections.get("posting_documents") or []
     invoice = documents[0] if len(documents) == 1 else {}
@@ -94,6 +96,7 @@ def assess(evidence, report, review, correction=None, references=None):
         "facts": facts,
         "alternatives": options,
         "observed_comparison_status": (report.get("balance") or {}).get("status"),
+        "comparison_signature": _issue(report),
         "existing_correction_observed": bool(existing_resolution),
         "references": references or [],
         "unresolved_evidence": list(evidence.get("blockers") or []),

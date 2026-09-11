@@ -261,6 +261,9 @@ async def _execute(operation, params, context):
                 ),
                 "resolution_history": resolutions["resolutions"],
                 "resolution_examples": resolutions["examples"],
+                "accounting_resolution_history": resolutions.get("accounting", {}).get("resolutions", []),
+                "accounting_resolution_examples": resolutions.get("accounting", {}).get("examples", []),
+                "accounting_resolution_usage": resolutions.get("accounting", {}).get("usage"),
                 "resolution_usage": resolutions["usage"],
                 "resolution_history_url": f"/api/v1/transaction-ops/cases/{case.id}/resolution-history",
                 "history": [
