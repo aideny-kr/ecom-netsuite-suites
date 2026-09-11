@@ -492,6 +492,51 @@ async def test_bigquery_preflight_is_skipped_when_the_plan_has_no_bigquery_sql_s
     assert isinstance(result, CompiledPlan)
 
 
+# ---------------------------------------------------------------------------
+# Delta gate (brief I): three confirmed gaps in the preflight above.
+#   1. credential decrypt failure escaped as an unhandled 500 (this test).
+#   2. dry_run_query never enforced read-only (covered in
+#      tests/test_bigquery_service.py -- item 2 lives at the service layer).
+#   3. every dry-run failure was treated as a plan defect, even a transient
+#      infra failure (BigQuery 503, expired auth token) that burns the
+#      single repair round on something a rewritten query cannot fix --
+#      tested separately, further down this file.
+# ---------------------------------------------------------------------------
+
+
+async def test_bigquery_preflight_credential_decrypt_failure_short_circuits_without_raising(db, tenant_a, monkeypatch):
+    """Item 1 (brief I): a connector whose `encrypted_credentials` is corrupt
+    (decrypt raises) must not escape `compile_instruction` as an unhandled
+    500 -- connector lookup + credential decrypt now run inside a try that
+    classifies any failure there as a PreflightUnavailable outcome, never a
+    plan defect, and never a wasted repair-round LLM call for a plan that
+    was never even inspected."""
+    from cryptography.fernet import InvalidToken
+
+    monkeypatch.setattr(compiler, "_tenant_locations", lambda *_a, **_kw: _async_list([]))
+    await _add_bigquery_connector(db, tenant_a.id)
+
+    def _raise_invalid_token(_encrypted):
+        raise InvalidToken("corrupt ciphertext")
+
+    monkeypatch.setattr("app.mcp.tools.bigquery_tools.decrypt_credentials", _raise_invalid_token)
+
+    plan = _bigquery_only_plan("SELECT sku FROM dataset.inventory_snapshot")
+    fake = FakeAdapter([_compile_plan_response(plan, tool_use_id="tu_1")])
+
+    result = await compile_instruction(
+        db,
+        tenant_id=tenant_a.id,
+        instruction="run a bigquery query",
+        actor_id=None,
+        llm=CompilerLLM(adapter=fake, model="fake-model"),
+    )
+
+    assert isinstance(result, Clarification)
+    assert "could not run" in result.question
+    assert len(fake.calls) == 1  # no repair round -- the plan was never the problem
+
+
 def test_system_prompt_states_the_report_step_rule():
     """A report_step param (on render_pdf, build_xlsx, and drive.upload) must
     be steered toward naming the report.compose step directly -- never a

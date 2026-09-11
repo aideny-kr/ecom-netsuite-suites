@@ -359,7 +359,7 @@ async def _audit_compile(
             "instruction_hash": hashlib.sha256(instruction.encode("utf-8")).hexdigest(),
             "model": model,
             "plan_version": plan_version,
-            "outcome": outcome,  # "compiled" | "clarification"
+            "outcome": outcome,  # "compiled" | "clarification" | "preflight_unavailable"
         },
     )
 
@@ -371,6 +371,26 @@ def _repair_tool_result_content(errors: list[str]) -> str:
         + ". Provide a corrected plan via compile_plan, or call ask_clarification if a "
         "required detail cannot be derived from the instruction."
     )
+
+
+class PreflightUnavailable(Exception):  # noqa: N818 — a preflight OUTCOME (like Clarification/PlanInvalid), not a generic Error
+    """Delta gate (brief I, item 1): raised by ``_bigquery_preflight`` when
+    a ``bigquery_sql`` step's dry run could not even be ATTEMPTED for a
+    reason that has nothing to do with the plan itself -- the tenant's
+    BigQuery connector could not be looked up, or its
+    ``encrypted_credentials`` could not be decrypted. ``reason`` is the
+    failing exception's CLASS NAME ONLY -- never ``str(exc)`` -- so a
+    credential or connection-string fragment embedded in a driver's error
+    message never reaches an audit payload or a user-facing question.
+
+    A failure here is never a plan defect (the plan was never even
+    inspected, so a repair round cannot help) -- ``compile_instruction``
+    catches it and returns a ``Clarification``-style "could not run"
+    message WITHOUT spending the single repair round on it."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
 
 
 async def _bigquery_preflight(db: AsyncSession, tenant_id: uuid.UUID, plan: dict) -> list[str]:
@@ -392,7 +412,14 @@ async def _bigquery_preflight(db: AsyncSession, tenant_id: uuid.UUID, plan: dict
     plan actually has a ``bigquery_sql`` step (every playbook-only Inventory
     Aging Weekly plan has none); a tenant with no active BigQuery connection
     fails CLOSED rather than silently skipping the check for the step(s) it
-    cannot validate."""
+    cannot validate.
+
+    Returns ``list[str]`` (one message per step with a genuine plan defect,
+    feeding the existing repair round) for a structurally-fine plan whose
+    query is simply wrong. Raises ``PreflightUnavailable`` instead (see its
+    own docstring, delta gate item 1) when the tenant's BigQuery connector
+    or credentials could not be resolved at all -- the plan was never even
+    inspected."""
     steps = plan.get("steps") if isinstance(plan, dict) else None
     bq_steps = [
         s
@@ -405,11 +432,21 @@ async def _bigquery_preflight(db: AsyncSession, tenant_id: uuid.UUID, plan: dict
     from app.mcp.tools.bigquery_tools import _extract_credentials, _get_bigquery_connector
     from app.services.bigquery_service import dry_run_query
 
-    connector = await _get_bigquery_connector({"tenant_id": tenant_id, "db": db})
-    if connector is None:
-        return [f"bigquery_sql step {s.get('id')}: preflight needs a BigQuery connection" for s in bq_steps]
+    # Item 1 (delta gate): connector lookup + credential decrypt run inside
+    # ONE try -- previously `_extract_credentials` sat AFTER the `connector
+    # is None` check but BEFORE any try, so a corrupt/undecryptable
+    # `encrypted_credentials` raised straight out of `compile_instruction`
+    # as an unhandled 500. Any failure here fails CLOSED as a
+    # PreflightUnavailable, never a plan defect: the plan was never even
+    # inspected, so repairing it cannot help.
+    try:
+        connector = await _get_bigquery_connector({"tenant_id": tenant_id, "db": db})
+        if connector is None:
+            return [f"bigquery_sql step {s.get('id')}: preflight needs a BigQuery connection" for s in bq_steps]
+        sa_json, project_id, location = _extract_credentials(connector)
+    except Exception as exc:
+        raise PreflightUnavailable(f"bigquery preflight unavailable: {type(exc).__name__}") from exc
 
-    sa_json, project_id, location = _extract_credentials(connector)
     errors: list[str] = []
     for step in bq_steps:
         query = step["params"].get("query", "")
@@ -441,6 +478,27 @@ async def _validate_and_preflight(
     return validated, []
 
 
+async def _preflight_unavailable_outcome(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    actor_id: uuid.UUID | None,
+    instruction: str,
+    model: str,
+    plan_version: int | None,
+    exc: PreflightUnavailable,
+) -> Clarification:
+    """Delta gate (item 1): the outcome for a ``PreflightUnavailable``
+    -- short-circuits ``compile_instruction`` WITHOUT spending the repair
+    round, audited under its own ``outcome`` value so it is distinguishable
+    from an ordinary "couldn't compile a valid plan" clarification in the
+    audit trail. Returns (never raises) a ``Clarification`` so every
+    existing caller of ``compile_instruction`` -- which only ever checks
+    ``isinstance(compiled, Clarification)`` -- keeps working unchanged; the
+    message text itself is the "own outcome" brief I asks for."""
+    await _audit_compile(db, tenant_id, actor_id, instruction, model, plan_version, outcome="preflight_unavailable")
+    return Clarification(question=f"BigQuery preflight could not run: {exc.reason}; try again")
+
+
 async def compile_instruction(
     db: AsyncSession,
     *,
@@ -468,7 +526,12 @@ async def compile_instruction(
 
     errors: list[str]
     if tool_name == _COMPILE_TOOL_NAME:
-        validated, plan_errors = await _validate_and_preflight(db, tenant_id, tool_input)
+        try:
+            validated, plan_errors = await _validate_and_preflight(db, tenant_id, tool_input)
+        except PreflightUnavailable as exc:
+            return await _preflight_unavailable_outcome(
+                db, tenant_id, actor_id, instruction, llm.model, plan_version, exc
+            )
         if validated is not None:
             compiled = _build_compiled_plan(tool_input, validated, llm.model)
             await _audit_compile(db, tenant_id, actor_id, instruction, llm.model, plan_version, outcome="compiled")
@@ -500,7 +563,12 @@ async def compile_instruction(
             return Clarification(question=question)
 
         if tool_name == _COMPILE_TOOL_NAME:
-            validated, plan_errors = await _validate_and_preflight(db, tenant_id, tool_input)
+            try:
+                validated, plan_errors = await _validate_and_preflight(db, tenant_id, tool_input)
+            except PreflightUnavailable as exc:
+                return await _preflight_unavailable_outcome(
+                    db, tenant_id, actor_id, instruction, llm.model, plan_version, exc
+                )
             if validated is not None:
                 compiled = _build_compiled_plan(tool_input, validated, llm.model)
                 await _audit_compile(db, tenant_id, actor_id, instruction, llm.model, plan_version, outcome="compiled")
