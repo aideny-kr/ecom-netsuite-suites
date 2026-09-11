@@ -433,6 +433,7 @@ async def test_bigquery_preflight_accepts_a_step_whose_dry_run_succeeds(db, tena
         client = MagicMock()
         job = MagicMock()
         job.total_bytes_processed = 100
+        job.statement_type = "SELECT"
         client.query.return_value = job
         return client
 
@@ -451,6 +452,50 @@ async def test_bigquery_preflight_accepts_a_step_whose_dry_run_succeeds(db, tena
 
     assert isinstance(result, CompiledPlan)
     assert len(fake.calls) == 1  # a clean compile never needs a repair round
+
+
+async def test_bigquery_preflight_rejects_a_script_statement_type_as_a_plan_defect(db, tenant_a, monkeypatch):
+    """Round 4 (fix/jobs-live-run-defects): the removed `;`-split
+    multi-statement text guard is replaced by BigQuery's OWN dry-run
+    `statement_type` classification (`app.services.bigquery_service.
+    dry_run_query`). A `ValueError` raised INSIDE `dry_run_query` for a
+    non-SELECT statement_type must still land in the plan-defect / repair-
+    round branch here -- not `PreflightUnavailable` -- because a rewritten
+    query genuinely can fix it, exactly like a BadRequest/NotFound does."""
+    monkeypatch.setattr(compiler, "_tenant_locations", lambda *_a, **_kw: _async_list([]))
+    await _add_bigquery_connector(db, tenant_a.id)
+
+    from unittest.mock import MagicMock
+
+    def fake_get_client(credentials, project_id, location=None):
+        client = MagicMock()
+        job = MagicMock()
+        job.total_bytes_processed = 100
+        job.statement_type = "SCRIPT"
+        client.query.return_value = job
+        return client
+
+    monkeypatch.setattr("app.services.bigquery_service._get_client", fake_get_client)
+
+    # The exact false negative the removed text guard missed: comment-
+    # stripping cleans this to `SELECT '`, which still starts with SELECT,
+    # but BigQuery's own dry run classifies the ORIGINAL two-statement text
+    # as a SCRIPT.
+    bad_plan = _bigquery_only_plan("SELECT '--'; DELETE FROM d.t")
+    fake = FakeAdapter(
+        [_compile_plan_response(bad_plan, tool_use_id="tu_1"), _compile_plan_response(bad_plan, tool_use_id="tu_2")]
+    )
+
+    result = await compile_instruction(
+        db,
+        tenant_id=tenant_a.id,
+        instruction="run a bigquery query",
+        actor_id=None,
+        llm=CompilerLLM(adapter=fake, model="fake-model"),
+    )
+
+    assert isinstance(result, Clarification)
+    assert len(fake.calls) == 2  # a plan defect fed the repair round -- not PreflightUnavailable
 
 
 async def test_bigquery_preflight_fails_closed_with_no_connector(db, tenant_a, monkeypatch):

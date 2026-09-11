@@ -57,20 +57,30 @@ def _strip_sql_comments(query: str) -> str:
 
 
 def _validate_read_only(query: str) -> None:
-    """Reject DML/DDL and multi-statement scripts. Raises ValueError."""
+    """Reject DML/DDL. Raises ValueError.
+
+    NOTE (round 4, fix/jobs-live-run-defects): this is a CHEAP first line of
+    defense only -- it checks the leading keyword of a comment-stripped copy
+    of the query, nothing more. A previous round added a `;`-split here to
+    also reject multi-statement scripts, but that was a text heuristic on
+    SQL and it failed both directions: it REJECTED a legitimate single
+    statement with a semicolon inside a string literal
+    (`SELECT * FROM t WHERE region = 'us;east'`), and it FAILED TO REJECT
+    `SELECT '--'; DELETE FROM d.t` -- `_strip_sql_comments` doesn't
+    understand string literals either, so it saw the `--` inside the quotes
+    as a real comment and cleaned the query down to `SELECT '`, a single
+    "statement" that still starts with SELECT, while the ORIGINAL
+    two-statement text is what actually reaches `execute_query`/
+    `dry_run_query`. The `;`-split is removed; multi-statement/script
+    rejection now lives in `dry_run_query`'s `statement_type` check, which
+    asks BigQuery's OWN parser to classify the ORIGINAL query text -- a
+    string literal or comment cannot fool BigQuery's parser the way it
+    fools a regex.
+    """
     cleaned = _strip_sql_comments(query).strip()
     # Allow SELECT and WITH (CTEs)
     if not (cleaned.upper().startswith("SELECT") or cleaned.upper().startswith("WITH")):
         raise ValueError("Read-only queries only — SELECT and WITH/CTE are allowed")
-    # Delta gate round 3, item 3: the check above only inspects the FIRST
-    # keyword -- `SELECT 1; DELETE FROM dataset.t` passed cleanly. BigQuery
-    # scripts (multiple `;`-separated statements) are never legitimate for
-    # this read-only tool. Split on `;` after stripping a single optional
-    # trailing separator (so `SELECT 1;` still passes); reject if any
-    # non-empty statement follows the first.
-    statements = cleaned.rstrip(";").split(";")
-    if any(stmt.strip() for stmt in statements[1:]):
-        raise ValueError("Read-only queries only — multi-statement scripts are not allowed")
 
 
 async def execute_query(
@@ -85,6 +95,15 @@ async def execute_query(
     """Execute a read-only BigQuery SQL query.
 
     Returns {"columns", "rows", "row_count", "bytes_processed", "truncated", "cache_hit", "query"}.
+
+    NOTE (round 4): `_validate_read_only`'s leading-keyword check is a cheap
+    first line of defense only -- it never asks BigQuery's own parser
+    anything, so it cannot see a multi-statement script or DML/DDL hidden
+    past a leading SELECT the way `dry_run_query`'s `statement_type` check
+    can (see that function's docstring). Follow-up, not done here: add an
+    equivalent dry-run `statement_type` gate in front of execution for this
+    BI-tool surface -- do NOT add a dry run to `execute_query` casually,
+    since every call here already pays for one real query execution.
     """
     _validate_read_only(query)
 
@@ -212,9 +231,23 @@ async def dry_run_query(
     Delta gate (brief I, item 2): calls ``_validate_read_only`` first, exactly
     like ``execute_query``/``estimate_query_cost`` already do — without this,
     an ``INSERT``/``UPDATE``/``DELETE`` step passed the compiler's
-    compile-time preflight cleanly and only ever failed at RUN time."""
+    compile-time preflight cleanly and only ever failed at RUN time.
+
+    Round 4 (fix/jobs-live-run-defects): also reads the dry-run job's OWN
+    ``statement_type`` (``google-cloud-bigquery``'s ``QueryJob.statement_type``
+    -- a multi-statement script reports ``"SCRIPT"``, DML reports e.g.
+    ``"DELETE"``/``"INSERT"``, a plain query reports ``"SELECT"``) and raises
+    ``ValueError`` for anything other than ``"SELECT"``. This replaces the
+    ``;``-split multi-statement guard removed from ``_validate_read_only``:
+    a dry run round-trips through BigQuery's OWN parser against the ORIGINAL
+    query text (the exact text ``execute_query`` would send), so neither a
+    semicolon inside a string literal nor a comment-like sequence inside one
+    can fool it the way they fooled a regex."""
     _validate_read_only(query)
-    await asyncio.to_thread(_sync_dry_run_job, credentials, project_id, query, location)
+    job = await asyncio.to_thread(_sync_dry_run_job, credentials, project_id, query, location)
+    statement_type = getattr(job, "statement_type", None)
+    if statement_type != "SELECT":
+        raise ValueError(f"bigquery preflight: only SELECT statements are allowed (got {statement_type})")
 
 
 async def estimate_query_cost(

@@ -476,10 +476,21 @@ async def _bigquery_preflight(db: AsyncSession, tenant_id: uuid.UUID, plan: dict
             continue
         try:
             await dry_run_query(sa_json, project_id, query, location=location)
-        except (BadRequest, NotFound) as exc:
+        except (BadRequest, NotFound, ValueError) as exc:
             # A genuine plan defect -- bad SQL BigQuery's own parser rejects
-            # with a 400, or a misspelled table/dataset (404) -- the repair
-            # round can fix either by rewriting the query.
+            # with a 400, a misspelled table/dataset (404), or (round 4,
+            # fix/jobs-live-run-defects) a `ValueError` from `dry_run_query`'s
+            # own `statement_type` check (BigQuery's dry-run job classifies
+            # the ORIGINAL query as something other than "SELECT" -- a
+            # multi-statement script, or DML/DDL hidden past a leading
+            # SELECT that `_validate_read_only`'s cheap leading-keyword check
+            # cannot see). NOTE this `ValueError` is UNAMBIGUOUS: `
+            # _validate_read_only`'s OWN `ValueError` was already checked
+            # explicitly above and `continue`d past before ever reaching
+            # `dry_run_query`, so a `ValueError` this late can only be the
+            # statement_type rejection -- never re-litigates the same
+            # leading-keyword failure. The repair round can fix any of
+            # these by rewriting the query.
             errors.append(f"bigquery_sql step {step.get('id')}: {exc}")
         except Exception as exc:
             # Round 3, item 2: everything else -- an auth failure, a 5xx, a
