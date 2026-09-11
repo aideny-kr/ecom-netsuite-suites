@@ -40,3 +40,41 @@ def requires_custom_tool_confirmation(connector, raw_tool_name: str) -> bool:
     return getattr(connector, "provider", None) in {"custom", "shopify_mcp", "stripe_mcp"} and not (
         is_read_only_metabase_tool(connector, raw_tool_name)
     )
+
+
+def metabase_query_input_error(connector, raw_tool_name: str, params: dict) -> str | None:
+    """Native read-tool names cannot authorize a SQL/native query passthrough."""
+    if not is_read_only_metabase_tool(connector, raw_tool_name):
+        return None
+    if raw_tool_name not in {"query", "construct_query", "execute_query", "execute_question"}:
+        return None
+    if "query" not in params:
+        # Opaque handles and saved-question identifiers follow the native read
+        # protocol. They do not accept a SQL/native query body from the caller.
+        return None
+    query = params["query"]
+    if query is None and params.get("query_handle") and raw_tool_name in {"query", "execute_query"}:
+        return None
+    valid = (
+        isinstance(query, dict)
+        and query.get("lib/type") == "mbql/query"
+        and isinstance(query.get("stages"), list)
+        and bool(query["stages"])
+    )
+
+    def contains_native(value):
+        if isinstance(value, dict):
+            return (
+                any(key in {"native", "native-query"} for key in value)
+                or value.get("type") == "native"
+                or (str(value.get("lib/type", "")).endswith("/native"))
+                or any(contains_native(child) for child in value.values())
+            )
+        return isinstance(value, list) and any(contains_native(child) for child in value)
+
+    if not valid or contains_native(query):
+        return (
+            "Metabase analytics accepts structured MBQL query objects only. "
+            "SQL strings and native query stages were not executed. Use the query tool with verified MBQL."
+        )
+    return None
