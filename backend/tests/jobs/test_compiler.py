@@ -371,14 +371,22 @@ async def _add_bigquery_connector(db, tenant_id) -> None:
 
 
 def _fake_get_client_raising_for(needle: str):
+    """Delta gate round 3, item 2: a REAL BigQuery client raises
+    `google.api_core.exceptions.BadRequest` for an invalid query -- never a
+    bare `ValueError` (that type is reserved for `_validate_read_only`'s own
+    plan-authoring rejection, which the preflight now checks explicitly and
+    separately, and for `_get_client`'s `BigQueryClientError`, which is an
+    infra failure, not a plan defect)."""
     from unittest.mock import MagicMock
+
+    from google.api_core.exceptions import BadRequest
 
     def fake_get_client(credentials, project_id, location=None):
         client = MagicMock()
 
         def fake_query(query, job_config=None):
             if needle in query:
-                raise ValueError(f'Table "{needle}" must be qualified with a dataset')
+                raise BadRequest(f'Table "{needle}" must be qualified with a dataset')
             job = MagicMock()
             job.total_bytes_processed = 100
             return job
@@ -636,6 +644,83 @@ async def test_bigquery_preflight_google_auth_error_short_circuits_without_a_rep
     assert isinstance(result, Clarification)
     assert "could not run" in result.question
     assert len(fake.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Delta gate round 3, item 2: `_bigquery_preflight`'s `except (BadRequest,
+# ValueError)` caught BOTH BadRequest (a genuine plan defect) AND ValueError
+# from `_get_client`'s client-construction failure (an infra problem) --
+# meaning a malformed/expired credential could feed the repair round and
+# leak raw exception text (potentially embedding credential fragments) into
+# a user-facing message. The fix: `_validate_read_only` runs FIRST and
+# explicitly (its ValueError IS a plan defect); `dry_run_query`'s own
+# BadRequest/NotFound are plan defects; everything else -- including
+# `_get_client`'s now-dedicated `BigQueryClientError` (item 4) -- is
+# PreflightUnavailable.
+# ---------------------------------------------------------------------------
+
+
+async def test_bigquery_preflight_malformed_credentials_short_circuit_without_leaking_credential_text(
+    db, tenant_a, monkeypatch
+):
+    """Runs through the REAL `_get_client` (no monkeypatch) -- `_add_bigquery_
+    connector` stores an empty `service_account_json`, which makes the real
+    `google.oauth2.service_account.Credentials.from_service_account_info`
+    raise offline (no network call). That must classify as
+    `PreflightUnavailable` (never a plan defect, never a repair round) and
+    the resulting Clarification's question must never carry the raw
+    exception text, which can embed credential/connection-string
+    fragments (`PreflightUnavailable.reason` is the exception's CLASS NAME
+    only)."""
+    monkeypatch.setattr(compiler, "_tenant_locations", lambda *_a, **_kw: _async_list([]))
+    await _add_bigquery_connector(db, tenant_a.id)
+
+    plan = _bigquery_only_plan("SELECT sku FROM dataset.inventory_snapshot")
+    fake = FakeAdapter([_compile_plan_response(plan, tool_use_id="tu_1")])
+
+    result = await compile_instruction(
+        db,
+        tenant_id=tenant_a.id,
+        instruction="run a bigquery query",
+        actor_id=None,
+        llm=CompilerLLM(adapter=fake, model="fake-model"),
+    )
+
+    assert isinstance(result, Clarification)
+    assert "could not run" in result.question
+    assert len(fake.calls) == 1  # no repair round -- an infra failure never gets a second LLM call
+    assert "service_account" not in result.question.lower()
+    assert "credential" not in result.question.lower()
+    assert "client_email" not in result.question.lower()
+
+
+async def test_bigquery_preflight_not_found_still_feeds_the_repair_round(db, tenant_a, monkeypatch):
+    """`google.api_core.exceptions.NotFound` -- a misspelled table/dataset --
+    is repairable, exactly like `BadRequest` above."""
+    from google.api_core.exceptions import NotFound
+
+    monkeypatch.setattr(compiler, "_tenant_locations", lambda *_a, **_kw: _async_list([]))
+    await _add_bigquery_connector(db, tenant_a.id)
+    monkeypatch.setattr(
+        "app.services.bigquery_service._get_client",
+        _fake_get_client_raising(NotFound("Not found: Table project:dataset.inventroy_snapshot")),
+    )
+
+    bad_plan = _bigquery_only_plan("SELECT sku FROM dataset.inventroy_snapshot")
+    fake = FakeAdapter(
+        [_compile_plan_response(bad_plan, tool_use_id="tu_1"), _compile_plan_response(bad_plan, tool_use_id="tu_2")]
+    )
+
+    result = await compile_instruction(
+        db,
+        tenant_id=tenant_a.id,
+        instruction="run a bigquery query",
+        actor_id=None,
+        llm=CompilerLLM(adapter=fake, model="fake-model"),
+    )
+
+    assert isinstance(result, Clarification)
+    assert len(fake.calls) == 2  # the repair round ran -- a plan defect, not an infra failure
 
 
 def test_system_prompt_states_the_report_step_rule():

@@ -40,7 +40,7 @@ import logging
 import uuid
 from dataclasses import dataclass
 
-from google.api_core.exceptions import BadRequest
+from google.api_core.exceptions import BadRequest, NotFound
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -375,26 +375,30 @@ def _repair_tool_result_content(errors: list[str]) -> str:
 
 
 class PreflightUnavailable(Exception):  # noqa: N818 — a preflight OUTCOME (like Clarification/PlanInvalid), not a generic Error
-    """Delta gate (brief I, items 1 + 3): raised by ``_bigquery_preflight``
-    when a ``bigquery_sql`` step's dry run could not be evaluated for a
-    reason that has nothing to do with the plan itself -- the tenant's
-    BigQuery connector could not be looked up, its ``encrypted_credentials``
-    could not be decrypted (item 1), or the dry run itself failed with
-    anything other than a ``google.api_core.exceptions.BadRequest`` (item 3:
-    auth failure, 5xx, timeout, connection error). ``reason`` is the failing
-    exception's CLASS NAME ONLY -- never ``str(exc)`` -- so a credential or
+    """Delta gate (brief I, items 1 + 3; round 3 fix, item 2): raised by
+    ``_bigquery_preflight`` when a ``bigquery_sql`` step's dry run could not
+    be evaluated for a reason that has nothing to do with the plan itself --
+    the tenant's BigQuery connector could not be looked up, its
+    ``encrypted_credentials`` could not be decrypted (item 1), the credentials
+    could not construct a working client (``bigquery_service.
+    BigQueryClientError`` -- round 3 item 4/2: this used to be an
+    indistinguishable ``ValueError`` that could feed the repair round), or the
+    dry run itself failed with anything other than a
+    ``google.api_core.exceptions.BadRequest``/``NotFound`` (auth failure,
+    5xx, timeout, connection error). ``reason`` is the failing exception's
+    CLASS NAME ONLY -- never ``str(exc)`` -- so a credential or
     connection-string fragment embedded in a driver's error message never
     reaches an audit payload or a user-facing question.
 
-    A ``BadRequest`` (or a plan-authoring ``ValueError`` -- e.g. the
-    read-only check in ``bigquery_service.dry_run_query``, item 2) is NOT
-    wrapped here: those are genuine plan defects a repair round can fix by
-    rewriting the query, so they stay in ``_bigquery_preflight``'s ordinary
-    ``list[str]`` return and keep feeding the existing repair-round path.
-    Only a failure a rewritten query could never fix short-circuits straight
-    to this outcome -- ``compile_instruction`` catches it and returns a
-    ``Clarification``-style "could not run" message WITHOUT spending the
-    single repair round on it."""
+    A ``BadRequest``/``NotFound`` (or a plan-authoring ``ValueError`` from
+    ``_validate_read_only``, checked explicitly and FIRST -- round 3 item 2)
+    is NOT wrapped here: those are genuine plan defects a repair round can
+    fix by rewriting the query, so they stay in ``_bigquery_preflight``'s
+    ordinary ``list[str]`` return and keep feeding the existing repair-round
+    path. Only a failure a rewritten query could never fix short-circuits
+    straight to this outcome -- ``compile_instruction`` catches it and
+    returns a ``Clarification``-style "could not run" message WITHOUT
+    spending the single repair round on it."""
 
     def __init__(self, reason: str):
         self.reason = reason
@@ -425,9 +429,10 @@ async def _bigquery_preflight(db: AsyncSession, tenant_id: uuid.UUID, plan: dict
     Returns ``list[str]`` (one message per step with a genuine plan defect,
     feeding the existing repair round) for a structurally-fine plan whose
     query is simply wrong. Raises ``PreflightUnavailable`` instead (see its
-    own docstring, delta gate items 1 + 3) when the failure has nothing to
-    do with the plan -- credential/connector trouble, or any BigQuery error
-    other than ``BadRequest``/read-only rejection."""
+    own docstring, delta gate items 1 + 3, round 3 item 2) when the failure
+    has nothing to do with the plan -- credential/connector trouble, or any
+    BigQuery error other than ``BadRequest``/``NotFound``/read-only
+    rejection."""
     steps = plan.get("steps") if isinstance(plan, dict) else None
     bq_steps = [
         s
@@ -438,7 +443,7 @@ async def _bigquery_preflight(db: AsyncSession, tenant_id: uuid.UUID, plan: dict
         return []
 
     from app.mcp.tools.bigquery_tools import _extract_credentials, _get_bigquery_connector
-    from app.services.bigquery_service import dry_run_query
+    from app.services.bigquery_service import _validate_read_only, dry_run_query
 
     # Item 1 (delta gate): connector lookup + credential decrypt run inside
     # ONE try -- previously `_extract_credentials` sat AFTER the `connector
@@ -458,19 +463,35 @@ async def _bigquery_preflight(db: AsyncSession, tenant_id: uuid.UUID, plan: dict
     errors: list[str] = []
     for step in bq_steps:
         query = step["params"].get("query", "")
+        # Round 3, item 2: `_validate_read_only` runs FIRST and explicitly --
+        # its ValueError IS a plan defect (a rewritten query fixes it), so it
+        # is recorded directly and the step never reaches `dry_run_query`
+        # (which would re-raise the identical ValueError from ITS OWN
+        # internal `_validate_read_only` call, but that path must not be
+        # caught below -- see why immediately after).
+        try:
+            _validate_read_only(query)
+        except ValueError as exc:
+            errors.append(f"bigquery_sql step {step.get('id')}: {exc}")
+            continue
         try:
             await dry_run_query(sa_json, project_id, query, location=location)
-        except (BadRequest, ValueError) as exc:
-            # A genuine plan defect (bad SQL BigQuery's own parser rejects
-            # with a 400, or -- item 2 -- a non-read-only query rejected by
-            # `_validate_read_only`) -- the repair round can fix either by
-            # rewriting the query, exactly as before item 3.
+        except (BadRequest, NotFound) as exc:
+            # A genuine plan defect -- bad SQL BigQuery's own parser rejects
+            # with a 400, or a misspelled table/dataset (404) -- the repair
+            # round can fix either by rewriting the query.
             errors.append(f"bigquery_sql step {step.get('id')}: {exc}")
         except Exception as exc:
-            # Item 3 (delta gate): anything else -- an auth failure, a 5xx,
-            # a timeout, a connection error -- is an INFRA failure, not a
-            # plan defect. A rewritten query cannot fix a down backend or an
-            # expired token, so this never reaches the repair round.
+            # Round 3, item 2: everything else -- an auth failure, a 5xx, a
+            # timeout, a connection error, or `_get_client`'s dedicated
+            # `BigQueryClientError` (malformed/expired credentials) -- is an
+            # INFRA failure, not a plan defect. Note this is now a BARE
+            # `except Exception`, not `except (BadRequest, ValueError)` framed
+            # negatively: a `ValueError` reaching here can ONLY come from
+            # something other than `_validate_read_only` (already handled
+            # above), so it is correctly treated as infra, never leaking
+            # credential text (`type(exc).__name__` only) into a plan
+            # defect message or a wasted repair round.
             raise PreflightUnavailable(f"bigquery preflight unavailable: {type(exc).__name__}") from exc
     return errors
 
