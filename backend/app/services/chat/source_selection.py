@@ -126,7 +126,7 @@ def resolve_source_selection(
         state = state or RequestContext(kind=route.kind)
         tool_names = {t.get("name", "").replace(".", "_") for t in tool_definitions}
         return SourceSelection(
-            transaction_workflow=route.kind == "transaction"
+            transaction_workflow=state.kind == "transaction"
             and bool(
                 tool_names & {"transaction_ops_status", "transaction_ops_groups", "transaction_ops_accounting_evidence"}
             ),

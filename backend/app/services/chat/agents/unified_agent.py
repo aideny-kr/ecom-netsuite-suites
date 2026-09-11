@@ -940,7 +940,17 @@ class UnifiedAgent(BaseSpecialistAgent):
 
         history = context.get("source_selection_history", history) or []
         task = context.get("source_selection_task", task)
-        if len(available_data_sources(self._tool_defs or [])) < 2 and not metabase_tool_names(self._tool_defs or []):
+        tool_names = {t.get("name", "").replace(".", "_") for t in self._tool_defs or []}
+        has_transaction_tools = bool(
+            tool_names & {"transaction_ops_status", "transaction_ops_groups", "transaction_ops_accounting_evidence"}
+        )
+        # Source count only decides whether an analytics choice is necessary.
+        # Accounting intent must still be established before the first tool call.
+        if (
+            len(available_data_sources(self._tool_defs or [])) < 2
+            and not metabase_tool_names(self._tool_defs or [])
+            and not has_transaction_tools
+        ):
             return SourceSelection()
         if self._context_need.lower() in {"docs", "workspace"}:
             route = RequestRoute(kind="conversation", continuation=True)

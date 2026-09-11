@@ -68,7 +68,7 @@ def test_analytics_source_lifecycle_across_operations_and_compaction():
 def test_other_requests_do_not_enter_analytics_clarification(kind, task):
     result = select(task, kind=kind, history=[stored_context("transaction")])
     assert not result.question
-    assert result.transaction_workflow == (kind == "transaction")
+    assert result.transaction_workflow == (kind in {"transaction", "conversation"})
 
 
 def test_pending_choice_survives_an_acknowledgment_but_not_a_new_task():
