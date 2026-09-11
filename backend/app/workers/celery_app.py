@@ -67,10 +67,14 @@ celery_app.conf.beat_schedule = {
     "transaction-operations-actions-minute": {
         "task": "tasks.transaction_ops_collect_actions",
         "schedule": 60.0,
+        # These stateless ticks rediscover durable DB work at execution time.
+        # Old ticks must not accumulate behind long-running investigations.
+        "options": {"expires": 120},
     },
     "transaction-operations-minute": {
         "task": "tasks.transaction_ops_collect_due",
         "schedule": 60.0,
+        "options": {"expires": 120},
     },
     "sync-metered-billing": {
         "task": "tasks.billing_sync",
