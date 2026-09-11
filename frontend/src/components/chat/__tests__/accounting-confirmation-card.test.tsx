@@ -136,6 +136,8 @@ describe("Accounting review", () => {
       accounting_group: {
         group_id: "group",
         concurrency: 3,
+        treatment_batches: [{ treatment_id: "tax", label: "Invoice tax correction", case_ids: ["case"], treatment: { currency: "USD", accounting_book: "1", ar_account: "119", offset_account: "210" } }],
+        investigation_batches: [{ code: "reconcile_refund_chain", next_step: "Trace credits, refunds and applications.", case_ids: ["other"], executable: false }],
         members: [
           {
             case_id: "case",
@@ -159,14 +161,16 @@ describe("Accounting review", () => {
       />,
     );
     const button = screen.getByRole("button", {
-      name: "Approve 1 invoice corrections",
+      name: "Approve 1 accounting corrections",
     });
     expect(button).toBeDisabled();
     expect(
       screen.getByText(
-        /2 orders reviewed · 1 exact corrections · 1 need individual/,
+        /2 orders reviewed · 1 exact corrections · 1 need further/,
       ),
     ).toBeVisible();
+    expect(screen.getByLabelText("Validated accounting treatments")).toHaveTextContent("AR account 119");
+    expect(screen.getByLabelText("Shared investigations")).toHaveTextContent("Trace credits, refunds and applications.");
     fireEvent.click(screen.getByRole("checkbox"));
     fireEvent.click(button);
     expect(approve).toHaveBeenCalledOnce();

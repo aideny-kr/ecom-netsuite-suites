@@ -492,6 +492,9 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
 
         evidence = json.loads(json.dumps(evidence, default=str))
         evidence["record_links"] = evidence_record_links(evidence)
+        from app.services.transaction_ops.resolution_guidance import investigation_guidance
+
+        evidence["investigation_routes"] = investigation_guidance(case.latest_report_json)["routes"]
         await log_event(
             db,
             tenant_id,

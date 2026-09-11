@@ -183,7 +183,7 @@ describe("Group approval integration safeguards", () => {
     );
     renderPage();
     fireEvent.click(await screen.findByRole("checkbox"));
-    const button = screen.getByRole("button", { name: /Approve 1 invoice/ });
+    const button = screen.getByRole("button", { name: /Approve 1 accounting/ });
     fireEvent.click(button);
     expect(api.post.mock.calls.filter(isMessagesCall)).toHaveLength(1);
     expect(button).toBeDisabled();
@@ -214,7 +214,7 @@ describe("Group approval integration safeguards", () => {
     );
     const view = renderPage();
     fireEvent.click(await screen.findByRole("checkbox"));
-    const button = screen.getByRole("button", { name: /Approve 1 invoice/ });
+    const button = screen.getByRole("button", { name: /Approve 1 accounting/ });
     fireEvent.click(button);
     await waitFor(() => expect(api.streamGet).toHaveBeenCalledTimes(1));
     const firstSignal = api.streamGet.mock.calls[0][1] as AbortSignal;

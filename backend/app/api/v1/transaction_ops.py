@@ -105,6 +105,24 @@ async def control_config(config_id: UUID, request: ConfigControl, user: Manager,
         raise _http_error(exc) from None
 
 
+class AccountingProfileUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # A required null explicitly disables the current treatment.
+    sales_credit_profile: dict | None
+
+
+@router.put("/configs/{config_id}/accounting-profile")
+async def configure_accounting_profile(config_id: UUID, request: AccountingProfileUpdate, user: Manager, db: Database):
+    from app.services.transaction_ops.accounting_profiles import configure_sales_credit_profile
+
+    try:
+        return await configure_sales_credit_profile(
+            db, user.tenant_id, config_id, request.sales_credit_profile, actor=user
+        )
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
 @router.post("/configs/{config_id}/runs", response_model=RunOut, status_code=202)
 async def create_run(config_id: UUID, request: RunCreate, user: Reader, db: Database):
     if request.origin == "schedule":

@@ -251,10 +251,18 @@ async def accounting_context(db, tenant_id, scope, report=None):
     ]
     if len(scoped_mcp) == 1:
         context["native_mcp_connector_id"] = str(scoped_mcp[0].id)
+    from app.services.transaction_ops.accounting_profiles import sales_credit_profile
+
+    try:
+        profile = await sales_credit_profile(db, tenant_id, config)
+        context["sales_credit_profile_status"] = "configured" if profile else "not_configured"
+    except (ValueError, TypeError):
+        profile = None
+        context["sales_credit_profile_status"] = "invalid_configuration"
     context.update(
         configuration_status="scoped_configuration_found",
         config_id=str(config.id),
-        sales_credit_profile=mapping.get("sales_credit_profile"),
+        sales_credit_profile=profile,
         netsuite_connection_id=str(config.netsuite_connection_id),
         query_scope_params={
             "connection_id": str(config.netsuite_connection_id),

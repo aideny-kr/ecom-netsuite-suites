@@ -95,6 +95,10 @@ async def test_support_reads_fail_closed_and_are_bounded(variant):
     target_refunds = AsyncMock(return_value=support["refunds"]["target"])
     with (
         patch("app.services.transaction_ops.state_service.get_config", AsyncMock(return_value=config)),
+        patch(
+            "app.services.transaction_ops.accounting_profiles.sales_credit_profile",
+            AsyncMock(return_value=data["review"]["sales_credit_profile"]),
+        ),
         patch("app.services.transaction_ops.netsuite_reader.authenticated_reader", connected),
         patch("app.services.transaction_ops.netsuite_reader.read_netsuite_order", order),
         patch("app.services.transaction_ops.refund_reader.read_solidus_refunds", source_refunds),

@@ -350,7 +350,9 @@ async def collect_support(db, tenant_id, source, report, review, evidence, *, no
         return None
     config = await state_service.get_config(db, tenant_id, review["config_id"])
     mapping = config.mapping_json
-    if not config.enabled or mapping.get("sales_credit_profile") != profile.model_dump(mode="json"):
+    from app.services.transaction_ops.accounting_profiles import sales_credit_profile
+
+    if not config.enabled or await sales_credit_profile(db, tenant_id, config) != profile.model_dump(mode="json"):
         return None
     if not mapping.get("solidus_refund_step_id"):
         raise ValueError("commercial_credit_fresh_refund_source_unavailable")

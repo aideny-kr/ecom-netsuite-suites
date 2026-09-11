@@ -44,7 +44,7 @@ export function AccountingGroupCard({
             <p className="mt-1 text-xs text-muted-foreground">
               {group.members.length} orders reviewed · {eligible.length} exact
               corrections · {group.members.length - eligible.length} need
-              individual investigation
+              further investigation
             </p>
           </div>
           <span role="status" className="text-xs font-medium">
@@ -71,9 +71,34 @@ export function AccountingGroupCard({
               afterward.
             </>
           ) : (
-            "No supported invoice changes are ready. These orders need individual investigation before an exact correction can be proposed for approval."
+            "No validated accounting changes are ready. Continue the shared investigations below before preparing exact corrections for approval."
           )}
         </p>
+        {Boolean(group.treatment_batches?.length) && (
+          <div className="space-y-2 rounded-lg border p-3" aria-label="Validated accounting treatments">
+            <h4 className="text-sm font-semibold">Accounting treatments</h4>
+            {group.treatment_batches!.map((batch) => (
+              <p key={batch.treatment_id} className="text-xs leading-relaxed">
+                <strong>{batch.label}</strong> · {batch.case_ids.length} orders · {batch.treatment.currency || "Currency unverified"}
+                <span className="block text-muted-foreground">
+                  Book {batch.treatment.accounting_book} · AR account {batch.treatment.ar_account} · Offset account {batch.treatment.offset_account || "Unverified"}
+                </span>
+              </p>
+            ))}
+            <p className="text-xs text-muted-foreground">Exact changes and remaining receivables are shown per order below. Cash settlement requires separate verification.</p>
+          </div>
+        )}
+        {Boolean(group.investigation_batches?.length) && (
+          <div className="space-y-2 rounded-lg border p-3" aria-label="Shared investigations">
+            <h4 className="text-sm font-semibold">Shared investigations</h4>
+            <p className="text-xs text-muted-foreground">These steps do not post changes. An order may need more than one check.</p>
+            {group.investigation_batches!.map((batch) => (
+              <p key={batch.code} className="text-xs leading-relaxed">
+                <strong>{batch.case_ids.length} orders</strong> · {batch.next_step}
+              </p>
+            ))}
+          </div>
+        )}
         {data.status === "indeterminate" && (
           <div
             role="alert"
@@ -209,7 +234,7 @@ export function AccountingGroupCard({
               disabled={disabled || blocked || !reviewed || !eligible.length}
               onClick={onConfirm}
             >
-              Approve {eligible.length} invoice corrections
+              Approve {eligible.length} accounting corrections
             </button>
           </div>
         </div>

@@ -47,6 +47,30 @@ async def test_trigger_returns_durable_pending_run_without_dispatch(client, db, 
     ] == response.json()["id"]
 
 
+async def test_accounting_profile_api_binds_actor_tenant_and_never_approves(client, db, admin_user, admin_user_b):
+    from tests.test_accounting_profiles import setup
+
+    actor, headers = admin_user
+    for user in (actor, admin_user_b[0]):
+        await enable_feature_flag(db, user.tenant_id, "celigo")
+        await enable_feature_flag(db, user.tenant_id, "reconciliation")
+    config, _, profile = await setup(db, actor)
+    url = f"/api/v1/transaction-ops/configs/{config.id}/accounting-profile"
+    body = {"sales_credit_profile": profile}
+    assert (await client.put(url, json=body)).status_code == 401
+    foreign = await client.put(url, json=body, headers=admin_user_b[1])
+    assert foreign.status_code == 404
+    assert (await client.put(url, json={**body, "approved_by": str(actor.id)}, headers=headers)).status_code == 422
+    saved = await client.put(url, json=body, headers=headers)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["financial_writes"] == 0
+    assert saved.json()["sales_credit_profile"] == profile
+    assert (
+        await client.put(url, json={"sales_credit_profile": {"account_id": "999"}}, headers=headers)
+    ).status_code == 422
+    assert (await client.put(url, json={}, headers=headers)).status_code == 422
+
+
 async def test_api_actor_cannot_be_supplied_and_pending_decision_is_locked(client, db, admin_user):
     actor, headers = admin_user
     _, _, proposal = await seed_proposal(db, actor)

@@ -74,9 +74,11 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
                 correlation_id=correlation_id,
                 session_id=session_id,
             )
+            routes = []
             try:
                 async with asyncio.timeout(120):
                     evidence = await execute_accounting_evidence({"case_id": member["case_id"]}, context=context)
+                    routes = (evidence.get("accounting_evidence") or {}).get("investigation_routes", [])
                     prepared = (
                         await candidate_confirmation(
                             db=child_db,
@@ -100,7 +102,10 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
                         # Keep the per-case evidence/candidate audit, without a ChatMessage.
                         await child_db.commit()
                         return {**member, "confirmation_id": str(uuid.uuid4()), "card": value}
-                    reason = "No supported invoice correction; individual investigation required."
+                    reason = (
+                        "No validated accounting correction is ready. "
+                        "Continue the shared investigation using the recorded evidence."
+                    )
             except Exception as exc:
                 await child_db.rollback()
                 await set_tenant_context(child_db, str(tenant_id))
@@ -114,10 +119,10 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
                 resource_type="transaction_case",
                 resource_id=member["case_id"],
                 correlation_id=correlation_id,
-                payload={"reason": reason, "financial_writes": 0},
+                payload={"reason": reason, "investigation_routes": routes, "financial_writes": 0},
             )
             await child_db.commit()
-            return {**member, "reason": reason}
+            return {**member, "reason": reason, "investigation_routes": routes}
 
     try:
         async with asyncio.timeout(PREPARATION_TIMEOUT):
@@ -136,16 +141,20 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
     ]
     if len(set(targets)) != len(targets):
         raise ValueError("Multiple cases target the same invoice; separate their identities before group approval.")
+    from app.services.transaction_ops.accounting_treatments import investigation_batches, treatment_batches
+
     group = {
         "group_id": selection["group_id"],
         "scope": selection["scope"],
         "members": members,
         "concurrency": CONCURRENCY,
+        "treatment_batches": treatment_batches(members),
+        "investigation_batches": investigation_batches(members),
     }
     params = {"manifest_digest": digest(group), "confirmation_ids": [m["confirmation_id"] for m in eligible]}
     card = WriteConfirmationPayload(
         mutation_type="execute",
-        record_type="invoice corrections",
+        record_type="accounting corrections",
         proposed_fields={"eligible_orders": len(eligible)},
         tool_name=GROUP_TOOL,
         tool_input=params,
@@ -167,10 +176,15 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
             **params,
             "case_count": len(members),
             "eligible": len(eligible),
+            "treatment_batches": group["treatment_batches"],
+            "investigation_batches": group["investigation_batches"],
             "financial_writes": 0,
         },
     )
-    return card, f"Prepared {len(eligible)} exact invoice corrections for review across {len(members)} orders."
+    return card, (
+        f"Prepared {len(eligible)} exact accounting corrections across {len(group['treatment_batches'])} "
+        f"validated treatments for {len(members)} orders. Remaining cases retain shared investigation steps."
+    )
 
 
 def stage_group_children(db, parent):
