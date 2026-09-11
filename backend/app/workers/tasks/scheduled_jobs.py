@@ -169,12 +169,22 @@ REASON_BLOCKED = "blocked"
 #: Redis transport: LOWER number = served first (kombu's Redis transport
 #: polls priority buckets in ASCENDING order — verified against
 #: `kombu.transport.redis.Transport.Channel._brpop_start`, `priority_steps`
-#: defaults to `[0, 3, 6, 9]`). `celery_app.py` sets
-#: `task_default_priority = 6` for unlabeled batch work (e.g.
-#: transaction_ops), so both constants below sit BELOW that default: 0 a
-#: person is waiting on this request/chat-turn right now, 3 a due
-#: occurrence fired by the minute-tick sweep, 6 the default for everything
-#: else.
+#: defaults to `[0, 3, 6, 9]`).
+#:
+#: Round 4 (fix/jobs-live-run-defects): the mechanism that keeps unlabeled
+#: batch work (e.g. `tasks.transaction_ops_run`) BELOW these two is
+#: `celery_app.py`'s `task_routes` catch-all entry — NOT `task_default_priority`.
+#: `task_default_priority` only becomes `Task.priority`, read by a bound
+#: task's own `.apply_async()`/`.delay()`; `celery_app.send_task(name, ...)`
+#: — what `transaction_ops.scheduler.publish_investigation` and every other
+#: `send_task` caller in this codebase actually use — never touches a `Task`
+#: object and never read that setting, so round 3's fix silently did
+#: nothing for the flood it was meant to stop. `task_routes` IS consulted by
+#: both dispatch styles (`Router.route()`), so it is the correct mechanism —
+#: see `celery_app.py`'s `_default_send_task_priority` and
+#: `tests/test_celery_config.py`. Both constants below still sit BELOW the
+#: catch-all's priority 6: 0 a person is waiting on this request/chat-turn
+#: right now, 3 a due occurrence fired by the minute-tick sweep.
 SCHEDULED_JOBS_RUN_NOW_PRIORITY = 0
 SCHEDULED_JOBS_SWEEP_PRIORITY = 3
 
