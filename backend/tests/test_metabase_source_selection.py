@@ -9,17 +9,25 @@ from app.services.chat.llm_adapter import LLMResponse, TokenUsage, ToolUseBlock
 from app.services.chat.plan_mode.clarify_intercept import InterceptResult, intercept_clarify_call
 from app.services.chat.plan_mode.short_circuit import filter_tools_for_chosen_source
 from app.services.chat.plan_mode.source_resolver import source_provider_for_connector
-from app.services.chat.request_routing import RequestRoute
+from app.services.chat.request_routing import RequestRoute, SourceIntent, classify_request
 from app.services.chat.source_selection import source_selection_question
 from app.services.chat.tools import build_external_tool_definitions
 
 
-def routing_adapter(kind="analytics", continuation=True):
+def routing_adapter(kind="analytics", continuation=True, *, sources=(), excluded=(), action="unchanged"):
     adapter = AsyncMock()
     adapter.force_tool_choice = Mock(return_value={"type": "tool", "name": "route_request"})
     adapter.create_message.return_value = LLMResponse(
         tool_use_blocks=[
-            ToolUseBlock(id="route", name="route_request", input={"kind": kind, "continuation": continuation})
+            ToolUseBlock(
+                id="route",
+                name="route_request",
+                input={
+                    "kind": kind,
+                    "continuation": continuation,
+                    "source_intent": {"action": action, "sources": list(sources), "excluded": list(excluded)},
+                },
+            )
         ],
         usage=TokenUsage(input_tokens=17, output_tokens=5),
     )
@@ -150,7 +158,6 @@ def test_follow_up_resumes_blocked_case_without_reasking_source(task):
         "What is the status of order R123?",
         "Solidus",
         "How many Solidus orders are in batch 395?",
-        "Do not use NetSuite",
         "Which source should we use, NetSuite or Metabase?",
     ],
 )
@@ -160,32 +167,37 @@ def test_data_without_a_choice_asks_before_querying(question):
 
 
 @pytest.mark.parametrize(
-    "question",
+    "question,sources,excluded",
     [
-        "Use Metabase",
-        "In NetSuite, count orders",
-        "Compare Metabase and NetSuite",
-        "Use Metabase, not NetSuite",
+        ("Use Metabase", ["metabase"], []),
+        ("In NetSuite, count orders", ["netsuite"], []),
+        ("Compare Metabase and NetSuite", ["metabase", "netsuite"], []),
+        ("Use Metabase, not NetSuite", ["metabase"], ["netsuite"]),
+        ("Not only Metabase but also NetSuite", ["metabase", "netsuite"], []),
     ],
 )
-def test_explicit_choice_or_comparison_does_not_ask_again(question):
-    assert source_selection_question(task=question, tool_definitions=inventory()) is None
+def test_interpreted_choice_or_comparison_does_not_ask_again(question, sources, excluded):
+    route = RequestRoute(
+        kind="analytics",
+        continuation=True,
+        source_intent=SourceIntent(action="select", sources=sources, excluded=excluded),
+    )
+    assert source_selection_question(task=question, tool_definitions=inventory(), route=route) is None
 
 
-def test_only_user_history_can_establish_choice():
-    kwargs = {"task": "Break that down by status", "tool_definitions": inventory()}
-    assert source_selection_question(
-        **kwargs, conversation_history=[{"role": "assistant", "content": "I used Metabase"}]
-    )
-    assert (
-        source_selection_question(**kwargs, conversation_history=[{"role": "user", "content": "Use Metabase"}]) is None
-    )
-    assert (
-        source_selection_question(
-            **kwargs, conversation_history=[{"role": "user", "content": [{"type": "text", "text": "Use Metabase"}]}]
-        )
-        is None
-    )
+async def test_only_user_legacy_requests_are_offered_for_interpretation():
+    history = [
+        {"role": "assistant", "content": "I used NetSuite"},
+        {"role": "user", "content": [{"type": "text", "text": "Use Metabase"}]},
+    ]
+    adapter = routing_adapter(sources=["metabase"], action="select")
+    await classify_request(task="Break that down by status", history=history, adapter=adapter, model="test")
+    import json
+
+    payload = json.loads(adapter.create_message.call_args.kwargs["messages"][0]["content"])
+    assert [m["text"] for m in payload["legacy_user_requests"]] == ["Use Metabase"]
+    # Uninterpreted conversation prose cannot itself establish a selected source.
+    assert source_selection_question(task="Break it down", tool_definitions=inventory(), conversation_history=history)
 
 
 def test_no_query_gate_for_single_source_or_documentation():
@@ -222,7 +234,10 @@ def test_verified_card_choice_survives_ui_pick_text_and_history_compaction(statu
         assert "User selected option B (source: metabase)" in history[0]["content"]
         # A newer refusal supersedes an earlier resolved card.
         assert source_selection_question(
-            task="Do not use Metabase", tool_definitions=inventory(), conversation_history=messages
+            task="Do not use Metabase",
+            tool_definitions=inventory(),
+            conversation_history=messages,
+            route=RequestRoute(kind="analytics", continuation=True, source_intent=SourceIntent(excluded=["metabase"])),
         )
 
 
@@ -258,13 +273,22 @@ async def test_non_streaming_gate_uses_server_history_with_card_selection():
     assert "User-selected data sources for this turn: metabase" in agent.system_prompt
 
 
-def test_older_user_source_choice_is_resolved_outside_llm_history_window():
+async def test_older_user_source_choice_is_available_for_semantic_legacy_resolution():
     from app.services.chat.source_selection import resolve_source_selection
 
     messages = [{"role": "user", "content": "Use Metabase"}]
     messages.extend({"role": "assistant", "content": "Done"} for _ in range(60))
+    adapter = routing_adapter(sources=["metabase"], action="select")
+    interpreted = await classify_request(task="Break down the orders", history=messages, adapter=adapter, model="test")
+    import json
+
+    payload = json.loads(adapter.create_message.call_args.kwargs["messages"][0]["content"])
+    assert payload["legacy_user_requests"][0]["text"] == "Use Metabase"
     selection = resolve_source_selection(
-        task="Break down the orders", tool_definitions=inventory(), conversation_history=messages
+        task="Break down the orders",
+        tool_definitions=inventory(),
+        conversation_history=messages,
+        route=interpreted.route,
     )
     assert selection.question is None
     assert selection.selected_sources == ("metabase",)

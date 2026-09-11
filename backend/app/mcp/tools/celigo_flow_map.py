@@ -47,7 +47,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.services import feature_flag_service
 from app.services.celigo import read_queries, run_state
@@ -94,7 +94,16 @@ def _errors_checked_cell(checked_at: datetime | None) -> str:
 
 
 def _snapshot_caveat(last_synced_at: datetime) -> str:
-    return f"Snapshot of production flows as of {_iso(last_synced_at)}."
+    snapshot = last_synced_at.replace(tzinfo=timezone.utc) if last_synced_at.tzinfo is None else last_synced_at
+    age_seconds = (datetime.now(timezone.utc) - snapshot).total_seconds()
+    if age_seconds < 0:
+        freshness = "The snapshot timestamp is in the future; freshness cannot be verified."
+    else:
+        age_hours = int(age_seconds // 3600)
+        freshness = (
+            f"Snapshot age at query time: {age_hours} full hour(s). This is stored snapshot data, not a live read."
+        )
+    return f"Snapshot of production flows as of {_iso(snapshot)}. {freshness}"
 
 
 async def _gate(context: dict, columns: tuple[str, ...]):

@@ -1054,7 +1054,7 @@ TOOL_REGISTRY = {
     # `test_celigo_chat_tools.py`'s static test).
     "celigo.integrations": {
         "description": (
-            "List the tenant's production Celigo integrations from last night's synced snapshot — "
+            "List the tenant's production Celigo integrations from the latest available synced snapshot — "
             "one row per integration with its flow counts, open-error rollup, and how recently its "
             "error counts were last verified."
         ),
@@ -1063,7 +1063,7 @@ TOOL_REGISTRY = {
     },
     "celigo.flows": {
         "description": (
-            "List production Celigo flows from last night's synced snapshot — one row per flow with "
+            "List production Celigo flows from the latest available synced snapshot — one row per flow with "
             "its schedule, whether it is on pace or stalled, and its open-error rollup. Optionally "
             "scope to one integration (by id or a name fragment) and filter to flows with open "
             "errors or a stalled run state."
@@ -1098,7 +1098,7 @@ TOOL_REGISTRY = {
     "celigo.flow_steps": {
         "description": (
             "Show how one production Celigo flow is built, in run order — one row per step or "
-            "router, from last night's synced snapshot: what it does, which branch it belongs to, "
+            "router, from the latest available synced snapshot: what it does, which branch it belongs to, "
             "its open-error count, and which named scripts attach to it (never their code)."
         ),
         "execute": celigo_flow_map.execute_flow_steps,
@@ -1112,7 +1112,7 @@ TOOL_REGISTRY = {
     },
     "celigo.flow_errors": {
         "description": (
-            "List the root causes behind a production Celigo flow's errors from last night's synced "
+            "List the root causes behind a production Celigo flow's errors from the latest available synced "
             "snapshot — one row per distinct cause with how often it has occurred, when it was first "
             "and last seen, and one sample message. Omit the flow to see root causes across every "
             "production flow, or list resolved causes instead of open ones."

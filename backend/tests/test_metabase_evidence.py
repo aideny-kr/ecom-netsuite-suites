@@ -309,3 +309,167 @@ def test_native_saved_question_can_render_its_actual_result_without_scalar_proof
     assert evidence.feedback(answer) is None
     assert "| count |" in evidence.resolve(answer) and "| 65 |" in evidence.resolve(answer)
     assert evidence.feedback("There are 65 matching orders.")
+
+
+def calculate(evidence, left, right, operation="percentage", **kwargs):
+    return evidence.calculate({"operation": operation, "left_reference": left, "right_reference": right, **kwargs})
+
+
+def test_cancellation_percentage_is_calculated_from_controlled_aggregate_references():
+    evidence = MetabaseEvidence({TOOL})
+    states = observed(evidence, [["canceled", 24], ["complete", 41]], grouped=True)
+    total = observed(evidence, [[65]])
+    numerator, denominator = states["rows"][0][1], total["rows"][0][0]
+    output = calculate(evidence, numerator, denominator)
+    answer = "Cancellation rate: " + output["value_reference"] + "%"
+    assert evidence.feedback(answer) is None
+    assert evidence.resolve(answer) == "Cancellation rate: 36.92%"
+    assert output["unit"] == "percent"
+    assert evidence.feedback("Canceled %: " + numerator + " / " + denominator)
+
+
+@pytest.mark.parametrize(
+    "operation,left,right,expected",
+    [
+        ("percentage", 0, 65, "0.00"),
+        ("ratio", 10, 4, "2.50"),
+        ("difference", 41, 24, "17.00"),
+        ("percentage_change", 80, 100, "-20.00"),
+        ("difference", 0, 0, "0.00"),
+    ],
+)
+def test_supported_calculations_preserve_sign_and_zero(operation, left, right, expected):
+    evidence = MetabaseEvidence({TOOL})
+    lref = observed(evidence, [[left]])["rows"][0][0]
+    rref = observed(evidence, [[right]])["rows"][0][0]
+    output = calculate(evidence, lref, rref, operation)
+    assert evidence.resolve(output["value_reference"]) == expected
+
+
+@pytest.mark.parametrize("operation", ["percentage", "ratio", "percentage_change"])
+def test_zero_denominator_is_unavailable_not_a_fabricated_zero(operation):
+    evidence = MetabaseEvidence({TOOL})
+    zero = observed(evidence, [[0]])["rows"][0][0]
+    output = calculate(evidence, zero, zero, operation)
+    assert "undefined" in output["error"] and "value_reference" not in output
+
+
+def test_calculator_rejects_detail_table_control_unknown_and_other_turn_references():
+    evidence = MetabaseEvidence({TOOL})
+    detail = observed(evidence, [[24]], params=query(aggregate=False), aggregate=False)
+    total = observed(evidence, [[65]])["rows"][0][0]
+    foreign = observed(MetabaseEvidence({TOOL}), [[24]])["rows"][0][0]
+    for invalid in ["24", detail["table_reference"], "{{mb_ref:invented}}", foreign]:
+        assert "error" in calculate(evidence, invalid, total)
+    assert not evidence.calculation_dependencies
+
+
+@pytest.mark.parametrize(
+    "kwargs", [{"decimal_places": -1}, {"decimal_places": 7}, {"decimal_places": True}, {"code": "1/2"}]
+)
+def test_calculator_rejects_invalid_precision_or_extra_expression_input(kwargs):
+    evidence = MetabaseEvidence({TOOL})
+    ref = observed(evidence, [[65]])["rows"][0][0]
+    assert "error" in calculate(evidence, ref, ref, **kwargs)
+
+
+def test_calculation_requires_controls_for_both_inputs_and_rechecks_dependencies():
+    evidence = MetabaseEvidence({TOOL})
+    first = observed(evidence, [["canceled", 24]], grouped=True)["rows"][0][1]
+    second = observed(evidence, [["canceled", 12]], grouped=True, params=query(grouped=True, batch=396))["rows"][0][1]
+    assert "error" in calculate(evidence, first, second)
+    observed(evidence, [[24]])
+    assert "error" in calculate(evidence, first, second)
+    observed(evidence, [[12]], params=query(batch=396))
+    output = calculate(evidence, first, second, "percentage_change")
+    assert evidence.resolve(output["value_reference"]) == "100.00"
+    observed(evidence, [[1]], params=query(batch=396))
+    assert evidence.feedback(output["value_reference"])
+
+
+def test_chained_calculation_uses_full_precision_and_keeps_lineage():
+    evidence = MetabaseEvidence({TOOL})
+    one = observed(evidence, [[1]])["rows"][0][0]
+    three = observed(evidence, [[3]])["rows"][0][0]
+    ratio = calculate(evidence, one, three, "ratio")["value_reference"]
+    assert evidence.resolve(ratio) == "0.33"
+    percent = calculate(evidence, ratio, one)["value_reference"]
+    assert evidence.resolve(percent) == "33.33"
+    assert evidence.calculation_dependencies[percent] == evidence.calculation_dependencies[ratio]
+
+
+@pytest.mark.parametrize("streaming", [True, False])
+@pytest.mark.parametrize("policy_allowed", [True, False])
+async def test_calculator_runs_inside_the_agent_without_external_dispatch(streaming, policy_allowed):
+    from app.services.chat.source_selection import SourceSelection
+
+    connector = _connector(names=["query"])
+    agent = _agent([connector])
+    agent._request_kind = "analytics"
+    agent._configure_metabase_evidence(SourceSelection(selected_sources=("metabase",)))
+    assert "analytics_calculate" in [t["name"] for t in agent.tool_definitions]
+    name = f"ext__{connector.id.hex}__query"
+    numerator = observed(agent._metabase_evidence, [[24]], tool=name)["rows"][0][0]
+    denominator = observed(agent._metabase_evidence, [[65]], tool=name)["rows"][0][0]
+    calls = 0
+
+    async def response(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return LLMResponse(
+                tool_use_blocks=[
+                    ToolUseBlock(
+                        "calculate",
+                        "analytics_calculate",
+                        {"operation": "percentage", "left_reference": numerator, "right_reference": denominator},
+                    )
+                ]
+            )
+        if not policy_allowed:
+            return LLMResponse(text_blocks=["Calculation blocked by workspace policy."])
+        ref = next(iter(agent._metabase_evidence.calculation_dependencies))
+        return LLMResponse(text_blocks=["Canceled: " + ref + "%"])
+
+    async def stream(**kwargs):
+        yield "response", await response(**kwargs)
+
+    adapter = MagicMock()
+    adapter.create_message = response
+    adapter.stream_message = stream
+    adapter.build_assistant_message.side_effect = lambda r: {"role": "assistant", "content": ""}
+    adapter.build_tool_result_message.side_effect = lambda content: {"role": "user", "content": content}
+    expected = "Canceled: 36.92%" if policy_allowed else "Calculation blocked by workspace policy."
+    with (
+        patch(
+            "app.services.policy_service.evaluate_tool_call",
+            return_value={"allowed": policy_allowed, "reason": "test policy"},
+        ),
+        patch("app.services.policy_service.get_active_policy", new=AsyncMock(return_value=None)),
+        patch("app.services.chat.mutation_guard.classify_connector_mutation", new=AsyncMock(return_value=None)),
+        patch("app.services.chat.tools.execute_tool_call", new=AsyncMock()) as dispatch,
+        patch(
+            "app.services.chat.agents.base_agent.extract_structured_confidence",
+            new=AsyncMock(return_value=SimpleNamespace(score=5, source="test")),
+        ),
+        patch("app.services.chat.agents.base_agent._maybe_store_query_pattern", new=AsyncMock()),
+    ):
+        if streaming:
+            events = [
+                e
+                async for e in BaseSpecialistAgent.run_streaming(
+                    agent, "Calculate cancellation rate", {}, AsyncMock(), adapter, "test"
+                )
+            ]
+            answer = events[-1][1]
+            assert "".join(p for k, p in events if k == "text") == expected
+        else:
+            answer = await BaseSpecialistAgent.run(
+                agent, "Calculate cancellation rate", {}, AsyncMock(), adapter, "test"
+            )
+        dispatch.assert_not_awaited()
+    assert answer.data == expected
+    assert answer.tool_calls_log[0]["tool"] == "analytics_calculate"
+    assert bool(agent._metabase_evidence.calculation_dependencies) is policy_allowed
+    agent._reset_source_routing()
+    assert "analytics_calculate" not in [t["name"] for t in agent.tool_definitions]

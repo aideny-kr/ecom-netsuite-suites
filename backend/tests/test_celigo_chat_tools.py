@@ -669,3 +669,31 @@ class TestStaticWiring:
         for name, entry in registry.TOOL_REGISTRY.items():
             if name.startswith("celigo."):
                 assert entry["execute"].__module__ == "app.mcp.tools.celigo_flow_map", name
+
+
+@pytest.mark.parametrize("age_hours", [0, 23, 168, -1])
+def test_snapshot_freshness_is_computed_from_actual_timestamp(monkeypatch, age_hours):
+    now = datetime(2026, 9, 11, 6, tzinfo=timezone.utc)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(celigo_flow_map, "datetime", Clock)
+    snapshot = now - timedelta(hours=age_hours)
+    caveat = celigo_flow_map._snapshot_caveat(snapshot)
+    assert snapshot.isoformat() in caveat
+    if age_hours < 0:
+        assert "freshness cannot be verified" in caveat
+    else:
+        assert f"{age_hours} full hour(s)" in caveat
+        assert "not a live read" in caveat
+    assert "last night" not in caveat
+
+
+def test_celigo_tool_descriptions_do_not_assume_the_nightly_sync_succeeded():
+    for name in _CELIGO_TOOL_NAMES:
+        description = registry.TOOL_REGISTRY[name]["description"]
+        assert "last night" not in description
+        assert "latest available" in description
