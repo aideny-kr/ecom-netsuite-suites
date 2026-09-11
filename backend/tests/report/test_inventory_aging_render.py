@@ -444,16 +444,108 @@ def test_details_summary_is_never_white_on_white():
     assert "color: var(--ink)" in _IA_CSS.split(".ia-section summary", 1)[1].split("}", 1)[0]
 
 
-def test_print_media_unclips_the_collapsible_aged_list():
+def test_page_rule_is_letter_landscape(html):
+    """The approved print layout (iterated against the real delivered report inside
+    the staging container — WeasyPrint is not installed on this dev machine, see
+    report_pdf.py's own docstring): landscape letter, not the WeasyPrint A4-portrait
+    default that clipped every wide table/chart in the delivered PDF."""
+    assert "@page { size: letter landscape" in html
+
+
+def test_print_media_block_carries_the_approved_kpi_mid_table_rules():
+    """The approved print stylesheet's load-bearing rules: the KPI row stays one
+    line of four cards, the trend chart sits beside the by-location table, long
+    tables repeat their header across pages."""
     from app.services.report.report_html import _IA_CSS
 
-    assert "@media print" in _IA_CSS
     print_block = _IA_CSS.split("@media print", 1)[1]
-    assert "details" in print_block
+    assert ".ia-kpis { display: flex" in print_block
+    assert ".ia-mid { display: flex" in print_block
+    assert "thead { display: table-header-group" in print_block
+
+
+def test_no_page_rule_for_a_spec_without_inventory_aging_sections():
+    """Byte-stability: `@page` (and the rest of `_IA_CSS`) is scoped to reports that
+    actually carry an inventory_aging section — every other report type must render
+    unaffected, same additive+conditional gate `_FS_CSS` already uses."""
+    spec = {"title": "Plain report", "sections": [{"type": "narrative", "markdown": "hello"}]}
+    out = render_report_html(spec)
+    assert "@page" not in out
+
+
+def test_print_hides_the_in_body_collapsible_aged_list_the_pdf_appendix_carries_it_instead():
+    """The in-body "All N aged SKUs" `<details>` block used to be FORCE-OPENED in
+    print (delivered PDF: a 786-row list force-expanded mid-report for 60 pages).
+    The approved layout instead HIDES it in print entirely — the PDF's full list
+    lives on its own appendix pages instead (`render_inventory_aging_appendix`,
+    wired at both PDF call sites via `appendix_html`)."""
+    from app.services.report.report_html import _IA_CSS
+
+    print_block = _IA_CSS.split("@media print", 1)[1]
+    assert ".ia-section details { display: none" in print_block
+    assert ":not([open])" not in print_block
 
 
 def test_render_report_html_deterministic(spec):
     assert render_report_html(spec) == render_report_html(spec)
+
+
+# ---------------------------------------------------------------------------
+# Item 2 -- the PDF appendix: a standalone document carrying the FULL (unbounded)
+# aged-SKU list, since print now hides the in-body collapsible block (item 1).
+# Renders from the SAME JSON-safe dict form `report_delivery._inventory_aging_model`
+# / `build_inventory_aging_workbook` already consume, never the live dataclass
+# (gate fix #4's "one representation for the rendered model").
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def ia_model(report):
+    from app.services.report.inventory_aging import json_safe as ia_json_safe
+
+    return ia_json_safe(report)
+
+
+def test_appendix_is_a_standalone_document_carrying_the_page_rule(ia_model):
+    from app.services.report.report_html import render_inventory_aging_appendix
+
+    appendix = render_inventory_aging_appendix(ia_model)
+    assert appendix.startswith("<!DOCTYPE html>")
+    assert "@page { size: letter landscape" in appendix
+
+
+def test_appendix_heading_and_group_row_per_location(ia_model, report):
+    from app.services.report.report_html import render_inventory_aging_appendix
+
+    appendix = render_inventory_aging_appendix(ia_model)
+    assert "Appendix" in appendix
+    assert "All aged SKUs" in appendix
+    assert appendix.count('<tr class="group"') == len(report.locations)
+    for loc in report.locations:
+        assert loc.location in appendix
+
+
+def test_appendix_contains_every_aged_item_row_not_just_top_five(ia_model, report):
+    """The appendix draws from `aged_items` (the UNBOUNDED per-location list), not
+    `top_items` (capped at 5) -- same distinction `_ia_top_positions_html`'s own
+    "All N aged SKUs" details block already makes (see its docstring)."""
+    from app.services.report.report_html import render_inventory_aging_appendix
+
+    appendix = render_inventory_aging_appendix(ia_model)
+    total_aged = sum(len(items) for items in report.aged_items.values())
+    assert total_aged == 4  # sanity on the fixture contract (3 Nova + 1 Solace)
+    group_rows = appendix.count('<tr class="group"')
+    header_rows = 1  # _IA_TOP_HEADER's own bare <tr>, also matched by "<tr"
+    assert appendix.count("<tr") - group_rows - header_rows == total_aged
+    for items in report.aged_items.values():
+        for it in items:
+            assert it.sku in appendix
+
+
+def test_appendix_reuses_the_top_header_and_item_row_markup(ia_model):
+    from app.services.report.report_html import _IA_TOP_HEADER, render_inventory_aging_appendix
+
+    appendix = render_inventory_aging_appendix(ia_model)
+    assert _IA_TOP_HEADER in appendix
+    assert appendix.count("<table") == 1
 
 
 # ---------------------------------------------------------------------------

@@ -365,14 +365,61 @@ _IA_CSS = """
 .ia-prov .full { grid-column: 1 / -1; }
 .ia-prov .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
 @media (max-width: 900px) { .ia-prov { grid-template-columns: 1fr; } }
-/* Print (design rule #15): a bare <details> (no `open` attribute) collapses its content
-   natively in every browser -- board packs need the FULL aged list on paper regardless
-   of the on-screen collapse state (spec §A4 "the appendix (full aged list) is appended
-   as its own pages"), so print forces every inventory_aging <details> block open. */
+/* Print (design rule #15): the approved layout, iterated against the real delivered
+   report inside the staging container (WeasyPrint is not installed on this dev
+   machine -- see report_pdf.py's own docstring) -- landscape letter, 4 pages,
+   everything fits. The delivered PDF (no `@page` rule -> WeasyPrint's A4-portrait
+   default, plus `grid`/`auto-fit`/`minmax` layouts WeasyPrint lays out badly) had
+   KPI cards stacked one per row and split across pages, the trend chart collapsed
+   to a sliver beside a clipped by-location table, the 13-column buckets table cut
+   after the first location, and heavy sparklines. The in-body "All N aged SKUs"
+   `<details>` block used to be FORCE-OPENED here (a 786-row list force-expanded
+   mid-report for 60 pages); it is a screen-only affordance now -- print HIDES it
+   instead, and the PDF carries the FULL aged list as its own appendix pages
+   (spec §A4 "the appendix (full aged list) is appended as its own pages"),
+   built by `render_inventory_aging_appendix` and passed as `render_report_pdf`'s
+   `appendix_html` at both PDF call sites (`registry._report_render_pdf_executor`,
+   `report_delivery._render_pdf_bytes`). */
+@page { size: letter landscape; margin: 9mm 9mm 10mm; }
 @media print {
-  .ia-section details:not([open]) > * { display: block !important; }
-  .ia-section summary { display: none !important; }
-  .chart, .tblcard { overflow-x: visible; box-shadow: none; break-inside: avoid; }
+  body { font-size: 12px; }
+  .report { max-width: none; padding: 0; }
+  h1 { font-size: 26px; margin: 0 0 4px; }
+  h2, h3 { break-after: avoid; page-break-after: avoid; }
+  .ia-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 24px; }
+  .ia-meta { text-align: right; }
+  .ia-section { margin: 12px 0; }
+  .ia-watch { display: flex; flex-wrap: wrap; gap: 6px; }
+  .ia-chip { font-size: 11px; padding: 4px 8px; box-shadow: none; }
+  /* KPI row: one line of four cards; the sparkline gets pixel dimensions and is clipped to its
+     card (WeasyPrint resolves a percentage svg width against the wrong box) */
+  .ia-kpis { display: flex; flex-wrap: nowrap; gap: 10px; margin: 8px 0 4px; }
+  .ia-kpis .kpi { flex: 1 1 0; min-width: 0; overflow: hidden; box-shadow: none;
+    padding: 8px 10px 6px; break-inside: avoid; }
+  .ia-kpis .kpi .v { font-size: 22px; }
+  .ia-kpis .kpi .d { font-size: 10px; white-space: nowrap; }
+  .ia-kpis .kpi .s { font-size: 10px; }
+  .ia-kpis .kpi svg { width: 214px; height: 26px; margin-top: 2px; display: block; }
+  /* trend chart beside the by-location table */
+  .ia-mid { display: flex; gap: 14px; align-items: flex-start; }
+  .ia-mid > .chart { flex: 0 0 32%; min-width: 0; }
+  .ia-mid > .tblcard { flex: 1 1 0; min-width: 0; }
+  .chart svg { width: 100%; height: auto; }
+  .chart, .tblcard, .nb-card { box-shadow: none; overflow-x: visible; }
+  .chart, .ia-mid > .tblcard { break-inside: avoid; }
+  /* long tables flow across pages (rows never split, header repeats); wide tables shrink to fit */
+  .ia-section > .tblcard { break-inside: auto; page-break-inside: auto; }
+  .tblcard { padding: 8px 10px; }
+  table.tnum { font-size: 9px; }
+  table.tnum th, table.tnum td { padding: 3px 4px; }
+  table.tnum th { white-space: normal; line-height: 1.15; }
+  thead { display: table-header-group; }
+  tr { break-inside: avoid; page-break-inside: avoid; }
+  /* the in-body collapsible full-SKU list is a screen affordance; the PDF carries the full list
+     as appendix pages instead (item 2) */
+  .ia-section details { display: none !important; }
+  .hl { display: block; }
+  .ia-prov { display: block; font-size: 10.5px; }
 }
 """
 
@@ -1708,6 +1755,27 @@ def _ia_top_item_row_html(it: dict, loc: dict) -> str:
     )
 
 
+def _ia_aged_item_rows_html(report: dict) -> tuple[str, int]:
+    """Group header + every aged item row, per location — the FULL (unbounded)
+    aged-SKU list, sourced from ``aged_items`` (never the capped ``top_items`` the
+    "Largest aged positions" table above uses). Shared by ``_ia_top_positions_html``'s
+    in-body "All N" `<details>` block (a screen-only affordance since item 1 hides it
+    in print) and ``render_inventory_aging_appendix``'s PDF appendix pages, so the two
+    can never drift on the row markup. Returns ``(rows_html, total_aged)``."""
+    rows: list[str] = []
+    total_aged = 0
+    for loc in report["locations"]:
+        aged_items = report["aged_items"].get(loc["location"], ())
+        total_aged += len(aged_items)
+        rows.append(
+            f'<tr class="group"><td class="lbl" colspan="7">{escape(loc["location"])} · aged '
+            f"{_ia_dollar_money(Decimal(loc['aged90_value']))} · {len(aged_items)} SKUs</td></tr>"
+        )
+        for it in aged_items:
+            rows.append(_ia_top_item_row_html(it, loc))
+    return "".join(rows), total_aged
+
+
 def _ia_top_positions_html(report: dict) -> str:
     """The top-5 table draws from ``top_items`` (capped); the collapsible "All N"
     details block draws from ``aged_items`` — the UNBOUNDED per-location list — so
@@ -1716,8 +1784,6 @@ def _ia_top_positions_html(report: dict) -> str:
     SKUs (review finding: this used to source both from ``top_items``, which
     made "All N aged SKUs" false-complete for any location with > 5 aged items)."""
     top_rows: list[str] = []
-    all_rows: list[str] = []
-    total_aged = 0
     for loc in report["locations"]:
         items = report["top_items"].get(loc["location"], ())
         top_rows.append(
@@ -1727,21 +1793,12 @@ def _ia_top_positions_html(report: dict) -> str:
         for it in items:
             top_rows.append(_ia_top_item_row_html(it, loc))
 
-    for loc in report["locations"]:
-        aged_items = report["aged_items"].get(loc["location"], ())
-        total_aged += len(aged_items)
-        all_rows.append(
-            f'<tr class="group"><td class="lbl" colspan="7">{escape(loc["location"])} · aged '
-            f"{_ia_dollar_money(Decimal(loc['aged90_value']))} · {len(aged_items)} SKUs</td></tr>"
-        )
-        for it in aged_items:
-            all_rows.append(_ia_top_item_row_html(it, loc))
-
+    all_rows_html, total_aged = _ia_aged_item_rows_html(report)
     details = (
         f"<details><summary>All {total_aged} aged SKUs (collapsed here; the Excel file "
         "carries every SKU)</summary>"
         f'<div class="tblcard"><table class="tnum"><thead>{_IA_TOP_HEADER}</thead>'
-        f"<tbody>{''.join(all_rows)}</tbody></table></div></details>"
+        f"<tbody>{all_rows_html}</tbody></table></div></details>"
     )
     return (
         '<div class="ia-section"><h2>Largest aged positions '
@@ -1749,6 +1806,44 @@ def _ia_top_positions_html(report: dict) -> str:
         "carries every SKU</span></h2>"
         f'<div class="tblcard"><table class="tnum"><thead>{_IA_TOP_HEADER}</thead>'
         f"<tbody>{''.join(top_rows)}</tbody></table>{details}</div></div>"
+    )
+
+
+def render_inventory_aging_appendix(ia_model: dict) -> str:
+    """A complete standalone HTML document carrying the FULL (unbounded) aged-SKU
+    list as its own PDF appendix pages (spec §A4: "the appendix (full aged list)
+    is appended as its own pages") — since item 1's print stylesheet now HIDES the
+    in-body collapsible "All N aged SKUs" block instead of force-opening it, this
+    is where that content lives on paper. ``render_report_pdf`` renders
+    ``appendix_html`` as an entirely separate WeasyPrint document and appends its
+    pages after the main one (see report_pdf.py), so it ships the same ``_CSS`` +
+    ``_IA_CSS`` stylesheet — the ``@page`` landscape rule and the table print rules
+    — as its own `<style>` rather than relying on anything from the main document.
+
+    ``ia_model`` is the JSON-safe dict form ``report_delivery._inventory_aging_model``
+    / ``build_inventory_aging_workbook`` already consume (``inventory_aging.json_safe``
+    — gate fix #4's "one representation for the rendered model" applies here too:
+    render from the dict, never the live ``AgingReport`` dataclass).
+
+    One `table.tnum` (``_IA_TOP_HEADER`` header, group row + every item row per
+    location via the shared ``_ia_aged_item_rows_html`` — reused, not duplicated,
+    from ``_ia_top_positions_html``'s own "All N" block)."""
+    rows_html, total_aged = _ia_aged_item_rows_html(ia_model)
+    loc_count = len(ia_model["locations"])
+    loc_word = "location" if loc_count == 1 else "locations"
+    accent_hsl = "240 6% 10%"  # render_report_html's own default — no tenant accent in play here
+    css = _CSS % {"accent": escape(accent_hsl), "accent_ink": _accent_ink(accent_hsl)} + _IA_CSS
+    return (
+        '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        "<title>Appendix — All aged SKUs</title>"
+        f'<style>{css}</style></head><body><div class="report">'
+        '<div class="ia-section"><h2>Appendix · All aged SKUs '
+        f"<span>· {total_aged} SKUs older than 90 days across {loc_count} {loc_word} "
+        "· same columns as the report</span></h2>"
+        f'<div class="tblcard"><table class="tnum"><thead>{_IA_TOP_HEADER}</thead>'
+        f"<tbody>{rows_html}</tbody></table></div></div>"
+        "</div></body></html>"
     )
 
 

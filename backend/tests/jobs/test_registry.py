@@ -362,6 +362,108 @@ def test_schedule_delivery_identity_shape():
 
 
 # ---------------------------------------------------------------------------
+# Item 2 (brief M) — `_report_render_pdf_executor` wires the PDF appendix (the
+# full aged-SKU list, since item 1's print stylesheet now hides the in-body
+# collapsible block) for an inventory_aging report, and passes none for any
+# other report type. Companion to `test_report_delivery.py`'s identical pair
+# for `_render_pdf_bytes` — same wiring, the scheduled-job call site.
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_report_render_pdf_executor_passes_the_inventory_aging_appendix(monkeypatch):
+    import uuid
+
+    from app.models.report import Report
+    from app.services.jobs.registry import StepContext
+    from app.services.report import report_pdf
+    from app.services.report.inventory_aging import compute
+    from app.services.report.report_html import build_inventory_aging_sections
+    from app.services.report.report_service import spec_json_safe
+    from tests.report.test_inventory_aging import _full_fixture
+
+    payloads, params = _full_fixture()
+    report_data = compute(payloads, params)
+    sections = build_inventory_aging_sections(report_data, composed_at="2026-09-08T13:00:00+00:00")
+    safe_spec = spec_json_safe({"title": "Inventory Aging Weekly", "sections": sections})
+    report = Report(
+        title="Inventory Aging Weekly",
+        spec_json=safe_spec,
+        rendered_html="<html><body>REPORT</body></html>",
+        recipe_json={
+            "schema_version": 1,
+            "captured_at": "2026-09-08T13:00:00+00:00",
+            "playbook": {"key": "inventory_aging", "params": params},
+            "sections": [],
+            "sources": {},
+        },
+    )
+
+    captured: dict = {}
+
+    def fake_render(rendered_html, *, appendix_html=None):
+        captured["rendered_html"] = rendered_html
+        captured["appendix_html"] = appendix_html
+        return b"%PDF-FAKE"
+
+    monkeypatch.setattr(report_pdf, "render_report_pdf", fake_render)
+
+    ctx = StepContext(
+        job_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        db=object(),
+        artifacts={"s1": {"report": report, "report_id": "r1", "rendered_html": report.rendered_html}},
+    )
+    spec = STEP_REGISTRY["report.render_pdf"]
+
+    result = await spec.executor(ctx, {"report_step": "s1"})
+
+    assert result["pdf_bytes"] == b"%PDF-FAKE"
+    assert captured["rendered_html"] == report.rendered_html
+    assert captured["appendix_html"]
+    assert "All aged SKUs" in captured["appendix_html"]
+
+
+@pytest.mark.asyncio
+async def test_report_render_pdf_executor_passes_none_appendix_for_a_generic_report(monkeypatch):
+    """Companion: a report with no inventory_aging playbook recipe must pass
+    appendix_html=None — the routing must not misfire on every report type."""
+    import uuid
+
+    from app.models.report import Report
+    from app.services.jobs.registry import StepContext
+    from app.services.report import report_pdf
+
+    report = Report(
+        title="Cash report",
+        spec_json={"title": "Cash report", "sections": []},
+        rendered_html="<html><body>REPORT</body></html>",
+        recipe_json=None,
+    )
+
+    captured: dict = {}
+
+    def fake_render(rendered_html, *, appendix_html=None):
+        captured["appendix_html"] = appendix_html
+        return b"%PDF-FAKE"
+
+    monkeypatch.setattr(report_pdf, "render_report_pdf", fake_render)
+
+    ctx = StepContext(
+        job_id=uuid.uuid4(),
+        run_id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        db=object(),
+        artifacts={"s1": {"report": report, "report_id": "r1", "rendered_html": report.rendered_html}},
+    )
+    spec = STEP_REGISTRY["report.render_pdf"]
+
+    result = await spec.executor(ctx, {"report_step": "s1"})
+
+    assert result["pdf_bytes"] == b"%PDF-FAKE"
+    assert captured["appendix_html"] is None
+
+
+# ---------------------------------------------------------------------------
 # Live-run defect (brief G, item 1): validate_plan rejects what the executor
 # cannot run — a report_step not pointing at a report.compose step, a
 # tracking-mode compose for a non-period-based playbook, and an unqualified
