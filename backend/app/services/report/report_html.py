@@ -420,6 +420,13 @@ _IA_CSS = """
   .ia-section details { display: none !important; }
   .hl { display: block; }
   .ia-prov { display: block; font-size: 10.5px; }
+  /* the appendix pages (render_inventory_aging_appendix) carry every aged SKU -- 786 rows on the
+     first live run -- so their cells get an explicit smaller size; the base `th,td` rule sizes
+     cells directly, which is why `table.tnum { font-size }` above never reaches them and the
+     report body's tables keep their approved size */
+  .ia-appendix table.tnum td { font-size: 10px; padding: 2px 4px; line-height: 1.2; }
+  .ia-appendix table.tnum th { font-size: 8.5px; padding: 2px 4px; }
+  .ia-appendix .tblcard tr.group td { font-size: 9px; padding: 3px 4px; }
 }
 """
 
@@ -1837,7 +1844,7 @@ def render_inventory_aging_appendix(ia_model: dict) -> str:
         '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         "<title>Appendix — All aged SKUs</title>"
-        f'<style>{css}</style></head><body><div class="report">'
+        f'<style>{css}</style></head><body><div class="report ia-appendix">'
         '<div class="ia-section"><h2>Appendix · All aged SKUs '
         f"<span>· {total_aged} SKUs older than 90 days across {loc_count} {loc_word} "
         "· same columns as the report</span></h2>"

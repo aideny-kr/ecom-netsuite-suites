@@ -548,6 +548,23 @@ def test_appendix_reuses_the_top_header_and_item_row_markup(ia_model):
     assert appendix.count("<table") == 1
 
 
+def test_appendix_prints_denser_than_the_report_body(ia_model):
+    """The base stylesheet sizes every cell directly (`th,td { font-size:14px }`), so
+    the print block's `table.tnum { font-size: 9px }` never reaches a cell and the
+    report body's tables keep their approved size. The appendix is a different
+    surface -- 786 rows on the first live run, 41 pages at body size -- so it is
+    scoped by its own class and its cells get an explicit smaller size (20 pages
+    for the same rows, measured in the staging container's WeasyPrint)."""
+    from app.services.report.report_html import _IA_CSS, render_inventory_aging_appendix
+
+    appendix = render_inventory_aging_appendix(ia_model)
+    assert '<div class="report ia-appendix">' in appendix
+    print_block = _IA_CSS[_IA_CSS.index("@media print") :]
+    assert ".ia-appendix table.tnum td { font-size: 10px; padding: 2px 4px;" in print_block
+    assert ".ia-appendix table.tnum th { font-size: 8.5px;" in print_block
+    assert ".ia-appendix .tblcard tr.group td { font-size: 9px;" in print_block
+
+
 # ---------------------------------------------------------------------------
 # Report head (spec §A1: "report head (title `Inventory Aging — Week of {snapshot
 # date}`, sub-line, meta block incl. 'no model generated a figure')"). Found at the
