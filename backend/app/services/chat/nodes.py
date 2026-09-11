@@ -38,11 +38,13 @@ logger = logging.getLogger(__name__)
 # dispatch) only — reconciliation.yaml's chat workflow is dormant.
 ALLOWED_CHAT_TOOLS: frozenset[str] = frozenset(
     {
+        "agent.skill",
         "transaction_ops.configs",
         "transaction_ops.groups",
         "transaction_ops.run",
         "transaction_ops.status",
         "transaction_ops.accounting_evidence",
+        "transaction_ops.accounting_reference",
         "transaction_ops.accounting_group",
         "netsuite.suiteql",
         "pivot.query_result",

@@ -436,6 +436,7 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
                 "freshness": "Stored current-definition observation; not proof of historical execution.",
             }
         db.info.pop("accounting_correction_candidate", None)
+        correction = None
         try:
             source = await refresh_source(db, tenant_id, review["scope"], case.order_reference)
             evidence["source_refresh"] = source
@@ -495,6 +496,20 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
         from app.services.transaction_ops.resolution_guidance import investigation_guidance
 
         evidence["investigation_routes"] = investigation_guidance(case.latest_report_json)["routes"]
+        from app.services.transaction_ops.resolution_assessment import assess, reference_provenance
+
+        assessment = assess(
+            evidence,
+            case.latest_report_json,
+            review,
+            correction,
+            references=await reference_provenance(db, tenant_id, case.id),
+        )
+        evidence["resolution_assessment"] = assessment
+        if correction:
+            # This object is the same scoped candidate consumed by the confirmation builder.
+            # Retain the explanation/provenance with the signed proposal and later audit.
+            correction["resolution_assessment"] = assessment
         await log_event(
             db,
             tenant_id,

@@ -302,7 +302,9 @@ from app.services.chat.tool_inventory import (
 )
 
 
-def _assemble_system_prompt(*, template: str, tool_definitions: list[dict]) -> str:
+def _assemble_system_prompt(
+    *, template: str, tool_definitions: list[dict], include_connected_skills: bool = True
+) -> str:
     """Resolve the {{TOOL_INVENTORY}} placeholder with the real tool schema.
 
     The replacement bundles:
@@ -327,7 +329,9 @@ def _assemble_system_prompt(*, template: str, tool_definitions: list[dict]) -> s
     # UnifiedAgent builds its own prompt; profiles appended to the orchestrator's
     # local system_prompt do not reach it. Use this shared final assembly seam,
     # after tool filtering, so both chat paths receive the connected skills.
-    metabase_context = build_metabase_skill_context(tool_definitions, template=template)
+    metabase_context = (
+        build_metabase_skill_context(tool_definitions, template=template) if include_connected_skills else ""
+    )
     if metabase_context:
         prompt += f"\n\n{metabase_context}"
     return prompt + build_source_selection_guidance(tool_definitions)

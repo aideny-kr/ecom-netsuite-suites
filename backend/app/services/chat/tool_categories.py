@@ -26,6 +26,10 @@ Category = Literal[
 ]
 
 _EXACT: dict[str, Category] = {
+    "agent.skill": "rag",
+    "agent_skill": "rag",
+    "transaction_ops.accounting_reference": "rag",
+    "transaction_ops_accounting_reference": "rag",
     "transaction_ops.configs": "control",
     "transaction_ops_configs": "control",
     "transaction_ops.run": "control",

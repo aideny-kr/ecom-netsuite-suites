@@ -367,6 +367,8 @@ export interface ChatMessage {
   citations: Citation[] | null;
   input_tokens?: number;
   output_tokens?: number;
+  cache_creation_tokens?: number;
+  cache_read_tokens?: number;
   model_used?: string;
   provider_used?: string;
   is_byok?: boolean;

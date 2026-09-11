@@ -727,10 +727,14 @@ class UnifiedAgent(BaseSpecialistAgent):
 
             skills = get_all_skills_metadata()
             if skills:
-                skills_block = "\n<available_skills>\nThe user can invoke these skills via slash commands:\n"
+                skills_block = (
+                    "\n<available_skills>\nLoad relevant specialist instructions on demand using the available "
+                    "skill-loading tool and exact slug. Users can also invoke slash commands. "
+                    "Do not load every skill or reread an unchanged skill already in this turn's context.\n"
+                )
                 for s in skills:
                     primary_trigger = next((t for t in s["triggers"] if t.startswith("/")), s["triggers"][0])
-                    skills_block += f"- `{primary_trigger}` — {s['name']}: {s['description']}\n"
+                    skills_block += f"- `{s['slug']}` ({primary_trigger}) — {s['name']}: {s['description']}\n"
                 skills_block += "</available_skills>"
                 parts.append(skills_block)
 
@@ -764,6 +768,14 @@ class UnifiedAgent(BaseSpecialistAgent):
                 "Use the operation's authorized connection context; all execution and approval checks still apply."
             )
         if getattr(self, "_transaction_workflow", False):
+            from app.services.chat.skills import get_skill_instructions
+
+            if not self._active_skill or self._active_skill["slug"] != "accounting_operations":
+                parts.append(
+                    "\n<accounting_operations>\n"
+                    + (get_skill_instructions("accounting_operations") or "")
+                    + "\n</accounting_operations>"
+                )
             parts.append(
                 "\nThis request selects a transaction case/group workflow, not a standalone database query. "
                 "Start with transaction_ops_status for the exact case or transaction_ops_accounting_group "
@@ -789,7 +801,11 @@ class UnifiedAgent(BaseSpecialistAgent):
         # Lazy import to avoid circular: orchestrator imports unified_agent.
         from app.services.chat.orchestrator import _assemble_system_prompt
 
-        return _assemble_system_prompt(template=prompt, tool_definitions=self._tool_defs or [])
+        return _assemble_system_prompt(
+            template=prompt,
+            tool_definitions=self._tool_defs or [],
+            include_connected_skills=not getattr(self, "_transaction_workflow", False),
+        )
 
     @property
     def tool_definitions(self) -> list[dict]:
@@ -811,8 +827,7 @@ class UnifiedAgent(BaseSpecialistAgent):
         from app.services.chat.skills import match_skill
 
         matched = match_skill(task)
-        if matched:
-            self._active_skill = matched
+        self._active_skill = matched
 
         vernacular = context.get("tenant_vernacular", "")
         if vernacular:

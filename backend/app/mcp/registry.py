@@ -1,4 +1,6 @@
 from app.mcp.tools import (
+    accounting_reference,
+    agent_skill,
     bigquery_tools,
     celigo_flow_map,
     cross_source_tool,
@@ -32,6 +34,34 @@ from app.mcp.tools import (
 )
 
 TOOL_REGISTRY = {
+    "transaction_ops.accounting_reference": {
+        "description": (
+            "Research current Oracle NetSuite documentation for an authorized accounting case. "
+            "Uses a fixed topic query without sending case details to public search, returns at most two "
+            "reference excerpts and records source provenance. Product guidance is not approval or account evidence."
+        ),
+        "execute": accounting_reference.execute,
+        "params_schema": {
+            "case_id": {"type": "string", "required": True, "description": "Exact transaction case UUID."},
+            "topic": {
+                "type": "string",
+                "required": True,
+                "enum": list(accounting_reference.TOPICS),
+                "description": "Product behavior to research; never put customer data in this parameter.",
+            },
+        },
+    },
+    "agent.skill": {
+        "description": (
+            "Load a maintained application skill on demand using its exact catalog slug. "
+            "Use for accounting operations, subledger investigation, treatment selection, "
+            "verification or other listed specialist workflows. Read-only guidance; grants no approval."
+        ),
+        "execute": agent_skill.execute,
+        "params_schema": {
+            "slug": {"type": "string", "required": True, "description": "Exact slug from available_skills."},
+        },
+    },
     "transaction_ops.groups": {
         "description": (
             "Group reconciliation cases by entity, source, currency, variance direction and credit context. "

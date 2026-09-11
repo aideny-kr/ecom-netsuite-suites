@@ -8,6 +8,7 @@ import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { useCreateSavedQuery } from "@/hooks/use-saved-queries";
 import { cn } from "@/lib/utils";
+import { tokenUsageSummary } from "@/lib/token-usage";
 import { useBranding } from "@/providers/branding-provider";
 import type { ChatMessage, ClarificationData, WriteConfirmationData } from "@/lib/types";
 import type { FinancialReportData, DataTableData, TaskOutputData, SheetsLinkData, DocsLinkData, ReportReadyData, StreamBlock } from "@/lib/chat-stream";
@@ -1220,6 +1221,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
       ? (structuredOutput.data as Record<string, string> | undefined)
       : undefined;
   const displayContent = applyDriveCitations(message.content, driveSources);
+  const tokenUsage = tokenUsageSummary(message);
 
   // Exact child cards are displayed inside their signed group review.
   if (structuredOutput?.accounting_group_child) return null;
@@ -1471,10 +1473,10 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
             <span>{message.provider_used}</span>
             <span>/</span>
             <span>{message.model_used}</span>
-            {message.input_tokens != null && message.output_tokens != null && (
+            {tokenUsage && (
               <>
                 <span className="ml-1">·</span>
-                <span>{(message.input_tokens + message.output_tokens).toLocaleString()} tokens</span>
+                <span title={tokenUsage.detail}>{tokenUsage.label}</span>
               </>
             )}
             {message.confidence_score != null && (
