@@ -196,7 +196,7 @@ jobs:
             docker pull "${IMG}:sha-${SHORT_SHA}"
             docker tag "${IMG}:sha-${SHORT_SHA}" "${IMG}:latest"
             PULLED_DIGEST=$(docker inspect --format '{{.Id}}' "${IMG}:sha-${SHORT_SHA}")
-            docker compose -f docker-compose.prod.yml up -d --no-deps backend worker beat
+            docker compose -f docker-compose.prod.yml up -d --no-deps backend worker worker-collectors beat
             # Verify the running container advances to the freshly-pulled image. Container
             # recreation can lag `up -d`, so poll instead of a single check after a fixed
             # sleep — that race false-failed deploys that had actually succeeded. Still
@@ -291,7 +291,7 @@ jobs:
               sleep 5
             done
             [ -n "$health_ok" ] || { echo "::error::backend health check never passed after 60s"; exit 1; }
-            docker compose -f docker-compose.prod.yml up -d --no-deps worker
+            docker compose -f docker-compose.prod.yml up -d --no-deps worker worker-collectors beat
 
       - name: Production health verification
         run: |

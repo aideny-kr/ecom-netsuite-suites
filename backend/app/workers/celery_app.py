@@ -4,6 +4,7 @@ from celery.schedules import crontab
 from app.core.config import settings
 
 RECON_COLLECTOR_PRIORITY = 3
+RECON_COLLECTOR_QUEUE = "recon-control"
 
 celery_app = Celery(
     "ecom_netsuite",
@@ -59,6 +60,7 @@ celery_app.conf.update(
         "default": {"exchange": "default", "routing_key": "default"},
         "sync": {"exchange": "sync", "routing_key": "sync"},
         "recon": {"exchange": "recon", "routing_key": "recon"},
+        RECON_COLLECTOR_QUEUE: {"exchange": RECON_COLLECTOR_QUEUE, "routing_key": RECON_COLLECTOR_QUEUE},
         "export": {"exchange": "export", "routing_key": "export"},
     },
     # Redis transport supports per-message priority with no new queues and no
@@ -93,10 +95,13 @@ celery_app.conf.update(
         {
             "tasks.scheduled_jobs_run_now": {"queue": "sync", "priority": 0},
             "tasks.scheduled_jobs_sweep": {"queue": "sync", "priority": 3},
-            # Short recovery collectors must run before long bulk scans;
-            # otherwise every two-minute tick can expire behind the backlog.
-            "tasks.transaction_ops_collect_due": {"queue": "recon", "priority": RECON_COLLECTOR_PRIORITY},
-            "tasks.transaction_ops_collect_actions": {"queue": "recon", "priority": RECON_COLLECTOR_PRIORITY},
+            # A dedicated worker consumes only these short collectors. Broker
+            # priority alone cannot bypass bulk work reserved by a busy worker.
+            "tasks.transaction_ops_collect_due": {"queue": RECON_COLLECTOR_QUEUE, "priority": RECON_COLLECTOR_PRIORITY},
+            "tasks.transaction_ops_collect_actions": {
+                "queue": RECON_COLLECTOR_QUEUE,
+                "priority": RECON_COLLECTOR_PRIORITY,
+            },
         },
         _default_send_task_priority,
     ),
