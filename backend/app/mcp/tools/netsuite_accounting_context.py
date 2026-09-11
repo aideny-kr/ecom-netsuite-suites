@@ -16,6 +16,7 @@ from sqlalchemy import select
 
 from app.core.database import set_tenant_context
 from app.core.dependencies import has_permission
+from app.core.encryption import decrypt_credentials
 from app.mcp.tools import netsuite_suiteql
 from app.models.connection import Connection
 from app.models.tenant import Tenant
@@ -45,6 +46,15 @@ class ContextRequest(BaseModel):
 
 def _account(value):
     return value.replace("_", "-").lower() if isinstance(value, str) else ""
+
+
+def _credentials_match(encrypted, account_id):
+    try:
+        credentials = decrypt_credentials(encrypted)
+        return isinstance(credentials, dict) and _account(credentials.get("account_id")) == account_id
+    except Exception:
+        # Never expose decrypted credentials or cryptographic error details.
+        return False
 
 
 async def _authorize(context):
@@ -147,7 +157,7 @@ async def _policies(context, connection_id, account_id):
     # must be reported as unavailable, not as a missing business treatment.
     current = (
         await db.execute(
-            select(Connection.metadata_json, Connection.status).where(
+            select(Connection.metadata_json, Connection.status, Connection.encrypted_credentials).where(
                 Connection.id == connection_id,
                 Connection.tenant_id == tenant_id,
                 Connection.provider == "netsuite",
@@ -158,6 +168,7 @@ async def _policies(context, connection_id, account_id):
         current is None
         or current.status != "active"
         or _account((current.metadata_json or {}).get("account_id")) != account_id
+        or not _credentials_match(current.encrypted_credentials, account_id)
     ):
         return {"status": "unavailable", "reason": "connection_scope_unavailable"}
     return {
@@ -197,8 +208,10 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
         }
     connection = connections[0]
     account_id = _account((connection.metadata_json or {}).get("account_id"))
-    if not re.fullmatch(r"[a-z0-9-]{1,255}", account_id) or (
-        request.expected_account_id is not None and _account(request.expected_account_id) != account_id
+    if (
+        not re.fullmatch(r"[a-z0-9-]{1,255}", account_id)
+        or (request.expected_account_id is not None and _account(request.expected_account_id) != account_id)
+        or not _credentials_match(connection.encrypted_credentials, account_id)
     ):
         return {"success": False, "error": "connection_scope_mismatch"}
     scope = {"connection_id": str(connection.id), "expected_account_id": account_id}
@@ -232,6 +245,15 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
             request.limit,
         )
         sections["calendar_year_window"] = year
+        sections["periods"]["calendar_attribution"] = {
+            "status": "unverified",
+            "reason": (
+                "These period rows do not include fiscal-calendar identity. Verify the link to the "
+                "requested subsidiary's fiscal calendar before assigning a period to that subsidiary; "
+                "matching period names or dates alone is insufficient when several calendars exist. "
+                "These are period-record lock flags, not subsidiary/book-specific posting eligibility."
+            ),
+        }
     elif request.section == "accounts":
         where = f" WHERE id = {request.account_id}" if request.account_id is not None else ""
         sections["accounts"] = await _reference(

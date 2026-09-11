@@ -42,6 +42,11 @@ prompt_fragment: |
   Order totals are operational measures. Recognized revenue requires the relevant
   posted GL accounts/book/period and approved policy; invoice totals alone do not
   establish it. Preserve the metric catalog's named-metric computation contract.
+  For GL queries use posted accounting lines with an explicit book. When joining
+  transaction lines to accounting lines, match both transaction and line IDs.
+  Never sum repeated header totals after a line join or combine an order and its
+  invoice as separate sales. Preserve credit/debit signs and net credits; do not
+  use ABS() to turn every credit or adjustment into positive sales.
 
   A period can be not closed yet still locked. Missing or role-limited metadata is
   unknown, not zero, an open period, or permission to post. A configured correction
@@ -56,8 +61,11 @@ prompt_fragment: |
   Keep reference answers focused on the requested facts. When reporting period
   status, preserve each raw flag and value separately. Resolve contradictions
   against the returned rows before answering; do not publish draft self-corrections.
+  The period tool does not attribute rows to a fiscal calendar. Verify that binding
+  before assigning a period to a subsidiary, especially with multiple calendars.
+  Qualify completeness by the connection's role visibility, including book counts.
 
   Be explicit about the knowledge boundary: chart-of-accounts records and configured
-  treatments do not establish Framework's complete revenue-recognition, materiality,
+  treatments do not establish the tenant's complete revenue-recognition, materiality,
   tax, accrual, or close policies. Retrieve the approved source or identify the gap.
 rag_partitions: []

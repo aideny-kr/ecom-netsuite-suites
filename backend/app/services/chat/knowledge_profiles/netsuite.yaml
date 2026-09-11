@@ -89,6 +89,7 @@ prompt_fragment: |
   - Never combine SalesOrd and CustInvc totals for the same sale.
   - Transaction-header totals repeat after a line join. Do not sum repeated headers.
   - Verify fields for the selected connector. Do not infer currency or posting meaning solely from a field name or an old successful query.
+  - Before using `tl.foreignamount`, verify its currency basis and sign convention for the transaction types in scope; do not assume it is a USD or consolidated amount.
   - Transaction currency, subsidiary base currency, and consolidated reporting currency are distinct. Base currency is not automatically USD.
   - For GL calculations, use the accounting lines with an explicit accounting-book scope. Preserve the tested join grain; a transaction-line/accounting-line join must match both transaction and line IDs.
   - Do not sum different subsidiary base currencies as one total. Establish the consolidation target, accounting period, and rate treatment or report separate currencies.

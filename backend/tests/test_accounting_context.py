@@ -206,6 +206,7 @@ async def test_period_dates_are_bounded_and_closed_does_not_mean_locked(ctx, mon
     query = reader.await_args.args[0]["query"]
     assert "2026-01-01" in query and "2027-01-01" in query and "TO_CHAR" in query
     assert "not a fiscal-year definition" in result["limitations"]
+    assert result["sections"]["periods"]["calendar_attribution"]["status"] == "unverified"
 
 
 async def test_account_lookup_reads_no_balances(ctx, monkeypatch):
@@ -268,6 +269,9 @@ def test_accounting_profile_activates_with_tool_and_current_facts_outrank_notes(
     assert "Current NetSuite Accounting Context" in prompt
     assert "Current tool evidence takes precedence" in prompt and "HIGHEST PRIORITY" not in prompt
     assert "Missing configuration is not a company policy prohibition" in " ".join(prompt.split())
+    assert "match both transaction and line IDs" in " ".join(prompt.split())
+    assert "do not use ABS()" in " ".join(prompt.split())
+    assert "Framework" not in prompt
     agent._tool_defs = []
     assert "Current NetSuite Accounting Context" not in agent.system_prompt
 
@@ -280,6 +284,8 @@ async def test_policies_preserve_current_overrides_and_missing_subsidiary_mappin
 
     actor = admin_user[0]
     config, connection, profile = await setup(db, actor, legacy=True)
+    connection.encrypted_credentials = encrypt_credentials({"account_id": "6738075_SB1"})
+    await db.flush()
     other = await state.create_config(
         db,
         actor.tenant_id,
@@ -315,18 +321,24 @@ async def test_policies_preserve_current_overrides_and_missing_subsidiary_mappin
     reader.assert_not_awaited()
 
 
-async def test_connection_revoked_during_policy_read_is_unavailable(db, admin_user, monkeypatch):
+@pytest.mark.parametrize("change", ["revocation", "credential_environment"])
+async def test_connection_changed_during_policy_read_is_unavailable(db, admin_user, monkeypatch, change):
     from app.services.transaction_ops import accounting_profiles as profiles
     from tests.test_accounting_profiles import setup
 
     actor = admin_user[0]
     _, connection, _ = await setup(db, actor, legacy=True)
+    connection.encrypted_credentials = encrypt_credentials({"account_id": "6738075_SB1"})
+    await db.flush()
     for flag in ("celigo", "reconciliation"):
         await enable_feature_flag(db, actor.tenant_id, flag, True)
     original = profiles.sales_credit_profile
 
     async def revoke(*args):
-        connection.status = "revoked"
+        if change == "revocation":
+            connection.status = "revoked"
+        else:
+            connection.encrypted_credentials = encrypt_credentials({"account_id": "6738075"})
         await db.flush()
         return await original(*args)
 
@@ -334,6 +346,24 @@ async def test_connection_revoked_during_policy_read_is_unavailable(db, admin_us
     result = await tool.execute({"section": "policies"}, {"db": db, "tenant_id": actor.tenant_id, "actor_id": actor.id})
     assert result["sections"]["policies"]["status"] == "unavailable"
     assert "configured_treatments" not in result["sections"]["policies"]
+
+
+@pytest.mark.parametrize("section", ["overview", "policies"])
+@pytest.mark.parametrize("credentials", [{"account_id": "12345_SB1"}, {}, "corrupt"])
+async def test_credentials_must_match_stored_environment_before_any_read(ctx, monkeypatch, section, credentials):
+    context, connection, _, _ = ctx
+    connection.encrypted_credentials = (
+        encrypt_credentials(credentials) if isinstance(credentials, dict) else credentials
+    )
+    await context["db"].flush()
+    reader = install_reader(monkeypatch)
+    policies = AsyncMock()
+    monkeypatch.setattr(tool, "_policies", policies)
+    result = await tool.execute({"section": section}, context)
+    assert result["error"] == "connection_scope_mismatch"
+    assert "credentials" not in json.dumps(result)
+    reader.assert_not_awaited()
+    policies.assert_not_awaited()
 
 
 @pytest.mark.parametrize("mode", ["rest", "mcp_only", "revoked", "discovery_failure"])
@@ -397,3 +427,18 @@ def test_shared_prompt_assembly_does_not_duplicate_accounting_context():
     first = _assemble_system_prompt(template="{{TOOL_INVENTORY}}", tool_definitions=defs)
     second = _assemble_system_prompt(template=first, tool_definitions=defs)
     assert second.count("## Current NetSuite Accounting Context") == 1
+
+
+@pytest.mark.parametrize("skill", ["sales_by_platform", "period_comparison"])
+def test_active_sales_skills_do_not_reintroduce_unscoped_usd_or_gl_revenue(skill):
+    from app.services.chat.agents.unified_agent import UnifiedAgent
+    from app.services.chat.tools import build_local_tool_definitions
+
+    agent = UnifiedAgent(tenant_id=uuid4(), user_id=uuid4(), correlation_id="accounting-skill")
+    agent._active_skill = {"slug": skill}
+    agent._tool_defs = [t for t in build_local_tool_definitions() if t["name"] == "netsuite_accounting_context"]
+    prompt = agent.system_prompt
+    assert "Never label sales-order totals as recognized revenue" in prompt
+    assert "selected data source" in prompt
+    assert "revenue_usd" not in prompt and "tl.amount * -1" not in prompt
+    assert "Current NetSuite Accounting Context" in prompt
