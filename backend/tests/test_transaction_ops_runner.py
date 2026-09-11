@@ -151,6 +151,55 @@ async def execute(state, source=None, target=None, page=None, enabled=True):
     )
 
 
+async def test_deadline_during_progress_finishes_budget_for_immediate_continuation():
+    from app.services.transaction_ops.state_service import StateError
+
+    state = State()
+    state.run.deadline_at = NOW
+    state.update_progress = AsyncMock(side_effect=StateError("run_lease_lost"))
+    state.finish_run = AsyncMock(wraps=state.finish_run)
+
+    result = await execute(state)
+
+    assert result["status"] == "finished"
+    assert result["termination_reason"] == "budget"
+    assert state.run.status == "finished"
+    state.finish_run.assert_awaited_once()
+    assert state.finish_run.call_args.kwargs["lease_token"] == state.token
+    assert state.events == []  # No provider calls or new spend after expiry.
+
+
+@pytest.mark.parametrize("deadline_passed", [False, True])
+async def test_lost_owner_yields_without_finishing_another_workers_run(deadline_passed):
+    from app.services.transaction_ops.state_service import StateError
+
+    state = State()
+    state.run.deadline_at = NOW if deadline_passed else NOW + timedelta(minutes=1)
+    state.update_progress = AsyncMock(side_effect=StateError("run_lease_lost"))
+    state.finish_run = AsyncMock(side_effect=StateError("run_lease_lost"))
+
+    result = await execute(state)
+
+    assert result["status"] == "yielded"
+    assert result["termination_reason"] == "stall"
+    assert state.run.status == "running"
+    assert state.finish_run.await_count == int(deadline_passed)
+    assert state.events == []
+
+
+async def test_deadline_finalization_does_not_hide_other_state_errors():
+    from app.services.transaction_ops.state_service import StateError
+
+    state = State()
+    state.run.deadline_at = NOW
+    state.update_progress = AsyncMock(side_effect=StateError("run_lease_lost"))
+    state.finish_run = AsyncMock(side_effect=StateError("not_found"))
+
+    with pytest.raises(StateError) as exc:
+        await execute(state)
+    assert exc.value.code == "not_found"
+
+
 async def test_direct_window_filters_other_entities_before_native_reads_and_uses_keyset():
     state = State(window=True)
     state.run.config_snapshot.update(source_step_id=None, source_connection_id=str(uuid4()))

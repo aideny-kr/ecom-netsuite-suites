@@ -746,6 +746,15 @@ async def run_investigation(
         return await finish("budget" if clock() >= run.deadline_at else "error")
     except state_service.StateError as exc:
         if exc.code == "run_lease_lost":
+            if clock() >= run.deadline_at:
+                try:
+                    # A progress write can meet the deadline before the next
+                    # budget reservation. Finalize only under the existing
+                    # owner's token so the worker can publish a continuation.
+                    return await finish("budget")
+                except state_service.StateError as finish_exc:
+                    if finish_exc.code != "run_lease_lost":
+                        raise
             return {"run_id": str(run_id), "status": "yielded", "termination_reason": "stall"}
         raise
     except Exception:
