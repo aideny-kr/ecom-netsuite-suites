@@ -1,7 +1,7 @@
 """Authenticated transaction configuration, investigations and human decisions.
 
-Run creation is durable queueing only. Provider execution/worker registration
-belongs to the runner; no request body can provide an approval actor.
+Run creation persists before bounded broker publication. Provider execution
+belongs to the worker; no request body can provide an approval actor.
 """
 
 from typing import Annotated, Literal
@@ -26,7 +26,7 @@ from app.schemas.transaction_runs import (
     RunCreate,
     RunOut,
 )
-from app.services.transaction_ops import case_service, order_actions, period_review
+from app.services.transaction_ops import case_service, order_actions, period_review, scheduler
 from app.services.transaction_ops import state_service as service
 from app.services.transaction_ops.period_review import PeriodReview
 
@@ -42,6 +42,14 @@ Manager = Annotated[User, Depends(require_permission("connections.manage"))]
 
 def _http_error(exc):
     return HTTPException(status_code=exc.http_status, detail={"code": exc.code})
+
+
+async def _publish_pending(run, tenant_id):
+    if run.status == "pending":
+        # Creation has committed. Publication is bounded and deduplicated;
+        # failures leave this durable run available to scheduler recovery.
+        await scheduler._dispatch(tenant_id, run.id, {"dispatched": 0, "dispatch_failed": 0})
+    return run
 
 
 class OrderInvestigation(BaseModel):
@@ -130,7 +138,8 @@ async def create_run(config_id: UUID, request: RunCreate, user: Reader, db: Data
     if request.review is not None:
         raise HTTPException(status_code=422, detail={"code": "review_scope_is_server_owned"})
     try:
-        return await service.create_run(db, user.tenant_id, config_id, request, actor=user)
+        run = await service.create_run(db, user.tenant_id, config_id, request, actor=user)
+        return await _publish_pending(run, user.tenant_id)
     except service.StateError as exc:
         raise _http_error(exc) from None
 
@@ -138,7 +147,8 @@ async def create_run(config_id: UUID, request: RunCreate, user: Reader, db: Data
 @router.post("/configs/{config_id}/review", response_model=RunOut, status_code=202)
 async def review_period(config_id: UUID, request: PeriodReview, user: Reader, db: Database):
     try:
-        return await period_review.create_review(db, user.tenant_id, config_id, request, actor=user)
+        run = await period_review.create_review(db, user.tenant_id, config_id, request, actor=user)
+        return await _publish_pending(run, user.tenant_id)
     except service.StateError as exc:
         raise _http_error(exc) from None
 

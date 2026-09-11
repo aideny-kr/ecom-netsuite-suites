@@ -1,11 +1,14 @@
 """Real authenticated API decisions; workers/models never get a decision route."""
 
 from datetime import datetime, timezone
+from unittest.mock import Mock
+from uuid import UUID
 
 import pytest
 
 from app.api.v1.transaction_ops import router
 from app.schemas.transaction_runs import RunCreate
+from app.services.transaction_ops import scheduler
 from app.services.transaction_ops import state_service as state
 from tests.conftest import create_test_user, enable_feature_flag, make_auth_headers
 from tests.test_transaction_ops_state import proposal_input
@@ -15,6 +18,13 @@ from tests.test_transaction_ops_state_db import seed_config
 @pytest.fixture(autouse=True)
 async def transaction_routes(app):
     app.include_router(router, prefix="/api/v1")
+
+
+@pytest.fixture(autouse=True)
+def publisher(monkeypatch):
+    publish = Mock(return_value=True)
+    monkeypatch.setattr(scheduler, "publish_investigation", publish)
+    return publish
 
 
 async def seed_proposal(db, actor):
@@ -35,13 +45,14 @@ async def seed_proposal(db, actor):
     return config, run, proposal
 
 
-async def test_trigger_returns_durable_pending_run_without_dispatch(client, db, admin_user):
+async def test_trigger_publishes_durable_pending_run(client, db, admin_user, publisher):
     actor, headers = admin_user
     config, _, _ = await seed_proposal(db, actor)
     body = {"evaluation_key": "api-request", "order_references": ["R123456789"]}
     response = await client.post(f"/api/v1/transaction-ops/configs/{config.id}/runs", json=body, headers=headers)
     assert response.status_code == 202, response.text
     assert response.json()["status"] == "pending"
+    publisher.assert_called_once_with(actor.tenant_id, UUID(response.json()["id"]))
     assert (await client.post(f"/api/v1/transaction-ops/configs/{config.id}/runs", json=body, headers=headers)).json()[
         "id"
     ] == response.json()["id"]
