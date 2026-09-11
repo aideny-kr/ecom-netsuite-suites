@@ -283,7 +283,7 @@ _CONNECTOR_GATED_TOOLS: dict[str, set[str]] = {
     "bigquery": {"bigquery_sql", "bigquery_schema", "bigquery_cost_estimate"},
     "google_sheets": {"sheets_create", "sheets_write_range", "sheets_read_range"},
 }
-_NETSUITE_ANALYTICS_TOOLS = {"netsuite_suiteql", "netsuite_financial_report"}
+_NETSUITE_ANALYTICS_TOOLS = {"netsuite_suiteql", "netsuite_financial_report", "netsuite_accounting_context"}
 
 
 def build_discovery_fallback_tools() -> list[dict]:
@@ -315,6 +315,11 @@ async def build_all_tool_definitions(
         )
     except Exception:
         logger.warning("Failed to discover local NetSuite connection", exc_info=True)
+
+    # Accounting reference reads bind to a REST Connection, not an arbitrary MCP.
+    # MCP-only tenants retain their advertised native tools instead.
+    if not netsuite_connected:
+        tools = [tool for tool in tools if tool["name"] != "netsuite_accounting_context"]
 
     # Celigo local tools (spec docs/superpowers/specs/2026-09-04-celigo-chat-access.md
     # §5, task 4A): gated on the tenant's `celigo` feature flag AND its flow-map

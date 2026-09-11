@@ -1,6 +1,6 @@
 ---
 Name: Period-over-Period Comparison
-Description: Compares sales metrics between two time periods (e.g., this month vs last month, Q1 vs Q2) with delta and percentage change.
+Description: Compares scoped sales or financial metrics between two time periods with deterministic changes and explicit currency and period bases.
 Triggers:
   - /period-compare
   - compare periods
@@ -11,32 +11,18 @@ Triggers:
 
 # Period-over-Period Comparison
 
-You are executing the Period-over-Period Comparison skill. Follow these exact steps:
+1. **Determine scope and periods:**
+   - Respect the user's selected data source; use its available tools and dialect. Do not switch a Metabase analysis to NetSuite.
+   - Use the requested periods. If one is specified, use the immediately preceding equivalent period as a stated assumption; if neither is specified, state current month versus previous month. Identify partial-period comparisons.
+   - For accounting measures, verify the source fiscal calendar and actual posting-period dates rather than inferring them from month names or an application default. Reuse current reference evidence within the task.
 
-1. **Determine Periods:**
-   - Check if the user specified two periods (e.g., "Jan vs Feb", "Q1 vs Q2 2026").
-   - If only one period given, compare it to the immediately preceding period of the same length.
-   - If no period specified, compare current month vs previous month.
+2. **Define a consistent measure:**
+   - Never label sales-order totals as recognized revenue. For a named financial metric, use the metric catalog's definition; GL measures require posted accounts, book and reporting currency.
+   - Apply identical inclusion rules, subsidiary scope, amount-field basis and signs to both periods. Verify fields on the selected connector before constructing SQL.
+   - Keep transaction, subsidiary base and consolidated currencies distinct. Compare each currency separately unless a verified reporting/conversion basis supports a common currency; do not assume subsidiary base amounts are USD.
+   - Aggregate order counts at header grain, or use COUNT(DISTINCT order ID) when line joins are necessary. Never sum repeated header totals. Preserve credit/debit signs and net credits appropriately.
 
-2. **Run Current Period Query:**
-   ```sql
-   SELECT COUNT(DISTINCT t.id) as order_count,
-          ROUND(SUM(tl.amount * -1), 2) as revenue_usd
-   FROM transactionline tl
-   JOIN transaction t ON tl.transaction = t.id
-   WHERE t.type = 'SalesOrd'
-     AND t.trandate >= <current_start>
-     AND t.trandate <= <current_end>
-     AND tl.mainline = 'F'
-     AND tl.taxline = 'F'
-     AND (tl.iscogs = 'F' OR tl.iscogs IS NULL)
-   ```
-
-3. **Run Prior Period Query:**
-   - Same structure with `<prior_start>` and `<prior_end>`.
-
-4. **Calculate & Present:**
-   - Compute delta (current - prior) and percentage change ((current - prior) / prior * 100).
-   - Present as a comparison table:
-     | Metric | Prior Period | Current Period | Change | % Change |
-   - Highlight growth in green context, decline in red context.
+3. **Compute and present:**
+   - Compute current, prior, change and percentage change in SQL or an available deterministic calculation tool using the same metric definition. Do not improvise arithmetic in the narrative.
+   - If the prior value is zero, report percentage change as undefined; do not divide by zero. Missing/unavailable data is not a zero value. Explain negative-denominator or partial-period comparisons where they affect interpretation.
+   - Present Metric, Currency/Reporting Basis, Prior Period, Current Period, Change and % Change. State the actual dates and whether either period is incomplete; qualify role visibility and any truncated results.

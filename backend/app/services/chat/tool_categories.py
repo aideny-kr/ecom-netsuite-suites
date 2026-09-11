@@ -26,6 +26,8 @@ Category = Literal[
 ]
 
 _EXACT: dict[str, Category] = {
+    "netsuite.accounting_context": "control",
+    "netsuite_accounting_context": "control",
     "transaction_ops.configs": "control",
     "transaction_ops_configs": "control",
     "transaction_ops.run": "control",

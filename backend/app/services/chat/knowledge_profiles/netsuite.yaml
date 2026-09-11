@@ -73,7 +73,7 @@ prompt_fragment: |
   - `t.foreigntotal` and `t.total` are HEADER-LEVEL fields.
   - If you JOIN transactionline, NEVER use `SUM(t.foreigntotal)` — it inflates by line count.
   - For order-level totals: query `transaction` alone without transactionline.
-  - For line-level breakdown: use `SUM(tl.amount * -1)` for revenue in base currency (USD).
+  - For line-level sales breakdown, use a verified line amount and its currency; GL revenue requires posting-account/book context.
 
   JOIN PATTERNS:
   - Filter to item lines only using `tl.mainline = 'F' AND tl.taxline = 'F' AND (tl.iscogs = 'F' OR tl.iscogs IS NULL) AND tl.assemblycomponent = 'F'`.
@@ -83,31 +83,19 @@ prompt_fragment: |
   - For strict revenue queries (excluding shipping, discounts, subtotals): `JOIN item i ON tl.item = i.id WHERE i.type NOT IN ('ShipItem', 'Discount', 'Subtotal', 'Markup', 'Payment', 'EndGroup')`.
   - LINKED RECORDS (createdfrom): The `createdfrom` field on transaction and transactionline links related records in the fulfillment chain. Common chains: SO → Invoice (`CustInvc.createdfrom = SalesOrd.id`), PO → Item Receipt (`ItemRcpt.createdfrom = PurchOrd.id`), RMA → Item Receipt (`ItemRcpt.createdfrom = RtnAuth.id`), SO → Item Fulfillment (`ItemShip.createdfrom = SalesOrd.id`). To find linked records: `SELECT t2.tranid FROM transaction t2 WHERE t2.createdfrom = <source_id>`.
 
-  LINE AMOUNT SIGN CONVENTION — IMPORTANT:
-  - In NetSuite, `tl.foreignamount` is NEGATIVE for revenue lines on sales orders, invoices, and credit memos (accounting convention: credits are negative).
-  - `t.foreigntotal` (header) is POSITIVE for the same transactions.
-  - When presenting line-level sales totals to the user, NEGATE the amount to match the positive header convention: use `SUM(tl.foreignamount) * -1` or `ABS(SUM(tl.foreignamount))`.
-  - For base currency (USD): use `SUM(tl.amount * -1)`. This is the GL-posted amount — the most accurate accounting value.
-  - Do NOT present raw negative amounts as "sales" — it confuses users. Always present revenue as positive numbers.
-  - Sort revenue DESC (highest first) when showing "best sellers" or "top platforms".
-
-  MULTI-CURRENCY — CRITICAL:
-  - `t.foreigntotal` = amount in the TRANSACTION currency (could be USD, EUR, GBP, etc.)
-  - `t.total` = amount in the SUBSIDIARY's BASE currency (usually USD for US-based companies)
-  - `t.currency` = the transaction's currency (use BUILTIN.DF(t.currency) for name)
-  - `t.exchangerate` = conversion rate from transaction currency to subsidiary base currency
-  - `tl.foreignamount` / `tl.netamount` = line amounts in TRANSACTION currency
-  - `tl.amount` / `tl.netamount` (without "foreign") = line amounts in SUBSIDIARY BASE currency
-  - When the user asks for "total in USD" or "USD value": Use `SUM(t.total)` — this is already converted to the subsidiary's base currency (USD). No manual conversion needed.
-  - When the user asks for breakdown by currency: Use `SUM(t.foreigntotal)` with `GROUP BY BUILTIN.DF(t.currency)` to show per-currency totals.
-  - For line-level amounts in base currency: Use `SUM(tl.amount) * -1` (base currency, negated for revenue).
-  - For line-level amounts in transaction currency: Use `SUM(tl.foreignamount) * -1` (transaction currency, negated for revenue).
-  - DEFAULT: For line-level USD revenue, use `SUM(tl.amount * -1)`. For header-level, use `SUM(t.total)`.
-
-  TRANSACTION TYPES (avoid double-counting):
-  - For order analysis: `t.type = 'SalesOrd'` only.
-  - For recognized revenue: `t.type = 'CustInvc'` only.
-  - NEVER combine SalesOrd + CustInvc in one SUM — same sale appears as both.
+  ACCOUNTING AMOUNTS AND CURRENCY:
+  - Distinguish operational order totals from posted accounting revenue. Sales orders are not GL revenue.
+  - An invoice-only filter is not a complete recognized-revenue definition; use the applicable posted GL income accounts, accounting book, period, and approved policy.
+  - Never combine SalesOrd and CustInvc totals for the same sale.
+  - Transaction-header totals repeat after a line join. Do not sum repeated headers.
+  - Verify fields for the selected connector. Do not infer currency or posting meaning solely from a field name or an old successful query.
+  - Before using `tl.foreignamount`, verify its currency basis and sign convention for the transaction types in scope; do not assume it is a USD or consolidated amount.
+  - Transaction currency, subsidiary base currency, and consolidated reporting currency are distinct. Base currency is not automatically USD.
+  - For GL calculations, use the accounting lines with an explicit accounting-book scope. Preserve the tested join grain; a transaction-line/accounting-line join must match both transaction and line IDs.
+  - Do not sum different subsidiary base currencies as one total. Establish the consolidation target, accounting period, and rate treatment or report separate currencies.
+  - NetSuite consolidated exchange rates and transaction exchange rates serve different purposes. Neither native reports nor saved searches are inherently inaccurate; match their scope before comparing.
+  - Preserve credit/debit signs and net credits appropriately. Do not use ABS() to turn every credit or adjustment into positive sales.
+  - For named metrics, use the metric catalog and its deterministic computation; do not replace its definition with an ad-hoc revenue formula.
 
   STATUS CODE FILTERING — CRITICAL:
   - The REST API uses SINGLE-LETTER status codes, NOT compound codes.

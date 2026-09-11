@@ -24,7 +24,7 @@ def available_data_sources(tool_definitions: list[dict]) -> dict[str, str]:
     }
     for tool in tool_definitions:
         name = tool.get("name", "")
-        if name in {"netsuite_suiteql", "netsuite_financial_report"}:
+        if name in {"netsuite_suiteql", "netsuite_financial_report", "netsuite_accounting_context"}:
             sources["netsuite"] = "NetSuite"
         elif name == "bigquery_sql":
             sources["bigquery"] = "BigQuery"

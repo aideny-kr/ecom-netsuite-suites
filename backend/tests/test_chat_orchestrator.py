@@ -35,6 +35,7 @@ class TestAllowedChatToolsFromOld:
             "transaction_ops.accounting_evidence",
             "transaction_ops.accounting_group",
             "netsuite.suiteql",
+            "netsuite.accounting_context",
             "pivot.query_result",
             "cross_source.query",
             "netsuite.financial_report",
