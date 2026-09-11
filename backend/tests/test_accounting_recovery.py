@@ -2,6 +2,7 @@
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
@@ -88,6 +89,33 @@ async def test_recovery_preserves_original_approver_and_queues_once(db, interrup
     assert done.actor_type == "system" and done.actor_id is None
     assert done.payload["approved_by"] == str(actor.id)
     assert done.payload["financial_writes"] == 0
+
+
+@pytest.mark.parametrize("verified", [True, False])
+async def test_native_decimal_readback_persists_in_message_and_audit(db, interrupted_credit, providers, verified):
+    actor, _, _, message, _, _ = interrupted_credit
+    providers.return_value = {
+        "status": "verified" if verified else "needs_review",
+        "invoice": {"total": Decimal("1425.93"), "amountPaid": Decimal("0.0")},
+        "gl": [{"debit": Decimal("167.07"), "credit": Decimal("0.0")}],
+    }
+    result = await mod.recover(db, actor.tenant_id, message.id)
+    await db.refresh(message)
+    assert result["termination_reason"] == ("done" if verified else "error")
+    assert message.structured_output["accounting_verification"]["invoice"]["total"] == "1425.93"
+    assert message.structured_output["accounting_execution"]["attempts"] == 1
+    assert message.structured_output["accounting_execution"]["approved_by"] == str(actor.id)
+    assert bool(message.structured_output.get("accounting_recheck")) == verified
+    event = await db.scalar(
+        select(AuditEvent).where(
+            AuditEvent.tenant_id == actor.tenant_id,
+            AuditEvent.resource_id == str(message.id),
+            AuditEvent.action == "accounting_recovery.completed",
+        )
+    )
+    assert event.payload["verification"]["gl"] == [{"debit": "167.07", "credit": "0.0"}]
+    assert event.payload["financial_writes"] == 0
+    providers.assert_awaited_once()
 
 
 @pytest.mark.parametrize("problem", ["tenant", "digest", "actor", "payload", "inactive"])

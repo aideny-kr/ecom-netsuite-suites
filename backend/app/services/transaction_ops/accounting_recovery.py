@@ -241,6 +241,10 @@ async def recover(db, tenant_id, message_id, *, now=None, lock_engine=None):
                         from app.services.transaction_ops.tax_correction import verify_after as verify_tax
 
                         verification = await verify_tax(db, tenant_id, so["accounting_review"], claim.get("receipt"))
+                    # Native readers retain exact Decimals. Persist the same
+                    # string representation as the immediate approval path,
+                    # including unsuccessful readbacks and nested GL rows.
+                    verification = json.loads(json.dumps(verification, default=str, allow_nan=False))
             except Exception as exc:
                 verification = {"status": "needs_review", "reason": type(exc).__name__, "retry_allowed": False}
             verified = verification.get("status") == "verified"
