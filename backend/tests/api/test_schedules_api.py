@@ -1061,7 +1061,7 @@ class TestScheduleRun:
         # shared `sync` queue.
         from app.workers.tasks.scheduled_jobs import SCHEDULED_JOBS_RUN_NOW_PRIORITY
 
-        assert priority == SCHEDULED_JOBS_RUN_NOW_PRIORITY == 9
+        assert priority == SCHEDULED_JOBS_RUN_NOW_PRIORITY == 0
 
     async def test_run_now_snapshots_the_plan_it_saw_onto_the_pre_created_jobs_row(
         self, client: AsyncClient, admin_user, db: AsyncSession, monkeypatch

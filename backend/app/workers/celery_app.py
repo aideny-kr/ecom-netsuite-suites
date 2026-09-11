@@ -30,11 +30,20 @@ celery_app.conf.update(
     # starving a human's "Run now" and the Beat sweep behind the flood — see
     # `app.workers.tasks.scheduled_jobs`'s SCHEDULED_JOBS_*_PRIORITY
     # constants for who actually publishes at an elevated priority.
-    broker_transport_options={
-        "priority_steps": list(range(10)),
-        "sep": ":",
-        "queue_order_strategy": "priority",
-    },
+    #
+    # We rely entirely on kombu's OWN defaults here rather than overriding
+    # `broker_transport_options`: kombu's Redis transport polls priority
+    # buckets in ASCENDING order (`Transport.Channel._brpop_start` builds its
+    # BRPOP key list `for pri in priority_steps for queue in queues`, and
+    # `priority_steps` defaults to `[0, 3, 6, 9]`) — so priority 0 is served
+    # FIRST, 9 LAST. Do NOT set `queue_order_strategy` (it replaces
+    # round-robin fairness across default/sync/recon/export with a fixed
+    # order — an unrelated regression) or `sep` (changes the Redis key names
+    # a worker addresses — old and new workers would talk past each other
+    # during a rolling deploy). `task_default_priority` puts unlabeled batch
+    # work (e.g. `tasks.transaction_ops_run`) in the middle 6 bucket,
+    # leaving 0 and 3 free below it for scheduled-jobs' own elevated sends.
+    task_default_priority=6,
 )
 
 celery_app.conf.include = [

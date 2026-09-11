@@ -159,17 +159,24 @@ REASON_STALL = "stall"
 REASON_ERROR = "error"
 REASON_BLOCKED = "blocked"
 
-#: Broker priority (Celery + Redis transport — `celery_app.py`'s own
-#: `broker_transport_options`). On staging the single shared worker
-#: (`-Q default,sync,recon,export`, concurrency 2) is flooded by another
-#: feature's `tasks.transaction_ops_run` batch (hundreds of messages queued
-#: on `sync`/`recon`), so a user's "Run now" and the Beat sweep fan-out sit
-#: behind the flood unless they publish at a higher priority. 9 = a person
-#: is waiting on this request/chat-turn right now; 7 = a due occurrence
-#: fired by the minute-tick sweep; 0 (the default for everything else, e.g.
-#: transaction_ops batch work) is left alone.
-SCHEDULED_JOBS_RUN_NOW_PRIORITY = 9
-SCHEDULED_JOBS_SWEEP_PRIORITY = 7
+#: Broker priority (Celery + Redis transport). On staging the single shared
+#: worker (`-Q default,sync,recon,export`, concurrency 2) is flooded by
+#: another feature's `tasks.transaction_ops_run` batch (hundreds of messages
+#: queued on `sync`/`recon`), so a user's "Run now" and the Beat sweep
+#: fan-out must publish BELOW that batch work's priority to win against the
+#: flood.
+#:
+#: Redis transport: LOWER number = served first (kombu's Redis transport
+#: polls priority buckets in ASCENDING order — verified against
+#: `kombu.transport.redis.Transport.Channel._brpop_start`, `priority_steps`
+#: defaults to `[0, 3, 6, 9]`). `celery_app.py` sets
+#: `task_default_priority = 6` for unlabeled batch work (e.g.
+#: transaction_ops), so both constants below sit BELOW that default: 0 a
+#: person is waiting on this request/chat-turn right now, 3 a due
+#: occurrence fired by the minute-tick sweep, 6 the default for everything
+#: else.
+SCHEDULED_JOBS_RUN_NOW_PRIORITY = 0
+SCHEDULED_JOBS_SWEEP_PRIORITY = 3
 
 #: Spec §B4: the run budget is "(bytes scanned, seconds, usd) enforced between
 #: steps", but no v1 step type (registry.py) reports a `cost_usd` figure

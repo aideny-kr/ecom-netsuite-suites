@@ -1657,7 +1657,7 @@ async def test_sweep_fanout_dispatches_with_broker_priority(db: AsyncSession, mo
     call = dispatched[0]
     assert call["name"] == "tasks.scheduled_jobs_sweep"
     assert call["queue"] == "sync"
-    assert call["priority"] == SCHEDULED_JOBS_SWEEP_PRIORITY == 7
+    assert call["priority"] == SCHEDULED_JOBS_SWEEP_PRIORITY == 3
 
 
 async def test_finalize_run_schedule_select_carries_for_update_lock(db: AsyncSession, monkeypatch):

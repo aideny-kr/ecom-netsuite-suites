@@ -187,7 +187,7 @@ class TestExecuteRun:
         # shared `sync` queue.
         from app.workers.tasks.scheduled_jobs import SCHEDULED_JOBS_RUN_NOW_PRIORITY
 
-        assert priority == SCHEDULED_JOBS_RUN_NOW_PRIORITY == 9
+        assert priority == SCHEDULED_JOBS_RUN_NOW_PRIORITY == 0
 
     async def test_execute_run_reestablishes_tenant_context_after_its_commit(
         self, db: AsyncSession, admin_user, monkeypatch
