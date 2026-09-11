@@ -537,6 +537,107 @@ async def test_bigquery_preflight_credential_decrypt_failure_short_circuits_with
     assert len(fake.calls) == 1  # no repair round -- the plan was never the problem
 
 
+def _fake_get_client_raising(exc: Exception):
+    from unittest.mock import MagicMock
+
+    def fake_get_client(credentials, project_id, location=None):
+        client = MagicMock()
+        client.query.side_effect = exc
+        return client
+
+    return fake_get_client
+
+
+async def test_bigquery_preflight_bad_request_still_feeds_the_repair_round(db, tenant_a, monkeypatch):
+    """Item 3 (brief I): `google.api_core.exceptions.BadRequest` -- the real
+    exception type BigQuery's own client raises for a 400 (syntax error,
+    unqualified table, unknown column) -- classifies as a PLAN-validity
+    error: the repair round still gets a chance to fix it."""
+    from google.api_core.exceptions import BadRequest
+
+    monkeypatch.setattr(compiler, "_tenant_locations", lambda *_a, **_kw: _async_list([]))
+    await _add_bigquery_connector(db, tenant_a.id)
+    monkeypatch.setattr(
+        "app.services.bigquery_service._get_client",
+        _fake_get_client_raising(BadRequest('Table "inventory_snapshot" must be qualified with a dataset')),
+    )
+
+    bad_plan = _bigquery_only_plan("SELECT sku FROM inventory_snapshot")
+    fake = FakeAdapter(
+        [_compile_plan_response(bad_plan, tool_use_id="tu_1"), _compile_plan_response(bad_plan, tool_use_id="tu_2")]
+    )
+
+    result = await compile_instruction(
+        db,
+        tenant_id=tenant_a.id,
+        instruction="run a bigquery query",
+        actor_id=None,
+        llm=CompilerLLM(adapter=fake, model="fake-model"),
+    )
+
+    assert isinstance(result, Clarification)
+    assert len(fake.calls) == 2  # the repair round ran -- a plan defect, not an infra failure
+
+
+async def test_bigquery_preflight_service_unavailable_short_circuits_without_a_repair_round(db, tenant_a, monkeypatch):
+    """Item 3 (brief I): `google.api_core.exceptions.ServiceUnavailable` (a
+    BigQuery 503) is an INFRA failure, not a plan defect -- rewriting the
+    query cannot fix a down backend, so the repair round (and its one
+    precious LLM call) is never spent on it."""
+    from google.api_core.exceptions import ServiceUnavailable
+
+    monkeypatch.setattr(compiler, "_tenant_locations", lambda *_a, **_kw: _async_list([]))
+    await _add_bigquery_connector(db, tenant_a.id)
+    monkeypatch.setattr(
+        "app.services.bigquery_service._get_client",
+        _fake_get_client_raising(ServiceUnavailable("BigQuery is temporarily unavailable")),
+    )
+
+    plan = _bigquery_only_plan("SELECT sku FROM dataset.inventory_snapshot")
+    fake = FakeAdapter([_compile_plan_response(plan, tool_use_id="tu_1")])
+
+    result = await compile_instruction(
+        db,
+        tenant_id=tenant_a.id,
+        instruction="run a bigquery query",
+        actor_id=None,
+        llm=CompilerLLM(adapter=fake, model="fake-model"),
+    )
+
+    assert isinstance(result, Clarification)
+    assert "could not run" in result.question
+    assert len(fake.calls) == 1  # no repair round -- an infra failure never gets a second LLM call
+
+
+async def test_bigquery_preflight_google_auth_error_short_circuits_without_a_repair_round(db, tenant_a, monkeypatch):
+    """Item 3 (brief I): the same infra classification applies to an auth
+    failure (expired/invalid token) as to the 503 above --
+    `google.auth.exceptions.GoogleAuthError`."""
+    from google.auth.exceptions import GoogleAuthError
+
+    monkeypatch.setattr(compiler, "_tenant_locations", lambda *_a, **_kw: _async_list([]))
+    await _add_bigquery_connector(db, tenant_a.id)
+    monkeypatch.setattr(
+        "app.services.bigquery_service._get_client",
+        _fake_get_client_raising(GoogleAuthError("token expired")),
+    )
+
+    plan = _bigquery_only_plan("SELECT sku FROM dataset.inventory_snapshot")
+    fake = FakeAdapter([_compile_plan_response(plan, tool_use_id="tu_1")])
+
+    result = await compile_instruction(
+        db,
+        tenant_id=tenant_a.id,
+        instruction="run a bigquery query",
+        actor_id=None,
+        llm=CompilerLLM(adapter=fake, model="fake-model"),
+    )
+
+    assert isinstance(result, Clarification)
+    assert "could not run" in result.question
+    assert len(fake.calls) == 1
+
+
 def test_system_prompt_states_the_report_step_rule():
     """A report_step param (on render_pdf, build_xlsx, and drive.upload) must
     be steered toward naming the report.compose step directly -- never a
