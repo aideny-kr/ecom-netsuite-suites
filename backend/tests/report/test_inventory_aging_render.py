@@ -444,12 +444,46 @@ def test_details_summary_is_never_white_on_white():
     assert "color: var(--ink)" in _IA_CSS.split(".ia-section summary", 1)[1].split("}", 1)[0]
 
 
-def test_print_media_unclips_the_collapsible_aged_list():
+def test_page_rule_is_letter_landscape(html):
+    """The approved print layout (iterated against the real delivered report inside
+    the staging container — WeasyPrint is not installed on this dev machine, see
+    report_pdf.py's own docstring): landscape letter, not the WeasyPrint A4-portrait
+    default that clipped every wide table/chart in the delivered PDF."""
+    assert "@page { size: letter landscape" in html
+
+
+def test_print_media_block_carries_the_approved_kpi_mid_table_rules():
+    """The approved print stylesheet's load-bearing rules: the KPI row stays one
+    line of four cards, the trend chart sits beside the by-location table, long
+    tables repeat their header across pages."""
     from app.services.report.report_html import _IA_CSS
 
-    assert "@media print" in _IA_CSS
     print_block = _IA_CSS.split("@media print", 1)[1]
-    assert "details" in print_block
+    assert ".ia-kpis { display: flex" in print_block
+    assert ".ia-mid { display: flex" in print_block
+    assert "thead { display: table-header-group" in print_block
+
+
+def test_no_page_rule_for_a_spec_without_inventory_aging_sections():
+    """Byte-stability: `@page` (and the rest of `_IA_CSS`) is scoped to reports that
+    actually carry an inventory_aging section — every other report type must render
+    unaffected, same additive+conditional gate `_FS_CSS` already uses."""
+    spec = {"title": "Plain report", "sections": [{"type": "narrative", "markdown": "hello"}]}
+    out = render_report_html(spec)
+    assert "@page" not in out
+
+
+def test_print_hides_the_in_body_collapsible_aged_list_the_pdf_appendix_carries_it_instead():
+    """The in-body "All N aged SKUs" `<details>` block used to be FORCE-OPENED in
+    print (delivered PDF: a 786-row list force-expanded mid-report for 60 pages).
+    The approved layout instead HIDES it in print entirely — the PDF's full list
+    lives on its own appendix pages instead (`render_inventory_aging_appendix`,
+    wired at both PDF call sites via `appendix_html`)."""
+    from app.services.report.report_html import _IA_CSS
+
+    print_block = _IA_CSS.split("@media print", 1)[1]
+    assert ".ia-section details { display: none" in print_block
+    assert ":not([open])" not in print_block
 
 
 def test_render_report_html_deterministic(spec):
