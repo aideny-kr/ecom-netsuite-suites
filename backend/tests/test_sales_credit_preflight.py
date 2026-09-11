@@ -58,7 +58,9 @@ async def test_support_reads_fail_closed_and_are_bounded(variant):
         "/record/v1/discountItem/50": support["item"],
         "/record/v1/creditMemo/30": credit,
         "/record/v1/accountingPeriod/171": support["period"],
-        "/record/v1/invoice/20": support["invoice"],
+        "/record/v1/invoice/20": {**support["invoice"], "item": {"items": support["classification_lines"]}},
+        "/record/v1/location/30": support["classification_records"]["location"],
+        "/record/v1/department/18": support["classification_records"]["department"],
     }
     if variant == "changed_invoice":
         payloads["/record/v1/invoice/20"] = {**support["invoice"], "lastModifiedDate": "changed"}
@@ -87,7 +89,7 @@ async def test_support_reads_fail_closed_and_are_bounded(variant):
     @asynccontextmanager
     async def connected(*args, **kwargs):
         assert args[1:4] == ("tenant", "connection", "123")
-        assert kwargs["max_api_calls"] == 10
+        assert kwargs["max_api_calls"] == 13
         yield reader
 
     order = AsyncMock(return_value={"orders": [{"record_id": "999" if variant == "wrong_order" else "90"}]})
@@ -117,7 +119,7 @@ async def test_support_reads_fail_closed_and_are_bounded(variant):
             else:
                 assert result is None
                 source_refunds.assert_not_awaited()
-    assert reader.calls <= 8
+    assert reader.calls <= 11
 
 
 @pytest.mark.parametrize(
@@ -133,6 +135,8 @@ async def test_support_reads_fail_closed_and_are_bounded(variant):
         "gl_changed",
         "gl_reordered",
         "new_duplicate",
+        "location_changed",
+        "department_inactive",
     ],
 )
 async def test_approval_rebuilds_candidate_from_current_scope_and_evidence(variant):
@@ -173,6 +177,10 @@ async def test_approval_rebuilds_candidate_from_current_scope_and_evidence(varia
         support["invoice_gl"]["rows"].reverse()
     if variant == "new_duplicate":
         support["duplicates"]["rows"] = [{"id": "31"}]
+    if variant == "location_changed":
+        support["invoice"]["location"] = {"id": "99"}
+    if variant == "department_inactive":
+        support["classification_records"]["department"]["isInactive"] = True
     db = AsyncMock()
     db.scalar.return_value = case
     with (

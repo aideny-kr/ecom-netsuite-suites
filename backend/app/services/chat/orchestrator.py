@@ -2812,6 +2812,7 @@ async def run_chat_turn(
                     resource_type="chat_session",
                     resource_id=str(session.id),
                     payload={"tool_name": tool_name, "tool_input": tool_input, "result": _exec_result_str[:1000]},
+                    status="success" if _exec_succeeded else "error",
                 )
                 if _repair_decision is not None and _repair_decision.reason != "reenter":
                     # Terminal exit — a SEPARATE audit event naming WHY the

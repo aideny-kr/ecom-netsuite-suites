@@ -30,6 +30,10 @@ from tests.test_sales_credit import inputs
         "wrong_book",
         "invoice_gl_changed",
         "invoice_changed",
+        "wrong_location",
+        "wrong_department",
+        "unexpected_class",
+        "line_location_changed",
     ],
 )
 async def test_credit_readback_requires_exact_native_application_and_gl(variant):
@@ -56,6 +60,8 @@ async def test_credit_readback_requires_exact_native_application_and_gl(variant)
         entity={"id": "70"},
         postingPeriod={"id": "171"},
         tranDate=proposal["proposed_fields"]["tranDate"],
+        location=proposal["proposed_fields"]["location"],
+        department=proposal["proposed_fields"]["department"],
     )
     applications["documents"]["31"] = credit
     applications["links"][0]["nextdoc"] = "31"
@@ -71,6 +77,14 @@ async def test_credit_readback_requires_exact_native_application_and_gl(variant)
         credit["unapplied"] = "1"
     if variant == "wrong_period":
         credit["postingPeriod"]["id"] = "172"
+    if variant == "wrong_location":
+        credit["location"] = {"id": "99"}
+    if variant == "wrong_department":
+        credit["department"] = {"id": "99"}
+    if variant == "unexpected_class":
+        credit["class"] = {"id": "99"}
+    if variant == "line_location_changed":
+        credit["line_items"][0]["location"] = {"id": "99"}
     if variant == "source_changed":
         source["total"] = "102"
     if variant == "wrong_gl":

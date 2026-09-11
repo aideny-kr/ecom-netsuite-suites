@@ -26,6 +26,9 @@ CREDIT_FIELDS = HEADER_FIELDS | {
     "amountPaid",
     "amountRemaining",
     "deposit",
+    "location",
+    "department",
+    "class",
 }
 
 
@@ -293,7 +296,9 @@ async def collect_commercial_credits(db, tenant_id, review, report, source, evid
                 projected["applications"] = _sublist(doc, "apply", "apply", APPLICATION_FIELDS, problems)
                 projected["applications_complete"] = not problems
                 if kind == "CustCred":
-                    projected["line_items"] = _sublist(doc, "item", "item", LINE_FIELDS, problems)
+                    projected["line_items"] = _sublist(
+                        doc, "item", "item", LINE_FIELDS | {"location", "department", "class"}, problems
+                    )
                     projected["lines_complete"] = not problems
                     lines = projected["line_items"] or []
                     if len(lines) == 1 and (lines[0].get("itemType") or {}).get("id") == "Discount":

@@ -15,6 +15,13 @@ from decimal import Decimal, localcontext
 
 from app.schemas.transaction_ops import _decimal
 from app.services.transaction_ops.commercial_credits import _applied_to, _money, source_adjustment_basis
+from app.services.transaction_ops.credit_classification import (
+    FIELDS,
+    RECORD_TYPES,
+    matches_approved,
+    reference,
+    verified_fields,
+)
 from app.services.transaction_ops.netsuite_reader import _account, _id
 from app.services.transaction_ops.sales_credit_profile import SalesCreditProfile
 
@@ -244,6 +251,7 @@ def build_candidate(*, tenant_id, case_id, source, report, review, support, now=
             if support["duplicates"].get("posting_key") != key:
                 return None
             fields = {
+                **verified_fields(invoice, support, profile.subsidiary_id),
                 "entity": {"id": str(invoice["entity"]["id"])},
                 "subsidiary": {"id": profile.subsidiary_id},
                 "currency": {"id": str(invoice["currency"]["id"])},
@@ -305,7 +313,15 @@ def build_candidate(*, tenant_id, case_id, source, report, review, support, now=
                     "approval_basis": "Approve this finalized source commercial adjustment as a non-taxable Sales "
                     "Adjustments credit and apply only to the displayed invoice. Finance approval confirms this "
                     "treatment and posting date. This credits receivables, leaves invoice tax unchanged, and does "
-                    "not issue a cash refund or prove bank/processor settlement.",
+                    "not issue a cash refund or prove bank/processor settlement. "
+                    "Preserve the invoice classifications: "
+                    + "; ".join(
+                        f"{field.title()}: {invoice[field].get('refName') or fields[field]['id']} "
+                        f"(ID {fields[field]['id']})"
+                        for field in FIELDS
+                        if field in fields
+                    )
+                    + ".",
                 }
             )
     except (KeyError, TypeError, ValueError, ArithmeticError):
@@ -373,7 +389,7 @@ async def collect_support(db, tenant_id, source, report, review, evidence, *, no
     }
     key = external_id(tenant_id, scope, source, invoice_id)
     async with authenticated_reader(
-        db, tenant_id, review["netsuite_connection_id"], profile.account_id, max_api_calls=10
+        db, tenant_id, review["netsuite_connection_id"], profile.account_id, max_api_calls=13
     ) as reader:
         duplicate_raw = await reader.request(
             "POST",
@@ -453,9 +469,30 @@ async def collect_support(db, tenant_id, source, report, review, evidence, *, no
                 target,
             ),
         }
-        latest = await reader.request("GET", f"/record/v1/invoice/{invoice_id}")
+        latest = await reader.request("GET", f"/record/v1/invoice/{invoice_id}", params={"expandSubResources": "true"})
         if any(str(latest.get(k)) != str(invoice.get(k)) for k in ("id", "lastModifiedDate")):
             raise ValueError("commercial_credit_invoice_changed_during_read")
+        if any(reference(latest, field) != reference(invoice, field) for field in FIELDS):
+            raise ValueError("Invoice classifications changed during evidence collection.")
+        errors = []
+        support["classification_lines"] = _sublist(latest, "item", "classifications", frozenset(FIELDS), errors)
+        support["classification_lines_complete"] = not errors
+        support["classification_records"] = {}
+        for field in FIELDS:
+            identifier = reference(invoice, field)
+            if identifier:
+                raw = await reader.request(
+                    "GET", f"/record/v1/{RECORD_TYPES[field]}/{identifier}", params={"expandSubResources": "true"}
+                )
+                support["classification_records"][field] = {
+                    **_project(raw, {"id", "name", "isInactive"}),
+                    "subsidiary": raw.get("subsidiary"),
+                }
+        try:
+            verified_fields(invoice, support, profile.subsidiary_id)
+        except (KeyError, TypeError, ValueError) as exc:
+            evidence["sales_credit_blocker"] = str(exc)
+            return None
     support["observed_at"] = datetime.now(timezone.utc).isoformat()
     return json.loads(json.dumps(support, default=str))
 
@@ -594,7 +631,7 @@ async def verify_after(db, tenant_id, proposal, receipt):
         if receipt_id is not None and _id(receipt_id) != credit_id:
             return {"status": "needs_review", "reason": "credit_receipt_identity_conflict", "retry_allowed": False}
         doc = await reader.request("GET", f"/record/v1/invoice/{invoice_id}")
-        for field in ("entity", "account", "currency", "subsidiary", "createdFrom", "postingPeriod"):
+        for field in ("entity", "account", "currency", "subsidiary", "createdFrom", "postingPeriod", *FIELDS):
             if str((doc.get(field) or {}).get("id")) != str((proposal["before"].get(field) or {}).get("id")):
                 return {
                     "status": "needs_review",
@@ -645,6 +682,7 @@ async def verify_after(db, tenant_id, proposal, receipt):
         and str((cm.get("postingPeriod") or {}).get("id")) == str(proposal["period"]["id"])
         and cm.get("tranDate") == proposal["proposed_fields"]["tranDate"]
         and str((cm.get("entity") or {}).get("id")) == str(proposal["before"]["entity"]["id"])
+        and matches_approved(cm, proposal)
     )
     return {
         "status": "verified" if matches else "needs_review",

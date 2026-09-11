@@ -52,6 +52,9 @@ DOCUMENT_FIELDS = (
     "shippingCost",
     "entity",
     "account",
+    "location",
+    "department",
+    "class",
 )
 
 

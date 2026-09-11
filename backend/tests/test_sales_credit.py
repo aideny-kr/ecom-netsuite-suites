@@ -27,6 +27,8 @@ def inputs(*, paid="101"):
         discountTotal="0",
         amountPaid=paid,
         amountRemaining=str(Decimal(106) - Decimal(paid)),
+        location={"id": "30", "refName": "Invoice warehouse"},
+        department={"id": "18", "refName": "Wholesale"},
     )
     profile = dict(
         schema_version=1,
@@ -69,6 +71,16 @@ def inputs(*, paid="101"):
         deposit["applications"][0]["amount"] = paid
         applications["links"][0]["foreignamount"] = paid
     support = dict(
+        classification_lines=[{}],
+        classification_lines_complete=True,
+        classification_records={
+            field: dict(
+                id=identifier,
+                isInactive=False,
+                subsidiary=dict(items=[{"id": "1"}], count=1, totalResults=1, hasMore=False),
+            )
+            for field, identifier in (("location", "30"), ("department", "18"))
+        },
         invoice=invoice,
         linked_documents={"complete": True, "rows": [{"id": "20", "type": "CustInvc"}]},
         order_id="90",
@@ -115,6 +127,8 @@ def test_exact_missing_credit_candidate_has_one_invoice_application_and_no_clone
     assert f["autoApply"] is False and f["toBeEmailed"] is False
     assert "createdFrom" not in f and "id" not in f and "tranId" not in f
     assert f["entity"] == {"id": "70"} and p["lock_record_type"] == "invoice"
+    assert f["location"] == {"id": "30"} and f["department"] == {"id": "18"}
+    assert "Invoice warehouse" in p["approval_basis"] and "Wholesale" in p["approval_basis"]
     assert p["expected_after"]["credit_tax"] == "0.00"
     assert p["record_type"] == "creditmemo" and p["mutation_type"] == "create"
 

@@ -247,6 +247,12 @@ async def test_approval_preflight_execution_verification_and_actor_audit(outcome
     elif outcome == "rejected":
         assert order == ["preflight", "write"]
         assert message.structured_output["repair_exit_reason"] == "fresh_accounting_evidence_required"
+        failed = next(
+            c.kwargs
+            for c in audit.await_args_list
+            if c.kwargs.get("action") in {"record.create.failed", "record.update.failed"}
+        )
+        assert failed["status"] == "error"
     else:
         assert order == ["preflight", "write", "verify"]
         so = message.structured_output
