@@ -58,6 +58,48 @@ themselves still carry an explicit `priority=` kwarg matching these routes.
 
 from __future__ import annotations
 
+from urllib.parse import urlparse
+from uuid import uuid4
+
+import pytest
+
+
+@pytest.mark.parametrize("name", ["tasks.transaction_ops_collect_due", "tasks.transaction_ops_collect_actions"])
+def test_reconciliation_collectors_keep_priority_across_actual_publication_paths(name):
+    """Consume real Redis envelopes: bound Task defaults can override routes."""
+    from app.workers.celery_app import RECON_COLLECTOR_PRIORITY, celery_app
+    from app.workers.tasks import transaction_ops  # noqa: F401 - register the bound tasks
+
+    assert urlparse(celery_app.conf.broker_url).hostname in {"localhost", "127.0.0.1", "redis"}
+    assert not celery_app.conf.task_always_eager
+    assert RECON_COLLECTOR_PRIORITY == 3
+    entry = next(e for e in celery_app.conf.beat_schedule.values() if e["task"] == name)
+    assert entry["options"]["expires"] == 120
+    queue_name = f"recon-priority-test-{uuid4()}"
+    with celery_app.connection_for_write() as connection:
+        queue = connection.SimpleQueue(queue_name, no_ack=True)
+        try:
+            options = {"queue": queue_name, "connection": connection, "ignore_result": True}
+            # All work stays in a unique unconsumed test queue. Nothing executes.
+            celery_app.send_task("tasks.transaction_ops_run", **options)
+            celery_app.send_task(name, **options)
+            celery_app.tasks[name].apply_async(**options)
+            celery_app.tasks[name].apply_async(**options, **entry["options"])
+            celery_app.send_task("tasks.scheduled_jobs_run_now", **options)
+
+            messages = [queue.get(block=False) for _ in range(5)]
+            assert [m.properties["priority"] for m in messages] == [0, 3, 3, 3, 6]
+            assert [m.headers["task"] for m in messages] == [
+                "tasks.scheduled_jobs_run_now",
+                name,
+                name,
+                name,
+                "tasks.transaction_ops_run",
+            ]
+        finally:
+            queue.queue.delete()
+            queue.close()
+
 
 def test_kombu_redis_transport_serves_the_lowest_priority_step_first():
     """Ground truth, read straight from the installed kombu package (not

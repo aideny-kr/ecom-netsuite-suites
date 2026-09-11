@@ -3,6 +3,8 @@ from celery.schedules import crontab
 
 from app.core.config import settings
 
+RECON_COLLECTOR_PRIORITY = 3
+
 celery_app = Celery(
     "ecom_netsuite",
     broker=settings.CELERY_BROKER_URL,
@@ -15,7 +17,7 @@ def _default_send_task_priority(name, args, kwargs, options, task=None, **kw):
     `celery.app.routes.Router.lookup_route` tries each router in list order
     and returns the first non-None result (verified against the installed
     `celery/app/routes.py`), so the explicit dict ahead of this one always
-    wins for the two names it names, and this callable only ever fires for
+    wins for the names it lists, and this callable only ever fires for
     everything else.
 
     Round 4 (fix/jobs-live-run-defects): round 3's fix set
@@ -91,6 +93,10 @@ celery_app.conf.update(
         {
             "tasks.scheduled_jobs_run_now": {"queue": "sync", "priority": 0},
             "tasks.scheduled_jobs_sweep": {"queue": "sync", "priority": 3},
+            # Short recovery collectors must run before long bulk scans;
+            # otherwise every two-minute tick can expire behind the backlog.
+            "tasks.transaction_ops_collect_due": {"queue": "recon", "priority": RECON_COLLECTOR_PRIORITY},
+            "tasks.transaction_ops_collect_actions": {"queue": "recon", "priority": RECON_COLLECTOR_PRIORITY},
         },
         _default_send_task_priority,
     ),
@@ -146,12 +152,12 @@ celery_app.conf.beat_schedule = {
         "schedule": 60.0,
         # These stateless ticks rediscover durable DB work at execution time.
         # Old ticks must not accumulate behind long-running investigations.
-        "options": {"expires": 120},
+        "options": {"expires": 120, "priority": RECON_COLLECTOR_PRIORITY},
     },
     "transaction-operations-minute": {
         "task": "tasks.transaction_ops_collect_due",
         "schedule": 60.0,
-        "options": {"expires": 120},
+        "options": {"expires": 120, "priority": RECON_COLLECTOR_PRIORITY},
     },
     "sync-metered-billing": {
         "task": "tasks.billing_sync",

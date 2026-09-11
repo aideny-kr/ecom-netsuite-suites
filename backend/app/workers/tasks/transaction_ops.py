@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 
 from app.core.database import set_tenant_context, worker_async_session
 from app.workers.base_task import InstrumentedTask
-from app.workers.celery_app import celery_app
+from app.workers.celery_app import RECON_COLLECTOR_PRIORITY, celery_app
 
 
 @celery_app.task(
@@ -55,6 +55,7 @@ def transaction_ops_run(tenant_id: str, run_id: str):
     base=InstrumentedTask,
     name="tasks.transaction_ops_collect_due",
     queue="recon",
+    priority=RECON_COLLECTOR_PRIORITY,
     max_retries=0,
     soft_time_limit=50,
     time_limit=55,
@@ -122,6 +123,7 @@ def transaction_ops_recover(tenant_id: str, operation_id: str):
     base=InstrumentedTask,
     name="tasks.transaction_ops_collect_actions",
     queue="recon",
+    priority=RECON_COLLECTOR_PRIORITY,
     max_retries=0,
     soft_time_limit=50,
     time_limit=55,
