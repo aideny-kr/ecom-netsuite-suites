@@ -464,6 +464,13 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
                         evidence["sales_credit_support"] = support
                 except (ValueError, NetSuiteEvidenceError, SourceReadError) as exc:
                     evidence["blockers"].append(f"sales_credit:{exc}")
+            if correction is None and evidence.get("commercial_credit_resolution"):
+                from app.services.transaction_ops.sales_order_alignment import prepare
+
+                try:
+                    correction = await prepare(db, tenant_id, case.id, source, review, evidence)
+                except (ValueError, KeyError, NetSuiteEvidenceError) as exc:
+                    evidence["blockers"].append(f"sales_order_alignment:{exc}")
             if correction:
                 evidence["assessment"]["correction_ready"] = "ready_for_exact_human_approval"
                 evidence["blockers"] = [
@@ -522,7 +529,7 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
             resource_type="transaction_case",
             resource_id=str(case.id),
             correlation_id=context.get("correlation_id"),
-            payload={"evidence": evidence},
+            payload={"evidence": evidence, "correction_candidate": correction},
         )
         return {"success": True, "case_id": str(case.id), "accounting_evidence": evidence}
     except (ValueError, _ToolError, StateError, NetSuiteEvidenceError) as exc:

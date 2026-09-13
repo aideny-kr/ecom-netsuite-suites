@@ -80,8 +80,9 @@ def investigation_guidance(report):
         route(
             "inspect_posted_documents",
             "Inspect native billing status, invoices, credit memos, applications, GL impact and posting period. "
-            "Do not edit a billed sales order to force a match; "
-            "a posted adjustment needs an approved accounting treatment.",
+            "A posting correction needs an approved accounting treatment. A billed sales order that still differs "
+            "from finalized source evidence needs a separate supported amendment with exact approval. Preserve "
+            "original evidence and verify its invoice, GL, billing and fulfillment remain unchanged.",
         )
     else:
         route(

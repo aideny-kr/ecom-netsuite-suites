@@ -292,14 +292,15 @@ def recon_fixture():
     return source, target, config, refunds
 
 
-def test_reconciliation_preserves_original_variance_and_matches_after_verified_credit():
+def test_posted_credit_does_not_hide_unamended_sales_order():
     from app.services.transaction_ops.order_reconciliation import reconcile_order
 
     source, target, config, refunds = recon_fixture()
     result = reconcile_order(source, target, config, refunds=refunds)
-    assert result["status"] == "matched"
+    assert result["status"] == "difference"
+    assert result["posting_reconciliation"]["status"] == "matched"
     assert result["original_amounts"]["order_total"]["delta"] == "-5.00"
-    assert result["amounts"]["order_total"] == {"source": "101.00", "target": "101.00", "delta": "0.00"}
+    assert result["amounts"]["order_total"] == {"source": "101.00", "target": "106.00", "delta": "-5.00"}
     assert result["adjustments"][0]["credit_memo_id"] == "30"
     assert result["adjustments"][0]["verification_evidence"]["sections"]["invoice_applications"]["credit_gl"]
 

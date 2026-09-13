@@ -102,7 +102,7 @@ async def test_queue_is_durable_idempotent_and_scoped(db, approved_credit, tenan
         ("order_still_wrong", "difference"),
     ],
 )
-@pytest.mark.parametrize("correction_kind", ["credit", "tax"])
+@pytest.mark.parametrize("correction_kind", ["credit", "tax", "sales_order"])
 async def test_normal_runner_reconciles_after_credit_without_another_proposal_or_write(
     db, approved_credit, variant, expected, correction_kind
 ):
@@ -113,6 +113,19 @@ async def test_normal_runner_reconciles_after_credit_without_another_proposal_or
         so = deepcopy(message.structured_output)
         so["accounting_review"].update(kind="invoice_tax", record_type="invoice", proposed_fields={"taxRate": "5"})
         so["accounting_review"].pop("profile")
+        message.structured_output = so
+        await db.flush()
+    if correction_kind == "sales_order":
+        from copy import deepcopy
+
+        so = deepcopy(message.structured_output)
+        p = so["accounting_review"]
+        p.update(
+            kind="sales_order_source_alignment",
+            record_type="salesorder",
+            invoice_id=p["record_id"],
+            record_id=p["before"]["createdFrom"]["id"],
+        )
         message.structured_output = so
         await db.flush()
     queued_at = datetime.now(timezone.utc)

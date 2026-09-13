@@ -11,7 +11,11 @@ def treatment_batches(members):
             continue
         proposal = card["accounting_review"]
         credit = proposal.get("kind") == "sales_adjustment_credit"
-        commercial = proposal.get("kind") in {"sales_adjustment_credit", "invoice_sales_adjustment"}
+        commercial = proposal.get("kind") in {
+            "sales_adjustment_credit",
+            "invoice_sales_adjustment",
+            "sales_order_source_alignment",
+        }
         treatment = {
             "kind": proposal.get("kind") or "invoice_tax",
             "scope": proposal["scope"],
@@ -21,7 +25,9 @@ def treatment_batches(members):
             "accounting_book": proposal["accounting_book"],
             "ar_account": proposal["ar_account"],
             "offset_account": proposal.get("sales_adjustment_account") if commercial else proposal["tax_account"],
-            "period": {key: proposal["period"].get(key) for key in ("id", "closed", "arLocked", "allLocked")},
+            "period": {
+                key: (proposal.get("period") or {}).get(key) for key in ("id", "closed", "arLocked", "allLocked")
+            },
             "profile": proposal["profile"] if commercial else {"tax_item_id": proposal["tax_item"].get("id")},
         }
         key = business_digest(treatment)
@@ -30,6 +36,8 @@ def treatment_batches(members):
                 "treatment_id": key,
                 "label": "Sales Adjustments credit and invoice application"
                 if credit
+                else "Sales order source alignment"
+                if proposal.get("kind") == "sales_order_source_alignment"
                 else "Sales Adjustment on unpaid invoice"
                 if commercial
                 else "Invoice tax correction",

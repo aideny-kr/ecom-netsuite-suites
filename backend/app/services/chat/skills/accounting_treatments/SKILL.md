@@ -12,6 +12,7 @@ Start with the cause and complete current evidence. Account configuration and ap
 Consider these alternatives, then distinguish a supported exact proposal from further investigation:
 
 - Already corrected or timing: re-read linked adjustments and full reconciliation. Do not post again to clear a stale observation.
+- Correct invoice, inconsistent sales order: posting success does not establish source-record integrity. Preserve the raw sales-order variance and evaluate a separate source-backed amendment. The supported billed-order adapter requires a verified invoice discount, finalized source adjustment, complete matching fully billed/fulfilled lines, zero tax/shipping and exact account configuration. Its approval changes only the order discount; re-read the order and prove its invoice, GL, billing and fulfillment remain unchanged. Never reopen, rebill or duplicate the invoice to accomplish this amendment. Preserve original and corrected snapshots and each approver in audit history. Other lifecycle/tax cases need their own supported treatment.
 - Existing credit or deposit: verify identity, unallocated balance, customer, currency, subsidiary, AR and intended application before considering an application. Existing credit should be investigated before creating another. Applying a record and issuing cash are distinct operations.
 - Fully unpaid invoice: a finalized commercial source adjustment may fit the configured invoice-discount adapter. Current support requires its exact eligibility, including no applications/existing discounts, zero tax/shipping, a posting Discount item and the original current open period. Unpaid status alone does not authorize editing an issued invoice. Unsupported unpaid cases must not silently become new credits.
 - Paid or partially paid invoice: inspect the full application and refund chain and company policy. Evaluate a credit or another supported treatment without rewriting settled history. Never infer that every paid invoice needs a credit or that every partial payment fits an existing recipe.
@@ -27,3 +28,7 @@ Oracle distinguishes posting/nonposting Discount items and credit applications:
 - https://docs.oracle.com/en/cloud/saas/netsuite/ns-online-help/section_N2248474.html
 - https://docs.oracle.com/en/cloud/saas/netsuite/ns-online-help/section_N1312521.html
 These references explain product mechanics. They do not authorize a change or certify company policy.
+
+Oracle permits sales-order edits subject to status, role and enabled features; billed status does not prove every field is immutable. Validate the actual account and exact fields:
+- https://docs.oracle.com/en/cloud/saas/netsuite/ns-online-help/article_8114418642.html
+- https://docs.oracle.com/en/cloud/saas/netsuite/ns-online-help/section_160312998983.html

@@ -17,7 +17,7 @@ from tests.test_accounting_approval_flow import inputs
 from tests.test_accounting_recheck import approved_credit  # noqa: F401
 
 
-@pytest.fixture(params=["credit", "discount", "tax"])
+@pytest.fixture(params=["credit", "discount", "tax", "sales_order"])
 async def interrupted_credit(db, approved_credit, request):  # noqa: F811
     from tests.conftest import enable_feature_flag
 
@@ -37,10 +37,20 @@ async def interrupted_credit(db, approved_credit, request):  # noqa: F811
         p = {**p, "record_type": "invoice", "mutation_type": "update", "proposed_fields": {"taxRate": "5"}}
         p.pop("kind")
         p.pop("profile")
+    if request.param == "sales_order":
+        p = {
+            **p,
+            "kind": "sales_order_source_alignment",
+            "record_type": "salesorder",
+            "mutation_type": "update",
+            "invoice_id": p["record_id"],
+            "record_id": p["before"]["createdFrom"]["id"],
+            "proposed_fields": {"discountItem": {"id": "50"}, "discountRate": -5},
+        }
     name, params = inputs(p)
     card = build_confirmation_payload(
         mutation_type="create" if request.param == "credit" else "update",
-        record_type="creditmemo" if request.param == "credit" else "invoice",
+        record_type=p["record_type"],
         tool_name=name,
         tool_input=params,
         session_id=str(message.session_id),

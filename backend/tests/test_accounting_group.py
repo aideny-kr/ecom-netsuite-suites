@@ -137,6 +137,17 @@ async def test_real_postgres_locks_protect_same_invoice_and_cap_account_across_c
             with pytest.raises(ValueError, match="same|this invoice"):
                 async with mod.accounting_write_slot(p):
                     pytest.fail("Duplicate invoice lock was granted")
+            with pytest.raises(ValueError, match="this invoice"):
+                async with mod.accounting_write_slot(
+                    {
+                        **p,
+                        "kind": "sales_order_source_alignment",
+                        "record_type": "salesorder",
+                        "record_id": "90",
+                        "invoice_id": p["record_id"],
+                    }
+                ):
+                    pytest.fail("Sales-order amendment must share the linked invoice lock")
             async with mod.accounting_write_slot({**p, "record_id": "21"}):
                 async with mod.accounting_write_slot({**p, "record_id": "22"}):
                     with pytest.raises(ValueError, match="Three corrections"):

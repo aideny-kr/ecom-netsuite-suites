@@ -136,12 +136,11 @@ async def prefetch_scoped_invoice_metadata(db, tenant_id, actor_id, proposal, co
     from app.services.transaction_ops.netsuite_reader import authenticated_reader
 
     p = proposal or {}
-    if (
-        p.get("tenant_id") != str(tenant_id)
-        or p.get("kind") != "invoice_sales_adjustment"
-        or p.get("record_type") != "invoice"
-    ):
-        raise ValueError("Native invoice metadata requires the current scoped accounting proposal.")
+    if p.get("tenant_id") != str(tenant_id) or (p.get("kind"), p.get("record_type")) not in {
+        ("invoice_sales_adjustment", "invoice"),
+        ("sales_order_source_alignment", "salesorder"),
+    }:
+        raise ValueError("Native accounting record metadata requires the current scoped accounting proposal.")
     connector = await get_mcp_connector(db, UUID(p["connector_id"]), tenant_id)
     account = p["scope"]["netsuite_account_id"]
     if (
@@ -150,16 +149,18 @@ async def prefetch_scoped_invoice_metadata(db, tenant_id, actor_id, proposal, co
         or not connector.is_enabled
         or urlsplit(connector.server_url).hostname != f"{account}.suitetalk.api.netsuite.com"
     ):
-        raise ValueError("The invoice metadata connector/account binding changed.")
-    key = (p["connector_id"], "invoice")
+        raise ValueError("The accounting record metadata connector/account binding changed.")
+    record_type = p["record_type"]
+    native_type = "salesOrder" if record_type == "salesorder" else "invoice"
+    key = (p["connector_id"], record_type)
     hit = _cache.get(key)
     if hit and time.monotonic() - hit[0] < _TTL_SECONDS:
         return
     async with authenticated_reader(db, tenant_id, p["connection_id"], account, max_api_calls=1) as reader:
-        raw = await reader.request("GET", "/record/v1/metadata-catalog/invoice")
-    metadata = _parse_properties_shape({"metadata": raw}, "invoice")
+        raw = await reader.request("GET", f"/record/v1/metadata-catalog/{native_type}")
+    metadata = _parse_properties_shape({"metadata": raw}, record_type)
     if metadata is None or not all(metadata.spec_for(k) for k in p["proposed_fields"]):
-        raise ValueError("The connected account did not provide usable invoice discount metadata.")
+        raise ValueError("The connected account did not provide usable accounting discount metadata.")
     await log_event(
         db,
         tenant_id,
@@ -173,7 +174,7 @@ async def prefetch_scoped_invoice_metadata(db, tenant_id, actor_id, proposal, co
             "account_id": account,
             "connection_id": p["connection_id"],
             "connector_id": p["connector_id"],
-            "record_type": "invoice",
+            "record_type": record_type,
             "source": "native_rest_schema",
             "requirements_known": metadata.requirements_known,
             "financial_writes": 0,

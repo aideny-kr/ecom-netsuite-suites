@@ -80,6 +80,14 @@ def assess(evidence, report, review, correction=None, references=None):
             "reason": "Prove missing/incorrect integration output and replay semantics before an exact sync proposal.",
         },
     ]
+    options.append(
+        {
+            "kind": "sales_order_source_alignment",
+            "status": "not_established",
+            "reason": "Requires a finalized source adjustment, a verified corrected invoice, "
+            "complete billed/fulfilled order evidence and unchanged linked accounting records.",
+        }
+    )
     if fully_unpaid:
         options[3].update(
             status="not_selected",

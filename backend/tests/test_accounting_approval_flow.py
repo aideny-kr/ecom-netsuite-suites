@@ -70,6 +70,13 @@ async def test_group_handoff_emits_one_real_card_without_another_model_hop():
 
 
 def kind_proposal(kind):
+    if kind == "sales_order":
+        from app.services.transaction_ops.sales_order_alignment import build_candidate as build_order
+        from tests.test_sales_order_alignment import inputs as order_inputs
+
+        data = order_inputs()
+        data["review"]["native_mcp_connector_id"] = proposal()["connector_id"]
+        return build_order(**data)
     if kind == "tax":
         return proposal()
     from app.services.transaction_ops.sales_credit import build_candidate
@@ -95,11 +102,11 @@ def inputs(p):
         )
     return (
         f"ext__{p['connector_id'].replace('-', '')}__ns_updateRecord",
-        {"recordType": "invoice", "recordId": p["record_id"], "data": json.dumps(p["proposed_fields"])},
+        {"recordType": p["record_type"], "recordId": p["record_id"], "data": json.dumps(p["proposed_fields"])},
     )
 
 
-@pytest.mark.parametrize("kind", ["tax", "credit", "discount"])
+@pytest.mark.parametrize("kind", ["tax", "credit", "discount", "sales_order"])
 async def test_agent_emits_exact_accounting_card_without_executing_or_duplicate_prefetch(kind):
     p = kind_proposal(kind)
     p["tenant_id"] = str(_TENANT_ID)
@@ -152,6 +159,8 @@ async def test_agent_emits_exact_accounting_card_without_executing_or_duplicate_
         assert "7030.02" in text and "7046.00" in text and "Posting period" in text
     elif kind == "credit":
         assert "Sales Adjustments credit" in text
+    elif kind == "sales_order":
+        assert "Align sales order" in text
     else:
         assert "Sales Adjustment for unpaid invoice" in text
 
@@ -160,12 +169,12 @@ async def test_agent_emits_exact_accounting_card_without_executing_or_duplicate_
     "kind,outcome",
     [
         (kind, outcome)
-        for kind in ("tax", "credit", "discount")
+        for kind in ("tax", "credit", "discount", "sales_order")
         for outcome in ("stale", "verified", "unverified", "rejected")
     ]
     + [
         (kind, outcome)
-        for kind in ("credit", "discount")
+        for kind in ("credit", "discount", "sales_order")
         for outcome in ("unknown_verified", "unknown_missing", "unreadable_verified")
     ],
 )
@@ -177,7 +186,7 @@ async def test_approval_preflight_execution_verification_and_actor_audit(outcome
     session_id = uuid.uuid4()
     card = build_confirmation_payload(
         mutation_type="create" if kind == "credit" else "update",
-        record_type="creditmemo" if kind == "credit" else "invoice",
+        record_type=p["record_type"],
         tool_name=name,
         tool_input=params,
         session_id=str(session_id),
@@ -216,7 +225,7 @@ async def test_approval_preflight_execution_verification_and_actor_audit(outcome
         )
 
     async def verify(*args, **kwargs):
-        if kind in {"credit", "discount"} and outcome in ("verified", "unverified"):
+        if kind in {"credit", "discount", "sales_order"} and outcome in ("verified", "unverified"):
             assert kwargs["receipt"]["success"] is True
         order.append("verify")
         return {"status": "verified" if verified_outcome else "needs_review", "cash_settlement": "not_verified"}
@@ -294,7 +303,7 @@ async def test_approval_preflight_execution_verification_and_actor_audit(outcome
             recheck.assert_not_awaited()
 
 
-@pytest.mark.parametrize("kind", ["tax", "credit", "discount"])
+@pytest.mark.parametrize("kind", ["tax", "credit", "discount", "sales_order"])
 @pytest.mark.parametrize("blocked", [None, "validation", "policy", "tenant", "unavailable_tool"])
 async def test_fresh_evidence_generates_real_card_without_second_model_hop(blocked, kind):
     p = kind_proposal(kind)

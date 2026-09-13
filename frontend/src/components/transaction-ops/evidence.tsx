@@ -199,9 +199,11 @@ export function ComparisonEvidence({ report }: { report: JsonObject }) {
 }
 function BalanceEvidence({ balance }: { balance: JsonObject }) {
   const amounts = objectValue(balance.amounts);
+  const posting = objectValue(balance.posting_reconciliation);
   if (!Object.keys(amounts).length) return null;
   return (
     <div className="overflow-x-auto">
+      {posting.status === "matched" && <p className="mb-3 rounded-lg border p-3 text-[13px]">The verified posting adjustment reconciles the invoice. The sales-order difference below still requires a source-backed amendment.</p>}
       <table className="w-full text-[13px] tabular-nums">
         <caption className="py-2 text-left font-medium">
           Order reconciliation ·{" "}
