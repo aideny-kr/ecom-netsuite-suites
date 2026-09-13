@@ -35,7 +35,15 @@ class _RecordingAdapter:
         assert kwargs["tools"][0]["name"] == "route_request"
         return LLMResponse(
             tool_use_blocks=[
-                ToolUseBlock(id="route", name="route_request", input={"kind": "conversation", "continuation": False})
+                ToolUseBlock(
+                    id="route",
+                    name="route_request",
+                    input={
+                        "kind": "conversation",
+                        "continuation": False,
+                        "source_intent": {"action": "unchanged", "sources": [], "excluded": []},
+                    },
+                )
             ]
         )
 

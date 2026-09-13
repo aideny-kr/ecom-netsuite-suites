@@ -766,6 +766,12 @@ def _compute_source_pin_update(tool_calls_log: list[dict]) -> str | None:
         # This evidence joins Framework and NetSuite; it is not a NetSuite source pin.
         if name in ("transaction_ops.status", "transaction_ops_status"):
             continue
+        if name in {"pivot_query_result", "pivot.query_result"} and (
+            (call.get("params") or {}).get("result_id")
+            or (call.get("result_payload") or {}).get("source_kind") == "metabase"
+        ):
+            # A frozen-result transformation never changes the selected source.
+            continue
 
         # M4: metric_compute is categorized as "data_table" but its actual source
         # depends on which backend executed the query (BigQuery vs SuiteQL vs expression).
@@ -1495,13 +1501,18 @@ def _make_tool_interceptor(context_need: str = ContextNeed.DATA, cache_callback=
         )
 
         result_id: str | None = None
-        if full_payload is not None and event_type in _STAMPED_DATA_EVENTS:
+        from app.services.chat.metabase_results import is_bound_table
+
+        # Metabase references are visible to the model but raw intermediate
+        # tables remain behind the existing evidence/control rendering boundary.
+        # The requested, verified pivot later emits its own data_table event.
+        if full_payload is not None and (event_type in _STAMPED_DATA_EVENTS or is_bound_table(full_payload)):
             counter["n"] += 1
             result_id = f"r{counter['n']}"
             # Re-stamp the decided id into the (already-condensed) LLM string + SSE
             # event data (idempotent — _stamp_result_id mutates event_data in place
             # and rewrites the condensed JSON's result_id field).
-            new_result_str = _stamp_result_id(new_result_str, event_data, result_id)
+            new_result_str = _stamp_result_id(new_result_str, event_data if event_data is not None else {}, result_id)
 
         # Thread the id + precomputed payload to the callback whenever EITHER a
         # result_id was assigned (writes the sidecar for a stamped data result) OR
