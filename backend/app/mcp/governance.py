@@ -44,6 +44,21 @@ MCP_REBASELINE_FACTOR = 2
 DEFAULT_TOOL_RATE_LIMIT = 60 * MCP_REBASELINE_FACTOR
 
 TOOL_CONFIGS = {
+    "netsuite.accounting_context": {
+        "default_limit": 100,
+        "max_limit": 500,
+        "timeout_seconds": 75,
+        "rate_limit_per_minute": 10,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": [
+            "section",
+            "connection_id",
+            "expected_account_id",
+            "calendar_year",
+            "account_id",
+            "limit",
+        ],
+    },
     "transaction_ops.groups": {
         "default_limit": 20,
         "max_limit": 50,

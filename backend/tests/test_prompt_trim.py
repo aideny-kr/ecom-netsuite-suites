@@ -86,14 +86,19 @@ class TestCriticalRulesPreserved:
 
     def test_line_amount_sign(self, suiteql_prompt):
         assert "tl.foreignamount" in suiteql_prompt
-        assert "* -1" in suiteql_prompt or "NEGATE" in suiteql_prompt.upper()
+        assert "verify its currency basis and sign convention" in suiteql_prompt
+        assert "Preserve credit/debit signs and net credits" in suiteql_prompt
+        assert "Do not use ABS()" in suiteql_prompt
 
     def test_transaction_type_double_counting(self, suiteql_prompt):
-        assert "double-count" in suiteql_prompt.lower() or "DOUBLE-COUNTING" in suiteql_prompt
+        assert "Never combine SalesOrd and CustInvc totals for the same sale" in suiteql_prompt
 
     def test_multi_currency(self, suiteql_prompt):
-        assert "t.total" in suiteql_prompt
-        assert "base currency" in suiteql_prompt.lower()
+        assert (
+            "Transaction currency, subsidiary base currency, and consolidated reporting currency are distinct"
+            in suiteql_prompt
+        )
+        assert "Base currency is not automatically USD" in suiteql_prompt
 
     def test_item_table_safe_columns(self, suiteql_prompt):
         assert "itemid" in suiteql_prompt

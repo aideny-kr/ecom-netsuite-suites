@@ -26,6 +26,7 @@ EXPECTED_TOOLS = {
     "transaction_ops.accounting_evidence",
     "transaction_ops.accounting_group",
     "netsuite.suiteql",
+    "netsuite.accounting_context",
     "netsuite.suiteql_stub",
     "netsuite.financial_report",
     "netsuite.connectivity",

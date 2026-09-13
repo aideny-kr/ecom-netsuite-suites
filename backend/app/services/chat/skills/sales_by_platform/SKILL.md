@@ -1,6 +1,6 @@
 ---
 Name: Sales by Platform Analysis
-Description: Breaks down sales orders by product platform (e.g., Dogwood, Tulip, Lilac) with order counts and revenue totals in USD.
+Description: Breaks down order sales by product platform with distinct order counts and explicitly scoped currencies.
 Triggers:
   - /sales-by-platform
   - sales by platform
@@ -10,32 +10,18 @@ Triggers:
 
 # Sales by Platform Analysis
 
-You are executing the Sales by Platform Analysis skill. Follow these exact steps:
+1. **Establish the measure and scope:**
+   - Respect the user's selected data source and use its available tools and SQL dialect. These instructions do not select NetSuite over Metabase or another source.
+   - Use the requested dates. If dates are omitted, state the current-month assumption; use a half-open date range and the user's timezone.
+   - Distinguish operational order sales from accounting revenue. Never label sales-order totals as recognized revenue. For a named financial metric, use its metric catalog definition; for GL revenue, establish posting accounts, book, accounting periods and reporting currency.
 
-1. **Determine Date Range:**
-   - Check if the user specified a date range (e.g., "this month", "Q1 2026", "during CES").
-   - If no date range specified, default to the current month: `t.trandate >= TRUNC(SYSDATE, 'MM')`.
+2. **Discover the platform and amount fields:**
+   - Use verified tenant field mappings and current metadata. Framework's `i.custitem_fw_platform` is a scoped field hint, not a universal item field.
+   - Verify the amount field's currency basis and sign convention. Keep transaction currency, subsidiary base currency and consolidated currency distinct. Group separate currencies unless an authorized reporting basis supplies the conversion.
+   - For NetSuite order sales, use SalesOrd item lines, the tenant's verified line exclusions (including tax, COGS and assembly components), and the appropriate platform mapping. Use the selected native MCP or scoped local query tool.
+   - Count distinct orders at the requested grain. Do not sum repeated header totals after a line join. Preserve credits/adjustments instead of applying ABS() to make every amount positive.
 
-2. **Run the Query:**
-   - Execute this SuiteQL pattern via `netsuite_suiteql`:
-   ```sql
-   SELECT BUILTIN.DF(i.custitem_fw_platform) as platform,
-          COUNT(DISTINCT t.id) as order_count,
-          ROUND(SUM(tl.amount * -1), 2) as revenue_usd
-   FROM transactionline tl
-   JOIN transaction t ON tl.transaction = t.id
-   JOIN item i ON i.id = tl.item
-   WHERE t.type = 'SalesOrd'
-     AND t.trandate >= <start_date>
-     AND t.trandate <= <end_date>
-     AND tl.mainline = 'F'
-     AND tl.taxline = 'F'
-     AND (tl.iscogs = 'F' OR tl.iscogs IS NULL)
-   GROUP BY BUILTIN.DF(i.custitem_fw_platform)
-   ORDER BY revenue_usd DESC
-   ```
-
-3. **Present Results:**
-   - Format as a markdown table with columns: Platform, Order Count, Revenue (USD).
-   - Include a total row at the bottom.
-   - Highlight the top-performing platform.
+3. **Validate and present:**
+   - Aggregate in the source query and label the table with Platform, Distinct Orders, Order Sales and Currency (or the user's verified financial measure).
+   - A multi-platform order can appear in more than one platform count. Compute the overall distinct-order total separately; do not sum platform counts.
+   - Add monetary totals only within a common verified currency/reporting basis. Rank platforms within that basis and state any missing mappings or partial coverage.

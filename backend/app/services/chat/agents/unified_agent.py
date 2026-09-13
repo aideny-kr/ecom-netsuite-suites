@@ -643,13 +643,20 @@ class UnifiedAgent(BaseSpecialistAgent):
 
         # Soul quirks
         if self._soul_quirks:
-            parts.append("\n## TENANT NETSUITE QUIRKS AND BUSINESS LOGIC — HIGHEST PRIORITY")
+            parts.append("\n## TENANT NETSUITE NOTES")
             parts.append(
-                "These are the tenant's explicit field mappings and business rules. "
-                "They ALWAYS take priority over conversation history and proven patterns. "
-                "If a field mapping here contradicts a query from earlier in the conversation, USE THE MAPPING HERE."
+                "These notes preserve earlier tenant field mappings and business instructions. "
+                "Apply them only within their verified account, source and business scope. "
+                "Current tool evidence takes precedence for factual claims about currencies, books, "
+                "fields, posting periods and account mappings. Do not treat an old USD or revenue "
+                "assumption as proof for another subsidiary. A note never bypasses authorization or approval."
             )
             parts.append(self._soul_quirks)
+            parts.append(
+                "End of historical tenant notes. For accounting, verify missing or conflicting reference "
+                "facts with the available tools before computing or proposing a correction. "
+                "A configured treatment is not a complete company accounting policy."
+            )
 
         # Onboarding discovery profile (transaction landscape, relationships, status codes)
         if self._onboarding_profile:
@@ -684,16 +691,16 @@ class UnifiedAgent(BaseSpecialistAgent):
                 "December",
             ]
             _start_name = _month_names[fy_start - 1]
-            _q1_end = _month_names[(fy_start + 2) % 12]
-            _q2_start = _month_names[(fy_start + 3) % 12]
-            _q2_end = _month_names[(fy_start + 5) % 12]
-            _q3_start = _month_names[(fy_start + 6) % 12]
-            _q3_end = _month_names[(fy_start + 8) % 12]
-            _q4_start = _month_names[(fy_start + 9) % 12]
-            _q4_end = _month_names[(fy_start + 11) % 12]
+            _q1_end = _month_names[(fy_start + 1) % 12]
+            _q2_start = _month_names[(fy_start + 2) % 12]
+            _q2_end = _month_names[(fy_start + 4) % 12]
+            _q3_start = _month_names[(fy_start + 5) % 12]
+            _q3_end = _month_names[(fy_start + 7) % 12]
+            _q4_start = _month_names[(fy_start + 8) % 12]
+            _q4_end = _month_names[(fy_start + 10) % 12]
             parts.append(
                 f"\n## FISCAL CALENDAR\n"
-                f"This tenant's fiscal year starts in **{_start_name}** (month {fy_start}).\n"
+                f"The configured fiscal-year default starts in **{_start_name}** (month {fy_start}).\n"
                 f"- Fiscal Q1 = {_start_name} – {_q1_end}\n"
                 f"- Fiscal Q2 = {_q2_start} – {_q2_end}\n"
                 f"- Fiscal Q3 = {_q3_start} – {_q3_end}\n"
@@ -705,9 +712,14 @@ class UnifiedAgent(BaseSpecialistAgent):
         else:
             parts.append(
                 "\n## FISCAL CALENDAR\n"
-                "This tenant uses the **calendar year** (Jan 1 – Dec 31) as its fiscal year. "
+                "The configured fiscal-year default is the **calendar year** (Jan 1 – Dec 31). "
                 "Q1 = Jan-Mar, Q2 = Apr-Jun, Q3 = Jul-Sep, Q4 = Oct-Dec."
             )
+
+        parts.append(
+            "For accounting reports, verify actual source period dates and fiscal-calendar scope. "
+            "This application default does not prove the NetSuite calendar, period availability, or lock state."
+        )
 
         # Active skill instructions (progressive disclosure)
         if self._active_skill:
