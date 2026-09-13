@@ -217,6 +217,17 @@ async def test_scope_denial_happens_before_cache_read():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "params", [{}, {"control_result_id": "r2"}, {"query": ""}, {"query": "SELECT 1", "aggregation": "identity"}]
+)
+async def test_incomplete_result_mode_cannot_fall_through_to_netsuite(params):
+    with patch.object(pivot_tool, "_execute_suiteql_pivot", new_callable=AsyncMock) as ns:
+        result = await pivot_tool.execute(params, {})
+    assert "error" in result
+    ns.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_saved_cross_turn_source_is_resolved_without_preview_or_requery():
     source = payload([["A", "x", 2]])
     message = SimpleNamespace(tool_calls=[{"result_id": "r1", "tool": TOOL, "result_payload": source}])
