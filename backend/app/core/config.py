@@ -10,6 +10,9 @@ class Settings(BaseSettings):
     APP_NAME: str = "NetSuite Ecommerce Ops Suite"
     APP_ENV: str = "development"
     APP_DEBUG: bool = True
+    # Dedicated customer installs opt in; existing hosted deployments keep their
+    # current registration and billing behavior until explicitly migrated.
+    SINGLE_COMPANY: bool = False
 
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/ecom_netsuite"
     DATABASE_URL_SYNC: str = "postgresql://postgres:postgres@localhost:5432/ecom_netsuite"

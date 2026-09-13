@@ -316,7 +316,9 @@ function TilesRow({
   const planState = queryState(planQuery);
   const quotaSub =
     planState === "success" && planQuery.data
-      ? `${planQuery.data.usage.schedules} of ${planQuery.data.limits.max_schedules} in your plan's quota`
+      ? planQuery.data.limits.max_schedules === -1
+        ? "No plan quota"
+        : `${planQuery.data.usage.schedules} of ${planQuery.data.limits.max_schedules} in your plan's quota`
       : undefined;
 
   const runsDone = runsLast7DaysTotal - runsLast7DaysFailed;

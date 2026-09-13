@@ -262,3 +262,18 @@ celery_app.conf.beat_schedule = {
         "options": {"expires": 120},
     },
 }
+
+# Customer-created schedules continue to run through scheduled-jobs-sweep.
+# Vendor billing, public web crawling and vendor benchmark/learning jobs do not
+# belong in a customer's dedicated install. Preserve existing hosted behavior.
+if settings.SINGLE_COMPANY:
+    _vendor_tasks = {
+        "tasks.billing_sync",
+        "tasks.knowledge_crawler",
+        "tasks.auto_learning",
+        "tasks.auto_query_improvement",
+        "tasks.agent_benchmark_vs_mcp",
+    }
+    celery_app.conf.beat_schedule = {
+        name: entry for name, entry in celery_app.conf.beat_schedule.items() if entry["task"] not in _vendor_tasks
+    }

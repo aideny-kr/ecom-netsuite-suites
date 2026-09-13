@@ -8,6 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_user
 from app.core.rate_limit import check_login_rate_limit
@@ -56,6 +57,8 @@ async def register(
     response: Response,
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
+    if settings.SINGLE_COMPANY:
+        raise HTTPException(status_code=404, detail="Public registration is disabled")
     try:
         tenant, user, tokens = await auth_service.register_tenant(
             db=db,

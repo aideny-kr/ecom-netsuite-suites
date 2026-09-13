@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.security import create_access_token, create_refresh_token, decode_token, hash_password, verify_password
 from app.models.tenant import Tenant, TenantConfig
 from app.models.user import Role, User, UserRole
@@ -18,6 +19,8 @@ async def register_tenant(
     full_name: str,
 ) -> tuple[Tenant, User, dict]:
     """Register a new tenant with admin user. Returns (tenant, user, tokens)."""
+    if settings.SINGLE_COMPANY:
+        raise ValueError("Public registration is disabled; use the company bootstrap command")
     # Check slug uniqueness
     existing = await db.execute(select(Tenant).where(Tenant.slug == tenant_slug))
     if existing.scalar_one_or_none():

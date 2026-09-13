@@ -187,7 +187,9 @@ export function TeamSection() {
         {/* Members */}
         <div>
           <p className="text-[13px] font-medium text-muted-foreground mb-2">
-            Members ({seatCount} of {MAX_SEATS})
+            {process.env.NEXT_PUBLIC_SINGLE_COMPANY === "true"
+              ? `Members (${seatCount})`
+              : `Members (${seatCount} of ${MAX_SEATS})`}
           </p>
           {membersLoading ? (
             <div className="flex items-center justify-center py-8">

@@ -42,6 +42,18 @@ export default function RegisterPage() {
     }
   }
 
+  if (process.env.NEXT_PUBLIC_SINGLE_COMPANY === "true") {
+    return (
+      <div className="flex min-h-screen items-center justify-center px-6">
+        <div className="max-w-md space-y-4 text-center">
+          <h1 className="text-2xl font-semibold">Join your company</h1>
+          <p className="text-muted-foreground">Ask your company administrator for an invitation.</p>
+          <Link href="/login" className="text-primary hover:underline">Sign in</Link>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex min-h-screen">
       {/* Left Panel - Branding */}

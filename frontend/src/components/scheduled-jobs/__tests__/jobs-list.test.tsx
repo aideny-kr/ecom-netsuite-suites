@@ -107,6 +107,17 @@ beforeEach(() => {
 
 // --- Tiles -----------------------------------------------------------------
 
+it("shows unlimited schedules without exposing the internal quota sentinel", () => {
+  mocks.planInfo.mockReturnValue({
+    data: { plan: "self_hosted", limits: { max_schedules: -1 }, usage: { schedules: 8 } },
+    isPending: false,
+    isError: false,
+  });
+  wrap(<ScheduledJobsList />);
+  expect(screen.getByText("No plan quota")).toBeInTheDocument();
+  expect(screen.queryByText(/of -1/)).not.toBeInTheDocument();
+});
+
 it("renders the four tiles with real counts from the list + plan usage", () => {
   wrap(<ScheduledJobsList />);
   expect(screen.getByText("Jobs")).toBeInTheDocument();

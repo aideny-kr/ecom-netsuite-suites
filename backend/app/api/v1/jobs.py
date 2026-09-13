@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.dependencies import require_permission
 from app.models.job import Job
@@ -110,6 +111,8 @@ async def trigger_job(
     from app.workers.celery_app import celery_app
 
     celery_task_name = ALLOWED_TASKS.get(task_name)
+    if settings.SINGLE_COMPANY and task_name != "onboarding_discovery":
+        celery_task_name = None
     if not celery_task_name:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

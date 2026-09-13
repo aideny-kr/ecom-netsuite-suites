@@ -181,6 +181,9 @@ export function JobsSection() {
   if (!isAdmin) return null;
 
   const jobs = jobsData?.items ?? [];
+  const cards = process.env.NEXT_PUBLIC_SINGLE_COMPANY === "true"
+    ? JOB_CARDS.filter((card) => card.taskName === "onboarding_discovery")
+    : JOB_CARDS;
 
   // Find last run for each task name
   const lastRunMap: Record<string, JobHistoryItem> = {};
@@ -202,7 +205,7 @@ export function JobsSection() {
       </div>
 
       <div className="grid gap-3">
-        {JOB_CARDS.map((card) => (
+        {cards.map((card) => (
           <JobCard
             key={card.taskName}
             {...card}

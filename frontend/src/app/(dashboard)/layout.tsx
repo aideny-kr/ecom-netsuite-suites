@@ -49,7 +49,9 @@ export default function DashboardLayout({
   }, [pathname]);
 
   useEffect(() => {
-    if (!user) {
+    // Dedicated installs configure their provider and connections in Settings.
+    // Auto-opening the hosted wizard starts its chat before an AI key exists.
+    if (!user || process.env.NEXT_PUBLIC_SINGLE_COMPANY === "true") {
       setShowOnboarding(false);
       return;
     }

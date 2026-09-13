@@ -119,6 +119,10 @@ async def get_current_superadmin(
     user: Annotated[User, Depends(get_current_user)],
 ) -> User:
     """Dependency that requires the user to have the superadmin global role."""
+    from app.core.config import settings
+
+    if settings.SINGLE_COMPANY:
+        raise HTTPException(status_code=404, detail="Platform administration is disabled")
     if getattr(user, "global_role", "user") != "superadmin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

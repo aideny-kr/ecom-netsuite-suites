@@ -130,6 +130,7 @@ export default function LoginPage() {
             </button>
           </form>
 
+          {process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID && <>
           <div className="relative my-6">
             <div className="absolute inset-0 flex items-center">
               <span className="w-full border-t border-zinc-800" />
@@ -186,7 +187,9 @@ export default function LoginPage() {
             </div>
           )}
 
-          <p className="mt-6 text-center text-[13px] text-zinc-500">
+          </>}
+
+          {process.env.NEXT_PUBLIC_SINGLE_COMPANY !== "true" && <p className="mt-6 text-center text-[13px] text-zinc-500">
             Don&apos;t have an account?{" "}
             <Link
               href="/register"
@@ -194,7 +197,7 @@ export default function LoginPage() {
             >
               Create one
             </Link>
-          </p>
+          </p>}
         </div>
       </div>
     </div>
