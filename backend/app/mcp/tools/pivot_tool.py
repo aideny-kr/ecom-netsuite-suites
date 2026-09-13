@@ -241,6 +241,10 @@ async def execute(params: dict, context: dict | None = None, **kwargs: Any) -> d
     Auto-detects dialect from query syntax if not explicitly specified.
     """
     ctx = context or {}
+    if "result_id" in params:
+        from app.mcp.tools.result_pivot import execute as execute_result_pivot
+
+        return await execute_result_pivot(params, ctx)
     dialect = params.get("dialect", "suiteql")
     query = params.get("query", "")
 

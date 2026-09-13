@@ -575,6 +575,14 @@ def extract_result_payload(
                 entry["definition_version"] = parsed["definition_version"]
             if "source_kind" not in entry and "source_kind" in parsed:
                 entry["source_kind"] = parsed["source_kind"]
+            from app.services.chat.metabase_results import is_bound_table
+
+            if is_bound_table(parsed):
+                entry["metabase_source"] = parsed["metabase_source"]
+            if tool_name == "pivot_query_result" and parsed.get("source_kind") == "metabase":
+                for key in ("caveats", "pivot_provenance", "pivot_config"):
+                    if key in parsed:
+                        entry[key] = parsed[key]
             return entry
 
     # --- Path 2: reportData (ns_runReport) ---
@@ -847,7 +855,9 @@ def build_tool_call_log_entry(
     # population EXACTLY. A payload-bearing but hidden tool (ns_listAllReports →
     # 'other' category, no stamp) is excluded from ALL THREE consumers, so the
     # dense visible-id sequence and the persisted-fallback numbering never drift.
-    if is_stamped_data_tool(tool_name):
+    from app.services.chat.metabase_results import is_bound_table
+
+    if is_stamped_data_tool(tool_name) or is_bound_table(parse_tool_result_value(result_str)):
         result_payload = extract_result_payload(tool_name, params, result_str)
         if result_payload is not None:
             entry["result_payload"] = result_payload

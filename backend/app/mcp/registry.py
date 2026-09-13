@@ -142,16 +142,26 @@ TOOL_REGISTRY = {
     },
     "pivot.query_result": {
         "description": (
-            "Pivot a query result into a crosstab table. Works with both SuiteQL and BigQuery. "
-            "Re-executes the query without row limits and pivots server-side. Use this INSTEAD "
-            "of building CASE WHEN pivot SQL manually."
+            "Pivot a query result into a crosstab table. For Metabase/Solidus, pass result_id "
+            "and control_result_id from completed queries on the chosen connector; cells retain "
+            "server aggregates (aggregation='identity', include_total=false). This path never "
+            "requeries or switches sources. For SuiteQL/BigQuery, pass query and dialect instead. "
+            "Do not mix the two input modes or build CASE WHEN pivot SQL manually."
         ),
         "execute": pivot_tool.execute,
         "params_schema": {
             "query": {
                 "type": "string",
-                "required": True,
+                "required": False,
                 "description": "SQL query to pivot. Row limits (FETCH FIRST / LIMIT) stripped automatically.",
+            },
+            "result_id": {
+                "type": "string",
+                "description": "Metabase result ID (rN) from this conversation; use instead of query/dialect.",
+            },
+            "control_result_id": {
+                "type": "string",
+                "description": "Completed ungrouped control result ID on the same Metabase connector and query scope.",
             },
             "row_field": {
                 "type": "string",
@@ -171,20 +181,23 @@ TOOL_REGISTRY = {
             "aggregation": {
                 "type": "string",
                 "required": False,
-                "default": "sum",
-                "description": "Aggregation: 'sum', 'count', 'avg', 'max', 'min'",
+                "description": (
+                    "Metabase result_id: 'identity' (default), preserving server aggregates. "
+                    "SQL query: 'sum' (default), 'count', 'avg', 'max', 'min'."
+                ),
             },
             "include_total": {
                 "type": "boolean",
                 "required": False,
-                "default": True,
-                "description": "Add a Total column",
+                "description": (
+                    "Add a Total column. Defaults false for Metabase, true for SQL. "
+                    "Metabase totals only for validated additive sum/count measures."
+                ),
             },
             "dialect": {
                 "type": "string",
                 "required": False,
-                "default": "suiteql",
-                "description": "SQL dialect: 'suiteql' or 'bigquery'",
+                "description": "SQL query mode only: 'suiteql' (default) or 'bigquery'. Omit when using result_id.",
             },
         },
     },

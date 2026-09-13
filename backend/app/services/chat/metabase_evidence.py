@@ -237,7 +237,44 @@ These reference requirements apply to the final answer, not tool arguments.
         self.bindings[reference] = (table_id, value)
         return reference
 
-    def observe(self, name: str, params: dict, result_str: str) -> str:
+    def observe_pivot(self, result_str: str, *, displayed: bool = False) -> str:
+        """References for the local tool's already-validated transformation.
+
+        Only called for pivot_query_result, never for a remote tool claiming to
+        be a pivot. The tool enforces source access, completeness and controls.
+        """
+        try:
+            result = json.loads(result_str)
+        except (TypeError, ValueError):
+            return result_str
+        if (
+            not isinstance(result, dict)
+            or result.get("error")
+            or result.get("source_kind") != "metabase"
+            or result.get("pivoted") is not True
+            or not isinstance(result.get("pivot_provenance"), dict)
+        ):
+            return result_str
+        table_id = len(self.tables)
+        columns, rows = result["columns"], result["rows"]
+        self.tables.append(EvidenceTable(columns, rows, False, True))
+        caveats = "\n\n".join(result.get("caveats", []))
+        rendered = _table(columns, rows[:100]) + "\n\n" + caveats
+        if len(rows) > 100:
+            rendered += "\n\nTable preview limited; the stored pivot contains additional rows."
+        output = {
+            "pivoted": True,
+            "table_reference": self._reference(table_id, "pivot", rendered),
+            "note": "Pivot table and caveats already displayed; do not repeat the table."
+            if displayed
+            else "Copy table_reference to present the verified pivot and its scope/total caveats.",
+        }
+        value = result.get("overall_value")
+        if _decimal(value) is not None:
+            output["overall_value_reference"] = self._reference(table_id, "overall", value)
+        return json.dumps(output)
+
+    def observe(self, name: str, params: dict, result_str: str, *, result_id: str | None = None) -> str:
         if name not in self.tool_names:
             return result_str
         try:
@@ -317,6 +354,7 @@ These reference requirements apply to the final answer, not tool arguments.
         return json.dumps(
             {
                 "status": result.get("status"),
+                **({"result_id": result_id} if result_id else {}),
                 "columns": columns,
                 "rows": preview,
                 "table_reference": table_ref,
