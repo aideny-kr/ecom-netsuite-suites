@@ -2661,9 +2661,11 @@ class BaseSpecialistAgent(abc.ABC):
                         if grounded_result != full_result_str:
                             llm_result_str = _suppress_metric_value_for_llm(grounded_result)
                     elif evidence is not None and block.name == "pivot_query_result":
-                        llm_result_str = evidence.observe_pivot(
+                        grounded_result = evidence.observe_pivot(
                             full_result_str, displayed=intercepted_result_id is not None
                         )
+                        if grounded_result != full_result_str:
+                            llm_result_str = grounded_result
 
                     tool_calls_log.append(
                         build_tool_call_log_entry(
