@@ -32,8 +32,17 @@ Updated at the end of every task, not "later".
 
 ## NOW — in flight
 
+**PIVOT (2026-09-13).** The product becomes an open-source, one-company-per-deployment
+platform installed by a coding agent; the business sells setup + USD 999/month hosting.
+The GOAL above is superseded in emphasis, not in substance: the accounting-ops automation
+stays the product, the delivery model changes. Plan, decisions to ratify, and verified
+facts: `docs/strategy/2026-09-13-open-source-single-company-pivot.md`; ClickUp mirror and
+pending tickets: `docs/strategy/2026-09-13-pivot-tickets.md`. Read the plan before
+starting anything on this branch.
+
 | branch | tier | state | blocked on |
 |---|---|---|---|
+| `claude/focused-mccarthy-gfb5rf` | T0 | pivot plan + ticket mirror committed | operator ratifying D1–D9 in the plan |
 | `feat/dev-loop-and-harness` | T2 | 21 commits, process only — gated ×3, blockers fixed, **frozen** | nothing |
 | `feat/agent-graph-operating-model` | T2 | Track O (22 majors) + reject action, **ungated** | needs Track O decision |
 
