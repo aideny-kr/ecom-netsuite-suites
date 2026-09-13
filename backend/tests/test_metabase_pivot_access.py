@@ -249,3 +249,84 @@ async def test_agent_query_control_pivot_uses_full_results_and_verified_renderin
         assert "SKU-59" in answer.data and "separately: 60" in answer.data
     assert "mb_ref" not in answer.data and len(answer.tool_calls_log) == 3
     assert [call["result_id"] for call in answer.tool_calls_log] == ["r1", "r2", "r3"]
+
+
+@pytest.mark.asyncio
+async def test_streaming_sql_pivot_keeps_condensed_result_when_metabase_evidence_is_active(db, tenant_a, admin_user):
+    import json
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.services.chat.agents.base_agent import BaseSpecialistAgent
+    from app.services.chat.llm_adapter import LLMResponse, ToolUseBlock
+    from app.services.chat.metabase_evidence import MetabaseEvidence
+    from app.services.chat.orchestrator import _make_tool_interceptor
+    from tests.test_metabase_skills import _agent, _connector
+
+    actor, _ = admin_user
+    ctx = await setup_context(db, tenant_a, actor)
+    agent = _agent([_connector(names=["query"])])
+    agent.tenant_id, agent.user_id = tenant_a.id, actor.id
+    agent._metabase_evidence = MetabaseEvidence({TOOL})
+    agent._tool_defs.append({"name": "pivot_query_result", "description": "Pivot", "input_schema": {"type": "object"}})
+    raw = json.dumps(
+        {
+            "columns": ["sku", "count"],
+            "rows": [[f"SKU-{i}", 1] for i in range(600)],
+            "row_count": 600,
+            "query": "SELECT sku, count FROM existing_result",
+            "pivoted": True,
+        }
+    )
+    outputs = []
+
+    async def stream(**kwargs):
+        if not outputs:
+            yield (
+                "response",
+                LLMResponse(
+                    tool_use_blocks=[
+                        ToolUseBlock(
+                            "sql-pivot", "pivot_query_result", {"query": "SELECT sku, count FROM existing_result"}
+                        )
+                    ]
+                ),
+            )
+        else:
+            yield "response", LLMResponse(text_blocks=["Done."])
+
+    def build_tool_result(content):
+        outputs.extend(json.loads(part["content"]) for part in content if part.get("type") == "tool_result")
+        return {"role": "user", "content": content}
+
+    adapter = MagicMock()
+    adapter.stream_message = stream
+    adapter.build_assistant_message.return_value = {"role": "assistant", "content": ""}
+    adapter.build_tool_result_message.side_effect = build_tool_result
+    with (
+        patch("app.services.chat.mutation_guard.classify_connector_mutation", new=AsyncMock(return_value=None)),
+        patch("app.services.chat.tools.execute_tool_call", new=AsyncMock(return_value=raw)),
+        patch(
+            "app.services.chat.agents.base_agent.extract_structured_confidence",
+            new=AsyncMock(return_value=SimpleNamespace(score=5, source="test")),
+        ),
+        patch("app.services.chat.agents.base_agent._maybe_store_query_pattern", new=AsyncMock()),
+    ):
+        events = [
+            event
+            async for event in BaseSpecialistAgent.run_streaming(
+                agent,
+                "Pivot the previous result",
+                {},
+                db,
+                adapter,
+                "test",
+                session_id=ctx["conversation_id"],
+                tool_result_interceptor=_make_tool_interceptor(),
+            )
+        ]
+    assert len(outputs) == 1
+    assert outputs[0]["result_id"] == "r1"
+    assert outputs[0]["row_count"] == 600 and len(outputs[0]["rows_preview"]) == 30
+    assert "rows" not in outputs[0]
+    assert events[-1][1].tool_calls_log[0]["result_id"] == "r1"
