@@ -198,7 +198,7 @@ Public flip gate (end of M3): quickstart green on a clean clone, cold installs p
 | Synchronized close week + one bad fleet upgrade | medium | Code-enforced deploy freeze BD-2…BD+7; canary→waves; nightly restore-verify |
 
 ## 8. Ticket map
-Tickets live in ClickUp list "Pivot · Open-Source Suite Studio" with one parent task per milestone (M0–M6 + GTM). Each ticket names the files, the acceptance criterion, and its tier per `CLAUDE.md` (single-company mode, installer secrets handling, fleet, and anything touching auth/RLS/credentials are **T2**).
+Tickets live in ClickUp list "Pivot · Open-Source Suite Studio" (https://app.clickup.com/90141183599/v/l/li/901421046222) with one parent task per milestone (M0–M6 + GTM). Each ticket names the files, the acceptance criterion, and its tier per `CLAUDE.md` (single-company mode, installer secrets handling, fleet, and anything touching auth/RLS/credentials are **T2**). The full mirror — created ids, the fifteen tickets still pending on the ClickUp rate limit, and the dependency map — is in `2026-09-13-pivot-tickets.md`.
 
 Existing tickets to close as superseded: 86ba3bgpq, 86ba3bgzf, 86ba3bh55, 86ba3bh6g, 86ba3bh4b, 86ba3bgy2 (desktop B0–B4), 86babkn74 (Bet 1 desktop), 86ba3bh72 / 86ba3bh81 / 86ba3bh92 (desktop OQs).
 
