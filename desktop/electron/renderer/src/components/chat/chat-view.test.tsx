@@ -70,8 +70,8 @@ describe("ChatView streams text + data_table over the IPC bridge", () => {
     const bridge = installBridge();
     render(<ChatView />);
     submit("q");
-    act(() => bridge.last()({ type: "error", error: "ANTHROPIC_API_KEY not set" }));
-    expect(screen.getByText(/ANTHROPIC_API_KEY not set/)).toBeInTheDocument();
+    act(() => bridge.last()({ type: "error", error: "No Anthropic credential resolved" }));
+    expect(screen.getByText(/No Anthropic credential resolved/)).toBeInTheDocument();
   });
 
   it("does not crash or render a card when a malformed data_table event arrives", () => {

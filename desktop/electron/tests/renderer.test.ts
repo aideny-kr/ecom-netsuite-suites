@@ -123,7 +123,7 @@ describe("renderer wiring", () => {
   it("renders error responses distinctly from successful responses", async () => {
     mountDOM();
     window.suiteStudio = {
-      runAgent: vi.fn(async () => ({ error: "ANTHROPIC_API_KEY not set" })),
+      runAgent: vi.fn(async () => ({ error: "No Anthropic credential resolved" })),
     };
 
     await import("../renderer");
@@ -140,7 +140,7 @@ describe("renderer wiring", () => {
     // silently swallowed gate #6 is broken). The marker the renderer
     // applies — class "error", role attribute, or visible "Error:"
     // prefix — is implementation-defined; we test the user-visible text.
-    expect(history.textContent).toContain("ANTHROPIC_API_KEY not set");
+    expect(history.textContent).toContain("No Anthropic credential resolved");
     // Some visible indicator that THIS line is an error, distinguishable
     // from a normal response. We accept either an explicit "Error" string
     // or an element with a class containing "error".
