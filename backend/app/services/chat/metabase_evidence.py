@@ -264,11 +264,12 @@ These reference requirements apply to the final answer, not tool arguments.
             rendered += "\n\nTable preview limited; the stored pivot contains additional rows."
         output = {
             "pivoted": True,
-            "table_reference": self._reference(table_id, "pivot", rendered),
             "note": "Pivot table and caveats already displayed; do not repeat the table."
             if displayed
             else "Copy table_reference to present the verified pivot and its scope/total caveats.",
         }
+        if not displayed:
+            output["table_reference"] = self._reference(table_id, "pivot", rendered)
         value = result.get("overall_value")
         if _decimal(value) is not None:
             output["overall_value_reference"] = self._reference(table_id, "overall", value)

@@ -291,7 +291,10 @@ def _reshape(params: ResultPivot, source: dict, control: dict) -> dict:
     ]
     if operation == "distinct":
         caveats.append(
-            "Distinct counts across groups may overlap. The overall distinct count is not the sum of pivot cells."
+            "The grouped distinct counts reconcile to the separately queried overall distinct count for this result."
+            if sum(numbers, Decimal(0)) == total_number
+            else "The grouped distinct counts overlap and exceed the separately queried overall distinct count. "
+            "Use the separate control for the overall population."
         )
     elif operation == "avg":
         caveats.append("The overall average comes from its own server aggregate, not an average of pivot cells.")

@@ -178,6 +178,9 @@ async def test_agent_query_control_pivot_uses_full_results_and_verified_renderin
         if step == 3:
             assert outputs[-1]["result_id"] == "r2"
             return LLMResponse(tool_use_blocks=[ToolUseBlock("pivot", "pivot_query_result", config().model_dump())])
+        if streaming:
+            assert "table_reference" not in outputs[-1]
+            return LLMResponse(text_blocks=["Overall: " + outputs[-1]["overall_value_reference"]])
         assert "table_reference" in outputs[-1]
         return LLMResponse(text_blocks=[outputs[-1]["table_reference"]])
 
@@ -240,6 +243,9 @@ async def test_agent_query_control_pivot_uses_full_results_and_verified_renderin
                 "test",
                 session_id=ctx["conversation_id"],
             )
-    assert "SKU-59" in answer.data and "separately: 60" in answer.data
+    if streaming:
+        assert answer.data == "Overall: 60"
+    else:
+        assert "SKU-59" in answer.data and "separately: 60" in answer.data
     assert "mb_ref" not in answer.data and len(answer.tool_calls_log) == 3
     assert [call["result_id"] for call in answer.tool_calls_log] == ["r1", "r2", "r3"]

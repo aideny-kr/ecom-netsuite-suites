@@ -73,6 +73,15 @@ def test_distinct_sku_overlap_preserves_cells_and_separate_control():
     assert "separately: 4" in result["caveats"][1]
     assert result["query"] == "" and result["source_kind"] == "metabase"
     assert result["pivot_provenance"]["query"] == source["metabase_source"]["query"]
+    assert "overlap and exceed" in result["caveats"][-1]
+
+
+def test_disjoint_distinct_groups_report_actual_control_agreement():
+    result = result_pivot.reshape(
+        config(), payload([["A", "canceled", 4], ["A", "complete", 4]]), payload([[8]], grouped=False)
+    )
+    assert "reconcile" in result["caveats"][-1]
+    assert "overlap" not in result["caveats"][-1]
 
 
 @pytest.mark.parametrize(
