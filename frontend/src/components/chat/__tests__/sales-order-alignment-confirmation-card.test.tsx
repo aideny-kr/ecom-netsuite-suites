@@ -11,7 +11,7 @@ const review: SalesOrderAlignmentReview = {
   invoice_id: "20", support: { invoice: { total: "95" } },
   expected_after: { total: "95", subtotal: "100", taxTotal: "0", discountTotal: "-5" },
 };
-const card: WriteConfirmationData = { ...creditCard, mutation_type: "update", record_type: "salesorder", record_id: "20", accounting_review: review, proposed_fields: review.proposed_fields };
+const card: WriteConfirmationData = { ...creditCard, target_account: review.scope.netsuite_account_id, target_environment: "PRODUCTION", mutation_type: "update", record_type: "salesorder", record_id: "20", accounting_review: review, proposed_fields: review.proposed_fields };
 describe("Sales order alignment approval", () => {
   it("shows the exact order impact and requires acknowledgment", () => {
     const approve = vi.fn(); const original = JSON.stringify(card);
@@ -26,6 +26,11 @@ describe("Sales order alignment approval", () => {
   it.each(["indeterminate", "executing", "approved", "failed", "rejected"] as const)("does not offer another write when %s", status => {
     render(<WriteConfirmationCard data={{ ...card, status }} onConfirm={vi.fn()} onReject={vi.fn()} />);
     expect(screen.queryByRole("button", { name: /Approve/ })).not.toBeInTheDocument();
+  });
+  it("blocks approval when the account environment is unverified", () => {
+    render(<WriteConfirmationCard data={{ ...card, target_environment: null }} onConfirm={vi.fn()} onReject={vi.fn()} />);
+    expect(screen.getByRole("checkbox")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Approve sales-order amendment" })).toBeDisabled();
   });
   it("preserves backend blocks", () => {
     render(<WriteConfirmationCard data={{ ...card, invariant_errors: ["Period locked"] }} onConfirm={vi.fn()} onReject={vi.fn()} />);

@@ -4,6 +4,7 @@ Read/prepare/verify only. The existing signed approval dispatcher performs the
 exact header update; this module never creates, rebills or reverses a document.
 """
 
+import json
 from copy import deepcopy
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -14,6 +15,9 @@ from app.services.transaction_ops.netsuite_reader import _collection, _id, _subl
 from app.services.transaction_ops.sales_credit_profile import SalesCreditProfile
 
 KIND = "sales_order_source_alignment"
+MAX_LINES = 100
+MAX_PROPOSAL_BYTES = 48_000
+AMENDED_FIELDS = {"lastModifiedDate", "total", "discountItem", "discountRate", "discountTotal"}
 FIELDS = (
     "id",
     "tranId",
@@ -34,6 +38,9 @@ FIELDS = (
     "discountRate",
     "discountTotal",
     "billingSchedule",
+    "createdFrom",
+    "account",
+    "postingPeriod",
     "class",
     "department",
     "location",
@@ -56,7 +63,6 @@ LINE_FIELDS = (
     "taxCode",
     "taxRate1",
     "taxAmount",
-    "inventoryDetail",
 )
 
 
@@ -68,18 +74,19 @@ def clean(value):
     return str(value) if isinstance(value, Decimal) else value
 
 
-def snapshot(raw):
+def snapshot(raw, *, amendable=False):
+    from app.services.transaction_ops.state_service import business_digest
+
     problems = []
     lines = _sublist(raw, "item", "item", frozenset(LINE_FIELDS), problems)
-    if problems or not lines:
-        raise ValueError("Complete native order and invoice lines are required.")
-    # Retain custom fields and sublists as well: an unexpected workflow side
-    # effect must require review, even when the resulting total agrees.
-    return {
-        **{k: clean(raw.get(k)) for k in FIELDS},
-        **{k: clean(v) for k, v in raw.items() if k not in {"links", "item"}},
-        "lines": clean(raw["item"]["items"]),
-    }
+    if problems or not lines or len(lines) > MAX_LINES:
+        raise ValueError("Complete native lines within the amendment review limit are required.")
+    protected = {k: v for k, v in raw.items() if k not in (AMENDED_FIELDS if amendable else set())}
+    projected = {k: clean(raw.get(k)) for k in FIELDS}
+    # A customer ID suffices for identity; do not retain contact details or
+    # arbitrary native fields in a chat approval, group manifest or audit.
+    projected["entity"] = {"id": reference(raw, "entity")} if raw.get("entity") else None
+    return {**projected, "lines": clean(lines), "native_digest": business_digest(clean(protected))}
 
 
 def linked_query(order_id, subsidiary):
@@ -124,8 +131,8 @@ async def read_support(db, tenant_id, review, invoice_id, order_id):
         if any(str(end.get(k)) != str(order.get(k)) for k in ("id", "lastModifiedDate", "total")):
             raise ValueError("Sales order changed during evidence collection.")
         return {
-            "currency": clean(currency),
-            "order": snapshot(order),
+            "currency": {k: clean(currency.get(k)) for k in ("id", "symbol", "currencyPrecision")},
+            "order": snapshot(order, amendable=True),
             "invoice": snapshot(invoice),
             "linked_documents": clean(rows),
             "invoice_amount_paid": str(invoice.get("amountPaid")),
@@ -219,7 +226,7 @@ def build_candidate(tenant_id, case_id, source, review, evidence, support):
             return None
         from app.services.transaction_ops.sales_credit import _native_number
 
-        return clean(
+        candidate = clean(
             deepcopy(
                 {
                     "kind": KIND,
@@ -237,7 +244,7 @@ def build_candidate(tenant_id, case_id, source, review, evidence, support):
                     "profile": profile.model_dump(mode="json"),
                     "source": source,
                     "before": order,
-                    "support": support,
+                    "support": {k: v for k, v in support.items() if k != "order"},
                     "invoice_id": str(invoice["id"]),
                     "observed_at": support["observed_at"],
                     "accounting_book": profile.accounting_book_id,
@@ -263,6 +270,9 @@ def build_candidate(tenant_id, case_id, source, review, evidence, support):
                 }
             )
         )
+        if len(json.dumps(candidate, separators=(",", ":")).encode()) > MAX_PROPOSAL_BYTES:
+            return None
+        return candidate
     except (KeyError, TypeError, ValueError, ArithmeticError):
         return None
 
@@ -276,6 +286,14 @@ async def prepare(db, tenant_id, case_id, source, review, evidence):
         return None
     support = await read_support(db, tenant_id, review, proof["invoice_id"], order["id"])
     sections = evidence["sections"]
+    observed = sections.get("posting_documents") or []
+    if (
+        len(observed) != 1
+        or not observed[0].get("lastModifiedDate")
+        or observed[0]["lastModifiedDate"] != support["invoice"]["lastModifiedDate"]
+        or reference(observed[0], "account") != reference(support["invoice"], "account")
+    ):
+        raise ValueError("Invoice posting proof and native snapshot are not from the same observed version.")
     support["invoice_gl"] = clean(sections["gl"][str(proof["invoice_id"])])
     support["invoice_applications"] = clean(sections["invoice_applications"])
     support["discount_item"] = clean(sections["invoice_discount_item"])
@@ -382,7 +400,7 @@ async def verify_after(db, tenant_id, p, receipt=None):
     fresh = await read_support(db, tenant_id, review, p["invoice_id"], p["record_id"])
     order, before = fresh["order"], p["before"]
     unchanged = set(before) | set(order)
-    unchanged -= {"lastModifiedDate", "total", "discountItem", "discountRate", "discountTotal"}
+    unchanged -= AMENDED_FIELDS
     ok = all(clean(order.get(k)) == clean(before.get(k)) for k in unchanged)
     ok = ok and clean(order["lines"]) == clean(before["lines"])
     ok = ok and all(_money(order[k]) == _money(v) for k, v in p["expected_after"].items())

@@ -75,6 +75,8 @@ def kind_proposal(kind):
         from tests.test_sales_order_alignment import inputs as order_inputs
 
         data = order_inputs()
+        data["review"]["scope"]["netsuite_account_id"] = "6738075"
+        data["review"]["sales_credit_profile"]["account_id"] = "6738075"
         data["review"]["native_mcp_connector_id"] = proposal()["connector_id"]
         return build_order(**data)
     if kind == "tax":
@@ -374,6 +376,8 @@ async def test_fresh_evidence_generates_real_card_without_second_model_hop(block
     else:
         assert len(cards) == 1
         assert cards[0]["record_id"] == (None if kind == "credit" else p["record_id"])
+        assert cards[0]["target_account"] == p["scope"]["netsuite_account_id"]
+        assert cards[0]["target_environment"] == "PRODUCTION"
         assert cards[0]["tool_input"] == params
         assert cards[0]["accounting_review"] == p
         result = next(v for k, v in events if k == "response")

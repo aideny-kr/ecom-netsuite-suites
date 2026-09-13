@@ -55,7 +55,7 @@ def inputs():
     proof = verified_existing_discount(source_adjustment_basis(d["source"]), invoice, s["applications"], gl, s["item"])
     assert proof
     support = {
-        "order": alignment.snapshot(order),
+        "order": alignment.snapshot(order, amendable=True),
         "invoice": alignment.snapshot(invoice),
         "linked_documents": [{"id": "20", "type": "CustInvc", "foreigntotal": "95"}],
         "invoice_amount_paid": "0",
@@ -157,6 +157,40 @@ def test_expanded_sublist_metadata_cannot_hide_incomplete_lines():
     assert alignment.snapshot(raw)["lines"] == [{"line": 1}]
 
 
+def test_projected_snapshots_exclude_pii_but_detect_unexpected_changes():
+    raw = {
+        "id": "90",
+        "entity": {"id": "70", "refName": "PRIVATE CUSTOMER"},
+        "email": "PRIVATE EMAIL",
+        "shippingAddress": {"addr1": "PRIVATE ADDRESS"},
+        "custbody_taxid": "PRIVATE TAXID",
+        "item": {"items": [{"line": 1, "memo": "PRIVATE LINE"}]},
+        "total": "100",
+        "lastModifiedDate": "before",
+    }
+    before = alignment.snapshot(raw, amendable=True)
+    assert "PRIVATE" not in json.dumps(before)
+    amended = deepcopy(raw)
+    amended.update(
+        total="95", discountRate="-5", discountItem={"id": "50"}, discountTotal="-5", lastModifiedDate="after"
+    )
+    assert alignment.snapshot(amended, amendable=True)["native_digest"] == before["native_digest"]
+    amended["email"] = "DIFFERENT PRIVATE EMAIL"
+    assert alignment.snapshot(amended, amendable=True)["native_digest"] != before["native_digest"]
+    assert alignment.snapshot(raw)["native_digest"] != alignment.snapshot({**raw, "total": "95"})["native_digest"]
+
+
+def test_proposal_payload_and_native_line_count_are_bounded():
+    d = inputs()
+    p = alignment.build_candidate(**d)
+    assert "order" not in p["support"]
+    assert len(json.dumps(p, separators=(",", ":")).encode()) < alignment.MAX_PROPOSAL_BYTES
+    d["source"]["oversized"] = "x" * alignment.MAX_PROPOSAL_BYTES
+    assert alignment.build_candidate(**d) is None
+    with pytest.raises(ValueError, match="review limit"):
+        alignment.snapshot({"item": {"items": [{"line": n} for n in range(alignment.MAX_LINES + 1)]}})
+
+
 def test_exact_connector_record_fields_and_fresh_evidence_required():
     d = inputs()
     d["review"]["native_mcp_connector_id"] = "00000000-0000-0000-0000-000000000001"
@@ -245,7 +279,7 @@ async def test_readback_verifies_order_and_preserves_posting_evidence(monkeypatc
     d = inputs()
     d["case_id"] = uuid4()
     p = alignment.build_candidate(**d)
-    fresh = deepcopy(p["support"])
+    fresh = {"order": deepcopy(p["before"]), **deepcopy(p["support"])}
     fresh["order"].update(total="95", discountItem={"id": "50"}, discountRate="-5", discountTotal="-5")
     sections = {
         "gl": {"20": deepcopy(fresh["invoice_gl"])},

@@ -21,7 +21,8 @@ export function SalesOrderAlignmentConfirmationCard({ data, proposal: p, onConfi
   const awaitingGroup = data.status === "pending" && groupState && groupState !== "pending";
   const pending = data.status === "pending" && !awaitingGroup;
   const verified = data.status === "approved" && data.accounting_verification?.status === "verified";
-  const blocked = Boolean(data.invariant_errors?.length || data.unfillable_line_fields?.length || data.editable_slots?.length);
+  const targetVerified = data.target_account?.toLowerCase().replace(/_/g, "-") === p.scope.netsuite_account_id.toLowerCase().replace(/_/g, "-") && ["PRODUCTION", "SANDBOX"].includes(data.target_environment || "");
+  const blocked = !targetVerified || Boolean(data.invariant_errors?.length || data.unfillable_line_fields?.length || data.editable_slots?.length);
   const currency = p.profile.currency;
   const after = verified ? data.accounting_verification?.sales_order : p.expected_after;
   const state = awaitingGroup ? groupState === "executing" ? "Awaiting result" : "Not submitted"
@@ -37,7 +38,7 @@ export function SalesOrderAlignmentConfirmationCard({ data, proposal: p, onConfi
             <h3 className="text-xl font-semibold tracking-tight">{verified ? "Sales order amendment verified" : "Align sales order with source"}</h3>
             <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
               Order {p.order_reference} (#{p.record_id}) · Linked invoice #{p.invoice_id}<br />
-              {label(p.before.subsidiary)} · {currency} · NetSuite {data.target_environment?.toLowerCase() || "environment unverified"} {p.scope.netsuite_account_id}
+              {label(p.before.subsidiary)} · {currency} · NetSuite {data.target_environment || "environment unverified"} {p.scope.netsuite_account_id}
             </p>
           </div>
           <span role="status" className="rounded-md bg-muted px-2.5 py-1 text-xs font-medium">{state}</span>
@@ -61,6 +62,7 @@ export function SalesOrderAlignmentConfirmationCard({ data, proposal: p, onConfi
           Approval authorizes only the displayed sales-order discount. Fresh checks must confirm the source, invoice and order still agree with this evidence. Existing item lines, billed and fulfilled quantities, classifications and original date are retained.
         </div>}
         {(data.error || (data.status !== "pending" && !verified && data.status !== "rejected" && data.status !== "executing")) && <p role="alert" className="rounded-lg bg-muted p-4">The outcome needs review. Check the recorded result before attempting another update. {data.error}</p>}
+        {!targetVerified && <p role="alert" className="rounded-lg border p-4">The target NetSuite account and environment must be verified before approval.</p>}
         {blocked && <p role="alert" className="rounded-lg bg-muted p-4">The accounting checks need review before approval.</p>}
         {verified && data.accounting_recheck?.status === "queued" && <p className="text-xs">Full reconciliation was queued. <a className="underline" href={`/transaction-operations/runs/${data.accounting_recheck.run_id}`}>View reconciliation result →</a></p>}
         {verified && data.accounting_recheck?.status === "not_queued" && <p className="text-xs">The full reconciliation could not be queued. The case still needs review.</p>}

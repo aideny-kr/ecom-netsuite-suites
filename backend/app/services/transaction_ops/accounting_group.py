@@ -25,6 +25,14 @@ from app.services.chat.write_confirmation_service import (
 
 CONCURRENCY = 3
 PREPARATION_TIMEOUT = 450  # Leave time to publish an explicit result within the chat budget.
+MAX_GROUP_BYTES = 4 * 1024 * 1024
+
+
+def require_bounded_group(group):
+    if len(json.dumps(group, separators=(",", ":"), default=str).encode()) > MAX_GROUP_BYTES:
+        raise ValueError("The group exceeds the approval review size limit; narrow the selected period or orders.")
+
+
 GROUP_TOOL = "transaction_ops_accounting_group_apply"  # Not exposed to model/MCP dispatch.
 _authorization_session_factory = async_session_factory
 
@@ -153,6 +161,7 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
         "treatment_batches": treatment_batches(members),
         "investigation_batches": investigation_batches(members),
     }
+    require_bounded_group(group)
     params = {"manifest_digest": digest(group), "confirmation_ids": [m["confirmation_id"] for m in eligible]}
     card = WriteConfirmationPayload(
         mutation_type="execute",
@@ -279,6 +288,7 @@ async def authorize_accounting_write(db, tenant_id, actor_id, tool_name, tool_in
 def validate_manifest(so, session_id):
     valid, name, params = validate_and_extract_confirmation(so, session_id)
     group = so.get("accounting_group") or {}
+    require_bounded_group(group)
     members = group.get("members") or []
     eligible = [m for m in members if m.get("confirmation_id")]
     ids = [m["confirmation_id"] for m in eligible]

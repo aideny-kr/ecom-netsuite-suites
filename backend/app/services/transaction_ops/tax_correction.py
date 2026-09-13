@@ -475,6 +475,8 @@ async def candidate_confirmation(*, db, tenant_id, actor_id, correlation_id, ses
     )
     if not validation.ok:
         raise ValueError("Native write validation needs review: " + json.dumps(validation.as_model_error()))
+    from app.services.chat.tools import netsuite_environment_of
+
     card = build_confirmation_payload(
         mutation_type=mutation,
         record_type=p["record_type"],
@@ -483,6 +485,8 @@ async def candidate_confirmation(*, db, tenant_id, actor_id, correlation_id, ses
         session_id=session_id,
         current_record=p["before"],
         validation=validation,
+        target_account=p["scope"]["netsuite_account_id"],
+        target_environment=netsuite_environment_of(p["scope"]["netsuite_account_id"]),
     )
     if card is None:
         raise ValueError("The verified invoice update could not be represented by an approval card.")
