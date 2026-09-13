@@ -323,7 +323,9 @@ async def test_creating_metabase_oauth_stays_disabled_until_consent(client, admi
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "status,body", [(302, b""), (400, b"secret-provider-error"), (200, b"x" * 65537), (200, b"[]"), (200, b"not-json")]
+    "status,body",
+    [(302, b""), (400, b"secret-provider-error"), (200, b"x" * 65537), (200, b"[]"), (200, b"not-json")],
+    ids=["redirect", "provider-error", "oversized", "nonobject-json", "invalid-json"],
 )
 async def test_oauth_http_rejects_redirects_errors_oversized_and_invalid_json(monkeypatch, status, body):
     import httpx
