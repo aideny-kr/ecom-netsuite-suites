@@ -191,6 +191,58 @@ def test_proposal_payload_and_native_line_count_are_bounded():
         alignment.snapshot({"item": {"items": [{"line": n} for n in range(alignment.MAX_LINES + 1)]}})
 
 
+@pytest.mark.parametrize("amendable", [False, True])
+def test_live_inventory_availability_does_not_stale_transaction_evidence(amendable):
+    raw = {"id": "90", "item": {"items": [{"line": 1, "quantity": "2", "quantityAvailable": "100"}]}}
+    original = deepcopy(raw)
+    before = alignment.snapshot(raw, amendable=amendable)
+    changed = deepcopy(raw)
+    changed["item"]["items"][0]["quantityAvailable"] = "37"
+    assert alignment.snapshot(changed, amendable=amendable) == before
+    del changed["item"]["items"][0]["quantityAvailable"]
+    assert alignment.snapshot(changed, amendable=amendable) == before
+    assert raw == original
+
+
+@pytest.mark.parametrize("amendable", [False, True])
+@pytest.mark.parametrize(
+    "field",
+    [
+        "quantity",
+        "quantityBilled",
+        "quantityFulfilled",
+        "quantityBackOrdered",
+        "amount",
+        "rate",
+        "taxAmount",
+        "location",
+        "custcol_example",
+    ],
+)
+def test_availability_exclusion_still_detects_transaction_line_changes(amendable, field):
+    raw = {"id": "90", "item": {"items": [{"line": 1, "quantityAvailable": "100", field: "2"}]}}
+    before = alignment.snapshot(raw, amendable=amendable)
+    raw["item"]["items"][0][field] = "3"
+    assert alignment.snapshot(raw, amendable=amendable)["native_digest"] != before["native_digest"]
+
+
+def test_availability_exclusion_is_limited_to_expanded_item_lines():
+    raw = {"quantityAvailable": "100", "item": {"items": [{"line": 1, "custom": {"quantityAvailable": "100"}}]}}
+    before = alignment.snapshot(raw)
+    changed = deepcopy(raw)
+    changed["quantityAvailable"] = "99"
+    assert alignment.snapshot(changed)["native_digest"] != before["native_digest"]
+    changed = deepcopy(raw)
+    changed["item"]["items"][0]["custom"]["quantityAvailable"] = "99"
+    assert alignment.snapshot(changed)["native_digest"] != before["native_digest"]
+
+
+def with_live_availability(projected, available, *, amendable=False):
+    raw = {k: deepcopy(v) for k, v in projected.items() if k not in {"lines", "native_digest"}}
+    raw["item"] = {"items": [{**deepcopy(line), "quantityAvailable": available} for line in projected["lines"]]}
+    return alignment.snapshot(raw, amendable=amendable)
+
+
 def test_exact_connector_record_fields_and_fresh_evidence_required():
     d = inputs()
     d["review"]["native_mcp_connector_id"] = "00000000-0000-0000-0000-000000000001"
@@ -217,7 +269,8 @@ async def test_conflicting_receipt_is_not_retried():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "changed", [None, "source", "before", "invoice_gl", "invoice_applications", "invoice", "profile", "connector"]
+    "changed",
+    [None, "availability", "source", "before", "invoice_gl", "invoice_applications", "invoice", "profile", "connector"],
 )
 async def test_approval_revalidates_frozen_evidence_and_configuration(monkeypatch, changed):
     from uuid import uuid4
@@ -228,6 +281,11 @@ async def test_approval_revalidates_frozen_evidence_and_configuration(monkeypatc
     p = alignment.build_candidate(**d)
     fresh = deepcopy(p)
     review = deepcopy(d["review"])
+    if changed == "availability":
+        p["before"] = with_live_availability(p["before"], "100", amendable=True)
+        fresh["before"] = with_live_availability(fresh["before"], "99", amendable=True)
+        p["support"]["invoice"] = with_live_availability(p["support"]["invoice"], "100")
+        fresh["support"]["invoice"] = with_live_availability(fresh["support"]["invoice"], "99")
     if changed in {"source", "before"}:
         fresh[changed]["total"] = "94"
     elif changed in {"invoice_gl", "invoice_applications", "invoice"}:
@@ -264,7 +322,7 @@ async def test_approval_revalidates_frozen_evidence_and_configuration(monkeypatc
         {"recordType": "salesorder", "recordId": p["record_id"], "data": json.dumps(p["proposed_fields"])},
         p,
     )
-    if changed:
+    if changed not in {None, "availability"}:
         with pytest.raises(ValueError):
             await call
     else:
@@ -272,7 +330,7 @@ async def test_approval_revalidates_frozen_evidence_and_configuration(monkeypatc
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("changed", [None, "invoice", "gl", "fulfillment", "custom_field", "source"])
+@pytest.mark.parametrize("changed", [None, "availability", "invoice", "gl", "fulfillment", "custom_field", "source"])
 async def test_readback_verifies_order_and_preserves_posting_evidence(monkeypatch, changed):
     from uuid import uuid4
 
@@ -281,6 +339,11 @@ async def test_readback_verifies_order_and_preserves_posting_evidence(monkeypatc
     p = alignment.build_candidate(**d)
     fresh = {"order": deepcopy(p["before"]), **deepcopy(p["support"])}
     fresh["order"].update(total="95", discountItem={"id": "50"}, discountRate="-5", discountTotal="-5")
+    if changed == "availability":
+        p["before"] = with_live_availability(p["before"], "100", amendable=True)
+        fresh["order"] = with_live_availability(fresh["order"], "99", amendable=True)
+        p["support"]["invoice"] = with_live_availability(p["support"]["invoice"], "100")
+        fresh["invoice"] = with_live_availability(fresh["invoice"], "99")
     sections = {
         "gl": {"20": deepcopy(fresh["invoice_gl"])},
         "invoice_applications": fresh["invoice_applications"],
@@ -310,5 +373,5 @@ async def test_readback_verifies_order_and_preserves_posting_evidence(monkeypatc
     )
     monkeypatch.setattr("app.services.transaction_ops.commercial_credits.collect_commercial_credits", AsyncMock())
     result = await alignment.verify_after(None, p["tenant_id"], p)
-    assert result["status"] == ("verified" if changed is None else "needs_review")
+    assert result["status"] == ("verified" if changed in {None, "availability"} else "needs_review")
     assert result["retry_allowed"] is False

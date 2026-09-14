@@ -81,7 +81,16 @@ def snapshot(raw, *, amendable=False):
     lines = _sublist(raw, "item", "item", frozenset(LINE_FIELDS), problems)
     if problems or not lines or len(lines) > MAX_LINES:
         raise ValueError("Complete native lines within the amendment review limit are required.")
-    protected = {k: v for k, v in raw.items() if k not in (AMENDED_FIELDS if amendable else set())}
+    protected = deepcopy({k: v for k, v in raw.items() if k not in (AMENDED_FIELDS if amendable else set())})
+    # REST item availability is live inventory, not this transaction's quantity.
+    # In account 6738075 it changes on unchanged billed orders and invoices.
+    # Exclude only this exact expanded-line field; retain transaction quantities,
+    # classifications, custom fields and every other native change detector.
+    item = protected.get("item")
+    if isinstance(item, dict) and isinstance(item.get("items"), list):
+        for line in item["items"]:
+            if isinstance(line, dict):
+                line.pop("quantityAvailable", None)
     projected = {k: clean(raw.get(k)) for k in FIELDS}
     # A customer ID suffices for identity; do not retain contact details or
     # arbitrary native fields in a chat approval, group manifest or audit.
