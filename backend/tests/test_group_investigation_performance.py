@@ -134,10 +134,19 @@ async def test_no_eligible_group_produces_audited_handoff_not_empty_card_and_reu
 
 async def test_actual_agent_continues_after_zero_candidates_without_confirmation():
     db = AsyncMock(spec=AsyncSession)
-    db.info = {"accounting_group_investigation": {"case_count": 55, "status": "investigation_required", "batches": []}}
+    case_id, observation_id = str(uuid4()), str(uuid4())
+    db.info = {
+        "accounting_group_investigation": {
+            "case_count": 55,
+            "status": "investigation_required",
+            "batches": [{"orders": [{"case_id": case_id, "audit_id": observation_id}]}],
+        }
+    }
     agent = UnifiedAgent(tenant_id=uuid4(), user_id=uuid4(), correlation_id=str(uuid4()))
+    original_tool = {"name": "transaction_ops_accounting_evidence", "input_schema": {"type": "object"}}
+    agent._tool_defs = [original_tool]
     adapter = MagicMock()
-    adapter.stream_message = _stream_replay(
+    replay = _stream_replay(
         [
             _llm_response(
                 tool_blocks=[
@@ -148,14 +157,22 @@ async def test_actual_agent_continues_after_zero_candidates_without_confirmation
                 tool_blocks=[
                     ToolUseBlock(
                         id="followup",
-                        name="transaction_ops_accounting_reference",
-                        input={"topic": "invoice_correction"},
+                        name="transaction_ops_accounting_evidence",
+                        input={"case_id": case_id, "observation_id": observation_id, "section": "source"},
                     )
                 ]
             ),
             _llm_response(text="The paid invoices need application evidence before a correction can be proposed."),
         ]
     )
+    requests = []
+
+    async def stream(**kwargs):
+        requests.append(kwargs)
+        async for event in replay(**kwargs):
+            yield event
+
+    adapter.stream_message = stream
     adapter.build_assistant_message.return_value = {"role": "assistant", "content": []}
     adapter.build_tool_result_message.side_effect = lambda results: {"role": "user", "content": results}
     execute = AsyncMock(return_value=json.dumps({"success": True, "financial_writes": 0}))
@@ -163,6 +180,7 @@ async def test_actual_agent_continues_after_zero_candidates_without_confirmation
         patch("app.services.policy_service.get_active_policy", AsyncMock(return_value=None)),
         patch("app.services.chat.tools.execute_tool_call", execute),
         patch("app.services.transaction_ops.accounting_group.prepare_group_confirmation", AsyncMock(return_value=None)),
+        patch("app.services.transaction_ops.tax_correction.candidate_confirmation", AsyncMock(return_value=None)),
     ):
         events = [
             e
@@ -175,6 +193,29 @@ async def test_actual_agent_continues_after_zero_candidates_without_confirmation
     assert any("application evidence" in str(value) for kind, value in events if kind == "text")
     sent = adapter.build_tool_result_message.call_args_list[0].args[0]
     assert json.loads(sent[-1]["content"])["status"] == "investigation_required"
+    assert requests[1]["tool_choice"] == {"type": "tool", "name": original_tool["name"]}
+    schema = requests[1]["tools"][0]["input_schema"]
+    assert schema["properties"]["observation_id"]["enum"] == [observation_id]
+    assert schema["properties"]["case_id"]["enum"] == [case_id]
+    assert schema["properties"]["section"]["enum"] == ["source"]
+    assert schema["required"] == ["case_id", "observation_id", "section"]
+    assert requests[2]["tool_choice"] is None
+    assert requests[2]["tools"] == [original_tool]
+    assert original_tool["input_schema"] == {"type": "object"}
+
+
+@pytest.mark.parametrize(
+    "definitions,batches",
+    [
+        ([], [{"orders": [{"case_id": "c", "audit_id": "a"}]}]),
+        ([{"name": "transaction_ops_accounting_evidence"}], []),
+        ([{"name": "transaction_ops_accounting_evidence"}], [{"orders": [{"case_id": "c"}]}]),
+    ],
+)
+def test_followup_does_not_invent_tools_or_observations(definitions, batches):
+    from app.services.transaction_ops.group_investigation import followup_read_tool
+
+    assert followup_read_tool({"batches": batches}, definitions) is None
 
 
 async def test_saved_observation_is_tenant_case_scoped_and_audited(db, tenant_a, tenant_b):

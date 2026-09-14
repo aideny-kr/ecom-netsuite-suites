@@ -1412,6 +1412,8 @@ class BaseSpecialistAgent(abc.ABC):
 
         try:
             patched_files: set[str] = set()  # Dedup workspace_propose_patch per file
+            group_followup_tool = None
+            group_followup_used = False
             for step in range(self.max_steps):
                 # Check cancel flag between steps (background run graceful stop)
                 if run_id and step > 0:
@@ -1425,6 +1427,13 @@ class BaseSpecialistAgent(abc.ABC):
 
                 # Stream the LLM response
                 step_tool_choice = tool_choice if step == 0 else None
+                step_tools = tools
+                step_thinking_level = current_thinking_level
+                if group_followup_tool is not None:
+                    step_tools = [group_followup_tool]
+                    step_tool_choice = {"type": "tool", "name": group_followup_tool["name"]}
+                    step_thinking_level = "none"  # Provider forced-tool protocol; normal reasoning resumes next hop.
+                    group_followup_tool = None
                 response = None
                 async for event_type, payload in adapter.stream_message(
                     model=model,
@@ -1432,9 +1441,9 @@ class BaseSpecialistAgent(abc.ABC):
                     system=prompt_parts.static,
                     system_dynamic=prompt_parts.dynamic,
                     messages=messages,
-                    tools=tools,
+                    tools=step_tools,
                     tool_choice=step_tool_choice,
-                    thinking_level=current_thinking_level,
+                    thinking_level=step_thinking_level,
                 ):
                     if event_type == "text" and getattr(self, "_metabase_evidence", None) is None:
                         yield "text", payload
@@ -2748,6 +2757,11 @@ class BaseSpecialistAgent(abc.ABC):
                                 # Feed the actual evidence back into the same agent loop.
                                 # A zero-candidate result is not a confirmation or success.
                                 tool_results_content[-1]["content"] = json.dumps(investigation, default=str)
+                                if not group_followup_used:
+                                    from app.services.transaction_ops.group_investigation import followup_read_tool
+
+                                    group_followup_tool = followup_read_tool(investigation, tools)
+                                    group_followup_used = group_followup_tool is not None
                                 yield (
                                     "tool_status",
                                     (
@@ -2799,6 +2813,7 @@ class BaseSpecialistAgent(abc.ABC):
                     if (
                         getattr(self, "_context_need", None) != "full"
                         and not _metabase_analysis
+                        and not getattr(self, "_transaction_workflow", False)
                         and skippable
                         and _has_successful_data_result([result_str])
                     ):
@@ -2827,6 +2842,7 @@ class BaseSpecialistAgent(abc.ABC):
                 if (
                     getattr(self, "_context_need", None) != "full"
                     and not _metabase_analysis
+                    and not getattr(self, "_transaction_workflow", False)
                     and step >= 1
                     and _has_successful_data_result(raw_result_strings)
                 ):
