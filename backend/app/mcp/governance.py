@@ -82,7 +82,7 @@ TOOL_CONFIGS = {
         "timeout_seconds": 90,
         "rate_limit_per_minute": 10,
         "requires_entitlement": "mcp_tools",
-        "allowlisted_params": ["case_id"],
+        "allowlisted_params": ["case_id", "observation_id", "section"],
     },
     "transaction_ops.status": {
         "default_limit": None,

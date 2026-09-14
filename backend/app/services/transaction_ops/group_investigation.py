@@ -59,6 +59,7 @@ def summarize(evidence):
     return {
         "observed_at": evidence.get("observed_at"),
         "audit_id": evidence.get("audit_id"),
+        "deferred_sections": evidence.get("deferred_sections") or [],
         "scope": (evidence.get("resolution_assessment") or {}).get("facts", {}).get("scope"),
         "source": {
             k: source.get(k) for k in ("total", "tax_total", "item_total", "ship_total", "currency", "updated_at")
@@ -118,6 +119,10 @@ def handoff(selection, members, reference_hits=0):
             "links in the final result. Prepare an exact supported approval card only after establishing eligibility; "
             "if the adapter cannot express the treatment, identify that specific capability gap and required evidence. "
             "A null candidate does not prove the order is correct. "
+            "Source totals are ecommerce values, not native NetSuite sales-order values. Deferred GL, application "
+            "or period sections are unverified: never claim balanced postings or settlement from missing evidence. "
+            "Report the actual period flags; a lock alone does not prove the period is closed or that the connected "
+            "role cannot make an approved correction. "
             "No empty approval card, no financial writes, no blanket "
             "claim of success. Do not ask the user to authorize investigation already requested."
         ),

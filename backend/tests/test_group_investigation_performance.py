@@ -355,3 +355,49 @@ def test_representative_reads_bound_work_and_preserve_exact_case_observation_pai
     assert {p["case_id"] for p in reads} == {"0", "1", "2", "3"}
     assert all(p["observation_id"] == "audit-" + p["case_id"] for p in reads)
     assert {p["section"] for p in reads} == {"source", "documents"}
+
+
+async def test_real_chat_dispatch_preserves_observation_id_without_native_collection(db, tenant_a):
+    from app.mcp.governance import TOOL_CONFIGS
+    from app.mcp.registry import TOOL_REGISTRY
+    from app.services.audit_service import log_event
+    from app.services.chat.tools import execute_tool_call
+
+    name = "transaction_ops.accounting_evidence"
+    assert set(TOOL_CONFIGS[name]["allowlisted_params"]) == set(TOOL_REGISTRY[name]["params_schema"])
+    case_id, actor_id = uuid4(), uuid4()
+    observation = await log_event(
+        db,
+        tenant_a.id,
+        category="transaction_ops",
+        action="accounting.evidence.observed",
+        resource_type="transaction_case",
+        resource_id=str(case_id),
+        payload={"evidence": {"source_refresh": {"total": "1.01"}}},
+    )
+    native = AsyncMock(side_effect=AssertionError("Saved evidence must not collect native records"))
+    with (
+        patch("app.mcp.governance.check_rate_limit", return_value=True),
+        patch(
+            "app.mcp.tools.transaction_ops_tools._authorize",
+            AsyncMock(return_value=(db, tenant_a.id, SimpleNamespace(id=actor_id))),
+        ),
+        patch(
+            "app.services.transaction_ops.case_service.get_case", AsyncMock(return_value=SimpleNamespace(id=case_id))
+        ),
+        patch("app.services.transaction_ops.accounting_evidence.collect_accounting_evidence", native),
+    ):
+        raw = await execute_tool_call(
+            tool_name="transaction_ops_accounting_evidence",
+            tool_input={"case_id": str(case_id), "observation_id": str(observation.id), "section": "source"},
+            tenant_id=tenant_a.id,
+            actor_id=actor_id,
+            correlation_id=str(uuid4()),
+            db=db,
+        )
+    result = json.loads(raw)
+    assert result["success"] and result["native_api_calls"] == 0
+    assert result["evidence"] == {"total": "1.01"}
+    assert result["observation_id"] == str(observation.id)
+    assert "accounting_evidence" not in result and "correction_candidate" not in result
+    native.assert_not_awaited()
