@@ -116,7 +116,7 @@ async def _recovery_ids(db, tenant_id, now):
 
 
 async def _candidate_ids(db, tenant_id, now):
-    _, _, config, run = _dependencies()
+    state, _, config, run = _dependencies()
     await set_tenant_context(db, str(tenant_id))
     latest = (
         select(run.config_id, func.max(run.created_at).label("latest_at"))
@@ -141,6 +141,7 @@ async def _candidate_ids(db, tenant_id, now):
             config.tenant_id == tenant_id,
             config.enabled.is_(True),
             config.schedule_enabled.is_(True),
+            state.current_config_clause(),
             ~active,
             or_(
                 latest.c.latest_at.is_(None),

@@ -489,3 +489,27 @@ async def test_pending_manual_review_does_not_block_daily_read_schedule(db, admi
         RunCreate(origin="schedule", evaluation_key="daily", order_references=["R123456789"]),
     )
     assert (await mod._schedule_history(db, actor.tenant_id, conf.id))[0] is True
+
+
+async def test_superseded_config_cannot_start_another_daily_scan(db, admin_user):
+    from app.schemas.transaction_runs import ConfigControl
+    from app.services.transaction_ops import state_service as state
+    from tests.test_transaction_ops_state_db import seed_config
+
+    actor = admin_user[0]
+    previous = await seed_config(db, actor.tenant_id, actor)
+    await state.control_config(
+        db, actor.tenant_id, previous.id, ConfigControl(enabled=True, schedule_enabled=True), actor=actor
+    )
+    from app.models.transaction_ops import TransactionConfig
+
+    values = {
+        column.name: getattr(previous, column.name)
+        for column in TransactionConfig.__table__.columns
+        if column.name not in {"id", "config_key", "supersedes_config_id", "created_at", "updated_at"}
+    }
+    successor = TransactionConfig(**values, config_key=uuid4().hex, supersedes_config_id=previous.id)
+    db.add(successor)
+    await db.flush()
+    assert previous.enabled is True
+    assert previous.id not in await mod._candidate_ids(db, actor.tenant_id, NOW)

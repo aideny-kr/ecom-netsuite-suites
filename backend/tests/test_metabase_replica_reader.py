@@ -61,6 +61,20 @@ def transport(monkeypatch):
     return loader, query
 
 
+@pytest.mark.parametrize("timeout", [False, True])
+async def test_transport_failure_is_distinct_from_incomplete_evidence(transport, timeout):
+    from app.services.chat.write_outcome import INDETERMINATE_KEY
+
+    if timeout:
+        transport[1].side_effect = TimeoutError
+    else:
+        transport[1].return_value = {INDETERMINATE_KEY: True, "error": "private upstream text"}
+    with pytest.raises(reader.ReplicaReadError) as caught:
+        await reader.read_order(AsyncMock(), uuid4(), BINDING, "R100000001", now=NOW)
+    assert caught.value.code == "replica_transport_failed"
+    assert "private" not in str(caught.value)
+
+
 @pytest.mark.asyncio
 async def test_fixed_order_query_exact_values_and_no_secret_or_arbitrary_sql(transport):
     row = order_row()
