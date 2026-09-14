@@ -9,6 +9,7 @@ from app.mcp.tools import (
     drive_tools,
     health,
     metric_tools,
+    netsuite_accounting_context,
     netsuite_connectivity,
     netsuite_financial_report,
     netsuite_metadata_tool,
@@ -60,6 +61,40 @@ TOOL_REGISTRY = {
         "execute": agent_skill.execute,
         "params_schema": {
             "slug": {"type": "string", "required": True, "description": "Exact slug from available_skills."},
+        },
+    },
+    "netsuite.accounting_context": {
+        "description": (
+            "Read current accounting reference facts on one authorized NetSuite REST connection. "
+            "section='overview' returns subsidiaries, base currencies, fiscal calendar IDs and books; "
+            "'periods' returns dates and separate closed/lock flags for a calendar-year window; "
+            "'accounts' reads chart-of-accounts references; 'policies' reads configured correction treatments. "
+            "Use when NetSuite accounting scope is missing or old notes conflict. These are reference facts, "
+            "not financial totals, a complete company policy manual, or authorization to post. "
+            "Supply both connection_id and expected_account_id for an explicit environment. No writes."
+        ),
+        "execute": netsuite_accounting_context.execute,
+        "params_schema": {
+            "section": {
+                "type": "string",
+                "default": "overview",
+                "description": "overview, periods, accounts, or policies",
+            },
+            "connection_id": {"type": "string", "description": "Exact connection UUID; requires expected_account_id"},
+            "expected_account_id": {
+                "type": "string",
+                "description": "Expected NetSuite account/environment; requires connection_id",
+            },
+            "calendar_year": {
+                "type": "integer",
+                "description": "Periods only: calendar-year window, 1900–2199; defaults to current UTC year",
+            },
+            "account_id": {"type": "integer", "description": "Accounts only: one positive internal account ID"},
+            "limit": {
+                "type": "integer",
+                "default": 100,
+                "description": "Reference row limit, 1–500. A capped result is partial.",
+            },
         },
     },
     "transaction_ops.groups": {
@@ -300,11 +335,11 @@ TOOL_REGISTRY = {
     },
     "netsuite.financial_report": {
         "description": (
-            "Run a verified financial report via SuiteQL templates "
-            "(Income Statement, Balance Sheet, Trial Balance, or Trend), using "
-            "BUILTIN.CONSOLIDATE for correct multi-currency consolidation at "
-            "posting-time FX. The local default for financial statements; for a "
-            "native pre-built report use the external MCP ns_runReport directly."
+            "Run an Income Statement, Balance Sheet, Trial Balance or Trend using fixed SuiteQL templates. "
+            "Uses the primary accounting book and consolidated rates into subsidiary 1. subsidiary_id "
+            "filters contributing transactions; it does not change the reporting currency or target. "
+            "Verify that scope matches the request. For a different book/consolidation context, inspect "
+            "the available native report or scoped query tools."
         ),
         "execute": netsuite_financial_report.execute,
         "params_schema": {

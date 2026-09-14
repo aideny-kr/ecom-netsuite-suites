@@ -139,6 +139,7 @@ class TestFilterToolsForDeadConnections:
 
         tools = [
             self._make_tool("netsuite_suiteql"),
+            self._make_tool("netsuite_accounting_context"),
             self._make_tool("netsuite_financial_report"),
             self._make_tool("rag_search"),
             self._make_tool("ext__ns_runCustomSuiteQL"),
@@ -149,6 +150,7 @@ class TestFilterToolsForDeadConnections:
         names = [t["name"] for t in filtered]
 
         assert "netsuite_suiteql" not in names
+        assert "netsuite_accounting_context" not in names
         assert "netsuite_financial_report" not in names
         assert "rag_search" in names
         assert "ext__ns_runCustomSuiteQL" in names
@@ -159,6 +161,7 @@ class TestFilterToolsForDeadConnections:
 
         tools = [
             self._make_tool("netsuite_suiteql"),
+            self._make_tool("netsuite_accounting_context"),
             self._make_tool("ext__ns_runCustomSuiteQL"),
             self._make_tool("ext__ns_runReport"),
             self._make_tool("rag_search"),
@@ -171,6 +174,7 @@ class TestFilterToolsForDeadConnections:
         assert "ext__ns_runCustomSuiteQL" not in names
         assert "ext__ns_runReport" not in names
         assert "netsuite_suiteql" in names
+        assert "netsuite_accounting_context" in names
         assert "rag_search" in names
 
     def test_both_dead_strips_all_netsuite(self):
@@ -179,6 +183,7 @@ class TestFilterToolsForDeadConnections:
 
         tools = [
             self._make_tool("netsuite_suiteql"),
+            self._make_tool("netsuite_accounting_context"),
             self._make_tool("netsuite_financial_report"),
             self._make_tool("ext__ns_runCustomSuiteQL"),
             self._make_tool("ext__ns_runReport"),
@@ -194,6 +199,7 @@ class TestFilterToolsForDeadConnections:
         names = [t["name"] for t in filtered]
 
         assert "netsuite_suiteql" not in names
+        assert "netsuite_accounting_context" not in names
         assert "netsuite_financial_report" not in names
         assert "ext__ns_runCustomSuiteQL" not in names
         assert "ext__ns_runReport" not in names
@@ -206,6 +212,7 @@ class TestFilterToolsForDeadConnections:
 
         tools = [
             self._make_tool("netsuite_suiteql"),
+            self._make_tool("netsuite_accounting_context"),
             self._make_tool("ext__ns_runCustomSuiteQL"),
             self._make_tool("rag_search"),
         ]

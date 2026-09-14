@@ -30,6 +30,8 @@ _EXACT: dict[str, Category] = {
     "agent_skill": "rag",
     "transaction_ops.accounting_reference": "rag",
     "transaction_ops_accounting_reference": "rag",
+    "netsuite.accounting_context": "control",
+    "netsuite_accounting_context": "control",
     "transaction_ops.configs": "control",
     "transaction_ops_configs": "control",
     "transaction_ops.run": "control",

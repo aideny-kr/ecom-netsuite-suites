@@ -329,6 +329,7 @@ class TestToolConfigs:
             "transaction_ops.accounting_evidence",
             "transaction_ops.accounting_group",
             "health",
+            "netsuite.accounting_context",
             "netsuite.suiteql",
             "netsuite.suiteql_stub",
             "netsuite.connectivity",
