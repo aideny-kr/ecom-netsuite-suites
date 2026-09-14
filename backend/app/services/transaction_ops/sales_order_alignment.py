@@ -95,7 +95,12 @@ def snapshot(raw, *, amendable=False):
     # A customer ID suffices for identity; do not retain contact details or
     # arbitrary native fields in a chat approval, group manifest or audit.
     projected["entity"] = {"id": reference(raw, "entity")} if raw.get("entity") else None
-    return {**projected, "lines": clean(lines), "native_digest": business_digest(clean(protected))}
+    result = {**projected, "lines": clean(lines), "native_digest": business_digest(clean(protected))}
+    if amendable:
+        from app.services.transaction_ops.sales_order_save_effects import SAVE_FIELDS
+
+        result["save_effects"] = {k: clean(raw[k]) for k in SAVE_FIELDS if k in raw}
+    return result
 
 
 def linked_query(order_id, subsidiary):
@@ -109,7 +114,7 @@ def linked_query(order_id, subsidiary):
     )
 
 
-async def read_support(db, tenant_id, review, invoice_id, order_id):
+async def read_support(db, tenant_id, review, invoice_id, order_id, *, before=None):
     scope = review["scope"]
     if not _id(invoice_id) or not _id(order_id):
         raise ValueError("Native record identities are required.")
@@ -139,9 +144,14 @@ async def read_support(db, tenant_id, review, invoice_id, order_id):
         end = await reader.request("GET", f"/record/v1/salesOrder/{order_id}")
         if any(str(end.get(k)) != str(order.get(k)) for k in ("id", "lastModifiedDate", "total")):
             raise ValueError("Sales order changed during evidence collection.")
+        order_snapshot = snapshot(order, amendable=True)
+        if before is not None:
+            from app.services.transaction_ops.sales_order_save_effects import comparison_snapshot
+
+            order_snapshot = comparison_snapshot(order, before, scope["netsuite_account_id"])
         return {
             "currency": {k: clean(currency.get(k)) for k in ("id", "symbol", "currencyPrecision")},
-            "order": snapshot(order, amendable=True),
+            "order": order_snapshot,
             "invoice": snapshot(invoice),
             "linked_documents": clean(rows),
             "invoice_amount_paid": str(invoice.get("amountPaid")),
@@ -400,25 +410,39 @@ async def validate_approved(db, tenant_id, tool_name, tool_input, proposal):
             raise ValueError("Linked invoice, billing or fulfillment evidence changed.")
 
 
-async def verify_after(db, tenant_id, p, receipt=None):
+async def verify_after(db, tenant_id, p, receipt=None, *, before_raw=None):
     if isinstance(receipt, dict) and any(
         str(receipt[k]) != p["record_id"] for k in ("id", "recordId", "internalId") if receipt.get(k)
     ):
         return {"status": "needs_review", "reason": "sales_order_receipt_identity_conflict", "retry_allowed": False}
     review = {"scope": p["scope"], "netsuite_connection_id": p["connection_id"]}
-    fresh = await read_support(db, tenant_id, review, p["invoice_id"], p["record_id"])
-    order, before = fresh["order"], p["before"]
+    before = p["before"]
+    if before_raw is not None:
+        # Read-only recovery of pre-upgrade cards. The archived native evidence
+        # must reproduce EVERY approved projection and the protected digest.
+        recovered = snapshot(before_raw, amendable=True)
+        if {k: v for k, v in recovered.items() if k != "save_effects"} != {
+            k: v for k, v in before.items() if k != "save_effects"
+        }:
+            raise ValueError("Archived sales-order baseline does not match approved evidence.")
+        before = recovered
+    fresh = await read_support(db, tenant_id, review, p["invoice_id"], p["record_id"], before=before)
+    order = fresh["order"]
     unchanged = set(before) | set(order)
-    unchanged -= AMENDED_FIELDS
-    ok = all(clean(order.get(k)) == clean(before.get(k)) for k in unchanged)
+    unchanged -= AMENDED_FIELDS | {"save_effects", "native_digest", "comparison_native_digest", "save_effects_valid"}
+    ok = order.get("comparison_native_digest", order["native_digest"]) == before["native_digest"]
+    ok = ok and order.get("save_effects_valid", True)
+    ok = ok and all(clean(order.get(k)) == clean(before.get(k)) for k in unchanged)
     ok = ok and clean(order["lines"]) == clean(before["lines"])
     ok = ok and all(_money(order[k]) == _money(v) for k, v in p["expected_after"].items())
     ok = ok and reference(order, "discountItem") == p["profile"]["item_id"]
     ok = ok and _money(order["discountRate"]) == _money(str(p["proposed_fields"]["discountRate"]))
-    ok = ok and all(
+    linked_unchanged = all(
         clean(fresh[k]) == clean(p["support"][k])
         for k in ("invoice", "linked_documents", "invoice_amount_paid", "invoice_amount_remaining")
     )
+    order_unchanged = ok
+    ok = ok and linked_unchanged
     # Independently re-collect posted invoice, application and GL evidence. The
     # order amendment must not be used as proof that its invoice is correct.
     from uuid import UUID
@@ -450,7 +474,9 @@ async def verify_after(db, tenant_id, p, receipt=None):
         "sales_order": order,
         "invoice": fresh["invoice"],
         "invoice_resolution": proof,
-        "linked_documents_unchanged": ok,
+        "sales_order_protected_fields_verified": order_unchanged,
+        "linked_documents_unchanged": linked_unchanged,
+        "reason": None if ok else "sales_order_postwrite_evidence_mismatch",
         "retry_allowed": False,
         "cash_settlement": "not_verified",
     }

@@ -330,7 +330,20 @@ async def test_approval_revalidates_frozen_evidence_and_configuration(monkeypatc
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("changed", [None, "availability", "invoice", "gl", "fulfillment", "custom_field", "source"])
+@pytest.mark.parametrize(
+    "changed",
+    [
+        None,
+        "availability",
+        "save_outputs",
+        "bad_save_outputs",
+        "invoice",
+        "gl",
+        "fulfillment",
+        "custom_field",
+        "source",
+    ],
+)
 async def test_readback_verifies_order_and_preserves_posting_evidence(monkeypatch, changed):
     from uuid import uuid4
 
@@ -344,6 +357,27 @@ async def test_readback_verifies_order_and_preserves_posting_evidence(monkeypatc
         fresh["order"] = with_live_availability(fresh["order"], "99", amendable=True)
         p["support"]["invoice"] = with_live_availability(p["support"]["invoice"], "100")
         fresh["invoice"] = with_live_availability(fresh["invoice"], "99")
+    if changed in {"save_outputs", "bad_save_outputs"}:
+        from app.services.transaction_ops.sales_order_save_effects import comparison_snapshot
+
+        raw_before = {
+            k: deepcopy(v) for k, v in p["before"].items() if k not in {"lines", "native_digest", "save_effects"}
+        }
+        raw_before["item"] = {"items": deepcopy(p["before"]["lines"])}
+        raw_before.update(totalCostEstimate="60", estGrossProfit="40", estGrossProfitPercent="40")
+        p["before"] = alignment.snapshot(raw_before, amendable=True)
+        raw_after = deepcopy(raw_before)
+        raw_after.update(
+            total="95",
+            discountItem={"id": "50"},
+            discountRate="-5",
+            discountTotal="-5",
+            estGrossProfit="35",
+            estGrossProfitPercent="36.8421",
+        )
+        if changed == "bad_save_outputs":
+            raw_after["estGrossProfit"] = "35.01"
+        fresh["order"] = comparison_snapshot(raw_after, p["before"], "6738075")
     sections = {
         "gl": {"20": deepcopy(fresh["invoice_gl"])},
         "invoice_applications": fresh["invoice_applications"],
@@ -373,5 +407,5 @@ async def test_readback_verifies_order_and_preserves_posting_evidence(monkeypatc
     )
     monkeypatch.setattr("app.services.transaction_ops.commercial_credits.collect_commercial_credits", AsyncMock())
     result = await alignment.verify_after(None, p["tenant_id"], p)
-    assert result["status"] == ("verified" if changed in {None, "availability"} else "needs_review")
+    assert result["status"] == ("verified" if changed in {None, "availability", "save_outputs"} else "needs_review")
     assert result["retry_allowed"] is False
