@@ -161,3 +161,17 @@ async def test_partial_links_and_conflicting_origin_cannot_be_complete(native):
     assert "invoice:20:origin_conflict" in result["blockers"]
     assert not result["sections"]["posting_documents"]
     assert "gl" not in result["sections"]
+
+
+async def test_source_ineligible_group_triage_reads_identity_and_amounts_but_marks_detail_deferred(native):
+    reader = native[0]
+    result = await mod.collect_accounting_evidence(
+        None, "tenant", review(), {"order_reference": "R123", "source": {"currency": "USD"}}, posting_detail=False
+    )
+    assert reader.calls == 3  # SO, links, invoice; currency is a fixture-local lookup.
+    assert result["sections"]["sales_order"]["id"] == "10"
+    assert result["sections"]["posting_documents"][0]["id"] == "20"
+    assert result["deferred_sections"] == ["gl", "deposits", "taxItem", "postingPeriod"]
+    assert all(k not in result["sections"] for k in result["deferred_sections"])
+    assert result["assessment"]["correction_ready"] is False
+    assert "posting_detail_deferred_until_supported_treatment_is_identified" in result["blockers"]

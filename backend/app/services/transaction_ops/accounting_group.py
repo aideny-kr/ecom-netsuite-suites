@@ -132,7 +132,9 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
             investigation_evidence = {}
             try:
                 async with asyncio.timeout(120):
-                    evidence = await execute_accounting_evidence({"case_id": member["case_id"]}, context=context)
+                    evidence = await execute_accounting_evidence(
+                        {"case_id": member["case_id"]}, context={**context, "group_preparation": True}
+                    )
                     collected = evidence.get("accounting_evidence") or {}
                     routes = collected.get("investigation_routes", [])
                     investigation_evidence = summarize(collected)

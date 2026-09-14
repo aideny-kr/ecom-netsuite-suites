@@ -58,7 +58,7 @@ DOCUMENT_FIELDS = (
 )
 
 
-async def collect_accounting_evidence(db, tenant_id, review, report):
+async def collect_accounting_evidence(db, tenant_id, review, report, *, posting_detail=True):
     """Read one case's native evidence chain, preserving partial failures and scope conflicts."""
     scope = review.get("scope") or {}
     targets = (review.get("observed_scope") or {}).get("target_records") or []
@@ -138,7 +138,12 @@ async def collect_accounting_evidence(db, tenant_id, review, report):
             return {"complete": complete, "rows": rows}
 
         async def document(kind, identifier, label):
-            raw = await read(label, "GET", f"/record/v1/{kind}/{identifier}", params={"expandSubResources": "true"})
+            raw = await read(
+                label,
+                "GET",
+                f"/record/v1/{kind}/{identifier}",
+                params={"expandSubResources": "true"} if posting_detail else None,
+            )
             if raw is None:
                 return None
             if _ref(raw.get("id")) != identifier or _ref(raw.get("subsidiary")) != subsidiary:
@@ -198,6 +203,8 @@ async def collect_accounting_evidence(db, tenant_id, review, report):
                 result["blockers"].append(f"{kind}:{identifier}:origin_conflict")
                 continue
             result["sections"]["posting_documents"].append(doc)
+            if not posting_detail:
+                continue
             for field, record_type, fields, seen in (
                 ("taxItem", "salesTaxItem", ("id", "itemId", "rate", "isInactive", "taxAgency"), seen_tax),
                 (
@@ -226,7 +233,10 @@ async def collect_accounting_evidence(db, tenant_id, review, report):
             )
             if gl is not None:
                 result["sections"].setdefault("gl", {})[identifier] = gl
-        for row in deposits[:2]:
+        if not posting_detail:
+            result["blockers"].append("posting_detail_deferred_until_supported_treatment_is_identified")
+            result["deferred_sections"] = ["gl", "deposits", "taxItem", "postingPeriod"]
+        for row in deposits[:2] if posting_detail else []:
             identifier = _id(row.get("id"))
             if not identifier:
                 result["blockers"].append("invalid_deposit_id")

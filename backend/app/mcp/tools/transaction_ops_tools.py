@@ -411,13 +411,27 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
         review = await accounting_context(db, tenant_id, case.scope_json, case.latest_report_json)
         import json
 
-        evidence = json.loads(
-            json.dumps(await collect_accounting_evidence(db, tenant_id, review, case.latest_report_json), default=str)
-        )
         from app.models.audit import AuditEvent
         from app.services.audit_service import log_event
+        from app.services.transaction_ops.group_investigation import unsupported_source_recipe
         from app.services.transaction_ops.source_reader import SourceReadError
         from app.services.transaction_ops.tax_correction import candidate, refresh_source
+
+        prefetched_source, source_error = None, None
+        if context.get("group_preparation") is True:
+            try:
+                prefetched_source = await refresh_source(db, tenant_id, review["scope"], case.order_reference)
+            except SourceReadError as exc:
+                source_error = exc
+        options = (
+            {"posting_detail": False} if prefetched_source and unsupported_source_recipe(prefetched_source) else {}
+        )
+        evidence = json.loads(
+            json.dumps(
+                await collect_accounting_evidence(db, tenant_id, review, case.latest_report_json, **options),
+                default=str,
+            )
+        )
 
         integration = await db.scalar(
             select(AuditEvent)
@@ -441,7 +455,13 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
         db.info.pop("accounting_correction_candidate", None)
         correction = None
         try:
-            source = await refresh_source(db, tenant_id, review["scope"], case.order_reference)
+            if source_error is not None:
+                raise source_error
+            source = (
+                prefetched_source
+                if prefetched_source is not None
+                else await refresh_source(db, tenant_id, review["scope"], case.order_reference)
+            )
             evidence["source_refresh"] = source
             from app.services.transaction_ops.commercial_credits import collect_commercial_credits
 

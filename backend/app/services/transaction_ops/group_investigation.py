@@ -158,3 +158,26 @@ async def read_observation(db, tenant_id, actor_id, case_id, params, correlation
         "authority": "Historical observation for investigation only; not fresh evidence or an executable proposal. "
         "Missing sections remain unverified. Refresh affected records before preparing/approving writes.",
     }
+
+
+def unsupported_source_recipe(source):
+    """Only defer deep preparation reads when ALL current adapters are impossible.
+
+    Tax correction requires positive INCLUDED tax and zero additional tax.
+    Sales credit, invoice discount, and SO alignment require finalized ORDER
+    adjustments (via source_adjustment_basis). No order adjustments plus positive
+    additional tax therefore excludes all four. Missing/ambiguous values default
+    to full evidence. Extend this predicate when adding a new treatment adapter.
+    """
+    try:
+        included = Decimal(str(source["included_tax_total"]))
+        additional = Decimal(str(source["additional_tax_total"]))
+        return (
+            source.get("adjustments") == []
+            and included.is_finite()
+            and additional.is_finite()
+            and included == 0
+            and additional > 0
+        )
+    except (KeyError, TypeError, ValueError, InvalidOperation):
+        return False
