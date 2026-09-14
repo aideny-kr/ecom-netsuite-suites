@@ -25,6 +25,7 @@ export function AccountingGroupCard({
       m.card.accounting_verification?.status === "verified",
   ).length;
   const pending = data.status === "pending";
+  const progress = data.accounting_plan_progress;
   const blocked = Boolean(
     data.invariant_errors?.length || data.unfillable_line_fields?.length,
   );
@@ -61,6 +62,11 @@ export function AccountingGroupCard({
                     : `${verified} / ${eligible.length} verified`}
           </span>
         </div>
+        {progress && progress.results_ready > 0 && (
+          <p role="status" className="text-[13px] font-medium">
+            {progress.reconciled} / {progress.orders} orders reconciled · {progress.remaining} need further review
+          </p>
+        )}
         <p className="text-[13px] leading-relaxed text-muted-foreground">
           {eligible.length > 0 ? (
             <>
@@ -124,7 +130,12 @@ export function AccountingGroupCard({
           {group.members.map((member) => {
             const card = member.card;
             const p = card?.accounting_review;
+            const receipt = member.resolution_receipt || card?.accounting_receipt;
+            const originalReceipt = card?.accounting_receipt;
+            const hasLaterReceipt = originalReceipt && receipt && originalReceipt.completion_audit_id !== receipt.completion_audit_id;
             const result =
+              receipt?.status === "reconciled" ? "Reconciled" :
+              receipt ? receipt.status === "partially_resolved" ? "Correction verified · further review" : "Verification needs review" :
               card?.accounting_verification?.status === "verified" &&
               card.status === "approved"
                 ? "Verified"
@@ -171,6 +182,28 @@ export function AccountingGroupCard({
                   )}
                 </summary>
                 <div className="mt-3">
+                  {receipt && (
+                    <div className="mb-3 space-y-2 text-xs leading-relaxed" aria-label="Verified accounting result">
+                      <p>{receipt.summary}</p>
+                      {hasLaterReceipt && (
+                        <div aria-label="Original correction approval">
+                          <p>Original correction approved by {originalReceipt.approved_by.name} · {new Date(originalReceipt.approved_at).toLocaleString()}</p>
+                          <p className="break-all text-muted-foreground">Original audit reference: {originalReceipt.completion_audit_id}</p>
+                        </div>
+                      )}
+                      <p>{hasLaterReceipt ? "Latest correction approved by" : "Approved by"} {receipt.approved_by.name} · {new Date(receipt.approved_at).toLocaleString()}</p>
+                      <p className="break-all text-muted-foreground">Audit reference: {receipt.completion_audit_id}</p>
+                      <div className="flex flex-wrap gap-3">
+                        {receipt.record_links.map((link) => (
+                          <a key={`${link.record_type}:${link.record_id}`} href={link.url} target="_blank" rel="noopener noreferrer" className="text-primary underline">{link.label}</a>
+                        ))}
+                        <a href={receipt.reconciliation_url} className="text-primary underline">Reconciliation result</a>
+                        <a href={receipt.audit_url} className="text-primary underline">Audit log</a>
+                      </div>
+                      {receipt.next_step.status === "awaiting_approval" && <p>The next correction requires approval in the new group card below.</p>}
+                      {receipt.next_step.reasons?.map((reason) => <p key={reason}>{reason}</p>)}
+                    </div>
+                  )}
                   {member.reason && (
                     <p className="mb-3 text-xs leading-relaxed">
                       {member.reason}

@@ -93,7 +93,10 @@ async def test_cancelled_group_call_keeps_durable_exact_approval_to_call_link(mo
     db.commit = AsyncMock()
     child_db = _make_db(child)
     child_db.info = {}
-    child_db.scalar = AsyncMock(return_value=session)
+    # The child first loads its chat session, then checks for a prior financial
+    # intent. This fixture has no prior execution; a ChatSession is not a
+    # ChatMessage result for the second query.
+    child_db.scalar = AsyncMock(side_effect=[session, None])
     child_db.rollback = AsyncMock()
     child_db.expire_all = MagicMock()
 

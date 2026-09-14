@@ -170,6 +170,13 @@ def _project(record):
         "requires_new_human_approval": True,
         "cash_settlement": "not_verified",
         "approval_url": f"/api/v1/chat/sessions/{message.session_id}",
+        "resolution_plan": p.get("resolution_plan"),
+        "completion": {
+            key: (so.get("accounting_receipt") or {}).get(key)
+            for key in ("status", "next_step", "record_links", "completion_audit_id", "checked_at")
+        }
+        if so.get("accounting_receipt")
+        else None,
     }
 
 
