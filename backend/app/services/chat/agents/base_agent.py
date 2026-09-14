@@ -908,6 +908,7 @@ class BaseSpecialistAgent(abc.ABC):
         current_thinking_level = "none" if thinking.is_forced_tool_choice(tool_choice) else thinking_level
 
         tool_calls_log: list[dict] = []
+        result_capture = None
         total_input_tokens = 0
         total_output_tokens = 0
         total_cache_creation = 0
@@ -1084,6 +1085,8 @@ class BaseSpecialistAgent(abc.ABC):
                         result_str = json.dumps(
                             {"error": f"Policy blocked: {policy_result.get('reason', 'Not allowed')}"}
                         )
+                    elif block.name == "analytics_calculate" and getattr(self, "_metabase_evidence", None) is not None:
+                        result_str = json.dumps(self._metabase_evidence.calculate(block.input))
                     else:
                         result_str = await execute_tool_call(
                             tool_name=block.name,
@@ -1105,12 +1108,31 @@ class BaseSpecialistAgent(abc.ABC):
                             except (json.JSONDecodeError, TypeError):
                                 pass
 
+                    from app.services.chat.metabase_results import is_bound_table, nonstream_interceptor
+
+                    captured_result_id = None
+                    if session_id and result_capture is None:
+                        try:
+                            bound = is_bound_table(json.loads(result_str))
+                        except (TypeError, ValueError):
+                            bound = False
+                        if bound:
+                            result_capture = await nonstream_interceptor(db, self.tenant_id, session_id, tool_calls_log)
+                    if result_capture is not None:
+                        _, stamped = result_capture(block.name, result_str, block.input, result_str)
+                        try:
+                            captured_result_id = json.loads(stamped).get("result_id")
+                        except (TypeError, ValueError, AttributeError):
+                            pass
                     evidence = getattr(self, "_metabase_evidence", None)
-                    grounded_result = (
-                        evidence.observe(block.name, block.input, result_str)
-                        if evidence is not None and block.name in evidence.tool_names
-                        else None
-                    )
+                    grounded_result = None
+                    if evidence is not None:
+                        if block.name in evidence.tool_names:
+                            grounded_result = evidence.observe(
+                                block.name, block.input, result_str, result_id=captured_result_id
+                            )
+                        elif block.name == "pivot_query_result":
+                            grounded_result = evidence.observe_pivot(result_str)
 
                     if grounded_result == result_str:
                         grounded_result = None
@@ -1137,6 +1159,8 @@ class BaseSpecialistAgent(abc.ABC):
                             duration_ms=elapsed_ms,
                         )
                     )
+                    if isinstance(captured_result_id, str):
+                        tool_calls_log[-1]["result_id"] = captured_result_id
 
                     tool_results_content.append(
                         {
@@ -1452,6 +1476,7 @@ class BaseSpecialistAgent(abc.ABC):
                     and getattr(self, "_prose_instead_of_write_bounced", False)
                     and not getattr(self, "_write_proposal_forced", False)
                     and not _write_reached_the_human(self)
+                    and not getattr(self, "_transaction_workflow", False)
                 ):
                     self._write_proposal_forced = True
                     print("[FORCE_WRITE] stage2 triggered", flush=True)
@@ -1530,6 +1555,7 @@ class BaseSpecialistAgent(abc.ABC):
                     _pending_write_type = _last_metadata_record_type(tool_calls_log)
                     if (
                         _pending_write_type
+                        and not getattr(self, "_transaction_workflow", False)
                         and not _write_reached_the_human(self)
                         and not getattr(self, "_prose_instead_of_write_bounced", False)
                     ):
@@ -1793,6 +1819,52 @@ class BaseSpecialistAgent(abc.ABC):
                     mutation_type = await classify_connector_mutation(block.name, db, self.tenant_id)
                     if mutation_type is not None:
                         record_type = block.input.get("recordType", "unknown")
+
+                        # Case/group corrections obtain their exact cards from
+                        # the guarded accounting tools below. Generic metadata
+                        # validation cannot establish treatment eligibility.
+                        if getattr(self, "_transaction_workflow", False):
+                            result_str = json.dumps(
+                                {
+                                    "error": "accounting_adapter_required",
+                                    "financial_writes": 0,
+                                    "instruction": "Use transaction_ops_accounting_evidence for the case or "
+                                    "transaction_ops_accounting_group for the selected group. These tools prepare "
+                                    "supported exact approval cards. If no proposal is available, investigate the "
+                                    "specific missing evidence or capability. Do not retry a generic write or "
+                                    "substitute a journal, credit, refund, replay or arbitrary API operation.",
+                                }
+                            )
+                            elapsed_ms = int((time.monotonic() - t0) * 1000)
+                            yield (
+                                "tool_end",
+                                {
+                                    "tool_name": block.name,
+                                    "step": step,
+                                    "duration_ms": elapsed_ms,
+                                    "success": False,
+                                    "result_summary": "A supported accounting treatment is required.",
+                                },
+                            )
+                            tool_calls_log.append(
+                                build_tool_call_log_entry(
+                                    step=step,
+                                    agent_name=self.agent_name,
+                                    tool_name=block.name,
+                                    params=block.input,
+                                    result_str=result_str,
+                                    duration_ms=elapsed_ms,
+                                )
+                            )
+                            tool_results_content.append(
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": block.id,
+                                    "content": result_str,
+                                    "is_error": True,
+                                }
+                            )
+                            continue
 
                         # ── ask_user hint pop (requirement C) — MUST happen
                         # before anything else touches tool_input: this key
@@ -2494,6 +2566,8 @@ class BaseSpecialistAgent(abc.ABC):
                         result_str = json.dumps(
                             {"error": f"Policy blocked: {policy_result.get('reason', 'Not allowed')}"}
                         )
+                    elif block.name == "analytics_calculate" and getattr(self, "_metabase_evidence", None) is not None:
+                        result_str = json.dumps(self._metabase_evidence.calculate(block.input))
                     else:
                         result_str = await execute_tool_call(
                             tool_name=block.name,
@@ -2572,11 +2646,26 @@ class BaseSpecialistAgent(abc.ABC):
                     # idempotent over an interceptor that already condensed a metric (the
                     # condensed string carries no suppress_llm_value flag).
                     llm_result_str = _suppress_metric_value_for_llm(llm_result_str)
+                    intercepted_result_id = None
+                    try:
+                        intercepted = json.loads(llm_result_str)
+                        if isinstance(intercepted, dict):
+                            intercepted_result_id = intercepted.get("result_id")
+                    except (ValueError, TypeError):
+                        pass
                     evidence = getattr(self, "_metabase_evidence", None)
                     if evidence is not None and block.name in evidence.tool_names:
-                        grounded_result = evidence.observe(block.name, block.input, full_result_str)
+                        grounded_result = evidence.observe(
+                            block.name, block.input, full_result_str, result_id=intercepted_result_id
+                        )
                         if grounded_result != full_result_str:
                             llm_result_str = _suppress_metric_value_for_llm(grounded_result)
+                    elif evidence is not None and block.name == "pivot_query_result":
+                        grounded_result = evidence.observe_pivot(
+                            full_result_str, displayed=intercepted_result_id is not None
+                        )
+                        if grounded_result != full_result_str:
+                            llm_result_str = grounded_result
 
                     tool_calls_log.append(
                         build_tool_call_log_entry(
@@ -2591,6 +2680,8 @@ class BaseSpecialistAgent(abc.ABC):
                             duration_ms=elapsed_ms,
                         )
                     )
+                    if isinstance(intercepted_result_id, str):
+                        tool_calls_log[-1]["result_id"] = intercepted_result_id
 
                     tool_results_content.append(
                         {
@@ -2603,6 +2694,12 @@ class BaseSpecialistAgent(abc.ABC):
                     # The supported accounting payload is already deterministic. Route it
                     # through the existing validator/HITL card instead of asking the model
                     # to repeat it in another hop (which can hallucinate a card in prose).
+                    if not _had_error and block.name in {
+                        "transaction_ops_status",
+                        "transaction_ops_accounting_evidence",
+                        "transaction_ops_accounting_group",
+                    }:
+                        self._transaction_workflow = True
                     if (
                         block.name in {"transaction_ops_accounting_evidence", "transaction_ops_accounting_group"}
                         and not _had_error

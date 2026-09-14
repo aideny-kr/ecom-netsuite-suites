@@ -2,6 +2,7 @@
 
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from unittest.mock import AsyncMock
 
 import pytest
@@ -16,7 +17,7 @@ from tests.test_accounting_approval_flow import inputs
 from tests.test_accounting_recheck import approved_credit  # noqa: F401
 
 
-@pytest.fixture(params=["credit", "discount"])
+@pytest.fixture(params=["credit", "discount", "tax"])
 async def interrupted_credit(db, approved_credit, request):  # noqa: F811
     from tests.conftest import enable_feature_flag
 
@@ -32,10 +33,14 @@ async def interrupted_credit(db, approved_credit, request):  # noqa: F811
             "mutation_type": "update",
             "proposed_fields": {"discountItem": {"id": "50"}, "discountRate": -5},
         }
+    elif request.param == "tax":
+        p = {**p, "record_type": "invoice", "mutation_type": "update", "proposed_fields": {"taxRate": "5"}}
+        p.pop("kind")
+        p.pop("profile")
     name, params = inputs(p)
     card = build_confirmation_payload(
-        mutation_type="update" if request.param == "discount" else "create",
-        record_type="invoice" if request.param == "discount" else "creditmemo",
+        mutation_type="create" if request.param == "credit" else "update",
+        record_type="creditmemo" if request.param == "credit" else "invoice",
         tool_name=name,
         tool_input=params,
         session_id=str(message.session_id),
@@ -61,6 +66,7 @@ def providers(monkeypatch):
     monkeypatch.setattr("app.services.transaction_ops.accounting_group.accounting_write_slot", lock)
     monkeypatch.setattr("app.services.transaction_ops.sales_credit.verify_after", verify)
     monkeypatch.setattr("app.services.transaction_ops.invoice_discount.verify_after", verify)
+    monkeypatch.setattr("app.services.transaction_ops.tax_correction.verify_after", verify)
     return verify
 
 
@@ -83,6 +89,33 @@ async def test_recovery_preserves_original_approver_and_queues_once(db, interrup
     assert done.actor_type == "system" and done.actor_id is None
     assert done.payload["approved_by"] == str(actor.id)
     assert done.payload["financial_writes"] == 0
+
+
+@pytest.mark.parametrize("verified", [True, False])
+async def test_native_decimal_readback_persists_in_message_and_audit(db, interrupted_credit, providers, verified):
+    actor, _, _, message, _, _ = interrupted_credit
+    providers.return_value = {
+        "status": "verified" if verified else "needs_review",
+        "invoice": {"total": Decimal("1425.93"), "amountPaid": Decimal("0.0")},
+        "gl": [{"debit": Decimal("167.07"), "credit": Decimal("0.0")}],
+    }
+    result = await mod.recover(db, actor.tenant_id, message.id)
+    await db.refresh(message)
+    assert result["termination_reason"] == ("done" if verified else "error")
+    assert message.structured_output["accounting_verification"]["invoice"]["total"] == "1425.93"
+    assert message.structured_output["accounting_execution"]["attempts"] == 1
+    assert message.structured_output["accounting_execution"]["approved_by"] == str(actor.id)
+    assert bool(message.structured_output.get("accounting_recheck")) == verified
+    event = await db.scalar(
+        select(AuditEvent).where(
+            AuditEvent.tenant_id == actor.tenant_id,
+            AuditEvent.resource_id == str(message.id),
+            AuditEvent.action == "accounting_recovery.completed",
+        )
+    )
+    assert event.payload["verification"]["gl"] == [{"debit": "167.07", "credit": "0.0"}]
+    assert event.payload["financial_writes"] == 0
+    providers.assert_awaited_once()
 
 
 @pytest.mark.parametrize("problem", ["tenant", "digest", "actor", "payload", "inactive"])
@@ -183,7 +216,14 @@ async def test_scheduler_dispatches_credit_recovery_and_preserves_receipt(
     dispatch.assert_awaited_once()
     assert dispatch.call_args.args[:3] == (actor.tenant_id, "credit_recover", message.id)
     await mod.recover(db, actor.tenant_id, message.id)
-    assert providers.call_args.args[3] == {"id": "999"}
+    assert message.structured_output["accounting_execution"]["receipt"] == {"id": "999"}
+    if message.structured_output["accounting_review"].get("kind") in {
+        "sales_adjustment_credit",
+        "invoice_sales_adjustment",
+    }:
+        assert providers.call_args.args[3] == {"id": "999"}
+    else:
+        assert providers.call_args.args[2]["record_id"] == message.structured_output["accounting_review"]["record_id"]
 
 
 async def test_group_refresh_uses_durable_children_without_starting_unsubmitted_members(

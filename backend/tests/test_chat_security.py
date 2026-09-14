@@ -30,6 +30,8 @@ class TestAllowedChatTools:
             "transaction_ops.groups",
             "transaction_ops.accounting_evidence",
             "transaction_ops.accounting_group",
+            "transaction_ops.accounting_reference",
+            "agent.skill",
             "netsuite.suiteql",
             "pivot.query_result",
             "cross_source.query",

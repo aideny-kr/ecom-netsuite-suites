@@ -283,6 +283,9 @@ async def history(db, tenant_id, case_id, *, limit=10, offset=0):
         ).all()
     applicable = [record for record in candidates[:25] if _issue(record[0].evidence_json.get("report") or {}) == issue]
     examples = [row for row in await _project(db, tenant_id, applicable) if row["verified_example"]]
+    from app.services.transaction_ops.accounting_history import history as accounting_history
+
+    accounting = await accounting_history(db, tenant_id, case, current_run, limit=limit, offset=offset)
     return {
         "case_id": str(case.id),
         "resolutions": rows,
@@ -290,6 +293,7 @@ async def history(db, tenant_id, case_id, *, limit=10, offset=0):
         "next_offset": offset + limit if len(records) > limit else None,
         "examples": examples[:5],
         "examples_truncated": len(candidates) > 25 or len(examples) > 5,
+        "accounting": accounting,
         "usage": "Historical examples inform investigation only. "
         "Re-read current evidence and obtain a new exact human approval.",
     }

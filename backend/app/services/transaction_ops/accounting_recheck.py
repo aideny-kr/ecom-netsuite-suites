@@ -17,6 +17,18 @@ from app.services.transaction_ops.case_service import _cleared
 from app.services.transaction_ops.settlement import SCOPE
 
 
+def supports(proposal):
+    """Only the implemented invoice corrections have native verification contracts."""
+    return bool(proposal) and (
+        proposal.get("kind") in {"sales_adjustment_credit", "invoice_sales_adjustment"}
+        or (
+            proposal.get("kind") in {None, "invoice_tax"}
+            and proposal.get("record_type") == "invoice"
+            and set(proposal.get("proposed_fields") or {}) == {"taxRate"}
+        )
+    )
+
+
 async def queue(db, tenant_id, message, actor_id, *, now):
     so = message.structured_output or {}
     p = so.get("accounting_review") or {}
@@ -24,7 +36,7 @@ async def queue(db, tenant_id, message, actor_id, *, now):
     if (
         message.tenant_id != tenant_id
         or p.get("tenant_id") != str(tenant_id)
-        or p.get("kind") not in {"sales_adjustment_credit", "invoice_sales_adjustment"}
+        or not supports(p)
         or so.get("status") != "approved"
         or verification.get("status") != "verified"
         or not actor_id
@@ -88,7 +100,7 @@ async def approval_for_run(db, tenant_id, run):
         so.get("status") != "approved"
         or (so.get("accounting_verification") or {}).get("status") != "verified"
         or p.get("tenant_id") != str(tenant_id)
-        or p.get("kind") not in {"sales_adjustment_credit", "invoice_sales_adjustment"}
+        or not supports(p)
         or str(run.config_id) != p.get("config_id")
         or run.params_json["order_references"] != [p.get("order_reference")]
     ):
@@ -104,7 +116,12 @@ def report_in_scope(run, p, report, now):
             len(targets) == 1
             and str(targets[0]["record_id"]) == str(p["before"]["createdFrom"]["id"])
             and str(report["source"]["record_id"]) == str(p["source"]["id"])
-            and report["balance"]["currency"] == p["profile"]["currency"]
+            and report["balance"]["currency"]
+            == (
+                p["profile"]["currency"]
+                if p.get("kind") in {"sales_adjustment_credit", "invoice_sales_adjustment"}
+                else p["source"]["currency"]
+            )
             and all(
                 verified_at <= datetime.fromisoformat(value["observed_at"]) <= now
                 for value in (report["source"], targets[0])

@@ -286,8 +286,9 @@ async def test_approval_preflight_execution_verification_and_actor_audit(outcome
         if outcome.startswith("unknown") or outcome == "unreadable_verified":
             assert so["status"] == ("approved" if verified_outcome else "indeterminate")
             assert so["accounting_verification"]["recovered_by_read"] is verified_outcome
-        if kind in {"credit", "discount"} and verified_outcome:
+        if verified_outcome:
             recheck.assert_awaited_once()
+            assert so["accounting_execution"]["approved_by"] == str(_USER_ID)
             assert so["accounting_recheck"] == {"status": "queued", "run_id": "recheck-run"}
         else:
             recheck.assert_not_awaited()

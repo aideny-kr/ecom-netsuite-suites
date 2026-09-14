@@ -99,12 +99,22 @@ async def test_queue_is_durable_idempotent_and_scoped(db, approved_credit, tenan
         ("refund_missing", "unverified"),
         ("stale", "unverified"),
         ("wrong_target", "unverified"),
+        ("order_still_wrong", "difference"),
     ],
 )
+@pytest.mark.parametrize("correction_kind", ["credit", "tax"])
 async def test_normal_runner_reconciles_after_credit_without_another_proposal_or_write(
-    db, approved_credit, variant, expected
+    db, approved_credit, variant, expected, correction_kind
 ):
     actor, _, case, message, source, target = approved_credit
+    if correction_kind == "tax":
+        from copy import deepcopy
+
+        so = deepcopy(message.structured_output)
+        so["accounting_review"].update(kind="invoice_tax", record_type="invoice", proposed_fields={"taxRate": "5"})
+        so["accounting_review"].pop("profile")
+        message.structured_output = so
+        await db.flush()
     queued_at = datetime.now(timezone.utc)
     run = await accounting_recheck.queue(db, actor.tenant_id, message, actor.id, now=queued_at)
     await db.commit()
@@ -112,6 +122,8 @@ async def test_normal_runner_reconciles_after_credit_without_another_proposal_or
     observed = now if variant != "stale" else queued_at - timedelta(seconds=1)
     source["read_at"] = target["observed_at"] = observed.isoformat()
     target["orders"][0]["header"].update(total="120.00", taxTotal="20.01" if variant == "penny" else "20.00")
+    if variant == "order_still_wrong":
+        target["orders"][0]["header"]["total"] = "121.00"
     if variant == "wrong_target":
         target["orders"][0]["record_id"] = target["orders"][0]["header"]["id"] = "201"
     refund = {"complete": True, "amount": "0.00", "currency": "USD", "order_reference": case.order_reference}
