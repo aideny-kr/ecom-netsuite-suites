@@ -908,6 +908,7 @@ class BaseSpecialistAgent(abc.ABC):
         current_thinking_level = "none" if thinking.is_forced_tool_choice(tool_choice) else thinking_level
 
         tool_calls_log: list[dict] = []
+        result_capture = None
         total_input_tokens = 0
         total_output_tokens = 0
         total_cache_creation = 0
@@ -1107,12 +1108,31 @@ class BaseSpecialistAgent(abc.ABC):
                             except (json.JSONDecodeError, TypeError):
                                 pass
 
+                    from app.services.chat.metabase_results import is_bound_table, nonstream_interceptor
+
+                    captured_result_id = None
+                    if session_id and result_capture is None:
+                        try:
+                            bound = is_bound_table(json.loads(result_str))
+                        except (TypeError, ValueError):
+                            bound = False
+                        if bound:
+                            result_capture = await nonstream_interceptor(db, self.tenant_id, session_id, tool_calls_log)
+                    if result_capture is not None:
+                        _, stamped = result_capture(block.name, result_str, block.input, result_str)
+                        try:
+                            captured_result_id = json.loads(stamped).get("result_id")
+                        except (TypeError, ValueError, AttributeError):
+                            pass
                     evidence = getattr(self, "_metabase_evidence", None)
-                    grounded_result = (
-                        evidence.observe(block.name, block.input, result_str)
-                        if evidence is not None and block.name in evidence.tool_names
-                        else None
-                    )
+                    grounded_result = None
+                    if evidence is not None:
+                        if block.name in evidence.tool_names:
+                            grounded_result = evidence.observe(
+                                block.name, block.input, result_str, result_id=captured_result_id
+                            )
+                        elif block.name == "pivot_query_result":
+                            grounded_result = evidence.observe_pivot(result_str)
 
                     if grounded_result == result_str:
                         grounded_result = None
@@ -1139,6 +1159,8 @@ class BaseSpecialistAgent(abc.ABC):
                             duration_ms=elapsed_ms,
                         )
                     )
+                    if isinstance(captured_result_id, str):
+                        tool_calls_log[-1]["result_id"] = captured_result_id
 
                     tool_results_content.append(
                         {
@@ -2575,11 +2597,26 @@ class BaseSpecialistAgent(abc.ABC):
                     # idempotent over an interceptor that already condensed a metric (the
                     # condensed string carries no suppress_llm_value flag).
                     llm_result_str = _suppress_metric_value_for_llm(llm_result_str)
+                    intercepted_result_id = None
+                    try:
+                        intercepted = json.loads(llm_result_str)
+                        if isinstance(intercepted, dict):
+                            intercepted_result_id = intercepted.get("result_id")
+                    except (ValueError, TypeError):
+                        pass
                     evidence = getattr(self, "_metabase_evidence", None)
                     if evidence is not None and block.name in evidence.tool_names:
-                        grounded_result = evidence.observe(block.name, block.input, full_result_str)
+                        grounded_result = evidence.observe(
+                            block.name, block.input, full_result_str, result_id=intercepted_result_id
+                        )
                         if grounded_result != full_result_str:
                             llm_result_str = _suppress_metric_value_for_llm(grounded_result)
+                    elif evidence is not None and block.name == "pivot_query_result":
+                        grounded_result = evidence.observe_pivot(
+                            full_result_str, displayed=intercepted_result_id is not None
+                        )
+                        if grounded_result != full_result_str:
+                            llm_result_str = grounded_result
 
                     tool_calls_log.append(
                         build_tool_call_log_entry(
@@ -2594,6 +2631,8 @@ class BaseSpecialistAgent(abc.ABC):
                             duration_ms=elapsed_ms,
                         )
                     )
+                    if isinstance(intercepted_result_id, str):
+                        tool_calls_log[-1]["result_id"] = intercepted_result_id
 
                     tool_results_content.append(
                         {
