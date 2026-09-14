@@ -2,7 +2,7 @@
 
 > Companion to `2026-09-13-open-source-single-company-pivot.md`.
 > ClickUp list: **Pivot · Open-Source Suite Studio** — https://app.clickup.com/90141183599/v/l/li/901421046222 (AI Research › AI-den).
-> Status 2026-09-13: 8 parents + 24 subtasks created; **15 subtasks (S-03…S-06, V-01…V-06, G-01…G-05) and the dependency links are pending** because the ClickUp connector's daily rate limit was hit. They are reproduced in full below so nothing is lost; a scheduled follow-up creates them when the quota resets.
+> Status 2026-09-14: **all 47 tickets exist** (8 parents + 39 subtasks), all 48 dependency links are set, and the §3.7/§3.8 amendments were posted as comments on P-01, I-05, O-07 and F-06 (V-03, G-01, G-04 carry them in their descriptions). The 2026-09-13 run stopped at 32 tickets on the ClickUp connector's daily rate limit; the remainder were created by the scheduled follow-up. The sections below stay as the text of record.
 
 ## Created
 
@@ -53,10 +53,25 @@
 | M5 | 86bbzv9d8 | Settings & Connections IA for one company (weeks 9–13) |
 | S-01 | 86bbzvbkx | HTML mock for Connections hub and Settings |
 | S-02 | 86bbzvbma | Company profile backend (fiscal year, thresholds, order-ref pattern) |
+| S-03 | 86bc0294v | Consolidate every connector onto /connections |
+| S-04 | 86bc0294y | Split the settings page; delete PlanInfoSection; Deployment/About; Pricing |
+| S-05 | 86bc02953 | Reduce the onboarding wizard; dedupe policy form |
+| S-06 | 86bc02958 | "Configured by deployment" pattern + tenant→company wording |
 | M6 | 86bbzv9fn | Selling points in revenue order (weeks 12+) |
+| V-01 | 86bc0295m | (b) ERP completeness checks: discovery, findings catalogue, HITL, learned-rule schema |
+| V-02 | 86bc0295p | Durable execution for every NetSuite write path |
+| V-03 | 86bc02972 | (e) Backfill engine, tier-aware concurrency |
+| V-04 | 86bc0297r | (a)+(c) Scheduled-workflow and export extensions |
+| V-05 | 86bc0297u | (d) Scoping skill + first PM connector |
+| V-06 | 86bc02980 | Autonomy Rung 1 |
 | GTM | 86bbzv9jt | Sell the second implementation (parallel from week 1) |
+| G-01 | 86bc02986 | Sell the second implementation (channels, discovery, offer, kill criterion) |
+| G-02 | 86bc0298f | Framework case study, references, design-partner agreement |
+| G-03 | 86bc0298t | suitestudio.ai marketing site |
+| G-04 | 86bc0298y | Partner page and NetSuite ecosystem presence |
+| G-05 | 86bc02994 | Capacity and bus factor |
 
-## Pending — create under M5 (86bbzv9d8)
+## Text of record — M5 subtasks (created 2026-09-14 under 86bbzv9d8)
 
 ### S-03 Consolidate every connector onto /connections with one card contract · priority normal
 Today NetSuite lives in Settings (`NetSuiteConnectionSection` inline at `settings/page.tsx:1571` **and** `components/settings/netsuite-connections-section.tsx` rendered at `:2889` — check whether both render), every other connector lives on `/connections`, and `CeligoConnectorCard` renders on both pages behind the same flag.
@@ -74,7 +89,7 @@ Delete `PlanInfoSection` (`:163-243`, `usePlanInfo`, `PLAN_TIERS`, `GET /tenants
 ### S-06 "Configured by deployment" read-only pattern + tenant→company wording (T0) · priority low
 Pick one pattern for installer-set values (disabled inputs inside the connector card with a "set by deployment — re-run `make secrets`" hint, recommended). Backend `GET /api/v1/settings/deployment` reporting which config keys are env-sourced (names + set/unset, never values). Wording "tenant" → "company"/"organization" in UI labels and API docs; do not rename tables or models. Blocked by S-01.
 
-## Pending — create under M6 (86bbzv9fn)
+## Text of record — M6 subtasks (created 2026-09-14 under 86bbzv9fn)
 
 ### V-01 (b) Package "ERP completeness checks": accounting-settings discovery, findings catalogue, HITL proposal flow, structured learned-rule schema · priority high · T2
 The strongest half exists: `services/transaction_ops/*` detects missing orders, amount and VAT differences, re-reads native subledger detail (`accounting_evidence.py:29-77`), enforces period-open and balanced-entry invariants (`posting_invariants.py`), produces immutable proposals a human approves, executes with a live re-read guard. Missing: it is Framework-shaped; "learned rules" are free text injected into the prompt (`tenant_learned_rule` has no link to any executor); no autonomy (V-02, V-06).
@@ -96,7 +111,7 @@ Raw material exists (metadata discovery, SuiteScript workspace tree, Celigo flow
 ### V-06 Autonomy Rung 1 · priority low · T2
 Ladder per `docs/superpowers/specs/2026-06-10-bet3-autonomous-posting-trust-model.md`. The reject action shipped (PR #193/#196; STATE.md is stale). Confirm reject is exposed in UI + chat tool so labels accrue; dashboard the false-positive rate; flip `recon_envelope_dry_run` to real auto-approval of **DB status only** for `matches` / `deterministic` / zero variance / run not closed, behind `autonomous_recon` (default off) with a kill switch and cost budget, `actor_type="system"` audit; publish the envelope and measured error rate; Rungs 2/3 remain separate decisions gated on labels and V-02. Learned-rule fast-track (V-01) may auto-approve only inside this envelope. Blocked by V-02.
 
-## Pending — create under GTM (86bbzv9jt)
+## Text of record — GTM subtasks (created 2026-09-14 under 86bbzv9jt)
 
 ### G-01 Sell the second implementation · priority urgent
 "What must be true" #1: a second NetSuite company with different subsidiaries/currencies/tax engine pays USD 15–35K for a Stripe/Shopify-to-NetSuite reconciliation implementation on the **current** code within 60 days. Target list of 30 Shopify/Stripe DTC brands on NetSuite (USD 20–200M revenue, 2–5 person accounting team, on Celigo/A2X/NetSuite Connector) from the NetSuite Professionals Slack, r/Netsuite, Shopify Plus agencies, CFO/accounting firms, Framework's network. 10 discovery calls that never mention chat: close length, payout reconciliation hours, connector failure points (payout reconciliation, FX rounding, Avalara vs NetSuite tax, partial refunds), what they pay today, and whether NetSuite Next / AI bank matching changes their interest; record which selling points anyone would pay for. Offer: capped fixed fee with change-order clause; acceptance on one specific closed month with an exclusion list; 30 days hypercare; design-partner terms (P-02). Collect security questionnaires before quoting (F-06). Log founder hours (target < 80 h by customer three). Owner: Aiden.
@@ -113,7 +128,7 @@ Join SDN at the free tier now; Built for NetSuite later. Partner program one-pag
 ### G-05 Capacity and bus factor · priority high
 Written weekly split (e.g. 2 days delivery/support, 3 days product); hours logged per customer (P-04); every setup step done twice becomes a playbook script; before customer four a part-time NetSuite implementation contractor (USD 125–175/hour) and a part-time SRE or partner firm in the on-call rota; close-week on-call as a paid add-on; no 24/7 SLA deals until a second person exists; customer-executable "Suite Studio is unavailable" runbook (F-04); monthly interrupt/hours audit; cap hosted customers at three until the rota exists.
 
-## Amendments to already-created tickets (apply as a comment or description edit when quota allows)
+## Amendments to already-created tickets (posted as ClickUp comments on 2026-09-14)
 
 Source: plan §3.7 (Oracle-side constraints), added after these tickets were created.
 
@@ -124,9 +139,7 @@ Source: plan §3.7 (Oracle-side constraints), added after these tickets were cre
 - **F-06 (86bbzvbkn)** — add HIPAA/ePHI exclusion to customer terms (AI Connector "not assessed for HIPAA"); replace the body with the compliance pack in plan §3.8: Art. 28 DPA + SCC Module 3 + UK Addendum + Annexes; public sub-processor register; Anthropic per-org zero data retention via sales with the Covered-Models (Fable/Mythos 30-day retention) disclosure and Opus 5 / Sonnet 5 as the hosted default; EU residency via Vertex `eu` multi-region (+10% tokens; no Files API/Batches on Vertex); PCI no-CHD scoping statement + PAN regex scanner on ingestion, transcripts and logs (product change); CCPA §7051(a) clauses; `EXPORT.md` + embargoed-region geo-block; **EU AI Act Article 50 "you are chatting with an AI system" disclosure in the chat UI and job emails (in force since 2 Aug 2026 — product change, S, do first)**; SOC 2 first-year budget USD 15–35K (Secureframe/Sprinto/Vanta Essentials + boutique auditor), Type 1 in 6–12 weeks.
 - **G-01 / G-04 (pending)** — incorporate the channel plan from plan §6: CPA / fractional-CFO NetSuite practices as the primary referral track (SuiteAccountants enrolment, 10–15% referral, firm keeps post-go-live support), the Stripe-gap positioning (Shopify Payments / PayPal / Amazon / multi-processor payouts that Stripe's own connector will not reconcile), `#ai-netsuite` Slack + r/Netsuite answers as SEO, SuiteWorld 2026 (Oct 25–28) as attendee with partner happy hours and a pre-event dinner, day-60 kill criterion.
 
-## Dependency links to add (waiting_on)
-
-Critical path first (create these when quota allows), then the rest.
+## Dependency links (waiting_on) — all set in ClickUp on 2026-09-14
 
 | Task | waits on |
 |---|---|
