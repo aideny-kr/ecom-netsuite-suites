@@ -81,7 +81,7 @@ async def db():
     await engine.dispose()
 
 
-async def _seed_pending_write(db, tool_input: dict) -> tuple[ChatSession, ChatMessage]:
+async def _seed_pending_write(db, tool_input: dict, *, repair_attempt: int = 0) -> tuple[ChatSession, ChatMessage]:
     """A real session + a real pending confirmation card, persisted.
 
     Persisted rather than mocked because the branch selects the card by id and
@@ -100,6 +100,7 @@ async def _seed_pending_write(db, tool_input: dict) -> tuple[ChatSession, ChatMe
         tool_name=_ext("ns_createRecord"),
         tool_input=tool_input,
         session_id=str(session.id),
+        repair_attempt=repair_attempt,
     )
     assert payload is not None
     msg = ChatMessage(
@@ -184,8 +185,15 @@ async def test_a_successful_write_settles_and_leaves_the_worklist(db):
 async def test_a_netsuite_refusal_settles_too(db):
     """A rejection is an ANSWER — the write demonstrably did not land, so it is
     not a mystery and does not belong on the worklist."""
+    # repair_attempt at the write-repair ceiling (max_attempts=2) makes this a
+    # TERMINAL failure. Without it, main's repair loop re-enters the AGENT after
+    # the ledger settles — correct product behaviour, but it needs a live LLM
+    # and this test is about the ledger, which settles first (orchestrator.py
+    # settles at ~2381; the repair decision is at ~2589).
     session, msg = await _seed_pending_write(
-        db, {"recordType": "customer", "data": json.dumps({"companyName": "Drill Rejected Co"})}
+        db,
+        {"recordType": "customer", "data": json.dumps({"companyName": "Drill Rejected Co"})},
+        repair_attempt=2,
     )
 
     await _approve(db, session, msg, json.dumps({"error": "Please enter value(s) for: Subsidiary."}))

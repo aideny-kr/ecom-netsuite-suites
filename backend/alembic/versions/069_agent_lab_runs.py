@@ -6,8 +6,9 @@ Create Date: 2026-04-18
 """
 
 import sqlalchemy as sa
-from alembic import op
 from sqlalchemy.dialects.postgresql import UUID
+
+from alembic import op
 
 # revision identifiers
 revision = "069_agent_lab_runs"
