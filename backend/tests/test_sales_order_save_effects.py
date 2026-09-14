@@ -74,6 +74,15 @@ def test_changed_cost_cannot_be_hidden_by_consistent_recalculated_profit():
     assert not valid(before, after)
 
 
+def test_stale_derived_outputs_are_not_treated_as_unchanged_evidence():
+    before, after = records()
+    after.update(estGrossProfit=before["estGrossProfit"], estGrossProfitPercent=before["estGrossProfitPercent"])
+    assert not valid(before, after)
+    before, after = records()
+    after["custbody_esc_last_modified_date"] = before["custbody_esc_last_modified_date"]
+    assert not valid(before, after)
+
+
 @pytest.mark.parametrize("field", ["estGrossProfit", "estGrossProfitPercent", "custbody_esc_last_modified_date"])
 def test_added_or_removed_save_fields_fail(field):
     before, after = records()

@@ -40,14 +40,14 @@ def comparison_snapshot(raw, before, account_id):
         return result
     try:
         profit_fields = {"estGrossProfit", "estGrossProfitPercent"}
-        if any(previous.get(k) != current.get(k) for k in profit_fields):
+        if profit_fields.intersection(current):
             if not profit_fields <= current.keys() or not all(
                 _profit_valid(values, total, raw["totalCostEstimate"])
                 for values, total in ((previous, before["total"]), (current, raw["total"]))
             ):
                 return result
         stamp = "custbody_esc_last_modified_date"
-        if previous.get(stamp) != current.get(stamp):
+        if previous.get(stamp) != current.get(stamp) or (str(account_id) == "6738075" and stamp in current):
             # Observed account-specific save stamp, not a general custom-field
             # exclusion. Other accounts retain strict equality for this field.
             if str(account_id) != "6738075":
