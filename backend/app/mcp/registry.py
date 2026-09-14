@@ -142,16 +142,26 @@ TOOL_REGISTRY = {
     },
     "pivot.query_result": {
         "description": (
-            "Pivot a query result into a crosstab table. Works with both SuiteQL and BigQuery. "
-            "Re-executes the query without row limits and pivots server-side. Use this INSTEAD "
-            "of building CASE WHEN pivot SQL manually."
+            "Pivot a query result into a crosstab table. For Metabase/Solidus, pass result_id "
+            "and control_result_id from completed queries on the chosen connector; cells retain "
+            "server aggregates (aggregation='identity', include_total=false). This path never "
+            "requeries or switches sources. For SuiteQL/BigQuery, pass query and dialect instead. "
+            "Do not mix the two input modes or build CASE WHEN pivot SQL manually."
         ),
         "execute": pivot_tool.execute,
         "params_schema": {
             "query": {
                 "type": "string",
-                "required": True,
+                "required": False,
                 "description": "SQL query to pivot. Row limits (FETCH FIRST / LIMIT) stripped automatically.",
+            },
+            "result_id": {
+                "type": "string",
+                "description": "Metabase result ID (rN) from this conversation; use instead of query/dialect.",
+            },
+            "control_result_id": {
+                "type": "string",
+                "description": "Completed ungrouped control result ID on the same Metabase connector and query scope.",
             },
             "row_field": {
                 "type": "string",
@@ -171,20 +181,23 @@ TOOL_REGISTRY = {
             "aggregation": {
                 "type": "string",
                 "required": False,
-                "default": "sum",
-                "description": "Aggregation: 'sum', 'count', 'avg', 'max', 'min'",
+                "description": (
+                    "Metabase result_id: 'identity' (default), preserving server aggregates. "
+                    "SQL query: 'sum' (default), 'count', 'avg', 'max', 'min'."
+                ),
             },
             "include_total": {
                 "type": "boolean",
                 "required": False,
-                "default": True,
-                "description": "Add a Total column",
+                "description": (
+                    "Add a Total column. Defaults false for Metabase, true for SQL. "
+                    "Metabase totals only for validated additive sum/count measures."
+                ),
             },
             "dialect": {
                 "type": "string",
                 "required": False,
-                "default": "suiteql",
-                "description": "SQL dialect: 'suiteql' or 'bigquery'",
+                "description": "SQL query mode only: 'suiteql' (default) or 'bigquery'. Omit when using result_id.",
             },
         },
     },
@@ -1054,7 +1067,7 @@ TOOL_REGISTRY = {
     # `test_celigo_chat_tools.py`'s static test).
     "celigo.integrations": {
         "description": (
-            "List the tenant's production Celigo integrations from last night's synced snapshot — "
+            "List the tenant's production Celigo integrations from the latest available synced snapshot — "
             "one row per integration with its flow counts, open-error rollup, and how recently its "
             "error counts were last verified."
         ),
@@ -1063,7 +1076,7 @@ TOOL_REGISTRY = {
     },
     "celigo.flows": {
         "description": (
-            "List production Celigo flows from last night's synced snapshot — one row per flow with "
+            "List production Celigo flows from the latest available synced snapshot — one row per flow with "
             "its schedule, whether it is on pace or stalled, and its open-error rollup. Optionally "
             "scope to one integration (by id or a name fragment) and filter to flows with open "
             "errors or a stalled run state."
@@ -1098,7 +1111,7 @@ TOOL_REGISTRY = {
     "celigo.flow_steps": {
         "description": (
             "Show how one production Celigo flow is built, in run order — one row per step or "
-            "router, from last night's synced snapshot: what it does, which branch it belongs to, "
+            "router, from the latest available synced snapshot: what it does, which branch it belongs to, "
             "its open-error count, and which named scripts attach to it (never their code)."
         ),
         "execute": celigo_flow_map.execute_flow_steps,
@@ -1112,7 +1125,7 @@ TOOL_REGISTRY = {
     },
     "celigo.flow_errors": {
         "description": (
-            "List the root causes behind a production Celigo flow's errors from last night's synced "
+            "List the root causes behind a production Celigo flow's errors from the latest available synced "
             "snapshot — one row per distinct cause with how often it has occurred, when it was first "
             "and last seen, and one sample message. Omit the flow to see root causes across every "
             "production flow, or list resolved causes instead of open ones."

@@ -241,6 +241,14 @@ async def execute(params: dict, context: dict | None = None, **kwargs: Any) -> d
     Auto-detects dialect from query syntax if not explicitly specified.
     """
     ctx = context or {}
+    if "result_id" in params:
+        from app.mcp.tools.result_pivot import execute as execute_result_pivot
+
+        return await execute_result_pivot(params, ctx)
+    if "control_result_id" in params or not isinstance(params.get("query"), str) or not params["query"].strip():
+        return {"error": "Supply a Metabase result_id, or a nonempty SuiteQL/BigQuery query. No source was queried."}
+    if params.get("aggregation", "sum") not in {"sum", "count", "avg", "min", "max"}:
+        return {"error": "SQL pivots support sum/count/avg/min/max. Identity requires a Metabase result_id."}
     dialect = params.get("dialect", "suiteql")
     query = params.get("query", "")
 

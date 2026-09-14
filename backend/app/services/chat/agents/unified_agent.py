@@ -895,10 +895,12 @@ class UnifiedAgent(BaseSpecialistAgent):
         self._transaction_workflow = False
         self._metabase_evidence = None
         self._numeric_verification_failed = False
+        if self._tool_defs is not None:
+            self._tool_defs = [tool for tool in self._tool_defs if tool.get("name") != "analytics_calculate"]
 
     def _configure_metabase_evidence(self, selection):
         from app.services.chat.metabase_context import metabase_tool_names
-        from app.services.chat.metabase_evidence import MetabaseEvidence
+        from app.services.chat.metabase_evidence import CALCULATOR_TOOL, MetabaseEvidence
         from app.services.chat.tool_inventory import available_data_sources
 
         selected = set(selection.selected_sources) or set(available_data_sources(self._tool_defs or []))
@@ -906,6 +908,7 @@ class UnifiedAgent(BaseSpecialistAgent):
             names = metabase_tool_names(self._tool_defs or [])
             if names:
                 self._metabase_evidence = MetabaseEvidence(names)
+                self._tool_defs = [*(self._tool_defs or []), CALCULATOR_TOOL]
 
     def _plan_source_selection(self, source):
         from app.services.chat.request_routing import RequestContext
@@ -930,7 +933,13 @@ class UnifiedAgent(BaseSpecialistAgent):
             route = RequestRoute(kind="conversation", continuation=True)
         else:
             try:
-                routing = await classify_request(task=task, history=history, adapter=adapter, model=model)
+                routing = await classify_request(
+                    task=task,
+                    history=history,
+                    adapter=adapter,
+                    model=model,
+                    available_sources=available_data_sources(self._tool_defs or []),
+                )
                 route = routing.route
                 self._routing_usage = routing.usage
             except Exception as exc:

@@ -164,6 +164,10 @@ def summarize_tool_result(tool_name: str, result_str: str) -> str:
                 if isinstance(collection, list):
                     row_count = len(collection)
                     break
+        if row_count is None and isinstance(parsed.get("data"), dict):
+            rows = parsed["data"].get("rows")
+            if isinstance(rows, list):
+                row_count = len(rows)
 
     # Top-level list (e.g. ns_listAllReports returns [...])
     if row_count is None and isinstance(result_str, str):
@@ -571,6 +575,14 @@ def extract_result_payload(
                 entry["definition_version"] = parsed["definition_version"]
             if "source_kind" not in entry and "source_kind" in parsed:
                 entry["source_kind"] = parsed["source_kind"]
+            from app.services.chat.metabase_results import is_bound_table
+
+            if is_bound_table(parsed):
+                entry["metabase_source"] = parsed["metabase_source"]
+            if tool_name == "pivot_query_result" and parsed.get("source_kind") == "metabase":
+                for key in ("caveats", "pivot_provenance", "pivot_config"):
+                    if key in parsed:
+                        entry[key] = parsed[key]
             return entry
 
     # --- Path 2: reportData (ns_runReport) ---
@@ -809,6 +821,32 @@ def build_tool_call_log_entry(
     if agent_name:
         entry["agent"] = agent_name
 
+    # A compact execution receipt lets history distinguish completed native
+    # queries from construction/pending results without parsing display prose.
+    # Keep handles connector-bound in the history consumer; never log raw rows
+    # or copy a server-supplied query/body into this receipt.
+    raw_name = tool_name.rsplit("__", 1)[-1]
+    if tool_name.startswith("ext__") and raw_name in {"construct_query", "query", "execute_query"}:
+        parsed = parse_tool_result_value(result_str)
+        if isinstance(parsed, dict) and not parsed.get("error") and not parsed.get("isError"):
+            if raw_name == "construct_query":
+                query = params.get("query") if isinstance(params, dict) else None
+                handle = parsed.get("query_handle")
+                if (
+                    isinstance(query, dict)
+                    and query.get("lib/type") == "mbql/query"
+                    and isinstance(handle, str)
+                    and 0 < len(handle) <= 1024
+                    and (
+                        parsed.get("status") is None
+                        or isinstance(parsed.get("status"), str)
+                        and parsed["status"] not in {"failed", "error", "canceled"}
+                    )
+                ):
+                    entry["query_receipt"] = {"constructed_handle": handle}
+            elif isinstance(parsed.get("status"), str):
+                entry["query_receipt"] = {"status": parsed["status"]}
+
     # UNIFIED SLOT CRITERION (re-gate r3, findings #1/#2): persist result_payload
     # IFF the result is extractable (condition a) AND it is a STAMPED data tool
     # (condition b — is_stamped_data_tool). This is the SAME criterion the in-turn
@@ -817,7 +855,9 @@ def build_tool_call_log_entry(
     # population EXACTLY. A payload-bearing but hidden tool (ns_listAllReports →
     # 'other' category, no stamp) is excluded from ALL THREE consumers, so the
     # dense visible-id sequence and the persisted-fallback numbering never drift.
-    if is_stamped_data_tool(tool_name):
+    from app.services.chat.metabase_results import is_bound_table
+
+    if is_stamped_data_tool(tool_name) or is_bound_table(parse_tool_result_value(result_str)):
         result_payload = extract_result_payload(tool_name, params, result_str)
         if result_payload is not None:
             entry["result_payload"] = result_payload
