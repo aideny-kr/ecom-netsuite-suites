@@ -184,3 +184,38 @@ async def test_legacy_scheduled_continuation_inherits_reporting_cycle(db, admin_
     assert child is not None
     assert child.progress_json["schedule_cycle_key"] == scheduler._cycle_key(config, prior)
     assert child.progress_json["continuation_part"] == 2
+
+
+def test_daily_coverage_counts_calendar_days_across_fall_dst():
+    start = datetime(2026, 10, 26, 7, tzinfo=timezone.utc)
+    end = datetime(2026, 11, 2, 8, tzinfo=timezone.utc)
+    assert daily_evidence.covered_days(start, end, [(start, end, "whole-week")]) == 7
+
+
+async def test_new_scheduler_run_executes_first_page_with_cycle_metadata(db, admin_user, monkeypatch):
+    from app.services.transaction_ops import scheduler, state_service
+    from tests.test_transaction_ops_state_db import seed_config
+
+    actor = admin_user[0]
+    config = await seed_config(db, actor.tenant_id, actor)
+    config.enabled = config.schedule_enabled = True
+    await db.flush()
+    monkeypatch.setattr(
+        scheduler.feature_flag_service, "list_tenants_with_flags", AsyncMock(return_value=[actor.tenant_id])
+    )
+    monkeypatch.setattr(scheduler, "_refresh_sources", AsyncMock(return_value=0))
+    monkeypatch.setattr(scheduler, "_recovery_ids", AsyncMock(return_value=[]))
+    monkeypatch.setattr(scheduler, "_dispatch", AsyncMock())
+    result = await scheduler.collect_due_runs(db, datetime.now(timezone.utc))
+    assert result["created"] == 1
+    run = (await state_service.list_runs(db, actor.tenant_id, config_id=config.id))[0]
+    key = run.progress_json["schedule_cycle_key"]
+    page = AsyncMock(return_value={"page_complete": True, "page": 1, "total_count": 0, "orders": [], "next_page": None})
+    outcome = await runner.run_investigation(
+        db, actor.tenant_id, run.id, _page_reader=page, _enabled=AsyncMock(return_value=True)
+    )
+    assert outcome["termination_reason"] == "done" and outcome["processed"] == 0
+    page.assert_awaited_once()
+    assert run.api_calls_used == 2
+    assert run.progress_json["scan_complete"] is True
+    assert run.progress_json["schedule_cycle_key"] == key

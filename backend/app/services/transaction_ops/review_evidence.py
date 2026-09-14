@@ -68,7 +68,7 @@ async def period_evidence(db, tenant_id, run_id):
 
     f, r = TransactionFinding, TransactionRun
     cohort = (
-        select(f.id, f.run_id, f.order_reference, f.report_json, f.updated_at)
+        select(f.id, f.run_id, f.order_reference, f.updated_at)
         .join(r, (f.tenant_id == r.tenant_id) & (f.run_id == r.id))
         .where(
             f.tenant_id == tenant_id,
@@ -83,6 +83,8 @@ async def period_evidence(db, tenant_id, run_id):
         .order_by(f.order_reference, f.updated_at.desc(), f.id.desc())
         .subquery()
     )
+    # Deduplicate narrow IDs before loading potentially large evidence blobs.
+    cohort = select(cohort, f.report_json).join(f, (f.id == cohort.c.id) & (f.tenant_id == tenant_id)).subquery()
     latest = current_review_evidence(cohort, tenant_id, root.config_snapshot)
     return latest, span
 

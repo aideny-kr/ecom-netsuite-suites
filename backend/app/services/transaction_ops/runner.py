@@ -50,10 +50,8 @@ class SourceScopeError(ValueError):
 
 def _initial_progress(run):
     current = dict(run.progress_json or {})
-    if current and not current.get("restart_scan"):
-        return current
     refs = list(run.params_json.get("order_references") or [])
-    return {
+    defaults = {
         "pending_refs": refs,
         "page": 1,
         "next_page": None,
@@ -80,6 +78,16 @@ def _initial_progress(run):
             else "offset"
         ),
     }
+
+    if current.get("restart_scan"):
+        # A failed scan starts with fresh cursors. Its reporting-cycle identity
+        # still prevents a continuation from opening an extra daily budget.
+        if current.get("schedule_cycle_key"):
+            defaults["schedule_cycle_key"] = current["schedule_cycle_key"]
+        return defaults
+    # New schedules carry metadata before the first provider page. Metadata is
+    # not a populated checkpoint; fill canonical counters/cursors as well.
+    return defaults | current
 
 
 def _page_progress(page, progress, params, config=None):

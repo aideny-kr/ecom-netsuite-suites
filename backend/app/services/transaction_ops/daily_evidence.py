@@ -1,6 +1,7 @@
 """Reuse scoped daily observations; saved evidence never authorizes a write."""
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import DateTime, cast, func, select
 
@@ -71,10 +72,11 @@ def covered_until(start, end, windows):
     return cursor
 
 
-def covered_days(start, end, windows):
+def covered_days(start, end, windows, timezone_name="America/Los_Angeles"):
+    zone = ZoneInfo(timezone_name)
     count, cursor = 0, start
     while cursor < end:
-        following = min(end, cursor + timedelta(days=1))
+        following = min(end, (cursor.astimezone(zone) + timedelta(days=1)).astimezone(timezone.utc))
         count += covered_until(cursor, following, windows) == following
         cursor = following
     return count

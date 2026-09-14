@@ -215,7 +215,8 @@ async def review_status(db, tenant_id, run_id):
     ]
     windows = own_windows + daily_windows
     completed_until = covered_until(span.start, span.end, windows)
-    completed_slices = covered_days(span.start, span.end, windows)
+    policy = (getattr(root, "config_snapshot", None) or {}).get("mapping_json", {}).get("reconciliation_policy") or {}
+    completed_slices = covered_days(span.start, span.end, windows, policy.get("timezone_name", "America/Los_Angeles"))
     complete = completed_until == span.end and len(runs) <= 512
     active = next((r for r in reversed(runs) if r.status in ("pending", "running")), None)
     return {
