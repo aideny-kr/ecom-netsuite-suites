@@ -4,6 +4,7 @@ import { useState } from "react";
 import type { WriteConfirmationData } from "@/lib/types";
 import { AccountingConfirmationCard } from "./accounting-confirmation-card";
 import { creditAmount } from "./sales-credit-confirmation-card";
+import { AccountingOrderPlanCard } from "./accounting-order-plan-card";
 
 export function AccountingGroupCard({
   data,
@@ -132,6 +133,12 @@ export function AccountingGroupCard({
             const p = card?.accounting_review;
             const receipt = member.resolution_receipt || card?.accounting_receipt;
             const originalReceipt = card?.accounting_receipt;
+            if (card && (receipt?.plan || p?.resolution_plan)) {
+              return <AccountingOrderPlanCard key={member.case_id} data={card} receipt={receipt} groupState={data.status}>
+                {member.reason && <p className="mb-3 text-xs leading-relaxed">{member.reason}</p>}
+                <AccountingConfirmationCard data={card} onConfirm={() => {}} onReject={() => {}} readOnly groupState={data.status} />
+              </AccountingOrderPlanCard>;
+            }
             const hasLaterReceipt = originalReceipt && receipt && originalReceipt.completion_audit_id !== receipt.completion_audit_id;
             const result =
               receipt?.status === "reconciled" ? "Reconciled" :

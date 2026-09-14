@@ -854,7 +854,27 @@ export interface EditableSlot {
   allowed?: { value: string; label: string }[] | null;
 }
 
+export interface AccountingResolutionPlan {
+  version: number;
+  order_reference: string;
+  currency?: string | null;
+  active_step: string;
+  status: string;
+  rules_fingerprint?: string;
+  steps: Array<{
+    id: string;
+    title: string;
+    status: string;
+    depends_on: string[];
+    affects_gl?: boolean;
+    current_total?: string | number | null;
+    target_total?: string | number | null;
+    note?: string;
+  }>;
+}
+
 interface AccountingReviewBase {
+  resolution_plan?: AccountingResolutionPlan;
   order_reference: string;
   record_id: string;
   case_id: string;
@@ -949,6 +969,8 @@ export interface WriteConfirmationData {
   accounting_group?: AccountingGroup | null;
   accounting_group_child?: boolean;
   accounting_receipt?: {
+    plan?: AccountingResolutionPlan;
+    balance?: { amounts?: Record<string, { source?: string | number | null; target?: string | number | null; delta?: string | number | null }> };
     status: "reconciled" | "partially_resolved" | "needs_review";
     summary: string;
     approved_by: { id: string; name: string };
