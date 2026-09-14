@@ -66,8 +66,10 @@ from app.models.workspace import (
     WorkspacePatch,
     WorkspaceRun,
 )
+from app.models.write_side_effect import WriteSideEffect
 
 __all__ = [
+    "WriteSideEffect",
     "TransactionConfig",
     "TransactionFinding",
     "TransactionOperation",

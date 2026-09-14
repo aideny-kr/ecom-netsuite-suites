@@ -48,18 +48,33 @@ from this file on 2026-08-03 and points at the code instead.
 
 ## Irreversible external writes
 
-None of this is built yet. It is design intent for the posting engine; the binding version
-lives in `docs/superpowers/plans/2026-08-02-autonomous-accounting-ops-program.md`. Kept here
-only as the shortlist you must not forget when that work starts.
+Rules 10 and 12 are now BUILT for the chat write path (2026-09-01) — the rest is still
+design intent for the posting engine, whose binding version lives in
+`docs/superpowers/plans/2026-08-02-autonomous-accounting-ops-program.md`.
 
 9. **Order irreversible steps last** — a failure before an irreversible step needs no
    compensation at all. Reordering is free; writing compensations is not.
 10. **Every external write needs a work-derived idempotency key and a side-effect log
     written *before* the call**, so a crash between send and confirm is recoverable.
+    *Built:* `chat/write_side_effect.py` (key) + `write_side_effect_repo.py` (log) +
+    `write_side_effects`. The key goes in `externalId`, where **NetSuite enforces
+    uniqueness server-side** — measured, not assumed: a repeated create returns HTTP 400
+    "This entity already exists", so a blind retry cannot duplicate and hitting the
+    refusal *proves* the original landed. Ordering is `record_attempt` → **commit** →
+    call → `settle_from_result`; only a definite answer moves a row off `attempted`.
 11. **An HMAC token proves payload integrity, not human freshness.** Any code holding the
     secret can mint one (`mutation_guard.py:100-134`); it is not evidence a person looked.
 12. **Recovery code that has never run is not recovery code.** A `kill -9` mid-write drill
-    is a required step of any posting PR's gate.
+    is a required step of any posting PR's gate. *Run 2026-09-01*, both branches: child
+    commits the attempt, dispatches, SIGKILLs itself (exit 137); a fresh process finds the
+    unsettled row and settles it by ASKING NetSuite — `written` when it landed, `rejected`
+    when it did not, zero unsettled remaining either way.
+12a. **Reconciliation may only conclude from a key that was actually SENT.** "No record
+    with this externalId" means the write never landed *only if* the payload carried that
+    externalId. For an unstamped payload the same empty answer is meaningless, and reading
+    it as "safe to retry" invites the duplicate the scheme exists to prevent. Enforced in
+    `reconcile_by_external_id` by comparing the key against `payload_json` — the payload
+    actually sent — and refusing to ask when they differ.
 
 ## Choosing a shape
 

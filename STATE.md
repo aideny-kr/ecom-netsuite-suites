@@ -34,6 +34,7 @@ Updated at the end of every task, not "later".
 
 | branch | tier | state | blocked on |
 |---|---|---|---|
+| `feat/batch-write-idempotency` | T2 | **READY FOR A MERGE DECISION** (not merged — the human's call). Phase 1: work-derived key in `externalId`, side-effect log committed BEFORE the call, settle only on a definite answer, callable+bounded resume path, `kill -9` drill re-run green in both outcomes. Gate ×4 (ceiling reached) → 1 shipped blocker + 1 I wrongly declared fixed + ~22 real defects, ALL closed. The four-round shape ("one key, three jobs") is RESOLVED — see OPEN | human merge decision |
 | `feat/dev-loop-and-harness` | T2 | 21 commits, process only — gated ×3, blockers fixed, **frozen** | nothing |
 | `feat/agent-graph-operating-model` | T2 | Track O (22 majors) + reject action, **ungated** | needs Track O decision |
 
@@ -185,6 +186,24 @@ path — OCR confidence is unquantified and the card cannot show what was misrea
 
 Written so the next session does not re-litigate these.
 
+- **2026-09-01 · Idempotency rides in `externalId`, NOT in a request header** · because
+  there is no header channel to ride in: `ns_createRecord` accepts exactly `recordType`
+  and `data`, read from the live MCP server's own schema, so a header-based scheme was
+  not a worse option — it was an impossible one. `externalId` is strictly better than the
+  header would have been: NetSuite enforces uniqueness **server-side**, so the guarantee
+  is not trusted from us. Measured live in the sandbox, not read in docs: identical create
+  twice → `recordId 5264548`, then HTTP 400 "This entity already exists", then a count of
+  1. A blind retry therefore cannot duplicate, and hitting the refusal *proves* the
+  original landed — which is why `classify_retry_result` maps a duplicate refusal to
+  WRITTEN rather than to an error.
+- **2026-09-01 · The payload is stamped at CARD BUILD, before the HMAC — never at
+  execution** · because stamping after approval would make the executed payload differ
+  from the approved one, which is the precise defect this branch already fixed once. The
+  key is therefore part of what the human sees and what the signature covers. Creates
+  only: an update targets an existing `recordId`, so stamping there would mutate a
+  business field for no benefit. A caller-supplied `externalId` is never overwritten —
+  their key is the better natural identity, and replacing it would corrupt an integration
+  we do not own.
 - **2026-09-10 · Rolling period is SHIPPED and RUNNING UNATTENDED — do not resume it** ·
   because STATE.md previously said "gate round 1 in flight" and pointed "resume here" at a
   worktree that no longer exists, which is exactly the stale-state trap this file exists to
@@ -426,6 +445,44 @@ Written so the next session does not re-litigate these.
 - **Don't add a rule to CLAUDE.md when a docstring next to the code would carry it.**
 
 ## OPEN — needs a human, blocking something
+
+### RESOLVED 2026-09-02 — "one key, three jobs" (was blocking `feat/batch-write-idempotency`)
+
+Four T2 gate rounds each found a fresh variant of ONE defect, which is what identified it as a
+design problem rather than a run of bugs:
+
+| round | variant |
+|---|---|
+| 1 | key derived from `.fields` — line items didn't participate; salesOrders posted header-only |
+| 2 | `record_type`/`connector`/`mutation_type` absent; payload-less mutations hashed to a CONSTANT; key frozen at card build |
+| 3 | the round-2 fix never reached the call site (un-asserted `.replace()`); `record_id` read from a different source than the card |
+| 4 | `record_id` dropped when the record is empty but an id exists; `merge_slot_values` never re-stamped; a synthesised key trusted as "sent" when it never was |
+
+**Root cause: one value served three jobs with three different validity conditions.**
+(1) the NetSuite dedupe token — must be IN the payload, creates only; (2) the ledger's row
+identity — needed for EVERY mutation type; (3) proof-of-landing — valid only if the key was
+actually SENT.
+
+**The fix conditions job 3 on job 1 rather than narrowing scope.** `key_was_sent(key,
+sent_payload)` is the single predicate deciding whether a uniqueness refusal proves anything, and
+BOTH the settle path and the reconcile path call it. It checks the key against `payload_json` —
+what we actually sent — so it cannot drift from reality the way an `ss-idem-` prefix check did.
+That is the "split the concept" option in substance without a schema change: "is this key in what
+we sent" is derivable, has one owner, and cannot disagree with itself.
+
+Chosen over narrowing phase 1 to creates only, because narrowing would keep the same latent
+conflict for whoever widened it later, and would drop the update/delete audit trail that a
+close-week reviewer actually wants.
+
+Not to be re-litigated: the key stays in `externalId` (no header channel exists — the MCP tool
+takes only `recordType` and `data`), and NetSuite's server-side uniqueness is the guarantee. Both
+measured live; see DECIDED.
+
+**Still open, deliberately:** `reconcile_unsettled` is callable, bounded and tested but NOT
+scheduled. Wiring it to a Beat cadence is its own slice with its own gate — per agent-graph it
+needs a cost budget and reason-enum reporting at the scheduler level too, not just inside the
+function.
+
 
 
 - **`feat/rolling-period`'s last full `verify.sh` is RED — on two auth tests this branch
