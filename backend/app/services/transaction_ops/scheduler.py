@@ -116,7 +116,7 @@ async def _recovery_ids(db, tenant_id, now):
 
 
 async def _candidate_ids(db, tenant_id, now):
-    _, _, config, run = _dependencies()
+    state, _, config, run = _dependencies()
     await set_tenant_context(db, str(tenant_id))
     latest = (
         select(run.config_id, func.max(run.created_at).label("latest_at"))
@@ -126,7 +126,10 @@ async def _candidate_ids(db, tenant_id, now):
     )
     active = exists(
         select(run.id).where(
-            run.tenant_id == tenant_id, run.config_id == config.id, run.status.in_(("pending", "running"))
+            run.tenant_id == tenant_id,
+            run.config_id == config.id,
+            run.origin.in_(("schedule", "recovery")),
+            run.status.in_(("pending", "running")),
         )
     )
     interval_seconds = config.interval_minutes * 60
@@ -138,6 +141,7 @@ async def _candidate_ids(db, tenant_id, now):
             config.tenant_id == tenant_id,
             config.enabled.is_(True),
             config.schedule_enabled.is_(True),
+            state.current_config_clause(),
             ~active,
             or_(
                 latest.c.latest_at.is_(None),
@@ -159,7 +163,12 @@ async def _schedule_history(db, tenant_id, config_id):
     active = (
         await db.execute(
             select(run.id)
-            .where(run.tenant_id == tenant_id, run.config_id == config_id, run.status.in_(("pending", "running")))
+            .where(
+                run.tenant_id == tenant_id,
+                run.config_id == config_id,
+                run.origin.in_(("schedule", "recovery")),
+                run.status.in_(("pending", "running")),
+            )
             .limit(1)
         )
     ).scalar_one_or_none()
@@ -171,6 +180,25 @@ async def _schedule_history(db, tenant_id, config_id):
         .execution_options(populate_existing=True)
     )
     return active is not None, latest.scalar_one_or_none()
+
+
+def _schedule_key(config, now):
+    policy = (getattr(config, "mapping_json", None) or {}).get("reconciliation_policy")
+    if policy:
+        from app.services.transaction_ops.periods import ReconciliationPolicy, scheduled_window
+
+        _, cutoff = scheduled_window(ReconciliationPolicy.model_validate(policy), now)
+        return f"daily:{cutoff.isoformat()}"
+    return _bucket(now, config.interval_minutes)
+
+
+def _cycle_key(config, run):
+    progress = getattr(run, "progress_json", None) or {}
+    if progress.get("schedule_cycle_key"):
+        return progress["schedule_cycle_key"]
+    # Legacy continuations inherit the root start, not their own creation day.
+    started = progress.get("continuation_started_at")
+    return _schedule_key(config, datetime.fromisoformat(started) if started else run.created_at)
 
 
 def _scope(config, latest, now):
@@ -320,11 +348,8 @@ async def collect_due_runs(db, now: datetime) -> dict:
                         # Manual/chat creates take this same lock in state.
                         config = await state.get_config(db, tenant_id, config_id, lock=True)
                         active, latest = await _schedule_history(db, tenant_id, config_id)
-                        key = _bucket(now, config.interval_minutes)
-                        already_due = latest is not None and (
-                            latest.params_json.get("evaluation_key") == key
-                            or _bucket(latest.created_at, config.interval_minutes) >= key
-                        )
+                        key = _schedule_key(config, now)
+                        already_due = latest is not None and _cycle_key(config, latest) >= key
                         policy_catchup = (
                             (getattr(config, "mapping_json", None) or {}).get("reconciliation_policy")
                             and latest is not None

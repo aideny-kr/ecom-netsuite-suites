@@ -179,6 +179,9 @@ async def test_coverage_prefers_final_continuation_over_query_order(monkeypatch)
     monkeypatch.setattr(state, "get_run", AsyncMock(return_value=prior))
     db = AsyncMock()
     db.scalars.return_value = SimpleNamespace(all=lambda: [final, prior])
+    from app.services.transaction_ops import daily_evidence
+
+    monkeypatch.setattr(daily_evidence, "completed_daily_windows", AsyncMock(return_value=[]))
     summary = await period_review.review_status(db, uuid4(), prior.id)
     assert summary["completed_until"] == params["window_end"]
 

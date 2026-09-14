@@ -1,14 +1,14 @@
 """Refresh a fixed review cohort without changing its historical findings."""
 
-from sqlalchemy import func, select, true, tuple_
+from sqlalchemy import and_, func, or_, select, tuple_
 
 from app.models.transaction_ops import TransactionFinding as Finding
 from app.models.transaction_ops import TransactionRun as Run
 
 
 def current_review_evidence(cohort, tenant_id, snapshot):
-    # A configuration revision can change mapping policy, but a different source
-    # or NetSuite business entity must never supply a replacement finding.
+    # A configuration revision may change policy, but a different source,
+    # account, entity, identity or currency cannot replace a finding.
     if not (snapshot.get("source_connection_id") or snapshot.get("source_step_id")) or not all(
         snapshot.get(key) for key in ("netsuite_account_id", "subsidiary_id", "record_type")
     ):
@@ -19,37 +19,55 @@ def current_review_evidence(cohort, tenant_id, snapshot):
     ]
     account = str(snapshot["netsuite_account_id"]).replace("_", "-").lower()
     scope.append(func.lower(func.replace(Run.config_snapshot["netsuite_account_id"].astext, "_", "-")) == account)
-    replacement = (
-        select(Finding.id, Finding.run_id, Finding.report_json, Finding.updated_at)
+    # Materialize only identity and winner keys. A per-order correlated lookup
+    # otherwise rescans the tenant's finding history thousands of times.
+    identities = (
+        select(
+            cohort.c.id,
+            cohort.c.order_reference,
+            cohort.c.updated_at,
+            cohort.c.report_json["source"]["record_id"].astext.label("source_id"),
+            cohort.c.report_json["balance"]["currency"].astext.label("currency"),
+        )
+        .cte(nesting=True)
+        .prefix_with("MATERIALIZED")
+    )
+    candidates = (
+        select(identities.c.id.label("cohort_id"), Finding.id.label("finding_id"))
+        .select_from(identities)
+        .join(Finding, (Finding.tenant_id == tenant_id) & (Finding.order_reference == identities.c.order_reference))
         .join(Run, (Run.id == Finding.run_id) & (Run.tenant_id == tenant_id))
         .where(
-            Finding.tenant_id == tenant_id,
-            Finding.order_reference == cohort.c.order_reference,
             *scope,
-            # Unknown identity is not evidence that two equal references are the
-            # same order. Keep the original finding when identity is incomplete.
             Finding.report_json["source"]["record_id"].astext != "",
-            Finding.report_json["source"]["record_id"].astext == cohort.c.report_json["source"]["record_id"].astext,
+            Finding.report_json["source"]["record_id"].astext == identities.c.source_id,
             Finding.report_json["balance"]["currency"].astext != "",
-            Finding.report_json["balance"]["currency"].astext == cohort.c.report_json["balance"]["currency"].astext,
-            tuple_(Finding.updated_at, Finding.id) > tuple_(cohort.c.updated_at, cohort.c.id),
+            Finding.report_json["balance"]["currency"].astext == identities.c.currency,
+            tuple_(Finding.updated_at, Finding.id) > tuple_(identities.c.updated_at, identities.c.id),
         )
-        .order_by(Finding.updated_at.desc(), Finding.id.desc())
-        .limit(1)
-        .correlate(cohort)
-        .lateral()
+        .distinct(identities.c.id)
+        .order_by(identities.c.id, Finding.updated_at.desc(), Finding.id.desc())
+        .subquery()
     )
-    # Project before filtering, counting or pagination so all views agree. The
-    # originating run link travels with the replacement report and amounts.
+    winners = (
+        select(
+            func.coalesce(candidates.c.finding_id, identities.c.id).label("id"),
+            identities.c.order_reference,
+        )
+        .select_from(identities.outerjoin(candidates, candidates.c.cohort_id == identities.c.id))
+        .subquery()
+    )
+    # Hydrate evidence only after selecting the latest compatible IDs. Keep the
+    # actual finding/run links, exact amounts and observation timestamps intact.
     return (
         select(
-            func.coalesce(replacement.c.id, cohort.c.id).label("id"),
-            func.coalesce(replacement.c.run_id, cohort.c.run_id).label("run_id"),
-            cohort.c.order_reference,
-            func.coalesce(replacement.c.report_json, cohort.c.report_json).label("report_json"),
-            func.coalesce(replacement.c.updated_at, cohort.c.updated_at).label("updated_at"),
+            Finding.id,
+            Finding.run_id,
+            winners.c.order_reference,
+            Finding.report_json,
+            Finding.updated_at,
         )
-        .select_from(cohort.outerjoin(replacement, true()))
+        .join(winners, (Finding.id == winners.c.id) & (Finding.tenant_id == tenant_id))
         .subquery()
     )
 
@@ -64,20 +82,27 @@ async def period_evidence(db, tenant_id, run_id):
     if not root.params_json.get("review"):
         raise state.StateError("not_a_period_review", 422)
     span = ReviewSpan.model_validate(root.params_json["review"])
+    from app.services.transaction_ops.daily_evidence import compatible_daily_runs
+
     f, r = TransactionFinding, TransactionRun
     cohort = (
-        select(f.id, f.run_id, f.order_reference, f.report_json, f.updated_at)
+        select(f.id, f.run_id, f.order_reference, f.updated_at)
         .join(r, (f.tenant_id == r.tenant_id) & (f.run_id == r.id))
         .where(
             f.tenant_id == tenant_id,
             r.tenant_id == tenant_id,
             r.config_id == root.config_id,
-            r.params_json["review"] == span.model_dump(mode="json"),
+            or_(
+                r.params_json["review"] == span.model_dump(mode="json"),
+                and_(*compatible_daily_runs(root, span)),
+            ),
         )
         .distinct(f.order_reference)
         .order_by(f.order_reference, f.updated_at.desc(), f.id.desc())
         .subquery()
     )
+    # Deduplicate narrow IDs before loading potentially large evidence blobs.
+    cohort = select(cohort, f.report_json).join(f, (f.id == cohort.c.id) & (f.tenant_id == tenant_id)).subquery()
     latest = current_review_evidence(cohort, tenant_id, root.config_snapshot)
     return latest, span
 

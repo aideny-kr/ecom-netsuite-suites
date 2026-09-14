@@ -342,7 +342,10 @@ async def test_real_scheduler_resumes_budget_cursor_once_in_next_bucket(db, admi
     runs = await state.list_runs(db, tenant_id, config_id=config_id)
     assert len(runs) == 2
     continuation = next(run for run in runs if run.id != prior.id)
-    assert continuation.progress_json == {"next_page": 4}
+    assert continuation.progress_json["next_page"] == 4
+    assert continuation.progress_json["evidence_root_id"] == str(prior.id)
+    assert continuation.progress_json["schedule_cycle_key"] == mod._bucket(next_tick, interval)
+    assert continuation.progress_json["continuation_baseline"]["processed"] == 0
     assert continuation.params_json["window_start"] == previous_scope["window_start"]
     assert continuation.params_json["window_end"] == previous_scope["window_end"]
     assert continuation.params_json["evaluation_key"] != previous_scope["evaluation_key"]
@@ -449,3 +452,64 @@ async def test_calendar_policy_continues_completed_backlog_in_current_bucket(dep
     stats = await mod.collect_due_runs(AsyncMock(), NOW)
     assert stats["created"] == 1
     assert dependencies.create_run.call_args.args[3].window_end == NOW - timedelta(days=9)
+
+
+def test_daily_cycle_is_based_on_reporting_cutoff_not_continuation_creation():
+    conf = config(mapping_json={"reconciliation_policy": {"timezone_name": "America/Los_Angeles"}})
+    started = datetime(2026, 9, 13, 18, tzinfo=timezone.utc)
+    prior = previous(
+        "budget",
+        created_at=datetime(2026, 9, 14, 2, tzinfo=timezone.utc),
+        progress_json={"continuation_started_at": started.isoformat()},
+    )
+    assert mod._cycle_key(conf, prior) == mod._schedule_key(conf, started)
+    assert mod._cycle_key(conf, prior) == mod._schedule_key(conf, datetime(2026, 9, 14, 15, tzinfo=timezone.utc))
+    assert mod._cycle_key(conf, prior) < mod._schedule_key(conf, datetime(2026, 9, 14, 16, tzinfo=timezone.utc))
+
+
+async def test_pending_manual_review_does_not_block_daily_read_schedule(db, admin_user):
+    from app.schemas.transaction_runs import ConfigControl, RunCreate
+    from app.services.transaction_ops import state_service as state
+    from tests.test_transaction_ops_state_db import seed_config
+
+    actor = admin_user[0]
+    conf = await seed_config(db, actor.tenant_id, actor)
+    await state.control_config(
+        db, actor.tenant_id, conf.id, ConfigControl(enabled=True, schedule_enabled=True), actor=actor
+    )
+    await state.create_run(
+        db, actor.tenant_id, conf.id, RunCreate(evaluation_key="manual", order_references=["R123456789"]), actor=actor
+    )
+    assert conf.id in await mod._candidate_ids(db, actor.tenant_id, NOW)
+    assert (await mod._schedule_history(db, actor.tenant_id, conf.id))[0] is False
+    await state.create_run(
+        db,
+        actor.tenant_id,
+        conf.id,
+        RunCreate(origin="schedule", evaluation_key="daily", order_references=["R123456789"]),
+    )
+    assert (await mod._schedule_history(db, actor.tenant_id, conf.id))[0] is True
+
+
+async def test_superseded_config_cannot_start_another_daily_scan(db, admin_user):
+    from app.schemas.transaction_runs import ConfigControl
+    from app.services.transaction_ops import state_service as state
+    from tests.test_transaction_ops_state_db import seed_config
+
+    actor = admin_user[0]
+    previous = await seed_config(db, actor.tenant_id, actor)
+    await state.control_config(
+        db, actor.tenant_id, previous.id, ConfigControl(enabled=True, schedule_enabled=True), actor=actor
+    )
+    from app.models.transaction_ops import TransactionConfig
+
+    values = {
+        column.name: getattr(previous, column.name)
+        for column in TransactionConfig.__table__.columns
+        if column.name not in {"id", "config_key", "supersedes_config_id", "created_at", "updated_at"}
+    }
+    successor = TransactionConfig(**values, config_key=uuid4().hex, supersedes_config_id=previous.id)
+    db.add(successor)
+    await db.flush()
+    assert previous.enabled is True
+    assert previous.id not in await mod._candidate_ids(db, actor.tenant_id, NOW)

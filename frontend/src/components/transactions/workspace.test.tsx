@@ -455,3 +455,19 @@ it("keeps queued reviews distinct from zero results and opens an earlier saved r
   expect(apiClient.post).not.toHaveBeenCalled();
   expect(apiClient.get).toHaveBeenCalledWith("/api/v1/transaction-ops/runs?limit=200&period_reviews_only=true");
 });
+
+it("shows completed daily coverage separately from enabled schedule", async () => {
+  const original = vi.mocked(apiClient.get).getMockImplementation()!;
+  vi.mocked(apiClient.get).mockImplementation(async (path, ...args) => {
+    if (path.endsWith("/daily-status")) return [{
+      config_id: "scope-a", status: "behind", checked_through: "2026-09-07",
+      last_completed_at: "2026-09-08T18:00:00Z", run_id: "daily-complete",
+    }];
+    return original(path, ...args);
+  });
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><TransactionWorkspace /></QueryClientProvider>);
+  const link = await screen.findByRole("link", { name: "Checked through 2026-09-07" });
+  expect(link).toHaveAttribute("href", "/transaction-operations/runs/daily-complete");
+  expect(screen.getByText(/Behind schedule/)).toBeInTheDocument();
+  expect(screen.getByText(/Daily checks on/)).toBeInTheDocument();
+});

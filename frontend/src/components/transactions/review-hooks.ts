@@ -64,6 +64,22 @@ export type BatchInvestigation = {
   runs: { id: string; config_id: string; case_ids: string[] }[];
   blocked: { case_id: string; code: string }[];
 };
+export type DailyStatus = {
+  config_id: string;
+  status: "paused" | "up_to_date" | "behind" | "not_verified";
+  checked_through: string | null;
+  last_completed_at: string | null;
+  run_id: string | null;
+};
+export function useDailyStatus() {
+  const access = useTransactionAccess();
+  return useQuery({
+    queryKey: ["transaction-ops", access.tenantId, "daily-status"],
+    enabled: access.allowed,
+    queryFn: () => apiClient.get<DailyStatus[]>(`${base}/daily-status`),
+    refetchInterval: 60000,
+  });
+}
 export function useReviewRuns() {
   const access = useTransactionAccess();
   return useQuery({
