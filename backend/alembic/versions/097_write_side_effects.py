@@ -53,7 +53,11 @@ revision = "097_write_side_effects"
 # 096 -> 093_report_series -> 094_dashboard_preference_series. Parenting on 096
 # (which already has a child) forked the graph into two heads. RE-PARENTED, not
 # merged — a merge migration makes `downgrade -1` ambiguous and is banned here.
-down_revision = "094_dashboard_preference_series"  # current single head (verify: alembic heads)
+down_revision = "102_schedule_retry_job"  # current single head (verify: alembic heads)
+# Re-parented on merge with main (2026-09-14): main added the scheduled-jobs
+# chain 100-102 while this branch sat unmerged, so 094 stopped being the head
+# and this revision forked the graph. RE-PARENTED, never merged — a merge
+# migration makes `downgrade -1` ambiguous and is banned here.
 branch_labels = None
 depends_on = None
 
