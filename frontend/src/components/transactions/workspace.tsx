@@ -63,6 +63,9 @@ function dateBasis(run: TransactionRun) {
 function dateBasisLabel(run: TransactionRun) {
   return dateBasis(run) === "updated_at" ? "Source update date (updated_at)" : "Order completion date (completed_at)";
 }
+function reviewKey(run: TransactionRun) {
+  return JSON.stringify([span(run).start, span(run).end, dateBasis(run)]);
+}
 export function TransactionWorkspace() {
   const access = useTransactionAccess();
   if (!access.allowed && !access.loading && !access.error)
@@ -84,6 +87,7 @@ function Workspace() {
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [pinned, setPinned] = useState<TransactionRun[]>([]);
+  const [savedReview, setSavedReview] = useState("");
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState("");
   const [tab, setTab] = useState("Orders");
@@ -119,11 +123,19 @@ function Workspace() {
     [runs.data],
   );
   const candidates = [...pinned, ...reviewRuns];
+  const savedReviews = Array.from(
+    new Map(
+      candidates
+        .filter((r) => scopes.some((c) => c.id === currentConfig(r)?.id))
+        .map((r) => [reviewKey(r), r]),
+    ).values(),
+  );
   const pinnedSelection = pinned.filter(
     (r) => !entity || (currentConfig(r)?.id || r.config_id) === entity,
   );
   const anchor =
     pinnedSelection[0] ||
+    savedReviews.find((r) => reviewKey(r) === savedReview) ||
     candidates.find((r) => scopes.some((c) => c.id === currentConfig(r)?.id));
   const selectedRuns = pinnedSelection.length
     ? pinnedSelection
@@ -184,6 +196,14 @@ function Workspace() {
         selectedRuns[0]?.config_id,
     })),
   );
+  const waitingForResults =
+    totals?.checked === 0 &&
+    selectedRuns.length > 0 &&
+    data.coverage.some((q, i) =>
+      q.data
+        ? q.data.status === "running"
+        : selectedRuns[i]?.status === "pending" || selectedRuns[i]?.status === "running",
+    );
   const failure =
     error ||
     configs.error ||
@@ -227,6 +247,7 @@ function Workspace() {
     }
     if (alive.current) {
       if (queued.length) {
+        setSavedReview(reviewKey(queued[0]));
         setPinned(queued);
         setOffset(0);
       }
@@ -305,6 +326,7 @@ function Workspace() {
               onChange={(e) => {
                 setEntity(e.target.value);
                 setPinned([]);
+                setSavedReview("");
                 setOffset(0);
                 setHistoryOffset(0);
               }}
@@ -367,7 +389,7 @@ function Workspace() {
         {anchor && (
           <p className="mt-2 text-[13px] text-muted-foreground">
             Viewing {dateLabel(span(anchor).start)} →{" "}
-            {dateLabel(span(anchor).end)} (end exclusive). {dateBasisLabel(anchor)}. Results available for{" "}
+            {dateLabel(span(anchor).end)} (end exclusive). {dateBasisLabel(anchor)}. Review jobs available for{" "}
             {selectedRuns.length} of{" "}
             {Math.max(scopes.length, selectedRuns.length)} selected entities.
           </p>
@@ -378,6 +400,32 @@ function Workspace() {
             results.
           </p>
         )}
+        {savedReviews.length > 0 && (
+          <label className="mt-4 flex flex-wrap items-center gap-3 text-[13px]">
+            Saved review results
+            <select
+              aria-label="Saved review results"
+              className={`${input} max-w-full`}
+              value={anchor ? reviewKey(anchor) : ""}
+              disabled={starting}
+              onChange={(e) => {
+                setSavedReview(e.target.value);
+                setPinned([]);
+                setOffset(0);
+                setSearch("");
+                setStatus("");
+                setSelectedCases([]);
+              }}
+            >
+              {savedReviews.map((r) => (
+                <option key={reviewKey(r)} value={reviewKey(r)}>
+                  {dateLabel(span(r).start)} → {dateLabel(span(r).end)} · {dateBasisLabel(r)}
+                </option>
+              ))}
+            </select>
+            <span className="text-muted-foreground">Open an earlier review while a new scan is queued or running.</span>
+          </label>
+        )}
         <div className="mt-3 flex flex-wrap gap-x-6 gap-y-2 text-[13px]">
           {data.coverage.map((q, i) => (
             <span key={selectedRuns[i].id}>
@@ -385,7 +433,7 @@ function Workspace() {
               {q.error
                 ? "Coverage unavailable"
                 : q.data
-                  ? `${q.data.complete ? "Scan complete" : q.data.status === "running" ? "Scanning" : "Needs attention"} · ${q.data.completed_slices} daily slices complete`
+                  ? `${q.data.complete ? "Scan complete" : (q.data.current_run_status || selectedRuns[i]?.status) === "pending" ? "Queued" : q.data.status === "running" ? "Scanning" : "Needs attention"} · ${q.data.completed_slices} daily slices complete`
                   : "Loading coverage…"}
             </span>
           ))}
@@ -426,12 +474,18 @@ function Workspace() {
               data-testid={`stat-${key}`}
               className="my-2 text-3xl font-semibold tabular-nums"
             >
-              {totals?.[key] ?? "—"}
+              {waitingForResults ? "—" : totals?.[key] ?? "—"}
             </p>
             <p className="text-xs text-muted-foreground">{note}</p>
           </div>
         ))}
       </div>
+      {waitingForResults && (
+        <p role="status" className="rounded-xl border bg-muted/20 p-4 text-[13px]">
+          Waiting for this review’s first results. Queued reviews start when a scan worker is available.
+          You can open saved review results above or use Cases to inspect existing issues.
+        </p>
+      )}
       <div
         role="tablist"
         aria-label="Transaction views"

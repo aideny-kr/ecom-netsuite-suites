@@ -230,6 +230,7 @@ async def review_status(db, tenant_id, run_id):
         "run_count": len(runs[:512]),
         "truncated": len(runs) > 512,
         "current_run_id": str(active.id) if active else str(slices[max(slices)].id),
+        "current_run_status": active.status if active else slices[max(slices)].status,
         "slices": [
             {
                 "start": start.isoformat(),

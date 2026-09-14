@@ -45,6 +45,7 @@ export type ReviewResults = {
   };
 };
 export type Coverage = {
+  current_run_status?: "pending" | "running" | "finished";
   complete: boolean;
   status: string;
   completed_slices: number;
@@ -68,7 +69,7 @@ export function useReviewRuns() {
   return useQuery({
     queryKey: ["transaction-ops", access.tenantId, "review-runs"],
     enabled: access.allowed,
-    queryFn: () => apiClient.get<TransactionRun[]>(`${base}/runs?limit=200`),
+    queryFn: () => apiClient.get<TransactionRun[]>(`${base}/runs?limit=200&period_reviews_only=true`),
     refetchInterval: 10000,
   });
 }
