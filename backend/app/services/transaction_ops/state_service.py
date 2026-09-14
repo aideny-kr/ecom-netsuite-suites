@@ -379,6 +379,22 @@ async def create_run(
         ):
             raise StateError("invalid_run_continuation")
         initial_progress = _bounded_json(previous.progress_json)
+        if request.origin == "schedule":
+            initial_progress["evidence_root_id"] = str(
+                uuid.UUID(
+                    initial_progress.get("evidence_root_id")
+                    or initial_progress.get("continuation_root_id")
+                    or str(previous.id)
+                )
+            )
+            if automatic_continuation and not initial_progress.get("schedule_cycle_key"):
+                from app.services.transaction_ops.scheduler import _cycle_key
+
+                initial_progress["schedule_cycle_key"] = _cycle_key(config, previous)
+            if not automatic_continuation:
+                # A new scheduled cycle must earn subsequent parts through new
+                # work; cumulative evidence is not new productivity.
+                initial_progress["schedule_cycle_key"] = request.evaluation_key
         for field in list(initial_progress):
             if field.startswith("continuation_"):
                 initial_progress.pop(field)
@@ -416,6 +432,13 @@ async def create_run(
             initial_progress.update(metadata)
     elif automatic_continuation:
         raise StateError("invalid_run_continuation")
+    if request.origin == "schedule":
+        initial_progress.setdefault("schedule_cycle_key", request.evaluation_key)
+        if resume_from_run_id is not None and not automatic_continuation:
+            initial_progress["continuation_baseline"] = {
+                field: initial_progress.get(field, 0)
+                for field in ("processed", "scan_count", "refund_scan_count", "outside_scope", "destination_scan_count")
+            }
     row = TransactionRun(
         tenant_id=tenant_id,
         config_id=config.id,
@@ -673,7 +696,11 @@ async def record_finding(db, tenant_id, run_id, order_reference, report_json, *,
 
 async def unseen_references(db, tenant_id, run_id, references):
     run = await get_run(db, tenant_id, run_id)
-    root = uuid.UUID((run.progress_json or {}).get("continuation_root_id") or str(run.id))
+    root = uuid.UUID(
+        (run.progress_json or {}).get("evidence_root_id")
+        or (run.progress_json or {}).get("continuation_root_id")
+        or str(run.id)
+    )
     seen = set(
         (
             await db.scalars(
@@ -687,7 +714,8 @@ async def unseen_references(db, tenant_id, run_id, references):
                     TransactionFinding.order_reference.in_(references),
                     TransactionRun.config_id == run.config_id,
                     (TransactionRun.id == root)
-                    | (TransactionRun.progress_json["continuation_root_id"].astext == str(root)),
+                    | (TransactionRun.progress_json["continuation_root_id"].astext == str(root))
+                    | (TransactionRun.progress_json["evidence_root_id"].astext == str(root)),
                 )
             )
         ).all()

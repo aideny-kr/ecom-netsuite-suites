@@ -376,6 +376,25 @@ async def run_investigation(
             {"source_connection_id": UUID(config["source_connection_id"])} if config.get("source_connection_id") else {}
         )
         mapping = TransactionMapping.model_validate(config["mapping_json"])
+        if not (await state.get_config(db, tenant_id, run.config_id)).enabled:
+            return await finish("stall")
+        if run.params_json.get("review"):
+            from app.schemas.transaction_runs import ReviewSpan
+            from app.services.transaction_ops.daily_evidence import completed_daily_windows, covered_until
+
+            span = ReviewSpan.model_validate(run.params_json["review"])
+            daily = await completed_daily_windows(db, run, span)
+            start, end = (_time(run.params_json[k]) for k in ("window_start", "window_end"))
+            if covered_until(start, end, daily) == end:
+                progress.update(
+                    scan_complete=True,
+                    refund_scan_complete=True,
+                    destination_scan_complete=True,
+                    pending_refs=[],
+                    reused_daily_run_ids=[row[2] for row in daily],
+                )
+                await save()
+                return await finish("done")
         await save()
         while True:
             if not (await state.get_config(db, tenant_id, run.config_id)).enabled:

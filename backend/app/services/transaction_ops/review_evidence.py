@@ -1,6 +1,6 @@
 """Refresh a fixed review cohort without changing its historical findings."""
 
-from sqlalchemy import func, select, true, tuple_
+from sqlalchemy import and_, func, or_, select, true, tuple_
 
 from app.models.transaction_ops import TransactionFinding as Finding
 from app.models.transaction_ops import TransactionRun as Run
@@ -64,6 +64,8 @@ async def period_evidence(db, tenant_id, run_id):
     if not root.params_json.get("review"):
         raise state.StateError("not_a_period_review", 422)
     span = ReviewSpan.model_validate(root.params_json["review"])
+    from app.services.transaction_ops.daily_evidence import compatible_daily_runs
+
     f, r = TransactionFinding, TransactionRun
     cohort = (
         select(f.id, f.run_id, f.order_reference, f.report_json, f.updated_at)
@@ -72,7 +74,10 @@ async def period_evidence(db, tenant_id, run_id):
             f.tenant_id == tenant_id,
             r.tenant_id == tenant_id,
             r.config_id == root.config_id,
-            r.params_json["review"] == span.model_dump(mode="json"),
+            or_(
+                r.params_json["review"] == span.model_dump(mode="json"),
+                and_(*compatible_daily_runs(root, span)),
+            ),
         )
         .distinct(f.order_reference)
         .order_by(f.order_reference, f.updated_at.desc(), f.id.desc())

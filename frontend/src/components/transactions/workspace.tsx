@@ -33,6 +33,7 @@ import { OrdersPage } from "./orders-page";
 import { configForRun } from "./review-scope";
 import {
   useReviewRuns,
+  useDailyStatus,
   useRunHistory,
   usePeriodData,
   useCases,
@@ -80,6 +81,7 @@ function Workspace() {
   const access = useTransactionAccess();
   const configs = useTransactionConfigs();
   const runs = useReviewRuns();
+  const daily = useDailyStatus();
   const start = useStartPeriodReview();
   const investigate = useBulkCaseInvestigation();
   const [entity, setEntity] = useState("");
@@ -386,6 +388,18 @@ function Workspace() {
           · Replica freshness is unverified; a completed scan is not financial
           certification.
         </p>
+        <div className="mt-2 flex flex-wrap gap-x-6 gap-y-2 text-[13px]" aria-label="Daily scan coverage">
+          {scopes.map((scope) => {
+            const coverage = Array.isArray(daily.data) ? daily.data.find((row) => row.config_id === scope.id) : undefined;
+            const label = coverage?.checked_through ? `Checked through ${coverage.checked_through}` : "No completed daily scan verified";
+            const state = coverage?.status === "behind" ? " · Behind schedule" : coverage?.status === "paused" ? " · Paused" : "";
+            return <span key={scope.id}>
+              {scope.name}: {daily.error ? "Daily coverage unavailable" : daily.isLoading ? "Loading daily coverage…" : <>
+                {coverage?.run_id ? <Link className="text-primary underline" href={runLink(coverage.run_id)}>{label}</Link> : label}{state}
+              </>}
+            </span>;
+          })}
+        </div>
         {anchor && (
           <p className="mt-2 text-[13px] text-muted-foreground">
             Viewing {dateLabel(span(anchor).start)} →{" "}

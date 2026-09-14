@@ -84,6 +84,13 @@ async def reconcile_source(request: SourceReconciliation, user: Reader, db: Data
         raise HTTPException(status_code=422, detail={"code": "invalid_reconciliation_window"}) from None
 
 
+@router.get("/daily-status")
+async def daily_status(user: Reader, db: Database):
+    from app.services.transaction_ops.daily_status import daily_status as read_status
+
+    return await read_status(db, user.tenant_id)
+
+
 @router.get("/configs", response_model=list[ConfigOut])
 async def list_configs(user: Reader, db: Database):
     return await service.list_configs(db, user.tenant_id)

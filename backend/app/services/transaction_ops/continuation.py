@@ -3,7 +3,7 @@
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.models.audit import AuditEvent
 from app.models.transaction_ops import TransactionRun
@@ -103,6 +103,11 @@ async def continue_budget_run(db, tenant_id, run_id, *, now=None):
                 TransactionRun.tenant_id == tenant_id,
                 TransactionRun.config_id == config.id,
                 TransactionRun.status.in_(("pending", "running")),
+                # Daily reads and manual reviews have independent finite cycles.
+                # Recovery work keeps its existing serialization semantics.
+                or_(TransactionRun.origin == "schedule", TransactionRun.origin == "recovery")
+                if previous.origin == "schedule"
+                else TransactionRun.origin != "schedule",
             )
             .limit(1)
         )
