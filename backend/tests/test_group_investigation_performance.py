@@ -132,7 +132,8 @@ async def test_no_eligible_group_produces_audited_handoff_not_empty_card_and_reu
     db.add.assert_not_called()
 
 
-async def test_actual_agent_continues_after_zero_candidates_without_confirmation():
+@pytest.mark.parametrize("block_saved_read", [False, True])
+async def test_actual_agent_continues_after_zero_candidates_without_confirmation(block_saved_read):
     db = AsyncMock(spec=AsyncSession)
     case_id, observation_id = str(uuid4()), str(uuid4())
     db.info = {
@@ -176,8 +177,13 @@ async def test_actual_agent_continues_after_zero_candidates_without_confirmation
     adapter.build_assistant_message.return_value = {"role": "assistant", "content": []}
     adapter.build_tool_result_message.side_effect = lambda results: {"role": "user", "content": results}
     execute = AsyncMock(return_value=json.dumps({"success": True, "financial_writes": 0}))
+
+    def evaluate(_policy, _tool, params):
+        return {"allowed": not (block_saved_read and params.get("observation_id")), "reason": "blocked"}
+
     with (
         patch("app.services.policy_service.get_active_policy", AsyncMock(return_value=None)),
+        patch("app.services.policy_service.evaluate_tool_call", evaluate),
         patch("app.services.chat.tools.execute_tool_call", execute),
         patch("app.services.transaction_ops.accounting_group.prepare_group_confirmation", AsyncMock(return_value=None)),
         patch("app.services.transaction_ops.tax_correction.candidate_confirmation", AsyncMock(return_value=None)),
@@ -188,19 +194,19 @@ async def test_actual_agent_continues_after_zero_candidates_without_confirmation
                 agent, task="Fix all orders in this group", context={}, db=db, adapter=adapter, model="test-model"
             )
         ]
-    assert execute.await_count == 2
+    assert execute.await_count == (1 if block_saved_read else 4)
     assert not any(kind == "confirmation_required" for kind, _ in events)
     assert any("application evidence" in str(value) for kind, value in events if kind == "text")
     sent = adapter.build_tool_result_message.call_args_list[0].args[0]
     assert json.loads(sent[-1]["content"])["status"] == "investigation_required"
-    assert requests[1]["tool_choice"] == {"type": "tool", "name": original_tool["name"]}
-    schema = requests[1]["tools"][0]["input_schema"]
-    assert schema["properties"]["observation_id"]["enum"] == [observation_id]
-    assert schema["properties"]["case_id"]["enum"] == [case_id]
-    assert schema["properties"]["section"]["enum"] == ["source"]
-    assert schema["required"] == ["case_id", "observation_id", "section"]
-    assert requests[2]["tool_choice"] is None
-    assert requests[2]["tools"] == [original_tool]
+    details = json.loads(sent[-1]["content"])["representative_observations"]
+    assert [d["section"] for d in details] == ["source", "documents"]
+    if block_saved_read:
+        assert all("Policy blocked" in d["result_preview"] for d in details)
+    assert all(d["case_id"] == case_id and d["observation_id"] == observation_id for d in details)
+    assert all(request["tool_choice"] is None for request in requests)
+    assert all(request["tools"] == [original_tool] for request in requests)
+    assert len({request["thinking_level"] for request in requests}) == 1
     assert original_tool["input_schema"] == {"type": "object"}
 
 
@@ -213,9 +219,9 @@ async def test_actual_agent_continues_after_zero_candidates_without_confirmation
     ],
 )
 def test_followup_does_not_invent_tools_or_observations(definitions, batches):
-    from app.services.transaction_ops.group_investigation import followup_read_tool
+    from app.services.transaction_ops.group_investigation import representative_reads
 
-    assert followup_read_tool({"batches": batches}, definitions) is None
+    assert representative_reads({"batches": batches}, definitions) == []
 
 
 async def test_saved_observation_is_tenant_case_scoped_and_audited(db, tenant_a, tenant_b):
@@ -338,3 +344,14 @@ async def test_actual_evidence_tool_uses_full_reads_for_supported_shapes_and_ref
     assert refresh.await_count == 1
     assert collect.await_args.kwargs == ({"posting_detail": False} if kind == "unsupported" else {})
     assert result["accounting_evidence"]["source_refresh"] == source
+
+
+def test_representative_reads_bound_work_and_preserve_exact_case_observation_pairs():
+    from app.services.transaction_ops.group_investigation import representative_reads
+
+    batches = [{"orders": [{"case_id": str(i), "audit_id": "audit-" + str(i)}]} for i in range(55)]
+    reads = representative_reads({"batches": batches}, [{"name": "transaction_ops_accounting_evidence"}])
+    assert len(reads) == 8
+    assert {p["case_id"] for p in reads} == {"0", "1", "2", "3"}
+    assert all(p["observation_id"] == "audit-" + p["case_id"] for p in reads)
+    assert {p["section"] for p in reads} == {"source", "documents"}

@@ -3,38 +3,24 @@
 from decimal import Decimal, InvalidOperation
 
 
-def followup_read_tool(investigation, definitions):
-    """One bounded historical read before an unsupported group can end in prose.
-
-    Narrow an already-authorized tool to one observed representative. This is
-    not write authority and cannot request a fresh upstream collection. Normal
-    tool selection resumes after this one hop, even if the read fails.
-    """
-    from copy import deepcopy
-
-    tool = next((t for t in definitions or [] if t.get("name") == "transaction_ops_accounting_evidence"), None)
-    orders = [order for batch in investigation.get("batches", []) for order in batch.get("orders", [])]
-    order = next((o for o in orders if o.get("case_id") and o.get("audit_id")), None)
-    if tool is None or order is None:
-        return None
-    result = deepcopy(tool)
-    result["description"] = (
-        "Inspect this representative's saved source line items and adjustments now to identify the cause of the "
-        "group variance. This read uses the existing observation, makes no upstream calls and cannot propose a write. "
-        "Afterwards continue targeted investigation as needed; do not ask permission to investigate. "
-        "Do not extrapolate this representative's treatment to unverified orders."
-    )
-    result["input_schema"] = {
-        "type": "object",
-        "properties": {
-            "case_id": {"type": "string", "enum": [str(order["case_id"])]},
-            "observation_id": {"type": "string", "enum": [str(order["audit_id"])]},
-            "section": {"type": "string", "enum": ["source"]},
-        },
-        "required": ["case_id", "observation_id", "section"],
-        "additionalProperties": False,
-    }
-    return result
+def representative_reads(investigation, definitions):
+    """Bounded saved detail reads, never a new collector or executable proposal."""
+    if not any(t.get("name") == "transaction_ops_accounting_evidence" for t in definitions or []):
+        return []
+    reads = []
+    seen = set()
+    for batch in investigation.get("batches", []):
+        order = next((o for o in batch.get("orders", []) if o.get("case_id") and o.get("audit_id")), None)
+        if order is None or str(order["case_id"]) in seen:
+            continue
+        seen.add(str(order["case_id"]))
+        for section in ("source", "documents"):
+            reads.append(
+                {"case_id": str(order["case_id"]), "observation_id": str(order["audit_id"]), "section": section}
+            )
+        if len(seen) == 4:
+            break
+    return reads
 
 
 def difference(left, right):
