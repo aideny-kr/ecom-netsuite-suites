@@ -40,6 +40,7 @@ import pytest
 from app.services.chat.agents.unified_agent import UnifiedAgent
 from app.services.chat.llm_adapter import LLMResponse, TokenUsage, ToolUseBlock
 from app.services.chat.request_routing import RequestRoute, RoutingResult
+from app.services.chat.tools import build_local_tool_definitions
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -103,6 +104,12 @@ def agent():
 
 # Common patches for all tests
 _PATCHES = {
+    # These fixtures replay connected NetSuite query responses. Declare that
+    # inventory explicitly instead of discovering a disconnected mock database.
+    "app.services.chat.tools.build_all_tool_definitions": {
+        "new_callable": AsyncMock,
+        "return_value": [tool for tool in build_local_tool_definitions() if tool["name"] != "bigquery_sql"],
+    },
     # These replay fixed query/tool responses. Request classification has its
     # own real UnifiedAgent coverage in test_request_routing and source tests.
     "app.services.chat.request_routing.classify_request": {
