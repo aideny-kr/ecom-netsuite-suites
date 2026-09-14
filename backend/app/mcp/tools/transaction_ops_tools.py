@@ -404,10 +404,17 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
 
     context = kwargs.get("context") or {}
     try:
-        if set(params) != {"case_id"}:
+        if "case_id" not in params or set(params) - {"case_id", "observation_id", "section"}:
+            raise _ToolError("invalid_parameters")
+        if "section" in params and "observation_id" not in params:
             raise _ToolError("invalid_parameters")
         db, tenant_id, actor = await _authorize(context, create=False)
         case = await case_service.get_case(db, tenant_id, uuid.UUID(str(params["case_id"])))
+        if "observation_id" in params:
+            from app.services.transaction_ops.group_investigation import read_observation
+
+            db.info.pop("accounting_correction_candidate", None)
+            return await read_observation(db, tenant_id, actor.id, case.id, params, context.get("correlation_id"))
         review = await accounting_context(db, tenant_id, case.scope_json, case.latest_report_json)
         import json
 
@@ -525,7 +532,7 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
             plan = proposal_plan(correction, case.latest_report_json)
             correction["resolution_plan"] = plan
             evidence["resolution_plan"] = plan
-        await log_event(
+        evidence_event = await log_event(
             db,
             tenant_id,
             category="transaction_ops",
@@ -536,6 +543,7 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
             correlation_id=context.get("correlation_id"),
             payload={"evidence": evidence, "correction_candidate": correction},
         )
+        evidence["audit_id"] = str(evidence_event.id)
         return {"success": True, "case_id": str(case.id), "accounting_evidence": evidence}
     except (ValueError, _ToolError, StateError, NetSuiteEvidenceError) as exc:
         return {"success": False, "error": "Accounting case or scoped configuration unavailable.", "reason": str(exc)}

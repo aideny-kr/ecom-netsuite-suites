@@ -106,11 +106,17 @@ def build_group_card(members, selection, session_id):
 
 async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id, session_id, tools, policy, **_):
     from app.mcp.tools.transaction_ops_tools import execute_accounting_evidence
+    from app.services.transaction_ops.group_investigation import handoff, summarize
+    from app.services.transaction_ops.read_batch import reference_read_batch
     from app.services.transaction_ops.tax_correction import candidate_confirmation
 
     selection = db.info.pop("accounting_group_selection", None)
     if not selection:
         raise ValueError("Refresh the scoped issue group before preparing corrections.")
+
+    previous = db.info.get("accounting_group_investigation")
+    if previous and previous.get("scope") == selection["scope"] and previous.get("group_id") == selection["group_id"]:
+        return None
 
     async def prepare(member):
         async with async_session_factory() as child_db:
@@ -123,10 +129,13 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
                 session_id=session_id,
             )
             routes = []
+            investigation_evidence = {}
             try:
                 async with asyncio.timeout(120):
                     evidence = await execute_accounting_evidence({"case_id": member["case_id"]}, context=context)
-                    routes = (evidence.get("accounting_evidence") or {}).get("investigation_routes", [])
+                    collected = evidence.get("accounting_evidence") or {}
+                    routes = collected.get("investigation_routes", [])
+                    investigation_evidence = summarize(collected)
                     prepared = (
                         await candidate_confirmation(
                             db=child_db,
@@ -170,14 +179,35 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
                 payload={"reason": reason, "investigation_routes": routes, "financial_writes": 0},
             )
             await child_db.commit()
-            return {**member, "reason": reason, "investigation_routes": routes}
+            return {
+                **member,
+                "reason": reason,
+                "investigation_routes": routes,
+                "investigation_evidence": investigation_evidence,
+            }
 
     try:
-        async with asyncio.timeout(PREPARATION_TIMEOUT):
-            members = await bounded_map(selection["members"], prepare)
+        with reference_read_batch() as reads:
+            async with asyncio.timeout(PREPARATION_TIMEOUT):
+                members = await bounded_map(selection["members"], prepare)
     except (asyncio.CancelledError, TimeoutError):
         await asyncio.shield(record_preparation_interrupted(tenant_id, actor_id, session_id, correlation_id, selection))
         raise
+    if not any(member.get("card") for member in members):
+        investigation = handoff(selection, members, reads.hits)
+        db.info["accounting_group_investigation"] = investigation
+        await log_event(
+            db,
+            tenant_id,
+            category="transaction_ops",
+            action="accounting_group.investigation_required",
+            actor_id=actor_id,
+            resource_type="chat_session",
+            resource_id=session_id,
+            correlation_id=correlation_id,
+            payload=investigation,
+        )
+        return None
     card = build_group_card(members, selection, session_id)
     group = card.accounting_group
     params = card.tool_input

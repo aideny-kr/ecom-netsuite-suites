@@ -133,10 +133,18 @@ TOOL_REGISTRY = {
         "invoices/cash sales, tax defaults versus transaction rates, posting-period locks, GL and deposits. "
         "Returns explicit missing evidence; never infers tax legality, root cause or available cash. Read-only. "
         "If correction_candidate is present, use its exact tool/params to display the human approval card; "
-        "do not execute or substitute another rate. Reuse returned sections and investigate only missing evidence.",
+        "do not execute or substitute another rate. Reuse returned sections and investigate only missing evidence. "
+        "To inspect an existing observation without repeating network reads, supply its observation_id and section. "
+        "Saved observations are historical investigation evidence and cannot create an approval candidate.",
         "execute": transaction_ops_tools.execute_accounting_evidence,
         "params_schema": {
-            "case_id": {"type": "string", "required": True, "description": "Durable case UUID from status"}
+            "observation_id": {"type": "string", "description": "Exact audit_id from previously collected evidence."},
+            "section": {
+                "type": "string",
+                "enum": ["source", "documents", "applications", "assessment"],
+                "description": "Saved evidence section; defaults to assessment.",
+            },
+            "case_id": {"type": "string", "required": True, "description": "Durable case UUID from status"},
         },
     },
     "transaction_ops.status": {

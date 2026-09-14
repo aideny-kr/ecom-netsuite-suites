@@ -2742,6 +2742,19 @@ class BaseSpecialistAgent(abc.ABC):
                                 ),
                             )
                             return
+                        if not prepared and block.name == "transaction_ops_accounting_group":
+                            investigation = db.info.get("accounting_group_investigation")
+                            if investigation:
+                                # Feed the actual evidence back into the same agent loop.
+                                # A zero-candidate result is not a confirmation or success.
+                                tool_results_content[-1]["content"] = json.dumps(investigation, default=str)
+                                yield (
+                                    "tool_status",
+                                    (
+                                        f"Evidence checked for {investigation['case_count']} orders. "
+                                        "Investigating why corrections are not ready…"
+                                    ),
+                                )
                         if prepared:
                             card, note = prepared
                             self._write_confirmation_emitted = True

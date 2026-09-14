@@ -1052,6 +1052,10 @@ class UnifiedAgent(BaseSpecialistAgent):
         )
         self._selected_user_sources = selection.selected_sources
         self._transaction_workflow = selection.transaction_workflow
+        if self._transaction_workflow:
+            from app.services.chat.transaction_context import transaction_tools
+
+            self._tool_defs = transaction_tools(self._tool_defs or [])
         self._configure_metabase_evidence(selection)
         if selection.question:
             return self._finish_source_routing(
@@ -1124,6 +1128,10 @@ class UnifiedAgent(BaseSpecialistAgent):
         )
         self._selected_user_sources = selection.selected_sources
         self._transaction_workflow = selection.transaction_workflow
+        if self._transaction_workflow:
+            from app.services.chat.transaction_context import transaction_tools
+
+            self._tool_defs = transaction_tools(self._tool_defs or [])
         self._configure_metabase_evidence(selection)
         if selection.question:
             yield "text", selection.question
