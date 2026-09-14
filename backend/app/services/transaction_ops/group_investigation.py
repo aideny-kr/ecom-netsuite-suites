@@ -57,7 +57,11 @@ def observation_preview(raw, limit=4000):
                         )
                     projected.append(item)
                 source["line_items"] = projected
-                result["projection"] = "Source line financial fields retained; verbose catalog metadata omitted."
+                source.pop("payments", None)
+                result["projection"] = (
+                    "Source line financial fields and payment totals/state retained; verbose catalog metadata and "
+                    "individual payment details omitted. Full details remain in the saved observation."
+                )
         raw = json.dumps(result, default=str, separators=(",", ":"))
     except (ValueError, TypeError, AttributeError):
         pass
@@ -89,10 +93,20 @@ def summarize(evidence):
             invoice.get("total"), invoice.get("taxTotal")
         ):
             reasons.append("Net amounts also differ; changing only the tax rate cannot reconcile this order.")
-        adjustments = [a for line in source.get("line_items", []) for a in line.get("adjustments", [])]
-        if any(a.get("finalized") is not True for a in adjustments + source.get("adjustments", [])):
+        lines = source.get("line_items")
+        order_adjustments = source.get("adjustments")
+        collections = [order_adjustments] + [
+            line.get("adjustments") if isinstance(line, dict) else None
+            for line in (lines if isinstance(lines, list) else [])
+        ]
+        if not isinstance(lines, list) or any(
+            not isinstance(values, list) or any(not isinstance(a, dict) for a in values) for values in collections
+        ):
+            reasons.append("Source adjustment detail is incomplete; missing values do not establish absence.")
+        adjustments = [a for values in collections if isinstance(values, list) for a in values if isinstance(a, dict)]
+        if any(a.get("finalized") is not True for a in adjustments):
             reasons.append("Source includes unfinalized adjustments; establish the finalized accounting basis.")
-        if not source.get("adjustments"):
+        if order_adjustments == []:
             reasons.append("No order-level source adjustment supports the configured sales-discount/credit recipe.")
         if difference(invoice.get("amountPaid"), 0) not in (None, "0"):
             reasons.append("Payment is recorded; inspect credits and applications before choosing the treatment.")

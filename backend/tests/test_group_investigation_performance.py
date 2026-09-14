@@ -460,3 +460,25 @@ def test_group_counts_are_exact_nonoverlapping_and_source_lines_fit_the_preview(
     assert preview["evidence"]["total"] == "1200.12"
     assert all(l["price"] == "100.01" and l["adjustments"][0]["finalized"] for l in preview["evidence"]["line_items"])
     assert "Preview truncated" in observation_preview(raw, limit=30)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        {},
+        {"adjustments": None, "line_items": None},
+        {"adjustments": None, "line_items": []},
+        {"line_items": [{"adjustments": None}]},
+        {"line_items": [{}]},
+        {"line_items": [None]},
+    ],
+)
+def test_unknown_adjustment_collections_do_not_become_absence_or_crash(source):
+    result = summarize(
+        {
+            "source_refresh": {"total": "1.01", "tax_total": "0.01", **source},
+            "sections": {"posting_documents": [{"record_type": "invoice", "total": "1.01", "taxTotal": "0.01"}]},
+        }
+    )
+    assert any("detail is incomplete" in r for r in result["reasons"])
+    assert not any("No order-level" in r for r in result["reasons"])
