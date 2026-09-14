@@ -433,3 +433,25 @@ it("exports the full filter scope without including pagination parameters", asyn
     vi.unstubAllGlobals();
   }
 });
+
+it("keeps queued reviews distinct from zero results and opens an earlier saved review without running it", async () => {
+  const normal = vi.mocked(apiClient.get).getMockImplementation()!;
+  const queued = { ...run, id: "queued-review", status: "pending", params_json: { ...run.params_json, review: { id: "new-span", start: "2026-09-07T07:00:00Z", end: "2026-09-14T07:00:00Z" } } };
+  vi.mocked(apiClient.get).mockImplementation(async (path: string) => {
+    if (path.includes("/runs?")) return [queued, run] as never;
+    if (path.includes("queued-review/review")) return { complete: false, status: "running", current_run_status: "pending", completed_slices: 0 } as never;
+    if (path.includes("/review-results?") && path.includes("queued-review")) return { summary: { checked: 0, matched: 0, needs_review: 0, not_verified: 0 }, items: [], total: 0, has_next: false } as never;
+    return normal(path);
+  });
+  mount();
+  await screen.findByText(/Queued · 0 daily slices complete/);
+  expect(screen.getByTestId("stat-checked")).toHaveTextContent("—");
+  expect(screen.getByText(/Waiting for this review’s first results/)).toBeVisible();
+  const select = screen.getByRole("combobox", { name: "Saved review results" }) as HTMLSelectElement;
+  const previous = Array.from(select.options).find(o => o.textContent?.includes("2026-08-31"))!;
+  fireEvent.change(select, { target: { value: previous.value } });
+  await waitFor(() => expect(screen.getByTestId("stat-checked")).toHaveTextContent("8"));
+  expect(await screen.findByText("R123456789")).toBeVisible();
+  expect(apiClient.post).not.toHaveBeenCalled();
+  expect(apiClient.get).toHaveBeenCalledWith("/api/v1/transaction-ops/runs?limit=200&period_reviews_only=true");
+});

@@ -65,6 +65,9 @@ async def test_review_queues_exact_calendar_cohort_and_idempotent_retry(client, 
     assert r.status_code == 202, r.text
     data = r.json()
     assert data["status"] == "pending"
+    coverage = await client.get(f"/api/v1/transaction-ops/runs/{data['id']}/review", headers=headers)
+    assert coverage.status_code == 200
+    assert coverage.json()["current_run_status"] == "pending"
     assert datetime.fromisoformat(data["params_json"]["window_start"]) == datetime(2026, 8, 1, 7, tzinfo=timezone.utc)
     assert datetime.fromisoformat(data["params_json"]["window_end"]) == datetime(2026, 8, 2, 7, tzinfo=timezone.utc)
     assert datetime.fromisoformat(data["params_json"]["review"]["end"]) == datetime(2026, 9, 1, 7, tzinfo=timezone.utc)
@@ -156,3 +159,52 @@ async def test_ordinary_run_route_cannot_forge_period_coverage(client, db, admin
         },
     )
     assert response.status_code == 422, response.text
+
+
+async def test_saved_review_listing_deduplicates_before_limit_and_preserves_tenant_scope(
+    client, db, admin_user, admin_user_b, monkeypatch
+):
+    from datetime import timedelta
+
+    from app.models.transaction_ops import TransactionRun
+
+    actor, headers = admin_user
+    other, _ = admin_user_b
+    config = await ready(db, actor, monkeypatch)
+    other_config = await ready(db, other, monkeypatch)
+    now = datetime.now(timezone.utc)
+
+    def make(c, days, review=None):
+        row = TransactionRun(
+            tenant_id=c.tenant_id,
+            config_id=c.id,
+            work_key=uuid4().hex,
+            origin="manual",
+            params_json={"review": {"id": review}} if review else {},
+            config_snapshot={},
+            max_api_calls=20,
+            max_orders=20,
+            deadline_at=now + timedelta(hours=1),
+            created_at=now - timedelta(days=days),
+        )
+        db.add(row)
+        return row
+
+    old = make(config, 4, "old-review")
+    make(config, 3, "new-review")
+    newest = make(config, 2, "new-review")  # Same review, later continuation.
+    for _ in range(201):
+        make(config, 1)  # Ordinary scans otherwise hide both saved reviews.
+    make(other_config, 0, "foreign-review")
+    await db.flush()
+    response = await client.get("/api/v1/transaction-ops/runs?period_reviews_only=true&limit=2", headers=headers)
+    assert response.status_code == 200, response.text
+    assert [r["id"] for r in response.json()] == [str(newest.id), str(old.id)]
+    foreign = await client.get(
+        f"/api/v1/transaction-ops/runs?period_reviews_only=true&config_id={other_config.id}",
+        headers=headers,
+    )
+    assert foreign.status_code == 200 and foreign.json() == []
+    ordinary = await client.get("/api/v1/transaction-ops/runs?limit=2", headers=headers)
+    assert ordinary.status_code == 200
+    assert all("review" not in r["params_json"] for r in ordinary.json())

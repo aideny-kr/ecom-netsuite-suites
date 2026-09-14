@@ -442,13 +442,31 @@ async def get_run(db, tenant_id, run_id, *, lock=False):
     return await _one(db, tenant_id, TransactionRun, run_id, lock=lock)
 
 
-async def list_runs(db, tenant_id, *, config_id=None, runnable_only=False, limit=100):
+async def list_runs(db, tenant_id, *, config_id=None, runnable_only=False, period_reviews_only=False, limit=100):
     await set_tenant_context(db, str(tenant_id))
     query = select(TransactionRun).where(TransactionRun.tenant_id == tenant_id)
     if config_id:
         query = query.where(TransactionRun.config_id == config_id)
     if runnable_only:
         query = query.where(TransactionRun.status.in_(("pending", "running")))
+    if period_reviews_only:
+        # Select one representative per saved review BEFORE limiting. Daily
+        # scans and continuations must not push older review cohorts off-screen.
+        review_id = TransactionRun.params_json["review"]["id"].astext
+        latest = (
+            query.where(review_id.is_not(None))
+            .distinct(TransactionRun.config_id, review_id)
+            .order_by(TransactionRun.config_id, review_id, TransactionRun.created_at.desc(), TransactionRun.id.desc())
+            .subquery()
+        )
+        model = aliased(TransactionRun, latest)
+        return list(
+            (
+                await db.scalars(
+                    select(model).order_by(model.created_at.desc(), model.id.desc()).limit(min(200, max(1, limit)))
+                )
+            )
+        )
     return list(
         (await db.execute(query.order_by(TransactionRun.created_at.desc()).limit(min(200, max(1, limit))))).scalars()
     )

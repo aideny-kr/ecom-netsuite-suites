@@ -155,9 +155,15 @@ async def review_period(config_id: UUID, request: PeriodReview, user: Reader, db
 
 @router.get("/runs", response_model=list[RunOut])
 async def list_runs(
-    user: Reader, db: Database, config_id: UUID | None = None, limit: Annotated[int, Query(ge=1, le=200)] = 100
+    user: Reader,
+    db: Database,
+    config_id: UUID | None = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    period_reviews_only: bool = False,
 ):
-    return await service.list_runs(db, user.tenant_id, config_id=config_id, limit=limit)
+    return await service.list_runs(
+        db, user.tenant_id, config_id=config_id, limit=limit, period_reviews_only=period_reviews_only
+    )
 
 
 @router.get("/runs/{run_id}", response_model=RunOut)
