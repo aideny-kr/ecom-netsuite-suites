@@ -377,7 +377,7 @@ async def test_real_chat_dispatch_preserves_observation_id_without_native_collec
     )
     native = AsyncMock(side_effect=AssertionError("Saved evidence must not collect native records"))
     with (
-        patch("app.mcp.governance.check_rate_limit", return_value=True),
+        patch("app.mcp.governance.check_mcp_tool_limit", return_value=True),
         patch(
             "app.mcp.tools.transaction_ops_tools._authorize",
             AsyncMock(return_value=(db, tenant_a.id, SimpleNamespace(id=actor_id))),
@@ -401,3 +401,24 @@ async def test_real_chat_dispatch_preserves_observation_id_without_native_collec
     assert result["observation_id"] == str(observation.id)
     assert "accounting_evidence" not in result and "correction_candidate" not in result
     native.assert_not_awaited()
+
+
+def test_saved_observation_budget_preserves_native_followup_headroom():
+    from app.mcp.governance import check_call_rate_limit
+
+    counts = {}
+
+    def limiter(tenant, tool, limit):
+        key = (tenant, tool)
+        counts[key] = counts.get(key, 0) + 1
+        return counts[key] <= limit
+
+    name = "transaction_ops.accounting_evidence"
+    with patch("app.mcp.governance.check_mcp_tool_limit", side_effect=limiter):
+        # Four representatives x two sections, then applications + assessment.
+        assert all(check_call_rate_limit("tenant", name, {"observation_id": "audit"}) for _ in range(16))
+        assert all(check_call_rate_limit("tenant", name, {"case_id": "case"}) for _ in range(10))
+        assert not check_call_rate_limit("tenant", name, {"case_id": "case"})
+        assert all(check_call_rate_limit("tenant", name, {"observation_id": "audit"}) for _ in range(44))
+        assert not check_call_rate_limit("tenant", name, {"observation_id": "audit"})
+        assert check_call_rate_limit("other-tenant", name, {"observation_id": "audit"})
