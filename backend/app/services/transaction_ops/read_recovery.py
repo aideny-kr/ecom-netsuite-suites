@@ -63,7 +63,7 @@ async def read_with_recovery(factory, *, retry_calls, progress, reserve, save, r
                 raise
             delay = 2**retries
             if remaining() <= delay:
-                raise
+                raise ReadBudgetExhaustedError from None
             if not await reserve(retry_calls):
                 raise ReadBudgetExhaustedError from None
             progress["read_retry_count"] = retries + 1

@@ -180,6 +180,31 @@ async def test_transient_source_retry_reserves_full_cost_and_keeps_order_cursor(
         assert state.run.progress_json["pending_refs"] == [REF]
 
 
+async def test_transient_read_without_time_for_backoff_remains_continuable():
+    from app.services.transaction_ops.continuation import next_metadata
+    from app.services.transaction_ops.source_reader import SourceReadError
+
+    state = State()
+    state.run.created_at = NOW
+    state.run.deadline_at = NOW + timedelta(milliseconds=500)
+    state.run.progress_json = {"processed": 1, "scan_count": 1}
+    reader = AsyncMock(side_effect=SourceReadError("source_transport_failed"))
+    result = await run_investigation(
+        None,
+        state.tenant,
+        state.run_id,
+        _state=state,
+        _source_reader=reader,
+        _enabled=AsyncMock(return_value=True),
+        _clock=lambda: NOW,
+    )
+    assert result["termination_reason"] == "budget"
+    reader.assert_awaited_once()
+    assert state.events == [("reserve", 2, 1)]
+    assert state.run.progress_json["pending_refs"] == [REF]
+    assert next_metadata(state.run, NOW)["continuation_part"] == 2
+
+
 async def test_deadline_during_progress_finishes_budget_for_immediate_continuation():
     from app.services.transaction_ops.state_service import StateError
 
