@@ -2749,7 +2749,10 @@ class BaseSpecialistAgent(abc.ABC):
                                 # Feed the actual evidence back into the same agent loop.
                                 # A zero-candidate result is not a confirmation or success.
                                 if not group_followup_used:
-                                    from app.services.transaction_ops.group_investigation import representative_reads
+                                    from app.services.transaction_ops.group_investigation import (
+                                        observation_preview,
+                                        representative_reads,
+                                    )
 
                                     group_followup_used = True
                                     details = []
@@ -2775,9 +2778,7 @@ class BaseSpecialistAgent(abc.ABC):
                                                     redact_output(active_policy, json.loads(read_result)), default=str
                                                 )
                                         # Bound extra model context. Full observations remain in their scoped audit.
-                                        preview = read_result[:4000]
-                                        if len(read_result) > 4000:
-                                            preview += "\n[Preview truncated; missing detail remains unverified.]"
+                                        preview = observation_preview(read_result)
                                         details.append({**read_params, "result_preview": preview})
                                         tool_calls_log.append(
                                             build_tool_call_log_entry(

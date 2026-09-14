@@ -23,6 +23,47 @@ def representative_reads(investigation, definitions):
     return reads
 
 
+def observation_preview(raw, limit=4000):
+    """Keep source line/accounting facts ahead of verbose catalog metadata."""
+    import json
+
+    try:
+        result = json.loads(raw)
+        source = result.get("evidence")
+        if result.get("section") == "source" and isinstance(source, dict):
+            lines = source.get("line_items")
+            if isinstance(lines, list):
+                projected = []
+                for line in lines:
+                    if not isinstance(line, dict):
+                        projected.append(line)
+                        continue
+                    item = {
+                        k: line[k] for k in ("id", "variant_id", "parent_id", "quantity", "price", "total") if k in line
+                    }
+                    variant = line.get("variant") or {}
+                    item["variant"] = {k: variant[k] for k in ("sku", "price") if k in variant}
+                    if "adjustments" in line:
+                        adjustments = line["adjustments"]
+                        item["adjustments"] = (
+                            [
+                                {k: a[k] for k in ("id", "source_type", "source_id", "amount", "finalized") if k in a}
+                                if isinstance(a, dict)
+                                else a
+                                for a in adjustments
+                            ]
+                            if isinstance(adjustments, list)
+                            else adjustments
+                        )
+                    projected.append(item)
+                source["line_items"] = projected
+                result["projection"] = "Source line financial fields retained; verbose catalog metadata omitted."
+        raw = json.dumps(result, default=str, separators=(",", ":"))
+    except (ValueError, TypeError, AttributeError):
+        pass
+    return raw if len(raw) <= limit else raw[:limit] + "\n[Preview truncated; missing detail remains unverified.]"
+
+
 def difference(left, right):
     try:
         a, b = Decimal(str(left)), Decimal(str(right))
@@ -106,7 +147,10 @@ def handoff(selection, members, reference_hits=0):
         "eligible": 0,
         "financial_writes": 0,
         "reference_reads_reused": reference_hits,
-        "batches": list(batches.values()),
+        "batches": [
+            {**batch, "batch_number": i, "case_count": len(batch["orders"])}
+            for i, batch in enumerate(batches.values(), 1)
+        ],
         "next_action": (
             "Continue this investigation now with the existing evidence. Do not call the group or full case-evidence "
             "collector again merely to rediscover these facts. To inspect saved detail, call "
@@ -115,8 +159,11 @@ def handoff(selection, members, reference_hits=0):
             "Use targeted connected read tools for missing evidence, "
             "batching exact record IDs within the same connection/subsidiary/currency. Start with one representative "
             "per distinct cause; do not assume its treatment applies to other orders. Consult accounting references "
-            "only for a specific unresolved treatment. Preserve each order, source/invoice/tax deltas and record/audit "
-            "links in the final result. Prepare an exact supported approval card only after establishing eligibility; "
+            "only for a specific unresolved treatment. Keep the final answer under 350 words: use the supplied "
+            "batch_number and case_count exactly (batches do not overlap), a short explanation per batch, and "
+            "provided record/audit links for representatives. Do not enumerate every order ID; all orders and "
+            "their deltas remain in the scoped evidence. Prepare an exact supported approval card only after "
+            "establishing eligibility; "
             "if the adapter cannot express the treatment, identify that specific capability gap and required evidence. "
             "A null candidate does not prove the order is correct. "
             "Source totals are ecommerce values, not native NetSuite sales-order values. Deferred GL, application "

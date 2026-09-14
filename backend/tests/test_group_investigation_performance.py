@@ -422,3 +422,41 @@ def test_saved_observation_budget_preserves_native_followup_headroom():
         assert all(check_call_rate_limit("tenant", name, {"observation_id": "audit"}) for _ in range(44))
         assert not check_call_rate_limit("tenant", name, {"observation_id": "audit"})
         assert check_call_rate_limit("other-tenant", name, {"observation_id": "audit"})
+
+
+def test_group_counts_are_exact_nonoverlapping_and_source_lines_fit_the_preview():
+    from app.services.transaction_ops.group_investigation import handoff, observation_preview
+
+    members = [{"case_id": str(i), "investigation_evidence": {"reasons": [str(i % 4)]}} for i in range(55)]
+    result = handoff({"group_id": "group", "scope": {}}, members)
+    assert [b["case_count"] for b in result["batches"]] == [14, 14, 14, 13]
+    assert sum(b["case_count"] for b in result["batches"]) == result["case_count"] == 55
+    assert [b["batch_number"] for b in result["batches"]] == [1, 2, 3, 4]
+    raw = json.dumps(
+        {
+            "section": "source",
+            "evidence": {
+                "total": "1200.12",
+                "line_items": [
+                    {
+                        "id": str(i),
+                        "quantity": "1",
+                        "price": "100.01",
+                        "total": "100.01",
+                        "variant": {
+                            "sku": "SKU-" + str(i),
+                            "price": "110.01",
+                            "description": "catalog metadata " * 200,
+                        },
+                        "adjustments": [{"amount": "0.01", "source_type": "tax", "finalized": True}],
+                    }
+                    for i in range(12)
+                ],
+            },
+        }
+    )
+    preview = json.loads(observation_preview(raw))
+    assert len(preview["evidence"]["line_items"]) == 12
+    assert preview["evidence"]["total"] == "1200.12"
+    assert all(l["price"] == "100.01" and l["adjustments"][0]["finalized"] for l in preview["evidence"]["line_items"])
+    assert "Preview truncated" in observation_preview(raw, limit=30)
