@@ -65,26 +65,22 @@ def state(monkeypatch):
     return state
 
 
-async def test_group_preparation_preserves_scope_and_collects_every_membership_page(ctx, monkeypatch):
+async def test_group_preparation_preserves_scope_and_collects_one_membership_snapshot(ctx, monkeypatch):
     ctx["db"].info = {}
     scope = {"group_id": "a" * 32, "review_run_ids": [str(uuid.uuid4())], "status": "needs_review", "search": "R"}
     members = [{"case_id": str(uuid.uuid4()), "order_reference": f"R{i}"} for i in range(53)]
-    get_members = AsyncMock(
-        side_effect=[{"cases": members[:50], "has_next": True}, {"cases": members[50:], "has_next": False}]
-    )
-    monkeypatch.setattr("app.services.transaction_ops.case_groups.group_members", get_members)
+    get_members = AsyncMock(return_value=members)
+    monkeypatch.setattr("app.services.transaction_ops.case_groups.preparation_members", get_members)
     result = await mod.execute_accounting_group(scope, context=ctx)
     assert result["case_count"] == 53 and result["financial_writes"] == 0
     assert ctx["db"].info["accounting_group_selection"]["members"] == members
-    for index, call in enumerate(get_members.await_args_list):
-        assert call.args[1] == TENANT
-        assert call.kwargs == {**scope, "limit": 50, "offset": index * 50}
+    get_members.assert_awaited_once_with(ctx["db"], TENANT, **scope)
 
 
 async def test_group_preparation_checks_permission_before_loading_any_cases(ctx, monkeypatch):
     members = AsyncMock()
     monkeypatch.setattr(mod, "has_permission", AsyncMock(return_value=False))
-    monkeypatch.setattr("app.services.transaction_ops.case_groups.group_members", members)
+    monkeypatch.setattr("app.services.transaction_ops.case_groups.preparation_members", members)
     result = await mod.execute_accounting_group({"group_id": "a" * 32}, context=ctx)
     assert result["success"] is False
     members.assert_not_awaited()

@@ -200,12 +200,35 @@ async def list_groups(db, tenant_id, *, limit=50, offset=0, review_run_ids=None,
 
 
 async def group_members(db, tenant_id, group_id, *, limit=50, offset=0, review_run_ids=None, status=None, search=""):
+    return await _group_members(
+        db,
+        tenant_id,
+        group_id,
+        limit=min(50, max(1, limit)),
+        offset=offset,
+        review_run_ids=review_run_ids,
+        status=status,
+        search=search,
+    )
+
+
+async def preparation_members(db, tenant_id, group_id, *, review_run_ids=None, status=None, search=""):
+    # One bounded membership snapshot, rather than recomputing the full review
+    # cohort for each UI-sized page. Never prepare a truncated financial group.
+    page = await _group_members(
+        db, tenant_id, group_id, limit=500, offset=0, review_run_ids=review_run_ids, status=status, search=search
+    )
+    if page["has_next"]:
+        raise StateError("Group exceeds 500 cases; narrow the period or entity. No partial group was prepared.", 422)
+    return page["cases"]
+
+
+async def _group_members(db, tenant_id, group_id, *, limit, offset, review_run_ids, status, search):
     if not isinstance(group_id, str) or not re.fullmatch(r"[0-9a-f]{32}", group_id):
         raise StateError("invalid_group_id", 422)
     await set_tenant_context(db, str(tenant_id))
     source, scope_key = await _source(db, tenant_id, review_run_ids, status, search)
     _, identifier = _signature(source, scope_key)
-    limit = min(50, max(1, limit))
     rows = (
         await db.execute(
             select(source.c.id, source.c.order_reference, source.c.last_observed_at)

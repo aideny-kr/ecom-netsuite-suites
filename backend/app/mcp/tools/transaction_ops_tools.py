@@ -370,7 +370,7 @@ async def execute_groups(params: dict, **kwargs) -> dict:
 
 async def execute_accounting_group(params: dict, **kwargs) -> dict:
     """Freeze scoped membership for the server-side proposal handoff; no writes."""
-    from app.services.transaction_ops.case_groups import group_members
+    from app.services.transaction_ops.case_groups import preparation_members
     from app.services.transaction_ops.state_service import StateError
 
     context = kwargs.get("context") or {}
@@ -378,14 +378,7 @@ async def execute_accounting_group(params: dict, **kwargs) -> dict:
         if "group_id" not in params or set(params) - {"group_id", "review_run_ids", "status", "search"}:
             raise _ToolError("invalid_parameters")
         db, tenant_id, _ = await _authorize(context, create=True)
-        members = []
-        for offset in range(0, 500, 50):
-            page = await group_members(db, tenant_id, **params, limit=50, offset=offset)
-            members.extend(page["cases"])
-            if not page["has_next"]:
-                break
-        else:
-            raise _ToolError("Group exceeds 500 cases; narrow the period or entity. No partial group was prepared.")
+        members = await preparation_members(db, tenant_id, **params)
         if not members or len({m["case_id"] for m in members}) != len(members):
             raise _ToolError("Group is empty or changed; refresh the exact scoped group.")
         db.info["accounting_group_selection"] = {"group_id": params["group_id"], "scope": params, "members": members}
