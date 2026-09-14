@@ -9,14 +9,38 @@ from app.services.chat import record_metadata_service as mod
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("record_type", ["invoice", "salesOrder"])
+async def test_native_metadata_uses_schema_accept_header(record_type):
+    import httpx
+
+    from app.services.transaction_ops.netsuite_reader import _Reader
+
+    def handle(request):
+        assert request.headers["Accept"] == "application/schema+json"
+        assert request.url.path == f"/record/v1/metadata-catalog/{record_type}"
+        return httpx.Response(200, json={"properties": {"discountRate": {"type": "number"}}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        reader = _Reader(client, "https://example.invalid", "test-token", max_api_calls=1)
+        result = await reader.request("GET", f"/record/v1/metadata-catalog/{record_type}")
+        assert "discountRate" in result["properties"] and reader.calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "record_type,kind,native_type",
+    [("invoice", "invoice_sales_adjustment", "invoice"), ("salesorder", "sales_order_source_alignment", "salesOrder")],
+)
 @pytest.mark.parametrize("variant", ["valid", "account", "tenant", "disabled", "malformed", "missing_field"])
-async def test_scoped_native_schema_preserves_validation_and_audit(monkeypatch, variant):
+async def test_scoped_native_schema_preserves_validation_and_audit(
+    monkeypatch, variant, record_type, kind, native_type
+):
     mod.clear_metadata_cache()
     tenant, connector_id = uuid4(), uuid4()
     p = {
         "tenant_id": str(tenant),
-        "kind": "invoice_sales_adjustment",
-        "record_type": "invoice",
+        "kind": kind,
+        "record_type": record_type,
         "connector_id": str(connector_id),
         "connection_id": "rest",
         "case_id": "case",
@@ -58,10 +82,10 @@ async def test_scoped_native_schema_preserves_validation_and_audit(monkeypatch, 
         else:
             await mod.prefetch_scoped_invoice_metadata(None, tenant, "actor", p, "correlation")
             await mod.prefetch_scoped_invoice_metadata(None, tenant, "actor", p, "correlation")
-            request.assert_awaited_once_with("GET", "/record/v1/metadata-catalog/invoice")
+            request.assert_awaited_once_with("GET", f"/record/v1/metadata-catalog/{native_type}")
             audit.assert_awaited_once()
             assert audit.call_args.kwargs["actor_id"] == "actor"
-            meta = mod._cache[(str(connector_id), "invoice")][1]
+            meta = mod._cache[(str(connector_id), record_type)][1]
             assert meta.requirements_known is False
             assert meta.spec_for("discountRate").type == "number"
     finally:

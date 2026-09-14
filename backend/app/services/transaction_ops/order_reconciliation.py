@@ -146,7 +146,16 @@ def _reconcile(source_evidence, target_evidence, config, refunds):
                 precision,
             )
             if left is not None and right is not None and amount is not None and right - amount == left:
-                values["order_total"] = (left, right - amount)
+                # A posting adjustment reconciles the invoice, not the source
+                # sales-order record. Keep its outstanding variance visible.
+                result["posting_reconciliation"] = {
+                    "status": "matched",
+                    "source": f"{left:.{precision}f}",
+                    "net_posting_total": f"{right - amount:.{precision}f}",
+                    "delta": f"{Decimal(0):.{precision}f}",
+                    "basis": commercial["kind"],
+                    "sales_order_alignment": "required",
+                }
                 adjustments.append(commercial)
     if adjustments:
         result["adjustments"] = adjustments

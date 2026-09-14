@@ -233,7 +233,10 @@ class _Reader:
         if self.calls >= self.max_api_calls:
             raise NetSuiteEvidenceError("api_call_budget")
         self.calls += 1
-        metadata_read = method == "GET" and path == "/record/v1/metadata-catalog/invoice"
+        metadata_read = method == "GET" and path in {
+            "/record/v1/metadata-catalog/invoice",
+            "/record/v1/metadata-catalog/salesOrder",
+        }
         try:
             async with self.client.stream(
                 method,

@@ -199,9 +199,11 @@ export function ComparisonEvidence({ report }: { report: JsonObject }) {
 }
 function BalanceEvidence({ balance }: { balance: JsonObject }) {
   const amounts = objectValue(balance.amounts);
+  const posting = objectValue(balance.posting_reconciliation);
   if (!Object.keys(amounts).length) return null;
   return (
     <div className="overflow-x-auto">
+      {posting.status === "matched" && <p className="mb-3 rounded-lg border p-3 text-[13px]">The verified posting adjustment reconciles the invoice. The sales-order difference below still requires a source-backed amendment.</p>}
       <table className="w-full text-[13px] tabular-nums">
         <caption className="py-2 text-left font-medium">
           Order reconciliation ·{" "}
@@ -255,8 +257,14 @@ function BalanceEvidence({ balance }: { balance: JsonObject }) {
     </div>
   );
 }
-export function FindingCard({ finding }: { finding: TransactionFinding }) {
+export function FindingCard({ finding, accountingReconciliation }: {
+  finding: TransactionFinding;
+  accountingReconciliation?: JsonObject;
+}) {
   const comparison = objectValue(finding.report_json.comparison);
+  const reconciled = accountingReconciliation?.status === "succeeded"
+    && accountingReconciliation.verification_scope === "order_total_tax_refunds"
+    && accountingReconciliation.finding_id === finding.id;
   return (
     <details className={cardClass}>
       <summary className="flex cursor-pointer flex-wrap items-center justify-between gap-3">
@@ -269,11 +277,24 @@ export function FindingCard({ finding }: { finding: TransactionFinding }) {
               ? comparison.currency
               : "Currency not established"}
           </span>
-          <Status>{actionLabel(comparison.recommended_action)}</Status>
+          <Status>{reconciled ? "Matched after approved correction" : actionLabel(comparison.recommended_action)}</Status>
         </span>
       </summary>
       <div className="mt-5 space-y-4">
-        <ComparisonEvidence report={finding.report_json} />
+        {reconciled ? (
+          <>
+            <BalanceEvidence balance={objectValue(finding.report_json.balance)} />
+            <p className="text-[13px] text-muted-foreground">
+              The approved correction passed the full order, tax and refund recheck.
+              Raw record differences below are retained as supporting evidence;
+              they do not override this verified reconciliation result. Cash settlement remains separate.
+            </p>
+            <details className="rounded-lg border p-3 text-[13px]">
+              <summary className="cursor-pointer font-medium">Raw record comparison and repair evidence</summary>
+              <div className="mt-3"><ComparisonEvidence report={finding.report_json} /></div>
+            </details>
+          </>
+        ) : <ComparisonEvidence report={finding.report_json} />}
         <p className="text-[13px] text-muted-foreground">
           Recorded {dateLabel(finding.updated_at)}
         </p>

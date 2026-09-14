@@ -1,7 +1,7 @@
 import React from "react";
 import { render, screen, within } from "@testing-library/react";
 import { expect, it } from "vitest";
-import { ComparisonEvidence } from "./evidence";
+import { ComparisonEvidence, FindingCard } from "./evidence";
 
 it("explains why a safe proposal cannot yet be prepared", () => {
   render(
@@ -47,4 +47,30 @@ it("shows independently verified balances even when detailed repair evidence is 
   const refunds = within(table).getByRole("row", { name: /Completed refunds/ });
   expect(within(refunds).getByText("0.00")).toBeInTheDocument();
   expect(within(refunds).getAllByText("Unknown")).toHaveLength(2);
+});
+
+const correctedFinding = {
+  id: "finding-1", run_id: "run-1", order_reference: "R146850445",
+  created_at: "2026-09-13T17:31:30Z", updated_at: "2026-09-13T17:31:30Z",
+  report_json: { comparison: { currency: "USD", recommended_action: "gather_evidence" } },
+};
+
+it("shows a verified recheck outcome while preserving raw repair evidence", () => {
+  render(<FindingCard finding={correctedFinding} accountingReconciliation={{
+    status: "succeeded", finding_id: "finding-1", verification_scope: "order_total_tax_refunds",
+  }} />);
+  expect(screen.getByText("Matched after approved correction")).toBeInTheDocument();
+  expect(screen.getByText("Raw record comparison and repair evidence")).toBeInTheDocument();
+  expect(screen.getByText(/Cash settlement remains separate/)).toBeInTheDocument();
+});
+
+it.each([
+  undefined,
+  { status: "succeeded", finding_id: "another-finding", verification_scope: "order_total_tax_refunds" },
+  { status: "unverified", finding_id: "finding-1", verification_scope: "order_total_tax_refunds" },
+  { status: "succeeded", finding_id: "finding-1", verification_scope: "invoice_only" },
+])("does not claim a match without the exact successful full recheck (%j)", (result) => {
+  render(<FindingCard finding={correctedFinding} accountingReconciliation={result} />);
+  expect(screen.getByText("More evidence needed")).toBeInTheDocument();
+  expect(screen.queryByText("Matched after approved correction")).not.toBeInTheDocument();
 });

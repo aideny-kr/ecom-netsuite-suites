@@ -173,14 +173,14 @@ function RunContent({ id }: { id: string }) {
         )}
       </section>
       {accountingRecheck && (
-        <section className={cardClass} aria-label="Post-credit reconciliation">
+        <section className={cardClass} aria-label="Post-correction reconciliation">
           <h2 className="font-semibold">
             {reconciliation.status === "succeeded" ? "Order, tax and refunds matched"
               : reconciliation.status === "difference" ? "Differences remain"
                 : run.status === "finished" ? "Reconciliation not verified" : "Reconciliation pending"}
           </h2>
           <p className="mt-2 text-[13px] text-muted-foreground">
-            This read-only check compares fresh source and ERP evidence after the approved credit.
+            This read-only check compares fresh source and ERP evidence after the approved correction.
             The approval, approver and result are linked in the audit log.
             Bank and processor clearance remain separate checks.
           </p>
@@ -287,7 +287,9 @@ function RunContent({ id }: { id: string }) {
               </p>
             ) : (
               findings.data.items.map((finding) => (
-                <FindingCard key={finding.id} finding={finding} />
+                <FindingCard key={finding.id} finding={finding}
+                  accountingReconciliation={accountingRecheck && run.status === "finished"
+                    && run.termination_reason === "done" ? reconciliation : undefined} />
               ))
             )}
           </>

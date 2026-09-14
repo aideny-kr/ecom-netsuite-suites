@@ -25,6 +25,14 @@ from app.services.chat.write_confirmation_service import (
 
 CONCURRENCY = 3
 PREPARATION_TIMEOUT = 450  # Leave time to publish an explicit result within the chat budget.
+MAX_GROUP_BYTES = 4 * 1024 * 1024
+
+
+def require_bounded_group(group):
+    if len(json.dumps(group, separators=(",", ":"), default=str).encode()) > MAX_GROUP_BYTES:
+        raise ValueError("The group exceeds the approval review size limit; narrow the selected period or orders.")
+
+
 GROUP_TOOL = "transaction_ops_accounting_group_apply"  # Not exposed to model/MCP dispatch.
 _authorization_session_factory = async_session_factory
 
@@ -135,7 +143,9 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
         (
             m["card"]["accounting_review"]["scope"]["netsuite_account_id"],
             m["card"]["accounting_review"].get("lock_record_type", m["card"]["record_type"]),
-            m["card"]["accounting_review"]["record_id"],
+            m["card"]["accounting_review"]["invoice_id"]
+            if m["card"]["accounting_review"].get("kind") == "sales_order_source_alignment"
+            else m["card"]["accounting_review"]["record_id"],
         )
         for m in eligible
     ]
@@ -151,6 +161,7 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
         "treatment_batches": treatment_batches(members),
         "investigation_batches": investigation_batches(members),
     }
+    require_bounded_group(group)
     params = {"manifest_digest": digest(group), "confirmation_ids": [m["confirmation_id"] for m in eligible]}
     card = WriteConfirmationPayload(
         mutation_type="execute",
@@ -277,6 +288,7 @@ async def authorize_accounting_write(db, tenant_id, actor_id, tool_name, tool_in
 def validate_manifest(so, session_id):
     valid, name, params = validate_and_extract_confirmation(so, session_id)
     group = so.get("accounting_group") or {}
+    require_bounded_group(group)
     members = group.get("members") or []
     eligible = [m for m in members if m.get("confirmation_id")]
     ids = [m["confirmation_id"] for m in eligible]
@@ -303,10 +315,16 @@ def validate_manifest(so, session_id):
         ):
             raise ValueError("A group member is not an exact supported pending correction.")
         targets.append(
-            (p["scope"]["netsuite_account_id"], p.get("lock_record_type", card["record_type"]), p["record_id"])
+            (
+                p["scope"]["netsuite_account_id"],
+                p.get("lock_record_type", card["record_type"]),
+                p.get("invoice_id", p["record_id"])
+                if p.get("kind") == "sales_order_source_alignment"
+                else p["record_id"],
+            )
         )
     if len(set(targets)) != len(targets):
-        raise ValueError("Overlapping invoice writes cannot be approved together.")
+        raise ValueError("Overlapping document corrections cannot be approved together.")
     return members
 
 
@@ -326,7 +344,10 @@ async def accounting_write_slot(proposal, *, lock_engine=None):
     async with (lock_engine if lock_engine is not None else engine).connect() as connection:
         try:
             record_type = "invoice" if proposal.get("kind") == "sales_adjustment_credit" else proposal["record_type"]
-            record = key(f"accounting-write:{account}:{record_type}:{proposal['record_id']}")
+            record_id = proposal["record_id"]
+            if proposal.get("kind") == "sales_order_source_alignment":
+                record_type, record_id = "invoice", proposal["invoice_id"]
+            record = key(f"accounting-write:{account}:{record_type}:{record_id}")
             if not await connection.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": record}):
                 raise ValueError("Another approved correction is checking this invoice. No additional update was sent.")
             keys.append(record)
@@ -498,7 +519,7 @@ async def run_group_confirmation(*, db, session, message, so, action, user_id, t
     await set_tenant_context(db, str(tenant_id))
     message.structured_output = final
     note = (
-        f"Verified {verified} of {eligible_count} approved invoice corrections. "
+        f"Verified {verified} of {eligible_count} approved record corrections. "
         "Each order retains its approval and execution audit. Full case and cash settlement remain separate."
         if action == "approve"
         else f"Rejected {rejected} of {eligible_count} proposed corrections."

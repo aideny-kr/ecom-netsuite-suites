@@ -241,7 +241,9 @@ def test_reconciliation_matches_only_proven_invoice_discount(variant):
     elif variant == "missing_links":
         s["applications"]["complete"] = False
     result = reconcile_order(source, target, config, refunds=refunds)
-    assert result["status"] == ("matched" if variant == "valid" else "difference")
+    assert result["status"] == "difference"
+    assert result["amounts"]["order_total"]["delta"] == "-5.00"
+    assert ("posting_reconciliation" in result) is (variant == "valid")
     if variant == "valid":
         assert result["original_amounts"]["order_total"]["delta"] == "-5.00"
         assert result["adjustments"][0]["kind"] == "posted_invoice_discount"

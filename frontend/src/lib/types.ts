@@ -903,7 +903,14 @@ export interface InvoiceDiscountReview extends Omit<SalesCreditReview, "kind" | 
   expected_after: { total: string; taxTotal: string; amountPaid: string; amountRemaining: string; discountTotal: string };
 }
 
-export type AccountingReview = InvoiceTaxReview | SalesCreditReview | InvoiceDiscountReview;
+export interface SalesOrderAlignmentReview extends Omit<SalesCreditReview, "kind" | "expected_after" | "period"> {
+  kind: "sales_order_source_alignment";
+  invoice_id: string;
+  support: { invoice: Record<string, unknown> };
+  expected_after: { total: string; subtotal: string; taxTotal: string; discountTotal: string };
+}
+
+export type AccountingReview = InvoiceTaxReview | SalesCreditReview | InvoiceDiscountReview | SalesOrderAlignmentReview;
 
 export interface AccountingGroup {
   group_id: string;
@@ -935,6 +942,7 @@ export interface WriteConfirmationData {
     status: string;
     reason?: string;
     invoice?: Record<string, unknown>;
+    sales_order?: Record<string, unknown>;
     credit_memo_id?: string;
     resolution?: Record<string, unknown>;
   } | null;

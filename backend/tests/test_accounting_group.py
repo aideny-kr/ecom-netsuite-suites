@@ -83,6 +83,15 @@ def test_even_server_signed_manifest_cannot_contain_overlapping_invoice_writes()
         mod.validate_manifest(so, str(session.id))
 
 
+def test_group_payload_is_bounded_before_approval():
+    so, session = group_fixture()
+    so["accounting_group"]["oversized"] = "x" * mod.MAX_GROUP_BYTES
+    so["tool_input"]["manifest_digest"] = mod.digest(so["accounting_group"])
+    so["confirmation_token"] = mint_confirmation_token(mod.GROUP_TOOL, so["tool_input"], [], str(session.id))
+    with pytest.raises(ValueError, match="size limit"):
+        mod.validate_manifest(so, str(session.id))
+
+
 async def test_bounded_workers_overlap_without_exceeding_three_and_stop_unsent_on_unknown():
     active, maximum = 0, 0
     gate = asyncio.Event()
@@ -137,6 +146,17 @@ async def test_real_postgres_locks_protect_same_invoice_and_cap_account_across_c
             with pytest.raises(ValueError, match="same|this invoice"):
                 async with mod.accounting_write_slot(p):
                     pytest.fail("Duplicate invoice lock was granted")
+            with pytest.raises(ValueError, match="this invoice"):
+                async with mod.accounting_write_slot(
+                    {
+                        **p,
+                        "kind": "sales_order_source_alignment",
+                        "record_type": "salesorder",
+                        "record_id": "90",
+                        "invoice_id": p["record_id"],
+                    }
+                ):
+                    pytest.fail("Sales-order amendment must share the linked invoice lock")
             async with mod.accounting_write_slot({**p, "record_id": "21"}):
                 async with mod.accounting_write_slot({**p, "record_id": "22"}):
                     with pytest.raises(ValueError, match="Three corrections"):

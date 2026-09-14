@@ -2579,7 +2579,7 @@ async def run_chat_turn(
 
                 _credit_recovery = _write_outcome == "indeterminate" and (_so.get("accounting_review") or {}).get(
                     "kind"
-                ) in {"sales_adjustment_credit", "invoice_sales_adjustment"}
+                ) in {"sales_adjustment_credit", "invoice_sales_adjustment", "sales_order_source_alignment"}
                 if _so.get("accounting_execution") and isinstance(_exec_result, dict):
                     # Retain a returned native identity even when verification
                     # fails, so later recovery cannot ignore a conflicting receipt.
@@ -2595,6 +2595,7 @@ async def run_chat_turn(
                         if _so["accounting_review"].get("kind") in {
                             "sales_adjustment_credit",
                             "invoice_sales_adjustment",
+                            "sales_order_source_alignment",
                         }:
                             async with asyncio.timeout(90):
                                 _verification = await verify_after(
@@ -2639,6 +2640,9 @@ async def run_chat_turn(
                             "\n\nThe Sales Adjustments credit, exact invoice application and GL entries were "
                             "independently re-read and verified. No cash refund was issued."
                             if _so["accounting_review"].get("kind") == "sales_adjustment_credit"
+                            else "\n\nSales-order amendment independently re-read and verified; "
+                            "the linked invoice, GL, billing and fulfillment evidence remain unchanged."
+                            if _so["accounting_review"].get("kind") == "sales_order_source_alignment"
                             else "\n\nInvoice total, tax and GL were independently re-read and verified. "
                             "Sales-order reconciliation and deposit/cash settlement remain separate checks; no additional money was moved."
                         )

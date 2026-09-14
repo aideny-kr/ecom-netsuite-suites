@@ -20,7 +20,7 @@ from app.services.transaction_ops.settlement import SCOPE
 def supports(proposal):
     """Only the implemented invoice corrections have native verification contracts."""
     return bool(proposal) and (
-        proposal.get("kind") in {"sales_adjustment_credit", "invoice_sales_adjustment"}
+        proposal.get("kind") in {"sales_adjustment_credit", "invoice_sales_adjustment", "sales_order_source_alignment"}
         or (
             proposal.get("kind") in {None, "invoice_tax"}
             and proposal.get("record_type") == "invoice"
@@ -114,12 +114,16 @@ def report_in_scope(run, p, report, now):
         verified_at = datetime.fromisoformat(run.params_json["verified_at"])
         return (
             len(targets) == 1
-            and str(targets[0]["record_id"]) == str(p["before"]["createdFrom"]["id"])
+            and str(targets[0]["record_id"])
+            == str(
+                p["record_id"] if p.get("kind") == "sales_order_source_alignment" else p["before"]["createdFrom"]["id"]
+            )
             and str(report["source"]["record_id"]) == str(p["source"]["id"])
             and report["balance"]["currency"]
             == (
                 p["profile"]["currency"]
-                if p.get("kind") in {"sales_adjustment_credit", "invoice_sales_adjustment"}
+                if p.get("kind")
+                in {"sales_adjustment_credit", "invoice_sales_adjustment", "sales_order_source_alignment"}
                 else p["source"]["currency"]
             )
             and all(

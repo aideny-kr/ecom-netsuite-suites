@@ -188,6 +188,10 @@ def is_tax_update(record_type, fields):
 
 
 def review_for_card(db, tenant_id, tool_name, record_type, normalized):
+    from app.services.transaction_ops import sales_order_alignment
+
+    if sales_order_alignment.is_update(record_type, normalized):
+        return sales_order_alignment.review_for_card(db, tenant_id, tool_name, record_type, normalized)
     from app.services.chat.tools import parse_external_tool_name
     from app.services.transaction_ops.invoice_discount import is_discount_update
     from app.services.transaction_ops.invoice_discount import review_for_card as discount_review
@@ -269,6 +273,10 @@ async def revalidate(db, tenant_id, proposal):
 
 
 async def verify_after(db, tenant_id, proposal, receipt=None):
+    if proposal.get("kind") == "sales_order_source_alignment":
+        from app.services.transaction_ops.sales_order_alignment import verify_after as verify_order
+
+        return await verify_order(db, tenant_id, proposal, receipt)
     if proposal.get("kind") == "invoice_sales_adjustment":
         from app.services.transaction_ops.invoice_discount import verify_after as verify_discount
 
@@ -351,6 +359,13 @@ async def validate_approved(db, tenant_id, tool_name, tool_input, proposal):
     if not parsed or parsed[1] != "ns_updateRecord":
         return
     normalized = normalize_write_payload(tool_input)
+    from app.services.transaction_ops import sales_order_alignment
+
+    if (
+        sales_order_alignment.is_update(str(tool_input.get("recordType", "")), normalized)
+        or (proposal or {}).get("kind") == sales_order_alignment.KIND
+    ):
+        return await sales_order_alignment.validate_approved(db, tenant_id, tool_name, tool_input, proposal)
     from app.services.transaction_ops.invoice_discount import is_discount_update
     from app.services.transaction_ops.invoice_discount import validate_approved as validate_discount
 
@@ -384,6 +399,11 @@ async def validate_approved(db, tenant_id, tool_name, tool_input, proposal):
 
 
 def approval_text(p):
+    if p.get("kind") == "sales_order_source_alignment":
+        return (
+            f"Align sales order {p['order_reference']} with the finalized source. "
+            "Its corrected invoice is retained. Review the exact amendment below."
+        )
     if p.get("kind") == "invoice_sales_adjustment":
         return f"Sales Adjustment for unpaid invoice {p['order_reference']}. Review the exact invoice discount below."
     if p.get("kind") == "sales_adjustment_credit":
@@ -438,7 +458,7 @@ async def candidate_confirmation(*, db, tenant_id, actor_id, correlation_id, ses
         raise ValueError("The configured policy blocks this correction.")
     if await classify_connector_mutation(name, db, tenant_id) != mutation:
         raise ValueError("The scoped connector does not expose a verified update operation.")
-    if p.get("kind") == "invoice_sales_adjustment":
+    if p.get("kind") in {"invoice_sales_adjustment", "sales_order_source_alignment"}:
         from app.services.chat.record_metadata_service import prefetch_scoped_invoice_metadata
 
         await prefetch_scoped_invoice_metadata(db, tenant_id, actor_id, p, correlation_id)
@@ -455,6 +475,8 @@ async def candidate_confirmation(*, db, tenant_id, actor_id, correlation_id, ses
     )
     if not validation.ok:
         raise ValueError("Native write validation needs review: " + json.dumps(validation.as_model_error()))
+    from app.services.chat.tools import netsuite_environment_of
+
     card = build_confirmation_payload(
         mutation_type=mutation,
         record_type=p["record_type"],
@@ -463,6 +485,8 @@ async def candidate_confirmation(*, db, tenant_id, actor_id, correlation_id, ses
         session_id=session_id,
         current_record=p["before"],
         validation=validation,
+        target_account=p["scope"]["netsuite_account_id"],
+        target_environment=netsuite_environment_of(p["scope"]["netsuite_account_id"]),
     )
     if card is None:
         raise ValueError("The verified invoice update could not be represented by an approval card.")
