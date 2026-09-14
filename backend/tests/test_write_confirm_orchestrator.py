@@ -186,6 +186,7 @@ def _make_db(confirm_msg, cas_rowcount: int = 1):
         return _FakeScalarResult(confirm_msg)
 
     db.execute = _execute
+    db.scalar = AsyncMock(return_value=None)
     db.commit = AsyncMock()
     db.refresh = AsyncMock()
     db.add = MagicMock()

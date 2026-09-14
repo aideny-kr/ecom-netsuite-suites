@@ -520,6 +520,11 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
             # This object is the same scoped candidate consumed by the confirmation builder.
             # Retain the explanation/provenance with the signed proposal and later audit.
             correction["resolution_assessment"] = assessment
+            from app.services.transaction_ops.resolution_plan import proposal_plan
+
+            plan = proposal_plan(correction, case.latest_report_json)
+            correction["resolution_plan"] = plan
+            evidence["resolution_plan"] = plan
         await log_event(
             db,
             tenant_id,

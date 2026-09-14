@@ -64,6 +64,46 @@ async def bounded_map(items, function, *, stop=None):
     return output
 
 
+def build_group_card(members, selection, session_id):
+    """Sign the same exact manifest for initial and dependent group stages."""
+    eligible = [m for m in members if m.get("card")]
+    targets = [
+        (
+            m["card"]["accounting_review"]["scope"]["netsuite_account_id"],
+            m["card"]["accounting_review"].get("lock_record_type", m["card"]["record_type"]),
+            m["card"]["accounting_review"]["invoice_id"]
+            if m["card"]["accounting_review"].get("kind") == "sales_order_source_alignment"
+            else m["card"]["accounting_review"]["record_id"],
+        )
+        for m in eligible
+    ]
+    if len(set(targets)) != len(targets):
+        raise ValueError("Multiple cases target the same invoice; separate their identities before group approval.")
+    from app.services.transaction_ops.accounting_treatments import investigation_batches, treatment_batches
+
+    group = {
+        "group_id": selection["group_id"],
+        "scope": selection["scope"],
+        "members": members,
+        "concurrency": CONCURRENCY,
+        "treatment_batches": treatment_batches(members),
+        "investigation_batches": investigation_batches(members),
+    }
+    require_bounded_group(group)
+    params = {"manifest_digest": digest(group), "confirmation_ids": [m["confirmation_id"] for m in eligible]}
+    card = WriteConfirmationPayload(
+        mutation_type="execute",
+        record_type="accounting corrections",
+        proposed_fields={"eligible_orders": len(eligible)},
+        tool_name=GROUP_TOOL,
+        tool_input=params,
+        accounting_group=group,
+        confirmation_token=mint_confirmation_token(GROUP_TOOL, params, [], session_id),
+        invariant_errors=[] if eligible else ["No supported corrections are ready for approval."],
+    )
+    return card
+
+
 async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id, session_id, tools, policy, **_):
     from app.mcp.tools.transaction_ops_tools import execute_accounting_evidence
     from app.services.transaction_ops.tax_correction import candidate_confirmation
@@ -138,41 +178,10 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
     except (asyncio.CancelledError, TimeoutError):
         await asyncio.shield(record_preparation_interrupted(tenant_id, actor_id, session_id, correlation_id, selection))
         raise
+    card = build_group_card(members, selection, session_id)
+    group = card.accounting_group
+    params = card.tool_input
     eligible = [m for m in members if m.get("card")]
-    targets = [
-        (
-            m["card"]["accounting_review"]["scope"]["netsuite_account_id"],
-            m["card"]["accounting_review"].get("lock_record_type", m["card"]["record_type"]),
-            m["card"]["accounting_review"]["invoice_id"]
-            if m["card"]["accounting_review"].get("kind") == "sales_order_source_alignment"
-            else m["card"]["accounting_review"]["record_id"],
-        )
-        for m in eligible
-    ]
-    if len(set(targets)) != len(targets):
-        raise ValueError("Multiple cases target the same invoice; separate their identities before group approval.")
-    from app.services.transaction_ops.accounting_treatments import investigation_batches, treatment_batches
-
-    group = {
-        "group_id": selection["group_id"],
-        "scope": selection["scope"],
-        "members": members,
-        "concurrency": CONCURRENCY,
-        "treatment_batches": treatment_batches(members),
-        "investigation_batches": investigation_batches(members),
-    }
-    require_bounded_group(group)
-    params = {"manifest_digest": digest(group), "confirmation_ids": [m["confirmation_id"] for m in eligible]}
-    card = WriteConfirmationPayload(
-        mutation_type="execute",
-        record_type="accounting corrections",
-        proposed_fields={"eligible_orders": len(eligible)},
-        tool_name=GROUP_TOOL,
-        tool_input=params,
-        accounting_group=group,
-        confirmation_token=mint_confirmation_token(GROUP_TOOL, params, [], session_id),
-        invariant_errors=[] if eligible else ["No supported corrections are ready for approval."],
-    )
     await log_event(
         db,
         tenant_id,
@@ -515,8 +524,27 @@ async def run_group_confirmation(*, db, session, message, so, action, user_id, t
         if verified == eligible_count
         else "indeterminate"
     )
-    final = {**so, "status": status, "accounting_group": {**so["accounting_group"], "members": outcomes}}
     await set_tenant_context(db, str(tenant_id))
+    # Completion workers may publish a dependent stage while this batch drains.
+    # Preserve that durable publication identity under the same parent row lock.
+    durable = await db.scalar(
+        select(ChatMessage)
+        .where(
+            ChatMessage.id == message.id,
+            ChatMessage.tenant_id == tenant_id,
+            ChatMessage.session_id == session.id,
+        )
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if durable is None:
+        raise ValueError("The group approval is unavailable.")
+    final = {
+        **durable.structured_output,
+        "status": status,
+        "accounting_group_dispatch": {"status": "finished", "finished_at": datetime.now(timezone.utc).isoformat()},
+        "accounting_group": {**so["accounting_group"], "members": outcomes},
+    }
     message.structured_output = final
     note = (
         f"Verified {verified} of {eligible_count} approved record corrections. "
@@ -577,9 +605,11 @@ async def persist_interrupted_group(tenant_id, session_id, message_id, so, actor
     async with async_session_factory() as db:
         await set_tenant_context(db, str(tenant_id))
         parent = await db.scalar(
-            select(ChatMessage).where(
+            select(ChatMessage)
+            .where(
                 ChatMessage.id == message_id, ChatMessage.tenant_id == tenant_id, ChatMessage.session_id == session_id
             )
+            .with_for_update()
         )
         members = []
         for member in so["accounting_group"]["members"]:
@@ -596,13 +626,20 @@ async def persist_interrupted_group(tenant_id, session_id, message_id, so, actor
                 value["reason"] = "Batch interrupted. Check this order’s recorded outcome; no automatic retry."
             members.append(value)
         parent.structured_output = {
-            **so,
+            **parent.structured_output,
             "status": "indeterminate",
+            "accounting_group_dispatch": {
+                "status": "interrupted",
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+            },
             "accounting_group": {**so["accounting_group"], "members": members},
         }
         parent.content = (
             "Group execution was interrupted. Review each recorded result before proposing further changes."
         )
+        from app.services.transaction_ops.accounting_plan_group import refresh
+
+        await refresh(db, tenant_id, parent)
         await log_event(
             db,
             tenant_id,

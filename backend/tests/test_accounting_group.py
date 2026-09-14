@@ -179,7 +179,7 @@ async def test_group_uses_existing_human_approval_path_and_persists_per_order_re
         for m in so["accounting_group"]["members"]
     }
     db = MagicMock()
-    db.scalar = AsyncMock(side_effect=list(children.values()))
+    db.scalar = AsyncMock(side_effect=[*children.values(), parent])
     db.commit = AsyncMock()
     db.flush = AsyncMock()
     if outcome == "changed":

@@ -916,7 +916,7 @@ export interface AccountingGroup {
   group_id: string;
   treatment_batches?: Array<{ treatment_id: string; label: string; case_ids: string[]; treatment: { currency?: string; accounting_book: string; ar_account: string; offset_account?: string } }>;
   investigation_batches?: Array<{ code: string; next_step: string; case_ids: string[]; executable: false }>;
-  members: Array<{ case_id: string; order_reference: string; confirmation_id?: string; reason?: string; card?: WriteConfirmationData }>;
+  members: Array<{ case_id: string; order_reference: string; confirmation_id?: string; reason?: string; card?: WriteConfirmationData; resolution_receipt?: WriteConfirmationData["accounting_receipt"] }>;
   concurrency: number;
 }
 
@@ -948,6 +948,18 @@ export interface WriteConfirmationData {
   } | null;
   accounting_group?: AccountingGroup | null;
   accounting_group_child?: boolean;
+  accounting_receipt?: {
+    status: "reconciled" | "partially_resolved" | "needs_review";
+    summary: string;
+    approved_by: { id: string; name: string };
+    approved_at: string;
+    record_links: Array<{ label: string; url: string; record_type: string; record_id: string }>;
+    reconciliation_url: string;
+    audit_url: string;
+    completion_audit_id: string;
+    next_step: { status: string; reasons?: string[]; confirmation_id?: string };
+  };
+  accounting_plan_progress?: { orders: number; results_ready: number; reconciled: number; remaining: number; status: string };
   accounting_recheck?: { status: "queued" | "not_queued"; run_id?: string; reason?: string };
   tool_name: string;
   tool_input: Record<string, unknown>;

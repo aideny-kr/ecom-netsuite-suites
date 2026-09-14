@@ -33,6 +33,8 @@ def evidence_digest(so):
 
 def execution_claim(so, confirmation_id, actor_id, context, *, now):
     """Called only after human-approval gates, persisted with the winning CAS."""
+    from app.services.transaction_ops.resolution_plan import operation_identity
+
     return {
         **so,
         "accounting_execution": {
@@ -41,6 +43,7 @@ def execution_claim(so, confirmation_id, actor_id, context, *, now):
             "approved_by": str(actor_id),
             "accepted_at": now.isoformat(),
             "evidence_digest": evidence_digest(so),
+            "operation_key": operation_identity(so["accounting_review"]),
             "approval_context": context,
             "attempts": 0,
             "next_at": (now + DELAY).isoformat(),
@@ -142,7 +145,7 @@ async def _authorize_read(db, tenant_id, message, claim):
     return actor
 
 
-async def refresh_group(db, tenant_id, session_id, parent_id):
+async def refresh_group(db, tenant_id, session_id, parent_id, *, depth=0):
     """Refresh embedded cards under a short parent row lock; never restart children."""
     parent = await db.scalar(
         select(ChatMessage)
@@ -182,6 +185,11 @@ async def refresh_group(db, tenant_id, session_id, parent_id):
         f"Verified {verified} of {len(eligible_members)} approved corrections. "
         "Full case reconciliation and cash settlement remain separate. Unverified writes are never retried."
     )
+    from app.services.transaction_ops.accounting_plan_group import refresh
+
+    await refresh(db, tenant_id, parent)
+    if depth < 8 and so.get("accounting_plan_predecessor"):
+        await refresh_group(db, tenant_id, session_id, so["accounting_plan_predecessor"], depth=depth + 1)
 
 
 async def recover(db, tenant_id, message_id, *, now=None, lock_engine=None):

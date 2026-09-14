@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { consumeChatStream } from "@/lib/chat-stream";
+import { accountingProgressPending } from "@/lib/accounting-progress";
 import type { FinancialReportData, DataTableData, TaskOutputData, SheetsLinkData, DocsLinkData, ReportReadyData, StreamBlock } from "@/lib/chat-stream";
 import { coerceDataTableData } from "@/lib/chat-stream";
 import type { ChartData } from "@/lib/types";
@@ -125,6 +126,7 @@ export default function ChatPage() {
     queryKey: ["chat-session", activeSessionId],
     queryFn: () => apiClient.get<ChatSessionDetail>(`/api/v1/chat/sessions/${activeSessionId}`),
     enabled: !!activeSessionId,
+    refetchInterval: (query) => accountingProgressPending(query.state.data?.messages || []) ? 5000 : false,
   });
 
   const createSession = useMutation({

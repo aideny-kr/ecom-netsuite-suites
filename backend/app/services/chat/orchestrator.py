@@ -2373,7 +2373,27 @@ async def run_chat_turn(
                         return
                 if _so.get("accounting_review"):
                     from app.services.transaction_ops.accounting_recovery import execution_claim
+                    from app.services.transaction_ops.resolution_plan import previous_execution
 
+                    _previous = await previous_execution(db, tenant_id, _confirm_msg.id, _so["accounting_review"])
+                    if _previous:
+                        await log_event(
+                            db,
+                            tenant_id,
+                            "transaction_ops",
+                            "accounting_plan.duplicate_execution_prevented",
+                            actor_id=user_id,
+                            resource_type="chat_message",
+                            resource_id=str(_confirm_msg.id),
+                            payload={**_previous, "financial_writes": 0},
+                        )
+                        await db.commit()
+                        yield {
+                            "type": "error",
+                            "error": "This correction already has an execution record. No duplicate update was sent. "
+                            "Review the recorded verification or reconciliation result before taking another action.",
+                        }
+                        return
                     _so = execution_claim(
                         _so, _confirm_msg.id, user_id, _approval_context, now=datetime.now(timezone.utc)
                     )

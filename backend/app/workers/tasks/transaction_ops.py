@@ -160,3 +160,24 @@ def transaction_ops_recover_credit(tenant_id: str, message_id: str):
         return asyncio.run(execute())
     except Exception:
         raise RuntimeError("accounting_credit_recovery_failed") from None
+
+
+@celery_app.task(
+    base=InstrumentedTask,
+    name="tasks.transaction_ops_complete_accounting",
+    queue="recon",
+    max_retries=0,
+    soft_time_limit=170,
+    time_limit=180,
+)
+def transaction_ops_complete_accounting(tenant_id: str, message_id: str):
+    async def execute():
+        from app.services.transaction_ops.accounting_completion import complete
+
+        async with worker_async_session() as db:
+            return await complete(db, uuid.UUID(tenant_id), uuid.UUID(message_id), lock_engine=db.bind)
+
+    try:
+        return asyncio.run(execute())
+    except Exception:
+        raise RuntimeError("accounting_completion_failed") from None

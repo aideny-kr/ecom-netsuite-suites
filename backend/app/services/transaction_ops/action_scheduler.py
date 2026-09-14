@@ -20,12 +20,18 @@ _TASKS = {
     "execute": "tasks.transaction_ops_execute",
     "recover": "tasks.transaction_ops_recover",
     "credit_recover": "tasks.transaction_ops_recover_credit",
+    "complete": "tasks.transaction_ops_complete_accounting",
 }
 
 
 def publish_action(tenant_id, kind, identifier, *, app=celery_app):
     task = _TASKS[kind]
-    key = {"execute": "proposal_id", "recover": "operation_id", "credit_recover": "message_id"}[kind]
+    key = {
+        "execute": "proposal_id",
+        "recover": "operation_id",
+        "credit_recover": "message_id",
+        "complete": "message_id",
+    }[kind]
     with app.connection_for_write(
         connect_timeout=_BROKER_IO_TIMEOUT,
         transport_options={
@@ -135,6 +141,7 @@ async def collect_due_actions(db, now):
         "executions": 0,
         "recoveries": 0,
         "credit_recoveries": 0,
+        "completions": 0,
         "dispatched": 0,
         "dispatch_failed": 0,
         "tenant_failed": 0,
@@ -153,8 +160,12 @@ async def collect_due_actions(db, now):
                     from app.services.transaction_ops.accounting_recovery import candidates as credit_candidates
 
                     credits = await credit_candidates(db, tenant_id, now, limit=_LIMIT + 1)
+                    from app.services.transaction_ops.accounting_completion import candidates as completion_candidates
+
+                    completions = await completion_candidates(db, tenant_id, now, limit=_LIMIT + 1)
                     await db.commit()
                     for kind, candidates, counter in (
+                        ("complete", completions, "completions"),
                         ("credit_recover", credits, "credit_recoveries"),
                         ("recover", recoveries, "recoveries"),
                         ("execute", executions, "executions"),

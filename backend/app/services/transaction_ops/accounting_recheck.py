@@ -178,4 +178,7 @@ async def record_outcome(db, tenant_id, run, reason, *, now):
         "cash_settlement": "not_verified",
     }
     run.progress_json = {**(run.progress_json or {}), "settlement": result}
+    from app.services.transaction_ops.accounting_completion import enqueue
+
+    enqueue(message, run, now)
     await state._audit(db, tenant_id, "accounting_recheck.complete", run, payload=result)
