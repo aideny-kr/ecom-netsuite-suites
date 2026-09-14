@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.services.chat.prompt_cache import split_system_prompt
-from app.services.chat.tool_categories import categorize, is_celigo_tool
+from app.services.chat.tool_categories import categorize, is_celigo_source
 from app.services.drive_rag.retriever import retrieve_drive_chunks
 from app.services.metrics.metric_compute import condense_metric_for_llm, is_suppressed_metric_payload
 
@@ -295,7 +295,11 @@ def _build_connection_warning_block(connection_warnings: list[str]) -> str:
     )
 
 
-from app.services.chat.tool_inventory import build_mcp_execution_guidance, build_tool_inventory_block
+from app.services.chat.tool_inventory import (
+    build_mcp_execution_guidance,
+    build_source_selection_guidance,
+    build_tool_inventory_block,
+)
 
 
 def _assemble_system_prompt(*, template: str, tool_definitions: list[dict]) -> str:
@@ -310,13 +314,23 @@ def _assemble_system_prompt(*, template: str, tool_definitions: list[dict]) -> s
     what it can call AND how to choose between them stays in sync with the
     real schema.
     """
+    from app.services.chat.metabase_context import build_metabase_skill_context
+
     inventory = build_tool_inventory_block(tool_definitions)
     guidance = build_mcp_execution_guidance(tool_definitions)
     combined = inventory + guidance
     if "{{TOOL_INVENTORY}}" in template:
-        return template.replace("{{TOOL_INVENTORY}}", combined)
-    # DB-stored custom templates may lack the placeholder — append at end
-    return template + f"\n\n{combined}" if combined else template
+        prompt = template.replace("{{TOOL_INVENTORY}}", combined)
+    else:
+        # DB-stored custom templates may lack the placeholder — append at end
+        prompt = template + f"\n\n{combined}" if combined else template
+    # UnifiedAgent builds its own prompt; profiles appended to the orchestrator's
+    # local system_prompt do not reach it. Use this shared final assembly seam,
+    # after tool filtering, so both chat paths receive the connected skills.
+    metabase_context = build_metabase_skill_context(tool_definitions, template=template)
+    if metabase_context:
+        prompt += f"\n\n{metabase_context}"
+    return prompt + build_source_selection_guidance(tool_definitions)
 
 
 # ---------------------------------------------------------------------------
@@ -482,6 +496,7 @@ def _coerce_assistant_content(
     persisted_output: dict | None,
     *,
     tool_calls: list[dict] | None = None,
+    error: str | None = None,
 ) -> str:
     """Decide what string to persist as ``ChatMessage.content``.
 
@@ -499,6 +514,17 @@ def _coerce_assistant_content(
       final text. Use the spiral-specific wording so the user doesn't read
       this as "I don't remember anything we just discussed".
     """
+    if error in {"request_routing_failed", "metabase_numeric_verification_failed"} and final_text:
+        return final_text
+    if error:
+        if "credit balance is too low" in error.lower() or "insufficient_quota" in error.lower():
+            notice = (
+                "The configured AI provider has insufficient API credit. Add credit or select a funded provider "
+                "in AI provider settings, then retry."
+            )
+        else:
+            notice = "The agent could not complete this request. Please retry or check your AI provider settings."
+        return f"{final_text}\n\n{notice}" if final_text else notice
     if isinstance(persisted_output, dict) and persisted_output.get("type") == "clarification":
         return ""
     if _is_pricing_task_output(persisted_output):
@@ -712,6 +738,10 @@ def _compute_source_pin_update(tool_calls_log: list[dict]) -> str | None:
         name = call.get("tool_name") or call.get("tool", "")
         cat = categorize(name)
 
+        # This evidence joins Framework and NetSuite; it is not a NetSuite source pin.
+        if name in ("transaction_ops.status", "transaction_ops_status"):
+            continue
+
         # M4: metric_compute is categorized as "data_table" but its actual source
         # depends on which backend executed the query (BigQuery vs SuiteQL vs expression).
         # Read source_kind from the result_payload (set by extract_result_payload for
@@ -732,7 +762,13 @@ def _compute_source_pin_update(tool_calls_log: list[dict]) -> str | None:
         # NetSuite and made a Celigo+BigQuery turn look like a source conflict.
         # Source-agnostic, so it contributes nothing either way -- the same
         # treatment metric_compute's `expression` backend gets above.
-        if is_celigo_tool(name):
+        #
+        # is_celigo_source (not is_celigo_tool) -- task 4B: is_celigo_tool only
+        # recognises the EXTERNAL connector's `ext__...` names; this repo's own
+        # local `celigo.*`/`celigo_*` chat tools (task 3) are exactly as much
+        # "not NetSuite" as the external ones, and is_celigo_source is the one
+        # place both spellings of both families are recognized.
+        if is_celigo_source(name):
             continue
 
         if cat == "bigquery":
@@ -795,6 +831,26 @@ def _intercept_tool_result(
     metric paths so the model can reference the result in ``report.compose`` and
     the id keys the in-turn full-payload sidecar (gate cluster A).
     """
+
+    # Investigation evidence is rendered deterministically, including currency.
+    # Suppress values even for FULL-context requests; a model cannot approve writes.
+    if tool_name in ("transaction_ops.status", "transaction_ops_status"):
+        invalid = json.dumps({"success": False, "error": "invalid_transaction_result"})
+        try:
+            parsed = json.loads(result_str)
+        except (ValueError, TypeError):
+            return None, None, invalid
+        if not isinstance(parsed, dict) or parsed.get("success") is not True:
+            return None, None, invalid
+        if not isinstance(parsed.get("rows"), list) or not isinstance(parsed.get("columns"), list):
+            return None, None, invalid
+        event = {key: parsed[key] for key in ("columns", "rows", "row_count", "truncated", "query") if key in parsed}
+        event.update(suppress_llm_value=True, source_kind="transaction_ops")
+        from app.services.transaction_ops.chat_evidence import condense_status
+
+        condensed = condense_status(parsed)
+        condensed = _stamp_result_id(condensed, event, result_id)
+        return "data_table", event, condensed
 
     # --- Report card path ---
     if tool_name in ("report_compose", "report.compose"):
@@ -975,6 +1031,16 @@ def _intercept_tool_result(
             "query": query,
             "truncated": truncated,
         }
+        # Honesty channel (spec docs/superpowers/specs/2026-09-04-celigo-chat-access.md
+        # §8, task 4C): ANY data_table tool may carry a `caveats` list -- snapshot age,
+        # unchecked-error flags, stall verdicts, whatever a caller wants the model to
+        # relay rather than reason past. Generic to the branch, not Celigo-specific.
+        # Absent/empty for every tool that doesn't set it, so this is a no-op for
+        # everything that predates it -- asserted by the byte-identical tests above.
+        caveats = parsed.get("caveats")
+        has_caveats = isinstance(caveats, list) and len(caveats) > 0 and all(isinstance(c, str) for c in caveats)
+        if has_caveats:
+            sse_event_data["caveats"] = caveats
         # Metric trust boundary: a metric_data_table is a single computed number.
         # The SSE event_data above STILL carries the full rows (the FE renders the
         # value), but the LLM-facing condensed string must withhold every row value
@@ -997,37 +1063,38 @@ def _intercept_tool_result(
         # Investigation queries (FULL context): send all rows so LLM can reason
         # over system notes, field changes, timelines, etc.
         # Standard queries: 5-row preview to save tokens.
+        _relay_note = " Relay every caveat to the user verbatim before interpreting the table." if has_caveats else ""
         if context_need == ContextNeed.FULL:
-            condensed = json.dumps(
-                {
-                    "columns": columns,
-                    "row_count": row_count,
-                    "rows": rows,
-                    "truncated": truncated,
-                    "note": (
-                        "The data table is also rendered in the frontend. "
-                        "Do NOT reproduce the table. Analyze the data and explain findings."
-                    ),
-                },
-                default=str,
-            )
+            condensed_payload = {
+                "columns": columns,
+                "row_count": row_count,
+                "rows": rows,
+                "truncated": truncated,
+                "note": (
+                    "The data table is also rendered in the frontend. "
+                    "Do NOT reproduce the table. Analyze the data and explain findings." + _relay_note
+                ),
+            }
+            if has_caveats:
+                condensed_payload["caveats"] = caveats
+            condensed = json.dumps(condensed_payload, default=str)
         else:
             row_preview = rows[:30]
-            condensed = json.dumps(
-                {
-                    "columns": columns,
-                    "row_count": row_count,
-                    "rows_preview": row_preview,
-                    "truncated": truncated,
-                    "note": (
-                        "The full data table has been sent to the frontend for rendering. "
-                        "Do NOT rebuild or reproduce the table in your response. "
-                        "Provide commentary, insights, and analysis only. "
-                        "Use rows_preview for charting and follow-up analysis."
-                    ),
-                },
-                default=str,
-            )
+            condensed_payload = {
+                "columns": columns,
+                "row_count": row_count,
+                "rows_preview": row_preview,
+                "truncated": truncated,
+                "note": (
+                    "The full data table has been sent to the frontend for rendering. "
+                    "Do NOT rebuild or reproduce the table in your response. "
+                    "Provide commentary, insights, and analysis only. "
+                    "Use rows_preview for charting and follow-up analysis." + _relay_note
+                ),
+            }
+            if has_caveats:
+                condensed_payload["caveats"] = caveats
+            condensed = json.dumps(condensed_payload, default=str)
         condensed = _stamp_result_id(condensed, sse_event_data, result_id)
         return "data_table", sse_event_data, condensed
 
@@ -2168,6 +2235,31 @@ async def run_chat_turn(
                 # retry, auto-revert-to-pending) risks a SECOND post for a
                 # write NetSuite already accepted. A human must check the
                 # NetSuite record and resolve it manually.
+                # Accounting tax corrections carry server-built source and native preconditions.
+                # Check again after the single-use approval claim, immediately before any write.
+                if _so.get("mutation_type") == "update":
+                    from app.services.transaction_ops.tax_correction import validate_approved
+
+                    try:
+                        await validate_approved(db, tenant_id, tool_name, tool_input, _so.get("accounting_review"))
+                    except Exception as exc:
+                        _confirm_msg.structured_output = {**_so, "status": "failed", "error": str(exc)}
+                        await log_event(
+                            db=db,
+                            tenant_id=tenant_id,
+                            actor_id=user_id,
+                            category="transaction_ops",
+                            action="accounting_correction.precondition_failed",
+                            resource_type="chat_message",
+                            resource_id=str(_confirm_msg.id),
+                            correlation_id=correlation_id,
+                            payload={"approved_by": str(user_id), "financial_writes": 0, "reason": str(exc)},
+                            status="error",
+                        )
+                        await db.commit()
+                        yield {"type": "error", "error": f"No change was sent to NetSuite: {exc}"}
+                        return
+
                 # ── Side-effect log: recorded and COMMITTED before the call ──
                 # agent-graph.md #10. The ordering is the whole mechanism: a
                 # row written AFTER the call, or left uncommitted, vanishes in
@@ -2374,6 +2466,8 @@ async def run_chat_turn(
                                 if isinstance(_exec_result, dict)
                                 else None
                             )
+                            if not _new_id and _mutation_type == "update":
+                                _new_id = _so.get("record_id")
                             if _new_id:
                                 # Resolve the account from the CONNECTOR that
                                 # executed this write, not from the tenant's
@@ -2424,6 +2518,43 @@ async def run_chat_turn(
                         "now risks creating it twice."
                     )
 
+                if _exec_succeeded and _so.get("accounting_review"):
+                    from app.services.transaction_ops.tax_correction import verify_after
+
+                    try:
+                        _verification = await verify_after(db, tenant_id, _so["accounting_review"])
+                    except Exception as exc:
+                        _verification = {"status": "needs_review", "reason": type(exc).__name__}
+                    await log_event(
+                        db=db,
+                        tenant_id=tenant_id,
+                        actor_id=user_id,
+                        category="transaction_ops",
+                        action="accounting_correction.verification.completed",
+                        resource_type="transaction_case",
+                        resource_id=_so["accounting_review"]["case_id"],
+                        correlation_id=correlation_id,
+                        payload={
+                            "approval_message_id": str(_confirm_msg.id),
+                            "approved_by": str(user_id),
+                            "before": _so["accounting_review"]["before"],
+                            "receipt": _exec_result,
+                            "verification": json.loads(json.dumps(_verification, default=str)),
+                        },
+                        status="success" if _verification["status"] == "verified" else "error",
+                    )
+                    if _verification["status"] == "verified":
+                        _confirm_content += (
+                            "\n\nInvoice total, tax and GL were independently re-read and verified. "
+                            "Sales-order reconciliation and deposit/cash settlement remain separate checks; no additional money was moved."
+                        )
+                    else:
+                        _confirm_content = (
+                            "NetSuite returned a response, but the invoice/GL correction is not verified. "
+                            "The case still needs review. Do not repeat this write."
+                        )
+                    _so = {**_so, "accounting_verification": json.loads(json.dumps(_verification, default=str))}
+
                 _updated_so = dict(_so)
                 if _exec_succeeded and _updated_so_record_url:
                     # Display-only, like field_labels: never part of the
@@ -2432,8 +2563,29 @@ async def run_chat_turn(
                 _repair_decision = None
                 _repair_root_id: str | None = None
                 _repair_current_attempt = 0
-                if _exec_succeeded:
+                if _mutation_type == "execute":
+                    # Arbitrary connectors do not share NetSuite's record schema
+                    # or repair semantics. Preserve successful data for the user
+                    # and subsequent agent turns; failures require a fresh request.
+                    from app.services.chat.write_confirmation_service import format_external_result
+
+                    _updated_so["status"] = "approved" if _exec_succeeded else _write_outcome
+                    if _exec_succeeded:
+                        _confirm_content = format_external_result(_exec_result)
+                    else:
+                        _updated_so["error"] = _exec_error or "The connected service did not confirm success."
+                        _confirm_content = (
+                            "The connected service did not confirm success. Check its current state before retrying."
+                            if _write_outcome == "indeterminate"
+                            else "The connected service reported a failed request."
+                        )
+                elif _exec_succeeded:
                     _updated_so["status"] = "approved"
+                elif _so.get("accounting_review"):
+                    # Accounting failures need new scoped evidence, never a speculative model repair.
+                    _updated_so["status"] = _write_outcome
+                    _updated_so["error"] = _exec_error
+                    _updated_so["repair_exit_reason"] = "fresh_accounting_evidence_required"
                 elif not may_enter_repair_loop(_write_outcome):
                     # TERMINAL, and deliberately NOT "failed" — calling this a
                     # failure is a claim about NetSuite we cannot support, and
@@ -2918,6 +3070,7 @@ async def run_chat_turn(
 
         max_turns = settings.CHAT_MAX_HISTORY_TURNS
         all_messages: list[dict] = []
+        msg_dicts: list[dict] = []
         summarised = 0
         # Self-sufficient history load: a freshly-created session (onboarding /
         # integration chat) never query-loaded its lazy="selectin" `messages`, so
@@ -3208,6 +3361,7 @@ async def run_chat_turn(
                             correlation_id=correlation_id,
                             metadata=None,
                             policy=active_policy,
+                            context_need=context_need,
                         )
                     else:
                         # Detect financial intent for task augmentation + domain knowledge boost
@@ -3647,6 +3801,7 @@ async def run_chat_turn(
                             # in base_agent.py for clarify_intercept.
                             from app.services.chat.plan_mode.source_resolver import (
                                 canonicalize_connector_providers,
+                                source_provider_for_connector,
                             )
                             from app.services.connection_service import list_connections
                             from app.services.mcp_connector_service import (
@@ -3661,7 +3816,7 @@ async def run_chat_turn(
                                 _rest = await list_connections(db, tenant_id)
                             except Exception:
                                 _rest = []
-                            _raw_providers = [getattr(c, "provider", "") for c in _mcp] + [
+                            _raw_providers = [source_provider_for_connector(c) for c in _mcp] + [
                                 getattr(c, "provider", "") for c in _rest if getattr(c, "status", "active") == "active"
                             ]
                             _plan_mode_connected_sources = sorted(canonicalize_connector_providers(_raw_providers))
@@ -3731,6 +3886,8 @@ async def run_chat_turn(
                             print("[ORCHESTRATOR] TRANSFORM intent — using cached result", flush=True)
 
                     # Augment task for financial report queries or transform requests
+                    context["source_selection_task"] = sanitized_input
+                    context["source_selection_history"] = msg_dicts
                     unified_task = sanitized_input
                     if not _is_chitchat and is_financial:
                         unified_task = _build_financial_mode_task(sanitized_input)
@@ -4067,6 +4224,11 @@ async def run_chat_turn(
 
                     # Persist charts alongside structured_output (backward compatible)
                     _persisted_output = last_structured_output
+                    from app.services.chat.request_routing import persist_request_context
+
+                    _persisted_output = persist_request_context(
+                        _persisted_output, getattr(agent_result, "request_context", None)
+                    )
                     if _charts_output:
                         if _persisted_output:
                             _persisted_output = {**_persisted_output, "charts": _charts_output}
@@ -4081,6 +4243,9 @@ async def run_chat_turn(
                             final_text,
                             _persisted_output,
                             tool_calls=coord_result_tool_calls,
+                            error=(agent_result.error or "agent_failed")
+                            if agent_result is not None and not agent_result.success
+                            else None,
                         ),
                         tool_calls=coord_result_tool_calls if coord_result_tool_calls else None,
                         citations=citations if citations else None,

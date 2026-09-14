@@ -70,3 +70,47 @@ def test_other_tools_still_summarized_to_row_count():
     result = {"files": [{"id": "1"}], "row_count": 1}
     summary = summarize_tool_result("workspace_list_files", json.dumps(result))
     assert summary == "Returned 1 row"
+
+
+def test_schedule_create_preserves_schedule_id_json():
+    """Scheduled Jobs platform (Slice 2, Task 7) — the chat hand-off card
+    (`schedule-created-card.tsx`) needs `schedule_id` to link "Review the
+    plan on Scheduled jobs →" to `/scheduled-jobs/{id}`. Same precedent as
+    workspace_propose_patch's changeset_id: allowlist the fields the
+    frontend needs rather than let the compact-summary fallback truncate an
+    arbitrary-length `summary_line` before the id."""
+    result = {
+        "schedule_id": "403dba46-76d1-49fc-8f17-c40e5c5dead7",
+        "name": "Payout reconciliation weekly",
+        "schedule_type": "job",
+        "plan_status": "pending_approval",
+        # Long enough that the generic result_str[:500] fallback would cut
+        # schedule_id off the end if this case fell through to it — pins
+        # the allowlist branch, not a lucky short-string truncation.
+        "summary_line": "reads Stripe payouts and NetSuite deposits, holds needs-review lines, "
+        "emails the exception summary " + ("x" * 500),
+    }
+    summary = summarize_tool_result("schedule.create", json.dumps(result))
+    parsed = json.loads(summary)
+    assert parsed["schedule_id"] == "403dba46-76d1-49fc-8f17-c40e5c5dead7"
+    assert parsed["plan_status"] == "pending_approval"
+
+
+def test_schedule_create_clarification_still_summarized_as_error():
+    # instruction given, but the compiler asked a question first — nothing
+    # was created, so this stays on the ordinary error path (the message
+    # IS the clarification question; the agent relays it in its own turn).
+    result = {"error": True, "clarification": True, "message": "Which subsidiary?"}
+    summary = summarize_tool_result("schedule.create", json.dumps(result))
+    assert summary == "Which subsidiary?"
+
+
+def test_schedule_create_without_schedule_id_falls_through_without_crashing():
+    # A shape missing schedule_id (defensive — every real execute_create
+    # success path sets it) must not crash the allowlist branch; it just
+    # falls through to the ordinary summarization the tool would have gotten
+    # without a schedule.create-specific case at all.
+    result = {"name": "no id here", "row_count": 0}
+    summary = summarize_tool_result("schedule.create", json.dumps(result))
+    assert isinstance(summary, str)
+    assert "schedule_id" not in summary

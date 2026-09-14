@@ -3,10 +3,13 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import type { McpConnector, McpConnectorTestResponse } from "@/lib/types";
+import { useAuth } from "@/providers/auth-provider";
 
 export function useMcpConnectors() {
+  const { user } = useAuth();
   return useQuery<McpConnector[]>({
-    queryKey: ["mcp-connectors"],
+    queryKey: ["mcp-connectors", user?.tenant_id],
+    enabled: !!user?.tenant_id,
     queryFn: () => apiClient.get<McpConnector[]>("/api/v1/mcp-connectors"),
   });
 }

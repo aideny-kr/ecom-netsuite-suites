@@ -166,14 +166,14 @@ export function AddMcpConnectorDialog() {
     if (!provider || !serverUrl) return;
 
     try {
-      await createConnector.mutateAsync({
+      const result = await createConnector.mutateAsync({
         provider,
         label,
         server_url: serverUrl,
         auth_type: authType,
         credentials: authType !== "none" ? credentials : undefined,
       });
-      toast({ title: "MCP connector created successfully" });
+      toast({ title: result.status === "error" ? "Saved — tool discovery needs attention" : "MCP connector connected", description: result.status === "error" ? "Check the server URL and credential, then test the connector." : undefined });
       setOpen(false);
       resetForm();
     } catch (err) {
@@ -200,18 +200,18 @@ export function AddMcpConnectorDialog() {
       : "Create";
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={(next) => { setOpen(next); if (!next) resetForm(); }}>
       <DialogTrigger asChild>
         <Button className="text-[13px] font-medium">
           <Plus className="mr-2 h-4 w-4" />
           Add MCP Connector
         </Button>
       </DialogTrigger>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
         <DialogHeader>
           <DialogTitle className="text-lg">Add MCP Connector</DialogTitle>
           <DialogDescription className="text-[13px]">
-            Connect to an external MCP server for real-time data queries.
+            Connect to an external MCP server. Custom tool calls require approval of their exact inputs before running.
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={onSubmit} className="space-y-4">
@@ -247,6 +247,7 @@ export function AddMcpConnectorDialog() {
             </Label>
             <Input
               id="mcp-label"
+              required={!isNetSuite && !isStripe}
               placeholder={
                 isNetSuite
                   ? "e.g., Production NetSuite"
@@ -329,6 +330,7 @@ export function AddMcpConnectorDialog() {
                 </Label>
                 <Input
                   id="mcp-url"
+                  type="url"
                   placeholder="https://example.com/mcp/v1"
                   value={serverUrl}
                   onChange={(e) => setServerUrl(e.target.value)}

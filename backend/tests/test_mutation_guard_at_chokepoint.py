@@ -139,3 +139,9 @@ async def test_a_non_mutation_external_tool_is_untouched():
         raw = await _call(_ext("list_flows"))
     assert "error" not in raw
     spy.assert_awaited_once()
+
+
+@pytest.fixture(autouse=True)
+def isolate_durable_audit_storage(monkeypatch):
+    # These dispatcher unit tests use synthetic actors/DBs. Audit persistence is tested separately.
+    monkeypatch.setattr("app.services.chat.external_tool_audit.append_event", AsyncMock())

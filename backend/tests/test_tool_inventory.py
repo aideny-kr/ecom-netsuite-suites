@@ -17,12 +17,13 @@ class TestBuildToolInventoryBlock:
     def test_empty_list_returns_empty_string(self):
         assert build_tool_inventory_block([]) == ""
 
-    def test_single_tool_renders_name_and_description(self):
+    def test_tool_index_does_not_duplicate_api_descriptions(self):
         block = build_tool_inventory_block([_tool("netsuite_suiteql", "Run SuiteQL against NetSuite.", "data_table")])
         assert "<available_tools>" in block
         assert "</available_tools>" in block
         assert "netsuite_suiteql" in block
-        assert "Run SuiteQL against NetSuite." in block
+        assert "Run SuiteQL against NetSuite." not in block
+        assert "supplied tool definitions" in block
 
     def test_bigquery_tools_trigger_dialect_warning(self):
         block = build_tool_inventory_block(
@@ -38,12 +39,29 @@ class TestBuildToolInventoryBlock:
         block = build_tool_inventory_block([_tool("netsuite_suiteql", "SuiteQL.", "data_table")])
         assert "BigQuery" not in block
 
+    def test_celigo_tool_triggers_dialect_free_hint(self):
+        """Task 4D (spec docs/superpowers/specs/2026-09-04-celigo-chat-access.md
+        §6-§7): the hint carries no table/column/schema words -- it's an intent
+        pointer ("use the celigo tools"), not a dialect rule like BigQuery's."""
+        block = build_tool_inventory_block(
+            [
+                _tool("netsuite_suiteql", "SuiteQL.", "data_table"),
+                _tool("celigo_flows", "List Celigo flows.", "data_table"),
+            ]
+        )
+        assert "Celigo" in block
+        assert "read-only snapshots" in block
+
+    def test_no_celigo_hint_when_no_celigo_tool(self):
+        block = build_tool_inventory_block([_tool("netsuite_suiteql", "SuiteQL.", "data_table")])
+        assert "Celigo" not in block
+
     def test_external_mcp_tool_listed_with_prefix_hint(self):
         block = build_tool_inventory_block(
             [_tool("ext__shopify_list_orders", "[shopify_mcp] List Shopify orders.", "other")]
         )
         assert "ext__shopify_list_orders" in block
-        assert "shopify_mcp" in block
+        assert "List Shopify orders" not in block
 
     def test_output_is_deterministic_for_same_input(self):
         tools = [

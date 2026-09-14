@@ -24,12 +24,13 @@ the eight flow-map tables themselves, which the guard does not cover.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import text
 
 from app.models.celigo import (
+    CeligoConfigChange,
     CeligoErrorSignature,
     CeligoFlow,
     CeligoFlowError,
@@ -183,7 +184,306 @@ async def _seed_world(db, tenant_id, *, pii_message: str = PII_MESSAGE) -> dict:
 # ---------------------------------------------------------------------------
 
 
+async def _seed_cron_flow(db, world: dict, *, schedule="? 0 */6 * * *", name: str = "Nightly Backfill") -> CeligoFlow:
+    """A second flow under *world*'s integration carrying the schedule shape
+    Celigo actually sends -- a cron STRING (96 of 239 live flows; `_seed_world`'s
+    object form was a fixture invention never observed live). Shared by the
+    list and detail tests so the two cannot drift apart (gate nit, PR #216)."""
+    flow = CeligoFlow(
+        tenant_id=world["integration"].tenant_id,
+        celigo_connection_id=world["connection_id"],
+        integration_id=world["integration"].id,
+        celigo_id=f"flow_cron_{world['suffix']}",
+        name=name,
+        disabled=False,
+        schedule=schedule,
+        raw_json={},
+    )
+    db.add(flow)
+    await db.flush()
+    return flow
+
+
+async def _seed_sandbox_world(db, world: dict) -> tuple[CeligoIntegration, CeligoFlow]:
+    """A sandbox integration + one flow under it, on the same connection as
+    *world*. Every read endpoint must treat both as if they did not exist."""
+    integration = CeligoIntegration(
+        tenant_id=world["integration"].tenant_id,
+        celigo_connection_id=world["connection_id"],
+        celigo_id=f"int_sb_{world['suffix']}",
+        name="ACME ERP (sandbox)",
+        sandbox=True,
+        raw_json={},
+    )
+    db.add(integration)
+    await db.flush()
+    flow = CeligoFlow(
+        tenant_id=world["integration"].tenant_id,
+        celigo_connection_id=world["connection_id"],
+        integration_id=integration.id,
+        celigo_id=f"flow_sb_{world['suffix']}",
+        name="Sandbox Sales Order Sync",
+        disabled=False,
+        raw_json={},
+    )
+    db.add(flow)
+    await db.flush()
+    return integration, flow
+
+
+async def _seed_router_chain_flow(
+    db, world: dict, *, name: str = "New Sales Order to NetSuite - Multi-Subsidiary"
+) -> dict:
+    """The real Multi-Subsidiary shape: source -> router 1 (one pass-through branch
+    holding a lookup with a preSavePage hook) -> router 2 (two named branches, each:
+    NetSuite lookup, add customer, update customer, add salesorder with a preMap hook).
+    Two scripts: one single-copy, one 3-copy family with 2 differing versions."""
+    tenant_id = world["integration"].tenant_id
+    conn_id = world["connection_id"]
+    sfx = world["suffix"]
+    flow = CeligoFlow(
+        tenant_id=tenant_id,
+        celigo_connection_id=conn_id,
+        integration_id=world["integration"].id,
+        celigo_id=f"flow_chain_{sfx}",
+        name=name,
+        disabled=False,
+        schedule="? 5,20,35,50 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23 ? * *",
+        timezone="America/Los_Angeles",
+        last_executed_at=datetime(2026, 9, 2, 17, 51, tzinfo=timezone.utc),
+        celigo_last_modified=datetime(2026, 9, 2, tzinfo=timezone.utc),
+        raw_json={
+            "numOpenError": 0,
+            "lastErrorAt": None,
+            "routers": [
+                {
+                    "id": "r1",
+                    "name": "",
+                    "branches": [
+                        {
+                            "branchId": "b0",
+                            "name": "",
+                            "nextRouterId": "r2",
+                            "pageProcessors": [{"_exportId": f"lkp_{sfx}"}],
+                        }
+                    ],
+                },
+                {
+                    "id": "r2",
+                    "name": "",
+                    "routeRecordsTo": "first_matching_branch",
+                    "routeRecordsUsing": "input_filters",
+                    "branches": [
+                        {
+                            "branchId": "bIntl",
+                            "name": "Framework Intl",
+                            "inputFilter": {
+                                "rules": ["notequals", ["string", ["extract", "business_entity"]], "Framework Inc"]
+                            },
+                            "pageProcessors": [{}, {}, {}, {}],
+                        },
+                        {
+                            "branchId": "bInc",
+                            "name": "Framework Inc",
+                            "inputFilter": {
+                                "rules": ["equals", ["string", ["extract", "business_entity"]], "Framework Inc"]
+                            },
+                            "pageProcessors": [{}, {}, {}, {}],
+                        },
+                    ],
+                },
+            ],
+        },
+    )
+    db.add(flow)
+    await db.flush()
+
+    def step(
+        celigo_id,
+        role,
+        adaptor,
+        *,
+        router=None,
+        branch=None,
+        seq=0,
+        record_type=None,
+        operation=None,
+        search_id=None,
+        reference_name=None,
+        mapping=None,
+    ):
+        return CeligoFlowStep(
+            tenant_id=tenant_id,
+            celigo_connection_id=conn_id,
+            flow_id=flow.id,
+            celigo_id=celigo_id,
+            role=role,
+            adaptor_type=adaptor,
+            router_id=router,
+            branch_id=branch,
+            sequence=seq,
+            record_type=record_type,
+            operation=operation,
+            search_id=search_id,
+            reference_name=reference_name,
+            mapping_json=mapping,
+            raw_json={},
+        )
+
+    steps = [
+        step(f"src_{sfx}", "generator", "HTTPExport", reference_name="Get New Sales Orders"),
+        step(
+            f"lkp_{sfx}",
+            "processor",
+            "HTTPExport",
+            router="r1",
+            branch="b0",
+            reference_name="Lookup Sales Orders (Multi-Subsidiary)",
+            mapping={"fields": [{"extract": "a", "generate": "b"}] * 23},
+        ),
+    ]
+    for branch, suffix in (("bIntl", "BV"), ("bInc", "Inc")):
+        steps += [
+            step(
+                f"cust_lkp_{branch}_{sfx}",
+                "processor",
+                "NetSuiteExport",
+                router="r2",
+                branch=branch,
+                seq=0,
+                record_type="customer",
+                search_id="5090",
+                reference_name="Lookup Customer",
+            ),
+            step(
+                f"cust_add_{branch}_{sfx}",
+                "processor",
+                "NetSuiteDistributedImport",
+                router="r2",
+                branch=branch,
+                seq=1,
+                record_type="customer",
+                operation="add",
+                reference_name=f"Import Customer ({suffix})",
+            ),
+            step(
+                f"cust_upd_{branch}_{sfx}",
+                "processor",
+                "NetSuiteDistributedImport",
+                router="r2",
+                branch=branch,
+                seq=2,
+                record_type="customer",
+                operation="update",
+                reference_name="Update Currency",
+            ),
+            step(
+                f"so_add_{branch}_{sfx}",
+                "processor",
+                "NetSuiteDistributedImport",
+                router="r2",
+                branch=branch,
+                seq=3,
+                record_type="salesorder",
+                operation="add",
+                reference_name=f"Add New Sales Order ({suffix})",
+            ),
+        ]
+    db.add_all(steps)
+    await db.flush()
+
+    solo = CeligoScript(
+        tenant_id=tenant_id,
+        celigo_connection_id=conn_id,
+        celigo_id=f"scr_solo_{sfx}",
+        name="sales_order_script_v2",
+        content="x" * 34145,
+        content_hash="hsolo",
+        celigo_last_modified=datetime(2026, 8, 25, tzinfo=timezone.utc),
+    )
+    fam = [
+        CeligoScript(
+            tenant_id=tenant_id,
+            celigo_connection_id=conn_id,
+            celigo_id=f"scr_fam{i}_{sfx}",
+            source_id=f"scr_fam0_{sfx}" if i else None,
+            name="ns_sales_order_premap",
+            content=c,
+            content_hash=h,
+            celigo_last_modified=datetime(2026, 1, 1 + i, tzinfo=timezone.utc),
+        )
+        for i, (c, h) in enumerate((("a" * 2284, "hA"), ("b" * 2443, "hB"), ("b" * 2443, "hB")))
+    ]
+    db.add_all([solo, *fam])
+    await db.flush()
+    by_id = {s.celigo_id: s for s in steps}
+    atts = [
+        CeligoScriptAttachment(
+            tenant_id=tenant_id,
+            celigo_connection_id=conn_id,
+            flow_id=flow.id,
+            flow_step_id=by_id[f"lkp_{sfx}"].id,
+            script_id=solo.id,
+            script_celigo_id=solo.celigo_id,
+            function_name="preSavePage",
+            json_path=f"lkp_{sfx}.hooks.preSavePage",
+            site_type="hook",
+        )
+    ]
+    for branch in ("bIntl", "bInc"):
+        atts.append(
+            CeligoScriptAttachment(
+                tenant_id=tenant_id,
+                celigo_connection_id=conn_id,
+                flow_id=flow.id,
+                flow_step_id=by_id[f"so_add_{branch}_{sfx}"].id,
+                script_id=fam[1].id,
+                script_celigo_id=fam[1].celigo_id,
+                function_name="preMap",
+                json_path=f"so_add_{branch}_{sfx}.hooks.preMap",
+                site_type="hook",
+            )
+        )
+    db.add_all(atts)
+    await db.flush()
+    return {"flow": flow, "steps": by_id, "solo": solo, "family": fam, "attachments": atts}
+
+
 class TestListIntegrations:
+    async def test_sandbox_integrations_are_not_listed(self, client, admin_user, db):
+        """Production only -- operator directive 2026-09-01 ("don't bring sandbox
+        celigo, just production"). A sandbox integration synced under the same
+        connection must not appear. A NULL `sandbox` (Celigo omitted the flag)
+        is treated as production, never hidden: hiding on an absent flag would
+        let a missing field silently erase real integrations."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        db.add(
+            CeligoIntegration(
+                tenant_id=user.tenant_id,
+                celigo_connection_id=world["connection_id"],
+                celigo_id=f"int_sb_{world['suffix']}",
+                name="ACME ERP (sandbox)",
+                sandbox=True,
+                raw_json={},
+            )
+        )
+        db.add(
+            CeligoIntegration(
+                tenant_id=user.tenant_id,
+                celigo_connection_id=world["connection_id"],
+                celigo_id=f"int_null_{world['suffix']}",
+                name="ACME Legacy",
+                sandbox=None,
+                raw_json={},
+            )
+        )
+        await db.flush()
+
+        r = await client.get("/api/v1/celigo/integrations", headers=headers)
+        assert r.status_code == 200, r.text
+        assert sorted(i["name"] for i in r.json()) == ["ACME ERP", "ACME Legacy"]
+
     async def test_lists_integrations_for_the_tenant(self, client, admin_user, db):
         user, headers = admin_user
         world = await _seed_world(db, user.tenant_id)
@@ -228,6 +528,164 @@ class TestListIntegrations:
         assert len(body) == 1
         assert body[0]["id"] == str(world_b["integration"].id), "tenant B must not see tenant A's integration"
 
+    async def test_lists_summary_counts_writes_families_and_flow_schedules(self, client, admin_user, db):
+        """Task 6: one request carries every dashboard summary the integration
+        card needs -- flow-schedule buckets, topology/script aggregates, the
+        write mix, and the per-flow schedule list -- so the list page never
+        makes N follow-up calls per integration."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        chain = await _seed_router_chain_flow(db, world)
+        paused = await _seed_cron_flow(db, world, name="Paused one")
+        paused.disabled = True
+        await db.flush()
+
+        r = await client.get("/api/v1/celigo/integrations", headers=headers)
+        assert r.status_code == 200, r.text
+        row = next(i for i in r.json() if i["id"] == str(world["integration"].id))
+        assert row["flow_count"] == 3 and row["paused_count"] == 1 and row["scheduled_count"] >= 1
+        assert row["scheduled_count"] + row["on_demand_count"] + row["paused_count"] == row["flow_count"]
+        assert row["step_count"] >= 10 and row["router_count"] >= 2 and row["lookup_count"] >= 3
+        assert row["script_count"] >= 2 and row["error_count"] >= 0 and row["changes_last_24h"] == 0
+        assert row["last_run_at"].startswith("2026-09-02T17:51")
+        assert {"record_type": "salesorder", "count": 2} in row["writes"]
+        assert "NetSuite" in row["adaptor_families"] and "HTTP" in row["adaptor_families"]
+        sched = next(f for f in row["flow_schedules"] if f["id"] == str(chain["flow"].id))
+        assert sched["disabled"] is False and sched["schedule"].startswith("? 5,20,35,50")
+        assert sched["last_executed_at"] is not None
+
+    async def test_router_count_counts_routers_per_flow_not_account_wide(self, client, admin_user, db):
+        """Gate fix wave, item 6: Celigo router ids are unique WITHIN a flow, not
+        across an integration -- a cloned flow carries the same router ids as its
+        original. Counting DISTINCT router_id across every flow of an integration
+        therefore collapsed N cloned flows' routers into one, so the card
+        under-reported the topology it claims to summarise."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        clone = await _seed_cron_flow(db, world, name="Cloned Flow")
+
+        for flow in (world["flow"], clone):
+            db.add(
+                CeligoFlowStep(
+                    tenant_id=user.tenant_id,
+                    celigo_connection_id=world["connection_id"],
+                    flow_id=flow.id,
+                    celigo_id=f"imp_{flow.celigo_id}",
+                    role="processor",
+                    sequence=1,
+                    adaptor_type="NetSuiteDistributedImport",
+                    router_id="r1",  # SAME id in both flows -- what a clone looks like
+                    branch_id="b1",
+                    raw_json={},
+                )
+            )
+        await db.flush()
+
+        r = await client.get("/api/v1/celigo/integrations", headers=headers)
+        assert r.status_code == 200, r.text
+        row = next(i for i in r.json() if i["id"] == str(world["integration"].id))
+        assert row["router_count"] == 2, "two flows each with router r1 are two routers, not one"
+
+    async def test_router_count_ignores_steps_with_no_router(self, client, admin_user, db):
+        """The router-less steps (`router_id IS NULL` -- most flow sources) must
+        not each count as a router. A naive row-constructor DISTINCT would count
+        `(flow_id, NULL)` as a real pair, since a ROW with a NULL member is not
+        itself NULL."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)  # its only step has router_id NULL
+        await _seed_cron_flow(db, world, name="Another router-less flow")
+        await db.flush()
+
+        r = await client.get("/api/v1/celigo/integrations", headers=headers)
+        assert r.status_code == 200, r.text
+        row = next(i for i in r.json() if i["id"] == str(world["integration"].id))
+        assert row["router_count"] == 0
+
+    async def test_errors_checked_at_is_null_when_any_flow_is_unchecked_and_min_when_all_are(
+        self, client, admin_user, db
+    ):
+        """Migration 098's honesty cursor, rolled up to the integration:
+        `MIN(errors_checked_at)` over the integration's production flows, and
+        NULL if the integration has no flows OR any flow's value is NULL --
+        a zero elsewhere in this response is not verified until every one of
+        this integration's flows has actually been checked with the correct
+        endpoint."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)  # errors_checked_at NULL by default
+        second = await _seed_cron_flow(db, world, name="Second Flow")
+        await db.flush()
+
+        r = await client.get("/api/v1/celigo/integrations", headers=headers)
+        assert r.status_code == 200, r.text
+        row = next(i for i in r.json() if i["id"] == str(world["integration"].id))
+        assert row["errors_checked_at"] is None, "world['flow'] was never checked -- NULL, not a zero-ish default"
+
+        older = datetime(2026, 9, 1, tzinfo=timezone.utc)
+        newer = datetime(2026, 9, 3, tzinfo=timezone.utc)
+
+        # MIXED: one flow checked, the other still NULL. This is the case the
+        # `bool_or(errors_checked_at IS NULL)` guard exists for -- a plain
+        # MIN() would skip the NULL and report the checked flow's timestamp,
+        # presenting an integration as verified while half of it never was.
+        world["flow"].errors_checked_at = newer
+        await db.flush()
+
+        r = await client.get("/api/v1/celigo/integrations", headers=headers)
+        assert r.status_code == 200, r.text
+        row = next(i for i in r.json() if i["id"] == str(world["integration"].id))
+        assert row["errors_checked_at"] is None, "one unchecked flow keeps the whole integration unverified"
+
+        second.errors_checked_at = older
+        await db.flush()
+
+        r = await client.get("/api/v1/celigo/integrations", headers=headers)
+        assert r.status_code == 200, r.text
+        row = next(i for i in r.json() if i["id"] == str(world["integration"].id))
+        assert row["errors_checked_at"].startswith("2026-09-01"), (
+            "MIN across the integration's flows once all are checked"
+        )
+
+    async def test_signature_count_dedupes_across_multiple_errors_sharing_one_signature(self, client, admin_user, db):
+        """Task 18 (cross-surface consistency): `signature_count` is the
+        DISTINCT root-cause count across the whole integration, the same
+        predicate as `error_count` (`celigo_error_is_open()`) but counting
+        distinct `signature_id` instead of rows -- mirrors the per-flow
+        query in `get_flow_detail`. Before this field existed, the tile's own
+        `ErrorPill` defaulted the root-cause count to the raw error count
+        (`signatureCount ?? count`), so two errors sharing one root cause
+        read as "2 open · 2 root causes" on the tile while the SAME two rows
+        correctly read "2 open · 1 root cause" one click away on the flows
+        table or the flow page. Seeding a SECOND error against `_seed_world`'s
+        existing signature (not a second signature) is what makes this
+        assertion fail under the naive `error_count`-as-`signature_count`
+        shortcut and pass under real distinct-count aggregation -- a fixture
+        with one error per signature can't tell the two apart."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        db.add(
+            CeligoFlowError(
+                tenant_id=user.tenant_id,
+                celigo_connection_id=world["connection_id"],
+                flow_id=world["flow"].id,
+                flow_step_id=world["step"].id,
+                signature_id=world["signature"].id,
+                celigo_id=f"err2_{world['suffix']}",
+                trace_key=f"trace2_{world['suffix']}",
+                source="import",
+                code="ERR001",
+                message="A second occurrence of the same root cause",
+                occurred_at=datetime.now(timezone.utc),
+                retriable=True,
+            )
+        )
+        await db.flush()
+
+        r = await client.get("/api/v1/celigo/integrations", headers=headers)
+        assert r.status_code == 200, r.text
+        row = next(i for i in r.json() if i["id"] == str(world["integration"].id))
+        assert row["error_count"] == 2, "both errors are open and belong to this integration"
+        assert row["signature_count"] == 1, "both errors share ONE signature -- must not double-count"
+
 
 # ---------------------------------------------------------------------------
 # GET /celigo/integrations/{id}/flows
@@ -235,6 +693,54 @@ class TestListIntegrations:
 
 
 class TestListIntegrationFlows:
+    async def test_a_cron_string_schedule_is_served_not_500(self, client, admin_user, db):
+        """LIVE DEFECT (2026-09-01, Framework staging): 96 of the 239 synced flows
+        carry `schedule` as Celigo's cron STRING, none as an object. The response
+        model declared `dict | None`, so every integration containing a scheduled
+        flow raised ResponseValidationError -> 500 -> (a 500 carries no CORS
+        headers) -> the browser saw "Failed to fetch" -> the flow map rendered
+        "0 flows" for 26 of 36 integrations. `_seed_world`'s object-shaped
+        schedule was a fixture invention; it was never observed live."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        await _seed_cron_flow(db, world)
+
+        r = await client.get(f"/api/v1/celigo/integrations/{world['integration'].id}/flows", headers=headers)
+        assert r.status_code == 200, r.text
+        by_name = {f["name"]: f for f in r.json()}
+        assert by_name["Nightly Backfill"]["schedule"] == "? 0 */6 * * *"
+        assert by_name["Sales Order Sync"]["schedule"] == {"type": "everyN", "unit": "minutes", "value": 15}
+
+    async def test_a_schedule_shape_nobody_has_seen_yet_is_served_not_500(self, client, admin_user, db):
+        """GATE FINDING (plausible, round 1): widening `dict | None` to
+        `dict | str | None` repeated the reasoning that caused the 500 -- an
+        enumeration of observed shapes. This column mirrors whatever Celigo
+        sends; the API's job is to relay it, not to vouch for its shape. So the
+        model is typed as JSON, and a list (or anything else) comes through."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        await _seed_cron_flow(db, world, schedule=[{"type": "cron", "expr": "? 0 */6 * * *"}], name="Listed")
+
+        r = await client.get(f"/api/v1/celigo/integrations/{world['integration'].id}/flows", headers=headers)
+        assert r.status_code == 200, r.text
+        by_name = {f["name"]: f for f in r.json()}
+        assert by_name["Listed"]["schedule"] == [{"type": "cron", "expr": "? 0 */6 * * *"}]
+
+    async def test_a_sandbox_integration_is_not_found_here_either(self, client, admin_user, db):
+        """GATE FINDING (round 1): production-only was enforced in
+        `/integrations`' WHERE clause alone; this route and the flow-detail
+        route looked rows up by tenant only, so a sandbox integration hidden
+        from the list was still fully readable by id (a bookmark, a stale
+        cache). `celigo_integration_is_production()` is now the ONE predicate
+        every read of these tables applies -- the `celigo_error_is_open()`
+        idiom, not a second call-site patch."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        sandbox_integration, _ = await _seed_sandbox_world(db, world)
+
+        r = await client.get(f"/api/v1/celigo/integrations/{sandbox_integration.id}/flows", headers=headers)
+        assert r.status_code == 404, r.text
+
     async def test_lists_flows_with_error_and_signature_counts(self, client, admin_user, db):
         user, headers = admin_user
         world = await _seed_world(db, user.tenant_id)
@@ -278,6 +784,24 @@ class TestListIntegrationFlows:
         assert flow_out["schedule"] == {"type": "everyN", "unit": "minutes", "value": 15}
         assert flow_out["error_count"] == 2, "the resolved error must not count as open"
         assert flow_out["signature_count"] == 1, "both open errors share one signature -- one root cause"
+
+    async def test_errors_checked_at_is_exposed_per_flow_row(self, client, admin_user, db):
+        """Migration 098 -- NULL until Phase E has consulted this flow's own
+        error summary at least once, then the timestamp of the last check."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)  # NULL by default
+
+        r = await client.get(f"/api/v1/celigo/integrations/{world['integration'].id}/flows", headers=headers)
+        assert r.status_code == 200, r.text
+        assert r.json()[0]["errors_checked_at"] is None
+
+        checked_at = datetime(2026, 9, 3, 1, 0, tzinfo=timezone.utc)
+        world["flow"].errors_checked_at = checked_at
+        await db.flush()
+
+        r = await client.get(f"/api/v1/celigo/integrations/{world['integration'].id}/flows", headers=headers)
+        assert r.status_code == 200, r.text
+        assert r.json()[0]["errors_checked_at"].startswith("2026-09-03T01:00")
 
     async def test_purged_but_unresolved_error_does_not_count_as_open(self, client, admin_user, db):
         """WHOLE-BRANCH REVIEW FINDING 5: this endpoint's own definition of
@@ -344,6 +868,121 @@ class TestListIntegrationFlows:
         r = await client.get(f"/api/v1/celigo/integrations/{world_a['integration'].id}/flows", headers=headers_b)
         assert r.status_code == 404, "tenant B must get 404, never tenant A's flows"
 
+    async def test_lists_topology_script_and_write_aggregates_per_flow(self, client, admin_user, db):
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        chain = await _seed_router_chain_flow(db, world)
+        r = await client.get(f"/api/v1/celigo/integrations/{world['integration'].id}/flows", headers=headers)
+        assert r.status_code == 200
+        row = next(f for f in r.json() if f["id"] == str(chain["flow"].id))
+        assert (row["step_count"], row["router_count"], row["branch_count"], row["lookup_count"]) == (10, 2, 3, 3)
+        assert (row["script_count"], row["diverged_family_count"]) == (2, 1)
+        assert sorted(row["writes"], key=lambda w: w["record_type"]) == [
+            {"record_type": "customer", "count": 4},
+            {"record_type": "salesorder", "count": 2},
+        ]
+        assert row["celigo_last_modified"].startswith("2026-09-02")
+        base = next(f for f in r.json() if f["id"] == str(world["flow"].id))
+        assert base["writes"] == [] or all("count" in w for w in base["writes"])
+
+    async def test_diverged_family_count_ignores_sandbox_copies(self, client, admin_user, db):
+        """GATE FINDING (round 1, Important): `diverged_keys` must be scoped to
+        PRODUCTION scripts only (`celigo_script_is_production()`), same as
+        every other read of `celigo_scripts` in this module -- see that
+        predicate's own docstring ("a clone-family count that summed both
+        environments was wrong by about half"). Two scenarios:
+
+        1. A sandbox copy added to the ALREADY-diverged chain-flow family
+           (2 distinct hashes among its production members) must not change
+           `diverged_family_count` -- it's still exactly one diverged family,
+           counted once (`COUNT(DISTINCT dedup_key)`), regardless of how many
+           extra hash values a non-production copy contributes.
+        2. A SECOND family whose production members share ONE content hash
+           (genuinely not diverged) but whose ONLY sandbox copy carries a
+           different hash must NOT be flagged diverged -- before the fix,
+           `diverged_keys`' `HAVING COUNT(DISTINCT content_hash) > 1` counted
+           the sandbox row too, incorrectly marking this family diverged and
+           inflating `diverged_family_count` to 2."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        chain = await _seed_router_chain_flow(db, world)
+        conn_id = world["connection_id"]
+        sfx = world["suffix"]
+
+        # Scenario 1 -- junk sandbox copy in the family that's already diverged.
+        db.add(
+            CeligoScript(
+                tenant_id=user.tenant_id,
+                celigo_connection_id=conn_id,
+                celigo_id=f"scr_fam_sb_{sfx}",
+                source_id=f"scr_fam0_{sfx}",  # same family as chain["family"]
+                name="ns_sales_order_premap",
+                content="sandbox junk",
+                content_hash="hSandboxJunk",
+                sandbox=True,
+            )
+        )
+
+        # Scenario 2 -- a second family, NOT diverged among its production
+        # copies (both share "hSame"), with a sandbox-only clone carrying a
+        # different hash. The production original is attached to the chain
+        # flow so its (non-)divergence is actually exercised by this endpoint.
+        orig2 = CeligoScript(
+            tenant_id=user.tenant_id,
+            celigo_connection_id=conn_id,
+            celigo_id=f"scr_fam2_orig_{sfx}",
+            name="ns_customer_postmap",
+            content="x",
+            content_hash="hSame",
+            sandbox=False,
+        )
+        clone2 = CeligoScript(
+            tenant_id=user.tenant_id,
+            celigo_connection_id=conn_id,
+            celigo_id=f"scr_fam2_clone_{sfx}",
+            source_id=f"scr_fam2_orig_{sfx}",
+            name="ns_customer_postmap",
+            content="x",
+            content_hash="hSame",
+            sandbox=False,
+        )
+        sandbox2 = CeligoScript(
+            tenant_id=user.tenant_id,
+            celigo_connection_id=conn_id,
+            celigo_id=f"scr_fam2_sandbox_{sfx}",
+            source_id=f"scr_fam2_orig_{sfx}",
+            name="ns_customer_postmap",
+            content="y",
+            content_hash="hDifferentSandboxOnly",
+            sandbox=True,
+        )
+        db.add_all([orig2, clone2, sandbox2])
+        await db.flush()
+
+        db.add(
+            CeligoScriptAttachment(
+                tenant_id=user.tenant_id,
+                celigo_connection_id=conn_id,
+                flow_id=chain["flow"].id,
+                flow_step_id=chain["steps"][f"src_{sfx}"].id,
+                script_id=orig2.id,
+                script_celigo_id=orig2.celigo_id,
+                function_name="postMap",
+                json_path=f"src_{sfx}.hooks.postMap",
+                site_type="hook",
+            )
+        )
+        await db.flush()
+
+        r = await client.get(f"/api/v1/celigo/integrations/{world['integration'].id}/flows", headers=headers)
+        assert r.status_code == 200, r.text
+        row = next(f for f in r.json() if f["id"] == str(chain["flow"].id))
+        assert row["script_count"] == 3, "solo + fam[1] + the new family-2 original, all production"
+        assert row["diverged_family_count"] == 1, (
+            "only the original chain family is diverged; family 2's production copies "
+            "share one hash and its sandbox-only clone must not count"
+        )
+
 
 # ---------------------------------------------------------------------------
 # GET /celigo/flows/{id}
@@ -351,6 +990,50 @@ class TestListIntegrationFlows:
 
 
 class TestGetFlowDetail:
+    async def test_a_cron_string_schedule_is_served_not_500(self, client, admin_user, db):
+        """Twin of TestListIntegrationFlows' test: the detail model declared
+        `schedule: dict | None` too, so opening any scheduled flow 500d."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        cron_flow = await _seed_cron_flow(db, world)
+
+        r = await client.get(f"/api/v1/celigo/flows/{cron_flow.id}", headers=headers)
+        assert r.status_code == 200, r.text
+        assert r.json()["schedule"] == "? 0 */6 * * *"
+
+    async def test_a_flow_under_a_sandbox_integration_is_not_found(self, client, admin_user, db):
+        """Twin of TestListIntegrationFlows' sandbox test: the detail route
+        must apply the same shared production predicate, through the flow's
+        integration."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        _, sandbox_flow = await _seed_sandbox_world(db, world)
+
+        r = await client.get(f"/api/v1/celigo/flows/{sandbox_flow.id}", headers=headers)
+        assert r.status_code == 404, r.text
+
+    async def test_a_list_shaped_filter_is_served_not_500(self, client, admin_user, db):
+        """filter_json/mapping_json are opaque Celigo config relayed as-is; a shape
+        nobody has seen yet must not 500 a whole flow (the schedule lesson)."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        world["step"].filter_json = ["and", ["equals", ["string", ["extract", "status"]], "open"]]
+        world["step"].mapping_json = "unexpected"
+        await db.flush()
+        r = await client.get(f"/api/v1/celigo/flows/{world['flow'].id}", headers=headers)
+        assert r.status_code == 200
+        assert r.json()["steps"][0]["filter_json"][0] == "and"
+        assert r.json()["steps"][0]["mapping_json"] == "unexpected"
+
+    async def test_step_carries_its_celigo_name_when_synced(self, client, admin_user, db):
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        world["step"].reference_name = "Lookup Customer"
+        await db.flush()
+        r = await client.get(f"/api/v1/celigo/flows/{world['flow'].id}", headers=headers)
+        assert r.status_code == 200
+        assert r.json()["steps"][0]["reference_name"] == "Lookup Customer"
+
     async def test_returns_flow_with_steps_and_attachments(self, client, admin_user, db):
         user, headers = admin_user
         world = await _seed_world(db, user.tenant_id)
@@ -377,6 +1060,25 @@ class TestGetFlowDetail:
         assert att_out["script_id"] == str(world["script"].id)
 
         assert body["unassigned_attachments"] == []
+
+    async def test_errors_checked_at_is_null_until_checked(self, client, admin_user, db):
+        """Migration 098's honesty cursor on the flow detail response --
+        NULL by default (`_seed_world` never sets it), set once Phase E has
+        actually consulted this flow's error summary."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+
+        r = await client.get(f"/api/v1/celigo/flows/{world['flow'].id}", headers=headers)
+        assert r.status_code == 200, r.text
+        assert r.json()["errors_checked_at"] is None
+
+        checked_at = datetime(2026, 9, 3, 2, 30, tzinfo=timezone.utc)
+        world["flow"].errors_checked_at = checked_at
+        await db.flush()
+
+        r = await client.get(f"/api/v1/celigo/flows/{world['flow'].id}", headers=headers)
+        assert r.status_code == 200, r.text
+        assert r.json()["errors_checked_at"].startswith("2026-09-03T02:30")
 
     async def test_step_order_is_deterministic_across_a_three_way_sequence_tie(self, client, admin_user, db):
         """WHOLE-BRANCH REVIEW FINDING 7 (2026-08-27, PROVEN by execution):
@@ -536,6 +1238,103 @@ class TestGetFlowDetail:
         assert len(body["unassigned_attachments"]) == 1
         assert body["unassigned_attachments"][0]["json_path"] == "routers[0].script"
 
+    async def test_detail_projects_kinds_facts_routers_and_script_families(self, client, admin_user, db):
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        chain = await _seed_router_chain_flow(db, world)
+        r = await client.get(f"/api/v1/celigo/flows/{chain['flow'].id}", headers=headers)
+        assert r.status_code == 200
+        body = r.json()
+        kinds = {s["celigo_id"]: s["kind"] for s in body["steps"]}
+        sfx = world["suffix"]
+        assert (
+            kinds[f"src_{sfx}"] == "source"
+            and kinds[f"lkp_{sfx}"] == "lookup"
+            and kinds[f"cust_lkp_bIntl_{sfx}"] == "lookup"
+            and kinds[f"so_add_bInc_{sfx}"] == "destination"
+        )
+        so = next(s for s in body["steps"] if s["celigo_id"] == f"so_add_bIntl_{sfx}")
+        assert (so["record_type"], so["operation"], so["search_id"], so["reference_name"]) == (
+            "salesorder",
+            "add",
+            None,
+            "Add New Sales Order (BV)",
+        )
+        lk = next(s for s in body["steps"] if s["celigo_id"] == f"cust_lkp_bIntl_{sfx}")
+        assert (lk["record_type"], lk["search_id"]) == ("customer", "5090")
+        assert [rt["id"] for rt in body["routers"]] == ["r1", "r2"]
+        assert body["routers"][0]["branches"][0]["next_router_id"] == "r2"
+        assert [b["name"] for b in body["routers"][1]["branches"]] == ["Framework Intl", "Framework Inc"]
+        assert body["routers"][1]["branches"][0]["rule_count"] == 1
+        assert body["celigo_open_error_count"] == 0 and body["last_error_at"] is None
+        hook = next(s for s in body["steps"] if s["celigo_id"] == f"so_add_bInc_{sfx}")["attachments"][0]
+        assert (
+            hook["script_name"],
+            hook["script_copies_count"],
+            hook["script_versions_count"],
+            hook["script_version_letter"],
+            hook["script_content_diverged"],
+        ) == ("ns_sales_order_premap", 3, 2, "B", True)
+        solo = next(s for s in body["steps"] if s["celigo_id"] == f"lkp_{sfx}")["attachments"][0]
+        assert (solo["script_copies_count"], solo["script_version_letter"], solo["script_size_chars"]) == (
+            1,
+            None,
+            34145,
+        )
+
+    async def test_boolean_num_open_error_is_not_a_count(self, client, admin_user, db):
+        """Gate fix wave, item 8: `isinstance(x, int)` is True for a bool in
+        Python, so a `numOpenError` of `true` would have been relayed as the
+        count 1 -- a fabricated error total from a field that said nothing of
+        the kind. It is a shape nobody has seen, which is exactly why it must
+        fail closed to None rather than to a number a UI will then print."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        world["flow"].raw_json = {**world["flow"].raw_json, "numOpenError": True}
+        await db.flush()
+
+        r = await client.get(f"/api/v1/celigo/flows/{world['flow'].id}", headers=headers)
+        assert r.status_code == 200, r.text
+        assert r.json()["celigo_open_error_count"] is None
+
+    async def test_last_error_at_accepts_epoch_millis(self, client, admin_user, db):
+        """Gate fix wave, item 9: `lastErrorAt` is parsed by the package's own
+        `parse_celigo_timestamp`, which handles BOTH shapes Celigo's REST API
+        uses -- an ISO-8601 string and epoch milliseconds. The API used to
+        carry a private re-implementation of only the string half, so an
+        epoch-ms value silently became `null`."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        world["flow"].raw_json = {**world["flow"].raw_json, "lastErrorAt": 1788336000000}  # 2026-09-02T08:00Z
+        await db.flush()
+
+        r = await client.get(f"/api/v1/celigo/flows/{world['flow'].id}", headers=headers)
+        assert r.status_code == 200, r.text
+        assert r.json()["last_error_at"] == "2026-09-02T08:00:00Z"
+
+    async def test_last_error_at_still_accepts_an_iso_string(self, client, admin_user, db):
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        world["flow"].raw_json = {**world["flow"].raw_json, "lastErrorAt": "2026-09-02T08:00:00Z"}
+        await db.flush()
+
+        r = await client.get(f"/api/v1/celigo/flows/{world['flow'].id}", headers=headers)
+        assert r.status_code == 200, r.text
+        assert r.json()["last_error_at"] == "2026-09-02T08:00:00Z"
+
+    async def test_boolean_last_error_at_is_not_a_timestamp(self, client, admin_user, db):
+        """A bool is an int in Python, so an unguarded epoch-ms branch would
+        turn `true` into 1970-01-01T00:00:00.001Z -- a real-looking timestamp
+        invented out of a flag."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        world["flow"].raw_json = {**world["flow"].raw_json, "lastErrorAt": True}
+        await db.flush()
+
+        r = await client.get(f"/api/v1/celigo/flows/{world['flow'].id}", headers=headers)
+        assert r.status_code == 200, r.text
+        assert r.json()["last_error_at"] is None
+
     async def test_404_for_unknown_flow(self, client, admin_user):
         _, headers = admin_user
         r = await client.get(f"/api/v1/celigo/flows/{uuid.uuid4()}", headers=headers)
@@ -560,11 +1359,198 @@ class TestGetFlowDetail:
 
 
 # ---------------------------------------------------------------------------
+# GET /celigo/flows/{id}/errors
+# ---------------------------------------------------------------------------
+
+
+class TestFlowErrors:
+    async def _seed_two_step_errors(self, db, world, chain):
+        sfx = world["suffix"]
+        tenant_id = world["integration"].tenant_id
+        sig = world["signature"]
+        rows = []
+        for i, step_key in enumerate((f"lkp_{sfx}", f"lkp_{sfx}", f"so_add_bIntl_{sfx}")):
+            rows.append(
+                CeligoFlowError(
+                    tenant_id=tenant_id,
+                    celigo_connection_id=world["connection_id"],
+                    flow_id=chain["flow"].id,
+                    flow_step_id=chain["steps"][step_key].id,
+                    signature_id=sig.id,
+                    celigo_id=f"err_{i}_{sfx}",
+                    trace_key=f"1582211{i}",
+                    source="pre_save_page_hook",
+                    code="script_error",
+                    message="TypeError: null",
+                    occurred_at=datetime(2026, 8, 17, 6 + i, tzinfo=timezone.utc),
+                    purge_at=datetime(2026, 9, 16, tzinfo=timezone.utc),
+                    retriable=False,
+                )
+            )
+        rows.append(
+            CeligoFlowError(
+                tenant_id=tenant_id,
+                celigo_connection_id=world["connection_id"],
+                flow_id=chain["flow"].id,
+                flow_step_id=chain["steps"][f"lkp_{sfx}"].id,
+                signature_id=sig.id,
+                celigo_id=f"err_resolved_{sfx}",
+                source="pre_save_page_hook",
+                code="script_error",
+                message="old",
+                occurred_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+                resolved_at=datetime(2026, 8, 2, tzinfo=timezone.utc),
+            )
+        )
+        db.add_all(rows)
+        await db.flush()
+
+    async def test_detail_carries_open_counts_per_step_and_per_flow(self, client, admin_user, db):
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        chain = await _seed_router_chain_flow(db, world)
+        await self._seed_two_step_errors(db, world, chain)
+        body = (await client.get(f"/api/v1/celigo/flows/{chain['flow'].id}", headers=headers)).json()
+        sfx = world["suffix"]
+        counts = {s["celigo_id"]: s["error_count"] for s in body["steps"]}
+        assert counts[f"lkp_{sfx}"] == 2 and counts[f"so_add_bIntl_{sfx}"] == 1 and counts[f"src_{sfx}"] == 0
+        assert body["error_count"] == 3 and body["signature_count"] == 1
+
+    async def test_flow_error_count_includes_errors_no_step_owns(self, client, admin_user, db):
+        """Final-review finding I9. Celigo can report an error against a FLOW
+        with no `flow_step_id` (a router-level or pre-dispatch failure). The
+        flow's `error_count` counts it -- the flow total is every open error,
+        full stop -- which means the steps can legitimately sum to LESS than
+        the flow. The old docstring claimed the two agreed "by construction";
+        this pins the real contract so the next reader trusts the number
+        rather than the sentence."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        chain = await _seed_router_chain_flow(db, world)
+        await self._seed_two_step_errors(db, world, chain)
+        db.add(
+            CeligoFlowError(
+                tenant_id=world["integration"].tenant_id,
+                celigo_connection_id=world["connection_id"],
+                flow_id=chain["flow"].id,
+                flow_step_id=None,
+                signature_id=world["signature"].id,
+                celigo_id=f"err_unattributed_{world['suffix']}",
+                source="router",
+                code="script_error",
+                message="TypeError: null",
+                occurred_at=datetime(2026, 8, 17, 9, tzinfo=timezone.utc),
+            )
+        )
+        await db.flush()
+
+        body = (await client.get(f"/api/v1/celigo/flows/{chain['flow'].id}", headers=headers)).json()
+        steps_sum = sum(s["error_count"] for s in body["steps"])
+        assert steps_sum == 3, "no step owns the new error"
+        assert body["error_count"] == steps_sum + 1 == 4
+        assert body["signature_count"] == 1, "one root cause, however it is attributed"
+
+    async def test_grouped_errors_by_signature_with_step_attribution_and_trace_keys(self, client, admin_user, db):
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        chain = await _seed_router_chain_flow(db, world)
+        await self._seed_two_step_errors(db, world, chain)
+        r = await client.get(f"/api/v1/celigo/flows/{chain['flow'].id}/errors", headers=headers)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["status"] == "open" and body["total"] == 3 and len(body["groups"]) == 1
+        g = body["groups"][0]
+        assert g["signature"]["id"] == str(world["signature"].id)
+        assert g["count"] == 3 and sorted(g["trace_keys"]) == ["15822110", "15822111", "15822112"]
+        assert set(g["step_ids"]) == {
+            str(chain["steps"][f"lkp_{world['suffix']}"].id),
+            str(chain["steps"][f"so_add_bIntl_{world['suffix']}"].id),
+        }
+        assert g["first_seen_at"].startswith("2026-08-17T06") and g["last_seen_at"].startswith("2026-08-17T08")
+        assert g["retriable"] is False and g["purge_at"].startswith("2026-09-16")
+        assert "message" in g["errors"][0]
+
+    async def test_resolved_filter_and_404s(self, client, admin_user, admin_user_b, db):
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        chain = await _seed_router_chain_flow(db, world)
+        await self._seed_two_step_errors(db, world, chain)
+        r = await client.get(f"/api/v1/celigo/flows/{chain['flow'].id}/errors?status=resolved", headers=headers)
+        assert r.status_code == 200 and r.json()["total"] == 1
+        assert (
+            await client.get(f"/api/v1/celigo/flows/{chain['flow'].id}/errors?status=bogus", headers=headers)
+        ).status_code == 422
+        assert (await client.get(f"/api/v1/celigo/flows/{uuid.uuid4()}/errors", headers=headers)).status_code == 404
+        user_b, headers_b = admin_user_b
+        # Brief's literal test omitted this -- every OTHER tenant-isolation test in
+        # this file enables the flag for tenant B first (see TestGetFlowDetail's
+        # own test_tenant_isolation) so the 404 asserted below is proven by the
+        # flow lookup, not a 403 from a flag this tenant never had.
+        await enable_feature_flag(db, user_b.tenant_id, "celigo")
+        assert (
+            await client.get(f"/api/v1/celigo/flows/{chain['flow'].id}/errors", headers=headers_b)
+        ).status_code == 404
+
+
+# ---------------------------------------------------------------------------
 # GET /celigo/scripts/{id}
 # ---------------------------------------------------------------------------
 
 
 class TestGetScriptDetail:
+    async def test_a_sandbox_script_is_not_found(self, client, admin_user, db):
+        """Scripts carry their own `sandbox` flag (132 of the live account's 259
+        are sandbox copies). Same shared-predicate rule as the flow routes:
+        hidden means hidden by id too, not only from a listing."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        sandbox_script = CeligoScript(
+            tenant_id=user.tenant_id,
+            celigo_connection_id=world["connection_id"],
+            celigo_id=f"scr_sb_{world['suffix']}",
+            name="Sandbox Transform",
+            content="function transform(record) { return record; }",
+            sandbox=True,
+        )
+        db.add(sandbox_script)
+        await db.flush()
+
+        r = await client.get(f"/api/v1/celigo/scripts/{sandbox_script.id}", headers=headers)
+        assert r.status_code == 404, r.text
+
+    async def test_attachment_count_and_used_by_are_the_same_production_rows(self, client, admin_user, db):
+        """GATE FINDING (round 3, major): `used_by` was production-joined but
+        `attachment_count` (from `list_logical_scripts`) counted every
+        attachment of the clone family, sandbox flows included, so the two
+        numbers on one response could disagree. Both now come from the same
+        production-filtered row set -- there is nothing left to keep in
+        step. Seeds the exact case: one script attached under a production
+        flow AND under a sandbox one."""
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+        _, sandbox_flow = await _seed_sandbox_world(db, world)
+        db.add(
+            CeligoScriptAttachment(
+                tenant_id=user.tenant_id,
+                celigo_connection_id=world["connection_id"],
+                flow_id=sandbox_flow.id,
+                flow_step_id=None,
+                script_id=world["script"].id,
+                script_celigo_id=world["script"].celigo_id,
+                function_name="transform",
+                json_path="routers[0].script",
+                site_type="router",
+            )
+        )
+        await db.flush()
+
+        r = await client.get(f"/api/v1/celigo/scripts/{world['script'].id}", headers=headers)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert [site["flow_name"] for site in body["used_by"]] == ["Sales Order Sync"]
+        assert body["attachment_count"] == len(body["used_by"]) == 1
+        assert body["integration_count"] == 1
+
     async def test_returns_content_and_used_by(self, client, admin_user, db):
         user, headers = admin_user
         world = await _seed_world(db, user.tenant_id)
@@ -883,3 +1869,88 @@ class TestSyncStatus:
         r = await client.get("/api/v1/celigo/sync-status", headers=headers_b)
         assert r.status_code == 200, r.text
         assert r.json()["last_synced_at"] is None, "tenant B must not see tenant A's sync cursor"
+
+
+# ---------------------------------------------------------------------------
+# GET /celigo/integrations/{id}/changes, GET /celigo/flows/{id}/changes
+# ---------------------------------------------------------------------------
+
+
+class TestChanges:
+    """Task 7 -- config-change routes. Both resolve their parent through the
+    same production join `list_integration_flows`/`get_flow_detail` use (404
+    otherwise, same as every other route in this module), tenant-scope the
+    `celigo_config_changes` rows, and order newest first (`created_at desc,
+    id desc` -- `id desc` is only a tiebreak for rows that share the exact
+    same `created_at`; the test below pins two rows to distinct explicit
+    `created_at` values so the ordering assertion exercises `created_at desc`
+    itself, not the tiebreak)."""
+
+    async def test_integration_and_flow_changes_newest_first(self, client, admin_user, admin_user_b, db):
+        user, headers = admin_user
+        world = await _seed_world(db, user.tenant_id)
+
+        # Explicit, distinct `created_at` values on each row -- NOT reliance
+        # on flushing between two `db.add` calls. Postgres's `now()` (which
+        # `TimestampMixin.created_at`'s server_default uses) is fixed for the
+        # whole transaction, so two statements in the same still-open
+        # transaction get the IDENTICAL `now()` regardless of how many
+        # flushes separate them; `db.flush()` pushes pending SQL over the
+        # same connection, it does not start a new transaction. That made
+        # the two rows tie on `created_at`, and the "newest first" ordering
+        # then fell through to `id desc` on a random UUID4 -- a coin flip,
+        # confirmed by running this test 8x back-to-back pre-fix (5/8
+        # failed with the exact assertion shape below). Passing `created_at`
+        # explicitly bypasses the server default entirely, so the ordering
+        # assertion actually exercises `created_at desc`.
+        t_older = datetime.now(timezone.utc) - timedelta(milliseconds=10)
+        t_newer = datetime.now(timezone.utc)
+        older = CeligoConfigChange(
+            tenant_id=user.tenant_id,
+            celigo_connection_id=world["connection_id"],
+            flow_id=world["flow"].id,
+            object_kind="flow",
+            object_id=world["flow"].id,
+            celigo_id=world["flow"].celigo_id,
+            field="disabled",
+            old_value=False,
+            new_value=True,
+            created_at=t_older,
+        )
+        newer = CeligoConfigChange(
+            tenant_id=user.tenant_id,
+            celigo_connection_id=world["connection_id"],
+            flow_id=world["flow"].id,
+            object_kind="flow_step",
+            object_id=world["step"].id,
+            celigo_id=world["step"].celigo_id,
+            field="mapping_json",
+            old_value={"a": 1},
+            new_value=["x"],
+            created_at=t_newer,
+        )
+        db.add(older)
+        db.add(newer)
+        await db.flush()
+
+        r = await client.get(f"/api/v1/celigo/integrations/{world['integration'].id}/changes", headers=headers)
+        assert r.status_code == 200 and [c["field"] for c in r.json()] == ["mapping_json", "disabled"]
+        assert r.json()[0]["new_value"] == ["x"]
+
+        r = await client.get(f"/api/v1/celigo/flows/{world['flow'].id}/changes", headers=headers)
+        assert r.status_code == 200 and len(r.json()) == 2
+
+        assert (
+            await client.get(f"/api/v1/celigo/integrations/{uuid.uuid4()}/changes", headers=headers)
+        ).status_code == 404
+
+        # CONTROLLER RULING R6 (overrides the brief's literal test): every
+        # OTHER tenant-isolation test in this file enables the flag for
+        # tenant B first (see e.g. TestGetFlowDetail's own
+        # test_tenant_isolation) -- without it this request 403s on the flag
+        # and proves nothing about tenant isolation.
+        user_b, headers_b = admin_user_b
+        await enable_feature_flag(db, user_b.tenant_id, "celigo")
+        assert (
+            await client.get(f"/api/v1/celigo/flows/{world['flow'].id}/changes", headers=headers_b)
+        ).status_code == 404

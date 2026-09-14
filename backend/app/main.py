@@ -10,6 +10,7 @@ from starlette.responses import Response
 
 from app.api.v1.router import api_router
 from app.core.config import settings
+from app.core.exception_handlers import register_exception_handlers
 from app.core.logging import setup_logging
 from app.core.middleware import CorrelationIdMiddleware
 from app.services.celigo_write_guard import CeligoManagedElsewhereError
@@ -176,6 +177,12 @@ def create_app() -> FastAPI:
     # ones nobody has written yet -- fail closed with a coherent, actionable
     # 400 instead of a 500, with zero per-endpoint code.
     application.add_exception_handler(CeligoManagedElsewhereError, _celigo_managed_elsewhere_handler)
+
+    # A ResponseValidationError (a response_model mismatch server-side) otherwise
+    # escapes ExceptionMiddleware to ServerErrorMiddleware, ABOVE CORSMiddleware:
+    # the browser gets a header-less 500 and reports it as a network failure
+    # indistinguishable from a real outage (2026-09-01 "0 flows" incident).
+    register_exception_handlers(application)
 
     # Routes
     application.include_router(api_router)

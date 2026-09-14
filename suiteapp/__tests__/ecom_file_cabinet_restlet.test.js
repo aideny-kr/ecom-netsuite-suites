@@ -1,14 +1,16 @@
-const SuiteCloudJestStubs = require('@oracle/suitecloud-unit-testing/SuiteCloudJestStubs');
+jest.mock('N/file');
+jest.mock('N/search');
+jest.mock('N/log');
+jest.mock('N/runtime');
+jest.mock('N/error');
 
 describe('ecom_file_cabinet_restlet', () => {
     let restlet;
 
-    beforeAll(() => {
-        SuiteCloudJestStubs.install();
-    });
-
     beforeEach(() => {
         jest.resetModules();
+        require('N/runtime').getCurrentScript.mockReturnValue({getRemainingUsage: () => 1000});
+        require('N/error').create.mockImplementation(({name, message}) => Object.assign(new Error(message), {name}));
         restlet = require('../src/FileCabinet/SuiteScripts/ecom_file_cabinet_restlet');
     });
 
@@ -67,24 +69,19 @@ describe('ecom_file_cabinet_restlet', () => {
     });
 
     describe('PUT', () => {
-        test('deletes and recreates file with new content', () => {
+        test('updates file contents in place, preserving the deployed file ID', () => {
             const file = require('N/file');
-            file.load.mockReturnValue({
-                name: 'existing.js',
-                folder: 100,
-                fileType: 'JAVASCRIPT',
-                description: 'test',
-            });
-            file.delete = jest.fn();
-            const mockFile = { save: jest.fn().mockReturnValue(101) };
-            file.create.mockReturnValue(mockFile);
+            const mockFile = {name: 'existing.js', contents: '// old', save: jest.fn().mockReturnValue(42)};
+            file.load.mockReturnValue(mockFile);
 
             const result = restlet.put({ fileId: 42, content: '// updated' });
 
             expect(result.success).toBe(true);
-            expect(result.fileId).toBe(101);
-            expect(result.previousFileId).toBe(42);
-            expect(file.delete).toHaveBeenCalledWith({ id: 42 });
+            expect(result.fileId).toBe(42);
+            expect(mockFile.contents).toBe('// updated');
+            expect(mockFile.save).toHaveBeenCalledTimes(1);
+            expect(file.delete).not.toHaveBeenCalled();
+            expect(file.create).not.toHaveBeenCalled();
         });
     });
 });

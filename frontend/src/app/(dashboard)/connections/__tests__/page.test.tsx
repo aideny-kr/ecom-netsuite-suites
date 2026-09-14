@@ -9,6 +9,7 @@ const { mockUseConnections, mockDeleteMutate } = vi.hoisted(() => ({
 
 vi.mock("@/hooks/use-connections", () => ({
   useConnections: mockUseConnections,
+  useTestConnection: () => ({ mutateAsync: vi.fn() }),
   useDeleteConnection: () => ({
     mutateAsync: mockDeleteMutate,
     isPending: false,
@@ -23,6 +24,12 @@ vi.mock("@/components/add-connection-dialog", () => ({
   AddConnectionDialog: () => null,
 }));
 
+vi.mock("@/providers/auth-provider", () => ({ useAuth: () => ({ user: { tenant_id: "t-1" } }) }));
+vi.mock("@/hooks/use-permissions", () => ({ usePermissions: () => ({ hasPermission: () => true }) }));
+vi.mock("@/hooks/use-features", () => ({ useFeature: () => true }));
+vi.mock("@/hooks/use-mcp-connectors", () => ({ useMcpConnectors: () => ({ data: [] }), useDeleteMcpConnector: () => ({ mutateAsync: vi.fn() }), useTestMcpConnector: () => ({ mutateAsync: vi.fn() }) }));
+vi.mock("@/components/add-mcp-connector-dialog", () => ({ AddMcpConnectorDialog: () => null }));
+vi.mock("@/components/settings/celigo-connector-card", () => ({ default: () => <div>Celigo connection management</div> }));
 import ConnectionsPage from "../page";
 
 function celigoConnection(over: Partial<Connection> = {}): Connection {
@@ -78,26 +85,26 @@ describe("ConnectionsPage — celigo row", () => {
     expect(screen.queryAllByRole("button")).toHaveLength(0);
   });
 
-  it("points to Settings as where the celigo connection is managed", () => {
+  it("embeds the dedicated Celigo management card", () => {
     mockUseConnections.mockReturnValue({ data: [celigoConnection()], isLoading: false });
     render(<ConnectionsPage />);
 
-    const link = screen.getByRole("link", { name: /settings/i });
-    expect(link).toHaveAttribute("href", "/settings");
+    expect(screen.getByText("Celigo connection management")).toBeInTheDocument();
   });
 
-  it("still shows the celigo row itself rather than hiding it", () => {
+  it("does not duplicate the generic Celigo row", () => {
     mockUseConnections.mockReturnValue({ data: [celigoConnection({ label: "Celigo Prod" })], isLoading: false });
     render(<ConnectionsPage />);
 
-    expect(screen.getByText("Celigo Prod")).toBeInTheDocument();
+    expect(screen.queryByText("Celigo Prod")).not.toBeInTheDocument();
+    expect(screen.getByText("Celigo connection management")).toBeInTheDocument();
   });
 
   it("leaves the working delete control in place for non-celigo providers", () => {
     mockUseConnections.mockReturnValue({ data: [shopifyConnection()], isLoading: false });
     render(<ConnectionsPage />);
 
-    expect(screen.getAllByRole("button")).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Delete Shopify" })).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /settings/i })).not.toBeInTheDocument();
   });
 });

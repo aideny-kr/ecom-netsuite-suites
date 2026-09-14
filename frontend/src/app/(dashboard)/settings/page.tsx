@@ -63,7 +63,6 @@ import { NetSuiteConnectionsSection } from "@/components/settings/netsuite-conne
 import { BigQueryConnectionSection } from "@/components/settings/bigquery-connection-section";
 import { DataSourceConnectorsSection } from "@/components/settings/data-source-connectors-section";
 import CeligoConnectorCard from "@/components/settings/celigo-connector-card";
-import { CeligoFlowMap } from "@/components/settings/celigo-flow-map";
 
 import { usePermissions } from "@/hooks/use-permissions";
 import { useAuth } from "@/providers/auth-provider";
@@ -2904,14 +2903,14 @@ export default function SettingsPage() {
           <SectionErrorBoundary name="Governance Policy">
             <GovernancePolicySection />
           </SectionErrorBoundary>
+          {/* Connecting/disconnecting Celigo is configuration and belongs here.
+              The flow map itself lives on the workspace ("Celigo flows" surface)
+              -- it is a diagnostic tool used beside script source, not a
+              setting, and Settings is not where anyone goes to ask why a charge
+              went unmatched. */}
           {showCeligo && (
             <SectionErrorBoundary name="Celigo">
               <CeligoConnectorCard />
-            </SectionErrorBoundary>
-          )}
-          {showCeligo && (
-            <SectionErrorBoundary name="Celigo Flow Map">
-              <CeligoFlowMap />
             </SectionErrorBoundary>
           )}
         </>

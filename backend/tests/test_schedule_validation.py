@@ -6,10 +6,20 @@ from app.schemas.schedule import ALLOWED_SCHEDULE_TYPES, ScheduleCreate
 
 
 class TestScheduleTypeValidation:
-    def test_valid_types_accepted(self):
-        for stype in ALLOWED_SCHEDULE_TYPES:
+    def test_legacy_types_accepted_with_a_name(self):
+        # The legacy direct-create shape: every allowed type EXCEPT "job", which
+        # is only ever created from an instruction (see test below).
+        for stype in ALLOWED_SCHEDULE_TYPES - {"job"}:
             s = ScheduleCreate(name="Test", schedule_type=stype)
             assert s.schedule_type == stype
+
+    def test_job_type_requires_an_instruction(self):
+        # A `schedule_type="job"` row with no instruction has no plan to run and
+        # must not fall through to the legacy create path (T2 gate finding).
+        with pytest.raises(Exception, match="needs an instruction"):
+            ScheduleCreate(name="Test", schedule_type="job")
+        s = ScheduleCreate(name="Test", schedule_type="job", instruction="Every Monday, email me the aging report")
+        assert s.schedule_type == "job"
 
     def test_invalid_type_rejected(self):
         with pytest.raises(Exception):

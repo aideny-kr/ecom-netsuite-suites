@@ -75,7 +75,7 @@ Everything here was confirmed by live probe, not documentation. Facts already re
 |---|---|
 | Errors carry `purgeAt` ≈ 30 days after `occurredAt` | Observed `occurredAt 2026-08-10` → `purgeAt 2026-09-09` |
 | Errors are keyed **per step**, not per flow | The integration-scoped summary reports `steps[]` per flow; a flow may have several failing steps with different counts |
-| `list_flow_errors` with `_id` only returns `steps: []` even when errors exist | Reproduced 2026-08-17. Use the `_integrationId` summary, or `_id` + `_stepId` |
+| **CORRECTED 2026-09-03** — `GET /v1/flows/{flowId}/errors` (flow id alone, no query params) is the PER-FLOW SUMMARY (`{"flowErrors": [{"_expOrImpId", "numError"}]}`), one entry per export/import in the flow — it IGNORES a `_stepId` query param entirely and returns the same summary either way. The OPEN errors of ONE resource live at a DIFFERENT path: `GET /v1/flows/{flowId}/{resourceId}/errors` (no `_stepId`) | Read-only probes, 2026-09-03: the `_id` + `_stepId` row this replaces was never confirmed against a raw REST call and was wrong — building it that way silently returned zero errors on every real sync (0/16 production flows with open errors detected) |
 | `limit` is ignored in step mode | Asked for 3, received 10 |
 | **`retriable: true` is NOT a retry-success signal** | All 30 current errors are marked `retriable: true`; all three classes are deterministic and would fail identically. It means "the platform can re-run it", not "re-running will work" |
 | Error objects carry `traceKey` (source-system record id), `errorId`, `retryDataKey`, `source`, `code`, `message`, `_flowJobId`, `occurredAt`, `purgeAt` | Observed across three flows |
@@ -137,8 +137,10 @@ signature fingerprint must strip emails.
 `InstrumentedTask`, nightly Beat + manual "Sync now". Inherits the dispatch-even-on-`error`
 posture and the freshness-cursor discipline.
 
-Sequencing: integrations → flows → steps → scripts by id → **errors per step** (via the
-`_integrationId` summary, then `_id` + `_stepId`; never `_id` alone).
+Sequencing: integrations → flows → steps → scripts by id → **errors per flow, then per step**
+(CORRECTED 2026-09-03: the flow's own summary, `GET /v1/flows/{flowId}/errors`, first —
+`{_expOrImpId: numError}` per resource — then `GET /v1/flows/{flowId}/{resourceId}/errors` only
+for a resource the summary reports a non-zero count for; see §3's corrected platform-fact row).
 
 **Errors are append-and-preserve.** Existing rows are NEVER deleted when they vanish from
 Celigo — that is the purge we exist to survive. Mark them `resolved_at` / `purged_at`

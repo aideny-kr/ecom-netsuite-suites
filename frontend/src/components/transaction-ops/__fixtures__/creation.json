@@ -1,0 +1,188 @@
+{
+  "input": {
+    "schema_version": 1,
+    "account_id": "6738075-sb1",
+    "subsidiary_id": "3",
+    "order_reference": "R123456789",
+    "external_id": "R123456789",
+    "order_status": "A",
+    "customer_email": "buyer@example.invalid",
+    "currency": {
+      "symbol": "EUR",
+      "precision": 2
+    },
+    "transaction_date": "2026-09-04",
+    "billing_address": {
+      "country": "US",
+      "state": "CA",
+      "addressee": "Example Buyer",
+      "attention": "",
+      "addr1": "1 Example Street",
+      "addr2": "",
+      "city": "Example City",
+      "zip": "90210",
+      "addrphone": ""
+    },
+    "shipping_address": {
+      "country": "US",
+      "state": "CA",
+      "addressee": "Example Buyer",
+      "attention": "",
+      "addr1": "1 Example Street",
+      "addr2": "",
+      "city": "Example City",
+      "zip": "90210",
+      "addrphone": ""
+    },
+    "shipping_method_id": "7",
+    "inventory_mode": "line_location",
+    "tax_profile": {
+      "schema_version": 1,
+      "mode": "line_tax_amount",
+      "account_id": "6738075-sb1",
+      "subsidiary_id": "3",
+      "tax_code_id": "610"
+    },
+    "native_tax_rounding": null,
+    "custom_form_id": null,
+    "terms_id": null,
+    "lines": [
+      {
+        "source_line_id": "11",
+        "source_parent_id": null,
+        "source_sku": "FRAME-1",
+        "netsuite_sku": "NATIVE-1",
+        "source_quantity": "1",
+        "quantity_multiplier": 2,
+        "quantity": "2",
+        "rate": "50",
+        "amount": "100",
+        "tax_amount": "20",
+        "tax_code_id": "610",
+        "inventory_unit_ids": [
+          "501"
+        ],
+        "location_id": "4",
+        "inventory_subsidiary_id": "3"
+      }
+    ],
+    "expected_totals": {
+      "subtotal": "100",
+      "taxtotal": "20",
+      "total": "120",
+      "shippingcost": "0",
+      "handlingcost": "0",
+      "discounttotal": "0"
+    }
+  },
+  "preview": {
+    "schema_version": 1,
+    "metadata": {
+      "customer": {
+        "id": "40",
+        "primary_subsidiary": "3",
+        "currency_ids": [
+          "4"
+        ],
+        "credit_hold": "AUTO",
+        "credit_limit": null
+      },
+      "currency": {
+        "id": "4",
+        "symbol": "EUR",
+        "precision": 2
+      },
+      "items": [
+        {
+          "id": "600",
+          "sku": "NATIVE-1",
+          "type": "InvtPart",
+          "unitstype": "1",
+          "units": "1"
+        }
+      ],
+      "locations": [
+        {
+          "id": "4",
+          "subsidiary": "3"
+        }
+      ]
+    },
+    "period_id": "99",
+    "record": {
+      "body": {
+        "entity": "40",
+        "subsidiary": "3",
+        "currency": "4",
+        "shipmethod": "7",
+        "customform": "1",
+        "terms": null,
+        "discountitem": null,
+        "subtotal": "100",
+        "taxtotal": "20",
+        "total": "120",
+        "shippingcost": "0",
+        "handlingcost": "0",
+        "discounttotal": "0",
+        "exchangerate": "1.1",
+        "custbody_fw_solidus_order_total": "120",
+        "custbody_fw_solidus_tax_amount": "20",
+        "tranid": "R123456789",
+        "externalid": "R123456789",
+        "trandate": "2026-09-04",
+        "orderstatus": "A",
+        "iscrosssubtransaction": false,
+        "tobeemailed": false,
+        "tobefaxed": false,
+        "getauth": false,
+        "paypalprocess": false
+      },
+      "lines": [
+        {
+          "item": "600",
+          "units": "1",
+          "quantity": "2",
+          "rate": "50",
+          "amount": "100",
+          "custcol_fw_vat_amount": "20",
+          "quantityfulfilled": "0",
+          "quantitybilled": "0",
+          "isclosed": false,
+          "createwo": false,
+          "createpo": "",
+          "price": "-1",
+          "inventory_unit_ids": [
+            "501"
+          ],
+          "original_sku": "FRAME-1",
+          "location": "4",
+          "taxcode": "610",
+          "taxrate1": "0",
+          "tax1amt": "20"
+        }
+      ],
+      "billing_address": {
+        "country": "US",
+        "state": "CA",
+        "addressee": "Example Buyer",
+        "attention": "",
+        "addr1": "1 Example Street",
+        "addr2": "",
+        "city": "Example City",
+        "zip": "90210",
+        "addrphone": ""
+      },
+      "shipping_address": {
+        "country": "US",
+        "state": "CA",
+        "addressee": "Example Buyer",
+        "attention": "",
+        "addr1": "1 Example Street",
+        "addr2": "",
+        "city": "Example City",
+        "zip": "90210",
+        "addrphone": ""
+      }
+    }
+  }
+}

@@ -39,6 +39,8 @@ def _schema_property_to_anthropic(name: str, spec: dict) -> dict:
     typ = spec.get("type", "string")
     if typ == "integer":
         prop["type"] = "integer"
+    elif typ == "boolean":
+        prop["type"] = "boolean"
     elif typ == "array":
         prop["type"] = "array"
     elif typ == "object":
@@ -175,6 +177,10 @@ def _connector_tag(connector) -> str:
     NetSuite connectors additionally carry environment and account, because a
     tenant can hold more than one and the difference is production money.
     """
+    from app.services.chat.metabase_context import METABASE_TOOL_TAG, is_metabase_connector
+
+    if is_metabase_connector(connector):
+        return METABASE_TOOL_TAG
     provider = getattr(connector, "provider", "") or "external"
     if not str(provider).startswith("netsuite"):
         return str(provider)
@@ -210,9 +216,20 @@ def build_external_tool_definitions(connectors: list) -> list[dict]:
     for connector in sorted(connectors, key=lambda c: str(c.id)):
         if not connector.discovered_tools:
             continue
+        connector_tag = _connector_tag(connector)
         sorted_discovered = sorted(connector.discovered_tools, key=lambda t: t.get("name", ""))
+        from app.services.chat.metabase_tool_policy import is_read_only_metabase_tool
+
+        direct_metabase_query = is_read_only_metabase_tool(connector, "query") and any(
+            tool.get("name") == "query" for tool in sorted_discovered
+        )
         for tool in sorted_discovered:
             raw_name = tool.get("name", "unknown")
+            # This client opens a fresh MCP session per call. Native construction
+            # handles do not survive that boundary; direct MBQL preserves the
+            # same read capability without issuing a predictably expired handle.
+            if direct_metabase_query and raw_name in {"construct_query", "execute_query"}:
+                continue
 
             # Celigo is exposed READ-ONLY. Write tools never enter the model's
             # inventory. This is layer 1 of 2 — see _execute_external_tool for
@@ -222,6 +239,20 @@ def build_external_tool_definitions(connectors: list) -> list[dict]:
 
             anthropic_name = _make_ext_tool_name(connector.id, raw_name)
             desc = tool.get("description", "") or ""
+            if connector_tag == "metabase_mcp":
+                # Generic names like `search` occur on several MCP servers.
+                # Keep the connection label visible alongside the source tag.
+                label = getattr(connector, "label", "")
+                if isinstance(label, str) and label:
+                    desc = f"{label}: {desc}"
+                if raw_name in {"query", "construct_query"} and is_read_only_metabase_tool(connector, raw_name):
+                    desc += (
+                        '\nNative query builder: query must be MBQL 5 {"lib/type":"mbql/query","stages":[...]}, '
+                        'with a portable source-table in the first stage. Do not send SQL or {"type":"native"}. '
+                        "Prefer query with the complete object over construct/execute handles. "
+                        "For counts, use server-side aggregation; unique orders require distinct order_id, "
+                        "also when grouping by order state. See the Metabase SQL skill for join syntax."
+                    )
             # Use the tool's input_schema if available, otherwise empty
             input_schema = tool.get("input_schema") or {
                 "type": "object",
@@ -240,7 +271,7 @@ def build_external_tool_definitions(connectors: list) -> list[dict]:
                     # difference — so a model asked to "test in sandbox" chose
                     # between them arbitrarily, and nobody could tell from the
                     # log which one ran.
-                    "description": f"[{_connector_tag(connector)}] {desc}",
+                    "description": f"[{connector_tag}] {desc}",
                     "input_schema": input_schema,
                 }
             )
@@ -252,6 +283,13 @@ _CONNECTOR_GATED_TOOLS: dict[str, set[str]] = {
     "bigquery": {"bigquery_sql", "bigquery_schema", "bigquery_cost_estimate"},
     "google_sheets": {"sheets_create", "sheets_write_range", "sheets_read_range"},
 }
+_NETSUITE_ANALYTICS_TOOLS = {"netsuite_suiteql", "netsuite_financial_report"}
+
+
+def build_discovery_fallback_tools() -> list[dict]:
+    """Do not advertise live query sources when their connections are unknown."""
+    unavailable = _NETSUITE_ANALYTICS_TOOLS | set().union(*_CONNECTOR_GATED_TOOLS.values())
+    return [tool for tool in build_local_tool_definitions() if tool["name"] not in unavailable]
 
 
 async def build_all_tool_definitions(
@@ -267,6 +305,44 @@ async def build_all_tool_definitions(
     the orchestrator + unified_agent — this builder just registers the tool.
     """
     tools = build_local_tool_definitions()
+    netsuite_connected = False
+    try:
+        from app.services.connection_service import list_connections
+
+        connections = await list_connections(db, tenant_id)
+        netsuite_connected = any(
+            connection.provider == "netsuite" and connection.status == "active" for connection in connections
+        )
+    except Exception:
+        logger.warning("Failed to discover local NetSuite connection", exc_info=True)
+
+    # Celigo local tools (spec docs/superpowers/specs/2026-09-04-celigo-chat-access.md
+    # §5, task 4A): gated on the tenant's `celigo` feature flag AND its flow-map
+    # `connections` row -- NOT the `celigo_mcp` external connector (Framework has the
+    # connection and no connector), so this does NOT go through
+    # `_CONNECTOR_GATED_TOOLS` below (that dict's keys double as the provider EXCLUSION
+    # list for external tool definitions; adding `celigo_mcp` there would silently drop
+    # every external Celigo MCP tool alongside these local ones). The `celigo` flag is
+    # the kill switch for the whole Celigo surface; every celigo.* execute() re-checks
+    # both the flag and the connection independently (dispatch-side, celigo_flow_map.py)
+    # -- this is only the inventory half, so a tool_use emitted before the flag flipped
+    # still fails closed at dispatch even if this half raced ahead of the flip.
+    from app.services.chat.tool_categories import is_celigo_source
+
+    celigo_local = {t["name"] for t in tools if is_celigo_source(t["name"])}
+    if celigo_local:
+        try:
+            from app.services.celigo.read_queries import _get_celigo_connection
+            from app.services.feature_flag_service import is_enabled as _celigo_flag_is_enabled
+
+            celigo_ok = await _celigo_flag_is_enabled(db, tenant_id, "celigo") and (
+                await _get_celigo_connection(db, tenant_id) is not None
+            )
+        except Exception:
+            celigo_ok = False
+            logger.warning("Failed to gate Celigo local tools for tenant", exc_info=True)
+        if not celigo_ok:
+            tools = [t for t in tools if t["name"] not in celigo_local]
 
     try:
         from app.services.mcp_connector_service import get_active_connectors_for_tenant
@@ -275,6 +351,7 @@ async def build_all_tool_definitions(
 
         # Determine which connector-gated tools to include
         active_providers = {c.provider for c in connectors} if connectors else set()
+        netsuite_connected = netsuite_connected or bool(active_providers & {"netsuite", "netsuite_mcp"})
         gated_tools_to_remove: set[str] = set()
         for provider, tool_names in _CONNECTOR_GATED_TOOLS.items():
             if provider not in active_providers:
@@ -290,6 +367,18 @@ async def build_all_tool_definitions(
             tools.extend(build_external_tool_definitions(external))
     except Exception:
         logger.warning("Failed to fetch external MCP connectors for tools", exc_info=True)
+        unavailable = set().union(*_CONNECTOR_GATED_TOOLS.values())
+        tools = [tool for tool in tools if tool["name"] not in unavailable]
+
+    if not netsuite_connected:
+        tools = [tool for tool in tools if tool["name"] not in _NETSUITE_ANALYTICS_TOOLS]
+
+    from app.services.chat.http_connector_tools import build_definitions as build_http_definitions
+
+    try:
+        tools.extend(await build_http_definitions(db, tenant_id))
+    except Exception:
+        logger.warning("Failed to fetch HTTP connection tools")
 
     from app.mcp.tools.result_reference_tool import TOOL_DEFINITION as _REF_RESULT_TOOL
 
@@ -308,6 +397,88 @@ async def build_all_tool_definitions(
 
 
 async def execute_tool_call(
+    tool_name,
+    tool_input,
+    tenant_id,
+    actor_id,
+    correlation_id,
+    db,
+    context_need=None,
+    session_id=None,
+    actor_type="user",
+    human_approved=False,
+):
+    """Do not spend another RPC/model repair cycle repeating a rejected query in one turn."""
+    kwargs = dict(
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        correlation_id=correlation_id,
+        db=db,
+        context_need=context_need,
+        session_id=session_id,
+        actor_type=actor_type,
+        human_approved=human_approved,
+    )
+    info = getattr(db, "info", None)
+    sql = (
+        tool_input.get("query")
+        if tool_name == "netsuite_suiteql"
+        else (tool_input.get("sqlQuery") if tool_name.endswith("__ns_runCustomSuiteQL") else None)
+    )
+    state = None
+    key = None
+    if isinstance(info, dict) and kwargs.get("correlation_id"):
+        identity = (str(kwargs.get("tenant_id")), kwargs["correlation_id"])
+        state = info.get("chat_query_failures")
+        if not state or state["turn"] != identity:
+            state = {"turn": identity, "queries": {}}
+            info["chat_query_failures"] = state
+        if isinstance(sql, str):
+            key = (
+                tool_name,
+                str(tool_input.get("connection_id")),
+                str(tool_input.get("expected_account_id")),
+                sql.strip(),
+            )
+            if key in state["queries"]:
+                return json.dumps(
+                    {
+                        "error": "This exact query already failed in this turn; no external retry was made.",
+                        "previous_error": state["queries"][key],
+                        "next_step": "Use native accounting evidence or inspect metadata before changing fields.",
+                    }
+                )
+    result_str = await _execute_tool_call_once(tool_name, tool_input, **kwargs)
+    if state is not None:
+        try:
+            result = json.loads(result_str)
+        except (ValueError, TypeError):
+            return result_str
+        error = ""
+        if isinstance(result, dict) and result.get("error"):
+            error = str(result.get("message") or result["error"])
+        # Do not memoize authentication, network, rate-limit or transient server failures.
+        if (
+            key
+            and error
+            and any(
+                term in error.lower()
+                for term in ("failed to parse", "invalid search query", "unknown identifier", "field was not found")
+            )
+        ):
+            state["queries"][key] = error[:1600]
+            result["query_recovery"] = (
+                "Do not repeat this query or blame FETCH globally. Use transaction_ops_accounting_evidence for cases; "
+                "otherwise inspect metadata and use a minimal qualified query. transactionline.createdfrom links "
+                "documents; do not guess transaction.createdfrom. Preserve status via BUILTIN.DF(t.status)."
+            )
+            result_str = json.dumps(result, default=str)
+        elif not error and "metadata" in tool_name.lower():
+            state["queries"].clear()  # New schema evidence permits a deliberate re-attempt.
+    return result_str
+
+
+async def _execute_tool_call_once(
     tool_name: str,
     tool_input: dict,
     tenant_id: uuid.UUID,
@@ -392,12 +563,35 @@ async def execute_tool_call(
             message_id=tool_input.get("message_id"),
         )
 
+    from app.services.chat.http_connector_tools import execute as execute_http
+    from app.services.chat.http_connector_tools import parse_name as parse_http_name
+
+    http_connection_id = parse_http_name(tool_name)
+    if http_connection_id is not None:
+        result = await execute_http(
+            http_connection_id, tool_input, tenant_id, actor_id, db, human_approved=human_approved
+        )
+        return json.dumps(result, default=str)
+
     # Check if it's an external tool
     ext_parsed = parse_external_tool_name(tool_name)
     if ext_parsed is not None:
         connector_id, raw_tool_name = ext_parsed
-        result = await _execute_external_tool(
-            connector_id, raw_tool_name, tool_input, tenant_id, db, human_approved=human_approved
+        from app.services.chat.external_tool_audit import audited_external_call
+
+        result = await audited_external_call(
+            execute=lambda: _execute_external_tool(
+                connector_id, raw_tool_name, tool_input, tenant_id, db, human_approved=human_approved
+            ),
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            actor_type=actor_type,
+            correlation_id=correlation_id,
+            session_id=session_id,
+            connector_id=connector_id,
+            tool_name=tool_name,
+            params=tool_input,
+            human_approved=human_approved,
         )
         duration_ms = int((time.monotonic() - start) * 1000)
         logger.info(
@@ -492,13 +686,25 @@ async def _execute_external_tool(
     human_approved: bool = False,
 ) -> dict:
     """Execute a tool on an external MCP connector."""
-    print(f"[EXT_MCP] Calling {raw_tool_name} with params: {tool_input}", flush=True)
     try:
         from app.services.mcp_connector_service import get_mcp_connector
 
         connector = await get_mcp_connector(db, connector_id, tenant_id)
         if not connector or not connector.is_enabled:
             return {"error": f"Connector '{connector_id}' not found or disabled"}
+
+        from app.services.chat.metabase_tool_policy import metabase_query_input_error, requires_custom_tool_confirmation
+
+        query_error = metabase_query_input_error(connector, raw_tool_name, tool_input)
+        if query_error:
+            return {"error": query_error}
+
+        if requires_custom_tool_confirmation(connector, raw_tool_name) and not human_approved:
+            return {
+                "error": "Custom MCP tools require human approval of the exact call before execution.",
+                "hitl_required": True,
+                "instruction": "Show a confirmation card for this call. Do not retry automatically.",
+            }
 
         # Layer 2 of 2 — the dispatcher is the choke point. execute_tool_call has
         # several callers and only one consults classify_mutation, so filtering
@@ -571,7 +777,29 @@ async def _execute_external_tool(
 
         from app.services.mcp_client_service import call_external_mcp_tool
 
-        return await call_external_mcp_tool(connector, raw_tool_name, tool_input, db=db)
+        result = await call_external_mcp_tool(connector, raw_tool_name, tool_input, db=db)
+        if (
+            raw_tool_name == "ns_runCustomSuiteQL"
+            and isinstance(result, dict)
+            and isinstance(result.get("result"), str)
+            and result["result"].startswith("Error executing SuiteQL query:")
+        ):
+            result = {**result, "error": result["result"]}
+        if isinstance(result, dict) and is_netsuite_provider(connector.provider):
+            from urllib.parse import urlsplit
+
+            host = urlsplit(getattr(connector, "server_url", "") or "").hostname or ""
+            suffix = ".suitetalk.api.netsuite.com"
+            if host.endswith(suffix) and host.removesuffix(suffix):
+                result = {
+                    **result,
+                    "verified_connection_scope": {
+                        "connector_id": str(connector_id),
+                        "account_id": host.removesuffix(suffix).lower(),
+                        "basis": "configured_netsuite_mcp_endpoint",
+                    },
+                }
+        return result
     except Exception as exc:
         logger.warning(
             "External tool %s on connector %s failed",

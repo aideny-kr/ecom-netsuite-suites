@@ -205,6 +205,16 @@ class Settings(BaseSettings):
         """
         return self.ROLLING_PERIOD_AUTO_COMPOSE_ENABLED and self.ROLLING_PERIOD_COMPOSE_MAX_PER_TENANT > 0
 
+    # Scheduled Jobs platform (Slice 2, spec §B4): the Beat entry is always
+    # registered; this gates the fan-out body. Default TRUE (unlike the sweeps
+    # above) because the sweep itself is not the safety boundary here — every
+    # individual schedule additionally requires a human-APPROVED plan
+    # (`plan_status == "approved"`) before `run_due_jobs` will ever touch it, so
+    # a fresh deployment with this on has literally nothing to run until a
+    # person approves a job. This flag exists as an emergency kill-switch, not
+    # an opt-in gate.
+    SCHEDULED_JOBS_ENABLED: bool = True
+
     # Autonomous query improvement loop
     QUERY_IMPROVEMENT_ENABLED: bool = False
     QUERY_IMPROVEMENT_BUDGET_USD: float = 12.0

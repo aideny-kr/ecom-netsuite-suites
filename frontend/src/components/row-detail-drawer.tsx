@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import {
   Dialog,
   DialogContent,
@@ -9,6 +10,8 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
+import { apiClient } from "@/lib/api-client";
+import { transactionAmount } from "@/components/transactions/format";
 
 interface RowDetailDrawerProps {
   open: boolean;
@@ -20,18 +23,24 @@ interface RowDetailDrawerProps {
 export function RowDetailDrawer({ open, onOpenChange, row, tableName }: RowDetailDrawerProps) {
   const [relatedLines, setRelatedLines] = useState<Record<string, unknown>[]>([]);
   const [loadingRelated, setLoadingRelated] = useState(false);
+  const [relatedError, setRelatedError] = useState(false);
+  const [relatedTotal, setRelatedTotal] = useState(0);
 
   useEffect(() => {
+    let current = true;
+    setRelatedLines([]);
+    setRelatedError(false);
+    setRelatedTotal(0);
     if (open && row && tableName === "payouts" && row.id) {
       setLoadingRelated(true);
-      fetch(`/api/v1/tables/payout_lines?payout_id=${row.id}`)
-        .then(res => res.json())
-        .then(data => setRelatedLines(data.items || []))
-        .catch(() => setRelatedLines([]))
-        .finally(() => setLoadingRelated(false));
+      apiClient.get<{ items: Record<string, unknown>[]; total: number }>(`/api/v1/tables/payout_lines?payout_id=${encodeURIComponent(String(row.id))}&page_size=50`)
+        .then(data => { if (current) { setRelatedLines(data.items); setRelatedTotal(data.total); } })
+        .catch(() => { if (current) setRelatedError(true); })
+        .finally(() => { if (current) setLoadingRelated(false); });
     } else {
-      setRelatedLines([]);
+      setLoadingRelated(false);
     }
+    return () => { current = false; };
   }, [open, row, tableName]);
 
   if (!row) return null;
@@ -45,13 +54,13 @@ export function RowDetailDrawer({ open, onOpenChange, row, tableName }: RowDetai
     return String(value);
   };
 
-  const skipFields = new Set(["raw_data"]);
+  const skipFields = new Set(["raw_data", "tenant_id", "dedupe_key", "source_connection_id"]);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-lg max-h-[90vh] flex flex-col">
         <DialogHeader>
-          <DialogTitle className="text-lg">Row Details</DialogTitle>
+          <DialogTitle className="text-lg">Transaction details</DialogTitle>
           <DialogDescription className="text-[13px]">
             {formatLabel(tableName)} record
           </DialogDescription>
@@ -83,7 +92,9 @@ export function RowDetailDrawer({ open, onOpenChange, row, tableName }: RowDetai
               <hr className="my-4 border-border" />
               <div>
                 <h4 className="text-[13px] font-semibold mb-2">Payout Lines</h4>
-                {loadingRelated ? (
+                {relatedError ? (
+                  <p role="alert" className="text-[12px] text-destructive">Payout lines could not be loaded. Reopen this transaction to retry.</p>
+                ) : loadingRelated ? (
                   <p className="text-[12px] text-muted-foreground">Loading...</p>
                 ) : relatedLines.length === 0 ? (
                   <p className="text-[12px] text-muted-foreground">No payout lines found.</p>
@@ -93,7 +104,7 @@ export function RowDetailDrawer({ open, onOpenChange, row, tableName }: RowDetai
                       <div key={i} className="rounded-lg border p-3 text-[12px] space-y-1">
                         <div className="flex justify-between">
                           <span className="font-medium">{String(line.line_type || line.type || "Line")}</span>
-                          <span className="tabular-nums">{String(line.amount || "-")} {String(line.currency || "")}</span>
+                          <span className="tabular-nums">{transactionAmount(line.amount, line.currency)} {String(line.currency || "")}</span>
                         </div>
                         {line.description ? (
                           <p className="text-muted-foreground">{String(line.description)}</p>
@@ -104,6 +115,11 @@ export function RowDetailDrawer({ open, onOpenChange, row, tableName }: RowDetai
                       </div>
                     ))}
                   </div>
+                )}
+                {relatedTotal > relatedLines.length && !relatedError && !loadingRelated && (
+                  <Link className="mt-3 block text-[13px] text-primary underline" href={`/tables/payout_lines?payout_id=${encodeURIComponent(String(row.id))}`}>
+                    View all {relatedTotal} payout lines
+                  </Link>
                 )}
               </div>
             </>

@@ -3,12 +3,13 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from app.services.report.report_html import render_report_html
+from app.services.report.report_html import build_inventory_aging_sections, render_report_html
 from app.services.report.report_service import (
     _REPORT_TABLE_TOP_K,
     _resolve_data_section,
     assemble_spec,
     fill_placeholders,
+    spec_json_safe,
 )
 from tests.fixtures import statement_fixture as fx
 
@@ -626,3 +627,35 @@ async def test_compose_report_rejects_financial_statement_section():
             created_by=uuid.uuid4(),
         )
     db.add.assert_not_called()  # never even constructed a Report row
+
+
+def test_spec_json_safe_is_idempotent_over_inventory_aging_sections_already_json_safe():
+    """Gate fix #4 (one representation for the rendered model): build_inventory_aging_sections
+    now performs the ONE conversion (inventory_aging.json_safe) itself, at its own
+    boundary, so a section's ``model`` is JSON-safe dict form (WatchItem -> plain
+    dict, Decimal -> decimal-literal string, date -> ISO string) from the moment the
+    spec is built -- never a live dataclass/Decimal/date tree left for
+    spec_json_safe to sanitize separately (that WAS the bug this exact regression
+    used to catch: ``TypeError: Object of type WatchItem is not JSON serializable``
+    on persist, and the two-representation split the renderers had to straddle).
+    spec_json_safe's inventory_aging branch is therefore idempotent over it: still
+    produces JSON-dumpable output, and never changes its content."""
+    from tests.report.test_inventory_aging import _full_fixture
+
+    payloads, params = _full_fixture()
+    from app.services.report.inventory_aging import compute
+
+    report = compute(payloads, params)
+    sections = build_inventory_aging_sections(report, composed_at="2026-09-08T13:05:00+00:00")
+    spec = {"title": "Inventory Aging — Week of 8 Sep 2026", "sections": sections}
+
+    # Already JSON-safe straight out of build_inventory_aging_sections -- plain dict
+    # form, not the live WatchItem dataclass -- and already JSON-dumpable on its own.
+    assert json.dumps(spec)
+    assert isinstance(spec["sections"][1]["model"], list)
+    assert spec["sections"][1]["model"][0]["dot"] in ("red", "green", "amber", "grey")
+
+    safe = spec_json_safe(spec)
+
+    assert json.dumps(safe)  # still JSONB-safe
+    assert safe["sections"][1]["model"] == spec["sections"][1]["model"]  # idempotent, unchanged

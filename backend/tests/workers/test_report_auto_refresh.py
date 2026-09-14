@@ -261,6 +261,106 @@ async def test_success_resets_failure_count(db, monkeypatch):
     assert row.version == 2 and row.refresh_failure_count == 0
 
 
+# --- Refresh-support follow-up: playbook-shaped (inventory_aging) recipes ------------
+
+
+def _inventory_aging_table_result(rows: list[dict]) -> str:
+    """A test_inventory_aging-shaped list[dict] fixture rendered as the raw
+    ``{"columns": [...], "rows": [[...], ...]}`` JSON a real bigquery_sql call
+    returns (rows POSITIONAL, matching ia.rows_from_table_payload's contract)."""
+    columns = list(rows[0].keys()) if rows else []
+    return json.dumps({"columns": columns, "rows": [[row[c] for c in columns] for row in rows]})
+
+
+def _seed_inventory_aging(db, tenant, user, *, recipe, auto_refresh="daily", stamp_ago=None, **cols):
+    report = Report(
+        tenant_id=tenant.id,
+        title="Inventory Aging Weekly",
+        spec_json={"sections": []},
+        rendered_html="<html>v1</html>",
+        created_by=user.id,
+        recipe_json=recipe,
+        auto_refresh=auto_refresh,
+        last_refreshed_at=(datetime.now(timezone.utc) - timedelta(seconds=stamp_ago)) if stamp_ago else None,
+        **cols,
+    )
+    db.add(report)
+    return report
+
+
+def _patch_bigquery_executor(monkeypatch, recipe: dict, payloads: dict[str, list[dict]]):
+    """Fake ``execute_tool_call`` keyed by the exact SQL text each of the recipe's
+    four bigquery_sql sources carries — the only thing distinguishing
+    r_items/r_prior/r_trend/r_meta once stripped of report_type/period."""
+    by_query = {
+        recipe["sources"][rid]["params"]["query"]: _inventory_aging_table_result(rows) for rid, rows in payloads.items()
+    }
+    calls: list[dict] = []
+
+    async def fake_execute(tool_name, tool_input, tenant_id, actor_id, correlation_id, db, **kw):
+        calls.append({"tool": tool_name, "params": tool_input, "actor_id": actor_id})
+        return by_query[tool_input["query"]]
+
+    monkeypatch.setattr("app.services.chat.tools.execute_tool_call", fake_execute)
+    return calls
+
+
+async def test_sweep_refreshes_an_inventory_aging_report_without_error(db, monkeypatch):
+    """Requirement 6 (first half): sweep_tenant_reports on a tenant with an
+    inventory_aging report (auto_refresh "daily", patched dispatcher) refreshes it
+    without error and produces a new version — the SAME generic sweep machinery
+    every other recipe shape gets, proven end-to-end for the playbook-shaped one."""
+    from app.services.report.playbooks import build_playbook_recipe
+    from tests.report.test_inventory_aging import _full_fixture
+
+    tenant, user = await _tenant(db, name="SweepAgingCorp")
+    payloads, params = _full_fixture()
+    _title, recipe = build_playbook_recipe("inventory_aging", params)
+    report = _seed_inventory_aging(db, tenant, user, recipe=recipe)  # NULL stamp = due
+    await db.flush()
+    tid, rid = tenant.id, report.id
+    _patch_bigquery_executor(monkeypatch, recipe, payloads)
+
+    stats = await sweep_tenant_reports(db, tid)
+
+    assert stats["failed"] == 0 and stats["refreshed"] == 1
+    row = await _reload(db, tid, rid)
+    assert row.version == 2
+    assert row.refresh_failure_count == 0
+    assert "<h1>Inventory Aging — Week of " in row.rendered_html
+
+
+async def test_sweep_inventory_aging_dispatcher_failure_increments_ladder_and_leaves_no_half_written_version(
+    db, monkeypatch
+):
+    """Requirement 6 (second half): a dispatcher failure on an inventory_aging
+    report increments refresh_failure_count exactly like any other recipe shape
+    and never leaves a half-written version — the current (last-good) version and
+    rendered_html stay untouched."""
+    from app.services.report.playbooks import build_playbook_recipe
+    from tests.report.test_inventory_aging import _full_fixture
+
+    tenant, user = await _tenant(db, name="SweepAgingFailCorp")
+    payloads, params = _full_fixture()
+    _title, recipe = build_playbook_recipe("inventory_aging", params)
+    report = _seed_inventory_aging(db, tenant, user, recipe=recipe)
+    await db.flush()
+    tid, rid = tenant.id, report.id
+
+    async def failing_execute(tool_name, tool_input, tenant_id, actor_id, correlation_id, db, **kw):
+        return json.dumps({"error": True, "message": "bigquery unavailable"})
+
+    monkeypatch.setattr("app.services.chat.tools.execute_tool_call", failing_execute)
+
+    stats = await sweep_tenant_reports(db, tid)
+
+    assert stats["failed"] == 1 and stats["refreshed"] == 0
+    row = await _reload(db, tid, rid)
+    assert row.refresh_failure_count == 1
+    assert row.version == 1
+    assert row.rendered_html == "<html>v1</html>"  # no half-written version
+
+
 async def test_debounce_and_supersede_skips_never_touch_the_ladder(db, monkeypatch):
     """429/supersede mean 'someone else refreshed' — not a dead connection. The ladder
     must not move (a manual-refresh race could otherwise walk a healthy report toward

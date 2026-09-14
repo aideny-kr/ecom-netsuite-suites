@@ -12,7 +12,7 @@ import collections
 import io
 from datetime import date, datetime, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, TypedDict
 
 import structlog
 from openpyxl import Workbook
@@ -62,6 +62,79 @@ def escape_csv_injection(value: Any) -> Any:
     if isinstance(value, str) and value.startswith(_CSV_INJECTION_PREFIXES):
         return "'" + value
     return value
+
+
+class SheetSpec(TypedDict):
+    """One worksheet for ``build_workbook``: a name, a header row, and data rows
+    (each row a list aligned to ``headers``). Cell values are Python-typed —
+    ``Decimal``/``int``/``float`` for numbers, ``date``/``datetime`` for dates,
+    ``str`` for text — ``build_workbook`` does the sanitisation/type-cell work."""
+
+    name: str
+    headers: list[str]
+    rows: list[list[Any]]
+
+
+def _workbook_cell_value(value: Any) -> Any:
+    """Shared cell-value normalisation for ``build_workbook``: ``Decimal`` has no
+    native openpyxl cell type, so it becomes a ``float`` (numeric cell); a
+    timezone-aware ``datetime`` has its tzinfo stripped (openpyxl raises on a
+    tz-aware datetime cell, same constraint as ``generate_section_excel``); a
+    plain ``date``/naive ``datetime`` passes through untouched — openpyxl detects
+    it natively and writes a date-typed cell. Every other value routes through
+    ``escape_csv_injection`` (a no-op on non-``str`` values), so numbers/dates/
+    bools/None can never be mistaken for a formula-injection string."""
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, datetime) and value.tzinfo is not None:
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+    return escape_csv_injection(value)
+
+
+def build_workbook(sheets: list[SheetSpec]) -> io.BytesIO:
+    """Generic multi-sheet workbook writer (spec §A3) — the shared builder behind
+    ``report_excel.build_inventory_aging_workbook``. Every string cell is
+    sanitised with ``escape_csv_injection`` (OWASP CSV-injection mitigation, the
+    same helper the evidence pack itself uses); every sheet gets a frozen header
+    row and an autofilter over its full range (even with zero data rows); numbers
+    are written as numeric cells and dates as date cells (never pre-formatted
+    strings); sheet names are capped at Excel's 31-char limit.
+
+    Deliberately does NOT touch ``generate_section_excel``/``generate_excel`` —
+    this is an ADDITIVE new entry point; the evidence pack's own output and tests
+    stay byte-identical because that code path is untouched."""
+    wb = Workbook()
+    wb.remove(wb.active)  # the generic builder owns every sheet; no default "Sheet"
+
+    for spec in sheets:
+        ws = wb.create_sheet(title=spec["name"][:31])
+        headers = spec["headers"]
+
+        for col_idx, header in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col_idx, value=header)
+            cell.fill = _HEADER_FILL
+            cell.font = _HEADER_FONT
+            cell.border = _THIN_BORDER
+            cell.alignment = Alignment(horizontal="center")
+
+        for row_idx, row in enumerate(spec["rows"], 2):
+            for col_idx, value in enumerate(row, 1):
+                cell = ws.cell(row=row_idx, column=col_idx, value=_workbook_cell_value(value))
+                cell.border = _THIN_BORDER
+
+        for col_idx in range(1, len(headers) + 1):
+            letter = get_column_letter(col_idx)
+            ws.column_dimensions[letter].width = max(15, len(headers[col_idx - 1]) + 4)
+
+        # Freeze the header row and autofilter the full range even with zero data
+        # rows — ``ws.dimensions`` still resolves to at least the header row.
+        ws.freeze_panes = "A2"
+        ws.auto_filter.ref = ws.dimensions
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
 
 
 class EvidencePackGenerator:

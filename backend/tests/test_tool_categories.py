@@ -64,6 +64,40 @@ class TestCategorize:
         assert categorize("netsuite.suiteql") == "data_table"
         assert categorize("bigquery.sql") == "bigquery"
 
+    def test_local_celigo_tools_are_data_table_both_spellings(self):
+        # Task 3 (spec docs/superpowers/specs/2026-09-04-celigo-chat-access.md §6):
+        # local celigo.* chat tools carry row data over a synced snapshot, same
+        # interception need as netsuite_suiteql/bigquery_sql above.
+        for dotted in ("celigo.integrations", "celigo.flows", "celigo.flow_steps", "celigo.flow_errors"):
+            assert categorize(dotted) == "data_table"
+            assert categorize(dotted.replace(".", "_")) == "data_table"
+
+
+class TestIsCeligoSource:
+    """`is_celigo_source` -- the WIDER "is this any Celigo tool" question
+    `_compute_source_pin_update` needs, vs. `is_celigo_tool`'s narrower
+    "is this the external hosted-API read tool" (task 3)."""
+
+    def test_local_dotted_and_underscored_names_are_celigo(self):
+        from app.services.chat.tool_categories import is_celigo_source
+
+        assert is_celigo_source("celigo_flows") is True
+        assert is_celigo_source("celigo.flows") is True
+        assert is_celigo_source("celigo_integrations") is True
+        assert is_celigo_source("celigo.flow_errors") is True
+
+    def test_external_celigo_read_tool_is_celigo(self):
+        from app.services.chat.tool_categories import is_celigo_source
+
+        connector_id = "ab" * 16  # 32 hex chars, matches _make_ext_tool_name's format
+        assert is_celigo_source(f"ext__{connector_id}__list_flows") is True
+
+    def test_unrelated_tool_is_not_celigo(self):
+        from app.services.chat.tool_categories import is_celigo_source
+
+        assert is_celigo_source("netsuite_suiteql") is False
+        assert is_celigo_source("bigquery_sql") is False
+
 
 class TestOrchestratorCategoryCheckers:
     """Prove the orchestrator's legacy helpers are now category-driven."""

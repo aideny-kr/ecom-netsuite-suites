@@ -64,6 +64,7 @@ calendar for quarterly windows."""
 _SOURCE_LABELS: dict[str, str] = {
     "netsuite": "NetSuite (GL recognized revenue, posted invoices, sales orders)",
     "bigquery": "BigQuery (ecommerce checkout totals, web/app analytics)",
+    "metabase": "Metabase (connected database metrics, including Solidus commerce data)",
     "shopify": "Shopify (gross sales, refunds, online storefront)",
     "stripe": "Stripe (collected cash, payouts, processor-side gross)",
     "drive": "Google Drive (uploaded spreadsheets, finance docs)",

@@ -40,7 +40,7 @@ class TestScheduleCRUD:
         )
         resp = await client.get("/api/v1/schedules", headers=headers)
         assert resp.status_code == 200
-        assert len(resp.json()) >= 1
+        assert len(resp.json()["schedules"]) >= 1
 
     async def test_delete_schedule(self, client: AsyncClient, admin_user):
         """Admin can delete their schedule."""
@@ -145,7 +145,7 @@ class TestScheduleTenantIsolation:
         # Tenant B lists schedules — should see empty
         resp = await client.get("/api/v1/schedules", headers=headers_b)
         assert resp.status_code == 200
-        assert len(resp.json()) == 0
+        assert len(resp.json()["schedules"]) == 0
 
     async def test_tenant_b_cannot_delete_tenant_a_schedule(self, client: AsyncClient, admin_user, admin_user_b):
         """Tenant B cannot delete Tenant A's schedule."""
@@ -183,8 +183,8 @@ class TestScheduleTenantIsolation:
         resp_a = await client.get("/api/v1/schedules", headers=headers_a)
         resp_b = await client.get("/api/v1/schedules", headers=headers_b)
 
-        names_a = {s["name"] for s in resp_a.json()}
-        names_b = {s["name"] for s in resp_b.json()}
+        names_a = {s["name"] for s in resp_a.json()["schedules"]}
+        names_b = {s["name"] for s in resp_b.json()["schedules"]}
 
         assert "A1" in names_a
         assert "B1" not in names_a

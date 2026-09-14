@@ -21,6 +21,7 @@ fire for a non-Celigo tool.
 
 import json
 import uuid
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -31,6 +32,19 @@ from app.services.chat.tools import _execute_external_tool, _make_ext_tool_name,
 from tests.conftest import enable_feature_flag
 
 _DISCOVERED = [{"name": "list_flows", "description": "List flows", "input_schema": {"type": "object"}}]
+
+
+@pytest.fixture(autouse=True)
+def _mock_external_tool_audit(monkeypatch):
+    """external_tool_audit.append_event opens its own async_session_factory() session per
+    call (fail-closed by design, see external_tool_audit.py) — independent of the `db`
+    fixture these tests pass around. test_the_refusal_also_holds_through_execute_tool_call
+    below reaches it through the REAL execute_tool_call, which would otherwise try a real
+    session (raising 'Event loop is closed' once this test's own event loop has torn down).
+    Same pattern as test_tool_call_logging.py / test_chat_multi_tool.py / test_chat_tools.py."""
+    mock = AsyncMock()
+    monkeypatch.setattr("app.services.chat.external_tool_audit.append_event", mock)
+    return mock
 
 
 async def seed_celigo_mcp_connector(db, tenant_id) -> McpConnector:
@@ -119,7 +133,9 @@ class TestFlagIsEnforcedAtTheDispatcher:
         assert "error" not in result, result
         assert mcp_spy == [("celigo_mcp", "list_flows")]
 
-    async def test_the_refusal_also_holds_through_execute_tool_call(self, db, tenant_a, mcp_spy):
+    async def test_the_refusal_also_holds_through_execute_tool_call(
+        self, db, tenant_a, mcp_spy, _mock_external_tool_audit
+    ):
         """The dispatcher's public entry point -- the one an already-emitted
         tool_use block arrives through."""
         connector = await seed_celigo_mcp_connector(db, tenant_a.id)
@@ -135,6 +151,8 @@ class TestFlagIsEnforcedAtTheDispatcher:
 
         assert "error" in json.loads(raw)
         assert mcp_spy == []
+        requested = [c for c in _mock_external_tool_audit.await_args_list if c.kwargs["action"] == "tool.requested"]
+        assert requested, "external call never reached external_tool_audit.append_event"
 
     async def test_a_write_tool_is_still_refused_regardless_of_the_flag(self, db, tenant_a, mcp_spy):
         """The read-only policy is independent of the flag and must not be

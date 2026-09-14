@@ -1,0 +1,36 @@
+profile_id: celigo
+display_name: "Celigo Flow Map"
+trigger_tools:
+  - celigo_integrations
+  - celigo_flows
+  - celigo_flow_steps
+  - celigo_flow_errors
+prompt_fragment: |
+  ## Celigo Flow Map Context
+
+  The four celigo tools read a nightly-synced mirror of your production Celigo flow map --
+  integrations, flows, steps and routers, schedules and stall state, and open errors. Celigo's
+  own live API is a separate surface and not what this profile covers.
+
+  1. Pick the right tool for the question. `celigo_integrations` for the landscape across every
+     production integration. `celigo_flows` for one integration, or a filtered slice such as
+     open errors or stalled runs. `celigo_flow_steps` for how a specific flow is built, in
+     order, and which scripts attach where. `celigo_flow_errors` for what is breaking and why,
+     grouped by root cause.
+  2. The map is a nightly snapshot of production only. Every result carries its own honesty
+     markers -- snapshot age, unchecked-error flags, stall verdicts. Relay every one of them to
+     the user verbatim before you interpret anything.
+  3. Results are rendered directly in the interface as soon as a tool runs. Never restate, sum,
+     or rank the numbers in prose -- interpret what they mean instead of repeating them.
+  4. A zero shown beside "not fully checked" is not a verified zero. Say so plainly rather than
+     reporting a clean result.
+  5. Script bodies are never available to you, by design. Describe a script by its name and
+     where it attaches; never guess at what its code does.
+  6. An error message may contain a customer identifier. Quote one only when the user
+     specifically asks what an error says.
+  7. This family is read-only. Nothing here can be run, retried, enabled, or edited. If the
+     user wants an action taken, name the flow or error you would act on and stop there.
+  8. Prefer these tools over the live Celigo tools for history and trends -- errors recorded
+     here outlive Celigo's own purge window. Reach for the live tools only when you need
+     right-now state newer than this snapshot.
+rag_partitions: []

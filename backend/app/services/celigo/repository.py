@@ -82,7 +82,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Iterable
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, delete, func, not_, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -95,6 +95,8 @@ from app.models.celigo import (
     CeligoIntegration,
     CeligoScript,
     CeligoScriptAttachment,
+    celigo_integration_is_production,
+    celigo_script_is_production,
 )
 from app.services.celigo.graph import ScriptRef
 
@@ -132,7 +134,7 @@ def _set_clause(values: dict, *, exclude: set[str]) -> dict:
     return out
 
 
-def _parse_celigo_timestamp(value: object) -> datetime | None:
+def parse_celigo_timestamp(value: object) -> datetime | None:
     """Best-effort parse of a Celigo timestamp field into an aware datetime.
 
     Defensive by design: `celigo_last_modified`/`last_executed_at` etc. are
@@ -143,8 +145,20 @@ def _parse_celigo_timestamp(value: object) -> datetime | None:
     present key but doesn't record its wire format); handles the two shapes
     most REST APIs of this kind use -- ISO-8601 strings and epoch
     milliseconds -- and returns None for anything else.
+
+    Public (no leading underscore) because the read API parses the same
+    Celigo timestamps out of the same stored `raw_json`: `celigo_flows.py`
+    used to carry a private re-implementation of only the string half, so an
+    epoch-ms `lastErrorAt` silently became NULL there while the sync's own
+    columns parsed it fine. `_parse_celigo_timestamp` remains as an alias for
+    this module's existing callers.
     """
     if value is None:
+        return None
+    # A bool IS an int in Python. Without this guard `True` would divide to
+    # 0.001 and come back as a real-looking 1970-01-01T00:00:00.001Z -- a
+    # timestamp invented out of a flag.
+    if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
         try:
@@ -157,6 +171,10 @@ def _parse_celigo_timestamp(value: object) -> datetime | None:
         except ValueError:
             return None
     return None
+
+
+#: Back-compat alias -- this module's own call sites predate the public name.
+_parse_celigo_timestamp = parse_celigo_timestamp
 
 
 def _content_hash(content: str | None) -> str | None:
@@ -199,6 +217,91 @@ async def upsert_integration(
         .returning(CeligoIntegration.id)
     )
     return (await db.execute(stmt)).scalar_one()
+
+
+async def purge_sandbox_rows(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    connection_id: uuid.UUID,
+    integration_celigo_ids: Iterable[str],
+    script_celigo_ids: Iterable[str],
+) -> tuple[int, int]:
+    """Remove every sandbox integration and sandbox script under one
+    connection; returns `(integrations_purged, scripts_purged)`. The flow map
+    is PRODUCTION ONLY (operator directive 2026-09-01); `sync_service.py`
+    stops writing sandbox rows and calls this at the end of every run so the
+    DB matches that promise.
+
+    A row is sandbox if its STORED flag says so (rows written before the
+    rule existed) OR if its Celigo id is in the set THIS run classified as
+    sandbox. The second half is not redundant (PR #216 gate finding, major):
+    the sync never upserts a sandbox object, so an integration that was
+    production when first synced and flipped to sandbox since keeps
+    `sandbox = false` in the DB forever -- a purge keyed on the stored flag
+    alone would never see it. "Sandbox" is spelled as the negation of the
+    read side's `celigo_*_is_production()` predicates so there is one
+    definition of it (NULL is production; only TRUE is swept).
+
+    What the FKs do with the rest: `celigo_flows.integration_id`, the flow's
+    steps, script attachments and config changes are `ON DELETE CASCADE` and
+    go with the integration. `celigo_flow_errors.flow_id` is `ON DELETE SET
+    NULL` and its rows are NEVER deleted here -- that table is THE audit
+    trail (design spec G2; `CeligoFlowError`'s docstring: "NEVER DELETE A
+    ROW HERE"), and SET NULL is the design, not a gap: an error outlives its
+    flow the same way it outlives Celigo's own ~30-day purge. (Round 1 of PR
+    #216's gate deleted them here; round 2 flagged that as a blocker. The
+    name-based pin in `test_celigo_repository.py` could not see an inline
+    delete, so that test now scans the source of every Celigo module.)
+
+    They are, however, STAMPED `purged_at = now()` first (an UPDATE -- the
+    one kind of transition the table allows, same as `mark_flow_errors_
+    purged`): an error whose flow this app has stopped tracking is not an
+    OPEN error, and `errors.py`'s signature recompute counts by
+    `celigo_error_is_open()` alone, so an orphan left open would inflate a
+    production signature that happens to share its fingerprint, forever
+    (gate round 3)."""
+    doomed_integrations = or_(
+        not_(celigo_integration_is_production()),
+        CeligoIntegration.celigo_id.in_(list(integration_celigo_ids)),
+    )
+    doomed_flow_ids = (
+        select(CeligoFlow.id)
+        .join(CeligoIntegration, CeligoIntegration.id == CeligoFlow.integration_id)
+        .where(
+            CeligoFlow.tenant_id == tenant_id,
+            CeligoIntegration.tenant_id == tenant_id,
+            CeligoIntegration.celigo_connection_id == connection_id,
+            doomed_integrations,
+        )
+    )
+    await db.execute(
+        update(CeligoFlowError)
+        .where(
+            CeligoFlowError.tenant_id == tenant_id,
+            CeligoFlowError.flow_id.in_(doomed_flow_ids),
+            CeligoFlowError.purged_at.is_(None),
+        )
+        .values(purged_at=func.now())
+    )
+    integrations_result = await db.execute(
+        delete(CeligoIntegration).where(
+            CeligoIntegration.tenant_id == tenant_id,
+            CeligoIntegration.celigo_connection_id == connection_id,
+            doomed_integrations,
+        )
+    )
+    scripts_result = await db.execute(
+        delete(CeligoScript).where(
+            CeligoScript.tenant_id == tenant_id,
+            CeligoScript.celigo_connection_id == connection_id,
+            or_(
+                not_(celigo_script_is_production()),
+                CeligoScript.celigo_id.in_(list(script_celigo_ids)),
+            ),
+        )
+    )
+    return (integrations_result.rowcount or 0), (scripts_result.rowcount or 0)
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +347,25 @@ async def upsert_flow(
         .returning(CeligoFlow.id)
     )
     return (await db.execute(stmt)).scalar_one()
+
+
+async def mark_flow_errors_checked(
+    db: AsyncSession, *, tenant_id: uuid.UUID, flow_id: uuid.UUID, checked_at: datetime | None
+) -> None:
+    """Write one `celigo_flows.errors_checked_at` row -- `sync_service.py`'s
+    Phase E, once per flow. A datetime means "this run obtained the flow's
+    error summary (`client.list_flow_error_summary`, verified live
+    2026-09-03) AND every step reached a verdict". `None` CLEARS it: the
+    latest run could not verify the flow (a 204 or malformed summary, a
+    step absent from it, a listing that disagreed with the summary), and an
+    older stamp left in place would present today's unverified count as a
+    checked one. One UPDATE, scoped by `tenant_id` AND `id` -- same
+    tenant-and-identity scoping every other write in this module uses."""
+    await db.execute(
+        update(CeligoFlow)
+        .where(CeligoFlow.tenant_id == tenant_id, CeligoFlow.id == flow_id)
+        .values(errors_checked_at=checked_at, updated_at=func.now())
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -448,17 +570,18 @@ async def backfill_flow_step_reference_info(
     record_type: str | None = None,
     operation: str | None = None,
     search_id: str | None = None,
+    reference_name: str | None = None,
 ) -> int:
     """Task 7's export/import fetch phase: bulk-backfill `adaptor_type`/
-    `connection_celigo_id`/`record_type`/`operation`/`search_id` onto EVERY
-    `celigo_flow_steps` row that references `celigo_id` (the export/import
-    object's own `_id`) -- filling in columns `upsert_flow_step`'s own
-    docstring flags as "live on the REFERENCED export/import object...
-    nullable here, filled in by whichever sync step fetches that object".
-    The SAME export/import id can be referenced by more than one flow, or
-    more than one branch within one flow (module docstring point 1) -- a
-    plain `db.get()`-and-update would only touch the first row found; this
-    statement updates ALL of them.
+    `connection_celigo_id`/`record_type`/`operation`/`search_id`/
+    `reference_name` onto EVERY `celigo_flow_steps` row that references
+    `celigo_id` (the export/import object's own `_id`) -- filling in columns
+    `upsert_flow_step`'s own docstring flags as "live on the REFERENCED
+    export/import object... nullable here, filled in by whichever sync step
+    fetches that object". The SAME export/import id can be referenced by
+    more than one flow, or more than one branch within one flow (module
+    docstring point 1) -- a plain `db.get()`-and-update would only touch the
+    first row found; this statement updates ALL of them.
 
     `record_type`/`operation`/`search_id` are Task 11's provenance input
     (fix round 2, migration 096) -- `record_type` is shared across import
@@ -467,6 +590,10 @@ async def backfill_flow_step_reference_info(
     `operation` is import-only and `search_id` is export-only, so a caller
     backfilling from the "wrong" kind simply never passes the other one,
     same as `adaptor_type`/`connection_celigo_id` already worked.
+
+    `reference_name` is Task 1's addition (migration 097) -- the export/
+    import's own `name` as typed in Celigo. It follows the same non-None-
+    only rule: a listing that omits the name never blanks a stored one.
 
     Only fields that are non-`None` are included in the `SET` clause: an
     export/import fetch that happens to omit one of these on a resync (a
@@ -489,6 +616,8 @@ async def backfill_flow_step_reference_info(
         values["operation"] = operation
     if search_id is not None:
         values["search_id"] = search_id
+    if reference_name is not None:
+        values["reference_name"] = reference_name
     if not values:
         return 0
     values["updated_at"] = func.now()
@@ -515,7 +644,16 @@ async def upsert_script(
 ) -> uuid.UUID:
     """Upsert one `celigo_scripts` row from a SANITIZED script payload
     (already through `sanitizer.sanitize("script", raw)`). `content_hash` is
-    computed here, never trusted from a caller (see `_content_hash`)."""
+    computed here, never trusted from a caller (see `_content_hash`).
+
+    A payload WITHOUT a body never empties a stored one: on conflict,
+    `content`/`content_hash` take the incoming value only when it is
+    non-NULL (`COALESCE(EXCLUDED.content, celigo_scripts.content)`). Celigo's
+    list mode omits `content` and its per-id GET is not guaranteed to carry
+    it either; before this rule a body-less payload silently overwrote real
+    source with NULL, and `_script_drift` ignores null hashes by design, so
+    nothing would have said so (PR #217 gate). A body that is present still
+    updates normally -- edits are not suppressed, only absence is."""
     content = sanitized.get("content")
     values = dict(
         tenant_id=tenant_id,
@@ -529,15 +667,11 @@ async def upsert_script(
         celigo_last_modified=_parse_celigo_timestamp(sanitized.get("lastModified")),
     )
     # dedup_key is STORED GENERATED -- deliberately never in `values`.
-    stmt = (
-        insert(CeligoScript)
-        .values(**values)
-        .on_conflict_do_update(
-            constraint="uq_celigo_scripts_identity",
-            set_=_set_clause(values, exclude={"tenant_id", "celigo_connection_id", "celigo_id"}),
-        )
-        .returning(CeligoScript.id)
-    )
+    stmt = insert(CeligoScript).values(**values)
+    set_ = _set_clause(values, exclude={"tenant_id", "celigo_connection_id", "celigo_id"})
+    set_["content"] = func.coalesce(stmt.excluded.content, CeligoScript.content)
+    set_["content_hash"] = func.coalesce(stmt.excluded.content_hash, CeligoScript.content_hash)
+    stmt = stmt.on_conflict_do_update(constraint="uq_celigo_scripts_identity", set_=set_).returning(CeligoScript.id)
     return (await db.execute(stmt)).scalar_one()
 
 
@@ -575,6 +709,9 @@ async def list_logical_scripts(
                 select(CeligoScript).where(
                     CeligoScript.tenant_id == tenant_id,
                     CeligoScript.celigo_connection_id == connection_id,
+                    # Production only -- a clone family must not count its
+                    # sandbox copies (132 of 259 scripts on the live account).
+                    celigo_script_is_production(),
                 )
             )
         )
@@ -589,8 +726,24 @@ async def list_logical_scripts(
         groups[script.dedup_key].append(script)
 
     all_celigo_ids = [s.celigo_id for s in scripts]
+    # Attachment sites are counted through their flow's integration so only
+    # PRODUCTION sites count -- the same join the API's `used_by` list makes
+    # (`celigo_flows.py`), so the two numbers describe one row set (gate
+    # round 3: they disagreed by exactly the sandbox sites before this).
     counts_result = await db.execute(
         select(CeligoScriptAttachment.script_celigo_id, func.count())
+        .join(
+            CeligoFlow,
+            and_(CeligoFlow.id == CeligoScriptAttachment.flow_id, CeligoFlow.tenant_id == tenant_id),
+        )
+        .join(
+            CeligoIntegration,
+            and_(
+                CeligoIntegration.id == CeligoFlow.integration_id,
+                CeligoIntegration.tenant_id == tenant_id,
+                celigo_integration_is_production(),
+            ),
+        )
         .where(
             CeligoScriptAttachment.tenant_id == tenant_id,
             CeligoScriptAttachment.celigo_connection_id == connection_id,

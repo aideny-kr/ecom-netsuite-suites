@@ -1,0 +1,1229 @@
+"""Persistence choke points. This module never calls a provider or invokes an LLM.
+
+Every spend and operation claim commits before returning. A runner must reserve
+its budget before its next call and dispatch only a returned ClaimedOperation.
+An uncertain or interrupted operation can only be reconciled, never reacquired.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import uuid
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal, localcontext
+
+from pydantic import ValidationError
+from sqlalchemy import and_, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
+
+from app.core.database import set_tenant_context
+from app.models.celigo import CeligoFlow, CeligoFlowStep
+from app.models.connection import ACTIVE_CONNECTION_STATUSES, Connection
+from app.models.tenant import Tenant
+from app.models.transaction_ops import (
+    TransactionConfig,
+    TransactionFinding,
+    TransactionOperation,
+    TransactionProposal,
+    TransactionRun,
+)
+from app.models.user import Permission, RolePermission, User, UserRole
+from app.schemas.transaction_runs import (
+    ClaimedOperation,
+    ConfigControl,
+    ConfigCreate,
+    ConfigOut,
+    FindingReport,
+    OperationReadPermit,
+    ProgressUpdate,
+    ProposalCreate,
+    ProposalDecision,
+    RunCreate,
+    Termination,
+    _bounded_json,
+)
+from app.services import audit_service
+from app.services.feature_flag_service import get_all_flags
+from app.services.transaction_ops.normalization import TransactionMapping
+
+_LEASE = timedelta(seconds=180)
+_RUN_QUEUE_AGE = timedelta(days=1)
+_EVIDENCE_AGE = timedelta(minutes=15)
+_OPERATION_CALLS = 96
+_OPERATION_TIME = timedelta(seconds=300)
+_LEDGER_RESULT_KEYS = frozenset(
+    {"dispatch_reserved", "provider", "payload_fingerprint", "dispatch_reserved_at", "termination_reason"}
+)
+
+
+class StateError(ValueError):
+    def __init__(self, code: str, http_status: int = 409):
+        super().__init__(code)
+        self.code = code
+        self.http_status = http_status
+
+
+def _clock(now=None):
+    value = now or datetime.now(timezone.utc)
+    if value.utcoffset() is None:
+        raise ValueError("An aware clock is required")
+    return value
+
+
+def business_digest(value) -> str:
+    def normalize(item):
+        if isinstance(item, Decimal):
+            if not item.is_finite():
+                raise ValueError("Nonfinite business key")
+            # Avoid normalize() inheriting the caller's Decimal precision.
+            with localcontext() as ctx:
+                ctx.prec = max(60, len(item.as_tuple().digits))
+                return format(item.normalize(), "f") if item else "0"
+        if isinstance(item, datetime):
+            return _clock(item).astimezone(timezone.utc).isoformat()
+        if isinstance(item, uuid.UUID):
+            return str(item)
+        if isinstance(item, dict):
+            return {key: normalize(val) for key, val in item.items()}
+        if isinstance(item, (tuple, list)):
+            return [normalize(val) for val in item]
+        if isinstance(item, float):
+            raise ValueError("Binary floats cannot identify financial work")
+        return item
+
+    return hashlib.sha256(json.dumps(normalize(value), sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+async def _one(db, tenant_id, model, identifier, *, lock=False):
+    await set_tenant_context(db, str(tenant_id))
+    query = (
+        select(model)
+        .where(model.tenant_id == tenant_id, model.id == identifier)
+        .execution_options(populate_existing=True)
+    )
+    if lock:
+        query = query.with_for_update()
+    row = (await db.execute(query)).scalar_one_or_none()
+    if row is None:
+        raise StateError("not_found", 404)
+    return row
+
+
+async def _commit(db, tenant_id):
+    await db.commit()
+    # SET LOCAL is cleared by a real COMMIT. Never reuse a pooled session without
+    # restoring the scope, including when the caller invokes another service.
+    await set_tenant_context(db, str(tenant_id))
+
+
+async def _audit(db, tenant_id, action, row, actor=None, payload=None):
+    # Keep exact evidence and changes in their immutable database records. Every
+    # event carries durable links; request correlation alone does not span jobs.
+    links = {}
+    for key in ("config_id", "run_id", "proposal_id"):
+        value = getattr(row, key, None)
+        if value is not None:
+            links[key] = str(value)
+    if isinstance(row, TransactionRun):
+        links["run_id"] = str(row.id)
+    elif isinstance(row, TransactionProposal):
+        links.update(proposal_id=str(row.id), evidence_fingerprint=row.evidence_fingerprint)
+        if row.decided_by is not None:
+            links.update(decided_by=str(row.decided_by), decided_at=row.decided_at.isoformat())
+    elif isinstance(row, TransactionOperation):
+        links["operation_id"] = str(row.id)
+    await audit_service.log_event(
+        db,
+        tenant_id,
+        category="transaction_ops",
+        action=f"transaction_ops.{action}",
+        actor_id=actor.id if actor else None,
+        actor_type="user" if actor else "system",
+        resource_type=row.__tablename__,
+        resource_id=str(row.id),
+        payload={**(payload or {}), **links},
+    )
+
+
+async def _human(db, tenant_id, actor, permission):
+    if actor is None or actor.tenant_id != tenant_id:
+        raise StateError("human_actor_required", 403)
+    current = (
+        await db.execute(
+            select(User)
+            .where(
+                User.id == actor.id,
+                User.tenant_id == tenant_id,
+            )
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if current is None or not current.is_active or current.actor_type != "user":
+        raise StateError("human_actor_required", 403)
+    # Read permission grants from the database on EVERY check. A User ORM
+    # object's cached user_roles collection can outlive a revoked assignment.
+    granted = (
+        await db.execute(
+            select(Permission.id)
+            .join(
+                RolePermission,
+                RolePermission.permission_id == Permission.id,
+            )
+            .join(UserRole, UserRole.role_id == RolePermission.role_id)
+            .where(
+                UserRole.tenant_id == tenant_id,
+                UserRole.user_id == current.id,
+                Permission.codename == permission,
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if granted is None:
+        raise StateError("permission_denied", 403)
+
+
+async def _check_bindings(db, tenant_id, request):
+    replica = TransactionMapping.model_validate(request.mapping_json).metabase_replica
+    if replica:
+        from app.services.transaction_ops.metabase_reader import ReplicaReadError, _connector
+
+        try:
+            await _connector(db, tenant_id, replica)
+        except ReplicaReadError:
+            raise StateError("replica_unavailable", 422) from None
+    # These are local ownership/lifecycle checks. The root runner independently
+    # validates live Framework/Celigo/provider configuration before any read/write.
+    if request.source_connection_id is not None:
+        source = (
+            await db.execute(
+                select(Connection.id).where(
+                    Connection.id == request.source_connection_id,
+                    Connection.tenant_id == tenant_id,
+                    Connection.provider == "solidus",
+                    Connection.status.in_(ACTIVE_CONNECTION_STATUSES),
+                    Connection.metadata_json["api_profile"].as_string() == "framework_sync",
+                )
+            )
+        ).scalar_one_or_none()
+        if source is None:
+            raise StateError("source_unavailable", 422)
+    for step_id in filter(None, (request.source_step_id, request.target_step_id)):
+        query = (
+            select(CeligoFlowStep.id)
+            .join(
+                CeligoFlow,
+                and_(
+                    CeligoFlow.id == CeligoFlowStep.flow_id,
+                    CeligoFlow.tenant_id == tenant_id,
+                    CeligoFlow.celigo_connection_id == CeligoFlowStep.celigo_connection_id,
+                ),
+            )
+            .join(
+                Connection,
+                and_(
+                    Connection.id == CeligoFlowStep.celigo_connection_id,
+                    Connection.tenant_id == tenant_id,
+                    Connection.provider == "celigo",
+                    Connection.status.in_(ACTIVE_CONNECTION_STATUSES),
+                ),
+            )
+            .where(CeligoFlowStep.id == step_id, CeligoFlowStep.tenant_id == tenant_id)
+        )
+        if (await db.execute(query)).scalar_one_or_none() is None:
+            raise StateError("source_unavailable", 422)
+    target = (
+        await db.execute(
+            select(Connection.id).where(
+                Connection.id == request.netsuite_connection_id,
+                Connection.tenant_id == tenant_id,
+                Connection.provider == "netsuite",
+                Connection.status.in_(ACTIVE_CONNECTION_STATUSES),
+            )
+        )
+    ).scalar_one_or_none()
+    if target is None:
+        raise StateError("destination_unavailable", 422)
+
+
+async def get_config(db, tenant_id, config_id, *, lock=False):
+    return await _one(db, tenant_id, TransactionConfig, config_id, lock=lock)
+
+
+def current_config_clause():
+    successor = aliased(TransactionConfig)
+    return (
+        ~select(successor.id)
+        .where(
+            successor.tenant_id == TransactionConfig.tenant_id,
+            successor.supersedes_config_id == TransactionConfig.id,
+        )
+        .exists()
+    )
+
+
+async def list_configs(db, tenant_id, *, scheduled_only=False):
+    await set_tenant_context(db, str(tenant_id))
+    query = select(TransactionConfig).where(TransactionConfig.tenant_id == tenant_id, current_config_clause())
+    if scheduled_only:
+        query = query.where(TransactionConfig.enabled.is_(True), TransactionConfig.schedule_enabled.is_(True))
+    return list((await db.execute(query.order_by(TransactionConfig.created_at).limit(200))).scalars())
+
+
+async def create_config(db: AsyncSession, tenant_id, request: ConfigCreate, *, actor):
+    await set_tenant_context(db, str(tenant_id))
+    await _human(db, tenant_id, actor, "connections.manage")
+    try:
+        TransactionMapping.model_validate(request.mapping_json)
+    except ValidationError:
+        raise StateError("invalid_mapping", 422) from None
+    await _check_bindings(db, tenant_id, request)
+    values = request.model_dump(mode="json")
+    key = business_digest({k: v for k, v in values.items() if k not in {"name", "schedule_enabled"}})
+    # Serialize creates by tenant without a global lock or caller-provided key.
+    await db.execute(select(Tenant.id).where(Tenant.id == tenant_id).with_for_update())
+    existing = (
+        await db.execute(
+            select(TransactionConfig).where(
+                TransactionConfig.tenant_id == tenant_id,
+                TransactionConfig.config_key == key,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing:
+        await _commit(db, tenant_id)
+        return existing
+    row = TransactionConfig(tenant_id=tenant_id, config_key=key, created_by=actor.id, **request.model_dump())
+    db.add(row)
+    await db.flush()
+    await _audit(db, tenant_id, "config.create", row, actor)
+    await _commit(db, tenant_id)
+    return row
+
+
+async def control_config(db, tenant_id, config_id, request: ConfigControl, *, actor):
+    row = await get_config(db, tenant_id, config_id, lock=True)
+    await _human(db, tenant_id, actor, "connections.manage")
+    if request.enabled and await db.scalar(
+        select(TransactionConfig.id).where(
+            TransactionConfig.tenant_id == tenant_id, TransactionConfig.supersedes_config_id == row.id
+        )
+    ):
+        raise StateError("config_superseded", 409)
+    if request.schedule_enabled and not request.enabled:
+        raise StateError("disabled_config_cannot_schedule", 422)
+    row.enabled, row.schedule_enabled = request.enabled, request.schedule_enabled
+    await _audit(db, tenant_id, "config.control", row, actor, request.model_dump())
+    await _commit(db, tenant_id)
+    return row
+
+
+async def create_run(
+    db,
+    tenant_id,
+    config_id,
+    request: RunCreate,
+    *,
+    actor=None,
+    now=None,
+    resume_from_run_id=None,
+    automatic_continuation=False,
+    human_retry=False,
+):
+    now = _clock(now)
+    if human_retry and (
+        request.origin != "manual" or automatic_continuation or not request.review or resume_from_run_id is None
+    ):
+        raise StateError("invalid_run_continuation")
+    config = await get_config(db, tenant_id, config_id, lock=True)
+    if not config.enabled:
+        raise StateError("config_disabled")
+    if request.origin == "schedule":
+        if not config.schedule_enabled:
+            raise StateError("schedule_disabled")
+    else:
+        await _human(db, tenant_id, actor, "recon.run")
+    if request.window_basis == "completed_at" and not (config.mapping_json or {}).get("metabase_replica"):
+        raise StateError("period_reader_unavailable", 422)
+    # Preserve idempotency for requests made before calendar cohorts were added.
+    excluded = {"window_basis"} if request.window_basis == "updated_at" else set()
+    if request.review is None:
+        excluded.add("review")
+    elif request.review.end > now:
+        raise StateError("review_period_not_closed", 422)
+    params = request.model_dump(mode="json", exclude=excluded)
+    key = business_digest({"config": config.config_key, "params": request.model_dump(exclude=excluded)})
+    existing = (
+        await db.execute(
+            select(TransactionRun).where(
+                TransactionRun.tenant_id == tenant_id,
+                TransactionRun.work_key == key,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing:
+        await _commit(db, tenant_id)
+        return existing
+    initial_progress = {}
+    if resume_from_run_id is not None:
+        previous = await get_run(db, tenant_id, resume_from_run_id)
+        previous_scope = {k: v for k, v in previous.params_json.items() if k not in {"evaluation_key", "origin"}}
+        new_scope = {k: v for k, v in params.items() if k not in {"evaluation_key", "origin"}}
+        if (
+            previous.config_id != config.id
+            or previous.status != "finished"
+            or previous.termination_reason not in ({"budget", "stall", "error"} if human_retry else {"budget", "stall"})
+            or previous_scope != new_scope
+        ):
+            raise StateError("invalid_run_continuation")
+        initial_progress = _bounded_json(previous.progress_json)
+        for field in list(initial_progress):
+            if field.startswith("continuation_"):
+                initial_progress.pop(field)
+        if human_retry:
+            attempt = initial_progress.get("review_attempt", 0)
+            if type(attempt) is not int or not 0 <= attempt < 512:
+                raise StateError("invalid_run_continuation")
+            initial_progress.update(
+                review_attempt=attempt + 1,
+                continuation_of=str(previous.id),
+                # Cumulative evidence survives, but it is not new productivity
+                # that can authorize an unattended continuation of this retry.
+                continuation_baseline={
+                    key: initial_progress.get(key, 0)
+                    for key in (
+                        "processed",
+                        "scan_count",
+                        "refund_scan_count",
+                        "outside_scope",
+                        "destination_scan_count",
+                    )
+                },
+            )
+        if automatic_continuation:
+            from app.services.transaction_ops.continuation import next_metadata
+
+            metadata = next_metadata(previous, now)
+            if (
+                previous.termination_reason != "budget"
+                or request.origin != previous.origin
+                or request.evaluation_key
+                != f"continue:{metadata['continuation_root_id']}:{metadata['continuation_part']}"
+            ):
+                raise StateError("invalid_run_continuation")
+            initial_progress.update(metadata)
+    elif automatic_continuation:
+        raise StateError("invalid_run_continuation")
+    row = TransactionRun(
+        tenant_id=tenant_id,
+        config_id=config.id,
+        work_key=key,
+        origin=request.origin,
+        params_json=params,
+        config_snapshot=ConfigOut.model_validate(config).model_dump(mode="json"),
+        max_api_calls=config.max_api_calls,
+        max_orders=config.max_orders,
+        deadline_at=now + timedelta(seconds=config.deadline_seconds),
+        initiated_by=actor.id if actor else None,
+        progress_json=initial_progress,
+    )
+    if human_retry:
+        row.created_at = now
+    db.add(row)
+    await db.flush()
+    await _audit(db, tenant_id, "run.create", row, actor)
+    await _commit(db, tenant_id)
+    return row
+
+
+async def get_run(db, tenant_id, run_id, *, lock=False):
+    return await _one(db, tenant_id, TransactionRun, run_id, lock=lock)
+
+
+async def list_runs(db, tenant_id, *, config_id=None, runnable_only=False, limit=100):
+    await set_tenant_context(db, str(tenant_id))
+    query = select(TransactionRun).where(TransactionRun.tenant_id == tenant_id)
+    if config_id:
+        query = query.where(TransactionRun.config_id == config_id)
+    if runnable_only:
+        query = query.where(TransactionRun.status.in_(("pending", "running")))
+    return list(
+        (await db.execute(query.order_by(TransactionRun.created_at.desc()).limit(min(200, max(1, limit))))).scalars()
+    )
+
+
+def _finish(row, reason, now):
+    row.status, row.termination_reason, row.finished_at = "finished", reason, now
+    row.lease_token = row.lease_until = None
+
+
+async def _finish_audited(db, tenant_id, row, reason, now):
+    from app.services.transaction_ops.settlement import is_settlement, record_outcome
+
+    if is_settlement(row):
+        await record_outcome(db, tenant_id, row, reason, now=now)
+    _finish(row, reason, now)
+    await _audit(db, tenant_id, "run.finish", row, payload={"reason": reason})
+
+
+def _lease(row, token, now):
+    if row.status != "running" or token != row.lease_token or row.lease_until is None or now >= row.lease_until:
+        raise StateError("run_lease_lost")
+
+
+def _first_claim_deadline(row, now):
+    """One execution budget after queueing, bounded by the original work's age."""
+    seconds = (row.config_snapshot or {}).get("deadline_seconds")
+    if type(seconds) is not int or not 30 <= seconds <= 3600:
+        return row.deadline_at  # Legacy/malformed snapshots cannot acquire extra time.
+    duration = timedelta(seconds=seconds)
+    queued_at = row.deadline_at - duration
+    hard_deadline = queued_at + _RUN_QUEUE_AGE
+    started = (row.progress_json or {}).get("continuation_started_at")
+    if started is not None:
+        try:
+            started = datetime.fromisoformat(started)
+            if started.utcoffset() is None or started > now:
+                return None
+        except (TypeError, ValueError):
+            return None
+        hard_deadline = min(hard_deadline, started + _RUN_QUEUE_AGE)
+    if now < queued_at or now >= hard_deadline:
+        return None
+    return min(now + duration, hard_deadline)
+
+
+async def claim_run(db, tenant_id, run_id, *, now=None):
+    from app.services.transaction_ops.settlement import is_settlement
+
+    now = _clock(now)
+    row = await get_run(db, tenant_id, run_id, lock=True)
+    if row.status == "finished":
+        await _commit(db, tenant_id)
+        return None
+    deadline = row.deadline_at
+    if (
+        row.status == "pending"
+        and (row.origin in {"manual", "chat", "schedule"} or is_settlement(row))
+        and row.lease_token is None
+        and row.api_calls_used == row.orders_used == 0
+    ):
+        deadline = _first_claim_deadline(row, now)
+    if deadline is None or now >= deadline:
+        await _finish_audited(db, tenant_id, row, "budget", now)
+        await _commit(db, tenant_id)
+        return None
+    if row.status == "running" and row.lease_until and now < row.lease_until:
+        await _commit(db, tenant_id)
+        return None
+    config = await get_config(db, tenant_id, row.config_id)
+    if not config.enabled or (row.origin == "schedule" and not config.schedule_enabled):
+        await _finish_audited(db, tenant_id, row, "stall", now)
+        await _commit(db, tenant_id)
+        return None
+    row.deadline_at = deadline
+    row.status, row.lease_token = "running", uuid.uuid4()
+    row.lease_until = min(row.deadline_at, now + _LEASE)
+    await _commit(db, tenant_id)
+    return row.lease_token
+
+
+async def reserve_budget(db, tenant_id, run_id, *, lease_token, api_calls=0, orders=0, now=None):
+    if any(type(value) is not int or value < 0 for value in (api_calls, orders)) or api_calls + orders == 0:
+        raise ValueError("Reserve positive integer spend before a call")
+    now = _clock(now)
+    row = await get_run(db, tenant_id, run_id, lock=True)
+    if row.status == "finished":
+        await _commit(db, tenant_id)
+        return False
+    if now >= row.deadline_at:
+        await _finish_audited(db, tenant_id, row, "budget", now)
+        await _commit(db, tenant_id)
+        return False
+    _lease(row, lease_token, now)
+    if row.api_calls_used + api_calls > row.max_api_calls or row.orders_used + orders > row.max_orders:
+        await _finish_audited(db, tenant_id, row, "budget", now)
+        await _commit(db, tenant_id)
+        return False
+    row.api_calls_used += api_calls
+    row.orders_used += orders
+    row.lease_until = min(row.deadline_at, now + _LEASE)
+    await _commit(db, tenant_id)
+    return True
+
+
+async def update_progress(db, tenant_id, run_id, request: ProgressUpdate, *, lease_token, now=None):
+    now = _clock(now)
+    row = await get_run(db, tenant_id, run_id, lock=True)
+    _lease(row, lease_token, now)
+    row.progress_json = request.progress_json
+    row.lease_until = min(row.deadline_at, now + _LEASE)
+    await _commit(db, tenant_id)
+    return row
+
+
+async def finish_run(db, tenant_id, run_id, reason: Termination, *, lease_token, now=None):
+    if reason not in {"done", "budget", "stall", "error"}:
+        raise ValueError("Invalid termination reason")
+    now = _clock(now)
+    row = await get_run(db, tenant_id, run_id, lock=True)
+    if row.status == "finished":
+        await _commit(db, tenant_id)
+        return row
+    # A provider call may consume the final instant of the run's deadline,
+    # which also expires its lease. The same fenced owner may record only
+    # budget termination in that case; expired owners cannot publish success,
+    # or finish work reclaimed under a different token.
+    if not (
+        reason == "budget"
+        and now >= row.deadline_at
+        and row.status == "running"
+        and lease_token is not None
+        and lease_token == row.lease_token
+    ):
+        _lease(row, lease_token, now)
+    await _finish_audited(db, tenant_id, row, reason, now)
+    await _commit(db, tenant_id)
+    return row
+
+
+async def get_proposal(db, tenant_id, proposal_id, *, lock=False):
+    return await _one(db, tenant_id, TransactionProposal, proposal_id, lock=lock)
+
+
+async def list_proposals(db, tenant_id, *, run_id=None, status=None, limit=100, offset=0):
+    await set_tenant_context(db, str(tenant_id))
+    query = select(TransactionProposal).where(TransactionProposal.tenant_id == tenant_id)
+    if run_id:
+        query = query.where(TransactionProposal.run_id == run_id)
+    if status:
+        query = query.where(TransactionProposal.status == status)
+    return list(
+        (
+            await db.execute(
+                query.order_by(TransactionProposal.created_at.desc(), TransactionProposal.id)
+                .offset(max(0, offset))
+                .limit(min(200, max(1, limit)))
+            )
+        ).scalars()
+    )
+
+
+async def record_finding(db, tenant_id, run_id, order_reference, report_json, *, lease_token, now=None, final=True):
+    now = _clock(now)
+    request = FindingReport(order_reference=order_reference, report_json=report_json)
+    if request.report_json.get("order_reference", order_reference) != order_reference:
+        raise StateError("finding_order_mismatch", 422)
+    request = request.model_copy(
+        update={"report_json": {k: v for k, v in request.report_json.items() if k != "case_id"}}
+    )
+    run = await get_run(db, tenant_id, run_id, lock=True)
+    _lease(run, lease_token, now)
+    row = (
+        await db.execute(
+            select(TransactionFinding).where(
+                TransactionFinding.tenant_id == tenant_id,
+                TransactionFinding.run_id == run_id,
+                TransactionFinding.order_reference == order_reference,
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        row = TransactionFinding(tenant_id=tenant_id, run_id=run_id, **request.model_dump())
+        db.add(row)
+    else:
+        row.report_json = request.report_json
+    run.lease_until = min(run.deadline_at, now + _LEASE)
+    await db.flush()
+    from app.services.transaction_ops.case_service import observe_finding
+
+    case = await observe_finding(db, tenant_id, run, row, now=now) if final else None
+    if case is not None:
+        row.report_json = {**row.report_json, "case_id": str(case.id)}
+        await db.flush()
+    await _commit(db, tenant_id)
+    return row
+
+
+async def unseen_references(db, tenant_id, run_id, references):
+    run = await get_run(db, tenant_id, run_id)
+    root = uuid.UUID((run.progress_json or {}).get("continuation_root_id") or str(run.id))
+    seen = set(
+        (
+            await db.scalars(
+                select(TransactionFinding.order_reference)
+                .join(
+                    TransactionRun,
+                    (TransactionRun.id == TransactionFinding.run_id) & (TransactionRun.tenant_id == tenant_id),
+                )
+                .where(
+                    TransactionFinding.tenant_id == tenant_id,
+                    TransactionFinding.order_reference.in_(references),
+                    TransactionRun.config_id == run.config_id,
+                    (TransactionRun.id == root)
+                    | (TransactionRun.progress_json["continuation_root_id"].astext == str(root)),
+                )
+            )
+        ).all()
+    )
+    return [reference for reference in references if reference not in seen]
+
+
+async def list_findings(db, tenant_id, run_id, *, offset=0, limit=100):
+    await get_run(db, tenant_id, run_id)
+    query = (
+        select(TransactionFinding)
+        .where(
+            TransactionFinding.tenant_id == tenant_id,
+            TransactionFinding.run_id == run_id,
+        )
+        .order_by(TransactionFinding.order_reference)
+        .offset(max(0, offset))
+        .limit(min(100, max(1, limit)))
+    )
+    return list((await db.execute(query)).scalars())
+
+
+async def propose(db, tenant_id, run_id, request: ProposalCreate, *, lease_token, now=None):
+    now = _clock(now)
+    if not timedelta(0) <= now - request.observed_at < _EVIDENCE_AGE:
+        raise StateError("stale_evidence")
+    run = await get_run(db, tenant_id, run_id, lock=True)
+    _lease(run, lease_token, now)
+    if run.origin == "recovery":
+        raise StateError("read_only_verification_run")
+    config = await get_config(db, tenant_id, run.config_id, lock=True)
+    if not config.enabled:
+        raise StateError("config_disabled")
+    if (config.mapping_json or {}).get("action_mode", "detect_only") != "propose_actions":
+        raise StateError("actions_disabled")
+    run.lease_until = min(run.deadline_at, now + _LEASE)
+    # The observation timestamp is freshness, not work identity. Before/after,
+    # authoritative versions (fingerprint) and exact destination define the work.
+    key = business_digest({"config": config.config_key, **request.model_dump(exclude={"observed_at", "evidence_json"})})
+    base_key, previous_attempt = key, None
+    # At most two separately approved attempts for identical economic work.
+    # Each generation retains its own immutable decision and operation ledger.
+    for attempt_number in (1, 2):
+        existing = (
+            await db.execute(
+                select(TransactionProposal)
+                .where(TransactionProposal.tenant_id == tenant_id, TransactionProposal.work_key == key)
+                .order_by(
+                    TransactionProposal.status.in_(("pending", "approved")).desc(),
+                    TransactionProposal.created_at.desc(),
+                    TransactionProposal.id.desc(),
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if existing is None:
+            break
+        attempted = (
+            await db.execute(
+                select(TransactionOperation).where(
+                    TransactionOperation.tenant_id == tenant_id, TransactionOperation.work_key == key
+                )
+            )
+        ).scalar_one_or_none()
+        if existing.status == "rejected":
+            await _commit(db, tenant_id)
+            return existing
+        if attempted is not None:
+            result = attempted.result_json or {}
+            known_no_write = attempted.status == "failed" and (
+                result.get("dispatch_reserved") is not True or result.get("code") == "provider_rejected_without_save"
+            )
+            if not known_no_write or attempt_number == 2:
+                await _commit(db, tenant_id)
+                return existing
+            previous_attempt = attempted.id
+            key = business_digest({"base_work": base_key, "retry_of_operation": attempted.id})
+            continue
+        if existing.status in {"pending", "approved"} and now < existing.valid_until:
+            await _commit(db, tenant_id)
+            return existing
+        if existing.status in {"pending", "approved"}:
+            existing.status = "superseded"
+            await db.flush()
+        break
+    values = request.model_dump()
+    if previous_attempt is not None:
+        values["evidence_json"] = _bounded_json(
+            {**values["evidence_json"], "retry": {"previous_operation_id": str(previous_attempt), "attempt": 2}}
+        )
+    row = TransactionProposal(
+        tenant_id=tenant_id,
+        config_id=config.id,
+        run_id=run.id,
+        work_key=key,
+        netsuite_account_id=config.netsuite_account_id,
+        subsidiary_id=config.subsidiary_id,
+        record_type=config.record_type,
+        valid_until=request.observed_at + _EVIDENCE_AGE,
+        **values,
+    )
+    db.add(row)
+    await db.flush()
+    await _audit(db, tenant_id, "proposal.create", row)
+    await _commit(db, tenant_id)
+    return row
+
+
+async def decide_proposal(db, tenant_id, proposal_id, request: ProposalDecision, *, actor, now=None):
+    now = _clock(now)
+    row = await get_proposal(db, tenant_id, proposal_id, lock=True)
+    await _human(db, tenant_id, actor, "recon.run")
+    if row.status != "pending":
+        raise StateError("proposal_not_pending")
+    if row.evidence_fingerprint != request.evidence_fingerprint:
+        raise StateError("evidence_changed")
+    if request.decision == "approve" and now >= row.valid_until:
+        row.status = "superseded"
+        await _audit(db, tenant_id, "proposal.expire", row, actor)
+        await _commit(db, tenant_id)
+        raise StateError("stale_evidence")
+    row.status = "approved" if request.decision == "approve" else "rejected"
+    row.decided_by, row.decided_at, row.decision_note = actor.id, now, request.note
+    await _audit(db, tenant_id, request.decision, row, actor, {"evidence_fingerprint": row.evidence_fingerprint})
+    await _commit(db, tenant_id)
+    return row
+
+
+async def claim_approved_operation(db, tenant_id, proposal_id, *, expected_evidence_fingerprint, now=None):
+    """Claim the approved intent before fresh, separately budgeted provider reads.
+
+    Matching an expected fingerprint here does not attest to fresh evidence.
+    The executor must compare fresh evidence with it before dispatch; the
+    provider adapter must enforce the final server-side conditional write.
+    """
+    now = _clock(now)
+    await set_tenant_context(db, str(tenant_id))
+    # Different proposals can concern the same external order. Serialize only
+    # the short pre-call transaction; never hold this lock during network I/O.
+    await db.execute(select(Tenant.id).where(Tenant.id == tenant_id).with_for_update())
+    row = await get_proposal(db, tenant_id, proposal_id, lock=True)
+    entity_key = business_digest(
+        {
+            "account": row.netsuite_account_id.replace("_", "-").lower(),
+            "subsidiary": row.subsidiary_id,
+            "record_type": row.record_type,
+            "order_reference": row.order_reference,
+        }
+    )
+    existing = (
+        await db.execute(
+            select(TransactionOperation.id).where(
+                TransactionOperation.tenant_id == tenant_id,
+                TransactionOperation.work_key == row.work_key,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        raise StateError("operation_already_attempted")
+    related = aliased(TransactionProposal)
+    unresolved = (
+        await db.execute(
+            select(TransactionOperation.id)
+            .join(related, and_(related.id == TransactionOperation.proposal_id, related.tenant_id == tenant_id))
+            .where(
+                TransactionOperation.tenant_id == tenant_id,
+                TransactionOperation.status.in_(("executing", "unknown")),
+                func.lower(func.replace(related.netsuite_account_id, "_", "-"))
+                == row.netsuite_account_id.replace("_", "-").lower(),
+                related.subsidiary_id == row.subsidiary_id,
+                related.record_type == row.record_type,
+                related.order_reference == row.order_reference,
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if unresolved is not None:
+        raise StateError("operation_already_attempted")
+    if row.status != "approved":
+        raise StateError("proposal_not_approved")
+    decider = (
+        await db.execute(
+            select(User)
+            .where(
+                User.id == row.decided_by,
+                User.tenant_id == tenant_id,
+            )
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    try:
+        await _human(db, tenant_id, decider, "recon.run")
+    except StateError:
+        row.status = "superseded"
+        await _audit(db, tenant_id, "proposal.invalidate", row, payload={"reason": "approval_actor_revoked"})
+        await _commit(db, tenant_id)
+        return None
+    config = await get_config(db, tenant_id, row.config_id)
+    if (
+        not config.enabled
+        or (config.mapping_json or {}).get("action_mode", "detect_only") != "propose_actions"
+        or row.evidence_fingerprint != expected_evidence_fingerprint
+        or now >= row.valid_until
+    ):
+        row.status = "superseded"
+        await _audit(db, tenant_id, "proposal.invalidate", row)
+        await _commit(db, tenant_id)
+        return None
+    operation = TransactionOperation(
+        tenant_id=tenant_id,
+        proposal_id=row.id,
+        work_key=row.work_key,
+        entity_key=entity_key,
+        attempted_at=now,
+        deadline_at=min(now + _OPERATION_TIME, row.valid_until),
+        max_api_calls=_OPERATION_CALLS,
+        api_calls_used=0,
+        status="executing",
+    )
+    db.add(operation)
+    await db.flush()
+    intent = ClaimedOperation(
+        operation_id=operation.id,
+        proposal_id=row.id,
+        work_key=row.work_key,
+        config_id=row.config_id,
+        action=row.action,
+        currency=row.currency,
+        netsuite_account_id=row.netsuite_account_id,
+        subsidiary_id=row.subsidiary_id,
+        record_type=row.record_type,
+        target_record_id=row.target_record_id,
+        before_json=row.before_json,
+        after_json=row.after_json,
+    )
+    await _audit(db, tenant_id, "operation.attempt", operation)
+    await _commit(db, tenant_id)
+    return intent
+
+
+async def complete_operation(db, tenant_id, operation_id, *, outcome, result_json, now=None):
+    if outcome not in {"verified", "unknown", "failed"}:
+        raise ValueError("Invalid operation outcome")
+    evidence = _bounded_json(result_json)
+    if _LEDGER_RESULT_KEYS.intersection(evidence):
+        raise StateError("reserved_operation_result_key")
+    row = await _one(db, tenant_id, TransactionOperation, operation_id, lock=True)
+    if row.status not in {"executing", "unknown"}:
+        raise StateError("operation_terminal")
+    # An unknown attempt can become verified/failed only after caller-provided
+    # read-only provider verification; this service never dispatches it again.
+    if row.status == "unknown" and evidence.get("reconciled") is not True:
+        raise StateError("reconciliation_evidence_required")
+    row.status, row.completed_at = outcome, _clock(now)
+    row.result_json = {
+        **(row.result_json or {}),
+        **evidence,
+        "termination_reason": {"verified": "done", "unknown": "stall", "failed": "error"}[outcome],
+    }
+    proposal = await get_proposal(db, tenant_id, row.proposal_id)
+    if outcome == "verified":
+        from app.services.transaction_ops.settlement import queue
+
+        await queue(db, tenant_id, row, proposal, now=row.completed_at)
+    await _audit(
+        db,
+        tenant_id,
+        "operation.complete",
+        row,
+        payload={
+            "outcome": outcome,
+            "code": evidence.get("code"),
+            "run_id": str(proposal.run_id),
+            "config_id": str(proposal.config_id),
+            "approved_by": str(proposal.decided_by),
+            "approved_at": proposal.decided_at.isoformat(),
+            "evidence_fingerprint": proposal.evidence_fingerprint,
+            # The result verifies the approved operation. A separate fresh case
+            # observation must establish agreement on gross, tax and refunds.
+            "settlement_status": "not_evaluated",
+        },
+    )
+    await _commit(db, tenant_id)
+    return row
+
+
+async def reserve_operation_dispatch(
+    db, tenant_id, claimed: ClaimedOperation, *, provider, payload_fingerprint, now=None
+):
+    """Consume one durable send permit. A crash after this commit permits only reads.
+
+    An adapter calls this after its final fresh provider preflight and before
+    its single mutation. No job retry or reconstructed claim can reserve again.
+    Provider receipts never grant approval, reset the permit, or prove success.
+    """
+    now = _clock(now)
+    if not isinstance(payload_fingerprint, str) or not re.fullmatch(r"[a-f0-9]{64}", payload_fingerprint):
+        raise StateError("invalid_dispatch_fingerprint")
+    await set_tenant_context(db, str(tenant_id))
+    tenant = (
+        await db.execute(
+            select(Tenant).where(Tenant.id == tenant_id).with_for_update().execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if tenant is None or not tenant.is_active:
+        raise StateError("tenant_unavailable", 403)
+    proposal = await get_proposal(db, tenant_id, claimed.proposal_id, lock=True)
+    operation = await _one(db, tenant_id, TransactionOperation, claimed.operation_id, lock=True)
+    expected = ClaimedOperation(
+        operation_id=operation.id,
+        proposal_id=proposal.id,
+        work_key=proposal.work_key,
+        config_id=proposal.config_id,
+        action=proposal.action,
+        currency=proposal.currency,
+        netsuite_account_id=proposal.netsuite_account_id,
+        subsidiary_id=proposal.subsidiary_id,
+        record_type=proposal.record_type,
+        target_record_id=proposal.target_record_id,
+        before_json=proposal.before_json,
+        after_json=proposal.after_json,
+    )
+    if claimed != expected or operation.proposal_id != proposal.id or operation.work_key != proposal.work_key:
+        raise StateError("claimed_operation_mismatch")
+    if (operation.result_json or {}).get("dispatch_reserved") is True:
+        await _commit(db, tenant_id)
+        return False
+    if operation.status != "executing" or proposal.status != "approved":
+        raise StateError("operation_not_executable")
+    required_provider = {
+        "correct_amounts": "netsuite",
+        "sync_missing_order": "netsuite",
+        "resolve_celigo_error": "celigo",
+    }
+    if required_provider.get(proposal.action) != provider:
+        raise StateError("unsupported_dispatch_provider")
+    if now >= proposal.valid_until:
+        raise StateError("stale_evidence")
+    config = await get_config(db, tenant_id, proposal.config_id)
+    if not config.enabled or (config.mapping_json or {}).get("action_mode", "detect_only") != "propose_actions":
+        raise StateError("actions_disabled")
+    flags = await get_all_flags(db, tenant_id)
+    if flags.get("celigo") is not True or flags.get("reconciliation") is not True:
+        raise StateError("feature_disabled", 403)
+    actor = (
+        await db.execute(
+            select(User)
+            .where(User.tenant_id == tenant_id, User.id == proposal.decided_by)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    await _human(db, tenant_id, actor, "recon.run")
+    if now >= operation.deadline_at or operation.api_calls_used >= operation.max_api_calls:
+        await _exhaust_operation(db, tenant_id, operation, now, "operation_budget_exhausted")
+        raise StateError("operation_budget_exhausted")
+    operation.api_calls_used += 1
+    operation.result_json = {
+        **(operation.result_json or {}),
+        "dispatch_reserved": True,
+        "provider": provider,
+        "payload_fingerprint": payload_fingerprint,
+        "dispatch_reserved_at": now.isoformat(),
+    }
+    await _audit(
+        db,
+        tenant_id,
+        "operation.dispatch",
+        operation,
+        payload={"provider": provider, "payload_fingerprint": payload_fingerprint},
+    )
+    await _commit(db, tenant_id)
+    return True
+
+
+async def _exhaust_operation(db, tenant_id, operation, now, code):
+    # This lock is shared with the dispatch permit. An old worker cannot send
+    # after recovery marks a pre-dispatch operation failed. A consumed permit
+    # cannot be distinguished from a sent request, so it always stays unknown.
+    operation.status = "unknown" if (operation.result_json or {}).get("dispatch_reserved") is True else "failed"
+    operation.completed_at = now
+    operation.result_json = {**(operation.result_json or {}), "termination_reason": "budget", "code": code}
+    await _audit(db, tenant_id, "operation.exhaust", operation, payload={"outcome": operation.status, "code": code})
+    await _commit(db, tenant_id)
+
+
+async def reserve_operation_budget(db, tenant_id, operation_id, *, api_calls, now=None):
+    """Commit the worst-case request cost before an execution-phase read.
+
+    No refunds, deadline extensions or replay after a terminal/unknown state.
+    A returned deadline must also bound the caller's transport timeout. Unknown
+    outcomes use a separate read-only reconciliation job, never this permit.
+    """
+    if type(api_calls) is not int or not 1 <= api_calls <= _OPERATION_CALLS:
+        raise ValueError("A bounded positive integer API-call cost is required")
+    now = _clock(now)
+    await set_tenant_context(db, str(tenant_id))
+    tenant = (
+        await db.execute(
+            select(Tenant).where(Tenant.id == tenant_id).with_for_update().execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if tenant is None or not tenant.is_active:
+        raise StateError("tenant_unavailable", 403)
+    operation = await _one(db, tenant_id, TransactionOperation, operation_id, lock=True)
+    if operation.status != "executing":
+        raise StateError("operation_not_executable")
+    if now >= operation.deadline_at or operation.api_calls_used + api_calls > operation.max_api_calls:
+        await _exhaust_operation(db, tenant_id, operation, now, "operation_budget_exhausted")
+        return None
+    flags = await get_all_flags(db, tenant_id)
+    if flags.get("celigo") is not True or flags.get("reconciliation") is not True:
+        raise StateError("feature_disabled", 403)
+    operation.api_calls_used += api_calls
+    permit = OperationReadPermit(
+        deadline_at=operation.deadline_at, remaining_api_calls=operation.max_api_calls - operation.api_calls_used
+    )
+    await _audit(db, tenant_id, "operation.read_budget", operation, payload={"api_calls": api_calls})
+    await _commit(db, tenant_id)
+    return permit
+
+
+async def recover_expired_operation(db, tenant_id, operation_id, *, now=None):
+    """Fence a lost executor without ever obtaining another send permit."""
+    now = _clock(now)
+    operation = await _one(db, tenant_id, TransactionOperation, operation_id, lock=True)
+    if operation.status != "executing" or now < operation.deadline_at:
+        await _commit(db, tenant_id)
+        return None
+    sent = (operation.result_json or {}).get("dispatch_reserved") is True
+    await _exhaust_operation(
+        db, tenant_id, operation, now, "interrupted_after_dispatch" if sent else "interrupted_before_dispatch"
+    )
+    return operation
+
+
+async def create_operation_recovery(db, tenant_id, operation_id, *, actor=None, evaluation_key=None, now=None):
+    """One automatic pass, plus explicit, idempotent human read-only rechecks.
+
+    Every recheck gets its own fixed run budget. No operation spend, approval,
+    deadline or dispatch reservation is reset. No schedule/model may supply a
+    new read-request key without a current authenticated human actor.
+    """
+    now = _clock(now)
+    manual = evaluation_key is not None
+    if manual:
+        if not isinstance(evaluation_key, uuid.UUID):
+            raise ValueError("A UUID recheck key is required")
+        await _human(db, tenant_id, actor, "recon.run")
+    operation = await _one(db, tenant_id, TransactionOperation, operation_id, lock=True)
+    key = business_digest(
+        {
+            "kind": "operation_recheck" if manual else "operation_recovery",
+            "operation_id": operation.id,
+            **({"evaluation_key": evaluation_key} if manual else {}),
+        }
+    )
+    existing = (
+        await db.execute(
+            select(TransactionRun).where(TransactionRun.tenant_id == tenant_id, TransactionRun.work_key == key)
+        )
+    ).scalar_one_or_none()
+    if existing:
+        await _commit(db, tenant_id)
+        return existing
+    if operation.status != "unknown" or (operation.result_json or {}).get("dispatch_reserved") is not True:
+        raise StateError("operation_not_recoverable")
+    proposal = await get_proposal(db, tenant_id, operation.proposal_id)
+    config = await get_config(db, tenant_id, proposal.config_id)
+    if not config.enabled:
+        raise StateError("config_disabled")
+    pending = (
+        await db.execute(
+            select(TransactionRun)
+            .where(
+                TransactionRun.tenant_id == tenant_id,
+                TransactionRun.origin == "recovery",
+                TransactionRun.params_json["operation_id"].astext == str(operation.id),
+                TransactionRun.status.in_(("pending", "running")),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if pending is not None:
+        if manual:
+            raise StateError("recovery_already_pending")
+        # The automatic collector can race a queued human request. Deliver
+        # the existing check under its own lease instead of adding a budget.
+        await _commit(db, tenant_id)
+        return pending
+    row = TransactionRun(
+        tenant_id=tenant_id,
+        config_id=config.id,
+        work_key=key,
+        origin="recovery",
+        params_json={
+            "operation_id": str(operation.id),
+            "order_references": [proposal.order_reference],
+            **({"manual_recheck": True, "evaluation_key": str(evaluation_key)} if manual else {}),
+        },
+        config_snapshot=ConfigOut.model_validate(config).model_dump(mode="json"),
+        max_api_calls=32,
+        max_orders=1,
+        deadline_at=now + timedelta(seconds=300),
+        progress_json={},
+        initiated_by=actor.id if manual else None,
+    )
+    db.add(row)
+    await db.flush()
+    await _audit(
+        db,
+        tenant_id,
+        "operation.recovery.create",
+        row,
+        actor if manual else None,
+        {"operation_id": str(operation.id), "manual_recheck": manual},
+    )
+    await _commit(db, tenant_id)
+    return row
+
+
+async def finish_operation_recovery(db, tenant_id, run_id, *, lease_token, reason, proof=None, now=None):
+    """Atomically persist the recovery's terminal state and verified/unknown outcome."""
+    if reason not in {"done", "budget", "stall", "error"} or (proof is not None and reason != "done"):
+        raise ValueError("Invalid recovery outcome")
+    now = _clock(now)
+    run = await get_run(db, tenant_id, run_id, lock=True)
+    if run.origin != "recovery":
+        raise StateError("not_a_recovery_run")
+    operation = await _one(db, tenant_id, TransactionOperation, uuid.UUID(run.params_json["operation_id"]), lock=True)
+    if run.status == "finished":
+        await _commit(db, tenant_id)
+        return operation
+    if not (
+        reason == "budget" and now >= run.deadline_at and run.status == "running" and lease_token == run.lease_token
+    ):
+        _lease(run, lease_token, now)
+    _finish(run, reason, now)
+    if operation.status == "unknown":
+        details = _bounded_json(
+            {
+                "reconciled": True,
+                "recovery": {"run_id": str(run_id), "termination_reason": reason},
+                **({"verification": proof} if proof is not None else {}),
+            }
+        )
+        operation.status = "verified" if proof is not None else "unknown"
+        operation.completed_at = now
+        operation.result_json = {
+            **(operation.result_json or {}),
+            **details,
+            "termination_reason": "done" if proof is not None else reason,
+        }
+        if proof is not None:
+            from app.services.transaction_ops.settlement import queue
+
+            proposal = await get_proposal(db, tenant_id, operation.proposal_id)
+            await queue(db, tenant_id, operation, proposal, now=now)
+    await _audit(
+        db, tenant_id, "operation.recovery.complete", operation, payload={"run_id": str(run_id), "reason": reason}
+    )
+    await _audit(db, tenant_id, "run.finish", run, payload={"reason": reason})
+    await _commit(db, tenant_id)
+    return operation

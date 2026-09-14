@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -369,6 +370,11 @@ class TestMutationPrefetchGuardSkipsNonNetSuite:
                 new_callable=AsyncMock,
                 return_value=None,
             ),
+            patch(
+                "app.services.mcp_connector_service.get_mcp_connector",
+                new_callable=AsyncMock,
+                return_value=SimpleNamespace(provider="celigo_mcp"),
+            ),
             # The pre-fetch reconstructs an ext__<connector>__ns_getRecord tool
             # name and calls the dispatcher via a FRESH
             # `from app.services.chat.tools import execute_tool_call` inside
@@ -376,6 +382,11 @@ class TestMutationPrefetchGuardSkipsNonNetSuite:
             # already-bound caller-side name) is the one that must be patched
             # to observe whether it was reached.
             patch("app.services.chat.tools.execute_tool_call", tools_execute_mock),
+            patch(
+                "app.services.mcp_connector_service.get_mcp_connector",
+                new_callable=AsyncMock,
+                return_value=MagicMock(provider="celigo_mcp"),
+            ),
         ):
             events = []
             async for event in BaseSpecialistAgent.run_streaming(

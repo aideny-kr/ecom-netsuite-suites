@@ -94,8 +94,14 @@ def test_run_chat_turn_assistant_persistence_sites_use_content_coercion():
     # "didn't try" (no tools) from "tool spiral" (tools ran but no final text).
     # Match the call shape without pinning to a specific line break.
     normalized = " ".join(source.split())
+    # Unified path: also threads `error=` (agent_result.error, or a generic fallback,
+    # when the agent didn't succeed) through to the helper — added alongside the
+    # governed-dispatch accounting-scope change, but the coercion call itself (and thus
+    # the no-LLM-numbers invariant) is unchanged, so widen the expected snippet to match.
     assert (
-        "_coerce_assistant_content( final_text, _persisted_output, tool_calls=coord_result_tool_calls, )" in normalized
+        "_coerce_assistant_content( final_text, _persisted_output, tool_calls=coord_result_tool_calls, "
+        'error=(agent_result.error or "agent_failed") if agent_result is not None and '
+        "not agent_result.success else None, )" in normalized
     )
     assert "_coerce_assistant_content( final_text, last_structured_output, tool_calls=tool_calls_log, )" in normalized
 

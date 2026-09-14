@@ -12,6 +12,37 @@ reuse proven patterns instead of rediscovering them from scratch.
 from app.services.chat.history_tool_trace import build_history_dicts, render_tool_trace
 
 
+def test_native_metabase_query_survives_follow_up_history_loading():
+    query = {"lib/type": "mbql/query", "stages": [{"source-table": ["Solidus", "public", "spree_line_items"]}]}
+    history, _ = build_history_dicts(
+        [
+            {"role": "user", "content": "Use Metabase"},
+            {
+                "role": "assistant",
+                "content": "65 orders",
+                "tool_calls": [
+                    {
+                        "tool": "ext__1234__query",
+                        "params": {"query": query},
+                        "result_summary": "Returned 2 rows",
+                    }
+                ],
+            },
+            {"role": "user", "content": "Break that down by status"},
+        ],
+        keep_recent=4,
+    )
+    assert len(history) == 3
+    trace = history[1]["content"]
+    assert "mbql/query" in trace and "spree_line_items" in trace
+    assert "SQL:" not in trace
+
+
+def test_non_string_query_does_not_hide_valid_sql_query():
+    trace = render_tool_trace([{"tool": "search", "params": {"query": ["term"], "sqlQuery": "SELECT 1"}}])
+    assert "SQL: SELECT 1" in trace
+
+
 class TestRenderToolTrace:
     def test_empty_list_returns_empty_string(self):
         assert render_tool_trace([]) == ""

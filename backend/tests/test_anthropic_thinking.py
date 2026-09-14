@@ -289,3 +289,38 @@ async def test_thinking_applied_when_tool_choice_is_auto():
 
     assert captured["thinking"] == {"type": "adaptive"}
     assert captured["output_config"] == {"effort": "medium"}
+
+
+@pytest.mark.asyncio
+async def test_conversation_cache_preserves_full_context_and_thinking():
+    from copy import deepcopy
+
+    adapter = AnthropicAdapter(api_key="sk-test")
+    adapter._client = MagicMock()
+    adapter._client.messages.create = AsyncMock(return_value=_fake_message([_block("text", text="ok")]))
+    messages = [{"role": "user", "content": "Keep all evidence"}]
+    tools = [{"name": "read", "description": "Full dialect rules", "input_schema": {"type": "object"}}]
+    before = deepcopy((messages, tools))
+    await adapter.create_message(
+        model="claude-sonnet-5",
+        max_tokens=16384,
+        system="static",
+        system_dynamic="dynamic",
+        messages=messages,
+        tools=tools,
+        thinking_level="high",
+    )
+    sent = adapter._client.messages.create.call_args.kwargs
+    assert sent["extra_body"]["cache_control"] == {"type": "ephemeral"}
+    # Exercise the installed SDK signature; a permissive mock alone misses unsupported kwargs.
+    import inspect
+
+    from anthropic.resources.messages import AsyncMessages
+
+    inspect.signature(AsyncMessages.create).bind(None, **sent)
+    inspect.signature(AsyncMessages.stream).bind(None, **sent)
+    assert sent["output_config"]["effort"] == "high"
+    assert sent["messages"] == messages
+    assert sent["system"][1]["text"] == "dynamic"
+    assert sent["tools"][0]["description"] == "Full dialect rules"
+    assert (messages, tools) == before

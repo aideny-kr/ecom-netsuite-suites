@@ -20,6 +20,11 @@ export interface DataTableData {
    *  When set, the component must hide SuiteQL-specific affordances (query expander,
    *  re-run/export-as-query, save-query) because `query` is a metric key, not SQL. */
   isMetric?: boolean;
+  /** The honesty channel any data_table tool may carry (spec
+   *  docs/superpowers/specs/2026-09-04-celigo-chat-access.md §8) — snapshot age,
+   *  unchecked-error flags, stall verdicts, etc. Absent when the backend result
+   *  carried none; the card renders nothing in that case. */
+  caveats?: string[];
 }
 
 /**
@@ -55,6 +60,7 @@ export function coerceDataTableData(d: Record<string, unknown>): DataTableData {
     query: typeof d.query === "string" ? d.query : "",
     truncated: Boolean(d.truncated),
     isMetric: deriveDataTableIsMetric(d),
+    ...(Array.isArray(d.caveats) && d.caveats.length > 0 ? { caveats: d.caveats as string[] } : {}),
   };
 }
 
@@ -333,6 +339,9 @@ export function normalizeStreamEvent(data: Record<string, unknown>): ChatStreamE
         // to signal that `query` is a metric key (not SQL) and the LLM should not narrate
         // the value. The FE uses isMetric to hide SQL-specific affordances.
         isMetric: deriveDataTableIsMetric(d),
+        // The honesty channel (spec docs/superpowers/specs/2026-09-04-celigo-chat-access.md
+        // §8) — absent for every data_table tool that doesn't set it.
+        ...(Array.isArray(d.caveats) && d.caveats.length > 0 ? { caveats: d.caveats as string[] } : {}),
       },
     };
   }

@@ -662,24 +662,45 @@ def spec_json_safe(spec: dict) -> dict:
     ``financial_statement`` section's ``model`` has its raw-``Decimal`` spark/trend
     fields turned into decimal-literal strings (see
     ``statement_builder.statement_model_json_safe``) — never through ``float`` (no
-    precision loss). Every other section type's fields are already JSON-safe and pass
-    through unchanged. Does not mutate ``spec``; a spec with no ``financial_statement``
-    section is returned UNCHANGED (no copy). Call this only when building the value to
-    persist — the LIVE ``spec`` (real Decimals) is what ``render_report_html`` must run
-    against first (its trend tooltip requires ``Decimal.quantize``)."""
+    precision loss). Refresh-support follow-up: an ``inventory_aging`` section's
+    ``model`` (a frozen dataclass, or a tuple/dict of them, straight off
+    ``inventory_aging.compute()`` — see ``report_html.build_inventory_aging_sections``)
+    gets the SAME treatment via ``inventory_aging.json_safe``, keyed off the identical
+    "has a `model` key and isn't `financial_statement`" test ``render_report_html`` uses
+    to decide whether ``_IA_CSS`` ships (``_IA_SECTION_TYPES`` / the bespoke
+    ``model``-bearing ``narrative``) — the two checks can never disagree about which
+    sections are inventory_aging-shaped. Every other section type's fields are already
+    JSON-safe and pass through unchanged. Does not mutate ``spec``; a spec with neither
+    shape present is returned UNCHANGED (no copy). Call this only when building the
+    value to persist — the LIVE ``spec`` (real Decimals) is what ``render_report_html``
+    must run against first (its trend tooltip requires ``Decimal.quantize``)."""
+    from app.services.report.report_html import _IA_SECTION_TYPES
+
     sections = spec.get("sections") or []
-    if not any(isinstance(s, dict) and s.get("type") == "financial_statement" for s in sections):
+
+    def _is_financial_statement(s: object) -> bool:
+        return isinstance(s, dict) and s.get("type") == "financial_statement"
+
+    def _is_inventory_aging(s: object) -> bool:
+        if not isinstance(s, dict) or "model" not in s:
+            return False
+        return s.get("type") in _IA_SECTION_TYPES or s.get("type") == "narrative"
+
+    if not any(_is_financial_statement(s) or _is_inventory_aging(s) for s in sections):
         return spec
+    from app.services.report.inventory_aging import json_safe as ia_json_safe
     from app.services.report.statement_builder import statement_model_json_safe
+
+    def _sanitize(s: dict) -> dict:
+        if _is_financial_statement(s):
+            return {**s, "model": statement_model_json_safe(s["model"])}
+        if _is_inventory_aging(s):
+            return {**s, "model": ia_json_safe(s["model"])}
+        return s
 
     return {
         **spec,
-        "sections": [
-            {**s, "model": statement_model_json_safe(s["model"])}
-            if isinstance(s, dict) and s.get("type") == "financial_statement"
-            else s
-            for s in sections
-        ],
+        "sections": [_sanitize(s) if isinstance(s, dict) else s for s in sections],
     }
 
 

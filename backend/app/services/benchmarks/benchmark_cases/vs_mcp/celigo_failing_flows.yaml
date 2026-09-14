@@ -1,0 +1,48 @@
+# Celigo flow-map ask: which flows are failing, and why.
+#
+# Spec: docs/superpowers/specs/2026-09-04-celigo-chat-access.md (§10 benchmark). The
+# assistant gained four read-only tools over the SYNCED Celigo flow map (a nightly
+# production snapshot in our own tables), never the live Celigo API. This case
+# measures that a health question routes through those tools and that every
+# number reaches the user through the table path, never the model's prose.
+#
+# Expected behavior:
+#   1. Agent calls celigo_flows with the open-errors filter (or celigo_integrations
+#      first, then celigo_flows) and celigo_flow_errors for the causes.
+#   2. Every result's `caveats` (the snapshot line first, then "not fully checked"
+#      when it applies) is relayed before interpretation -- the answer names the
+#      snapshot time.
+#   3. The model interprets (which integration, which root cause dominates) but
+#      does not restate, sum or rank counts in prose: counts live in the tables.
+#   4. At most one sample error message is quoted, and only if it explains the
+#      dominant cause; no customer identifiers are repeated elsewhere.
+#
+# Baseline: Claude + the tenant's hosted MCP servers. The Framework tenant has NO
+# Celigo MCP connector (only the flow-map token connection), so the baseline has
+# no Celigo tool to call and is expected to say it cannot answer -- a LOW
+# baseline accuracy is the correct expectation here, not a scoring bug. The case
+# still guards OUR side: routing, the caveat relay, and the no-numbers-in-prose
+# invariant. Run on staging with both model flags (memory:
+# vs-mcp-benchmark-how-to-run); the local ENCRYPTION_KEY cannot decrypt the
+# tenant's credentials.
+case_id: celigo_failing_flows
+query: "Which Celigo flows are failing right now, and what is the most common cause?"
+expected_answer_contains:
+  - "snapshot"
+  - "Celigo"
+expected_tools:
+  - celigo_flows
+  - celigo_flow_errors
+expected_accuracy: 0.7
+max_cost: 0.60
+max_latency_ms: 150000
+tags:
+  - celigo
+  - honesty
+  - read-only
+notes: >-
+  Ours must route through celigo_flows (open-errors filter) and celigo_flow_errors,
+  relay the snapshot caveat, and keep counts in the tables. The baseline has no
+  Celigo tool on this tenant; its low accuracy is expected.
+baseline_expected_tools: []
+baseline_expected_accuracy: 0.2

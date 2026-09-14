@@ -19,6 +19,11 @@ ACTOR_ID = str(uuid.uuid4())
 
 EXPECTED_TOOLS = {
     "health",
+    "transaction_ops.configs",
+    "transaction_ops.run",
+    "transaction_ops.status",
+    "transaction_ops.groups",
+    "transaction_ops.accounting_evidence",
     "netsuite.suiteql",
     "netsuite.suiteql_stub",
     "netsuite.financial_report",
@@ -69,6 +74,10 @@ EXPECTED_TOOLS = {
     "docs.create",
     "metric.resolve",
     "metric.compute",
+    "celigo.integrations",
+    "celigo.flows",
+    "celigo.flow_steps",
+    "celigo.flow_errors",
 }
 
 

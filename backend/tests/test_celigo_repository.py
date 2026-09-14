@@ -28,13 +28,21 @@ import uuid
 
 import pytest
 import sqlalchemy.exc
-from sqlalchemy import select, text
+from sqlalchemy import JSON, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.celigo import CeligoFlowError, CeligoScriptAttachment
+from app.models.celigo import (
+    CeligoFlow,
+    CeligoFlowError,
+    CeligoFlowStep,
+    CeligoIntegration,
+    CeligoScriptAttachment,
+    celigo_flow_is_on_demand,
+)
 from app.services.celigo.graph import walk_script_refs
 from app.services.celigo.repository import (
     FlowStepRoleCollisionError,
+    backfill_flow_step_reference_info,
     extract_flow_steps,
     list_logical_scripts,
     mark_flow_errors_purged,
@@ -710,6 +718,68 @@ class TestFlowErrorsAreNeverDeleted:
         delete_like = [name for name in dir(repo_module) if "delete" in name.lower() and "flow_error" in name.lower()]
         assert delete_like == []
 
+    def test_no_celigo_code_path_deletes_flow_error_rows(self):
+        """The test above checks FUNCTION NAMES, and a check that cannot fail is
+        not a check: PR #216's first fix round added `delete(CeligoFlowError)`
+        inline inside a function called `purge_sandbox_rows`, and the name
+        scan stayed green while the audit-trail invariant it pins was broken.
+        The independent-model review angle had (correctly) pointed out the FK
+        is SET NULL; the wrong lesson was drawn -- delete the rows -- instead
+        of the right one: SET NULL IS the design, an error outlives its flow.
+
+        So this scans the SOURCE of every Celigo module that can reach the
+        database for any DELETE aimed at `celigo_flow_errors`, whatever the
+        enclosing function is called: a SQLAlchemy `delete(CeligoFlowError)`,
+        a `CeligoFlowError.__table__.delete()`, or raw SQL naming the table.
+        A static scan is the right shape for an absence claim -- there is no
+        execution that proves "nothing anywhere deletes"."""
+        import ast
+        from pathlib import Path
+
+        import app.services.celigo.repository as repo_module
+
+        services_dir = Path(repo_module.__file__).parent
+        app_dir = services_dir.parents[1]
+        candidates = sorted(services_dir.glob("*.py")) + [
+            app_dir / "api" / "v1" / "celigo_flows.py",
+            app_dir / "workers" / "tasks" / "celigo_flow_map_sync.py",
+        ]
+        assert all(p.exists() for p in candidates), [str(p) for p in candidates if not p.exists()]
+
+        def _names_deleted(tree: ast.AST) -> list[str]:
+            hits: list[str] = []
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call):
+                    func = node.func
+                    # delete(CeligoFlowError) / sa.delete(CeligoFlowError)
+                    if (
+                        (isinstance(func, ast.Name) and func.id == "delete")
+                        or (isinstance(func, ast.Attribute) and func.attr == "delete")
+                    ) and node.args:
+                        target = node.args[0]
+                        if isinstance(target, ast.Name):
+                            hits.append(target.id)
+                    # CeligoFlowError.__table__.delete()
+                    if (
+                        isinstance(func, ast.Attribute)
+                        and func.attr == "delete"
+                        and isinstance(func.value, ast.Attribute)
+                        and func.value.attr == "__table__"
+                        and isinstance(func.value.value, ast.Name)
+                    ):
+                        hits.append(func.value.value.id)
+                if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                    if "delete from celigo_flow_errors" in " ".join(node.value.lower().split()):
+                        hits.append("celigo_flow_errors (raw SQL)")
+            return hits
+
+        offenders: dict[str, list[str]] = {}
+        for path in candidates:
+            hits = [h for h in _names_deleted(ast.parse(path.read_text())) if "FlowError" in h or "flow_errors" in h]
+            if hits:
+                offenders[str(path.relative_to(app_dir.parent))] = hits
+        assert offenders == {}, f"celigo_flow_errors is the audit trail and is never deleted: {offenders}"
+
 
 class TestNullConnectionIdCannotSilentlyDuplicateAuditRows:
     """`celigo_connection_id` is nullable/SET NULL on `celigo_error_signatures`
@@ -788,3 +858,108 @@ class TestFlowStepInsertNeverSwallowsUnrelatedIntegrityErrors:
 
         with pytest.raises(sqlalchemy.exc.IntegrityError):
             await sync_flow_steps(db, tenant_id=tenant.id, connection_id=conn_id, flow_id=bogus_flow_id, steps=steps)
+
+
+async def test_backfill_writes_reference_name_and_none_never_clobbers(db):
+    tenant = await create_test_tenant(db)
+    conn_id = await _make_connection(db, tenant.id)
+    integration = CeligoIntegration(
+        tenant_id=tenant.id, celigo_connection_id=conn_id, celigo_id="int_names", name="Names", raw_json={}
+    )
+    db.add(integration)
+    await db.flush()
+    flow = CeligoFlow(
+        tenant_id=tenant.id,
+        celigo_connection_id=conn_id,
+        integration_id=integration.id,
+        celigo_id="flow_names",
+        name="Names flow",
+        raw_json={},
+    )
+    db.add(flow)
+    await db.flush()
+    step = CeligoFlowStep(
+        tenant_id=tenant.id,
+        celigo_connection_id=conn_id,
+        flow_id=flow.id,
+        celigo_id="exp_names",
+        role="generator",
+        sequence=0,
+        raw_json={},
+    )
+    db.add(step)
+    await db.flush()
+
+    n = await backfill_flow_step_reference_info(
+        db,
+        tenant_id=tenant.id,
+        connection_id=conn_id,
+        celigo_id="exp_names",
+        adaptor_type="HTTPExport",
+        connection_celigo_id=None,
+        reference_name="Get New Sales Orders",
+    )
+    assert n == 1
+    await db.refresh(step)
+    assert step.reference_name == "Get New Sales Orders"
+
+    # A later backfill with no name (Celigo omitted it) must not blank the stored one.
+    await backfill_flow_step_reference_info(
+        db,
+        tenant_id=tenant.id,
+        connection_id=conn_id,
+        celigo_id="exp_names",
+        adaptor_type="HTTPExport",
+        connection_celigo_id=None,
+        reference_name=None,
+    )
+    await db.refresh(step)
+    assert step.reference_name == "Get New Sales Orders"
+
+
+def sa_null_json():
+    """SQLAlchemy's JSON null sentinel -- writes the JSON `null` value into a
+    JSONB column, not SQL NULL. `schedule.is_(None)` and `jsonb_typeof(...) ==
+    'null'` are two different rows on disk; a test fixture that only ever
+    wrote SQL NULL would never exercise the second branch of
+    `celigo_flow_is_on_demand()`."""
+    return JSON.NULL
+
+
+async def test_celigo_flow_is_on_demand_treats_json_null_and_empty_string_as_on_demand(db):
+    tenant = await create_test_tenant(db)
+    conn_id = await _make_connection(db, tenant.id)
+    integration = CeligoIntegration(
+        tenant_id=tenant.id, celigo_connection_id=conn_id, celigo_id="int_od", name="OD", raw_json={}
+    )
+    db.add(integration)
+    await db.flush()
+
+    def flow(cid, schedule):
+        return CeligoFlow(
+            tenant_id=tenant.id,
+            celigo_connection_id=conn_id,
+            integration_id=integration.id,
+            celigo_id=cid,
+            name=cid,
+            schedule=schedule,
+            raw_json={},
+        )
+
+    db.add_all(
+        [
+            flow("od_sqlnull", None),
+            flow("od_jsonnull", sa_null_json()),
+            flow("od_empty", ""),
+            flow("cron", "? 5 * ? * *"),
+        ]
+    )
+    await db.flush()
+    ids = set(
+        (
+            await db.execute(
+                select(CeligoFlow.celigo_id).where(CeligoFlow.tenant_id == tenant.id, celigo_flow_is_on_demand())
+            )
+        ).scalars()
+    )
+    assert ids == {"od_sqlnull", "od_jsonnull", "od_empty"}

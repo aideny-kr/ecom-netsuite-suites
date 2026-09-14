@@ -15,7 +15,8 @@ import uuid
 from typing import TYPE_CHECKING, Any, Callable
 from xml.sax.saxutils import escape as _xml_escape
 
-from app.services.chat.agents.base_agent import BaseSpecialistAgent
+from app.services.chat.agents.base_agent import AgentResult, BaseSpecialistAgent
+from app.services.chat.metabase_context import is_metabase_connector
 from app.services.chat.tools import build_local_tool_definitions
 
 if TYPE_CHECKING:
@@ -32,6 +33,12 @@ _logger = logging.getLogger(__name__)
 # Provider descriptions for connected systems awareness
 # ---------------------------------------------------------------------------
 _PROVIDER_DESCRIPTIONS: dict[str, str | None] = {
+    "metabase_mcp": (
+        "Metabase BI — discover connected databases, business metrics, models, and saved questions; "
+        "query and analyze their data using the available MCP tools. For Solidus commerce analysis, "
+        "verify the database schema and metric definitions first. SQL uses the underlying database's "
+        "dialect, not SuiteQL. Native SQL availability depends on the connected user's permissions."
+    ),
     "netsuite_mcp": (
         "NetSuite ERP — financial reports, saved searches, SuiteQL queries, "
         "record CRUD, and subsidiary management. Primary source of truth for "
@@ -73,7 +80,9 @@ def _build_role_prompt(connectors: list | None, brand_name: str) -> str:
 
     providers = set()
     for c in connectors:
-        if c.provider == "netsuite_mcp":
+        if is_metabase_connector(c):
+            providers.add("Metabase")
+        elif c.provider == "netsuite_mcp":
             providers.add("NetSuite")
         elif c.provider == "shopify_mcp":
             providers.add("Shopify")
@@ -108,7 +117,8 @@ def _build_connected_systems_block(connectors: list | None) -> str:
 
         tool_names = [t.get("name", "unknown") for t in connector.discovered_tools]
         tool_count = len(tool_names)
-        provider_desc = _PROVIDER_DESCRIPTIONS.get(connector.provider)
+        provider = "metabase_mcp" if is_metabase_connector(connector) else connector.provider
+        provider_desc = _PROVIDER_DESCRIPTIONS.get(provider)
         if provider_desc is None:
             provider_desc = f"{connector.label} — custom integration."
         tool_list = ", ".join(tool_names[:15])
@@ -191,6 +201,7 @@ needs and use the right tools to get the answer efficiently.
 {{TOOL_INVENTORY}}
 
 <tool_selection>
+Choose the user's requested connected source first. NetSuite-specific tools, schema, SQL rules, and workflows below apply only to NetSuite data.
 FINANCIAL STATEMENTS → netsuite_financial_report (local) or ns_runReport (MCP, call ns_listAllReports first).
   Parameters: report_type ("income_statement"|"balance_sheet"|"trial_balance"|"income_statement_trend"|"balance_sheet_trend"), period ("Feb 2026"), subsidiary_id (optional). ALWAYS use accounting period names, NEVER date ranges.
 SAVED SEARCHES → ns_runSavedSearch (call ns_listSavedSearches to discover).
@@ -231,7 +242,7 @@ CHANGE REQUEST DISCIPLINE:
 You are an AGENT. Run tools in a loop until you have the answer.
 
 DATA FRESHNESS RULES:
-1. USER-PROVIDED SQL → execute via netsuite_suiteql. NEVER answer from memory.
+1. USER-PROVIDED SQL → use the requested source's available query tool and dialect; netsuite_suiteql is only for NetSuite SuiteQL. NEVER answer from memory or claim unexecuted SQL ran.
 2. NEW DATA QUESTIONS → MUST call a tool. NEVER make up numbers.
 3. TRANSFORMATION REQUESTS (chart, pivot, export existing data) → use reference_previous_result if [CACHED DATA AVAILABLE].
 4. When in doubt, re-query (always safe).
@@ -740,6 +751,31 @@ class UnifiedAgent(BaseSpecialistAgent):
             parts.append("\n\n" + self._plan_mode_augmentation)
         if self._plan_mode_resume_directive:
             parts.append("\n\n" + self._plan_mode_resume_directive)
+        if getattr(self, "_selected_user_sources", ()):
+            parts.append(
+                "\nUser-selected data sources for this turn: "
+                + ", ".join(self._selected_user_sources)
+                + ". Honor this verified user choice even when older conversation text has been compacted."
+            )
+        if getattr(self, "_request_kind", None) in {"operations", "conversation"}:
+            parts.append(
+                "\nThis turn continues an operation or non-analytics conversation. "
+                "Do not interrupt it with the analytics data-source question. "
+                "Use the operation's authorized connection context; all execution and approval checks still apply."
+            )
+        if getattr(self, "_transaction_workflow", False):
+            parts.append(
+                "\nThis request selects a transaction case/group workflow, not a standalone database query. "
+                "Start with transaction_ops_status for the exact case or transaction_ops_groups "
+                "for the exact group and supplied scope, then transaction_ops_accounting_evidence for a case. Resolve connections from that authorized evidence; "
+                "do not ask which data source to use. Continue targeted read-only investigation when evidence "
+                "is incomplete without asking discretionary permission. Prepare only supported exact changes "
+                "for human approval; this request is not financial approval."
+                " Use only exact record_links returned by the accounting-evidence tool. Never build a case link "
+                "from the default connector: production and sandbox may both be connected."
+            )
+        if getattr(self, "_metabase_evidence", None) is not None:
+            parts.append(self._metabase_evidence.prompt)
         # Write-repair directive last — the most specific, most recent
         # instruction on a repair turn, so it must be able to override
         # anything framed above it (mirrors the Plan Mode ordering rule).
@@ -827,9 +863,11 @@ class UnifiedAgent(BaseSpecialistAgent):
             self._tool_defs = await build_all_tool_definitions(db, self.tenant_id)
         except Exception:
             _logger.warning("unified_agent.tool_discovery_failed", exc_info=True)
-            # Fallback: at least populate local tools so basic queries still work.
+            # Do not offer disconnected query sources after discovery fails.
             if self._tool_defs is None:
-                self._tool_defs = build_local_tool_definitions()
+                from app.services.chat.tools import build_discovery_fallback_tools
+
+                self._tool_defs = build_discovery_fallback_tools()
 
         # Extract NetSuite account slug for record deep links
         try:
@@ -846,6 +884,83 @@ class UnifiedAgent(BaseSpecialistAgent):
             _logger.warning("unified_agent.account_slug_failed", exc_info=True)
 
         return task
+
+    def _reset_source_routing(self):
+        from app.services.chat.llm_adapter import TokenUsage
+
+        self._routing_usage = TokenUsage()
+        self._routing_error = False
+        self._request_kind = None
+        self._selected_user_sources = ()
+        self._transaction_workflow = False
+        self._metabase_evidence = None
+        self._numeric_verification_failed = False
+
+    def _configure_metabase_evidence(self, selection):
+        from app.services.chat.metabase_context import metabase_tool_names
+        from app.services.chat.metabase_evidence import MetabaseEvidence
+        from app.services.chat.tool_inventory import available_data_sources
+
+        selected = set(selection.selected_sources) or set(available_data_sources(self._tool_defs or []))
+        if self._request_kind == "analytics" and selected == {"metabase"}:
+            names = metabase_tool_names(self._tool_defs or [])
+            if names:
+                self._metabase_evidence = MetabaseEvidence(names)
+
+    def _plan_source_selection(self, source):
+        from app.services.chat.request_routing import RequestContext
+        from app.services.chat.source_selection import SourceSelection
+
+        # The orchestrator has already validated the signed card and connector.
+        self._request_kind = "analytics"
+        state = RequestContext(kind="analytics", sources=[source] if source else [], pending_source=not bool(source))
+        return SourceSelection(selected_sources=tuple(state.sources), request_context=state.model_dump())
+
+    async def _select_analytics_source(self, task, context, adapter, model, history=None):
+        from app.services.chat.metabase_context import metabase_tool_names
+        from app.services.chat.request_routing import RequestRoute, classify_request
+        from app.services.chat.source_selection import SourceSelection, resolve_source_selection
+        from app.services.chat.tool_inventory import available_data_sources
+
+        history = context.get("source_selection_history", history) or []
+        task = context.get("source_selection_task", task)
+        if len(available_data_sources(self._tool_defs or [])) < 2 and not metabase_tool_names(self._tool_defs or []):
+            return SourceSelection()
+        if self._context_need.lower() in {"docs", "workspace"}:
+            route = RequestRoute(kind="conversation", continuation=True)
+        else:
+            try:
+                routing = await classify_request(task=task, history=history, adapter=adapter, model=model)
+                route = routing.route
+                self._routing_usage = routing.usage
+            except Exception as exc:
+                self._routing_usage = getattr(exc, "usage", self._routing_usage)
+                # A failed routing call cannot release an unresolved analytics query.
+                # Cancellation still propagates; no data or operational tool has run.
+                self._routing_error = True
+                return SourceSelection(question="I couldn't determine the request context. Please retry your message.")
+        self._request_kind = route.kind
+        return resolve_source_selection(
+            task=task,
+            tool_definitions=self._tool_defs or [],
+            conversation_history=history,
+            context_need=self._context_need,
+            route=route,
+        )
+
+    def _finish_source_routing(self, result, selection):
+        result.request_context = selection.request_context
+        usage = getattr(self, "_routing_usage", None)
+        if usage:
+            for field in ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"):
+                setattr(result.tokens_used, field, getattr(result.tokens_used, field) + getattr(usage, field))
+        if getattr(self, "_routing_error", False):
+            result.success = False
+            result.error = "request_routing_failed"
+        if getattr(self, "_numeric_verification_failed", False):
+            result.success = False
+            result.error = "metabase_numeric_verification_failed"
+        return result
 
     async def run(
         self,
@@ -872,6 +987,7 @@ class UnifiedAgent(BaseSpecialistAgent):
         after the user picks a clarification option. Applied AFTER
         ``_setup_context`` and the ``plan_mode_clarify_only`` filter.
         """
+        self._reset_source_routing()
         task = await self._setup_context(task, context, db)
         if financial_mode:
             self._tool_defs = self.financial_tool_definitions
@@ -894,7 +1010,19 @@ class UnifiedAgent(BaseSpecialistAgent):
                 plan_mode_resume_source,
                 active_connectors=self._connectors,
             )
-        return await super().run(
+        selection = (
+            await self._select_analytics_source(task, context, adapter, model)
+            if not (plan_mode_clarify_only or plan_mode_resume_source)
+            else self._plan_source_selection(plan_mode_resume_source)
+        )
+        self._selected_user_sources = selection.selected_sources
+        self._transaction_workflow = selection.transaction_workflow
+        self._configure_metabase_evidence(selection)
+        if selection.question:
+            return self._finish_source_routing(
+                AgentResult(success=True, data=selection.question, agent_name=self.agent_name), selection
+            )
+        result = await super().run(
             task,
             context,
             db,
@@ -903,6 +1031,7 @@ class UnifiedAgent(BaseSpecialistAgent):
             tool_choice=tool_choice,
             thinking_level=thinking_level,
         )
+        return self._finish_source_routing(result, selection)
 
     async def run_streaming(
         self,
@@ -932,6 +1061,7 @@ class UnifiedAgent(BaseSpecialistAgent):
         after the user picks a clarification option. Applied AFTER
         ``_setup_context`` and the ``plan_mode_clarify_only`` filter.
         """
+        self._reset_source_routing()
         task = await self._setup_context(task, context, db)
         if financial_mode:
             self._tool_defs = self.financial_tool_definitions
@@ -952,6 +1082,23 @@ class UnifiedAgent(BaseSpecialistAgent):
                 plan_mode_resume_source,
                 active_connectors=self._connectors,
             )
+        selection = (
+            await self._select_analytics_source(task, context, adapter, model, conversation_history)
+            if not (plan_mode_clarify_only or plan_mode_resume_source)
+            else self._plan_source_selection(plan_mode_resume_source)
+        )
+        self._selected_user_sources = selection.selected_sources
+        self._transaction_workflow = selection.transaction_workflow
+        self._configure_metabase_evidence(selection)
+        if selection.question:
+            yield "text", selection.question
+            yield (
+                "response",
+                self._finish_source_routing(
+                    AgentResult(success=True, data=selection.question, agent_name=self.agent_name), selection
+                ),
+            )
+            return
         async for event in super().run_streaming(
             task,
             context,
@@ -965,4 +1112,6 @@ class UnifiedAgent(BaseSpecialistAgent):
             run_id=run_id,
             thinking_level=thinking_level,
         ):
+            if event[0] == "response":
+                self._finish_source_routing(event[1], selection)
             yield event

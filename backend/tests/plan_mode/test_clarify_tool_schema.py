@@ -45,7 +45,7 @@ def test_option_item_shape():
 
 def test_source_enum():
     src = CLARIFY_TOOL_SCHEMA["input_schema"]["properties"]["options"]["items"]["properties"]["source"]
-    assert src["enum"] == ["netsuite", "bigquery", "shopify", "stripe", "drive"]
+    assert src["enum"] == ["netsuite", "bigquery", "metabase", "shopify", "stripe", "drive"]
 
 
 def test_max_lengths_present():

@@ -323,6 +323,42 @@ async def test_sections_referencing_missing_source_fail_before_publish(db, monke
     assert row.rendered_html == "<html>golden</html>" and row.version == 1
 
 
+async def test_malformed_sections_computation_wrapped_as_refresh_error_with_audit(db, monkeypatch):
+    """Gate fix: the needed_rids/required_rids computation (the recipe.get('playbook')
+    branch) must run INSIDE the failure-audit try/except, not between the Phase-1 commit
+    and the try. A malformed recipe blowing up there (e.g. a corrupted sections shape a
+    future change to referenced_result_ids no longer tolerates) must still surface as a
+    clean RefreshError(500) with a durable report.refresh audit row — never an unhandled
+    exception escaping refresh_report with the current version left untouched (the
+    attempt-time stamp itself staying set is correct/unchanged; no OTHER dangling state)."""
+    tenant, user, report = await _seed_report(db, recipe=_recipe(), html="<html>golden</html>")
+    rid, tid, uid = report.id, tenant.id, user.id  # the service's rollback expires ORM instances
+
+    def _boom(sections):
+        raise TypeError("malformed sections")
+
+    monkeypatch.setattr("app.services.report.report_service.referenced_result_ids", _boom)
+    with pytest.raises(RefreshError) as exc:
+        await refresh_report(db, report_id=rid, tenant_id=tid, actor_id=uid)
+    assert exc.value.status_code == 500
+    # current version untouched; no version rows created
+    row = (await db.execute(select(Report).where(Report.id == rid))).scalar_one()
+    assert row.rendered_html == "<html>golden</html>" and row.version == 1
+    count = (await db.execute(select(func.count(ReportVersion.id)).where(ReportVersion.report_id == rid))).scalar()
+    assert count == 0
+    # durable failure audit — proves the exception was caught, not left to escape raw
+    audit = (
+        await db.execute(
+            text(
+                "SELECT count(*) FROM audit_events WHERE action='report.refresh' "
+                "AND status='error' AND resource_id=:arid"
+            ),
+            {"arid": str(rid)},
+        )
+    ).scalar()
+    assert audit == 1
+
+
 # --- T2-gate round-1 fixes: RLS context across commits, LLM strip, supersede guard ----
 # SET LOCAL app.current_tenant_id is TRANSACTION-scoped: every commit/rollback clears it.
 # The test fixture wraps tests in an outer transaction (savepoints), so the GUC survives
@@ -846,3 +882,184 @@ async def test_refresh_of_v1_style_recipe_stays_byte_stable_no_fs_markup(db, mon
         isinstance(s, dict) and s.get("type") == "financial_statement" for s in updated.spec_json["sections"]
     )
     assert json.dumps(updated.spec_json)
+
+
+# ---------------------------------------------------------------------------
+# Refresh-support follow-up: refresh_report delegates to
+# playbooks.rebuild_playbook_spec for a recipe carrying a "playbook" key
+# (inventory_aging, Slice 1's own non-financial_statement playbook).
+# ---------------------------------------------------------------------------
+def _inventory_aging_table_result(rows: list[dict]) -> str:
+    """A test_inventory_aging-shaped list[dict] fixture rendered as the raw
+    ``{"columns": [...], "rows": [[...], ...]}`` JSON a real bigquery_sql call
+    returns (rows POSITIONAL, matching ia.rows_from_table_payload's contract)."""
+    columns = list(rows[0].keys()) if rows else []
+    return json.dumps({"columns": columns, "rows": [[row[c] for c in columns] for row in rows]})
+
+
+def _patch_bigquery_executor(monkeypatch, recipe: dict, payloads: dict[str, list[dict]]):
+    """Fake ``execute_tool_call`` keyed by the exact SQL text each of the recipe's
+    four bigquery_sql sources carries — the only thing distinguishing
+    r_items/r_prior/r_trend/r_meta once stripped of report_type/period."""
+    by_query = {
+        recipe["sources"][rid]["params"]["query"]: _inventory_aging_table_result(rows) for rid, rows in payloads.items()
+    }
+    calls: list[dict] = []
+
+    async def fake_execute(tool_name, tool_input, tenant_id, actor_id, correlation_id, db, **kw):
+        calls.append({"tool": tool_name, "params": tool_input})
+        return by_query[tool_input["query"]]
+
+    monkeypatch.setattr("app.services.chat.tools.execute_tool_call", fake_execute)
+    return calls
+
+
+async def test_refresh_delegates_to_the_inventory_aging_playbook_rebuild_hook(db, monkeypatch):
+    """Requirement 2: a recipe carrying a "playbook" key routes through
+    playbooks.rebuild_playbook_spec instead of assemble_spec — refresh succeeds,
+    publishes a new version, and the rendered page is a real inventory_aging
+    render (not a crash, not a snapshot echo)."""
+    from tests.report.test_inventory_aging import _full_fixture
+
+    payloads, params = _full_fixture()
+    _title, recipe = build_playbook_recipe("inventory_aging", params)
+    tenant, user, report = await _seed_report(db, recipe=recipe, html="<html>v1</html>")
+    calls = _patch_bigquery_executor(monkeypatch, recipe, payloads)
+
+    updated = await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
+
+    assert len(calls) == 4
+    assert updated.version == 2
+    assert "<h1>Inventory Aging — Week of " in updated.rendered_html
+    assert "Watch items" in updated.rendered_html
+    assert json.dumps(updated.spec_json)  # persisted spec is actually JSON-safe
+    assert updated.spec_json["sections"][0]["type"] == "report_head"
+
+
+async def test_refresh_inventory_aging_rerenders_identically_from_its_own_stored_spec(db, monkeypatch):
+    """Gate fix #4: the refresh path persists spec_json already run through
+    spec_json_safe -- proving THAT stored form (post a real JSON round trip, exactly
+    what scripts/backfill_report_html.py would load and re-render) renders back to
+    the SAME frozen rendered_html the refresh just published. One representation for
+    the rendered model means the refresh's own output is safe to re-render later."""
+    from app.services.report.report_html import render_report_html
+    from tests.report.test_inventory_aging import _full_fixture
+
+    payloads, params = _full_fixture()
+    _title, recipe = build_playbook_recipe("inventory_aging", params)
+    tenant, user, report = await _seed_report(db, recipe=recipe, html="<html>v1</html>")
+    _patch_bigquery_executor(monkeypatch, recipe, payloads)
+
+    updated = await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
+
+    stored = json.loads(json.dumps(updated.spec_json))
+    assert render_report_html(stored) == updated.rendered_html
+
+
+async def test_refresh_inventory_aging_dispatches_exactly_the_four_recipe_sources_with_max_rows(db, monkeypatch):
+    """Requirement 5 (cost guard): a refresh must run ONLY the recipe's own
+    sources, each with its stored max_rows — never more, never fewer."""
+    from tests.report.test_inventory_aging import _full_fixture
+
+    payloads, params = _full_fixture()
+    _title, recipe = build_playbook_recipe("inventory_aging", params)
+    tenant, user, report = await _seed_report(db, recipe=recipe, html="<html>v1</html>")
+    calls = _patch_bigquery_executor(monkeypatch, recipe, payloads)
+
+    await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
+
+    assert len(calls) == 4
+    expected_queries = {src["params"]["query"] for src in recipe["sources"].values()}
+    actual_queries = {c["params"]["query"] for c in calls}
+    assert actual_queries == expected_queries
+    for c in calls:
+        assert isinstance(c["params"].get("max_rows"), int)
+
+
+async def test_refresh_inventory_aging_source_failure_fails_the_whole_refresh(db, monkeypatch):
+    """Every one of inventory_aging's four sources is required (compute() cannot
+    build a partial AgingReport) — a single tool failure must fail closed, never
+    publish a version built on incomplete data."""
+    from tests.report.test_inventory_aging import _full_fixture
+
+    payloads, params = _full_fixture()
+    _title, recipe = build_playbook_recipe("inventory_aging", params)
+    tenant, user, report = await _seed_report(db, recipe=recipe, html="<html>v1</html>")
+    rid, tid, uid = report.id, tenant.id, user.id
+
+    async def failing_execute(tool_name, tool_input, tenant_id, actor_id, correlation_id, db, **kw):
+        return json.dumps({"error": True, "message": "bigquery unavailable"})
+
+    monkeypatch.setattr("app.services.chat.tools.execute_tool_call", failing_execute)
+
+    with pytest.raises(RefreshError):
+        await refresh_report(db, report_id=rid, tenant_id=tid, actor_id=uid)
+
+    row = (await db.execute(select(Report).where(Report.id == rid))).scalar_one()
+    assert row.rendered_html == "<html>v1</html>"  # current version untouched
+    assert row.version == 1
+
+
+async def test_refresh_inventory_aging_r_items_over_5000_rows_not_truncated(db, monkeypatch):
+    """Review finding (blocker): ``_execute_sources`` used to apply the statement-only
+    ``STATEMENT_ROW_CAP`` (5000) to EVERY dispatched source unconditionally --
+    including inventory_aging's own bigquery_sql sources, which declare their own
+    ``max_rows=200_000`` in the recipe (``inventory_aging.build_sources``, an order of
+    magnitude above the reused constant). 6000 on-hand SKUs at one location must all
+    survive extraction -- a silent truncation at 5000 would drop 1000 SKUs from every
+    KPI/bucket/top-positions total with no truncation indicator anywhere in the
+    inventory_aging render (unlike statement_builder's own row-cap warn chip)."""
+    from tests.report.test_inventory_aging import SNAPSHOT, _item, _prior_row, _trend_row
+
+    location = "Acme"
+    items = [_item(location, f"SKU-{i:05d}", 5, 10, 1) for i in range(6000)]
+    prior = [
+        _prior_row(location, value=0, value_90p=0, value_180p=0, skus=0, skus_90p=0, skus_180p=0, qty=0, qty_90p=0)
+    ]
+    trend = [_trend_row(location, SNAPSHOT, 60000, 0, 0.0)]
+    meta = [
+        {
+            "location": location,
+            "first_snapshot_date": SNAPSHOT.isoformat(),
+            "last_snapshot_date": SNAPSHOT.isoformat(),
+            "snapshot_count": 1,
+        }
+    ]
+    payloads = {"r_items": items, "r_prior": prior, "r_trend": trend, "r_meta": meta}
+    params = {"locations": [location]}
+
+    _title, recipe = build_playbook_recipe("inventory_aging", params)
+    tenant, user, report = await _seed_report(db, recipe=recipe, html="<html>v1</html>")
+    calls = _patch_bigquery_executor(monkeypatch, recipe, payloads)
+
+    updated = await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
+
+    assert len(calls) == 4
+    kpi_model = next(s["model"] for s in updated.spec_json["sections"] if s["type"] == "kpi_cards")
+    on_hand = next(k for k in kpi_model if k["key"] == "on_hand_value")
+    assert "6,000 SKUs" in on_hand["sub_detail"], on_hand["sub_detail"]
+
+
+async def test_refresh_inventory_aging_composed_at_stamp_advances_on_refresh(db, monkeypatch):
+    """Review finding (major): the rendered page's ``.report-head`` "Composed <date>"
+    line is inventory_aging's ONLY in-page freshness stamp (no separate 'Data
+    refreshed' banner the way financial_statement gets). Passing refresh_report's
+    ORIGINAL recipe['captured_at'] (frozen at first compose) into rebuild_playbook_spec
+    on every refresh means that stamp never advances, even though
+    ``report.last_refreshed_at`` (the DB column driving the dashboard's OWN freshness
+    badge) is correctly updated -- two freshness indicators on the same report
+    disagreeing after the very first refresh."""
+    from tests.report.test_inventory_aging import _full_fixture
+
+    payloads, params = _full_fixture()
+    _title, recipe = build_playbook_recipe("inventory_aging", params)
+    original_captured_at = recipe["captured_at"]
+    tenant, user, report = await _seed_report(db, recipe=recipe, html="<html>v1</html>")
+    _patch_bigquery_executor(monkeypatch, recipe, payloads)
+
+    updated = await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
+
+    head_model = next(s["model"] for s in updated.spec_json["sections"] if s["type"] == "report_head")
+    assert head_model["composed_at"] != original_captured_at
+    stamped = datetime.fromisoformat(head_model["composed_at"])
+    assert (datetime.now(timezone.utc) - stamped).total_seconds() < 30

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<transactionbodycustomfield scriptid="custbody_ecom_tx_ops_work_key">
+    <label>Transaction operations work key</label>
+    <description>Exact approved operation fingerprint used to attribute missing-order creation during independent verification and recovery.</description>
+    <fieldtype>TEXT</fieldtype>
+    <storevalue>T</storevalue>
+    <bodysale>T</bodysale>
+    <maxlength>64</maxlength>
+</transactionbodycustomfield>

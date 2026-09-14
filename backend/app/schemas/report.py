@@ -185,7 +185,29 @@ class ReportResponse(BaseModel):
     # (None = a one-off snapshot, not linked into any lineage — every pre-093 row too).
     period: str | None = None
     series_id: str | None = None
+    # Task 5 (Drive delivery): the last successful delivery's receipt —
+    # {pdf: {file_id, url}, xlsx: {file_id, url}, folder_id, period_key, delivered_at} —
+    # or None if never delivered (or the last attempt failed, which never partially
+    # writes this field — see report_delivery.py).
+    delivery_json: dict | None = None
     model_config = {"from_attributes": True}
+
+
+class DeliveryFileResponse(BaseModel):
+    file_id: str
+    url: str
+
+
+class DeliveryResultResponse(BaseModel):
+    """POST /reports/{id}/deliver's 200 body — mirrors report_delivery.DeliveryResult
+    field-for-field (a flat shape; the DB's delivery_json is the nested nested one)."""
+
+    pdf_file_id: str
+    pdf_url: str
+    xlsx_file_id: str
+    xlsx_url: str
+    folder_id: str
+    delivered_at: datetime
 
 
 class PlaybookComposeRequest(BaseModel):

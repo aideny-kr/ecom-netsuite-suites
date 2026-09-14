@@ -23,7 +23,9 @@ export default function DashboardLayout({
   // the boxed container has no height chain and collapses iframes to ~150px.
   // The /reports LIST page stays boxed ("/reports".startsWith("/reports/") is false).
   const isFluid =
-    pathname?.startsWith("/workspace") || pathname?.startsWith("/chat") || pathname?.startsWith("/reports/");
+    pathname?.startsWith("/workspace") ||
+    pathname?.startsWith("/chat") ||
+    pathname?.startsWith("/reports/");
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [connectionHealth, setConnectionHealth] = useState<
     | { state: "ok" }
@@ -32,6 +34,19 @@ export default function DashboardLayout({
   >({ state: "ok" });
   const [bannerDismissed, setBannerDismissed] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+
+  useEffect(() => {
+    const compact = window.matchMedia("(max-width: 767px)");
+    const update = () => setSidebarCollapsed(compact.matches);
+    update();
+    compact.addEventListener("change", update);
+    return () => compact.removeEventListener("change", update);
+  }, []);
+
+  useEffect(() => {
+    if (window.matchMedia("(max-width: 767px)").matches)
+      setSidebarCollapsed(true);
+  }, [pathname]);
 
   useEffect(() => {
     if (!user) {
@@ -49,7 +64,9 @@ export default function DashboardLayout({
     }
     // Check if both connections already exist — skip onboarding if so
     apiClient
-      .get<{ valid: boolean }>("/api/v1/onboarding/checklist/connection/validate")
+      .get<{ valid: boolean }>(
+        "/api/v1/onboarding/checklist/connection/validate",
+      )
       .then((result) => {
         if (result.valid) {
           setShowOnboarding(false);
@@ -128,13 +145,25 @@ export default function DashboardLayout({
       {showOnboarding && (
         <OnboardingWizard onComplete={handleOnboardingComplete} />
       )}
-      <Suspense fallback={null}>
-        <Sidebar
-          collapsed={sidebarCollapsed}
-          onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
+      {!sidebarCollapsed && (
+        <button
+          className="fixed inset-0 z-30 bg-black/40 md:hidden"
+          aria-label="Close sidebar"
+          onClick={() => setSidebarCollapsed(true)}
         />
-      </Suspense>
-      <main className="flex-1 overflow-auto bg-background scrollbar-thin">
+      )}
+      <div
+        className="shrink-0 max-md:absolute max-md:inset-y-0 max-md:left-0 max-md:z-40"
+        aria-hidden={sidebarCollapsed}
+      >
+        <Suspense fallback={null}>
+          <Sidebar
+            collapsed={sidebarCollapsed}
+            onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
+          />
+        </Suspense>
+      </div>
+      <main className="min-w-0 flex-1 overflow-auto bg-background scrollbar-thin">
         {sidebarCollapsed && (
           <button
             onClick={() => setSidebarCollapsed(false)}
@@ -193,10 +222,14 @@ export default function DashboardLayout({
             </button>
           </div>
         )}
-        <div className={cn(
-          "mx-auto",
-          isFluid ? "h-full min-h-0 w-full min-w-0 max-w-none" : "max-w-[1400px] px-8 py-8"
-        )}>
+        <div
+          className={cn(
+            "mx-auto",
+            isFluid
+              ? "h-full min-h-0 w-full min-w-0 max-w-none"
+              : "max-w-[1400px] px-4 pb-6 pt-16 md:px-8 md:py-8",
+          )}
+        >
           {children}
         </div>
       </main>

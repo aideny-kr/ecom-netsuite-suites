@@ -54,6 +54,9 @@ export function useCeligoConnect() {
       apiClient.post<CeligoStatus>("/api/v1/connector-status/celigo/connect", data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["celigo", "status"] });
+      queryClient.invalidateQueries({ queryKey: ["connections"] });
+      queryClient.invalidateQueries({ queryKey: ["mcp-connectors"] });
+      queryClient.invalidateQueries({ queryKey: ["transaction-ops"] });
     },
   });
 }
@@ -65,6 +68,9 @@ export function useCeligoDisconnect() {
     mutationFn: () => apiClient.delete<void>("/api/v1/connector-status/celigo"),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["celigo", "status"] });
+      queryClient.invalidateQueries({ queryKey: ["connections"] });
+      queryClient.invalidateQueries({ queryKey: ["mcp-connectors"] });
+      queryClient.invalidateQueries({ queryKey: ["transaction-ops"] });
     },
   });
 }

@@ -5,6 +5,17 @@
  * `GET /celigo/scripts/{id}` (`CeligoScriptOut`,
  * backend/app/api/v1/celigo_flows.py).
  *
+ * Task 17 — the presentational half (`CeligoScriptViewerBody`) was extracted
+ * so the flow page's script DRAWER (`celigo/celigo-script-drawer.tsx`,
+ * mockup screen 4, a right panel over the inspector reached via
+ * `&script=<scriptId>`) could reuse the exact same header/pills/table/code/
+ * banner instead of re-implementing them.
+ *
+ * Task 18 — `CeligoScriptViewerDialog` (the centered-dialog wrapper this
+ * file used to also export) is deleted along with its last caller,
+ * `celigo-flow-map.tsx`: `CeligoScriptViewerBody` below is now this file's
+ * only export, reached exclusively through `CeligoScriptDrawer`.
+ *
  * ═══ SECURITY CONTRACT ═══
  * `content` is arbitrary third-party JavaScript, written by whoever
  * configured the tenant's Celigo account -- untrusted input, never
@@ -13,6 +24,17 @@
  * content passed as `children`, the library only tokenizes it for display).
  * Never `dangerouslySetInnerHTML`, never `eval`, never `new Function`, never
  * injected into an attribute/href/style, never logged to the console.
+ *
+ * ═══ N2 (standing decision) ═══
+ * The banner below is the exact, project-wide string Global Constraints
+ * mandates -- verbatim, not paraphrased. It is now IMPORTED from
+ * `components/celigo/shared.tsx` (`N2_SHIELD_TEXT`), the single definition
+ * this file and `celigo-step-inspector.tsx`'s Scripts tab both render. The
+ * two used to hold hand-kept copies of the literal, on the reasoning that a
+ * duplicate is safer than an import that outlives its usefulness -- but two
+ * copies of a mandated string is the shape that drifts, and an edit to one
+ * would leave the other promising something different about the same
+ * content, with nothing to catch it.
  *
  * ═══ THE CORRECTION THAT MATTERS MOST (mockup-spec.md's correction section,
  * which overrides the Screen 04 body) ═══
@@ -40,14 +62,14 @@
  * the id is what makes the row identifiable.
  */
 
-import { useCeligoScript, type CeligoScriptAttachmentSite } from "@/hooks/use-celigo-flows";
+import type { CeligoScript, CeligoScriptAttachmentSite } from "@/hooks/use-celigo-flows";
+import { N2_SHIELD_TEXT } from "@/components/celigo/shared";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { AlertTriangle, Loader2, ShieldAlert } from "lucide-react";
+import { ShieldAlert } from "lucide-react";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
+import { cn } from "@/lib/utils";
 
 /** `x ?? fallback` does not catch `""` -- the exact bug shape that shipped
  * for the Celigo card's `account_name` earlier this session. Guard both. */
@@ -55,14 +77,23 @@ function displayOr(value: string | null | undefined, fallback = "—"): string {
   return value ? value : fallback;
 }
 
-/** Mirrors `stepKindLabel` in celigo-flow-map.tsx (not exported from
- * there, so duplicated here rather than reaching across files for one
- * string). `flow_step_role` is null for a router-level script ref with no
- * owning step -- see `CeligoFlowDetailOut.unassigned_attachments`'s
- * docstring. */
+/** `flow_step_role` is null for a router-level script ref with no owning
+ * step -- see `CeligoFlowDetailOut.unassigned_attachments`'s docstring.
+ *
+ * `role` only separates the flow's one GENERATOR (its source) from every
+ * processor, and a processor is either a lookup or a destination — so
+ * calling every processor a "Destination" announced the wrong direction of
+ * data for every lookup site. An `*Export` adaptor on a processor is Celigo's
+ * own marker for a lookup (`NetSuiteDistributedExport`, `HTTPExport`), the
+ * same signal `celigo-step-inspector.tsx` and the canvas bubble read. */
 function siteLocationLabel(site: CeligoScriptAttachmentSite): string {
   if (!site.flow_step_role) return "Router";
-  const kind = site.flow_step_role === "generator" ? "Source" : "Destination";
+  const kind =
+    site.flow_step_role === "generator"
+      ? "Source"
+      : site.flow_step_adaptor_type?.endsWith("Export")
+        ? "Lookup"
+        : "Destination";
   return `${kind} · ${displayOr(site.flow_step_adaptor_type, "Unknown adaptor")}`;
 }
 
@@ -75,7 +106,8 @@ function siteLocationLabel(site: CeligoScriptAttachmentSite): string {
  * summarizes. `CeligoScriptOut` exposes no `celigo_id` field for the row
  * the caller navigated to, so there is no way to single out "this one's own"
  * clone; the first group shown is simply the backend's own return order
- * (sorted by flow name, then `json_path`). */
+ * (sorted by flow name, then `json_path`) unless `currentStepId` (below)
+ * names a specific site to prefer instead. */
 function groupSitesByCopy(usedBy: CeligoScriptAttachmentSite[]): CeligoScriptAttachmentSite[][] {
   const order: string[] = [];
   const groups = new Map<string, CeligoScriptAttachmentSite[]>();
@@ -89,145 +121,222 @@ function groupSitesByCopy(usedBy: CeligoScriptAttachmentSite[]): CeligoScriptAtt
   return order.map((key) => groups.get(key)!);
 }
 
-function ErrorNotice({ message, onRetry }: { message: string; onRetry?: () => void }) {
-  return (
-    <div className="flex items-center gap-2 rounded-lg border border-destructive/50 bg-destructive/5 px-3 py-2 text-[13px] text-destructive">
-      <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-      <span className="flex-1">{message}</span>
-      {onRetry && (
-        <Button variant="outline" size="sm" className="h-6 px-2 text-[11px]" onClick={onRetry}>
-          Retry
-        </Button>
-      )}
-    </div>
-  );
+/** `(chars/1024).toFixed(1)` KB off the script's OWN `content` -- there is
+ * no server-sent size field on `CeligoScriptOut` (unlike
+ * `CeligoAttachmentOut.script_size_chars`, which `celigo-step-inspector.tsx`
+ * reads for the SAME fact at the chip/card level), so this is the only size
+ * this view can honestly show. `null` content (not synced) returns `null`
+ * so the caller omits the fact rather than printing a fabricated "0.0 KB". */
+function formatContentSize(content: string | null): string | null {
+  if (!content) return null;
+  return `${(content.length / 1024).toFixed(1)} KB`;
 }
 
-function UntrustedContentBanner() {
+/** Global Constraints' N2 copy, verbatim -- "shown to you only. Never run
+ * here, never sent to the assistant." replaces this file's earlier line,
+ * which (wrongly) promised the source would be quoted TO the assistant
+ * inside a sealed block. It never is: N2 keeps script content off every
+ * chat/tool path entirely, so the banner must not imply otherwise. */
+function UntrustedContentBanner({ className }: { className?: string }) {
   return (
-    <div className="flex items-start gap-2.5 rounded-xl border border-amber-500/30 bg-amber-500/5 p-3">
+    <div className={cn("flex items-start gap-2.5 rounded-xl border border-amber-500/30 bg-amber-500/5 p-3", className)}>
       <ShieldAlert className="h-4 w-4 text-amber-600 mt-0.5 shrink-0" aria-hidden />
-      <p className="text-[12px] text-muted-foreground">
-        Script source is treated as untrusted input. It is shown to you and quoted to the
-        assistant inside a sealed block — never followed as instructions, never run.
-      </p>
+      <p className="text-[12px] text-muted-foreground">{N2_SHIELD_TEXT}</p>
     </div>
   );
 }
 
-export function CeligoScriptViewerDialog({
-  scriptId,
-  onOpenChange,
+/**
+ * Task 17 -- the re-homed body: header (hook chip + name), the copies/
+ * sites-and-flows pills + size, the "Scripts view" affordance, the used-by
+ * table, the code panel, and the N2 banner. Presentational only -- loading
+ * and error states are the caller's own job (`CeligoScriptDrawer`), since it
+ * already gates on its own `useCeligoScript` + `queryState()` before ever
+ * reaching this component.
+ *
+ * `currentStepId`, when given, is the `flow_step_id` of the step the caller
+ * actually opened this script FROM. It picks out that one used_by site so
+ * the header names THAT site's function (`HK preMap`, not an arbitrary
+ * first one) and so the copy group shown explicitly in the table -- the
+ * mockup's "this copy: N sites · M flows" -- is the SAME clone attached at
+ * that site, not whichever clone the backend happened to return first.
+ * Omitted (e.g. a future Scripts-view context with no owning step) falls
+ * back to the first used_by entry / first copy group, exactly this
+ * component's pre-Task-17 behavior.
+ *
+ * `layout` (celigo flow sizing UI): `"dialog"` (default, unchanged) is the
+ * settings dialog's own centered/scrolling presentation -- the code region
+ * keeps its fixed 320px cap. `"fill"` is `CeligoScriptDrawer`'s: the root
+ * becomes a full-height flex column, the attachment-sites table is capped at
+ * 35% of that height (its own scrollbar past that), and the code region
+ * takes every remaining pixel instead of stopping at 320px -- so maximizing
+ * the drawer grows the code both wider AND taller.
+ */
+export function CeligoScriptViewerBody({
+  script,
+  currentStepId,
+  currentJsonPath,
+  layout = "dialog",
+  onOpenScriptsView,
 }: {
-  scriptId: string | null;
-  onOpenChange: (open: boolean) => void;
-}) {
-  const { data: script, isLoading, isError, refetch } = useCeligoScript(scriptId ?? undefined);
+  script: CeligoScript;
+  currentStepId?: string | null;
+  /** The `json_path` of the attachment site the reader actually clicked.
+   * `currentStepId` cannot resolve two sites of the same script on the SAME
+   * step — a transform and a hook, or two clones of one family — so the
+   * header named whichever site came back first. This wins over the step id
+   * when both are given; an unrecognised path (an old link, a site that has
+   * since moved) falls through to the step, then to the first site. */
+  currentJsonPath?: string | null;
+  layout?: "dialog" | "fill";
+  /** Task 6 — the Scripts view now exists (`celigo-route.ts`'s `go.scripts`,
+   * `components/celigo/scripts/`), so "Scripts view ↗" can finally be a real
+   * affordance -- but only for a caller that actually has somewhere to send
+   * it. `CeligoScriptDrawer` supplies this (navigates via `go.scripts({
+   * family: script.dedup_key, copy: script.id })` and closes itself); the
+   * settings dialog (this file's other caller) supplies nothing, and the
+   * label stays inert text -- never a button/link implying an affordance
+   * this surface can't back. */
+  onOpenScriptsView?: () => void;
+}): JSX.Element {
+  const fill = layout === "fill";
+  const copyGroups = groupSitesByCopy(script.used_by);
+  const currentSite =
+    (currentJsonPath ? script.used_by.find((s) => s.json_path === currentJsonPath) : undefined) ??
+    (currentStepId ? script.used_by.find((s) => s.flow_step_id === currentStepId) : undefined) ??
+    script.used_by[0];
+  const shownSites =
+    copyGroups.find((g) => g[0]?.script_celigo_id === currentSite?.script_celigo_id) ?? copyGroups[0] ?? [];
+  const remainingCopies = Math.max(script.copies_count - 1, 0);
 
-  const copyGroups = script ? groupSitesByCopy(script.used_by) : [];
-  const shownSites = copyGroups[0] ?? [];
-  const remainingCopies = script ? Math.max(script.copies_count - 1, 0) : 0;
+  const headerFunctionName = displayOr(currentSite?.function_name, "hook");
+  const flowCount = new Set(shownSites.map((s) => s.flow_id)).size;
+  const sizeLabel = formatContentSize(script.content);
 
   return (
-    <Dialog open={!!scriptId} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[85vh] max-w-3xl overflow-y-auto">
-        {isError ? (
-          // Checked before the loading/!script branch below -- once a query
-          // errors, isLoading is false and `script` stays undefined
-          // forever, so that branch alone would spin forever with no escape
-          // (the exact ordering Task 9's fix round 1 caught in
-          // FlowDetailDialog).
-          <div className="flex flex-col items-center gap-3 py-8">
-            <ErrorNotice message="Couldn't load this script." onRetry={() => refetch()} />
-          </div>
-        ) : isLoading || !script ? (
-          <div className="flex items-center justify-center gap-2 py-8 text-[13px] text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            Loading script…
-          </div>
+    <div className={cn("flex flex-col gap-3", fill && "h-full min-h-0")}>
+      <div className={cn("flex flex-col gap-1.5", fill && "shrink-0")}>
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge
+            variant="outline"
+            className="border-blue-500/50 bg-blue-500/10 text-[11px] text-blue-700 dark:text-blue-400"
+          >
+            {`HK ${headerFunctionName}`}
+          </Badge>
+          <span className="font-mono text-[13px] font-semibold">{script.name}</span>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge
+            variant="outline"
+            className="text-[11px] border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-400"
+          >
+            {`${script.copies_count} copies${script.content_diverged ? " · diverged" : ""}`}
+          </Badge>
+          <Badge variant="outline" className="border-border bg-muted text-[11px] text-muted-foreground">
+            {/* Each half pluralises on its OWN count: a single-site script
+                read "1 sites · 1 flows". */}
+            {`${shownSites.length} site${shownSites.length === 1 ? "" : "s"} · ${flowCount} flow${flowCount === 1 ? "" : "s"}`}
+          </Badge>
+          {sizeLabel && <span className="text-[11px] tabular-nums text-muted-foreground">{sizeLabel}</span>}
+        </div>
+      </div>
+
+      {/* "Scripts view" -- the full clone family (every site, every copy,
+          the diff) lives in the account-wide Scripts view
+          (`components/celigo/scripts/celigo-scripts-page.tsx`). A real
+          `<button>` only when a caller supplies `onOpenScriptsView` (see
+          that prop's docstring above); otherwise the exact same inert text
+          as before, since this surface still has no destination to promise
+          on its own. */}
+      <div className={cn("flex items-center justify-end border-b pb-2", fill && "shrink-0")}>
+        {onOpenScriptsView ? (
+          <button
+            type="button"
+            onClick={onOpenScriptsView}
+            className="text-[12px] font-medium text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+          >
+            Scripts view ↗
+          </button>
         ) : (
-          <>
-            <DialogHeader>
-              <div className="flex flex-wrap items-center gap-2">
-                <DialogTitle>{script.name}</DialogTitle>
-                <Badge
-                  variant="outline"
-                  className="text-[11px] border-amber-500/50 bg-amber-500/10 text-amber-700 dark:text-amber-400"
-                >
-                  {script.copies_count} copies · {script.integration_count} integrations
-                </Badge>
-              </div>
-              <DialogDescription className="sr-only">
-                Attachment sites and source for this script
-              </DialogDescription>
-            </DialogHeader>
-
-            {script.used_by.length === 0 ? (
-              // Genuinely-empty, distinct from the isError branch above --
-              // a script that synced with no recorded attachment sites is a
-              // real (if unusual) state, not a failed request.
-              <p className="py-2 text-[12px] text-muted-foreground">
-                No attachment sites recorded for this script.
-              </p>
-            ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="h-8 text-[11px]">Attached to</TableHead>
-                    <TableHead className="h-8 text-[11px]">Where</TableHead>
-                    <TableHead className="h-8 text-[11px]">Function</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {shownSites.map((site, i) => (
-                    <TableRow key={`${site.script_celigo_id}-${site.json_path}-${i}`}>
-                      <TableCell className="py-1.5">
-                        <p className="text-[13px]">{site.flow_name}</p>
-                        <p className="text-[11px] text-muted-foreground">{siteLocationLabel(site)}</p>
-                      </TableCell>
-                      <TableCell className="py-1.5 font-mono text-[12px] break-all">{site.json_path}</TableCell>
-                      <TableCell className="py-1.5 font-mono text-[12px]">
-                        {displayOr(site.function_name)}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                  {remainingCopies > 0 && (
-                    <TableRow>
-                      <TableCell colSpan={3} className="py-1.5 text-[12px] text-muted-foreground">
-                        {script.content_diverged
-                          ? `+ ${remainingCopies} further copies — content differs across copies; the source below is only this copy's own version, not a canonical one for the group.`
-                          : `+ ${remainingCopies} further copies, identical source`}
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            )}
-
-            <div className="space-y-2">
-              {script.content_diverged && (
-                <p className="text-[12px] text-amber-600">
-                  This script&apos;s copies have diverged — the source below is this specific copy&apos;s
-                  own version, not a single canonical version for the group.
-                </p>
-              )}
-              <div className="overflow-hidden rounded-lg border">
-                <SyntaxHighlighter
-                  language="javascript"
-                  style={oneDark}
-                  showLineNumbers
-                  wrapLongLines
-                  customStyle={{ margin: 0, padding: "1rem", fontSize: "12px", maxHeight: "320px" }}
-                >
-                  {script.content ? script.content : "// No source recorded for this script."}
-                </SyntaxHighlighter>
-              </div>
-            </div>
-
-            <UntrustedContentBanner />
-          </>
+          <span className="text-[12px] font-medium text-muted-foreground">Scripts view ↗</span>
         )}
-      </DialogContent>
-    </Dialog>
+      </div>
+
+      {/* Fix 2 (celigo flow sizing UI): in `layout="fill"` this wrapper is
+          capped at 35% of the drawer's own height with its own scrollbar --
+          a script attached at many sites must not be able to push the code
+          area (below) down to nothing. The dialog layout leaves this
+          unconstrained, exactly as before. */}
+      <div className={cn(fill && "max-h-[35%] shrink-0 overflow-auto")}>
+        {script.used_by.length === 0 ? (
+          // Genuinely-empty, distinct from the isError branch the caller
+          // handles above -- a script that synced with no recorded
+          // attachment sites is a real (if unusual) state, not a failed
+          // request.
+          <p className="py-2 text-[12px] text-muted-foreground">
+            No attachment sites recorded for this script.
+          </p>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead className="h-8 text-[11px]">Attached to</TableHead>
+                <TableHead className="h-8 text-[11px]">Where</TableHead>
+                <TableHead className="h-8 text-[11px]">Function</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {shownSites.map((site, i) => (
+                <TableRow key={`${site.script_celigo_id}-${site.json_path}-${i}`}>
+                  <TableCell className="py-1.5">
+                    <p className="text-[13px]">{site.flow_name}</p>
+                    <p className="text-[11px] text-muted-foreground">{siteLocationLabel(site)}</p>
+                  </TableCell>
+                  <TableCell className="py-1.5 font-mono text-[12px] break-all">{site.json_path}</TableCell>
+                  <TableCell className="py-1.5 font-mono text-[12px]">
+                    {displayOr(site.function_name)}
+                  </TableCell>
+                </TableRow>
+              ))}
+              {remainingCopies > 0 && (
+                <TableRow>
+                  <TableCell colSpan={3} className="py-1.5 text-[12px] text-muted-foreground">
+                    {script.content_diverged
+                      ? `+ ${remainingCopies} further copies — content differs across copies; the source below is only this copy's own version, not a canonical one for the group.`
+                      : `+ ${remainingCopies} further copies, identical source`}
+                  </TableCell>
+                </TableRow>
+              )}
+            </TableBody>
+          </Table>
+        )}
+      </div>
+
+      <div className={cn("space-y-2", fill && "flex min-h-0 flex-1 flex-col")}>
+        {script.content_diverged && (
+          <p className={cn("text-[12px] text-amber-600", fill && "shrink-0")}>
+            This script&apos;s copies have diverged — the source below is this specific copy&apos;s
+            own version, not a single canonical version for the group.
+          </p>
+        )}
+        <div className={cn("rounded-lg border", fill ? "min-h-0 flex-1 overflow-auto" : "overflow-hidden")}>
+          <SyntaxHighlighter
+            language="javascript"
+            style={oneDark}
+            showLineNumbers
+            wrapLongLines
+            customStyle={
+              fill
+                ? { margin: 0, padding: "1rem", fontSize: "12px" }
+                : { margin: 0, padding: "1rem", fontSize: "12px", maxHeight: "320px" }
+            }
+          >
+            {script.content ? script.content : "// No source recorded for this script."}
+          </SyntaxHighlighter>
+        </div>
+      </div>
+
+      <UntrustedContentBanner className={fill ? "shrink-0" : undefined} />
+    </div>
   );
 }

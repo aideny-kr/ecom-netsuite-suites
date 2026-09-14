@@ -1,5 +1,6 @@
 from app.mcp.tools import (
     bigquery_tools,
+    celigo_flow_map,
     cross_source_tool,
     data_sample,
     docs_tools,
@@ -25,21 +26,104 @@ from app.mcp.tools import (
     sheets_tools,
     suitescript_sync_tool,
     task_file_tools,
+    transaction_ops_tools,
     web_search,
     workspace_tools,
 )
 
 TOOL_REGISTRY = {
+    "transaction_ops.groups": {
+        "description": (
+            "Group reconciliation cases by entity, source, currency, variance direction and credit context. "
+            "Supply review_run_ids for the selected period; otherwise lists all open historical cases. "
+            "Repeat the exact review_run_ids, status and search on every member request. "
+            "Groups describe symptoms, not a verified shared cause. "
+            "Supply group_id to read exact case members. "
+            "Follow has_next with offset+limit. Investigate cases before exact proposal approval; "
+            "a group never authorizes writes."
+        ),
+        "execute": transaction_ops_tools.execute_groups,
+        "params_schema": {
+            "group_id": {"type": "string", "description": "Group ID from the group list; omit to list groups"},
+            "review_run_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "Selected period run UUIDs, 1 to 20. Preserve on every page/member request.",
+            },
+            "status": {
+                "type": "string",
+                "description": "Category: needs_review (default), matched, not_verified. Requires review_run_ids.",
+            },
+            "search": {
+                "type": "string",
+                "description": "Exact order-reference search text, at most 200 characters. Requires review_run_ids.",
+            },
+            "limit": {"type": "integer", "description": "Page size, 1 to 50; default 20"},
+            "offset": {"type": "integer", "description": "Page offset; default 0"},
+        },
+    },
+    "transaction_ops.configs": {
+        "description": "List configured Framework transaction investigation scopes before choosing a scope to inspect.",
+        "execute": transaction_ops_tools.execute_configs,
+        "params_schema": {},
+    },
+    "transaction_ops.run": {
+        "description": (
+            "Investigate missing or incorrect Framework orders against NetSuite in a configured scope. "
+            "Provide exact order references OR an aware time window of at most 31 days. "
+            "Creates a durable read-only investigation; proposed corrections require human approval in the review page."
+        ),
+        "execute": transaction_ops_tools.execute_run,
+        "params_schema": {
+            "config_id": {"type": "string", "required": True, "description": "Configured investigation scope UUID"},
+            "order_references": {"type": "array", "description": "Exact Framework order references, at most 200"},
+            "window_start": {"type": "string", "description": "ISO timestamp with timezone; use with window_end"},
+            "window_end": {"type": "string", "description": "ISO timestamp with timezone; use with window_start"},
+        },
+    },
+    "transaction_ops.accounting_evidence": {
+        "description": "Read scoped native accounting evidence for a transaction case in one bounded call. "
+        "Use FIRST after investigation status, before ad-hoc SuiteQL. Returns native lifecycle labels, linked "
+        "invoices/cash sales, tax defaults versus transaction rates, posting-period locks, GL and deposits. "
+        "Returns explicit missing evidence; never infers tax legality, root cause or available cash. Read-only. "
+        "If correction_candidate is present, use its exact tool/params to display the human approval card; "
+        "do not execute or substitute another rate. Reuse returned sections and investigate only missing evidence.",
+        "execute": transaction_ops_tools.execute_accounting_evidence,
+        "params_schema": {
+            "case_id": {"type": "string", "required": True, "description": "Durable case UUID from status"}
+        },
+    },
+    "transaction_ops.status": {
+        "description": (
+            "Read investigation status or a durable case and its recent history. "
+            "Provide exactly one run_id or case_id. The evidence table renders automatically; "
+            "do not restate or recompute its amounts. Human decisions are made on the linked review page."
+        ),
+        "execute": transaction_ops_tools.execute_status,
+        "params_schema": {
+            "run_id": {"type": "string", "description": "Investigation run UUID; omit when case_id is supplied"},
+            "case_id": {"type": "string", "description": "Durable transaction case UUID; omit when run_id is supplied"},
+        },
+    },
     "health": {
         "description": "Health check — returns server status and registered tool count",
         "execute": health.execute,
         "params_schema": {},
     },
     "netsuite.suiteql": {
-        "description": "Execute a SuiteQL query against NetSuite",
+        "description": "Execute a read-only SuiteQL query. For accounting investigations, pass both connection_id "
+        "and expected_account_id from accounting_review to bind the query to the exact account/environment.",
         "execute": netsuite_suiteql.execute,
         "params_schema": {
             "query": {"type": "string", "required": True, "description": "SuiteQL query to execute"},
+            "connection_id": {
+                "type": "string",
+                "description": "Exact NetSuite connection UUID; requires expected_account_id",
+            },
+            "expected_account_id": {
+                "type": "string",
+                "description": "Expected NetSuite account/environment; requires connection_id",
+            },
             "limit": {"type": "integer", "required": False, "default": 100, "description": "Max rows to return"},
             "user_question": {
                 "type": "string",
@@ -347,12 +431,23 @@ TOOL_REGISTRY = {
         },
     },
     "schedule.create": {
-        "description": "Create a scheduled job",
+        "description": (
+            "Create a scheduled job. Give 'instruction' (a plain-language description) to compile "
+            "an allow-listed step plan for approval; otherwise give 'name' + 'schedule_type' for a "
+            "legacy schedule."
+        ),
         "execute": schedule_ops.execute_create,
         "params_schema": {
-            "name": {"type": "string", "required": True},
-            "schedule_type": {"type": "string", "required": True},
+            "instruction": {
+                "type": "string",
+                "required": False,
+                "description": "Plain-language schedule instruction — compiled into a plan pending approval",
+            },
+            "name": {"type": "string", "required": False},
+            "schedule_type": {"type": "string", "required": False},
             "cron": {"type": "string", "required": False},
+            "timezone": {"type": "string", "required": False},
+            "delivery": {"type": "object", "required": False},
             "params": {"type": "object", "required": False},
         },
     },
@@ -362,10 +457,16 @@ TOOL_REGISTRY = {
         "params_schema": {},
     },
     "schedule.run": {
-        "description": "Trigger a scheduled job run",
+        "description": "Trigger a scheduled job run now",
         "execute": schedule_ops.execute_run,
         "params_schema": {
             "schedule_id": {"type": "string", "required": True},
+            "use_pending": {
+                "type": "boolean",
+                "required": False,
+                "default": False,
+                "description": "Run the not-yet-approved pending plan instead of the approved one",
+            },
         },
     },
     "workspace.list_files": {
@@ -943,6 +1044,98 @@ TOOL_REGISTRY = {
                 "type": "object",
                 "required": False,
                 "description": 'typed params, e.g. {"period": "last_quarter"}',
+            },
+        },
+    },
+    # Celigo flow-map read tools (spec docs/superpowers/specs/2026-09-04-celigo-chat-access.md
+    # §3, task 3). Source is a nightly production-only snapshot, never Celigo's live API --
+    # every row carries how fresh it is, and a caveat says so. Read-only by construction: no
+    # entry in this family names a handler outside `celigo_flow_map.py` (asserted by
+    # `test_celigo_chat_tools.py`'s static test).
+    "celigo.integrations": {
+        "description": (
+            "List the tenant's production Celigo integrations from last night's synced snapshot — "
+            "one row per integration with its flow counts, open-error rollup, and how recently its "
+            "error counts were last verified."
+        ),
+        "execute": celigo_flow_map.execute_integrations,
+        "params_schema": {},
+    },
+    "celigo.flows": {
+        "description": (
+            "List production Celigo flows from last night's synced snapshot — one row per flow with "
+            "its schedule, whether it is on pace or stalled, and its open-error rollup. Optionally "
+            "scope to one integration (by id or a name fragment) and filter to flows with open "
+            "errors or a stalled run state."
+        ),
+        "execute": celigo_flow_map.execute_flows,
+        "params_schema": {
+            "integration": {
+                "type": "string",
+                "required": False,
+                "description": "Integration id, or a case-insensitive fragment of its name",
+            },
+            "only_open_errors": {
+                "type": "boolean",
+                "required": False,
+                "default": False,
+                "description": "Only flows with at least one open error",
+            },
+            "only_stalled": {
+                "type": "boolean",
+                "required": False,
+                "default": False,
+                "description": "Only flows whose run state is stalled",
+            },
+            "limit": {
+                "type": "integer",
+                "required": False,
+                "default": 50,
+                "description": "Max flows to return (max 200)",
+            },
+        },
+    },
+    "celigo.flow_steps": {
+        "description": (
+            "Show how one production Celigo flow is built, in run order — one row per step or "
+            "router, from last night's synced snapshot: what it does, which branch it belongs to, "
+            "its open-error count, and which named scripts attach to it (never their code)."
+        ),
+        "execute": celigo_flow_map.execute_flow_steps,
+        "params_schema": {
+            "flow": {
+                "type": "string",
+                "required": True,
+                "description": "Flow id, or its exact name (case-insensitive)",
+            },
+        },
+    },
+    "celigo.flow_errors": {
+        "description": (
+            "List the root causes behind a production Celigo flow's errors from last night's synced "
+            "snapshot — one row per distinct cause with how often it has occurred, when it was first "
+            "and last seen, and one sample message. Omit the flow to see root causes across every "
+            "production flow, or list resolved causes instead of open ones."
+        ),
+        "execute": celigo_flow_map.execute_flow_errors,
+        "params_schema": {
+            "flow": {
+                "type": "string",
+                "required": False,
+                "description": "Flow id, or its exact name (case-insensitive); omitted = every production flow",
+            },
+            "status": {
+                "type": "string",
+                "required": False,
+                "default": "open",
+                "enum": ["open", "resolved"],
+                "description": "Which errors to group",
+            },
+            "limit": {
+                "type": "integer",
+                "required": False,
+                "default": 25,
+                "description": "Max root-cause groups to return (max 50)",
             },
         },
     },

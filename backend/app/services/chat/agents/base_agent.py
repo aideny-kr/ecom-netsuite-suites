@@ -521,6 +521,10 @@ def _suppress_metric_value_for_llm(result_str: str) -> str:
     except (json.JSONDecodeError, TypeError):
         return result_str
     if is_suppressed_metric_payload(parsed):
+        if parsed.get("source_kind") == "transaction_ops":
+            from app.services.transaction_ops.chat_evidence import condense_status
+
+            return condense_status(parsed)
         return condense_metric_for_llm(parsed)
     return result_str
 
@@ -775,6 +779,7 @@ class AgentResult:
     tokens_used: TokenUsage = field(default_factory=TokenUsage)
     agent_name: str = ""
     confidence_score: float | None = None
+    request_context: dict | None = None
 
 
 def _compute_confidence(
@@ -962,15 +967,24 @@ class BaseSpecialistAgent(abc.ABC):
                             {
                                 "role": "user",
                                 "content": (
-                                    "You MUST execute the query using netsuite_suiteql — do NOT answer from memory "
-                                    "or prior conversation. The user needs fresh, live data from NetSuite. "
-                                    "Call the tool NOW."
+                                    "Execute the requested query using the available tools for the user's selected "
+                                    "data source. Do not answer from memory or switch sources. Obtain completed "
+                                    "server aggregates for counts and calculated summaries."
                                 ),
                             }
                         )
                         continue
 
                     final_text = "\n".join(response.text_blocks) if response.text_blocks else ""
+
+                    evidence = getattr(self, "_metabase_evidence", None)
+                    if evidence is not None:
+                        feedback = evidence.feedback(strip_confidence_tag(final_text))
+                        if feedback:
+                            messages.append(adapter.build_assistant_message(response))
+                            messages.append({"role": "user", "content": feedback})
+                            continue
+                        final_text = evidence.resolve(final_text)
 
                     # Extract confidence BEFORE stripping tag so agent self-score is used
                     # (Haiku fallback only fires when tag is missing)
@@ -1033,9 +1047,9 @@ class BaseSpecialistAgent(abc.ABC):
                     t0 = time.monotonic()
 
                     # Mutation intercept: block writes in non-streaming path too
-                    from app.services.chat.mutation_guard import classify_mutation as _classify_mut
+                    from app.services.chat.mutation_guard import classify_connector_mutation
 
-                    _mut_type = _classify_mut(block.name)
+                    _mut_type = await classify_connector_mutation(block.name, db, self.tenant_id)
                     if _mut_type is not None:
                         result_str = json.dumps(
                             {
@@ -1091,6 +1105,16 @@ class BaseSpecialistAgent(abc.ABC):
                             except (json.JSONDecodeError, TypeError):
                                 pass
 
+                    evidence = getattr(self, "_metabase_evidence", None)
+                    grounded_result = (
+                        evidence.observe(block.name, block.input, result_str)
+                        if evidence is not None and block.name in evidence.tool_names
+                        else None
+                    )
+
+                    if grounded_result == result_str:
+                        grounded_result = None
+
                     # Truncate error payloads to prevent token bloat on retries
                     result_str = _truncate_error_payload(result_str)
 
@@ -1099,6 +1123,8 @@ class BaseSpecialistAgent(abc.ABC):
                     # from the LLM-facing content directly (anti-hallucination invariant).
                     # The full result_str is still recorded in the audit log below.
                     llm_result_str = _suppress_metric_value_for_llm(result_str)
+                    if grounded_result is not None:
+                        llm_result_str = _suppress_metric_value_for_llm(grounded_result)
 
                     elapsed_ms = int((time.monotonic() - t0) * 1000)
                     tool_calls_log.append(
@@ -1151,6 +1177,16 @@ class BaseSpecialistAgent(abc.ABC):
             total_cache_creation += response.usage.cache_creation_input_tokens
             total_cache_read += response.usage.cache_read_input_tokens
             final_text = "\n".join(response.text_blocks) if response.text_blocks else ""
+
+            evidence = getattr(self, "_metabase_evidence", None)
+            if evidence is not None:
+                from app.services.chat.metabase_evidence import UNVERIFIED
+
+                if evidence.feedback(strip_confidence_tag(final_text)):
+                    self._numeric_verification_failed = True
+                    final_text = UNVERIFIED
+                else:
+                    final_text = evidence.resolve(final_text)
 
             # Extract confidence BEFORE stripping tag so agent self-score is used
             # (Haiku fallback only fires when tag is missing)
@@ -1376,7 +1412,7 @@ class BaseSpecialistAgent(abc.ABC):
                     tool_choice=step_tool_choice,
                     thinking_level=current_thinking_level,
                 ):
-                    if event_type == "text":
+                    if event_type == "text" and getattr(self, "_metabase_evidence", None) is None:
                         yield "text", payload
                     elif event_type == "response":
                         response = payload
@@ -1466,9 +1502,9 @@ class BaseSpecialistAgent(abc.ABC):
                             {
                                 "role": "user",
                                 "content": (
-                                    "You MUST execute the query using netsuite_suiteql — do NOT answer from memory "
-                                    "or prior conversation. The user needs fresh, live data from NetSuite. "
-                                    "Call the tool NOW."
+                                    "Execute the requested query using the available tools for the user's selected "
+                                    "data source. Do not answer from memory or switch sources. Obtain completed "
+                                    "server aggregates for counts and calculated summaries."
                                 ),
                             }
                         )
@@ -1523,6 +1559,15 @@ class BaseSpecialistAgent(abc.ABC):
                     # ── End prose-instead-of-proposing guard ──
                     final_text = "\n".join(response.text_blocks) if response.text_blocks else ""
 
+                    evidence = getattr(self, "_metabase_evidence", None)
+                    if evidence is not None:
+                        feedback = evidence.feedback(strip_confidence_tag(final_text))
+                        if feedback:
+                            messages.append(adapter.build_assistant_message(response))
+                            messages.append({"role": "user", "content": feedback})
+                            continue
+                        final_text = evidence.resolve(final_text)
+
                     # Extract confidence BEFORE stripping tag so agent self-score is used
                     # (Haiku fallback only fires when tag is missing)
                     tools_used = [c.get("tool", "") for c in tool_calls_log]
@@ -1547,6 +1592,8 @@ class BaseSpecialistAgent(abc.ABC):
 
                     await _maybe_store_query_pattern(db, self.tenant_id, task, tool_calls_log)
 
+                    if evidence is not None:
+                        yield "text", final_text
                     yield (
                         "response",
                         AgentResult(
@@ -1566,6 +1613,12 @@ class BaseSpecialistAgent(abc.ABC):
                 messages.append(adapter.build_assistant_message(response))
                 tool_results_content = []
                 raw_result_strings: list[str] = []  # Track originals for stop-when-done check
+                from app.services.chat.metabase_context import metabase_tool_names
+
+                # BI queries may return metadata, partial populations, or one
+                # aggregate before the control query. Let that batch complete.
+                _metabase_names = metabase_tool_names(self.tool_definitions)
+                _metabase_analysis = any(block.name in _metabase_names for block in response.tool_use_blocks)
 
                 for i, block in enumerate(response.tool_use_blocks):
                     if block.name.startswith("workspace_"):
@@ -1629,13 +1682,15 @@ class BaseSpecialistAgent(abc.ABC):
                             InterceptResult,
                             intercept_clarify_call,
                         )
-                        from app.services.connection_service import list_connections
 
                         # Active connectors = MCP connectors + REST connections.
                         # REST-only tenants (e.g., NetSuite via REST API without an
                         # MCP connector) would otherwise be excluded from the
                         # canonical-source set and every clarify option would drop.
-                        _mcp_providers = [getattr(c, "provider", "") for c in getattr(self, "_connectors", [])]
+                        from app.services.chat.plan_mode.source_resolver import source_provider_for_connector
+                        from app.services.connection_service import list_connections
+
+                        _mcp_providers = [source_provider_for_connector(c) for c in getattr(self, "_connectors", [])]
                         _rest_connections: list = []
                         try:
                             _rest_connections = await list_connections(db, self.tenant_id)
@@ -1733,9 +1788,9 @@ class BaseSpecialistAgent(abc.ABC):
                     # ── End Plan Mode clarify intercept ──
 
                     # ── Mutation intercept: HITL write confirmation ──
-                    from app.services.chat.mutation_guard import classify_mutation
+                    from app.services.chat.mutation_guard import classify_connector_mutation
 
-                    mutation_type = classify_mutation(block.name)
+                    mutation_type = await classify_connector_mutation(block.name, db, self.tenant_id)
                     if mutation_type is not None:
                         record_type = block.input.get("recordType", "unknown")
 
@@ -1748,7 +1803,7 @@ class BaseSpecialistAgent(abc.ABC):
                         # server-executed fetch (slot_option_sources.py),
                         # resolved below once validation/the repair loop have
                         # decided this attempt is the one shown as a card.
-                        _ask_user_hint = block.input.pop("ask_user", None)
+                        _ask_user_hint = block.input.pop("ask_user", None) if mutation_type != "execute" else None
 
                         # Is this write headed for NetSuite at all? Everything
                         # the agentic write loop adds below — the investigation
@@ -1768,7 +1823,15 @@ class BaseSpecialistAgent(abc.ABC):
                         )
 
                         _parsed_write = _parse_write_tool_name(block.name)
-                        _is_netsuite_write = bool(_parsed_write and _parsed_write[1].startswith("ns_"))
+                        _is_netsuite_write = bool(
+                            mutation_type != "execute" and _parsed_write and _parsed_write[1].startswith("ns_")
+                        )
+                        if mutation_type == "execute" and _parsed_write:
+                            record_type = f"external tool {_parsed_write[1]}"
+                        elif mutation_type == "execute":
+                            from app.services.chat.http_connector_tools import describe_target
+
+                            record_type = await describe_target(block.name, db, self.tenant_id)
 
                         # ── Investigation gate (requirement A) — mechanism,
                         # not prompt (the write profile's metadata-first
@@ -2078,8 +2141,28 @@ class BaseSpecialistAgent(abc.ABC):
                         # before/after diff display (capped at 5s to avoid
                         # blocking the SSE stream on slow MCP calls)
                         current_record: dict[str, Any] | None = None
-                        if mutation_type in ("update", "upsert"):
-                            record_id = block.input.get("id") or (block.input.get("body") or {}).get("id")
+                        accounting_card = None
+                        if _is_netsuite_write and mutation_type == "update":
+                            from app.services.chat.write_payload import normalize_write_payload
+                            from app.services.transaction_ops.tax_correction import review_for_card
+
+                            try:
+                                accounting_card = review_for_card(
+                                    db, self.tenant_id, block.name, record_type, normalize_write_payload(block.input)
+                                )
+                            except ValueError as exc:
+                                if validation is None:
+                                    validation = ValidationResult(ok=False)
+                                validation.invariant_errors.append(str(exc))
+                                validation.ok = False
+                            if accounting_card:
+                                current_record = accounting_card["before"]
+                        if mutation_type in ("update", "upsert") and accounting_card is None:
+                            record_id = (
+                                block.input.get("recordId")
+                                or block.input.get("id")
+                                or (block.input.get("body") or {}).get("id")
+                            )
                             if record_id:
                                 from app.services.chat.tools import _make_ext_tool_name, parse_external_tool_name
 
@@ -2097,7 +2180,7 @@ class BaseSpecialistAgent(abc.ABC):
                                         get_result_str = await _aio.wait_for(
                                             execute_tool_call(
                                                 tool_name=get_tool_name,
-                                                tool_input={"recordType": record_type, "id": str(record_id)},
+                                                tool_input={"recordType": record_type, "recordId": str(record_id)},
                                                 tenant_id=self.tenant_id,
                                                 actor_id=self.user_id,
                                                 correlation_id=self.correlation_id,
@@ -2107,6 +2190,10 @@ class BaseSpecialistAgent(abc.ABC):
                                             timeout=5.0,
                                         )
                                         current_record = json.loads(get_result_str)
+                                        if isinstance(current_record, dict) and isinstance(
+                                            current_record.get("data"), dict
+                                        ):
+                                            current_record = current_record["data"]
                                     except Exception:
                                         logger.warning(
                                             "mutation_intercept: failed to pre-fetch %s/%s",
@@ -2297,6 +2384,11 @@ class BaseSpecialistAgent(abc.ABC):
                             # — not "a write tool was called" — is what stands
                             # the prose guard down; see _write_reached_the_human.
                             self._write_confirmation_emitted = True
+                            if accounting_card:
+                                payload.accounting_review = accounting_card
+                                from app.services.transaction_ops.tax_correction import approval_text
+
+                                yield "text", "\n\n" + approval_text(accounting_card) + "\n\n"
                             yield ("confirmation_required", payload.model_dump())
                             _confirmation_result: dict[str, Any] = {
                                 "confirmation_required": True,
@@ -2554,6 +2646,11 @@ class BaseSpecialistAgent(abc.ABC):
                     # idempotent over an interceptor that already condensed a metric (the
                     # condensed string carries no suppress_llm_value flag).
                     llm_result_str = _suppress_metric_value_for_llm(llm_result_str)
+                    evidence = getattr(self, "_metabase_evidence", None)
+                    if evidence is not None and block.name in evidence.tool_names:
+                        grounded_result = evidence.observe(block.name, block.input, full_result_str)
+                        if grounded_result != full_result_str:
+                            llm_result_str = _suppress_metric_value_for_llm(grounded_result)
 
                     tool_calls_log.append(
                         build_tool_call_log_entry(
@@ -2577,6 +2674,77 @@ class BaseSpecialistAgent(abc.ABC):
                         }
                     )
 
+                    # The supported accounting payload is already deterministic. Route it
+                    # through the existing validator/HITL card instead of asking the model
+                    # to repeat it in another hop (which can hallucinate a card in prose).
+                    if block.name == "transaction_ops_accounting_evidence" and not _had_error:
+                        from app.services.transaction_ops.tax_correction import candidate_confirmation
+
+                        try:
+                            prepared = await candidate_confirmation(
+                                db=db,
+                                tenant_id=self.tenant_id,
+                                actor_id=self.user_id,
+                                correlation_id=self.correlation_id,
+                                session_id=session_id or str(self.tenant_id),
+                                task=task,
+                                tools=self.tool_definitions,
+                                policy=active_policy,
+                                case_id=block.input.get("case_id"),
+                            )
+                        except ValueError as exc:
+                            prepared = None
+                            note = f"The correction needs review before an approval card can be created: {exc}"
+                            yield "text", "\n\n" + note
+                            yield (
+                                "response",
+                                AgentResult(
+                                    success=False,
+                                    data=note,
+                                    error=str(exc),
+                                    tool_calls_log=tool_calls_log,
+                                    tokens_used=TokenUsage(
+                                        total_input_tokens, total_output_tokens, total_cache_creation, total_cache_read
+                                    ),
+                                    agent_name=self.agent_name,
+                                ),
+                            )
+                            return
+                        if prepared:
+                            card, note = prepared
+                            self._write_confirmation_emitted = True
+                            tool_calls_log.append(
+                                build_tool_call_log_entry(
+                                    step=step,
+                                    agent_name=self.agent_name,
+                                    tool_name=card.tool_name,
+                                    params=card.tool_input,
+                                    duration_ms=0,
+                                    result_str=json.dumps(
+                                        {
+                                            "confirmation_required": True,
+                                            "proposal_origin": "verified_accounting_evidence",
+                                            "financial_writes": 0,
+                                        }
+                                    ),
+                                )
+                            )
+                            yield "text", "\n\n" + note
+                            yield "confirmation_required", card.model_dump()
+                            yield (
+                                "response",
+                                AgentResult(
+                                    success=True,
+                                    data=note,
+                                    tool_calls_log=tool_calls_log,
+                                    tokens_used=TokenUsage(
+                                        total_input_tokens, total_output_tokens, total_cache_creation, total_cache_read
+                                    ),
+                                    agent_name=self.agent_name,
+                                ),
+                            )
+                            return
+
                     # Early exit: if this tool returned data and there are more
                     # tools queued, skip redundant DATA tools — but always allow
                     # knowledge/context tools (workspace_search, rag_search, web_search)
@@ -2585,6 +2753,7 @@ class BaseSpecialistAgent(abc.ABC):
                     must_run = [b for b in remaining_blocks if b.name in _KNOWLEDGE_TOOLS]
                     if (
                         getattr(self, "_context_need", None) != "full"
+                        and not _metabase_analysis
                         and skippable
                         and _has_successful_data_result([result_str])
                     ):
@@ -2612,6 +2781,7 @@ class BaseSpecialistAgent(abc.ABC):
                 # Soft enforcement: nudge LLM to stop if data was already returned
                 if (
                     getattr(self, "_context_need", None) != "full"
+                    and not _metabase_analysis
                     and step >= 1
                     and _has_successful_data_result(raw_result_strings)
                 ):
@@ -2644,7 +2814,7 @@ class BaseSpecialistAgent(abc.ABC):
                 messages=messages,
                 thinking_level=current_thinking_level,
             ):
-                if event_type == "text":
+                if event_type == "text" and getattr(self, "_metabase_evidence", None) is None:
                     yield "text", payload
                 elif event_type == "response":
                     response = payload
@@ -2656,6 +2826,16 @@ class BaseSpecialistAgent(abc.ABC):
                 total_cache_read += response.usage.cache_read_input_tokens
 
             final_text = "\n".join(response.text_blocks) if response and response.text_blocks else ""
+
+            evidence = getattr(self, "_metabase_evidence", None)
+            if evidence is not None:
+                from app.services.chat.metabase_evidence import UNVERIFIED
+
+                if evidence.feedback(strip_confidence_tag(final_text)):
+                    self._numeric_verification_failed = True
+                    final_text = UNVERIFIED
+                else:
+                    final_text = evidence.resolve(final_text)
 
             # Extract confidence BEFORE stripping tag so agent self-score is used
             # (Haiku fallback only fires when tag is missing)
@@ -2679,6 +2859,8 @@ class BaseSpecialistAgent(abc.ABC):
 
             await _maybe_store_query_pattern(db, self.tenant_id, task, tool_calls_log)
 
+            if evidence is not None:
+                yield "text", final_text
             yield (
                 "response",
                 AgentResult(

@@ -260,3 +260,36 @@ class TestListSchedules:
         task_names = [s["task"] for s in data]
         assert "tasks.knowledge_crawler" in task_names
         assert "tasks.auto_learning" in task_names
+
+    @pytest.mark.asyncio
+    async def test_schedule_field_is_a_human_phrase_not_raw_celery_text(self):
+        """Live-run defect (brief G item 5): with REAL Beat schedule values
+        (a plain numeric interval, and an actual `celery.schedules.crontab`
+        — not the string stand-ins `test_returns_schedules` above uses), the
+        `schedule` field must be the human phrase `format_beat_schedule`
+        produces, never the raw `str()` of the underlying object (e.g.
+        "21600" or "<crontab: 0 3 * * * (m/h/dM/MY/d)>")."""
+        from celery.schedules import crontab
+
+        with patch("app.workers.celery_app.celery_app") as mock_celery:
+            mock_celery.conf.beat_schedule = {
+                "oracle-skill-reseed": {
+                    "task": "tasks.oracle_skill_reseed",
+                    "schedule": 6 * 60 * 60,
+                },
+                "knowledge-crawler": {
+                    "task": "tasks.knowledge_crawler",
+                    "schedule": crontab(hour=3, minute=0),
+                },
+            }
+
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                response = await client.get(
+                    "/api/v1/jobs/schedules",
+                    headers={"Authorization": "Bearer test"},
+                )
+        assert response.status_code == 200
+        data = response.json()
+        by_name = {s["name"]: s["schedule"] for s in data}
+        assert by_name["oracle-skill-reseed"] == "every 6 h"
+        assert by_name["knowledge-crawler"] == "daily 03:00"

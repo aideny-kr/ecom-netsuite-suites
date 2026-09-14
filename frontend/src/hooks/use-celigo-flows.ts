@@ -9,6 +9,40 @@ import { apiClient } from "@/lib/api-client";
 // backend keeps them explicit (no `raw_json` leakage): these types must stay
 // in lockstep with it by hand, the same discipline, not auto-generated.
 
+/** A flow's schedule, relayed by the API as whatever JSON Celigo sent
+ * (`CeligoSchedule` in `celigo_flows.py`). The only shape seen live is a
+ * six-field cron STRING (e.g. `? 0 0 6 * *`; 96 of 239 flows); `null` is on
+ * demand. `formatSchedule` renders anything else as a generic label -- the
+ * API deliberately does not vouch for the shape, so neither does this type. */
+export type CeligoSchedule = string | Record<string, unknown> | unknown[] | number | boolean | null;
+
+/** `filter_json`/`mapping_json`'s type on the wire (`JsonValue` on
+ * `CeligoFlowStepOut` in `celigo_flows.py`) -- the same reasoning as
+ * `CeligoSchedule` above: these are opaque Celigo config relayed as-is, a
+ * shape nobody has seen yet must not break the whole flow response. */
+export type CeligoJson = Record<string, unknown> | unknown[] | string | number | boolean | null;
+
+/** One `(record_type, count)` row of a flow's write mix (`CeligoRecordWriteOut`
+ * in `celigo_flows.py`) -- every record type actually POSTED from the flow
+ * (a lookup export's `record_type` with no `operation` is a read, not a
+ * write, and is excluded server-side), ordered by count desc then
+ * record_type. */
+export interface CeligoRecordWrite {
+  record_type: string;
+  count: number;
+}
+
+/** One row of `CeligoIntegration.flow_schedules` (`CeligoFlowScheduleOut` in
+ * `celigo_flows.py`) -- the per-flow detail behind the card's aggregate
+ * schedule counts. */
+export interface CeligoFlowSchedule {
+  id: string;
+  name: string;
+  disabled: boolean | null;
+  schedule: CeligoSchedule;
+  last_executed_at: string | null;
+}
+
 export interface CeligoIntegration {
   id: string;
   celigo_id: string;
@@ -17,6 +51,40 @@ export interface CeligoIntegration {
   mode: string | null;
   description: string | null;
   celigo_last_modified: string | null;
+  /** Task 6 -- dashboard summaries, each a grouped query server-side across
+   * every integration at once (never N+1) -- see `CeligoIntegrationOut`'s
+   * docstring (backend/app/api/v1/celigo_flows.py) for what each one counts
+   * and why `scheduled_count + on_demand_count + paused_count ===
+   * flow_count` always. */
+  flow_count: number;
+  scheduled_count: number;
+  on_demand_count: number;
+  paused_count: number;
+  step_count: number;
+  router_count: number;
+  lookup_count: number;
+  script_count: number;
+  no_run_count: number;
+  error_count: number;
+  /** Task 18 -- the integration-wide twin of `CeligoFlowSummary.signature_count`:
+   * DISTINCT root causes across every flow in the integration, so the tile's
+   * `ErrorPill` reads "10 open · 1 root cause" the same way the flows table and
+   * the flow page already do for the same underlying errors, instead of
+   * defaulting to "10 open · 10 root causes" (one claim per row) when this
+   * field didn't exist. */
+  signature_count: number;
+  changes_last_24h: number;
+  last_run_at: string | null;
+  writes: CeligoRecordWrite[];
+  adaptor_families: string[];
+  flow_schedules: CeligoFlowSchedule[];
+  /** The OLDEST `errors_checked_at` among this integration's own flows, null
+   * if ANY flow is unchecked (or the integration has no flows) -- so a
+   * non-null value here is a promise that EVERY flow's open-error count was
+   * asked with the correct endpoint, not just some of them. Feeds
+   * `ErrorPill`'s `checkedAt`: `error_count === 0` with this `null` is not a
+   * verified zero, it is "not checked yet" (see that pill's docstring). */
+  errors_checked_at: string | null;
 }
 
 export interface CeligoFlowSummary {
@@ -24,13 +92,30 @@ export interface CeligoFlowSummary {
   celigo_id: string;
   name: string;
   disabled: boolean | null;
-  schedule: Record<string, unknown> | null;
+  schedule: CeligoSchedule;
   timezone: string | null;
   last_executed_at: string | null;
   /** Raw open-error count (`resolved_at IS NULL AND purged_at IS NULL`). */
   error_count: number;
   /** Open DISTINCT root-cause count -- the plan's deviation 1 lead value. */
   signature_count: number;
+  /** Task 5 -- topology/script/write aggregates for the flow-list table
+   * columns, each a grouped query server-side (never N+1) -- see
+   * `CeligoFlowSummaryOut`'s docstring (backend/app/api/v1/celigo_flows.py)
+   * for what each one counts. */
+  step_count: number;
+  router_count: number;
+  branch_count: number;
+  lookup_count: number;
+  script_count: number;
+  diverged_family_count: number;
+  writes: CeligoRecordWrite[];
+  celigo_last_modified: string | null;
+  /** When this flow's OWN open-error count was last asked with the correct
+   * per-flow endpoint -- null when it never has been. Feeds `ErrorPill`'s
+   * `checkedAt`; see `CeligoIntegration.errors_checked_at`'s docstring for
+   * why a zero without this is not a verified zero. */
+  errors_checked_at: string | null;
 }
 
 export interface CeligoAttachment {
@@ -42,6 +127,14 @@ export interface CeligoAttachment {
   function_name: string | null;
   json_path: string;
   site_type: string | null;
+  /** Script clone-family state (`topology.script_family_facts`) -- null when
+   * the attachment's script isn't synced locally, or is a sandbox copy. */
+  script_name: string | null;
+  script_size_chars: number | null;
+  script_copies_count: number | null;
+  script_versions_count: number | null;
+  script_version_letter: string | null;
+  script_content_diverged: boolean | null;
 }
 
 export interface CeligoFlowStep {
@@ -55,11 +148,37 @@ export interface CeligoFlowStep {
   sequence: number;
   adaptor_type: string | null;
   connection_celigo_id: string | null;
-  filter_json: Record<string, unknown> | null;
-  mapping_json: Record<string, unknown> | null;
+  reference_name: string | null;
+  filter_json: CeligoJson;
+  mapping_json: CeligoJson;
   proceed_on_failure: boolean | null;
   skip_retries: boolean | null;
+  /** Celigo's own vocabulary (`topology.step_kind`). */
+  kind: "source" | "lookup" | "destination";
+  record_type: string | null;
+  operation: string | null;
+  search_id: string | null;
   attachments: CeligoAttachment[];
+  /** Open (`celigo_error_is_open()`) error count attributed to THIS step. */
+  error_count: number;
+}
+
+export interface CeligoRouterBranch {
+  id: string | null;
+  name: string | null;
+  rule_count: number;
+  next_router_id: string | null;
+  order: number;
+  declared_step_count: number;
+}
+
+export interface CeligoRouter {
+  id: string | null;
+  name: string | null;
+  route_records_to: string | null;
+  route_records_using: string | null;
+  has_script_slot: boolean;
+  branches: CeligoRouterBranch[];
 }
 
 export interface CeligoFlowDetail {
@@ -68,7 +187,7 @@ export interface CeligoFlowDetail {
   celigo_id: string;
   name: string;
   disabled: boolean | null;
-  schedule: Record<string, unknown> | null;
+  schedule: CeligoSchedule;
   timezone: string | null;
   last_executed_at: string | null;
   source_id: string | null;
@@ -77,6 +196,25 @@ export interface CeligoFlowDetail {
   celigo_last_modified: string | null;
   steps: CeligoFlowStep[];
   unassigned_attachments: CeligoAttachment[];
+  routers: CeligoRouter[];
+  /** Celigo's OWN open-error count/timestamp (`raw_json.numOpenError`/
+   * `lastErrorAt`) -- distinct from this app's own error tables. */
+  celigo_open_error_count: number | null;
+  last_error_at: string | null;
+  /** This app's OWN open counts (Task 4). `error_count` is EVERY open error on
+   * the flow, the ones no step owns included (Celigo reports router-level and
+   * pre-dispatch failures with a null `flow_step_id`) -- so adding up the
+   * steps' own `error_count`s can come to LESS than this, and a UI must not
+   * present the two as the same number. `signature_count` is DISTINCT root
+   * causes across the whole flow (not a per-step sum, which would over-count a
+   * signature spanning multiple steps). */
+  error_count: number;
+  signature_count: number;
+  /** When this flow's OWN open-error count was last asked with the correct
+   * per-flow endpoint -- null when it never has been. See
+   * `CeligoIntegration.errors_checked_at`'s docstring for why a zero
+   * without this is not a verified zero. */
+  errors_checked_at: string | null;
 }
 
 export function useCeligoIntegrations() {
@@ -185,5 +323,250 @@ export function useCeligoScript(scriptId: string | undefined) {
     queryKey: ["celigo", "script", scriptId],
     queryFn: () => apiClient.get<CeligoScript>(`/api/v1/celigo/scripts/${scriptId}`),
     enabled: !!scriptId,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Task 3 -- account-wide Scripts view (spec §2.2/§2.4/§3.3), mirroring
+// `backend/app/services/celigo/script_families.py`'s frozen dataclasses via
+// `backend/app/api/v1/celigo_flows.py`'s Out models field-for-field
+// (uuid fields coerced to `string` server-side, same as every other Celigo
+// type in this file). This is a DIFFERENT clone-family view from
+// `CeligoScript` above: that one is a single script plus its family's
+// attachment sites (the drawer, `GET /celigo/scripts/{id}`); these are the
+// account-wide LIST (every family, `GET /celigo/scripts/families`, no
+// `content`/`content_hash` -- the N2 boundary, spec §5) and one family's
+// full DETAIL (`GET /celigo/scripts/families/{dedup_key}`, `content` per
+// member -- the only other place, besides the drawer, script content is
+// allowed to reach the browser).
+// ---------------------------------------------------------------------------
+
+/** `ScriptFamilySummary.kind`'s closed vocabulary (spec §2.2) -- a single
+ * site_type -> that kind; several disagreeing site_types on one family ->
+ * `"mixed"`; no sites at all -> `"unattached"`. Exported so callers that key
+ * off every kind (`family-row.tsx`'s `KIND_BADGE`,
+ * `celigo-scripts-list.tsx`'s `GROUP_TITLE`) get an exhaustiveness check
+ * from tsc instead of a bare `string` that silently accepts a typo or an
+ * enum value the backend hasn't sent yet. */
+export type CeligoScriptFamilyKind = "hook" | "transform" | "filter" | "router" | "mixed" | "unattached";
+
+export interface CeligoScriptFamilyTotals {
+  scripts: number;
+  families: number;
+  attached_families: number;
+  unattached_families: number;
+  diverged_families: number;
+  sites: number;
+  flows_with_sites: number;
+  flows_total: number;
+  integrations_with_sites: number;
+  sites_with_open_errors: number;
+}
+
+/** The LIST row (`CeligoScriptFamilySummaryOut`) -- deliberately no
+ * `content`/`content_hash` field; see this module's docstring above. */
+export interface CeligoScriptFamilySummary {
+  dedup_key: string;
+  name: string;
+  kind: CeligoScriptFamilyKind;
+  function_name: string | null;
+  copies_count: number;
+  versions_count: number;
+  content_diverged: boolean;
+  original_present: boolean;
+  sites_count: number;
+  flows_count: number;
+  integrations_count: number;
+  integration_ids: string[];
+  flow_names: string[];
+  sites_with_open_errors: number;
+  sites_unchecked: number;
+  first_modified: string | null;
+  last_modified: string | null;
+  max_size_bytes: number | null;
+  other_families_with_name: number;
+}
+
+export interface CeligoScriptFamiliesList {
+  totals: CeligoScriptFamilyTotals;
+  families: CeligoScriptFamilySummary[];
+  /** Last successful flow-map sync (`read_queries.sync_status`), `null` =
+   * never -- same "not known yet, never a confident zero" rule as
+   * `CeligoIntegration.errors_checked_at` elsewhere in this file. */
+  synced_at: string | null;
+}
+
+/** One family member (`CeligoScriptFamilyMemberOut`) -- the DETAIL response
+ * only; `content` IS present here (see this module's docstring above). */
+export interface CeligoScriptFamilyMember {
+  script_id: string;
+  celigo_id: string;
+  name: string;
+  is_original: boolean;
+  version_letter: string | null;
+  content_hash: string | null;
+  size_bytes: number | null;
+  celigo_last_modified: string | null;
+  sites_count: number;
+  flows_count: number;
+  content: string | null;
+}
+
+export interface CeligoScriptFamilyVersion {
+  letter: string;
+  content_hash: string;
+  copies_count: number;
+  sites_count: number;
+  first_seen: string | null;
+  size_bytes: number | null;
+  holds_original: boolean;
+}
+
+/** One where-used row (`CeligoScriptFamilySiteOut`). `open_error_count`
+ * is `null` for router-level sites (no owning step); `errors_checked_at`
+ * is the flow's own honesty stamp (spec §1 item 8) -- `null` means "never
+ * checked", not "checked, zero found". */
+export interface CeligoScriptFamilySite {
+  attachment_id: string;
+  script_id: string | null;
+  script_celigo_id: string;
+  version_letter: string | null;
+  integration_id: string | null;
+  integration_name: string | null;
+  flow_id: string;
+  flow_name: string;
+  flow_disabled: boolean | null;
+  flow_step_id: string | null;
+  step_reference_name: string | null;
+  step_role: string | null;
+  step_adaptor_type: string | null;
+  step_record_type: string | null;
+  step_operation: string | null;
+  json_path: string;
+  function_name: string | null;
+  site_type: string;
+  open_error_count: number | null;
+  errors_checked_at: string | null;
+}
+
+export interface CeligoScriptFamilyDetail {
+  summary: CeligoScriptFamilySummary;
+  members: CeligoScriptFamilyMember[];
+  versions: CeligoScriptFamilyVersion[];
+  sites: CeligoScriptFamilySite[];
+}
+
+export function useCeligoScriptFamilies() {
+  return useQuery<CeligoScriptFamiliesList>({
+    queryKey: ["celigo", "script-families"],
+    queryFn: () => apiClient.get<CeligoScriptFamiliesList>("/api/v1/celigo/scripts/families"),
+  });
+}
+
+export function useCeligoScriptFamily(dedupKey: string | null) {
+  return useQuery<CeligoScriptFamilyDetail>({
+    queryKey: ["celigo", "script-family", dedupKey],
+    queryFn: () =>
+      apiClient.get<CeligoScriptFamilyDetail>(
+        `/api/v1/celigo/scripts/families/${encodeURIComponent(dedupKey ?? "")}`,
+      ),
+    enabled: !!dedupKey,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Task 4 -- grouped flow errors (`CeligoFlowErrorGroupOut`/`CeligoFlowErrorsOut`
+// in celigo_flows.py), mirrored field-for-field. `CeligoErrorSignature`/
+// `CeligoError` mirror `CeligoErrorSignatureOut`/`CeligoErrorOut` the same way.
+// ---------------------------------------------------------------------------
+
+export interface CeligoErrorSignature {
+  id: string;
+  fingerprint: string;
+  source: string | null;
+  code: string | null;
+  sample_message: string | null;
+  occurrence_count: number;
+  first_seen: string | null;
+  last_seen: string | null;
+}
+
+export interface CeligoError {
+  id: string;
+  celigo_id: string;
+  flow_id: string | null;
+  flow_step_id: string | null;
+  trace_key: string | null;
+  source: string | null;
+  code: string | null;
+  message: string | null;
+  occurred_at: string | null;
+  purge_at: string | null;
+  resolved_at: string | null;
+  purged_at: string | null;
+  retriable: boolean | null;
+}
+
+export interface CeligoFlowErrorGroup {
+  signature: CeligoErrorSignature | null;
+  count: number;
+  step_ids: (string | null)[];
+  first_seen_at: string | null;
+  last_seen_at: string | null;
+  retriable: boolean | null;
+  purge_at: string | null;
+  trace_keys: string[];
+  errors: CeligoError[];
+}
+
+export interface CeligoFlowErrors {
+  flow_id: string;
+  status: "open" | "resolved";
+  /** Rows this response actually grouped, capped server-side at 2000 -- NOT
+   * the flow's whole-population count. Read it as "at least"; the uncapped
+   * total is `CeligoFlowDetail.error_count`. Nothing renders it today. */
+  total: number;
+  groups: CeligoFlowErrorGroup[];
+}
+
+export function useCeligoFlowErrors(flowId: string | undefined, status: "open" | "resolved" = "open") {
+  return useQuery<CeligoFlowErrors>({
+    queryKey: ["celigo", "flow", flowId, "errors", status],
+    queryFn: () => apiClient.get<CeligoFlowErrors>(`/api/v1/celigo/flows/${flowId}/errors?status=${status}`),
+    enabled: !!flowId,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Task 7 -- config-change routes (`CeligoConfigChangeOut` in celigo_flows.py),
+// mirrored field-for-field. `object_id` carries no FK (the model has none
+// either -- polymorphic over three object kinds), so it is relayed as-is.
+// ---------------------------------------------------------------------------
+
+export interface CeligoConfigChange {
+  id: string;
+  object_kind: string;
+  object_id: string | null;
+  celigo_id: string;
+  field: string;
+  old_value: CeligoJson;
+  new_value: CeligoJson;
+  flow_id: string | null;
+  created_at: string;
+}
+
+export function useCeligoIntegrationChanges(integrationId: string | undefined) {
+  return useQuery<CeligoConfigChange[]>({
+    queryKey: ["celigo", "integration", integrationId, "changes"],
+    queryFn: () => apiClient.get<CeligoConfigChange[]>(`/api/v1/celigo/integrations/${integrationId}/changes`),
+    enabled: !!integrationId,
+  });
+}
+
+export function useCeligoFlowChanges(flowId: string | undefined) {
+  return useQuery<CeligoConfigChange[]>({
+    queryKey: ["celigo", "flow", flowId, "changes"],
+    queryFn: () => apiClient.get<CeligoConfigChange[]>(`/api/v1/celigo/flows/${flowId}/changes`),
+    enabled: !!flowId,
   });
 }
