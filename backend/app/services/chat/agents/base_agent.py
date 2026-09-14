@@ -1412,6 +1412,7 @@ class BaseSpecialistAgent(abc.ABC):
 
         try:
             patched_files: set[str] = set()  # Dedup workspace_propose_patch per file
+            group_followup_used = False
             for step in range(self.max_steps):
                 # Check cancel flag between steps (background run graceful stop)
                 if run_id and step > 0:
@@ -2742,6 +2743,68 @@ class BaseSpecialistAgent(abc.ABC):
                                 ),
                             )
                             return
+                        if not prepared and block.name == "transaction_ops_accounting_group":
+                            investigation = db.info.get("accounting_group_investigation")
+                            if investigation:
+                                # Feed the actual evidence back into the same agent loop.
+                                # A zero-candidate result is not a confirmation or success.
+                                if not group_followup_used:
+                                    from app.services.transaction_ops.group_investigation import (
+                                        observation_preview,
+                                        representative_reads,
+                                    )
+
+                                    group_followup_used = True
+                                    details = []
+                                    read_name = "transaction_ops_accounting_evidence"
+                                    for read_params in representative_reads(investigation, tools):
+                                        read_start = time.monotonic()
+                                        read_policy = policy_evaluate(active_policy, read_name, read_params)
+                                        if not read_policy["allowed"]:
+                                            read_result = json.dumps({"error": "Policy blocked saved-evidence read"})
+                                        else:
+                                            read_result = await execute_tool_call(
+                                                tool_name=read_name,
+                                                tool_input=read_params,
+                                                tenant_id=self.tenant_id,
+                                                actor_id=self.user_id,
+                                                correlation_id=self.correlation_id,
+                                                db=db,
+                                                context_need=getattr(self, "_context_need", None),
+                                                session_id=session_id,
+                                            )
+                                            if active_policy and active_policy.blocked_fields:
+                                                read_result = json.dumps(
+                                                    redact_output(active_policy, json.loads(read_result)), default=str
+                                                )
+                                        # Bound extra model context. Full observations remain in their scoped audit.
+                                        preview = observation_preview(read_result)
+                                        details.append({**read_params, "result_preview": preview})
+                                        tool_calls_log.append(
+                                            build_tool_call_log_entry(
+                                                step=step,
+                                                agent_name=self.agent_name,
+                                                tool_name=read_name,
+                                                params=read_params,
+                                                result_str=preview,
+                                                duration_ms=int((time.monotonic() - read_start) * 1000),
+                                            )
+                                        )
+                                    investigation["representative_observations"] = details
+                                    investigation["representative_instruction"] = (
+                                        "The saved source and document details below have already been inspected for "
+                                        "up to four distinct batches. Use their actual line/adjustment facts to explain "
+                                        "the cause; fetch only missing evidence. Do not ask permission to continue the "
+                                        "requested investigation. Representatives do not verify the remaining orders."
+                                    )
+                                tool_results_content[-1]["content"] = json.dumps(investigation, default=str)
+                                yield (
+                                    "tool_status",
+                                    (
+                                        f"Evidence checked for {investigation['case_count']} orders. "
+                                        "Investigating why corrections are not ready…"
+                                    ),
+                                )
                         if prepared:
                             card, note = prepared
                             self._write_confirmation_emitted = True
@@ -2786,6 +2849,7 @@ class BaseSpecialistAgent(abc.ABC):
                     if (
                         getattr(self, "_context_need", None) != "full"
                         and not _metabase_analysis
+                        and not getattr(self, "_transaction_workflow", False)
                         and skippable
                         and _has_successful_data_result([result_str])
                     ):
@@ -2814,6 +2878,7 @@ class BaseSpecialistAgent(abc.ABC):
                 if (
                     getattr(self, "_context_need", None) != "full"
                     and not _metabase_analysis
+                    and not getattr(self, "_transaction_workflow", False)
                     and step >= 1
                     and _has_successful_data_result(raw_result_strings)
                 ):

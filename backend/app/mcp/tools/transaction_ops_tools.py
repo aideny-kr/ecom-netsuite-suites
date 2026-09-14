@@ -370,7 +370,7 @@ async def execute_groups(params: dict, **kwargs) -> dict:
 
 async def execute_accounting_group(params: dict, **kwargs) -> dict:
     """Freeze scoped membership for the server-side proposal handoff; no writes."""
-    from app.services.transaction_ops.case_groups import group_members
+    from app.services.transaction_ops.case_groups import preparation_members
     from app.services.transaction_ops.state_service import StateError
 
     context = kwargs.get("context") or {}
@@ -378,14 +378,7 @@ async def execute_accounting_group(params: dict, **kwargs) -> dict:
         if "group_id" not in params or set(params) - {"group_id", "review_run_ids", "status", "search"}:
             raise _ToolError("invalid_parameters")
         db, tenant_id, _ = await _authorize(context, create=True)
-        members = []
-        for offset in range(0, 500, 50):
-            page = await group_members(db, tenant_id, **params, limit=50, offset=offset)
-            members.extend(page["cases"])
-            if not page["has_next"]:
-                break
-        else:
-            raise _ToolError("Group exceeds 500 cases; narrow the period or entity. No partial group was prepared.")
+        members = await preparation_members(db, tenant_id, **params)
         if not members or len({m["case_id"] for m in members}) != len(members):
             raise _ToolError("Group is empty or changed; refresh the exact scoped group.")
         db.info["accounting_group_selection"] = {"group_id": params["group_id"], "scope": params, "members": members}
@@ -404,20 +397,41 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
 
     context = kwargs.get("context") or {}
     try:
-        if set(params) != {"case_id"}:
+        if "case_id" not in params or set(params) - {"case_id", "observation_id", "section"}:
+            raise _ToolError("invalid_parameters")
+        if "section" in params and "observation_id" not in params:
             raise _ToolError("invalid_parameters")
         db, tenant_id, actor = await _authorize(context, create=False)
         case = await case_service.get_case(db, tenant_id, uuid.UUID(str(params["case_id"])))
+        if "observation_id" in params:
+            from app.services.transaction_ops.group_investigation import read_observation
+
+            db.info.pop("accounting_correction_candidate", None)
+            return await read_observation(db, tenant_id, actor.id, case.id, params, context.get("correlation_id"))
         review = await accounting_context(db, tenant_id, case.scope_json, case.latest_report_json)
         import json
 
-        evidence = json.loads(
-            json.dumps(await collect_accounting_evidence(db, tenant_id, review, case.latest_report_json), default=str)
-        )
         from app.models.audit import AuditEvent
         from app.services.audit_service import log_event
+        from app.services.transaction_ops.group_investigation import unsupported_source_recipe
         from app.services.transaction_ops.source_reader import SourceReadError
         from app.services.transaction_ops.tax_correction import candidate, refresh_source
+
+        prefetched_source, source_error = None, None
+        if context.get("group_preparation") is True:
+            try:
+                prefetched_source = await refresh_source(db, tenant_id, review["scope"], case.order_reference)
+            except SourceReadError as exc:
+                source_error = exc
+        options = (
+            {"posting_detail": False} if prefetched_source and unsupported_source_recipe(prefetched_source) else {}
+        )
+        evidence = json.loads(
+            json.dumps(
+                await collect_accounting_evidence(db, tenant_id, review, case.latest_report_json, **options),
+                default=str,
+            )
+        )
 
         integration = await db.scalar(
             select(AuditEvent)
@@ -441,7 +455,13 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
         db.info.pop("accounting_correction_candidate", None)
         correction = None
         try:
-            source = await refresh_source(db, tenant_id, review["scope"], case.order_reference)
+            if source_error is not None:
+                raise source_error
+            source = (
+                prefetched_source
+                if prefetched_source is not None
+                else await refresh_source(db, tenant_id, review["scope"], case.order_reference)
+            )
             evidence["source_refresh"] = source
             from app.services.transaction_ops.commercial_credits import collect_commercial_credits
 
@@ -525,7 +545,7 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
             plan = proposal_plan(correction, case.latest_report_json)
             correction["resolution_plan"] = plan
             evidence["resolution_plan"] = plan
-        await log_event(
+        evidence_event = await log_event(
             db,
             tenant_id,
             category="transaction_ops",
@@ -536,6 +556,7 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
             correlation_id=context.get("correlation_id"),
             payload={"evidence": evidence, "correction_candidate": correction},
         )
+        evidence["audit_id"] = str(evidence_event.id)
         return {"success": True, "case_id": str(case.id), "accounting_evidence": evidence}
     except (ValueError, _ToolError, StateError, NetSuiteEvidenceError) as exc:
         return {"success": False, "error": "Accounting case or scoped configuration unavailable.", "reason": str(exc)}
