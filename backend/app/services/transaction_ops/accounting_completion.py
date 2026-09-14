@@ -426,7 +426,8 @@ async def complete(db, tenant_id, message_id, *, now=None, lock_engine=None):
                     "balance": report.get("balance") or {},
                     "next_step": next_step,
                     "cash_settlement": "not_verified",
-                    "checked_at": now.isoformat(),
+                    "checked_at": run.progress_json["settlement"]["checked_at"],
+                    "published_at": now.isoformat(),
                     "summary": "The correction is verified and source, sales-order totals, tax and refunds reconcile."
                     if verified
                     else "The native correction is verified. The complete order still needs review."
@@ -435,6 +436,8 @@ async def complete(db, tenant_id, message_id, *, now=None, lock_engine=None):
                 }
                 group_id = claim.get("group_approval_id")
                 if next_card:
+                    # Explicit order survives equal transaction timestamps and UUID sorting.
+                    next_card.created_at = now + timedelta(microseconds=1)
                     if group_id:
                         next_card.structured_output = {**next_card.structured_output, "accounting_group_child": True}
                     db.add(next_card)
@@ -466,6 +469,7 @@ async def complete(db, tenant_id, message_id, *, now=None, lock_engine=None):
                             output_tokens=0,
                             cache_creation_tokens=0,
                             cache_read_tokens=0,
+                            created_at=now,
                         )
                     )
                 message.structured_output = {

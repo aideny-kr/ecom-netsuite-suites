@@ -46,12 +46,16 @@ async def test_finished_recheck_publishes_once_with_original_approver_and_record
     prepare = AsyncMock(side_effect=AssertionError("Matched order must not prepare another write"))
     monkeypatch.setattr(mod, "prepare_next", prepare)
     assert message.id in await mod.candidates(db, actor.tenant_id, datetime.now(timezone.utc), limit=10)
-    result = await mod.complete(db, actor.tenant_id, message.id)
+    published_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    result = await mod.complete(db, actor.tenant_id, message.id, now=published_at)
     assert result["status"] == "reconciled"
     assert result["financial_writes"] == 0
     await db.refresh(message)
     receipt = message.structured_output["accounting_receipt"]
     assert receipt["approved_by"]["id"] == str(actor.id)
+    assert receipt["checked_at"] == run.progress_json["settlement"]["checked_at"]
+    assert receipt["published_at"] == published_at.isoformat()
+    assert receipt["checked_at"] != receipt["published_at"]
     assert receipt["reconciliation_run_id"] == str(run.id)
     assert {link["record_type"] for link in receipt["record_links"]} >= {"salesorder", "creditmemo"}
     assert receipt["balance"]["amounts"]["order_total"]["delta"] == "0.00"

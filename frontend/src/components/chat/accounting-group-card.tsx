@@ -131,6 +131,8 @@ export function AccountingGroupCard({
             const card = member.card;
             const p = card?.accounting_review;
             const receipt = member.resolution_receipt || card?.accounting_receipt;
+            const originalReceipt = card?.accounting_receipt;
+            const hasLaterReceipt = originalReceipt && receipt && originalReceipt.completion_audit_id !== receipt.completion_audit_id;
             const result =
               receipt?.status === "reconciled" ? "Reconciled" :
               receipt ? receipt.status === "partially_resolved" ? "Correction verified · further review" : "Verification needs review" :
@@ -183,7 +185,14 @@ export function AccountingGroupCard({
                   {receipt && (
                     <div className="mb-3 space-y-2 text-xs leading-relaxed" aria-label="Verified accounting result">
                       <p>{receipt.summary}</p>
-                      <p>Approved by {receipt.approved_by.name} · {new Date(receipt.approved_at).toLocaleString()}</p>
+                      {hasLaterReceipt && (
+                        <div aria-label="Original correction approval">
+                          <p>Original correction approved by {originalReceipt.approved_by.name} · {new Date(originalReceipt.approved_at).toLocaleString()}</p>
+                          <p className="break-all text-muted-foreground">Original audit reference: {originalReceipt.completion_audit_id}</p>
+                        </div>
+                      )}
+                      <p>{hasLaterReceipt ? "Latest correction approved by" : "Approved by"} {receipt.approved_by.name} · {new Date(receipt.approved_at).toLocaleString()}</p>
+                      <p className="break-all text-muted-foreground">Audit reference: {receipt.completion_audit_id}</p>
                       <div className="flex flex-wrap gap-3">
                         {receipt.record_links.map((link) => (
                           <a key={`${link.record_type}:${link.record_id}`} href={link.url} target="_blank" rel="noopener noreferrer" className="text-primary underline">{link.label}</a>
