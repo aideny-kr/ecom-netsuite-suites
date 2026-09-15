@@ -96,3 +96,83 @@ failure rolls back the plan change. Concurrent bootstrap/adoption calls serializ
 
 Synthetic regression coverage is useful but does not prove preservation of a real
 company export. Keep the migration ticket open until that rehearsal is verified.
+
+## Selective snapshot utility
+
+`python -m app.cli.company_snapshot` exports a reviewed policy and restores it into
+an **empty offline rehearsal database**. It requires `SNAPSHOT_DATABASE_URL`
+explicitly and never falls back to the application's environment configuration.
+The restore CLI accepts only loopback destinations whose names end in `_rehearsal`.
+Keep database and filesystem archives in a private directory outside the repository.
+
+The private JSON policy has exactly `version` (1), `tenant_id`, `tenant_slug`,
+`schema_revision` (list), and `tables`. Every public table needs an explicit rule:
+
+- `tenant`: exact company rows; optional `shared_ids` admits only reviewed system
+  or NULL-owner rows with those UUIDs.
+- `company`: only `tenants`, selecting the company and system owner.
+- `connections`: only `cursor_states`, selected through the company's connections.
+- `all`: only `roles`, `permissions`, `role_permissions`, and `alembic_version`.
+- `ids`: only `domain_knowledge_chunks`, with an explicit reviewed UUID list.
+
+A changed table inventory, absent reviewed ID or mismatched schema revision stops
+export. The utility holds one repeatable-read, read-only transaction and retains
+primary keys, exact encrypted bytes, JSON and numeric values through PostgreSQL
+binary COPY. The archive carries completion records, per-table counts and SHA256
+checksums. Partial archives cannot be imported. Stored generated columns are
+recomputed and their complete row contents are checked against the source too.
+
+Provision a fresh independent PostgreSQL cluster with the same major version and
+matching supported extensions. Load a reviewed **schema-only** copy, without seed
+rows, into the destination. Compare actual source schema drift with migrations;
+never drop source-only columns to make a restore pass. Columns, defaults, primary
+and foreign keys, indexes, triggers, policies and application functions must match.
+The supported application extensions are plpgsql, vector, pgcrypto, uuid-ossp,
+pg_trgm and btree_gin. Managed platform schemas/extensions are outside this public
+application snapshot; separately review any application dependency on them. Views,
+materialized views, sequences, identity columns, virtual generated columns and
+custom binary types other than vector require an explicit design before support.
+
+Export with `--policy`, `--archive` and `--report`, each pointing to a private path.
+All output paths must be new. Review the completed archive's SHA256 separately.
+Restore uses those same arguments plus `--expected-sha256`, `--expected-database`
+and `--expected-cluster` from the independently verified provisioning record.
+No API, worker or scheduler should run against the destination. Isolate its network.
+
+Restore owns one transaction and locks every table. It refuses a populated target
+or a source/destination cluster match. Operator-only trigger suppression permits
+exact import and circular references; it is local to the transaction. Before commit,
+all declared foreign keys (including composite/MATCH FULL), row scope, counts and
+content checksums are verified. Triggers are restored before commit. RLS-filtered
+operator reads fail closed. A rerun refuses existing rows instead of replacing them.
+If a connection/report failure leaves the outcome uncertain, inspect the destination;
+do not delete rows and retry against it. Use a newly provisioned target when needed.
+
+This utility does not copy workspace files, transfer decryption keys, grant runtime
+privileges, activate schedules or authorize cutover. Verify those separately with
+private before/after checksums and the adoption acceptance checks above.
+
+### Export window and schema fidelity
+
+Use a window with no deployments, migrations, table rewrites or TRUNCATE operations.
+Ordinary application writes may continue under the consistent snapshot. Export
+acquires all table locks before its first snapshot query; this avoids PostgreSQL's
+[table-rewrite snapshot caveat](https://www.postgresql.org/docs/17/mvcc-caveats.html).
+Locks remain held until export finishes, so a queued schema change can delay normal
+traffic behind it. Source lock timeout is five seconds; statement and idle-transaction
+timeouts are explicitly fifteen minutes. An interrupted export must start again.
+
+Database encoding, locale/provider/version and column collations must also match.
+Collatable keys use C ordering for deterministic checksums. Only the explicit
+portable builtin type allowlist (and their arrays) plus vector is supported;
+cluster-local identifiers such as oid/regclass are refused. Public rules and
+ALWAYS/REPLICA triggers are refused because replica mode would not suppress them.
+The same one-MiB frame limit is enforced during export and restore.
+
+A schema dump can reparse equivalent CHECK/index expressions into a different
+catalog representation. Preserve the strict comparison: provision through native
+migrations and reviewed source drift when necessary. In a freshly created,
+independently initialized, disposable destination only, remove that provisioning
+run's generated bootstrap catalogs after verifying their exact initial contents
+and that all other tables are empty. Never clear existing company data, and never
+prune a shared source. Record this preparation separately from the logical import.
