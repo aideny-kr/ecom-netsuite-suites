@@ -1,8 +1,8 @@
-"""Operator-only bootstrap for a dedicated, initially empty database.
+"""Operator-only fresh bootstrap and guarded adoption of an isolated company.
 
-No HTTP route calls this service. The database advisory lock serializes concurrent
-installers; public registration is disabled in SINGLE_COMPANY mode. Nothing here
-converts existing tenants, rotates passwords, seeds soul files, or enables autonomy.
+No HTTP route calls these services. Both serialize with the same advisory lock.
+Adoption only removes commercial plan restrictions; neither path rotates existing
+credentials, overwrites company instructions or supplies financial approval.
 """
 
 import uuid
@@ -26,17 +26,29 @@ _SYSTEM_TENANT = uuid.UUID(int=0)  # Migration 080 seeds the shared metric catal
 _COMPANY_FLAGS = {"mcp_tools", "byok_ai", "custom_branding", "reconciliation", "celigo", "recon_resolution_ui"}
 
 
+def company_entitlement_changes(plan: str) -> dict:
+    """Expose the commercial capability change without changing feature flags."""
+    from app.services.entitlement_service import PLAN_LIMITS
+
+    before = PLAN_LIMITS.get(plan, PLAN_LIMITS["free"])
+    after = PLAN_LIMITS["self_hosted"]
+    return {
+        key: {"before": before.get(key), "after": value} for key, value in after.items() if before.get(key) != value
+    }
+
+
 async def adopt_existing_company(
     db: AsyncSession,
     *,
     expected_tenant_id: uuid.UUID,
     expected_slug: str,
     expected_database: str,
+    expected_system_identifier: str,
     apply: bool = False,
 ) -> tuple[Tenant, bool]:
     """Convert an already-isolated company; preview by default, never extract/delete.
 
-    The operator supplies the exact destination database, company UUID and slug.
+    The operator supplies the destination cluster/database, company UUID and slug.
     Only the commercial plan/expiry change. Company configuration, permissions,
     feature flags, credentials, schedules, approvals and workspace files survive.
     This service owns its transaction and must use an otherwise clean session.
@@ -45,15 +57,24 @@ async def adopt_existing_company(
         raise ValueError("Existing-company adoption requires SINGLE_COMPANY=true")
     if db.new or db.dirty or db.deleted:
         raise ValueError("Adoption requires a clean operator session")
-    if not expected_database or not expected_slug or expected_tenant_id == _SYSTEM_TENANT:
-        raise ValueError("An explicit destination database and company identity are required")
+    if (
+        not expected_database
+        or not expected_slug
+        or expected_tenant_id == _SYSTEM_TENANT
+        or not expected_system_identifier.isdecimal()
+    ):
+        raise ValueError("An explicit destination cluster/database and company identity are required")
     try:
         database = (await db.execute(text("SELECT current_database()"))).scalar_one()
         if database != expected_database:
             raise ValueError("Destination database does not match the expected database")
+        cluster = (await db.execute(text("SELECT system_identifier::text FROM pg_control_system()"))).scalar_one()
+        if cluster != expected_system_identifier:
+            raise ValueError("Destination cluster does not match the expected system identifier")
         # Serialize with bootstrap; block concurrent tenant creation until commit.
-        # row_security=off raises if RLS would hide a second company from this
-        # inventory. This command needs operator authority, never runtime bypass.
+        # tenants itself has no RLS. row_security=off makes the subsequent scoped
+        # table inventory fail if RLS hides rows from this operator connection.
+        await db.execute(text("SET LOCAL lock_timeout = '5s'"))
         await db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _BOOTSTRAP_LOCK})
         await db.execute(text("SET LOCAL row_security = off"))
         await db.execute(text("LOCK TABLE tenants IN SHARE ROW EXCLUSIVE MODE"))
@@ -65,6 +86,32 @@ async def adopt_existing_company(
             raise ValueError("Company identity does not match the expected UUID and slug")
         if not tenant.is_active:
             raise ValueError("The company is deactivated; adoption will not reactivate it")
+        tables = (
+            (
+                await db.execute(
+                    text(
+                        "SELECT c.relname FROM pg_catalog.pg_class c "
+                        "JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+                        "JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid "
+                        "WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') "
+                        "AND a.attname = 'tenant_id' AND a.attnum > 0 AND NOT a.attisdropped ORDER BY c.relname"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for table in tables:
+            quoted = '"' + table.replace('"', '""') + '"'
+            await db.execute(text(f"LOCK TABLE public.{quoted} IN SHARE MODE"))
+            foreign = (
+                await db.execute(
+                    text(f"SELECT 1 FROM public.{quoted} WHERE tenant_id NOT IN (:company, :system) LIMIT 1"),
+                    {"company": tenant.id, "system": _SYSTEM_TENANT},
+                )
+            ).first()
+            if foreign:
+                raise ValueError("Destination contains rows belonging to another company; verify the export/import")
         await set_tenant_context(db, str(tenant.id))
         admin = (
             await db.execute(
@@ -91,6 +138,7 @@ async def adopt_existing_company(
             "plan": tenant.plan,
             "plan_expires_at": (tenant.plan_expires_at.isoformat() if tenant.plan_expires_at else None),
         }
+        entitlements = company_entitlement_changes(tenant.plan)
         tenant.plan = "self_hosted"
         tenant.plan_expires_at = None
         await log_event(
@@ -101,7 +149,12 @@ async def adopt_existing_company(
             actor_type="system",
             resource_type="tenant",
             resource_id=str(tenant.id),
-            payload={"before": previous, "after": {"plan": "self_hosted", "plan_expires_at": None}},
+            payload={
+                "before": previous,
+                "after": {"plan": "self_hosted", "plan_expires_at": None},
+                "entitlement_changes": entitlements,
+                "destination_system_identifier": cluster,
+            },
         )
         await db.commit()
         return tenant, True

@@ -15,6 +15,7 @@ from app.models.connection import Connection
 from app.models.job import Job
 from app.models.pipeline import Schedule
 from app.models.tenant import TenantConfig
+from app.services.audit_service import log_event
 from app.services.company_bootstrap import adopt_existing_company, validate_company_database
 from tests.conftest import (
     create_test_recon_result,
@@ -50,6 +51,9 @@ async def arguments(db, tenant):
         expected_tenant_id=tenant.id,
         expected_slug=tenant.slug,
         expected_database=(await db.execute(text("SELECT current_database()"))).scalar_one(),
+        expected_system_identifier=(
+            await db.execute(text("SELECT system_identifier::text FROM pg_control_system()"))
+        ).scalar_one(),
     )
 
 
@@ -91,6 +95,7 @@ async def test_adoption_preview_apply_and_replay_preserve_all_other_rows(db, com
     config.ai_api_key_encrypted = encrypt_credentials({"key": "synthetic-provider-key"})
     run = await create_test_recon_run(db, tenant.id)
     await create_test_recon_result(db, tenant.id, run.id, evidence={"source": "synthetic-preserved-evidence"})
+    await log_event(db, tenant.id, category="test", action="preserved.audit", payload={"original": True})
     await db.commit()
     soul = AsyncMock()
     monkeypatch.setattr("app.services.soul_service.seed_default_soul", soul)
@@ -114,6 +119,14 @@ async def test_adoption_preview_apply_and_replay_preserve_all_other_rows(db, com
         else:
             assert old == new
     assert len(after["audit_events"]) == len(before["audit_events"]) + 1
+    assert set(before["audit_events"]) <= set(after["audit_events"])
+    event = json.loads(next(iter(set(after["audit_events"]) - set(before["audit_events"]))))
+    assert event["tenant_id"] == str(tenant.id)
+    assert event["action"] == "company.adopt" and event["actor_type"] == "system"
+    assert event["payload"]["before"]["plan"] == "free"
+    assert event["payload"]["after"] == {"plan": "self_hosted", "plan_expires_at": None}
+    assert event["payload"]["entitlement_changes"]["chat_api"] == {"before": False, "after": True}
+    assert event["payload"]["destination_system_identifier"] == args["expected_system_identifier"]
     assert [await has_permission(db, owner.id, p) for p in ("tenant.manage", "connections.manage")] == permissions
     assert (await validate_company_database(db)).id == tenant.id
     _, changed = await adopt_existing_company(db, **args, apply=True)
@@ -122,7 +135,9 @@ async def test_adoption_preview_apply_and_replay_preserve_all_other_rows(db, com
     soul.assert_not_awaited()
 
 
-@pytest.mark.parametrize("mismatch", ["database", "id", "slug", "shared", "inactive", "no_admin", "mode"])
+@pytest.mark.parametrize(
+    "mismatch", ["database", "cluster", "id", "slug", "shared", "orphan", "inactive", "no_admin", "mode"]
+)
 async def test_adoption_rejects_wrong_database_or_company_without_any_changes(db, company_mode, monkeypatch, mismatch):
     tenant = await create_test_tenant(db, slug="expected-company")
     if mismatch != "no_admin":
@@ -130,12 +145,16 @@ async def test_adoption_rejects_wrong_database_or_company_without_any_changes(db
     args = await arguments(db, tenant)
     if mismatch == "database":
         args["expected_database"] = "wrong-database"
+    elif mismatch == "cluster":
+        args["expected_system_identifier"] = "0"
     elif mismatch == "id":
         args["expected_tenant_id"] = uuid.uuid4()
     elif mismatch == "slug":
         args["expected_slug"] = "wrong-company"
     elif mismatch == "shared":
         await create_test_tenant(db, slug="unrelated-company")
+    elif mismatch == "orphan":
+        db.add(Job(tenant_id=uuid.uuid4(), job_type="unrelated-orphan", status="completed"))
     elif mismatch == "inactive":
         tenant.is_active = False
     elif mismatch == "mode":
@@ -180,7 +199,12 @@ async def test_failed_adoption_audit_rolls_back_company_change(db, company_mode,
     await db.commit()
     args = await arguments(db, tenant)
     before = await snapshot(db)
-    monkeypatch.setattr("app.services.company_bootstrap.log_event", AsyncMock(side_effect=RuntimeError("audit failed")))
+
+    async def fail_after_update(*args, **kwargs):
+        await db.flush()
+        raise RuntimeError("audit failed")
+
+    monkeypatch.setattr("app.services.company_bootstrap.log_event", fail_after_update)
     with pytest.raises(RuntimeError, match="audit failed"):
         await adopt_existing_company(db, **args, apply=True)
     assert await snapshot(db) == before

@@ -6,6 +6,9 @@ import subprocess
 import sys
 
 import pytest
+from sqlalchemy.engine import make_url
+
+from app.core.config import settings
 
 
 @pytest.mark.parametrize("single_company", ["true", "false"])
@@ -50,10 +53,14 @@ def test_adoption_cli_requires_explicit_destination_identity():
         env={**os.environ, "SINGLE_COMPANY": "true"},
     )
     assert result.returncode == 1
-    assert "--expected-database, --tenant-id and --tenant-slug" in result.stderr
+    assert "--expected-system-identifier" in result.stderr
 
 
 def test_adoption_cli_refuses_wrong_database_without_printing_connection_details():
+    dsn = settings.DATABASE_URL_DIRECT or settings.DATABASE_URL
+    parsed = make_url(dsn)
+    if parsed.host not in {"127.0.0.1", "localhost"} or parsed.database != "ecom_netsuite_test":
+        pytest.skip("CLI connection check requires the isolated test database")
     result = subprocess.run(
         [
             sys.executable,
@@ -62,6 +69,8 @@ def test_adoption_cli_refuses_wrong_database_without_printing_connection_details
             "adopt-existing",
             "--expected-database",
             "wrong-db",
+            "--expected-system-identifier",
+            "0",
             "--tenant-id",
             "11111111-1111-1111-1111-111111111111",
             "--tenant-slug",
@@ -70,8 +79,52 @@ def test_adoption_cli_refuses_wrong_database_without_printing_connection_details
         ],
         capture_output=True,
         text=True,
-        env={**os.environ, "SINGLE_COMPANY": "true"},
+        env={
+            **os.environ,
+            "SINGLE_COMPANY": "true",
+            "APP_DEBUG": "false",
+            "DATABASE_URL": dsn,
+            "DATABASE_URL_DIRECT": dsn,
+        },
     )
     assert result.returncode == 1
     assert "Destination database does not match" in result.stderr
-    assert os.environ["DATABASE_URL"] not in result.stdout + result.stderr
+    for value in (dsn, parsed.password, parsed.host):
+        if value:
+            assert value not in result.stdout + result.stderr
+
+
+def test_operator_permission_error_has_safe_recovery_message(monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    from sqlalchemy.exc import DBAPIError
+
+    from app.cli import company
+
+    def fail(coro):
+        coro.close()
+        raise DBAPIError("secret-sql", {}, SimpleNamespace(sqlstate="42501"))
+
+    monkeypatch.setattr(company.asyncio, "run", fail)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "company",
+            "adopt-existing",
+            "--expected-database",
+            "synthetic",
+            "--expected-system-identifier",
+            "0",
+            "--tenant-id",
+            "11111111-1111-1111-1111-111111111111",
+            "--tenant-slug",
+            "example",
+            "--apply",
+        ],
+    )
+    assert company.main() == 1
+    output = capsys.readouterr().err
+    assert "operator database authority" in output
+    assert "rerun the preview" in output
+    assert "secret-sql" not in output

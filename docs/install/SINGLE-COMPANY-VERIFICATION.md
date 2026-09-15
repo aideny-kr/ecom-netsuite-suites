@@ -1,3 +1,11 @@
+# Historical foundation evidence only
+
+This document records the original September 13 local-evaluation foundation at
+the revisions listed below. It is superseded as release evidence and does **not**
+verify the FW-001 integration baseline, later existing-company adoption, a real
+company export/import, production runtime, or any deployment. Use the current
+ticket checkpoint and exact-revision CI/independent review for release decisions.
+
 # Single-company foundation — verification, 2026-09-13
 
 Branch: `codex/single-company-foundation`; base: `430d5751`.

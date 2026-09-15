@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import getpass
+import json
 import sys
 import uuid
 
@@ -11,7 +12,12 @@ from pydantic import ValidationError
 from app.core.config import settings
 from app.core.database import worker_async_session
 from app.schemas.auth import RegisterRequest
-from app.services.company_bootstrap import adopt_existing_company, bootstrap_company, validate_company_database
+from app.services.company_bootstrap import (
+    adopt_existing_company,
+    bootstrap_company,
+    company_entitlement_changes,
+    validate_company_database,
+)
 
 
 async def run(command: str, request: RegisterRequest | None = None, adoption: dict | None = None) -> None:
@@ -26,9 +32,18 @@ async def run(command: str, request: RegisterRequest | None = None, adoption: di
         elif command == "adopt-existing":
             assert adoption is not None
             tenant, changed = await adopt_existing_company(db, **adoption)
+            print("Verified destination cluster: " + adoption["expected_system_identifier"])
+            print(
+                "Connection selected from: "
+                + ("DATABASE_URL_DIRECT" if settings.DATABASE_URL_DIRECT else "DATABASE_URL")
+            )
             if not adoption["apply"]:
                 print(
                     f"Verified isolated company. Current plan: {tenant.plan}. Target plan: self_hosted; expiry: none."
+                )
+                print(
+                    "Commercial entitlement changes: "
+                    + json.dumps(company_entitlement_changes(tenant.plan), sort_keys=True)
                 )
                 print("Preview only. Use --apply after reviewing the preserved-data rehearsal and release gates.")
             else:
@@ -47,6 +62,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=["bootstrap", "adopt-existing", "check", "check-runtime"])
     parser.add_argument("--expected-database", help="Exact destination database name (never a URL)")
+    parser.add_argument("--expected-system-identifier", help="Destination PostgreSQL cluster system_identifier")
     parser.add_argument("--tenant-id", type=uuid.UUID, help="Existing company UUID to preserve")
     parser.add_argument("--tenant-slug", help="Existing company slug to preserve")
     parser.add_argument("--apply", action="store_true", help="Apply reviewed adoption; default is preview")
@@ -55,15 +71,20 @@ def main() -> int:
         request = None
         adoption = None
         if args.command == "adopt-existing":
-            if not all((args.expected_database, args.tenant_id, args.tenant_slug)):
-                raise ValueError("Adoption requires --expected-database, --tenant-id and --tenant-slug")
+            if not all((args.expected_database, args.expected_system_identifier, args.tenant_id, args.tenant_slug)):
+                raise ValueError(
+                    "Adoption requires --expected-database, --expected-system-identifier, --tenant-id and --tenant-slug"
+                )
             adoption = dict(
                 expected_database=args.expected_database,
+                expected_system_identifier=args.expected_system_identifier,
                 expected_tenant_id=args.tenant_id,
                 expected_slug=args.tenant_slug,
                 apply=args.apply,
             )
-        elif any((args.expected_database, args.tenant_id, args.tenant_slug, args.apply)):
+        elif any(
+            (args.expected_database, args.expected_system_identifier, args.tenant_id, args.tenant_slug, args.apply)
+        ):
             raise ValueError("Adoption options are only valid with adopt-existing")
         if args.command == "bootstrap":
             if not sys.stdin.isatty():
@@ -87,10 +108,22 @@ def main() -> int:
     except (ValueError, EOFError, KeyboardInterrupt) as exc:
         print(str(exc) or "Setup cancelled.", file=sys.stderr)
         return 1
-    except Exception:
+    except Exception as exc:
         # Connection exceptions can embed credentials. Operator-facing output
         # must not include the DSN or database parameters.
-        print("Database check failed. Check connectivity and run migrations first.", file=sys.stderr)
+        sqlstate = getattr(getattr(exc, "orig", None), "sqlstate", None)
+        if sqlstate == "42501":
+            print(
+                "This command requires operator database authority; do not broaden the runtime role.", file=sys.stderr
+            )
+        elif sqlstate in {"55P03", "40P01"}:
+            print(
+                "Destination is busy; stop its services and verify the offline target before retrying.", file=sys.stderr
+            )
+        else:
+            print("Database operation failed; verify the selected connection and schema privately.", file=sys.stderr)
+        if args.command == "adopt-existing" and args.apply:
+            print("The stored outcome may be uncertain; rerun the preview before any retry.", file=sys.stderr)
         return 1
     return 0
 
