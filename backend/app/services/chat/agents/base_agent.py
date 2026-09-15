@@ -2469,7 +2469,11 @@ class BaseSpecialistAgent(abc.ABC):
                                         "the cause; fetch only missing evidence. Do not ask permission to continue the "
                                         "requested investigation. Representatives do not verify the remaining orders."
                                     )
-                                tool_results_content[-1]["content"] = json.dumps(investigation, default=str)
+                                from app.services.transaction_ops.group_investigation import model_handoff
+
+                                tool_results_content[-1]["content"] = json.dumps(
+                                    model_handoff(investigation), default=str
+                                )
                                 yield (
                                     "tool_status",
                                     (

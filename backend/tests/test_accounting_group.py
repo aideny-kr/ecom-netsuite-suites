@@ -136,6 +136,57 @@ async def test_cancellation_waits_for_all_workers_and_never_leaves_background_wr
     assert not active
 
 
+async def test_preparation_deadline_retains_ready_members_and_drains_unfinished_workers():
+    active = set()
+
+    async def prepare(item):
+        if item == 0:
+            return {"id": item, "card": "exact-proposal"}
+        active.add(item)
+        try:
+            await asyncio.Event().wait()
+        finally:
+            active.remove(item)
+
+    result = await mod.bounded_map(
+        list(range(8)),
+        prepare,
+        timeout=0.05,
+        unfinished=lambda item: {"id": item, "preparation_status": "incomplete"},
+    )
+    assert result[0] == {"id": 0, "card": "exact-proposal"}
+    assert [r["id"] for r in result] == list(range(8))
+    assert all(r.get("preparation_status") == "incomplete" and "card" not in r for r in result[1:])
+    assert not active
+
+
+async def test_preparation_deadline_does_not_swallow_parent_cancellation():
+    started = asyncio.Event()
+    active = set()
+
+    async def prepare(item):
+        active.add(item)
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            active.remove(item)
+
+    task = asyncio.create_task(
+        mod.bounded_map(
+            [1, 2, 3, 4],
+            prepare,
+            timeout=60,
+            unfinished=lambda item: {"id": item},
+        )
+    )
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not active
+
+
 async def test_real_postgres_locks_protect_same_invoice_and_cap_account_across_connections(monkeypatch):
     engine = create_async_engine(settings.DATABASE_URL_DIRECT or settings.DATABASE_URL)
     monkeypatch.setattr(mod, "engine", engine)

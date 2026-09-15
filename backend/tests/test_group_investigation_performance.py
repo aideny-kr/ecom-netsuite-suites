@@ -264,48 +264,6 @@ async def test_saved_observation_is_tenant_case_scoped_and_audited(db, tenant_a,
         await read_observation(db, tenant_a.id, None, case_id, {**params, "observation_id": str(wrong.id)}, "test")
 
 
-@pytest.mark.parametrize("kind", ["tax", "credit", "discount", "sales_order"])
-def test_triage_never_skips_evidence_for_any_supported_correction(kind):
-    from app.services.transaction_ops.group_investigation import unsupported_source_recipe
-    from tests.test_accounting_approval_flow import kind_proposal
-
-    proposal = kind_proposal(kind)
-    assert proposal is not None
-    assert unsupported_source_recipe(proposal["source"]) is False
-
-
-@pytest.mark.parametrize("kind", ["tax", "credit", "discount", "sales_order"])
-def test_deferred_source_basis_is_ineligible_under_every_current_adapter(kind):
-    from app.services.transaction_ops.group_investigation import unsupported_source_recipe
-    from app.services.transaction_ops.sales_credit import build_candidate as credit_candidate
-    from app.services.transaction_ops.sales_order_alignment import build_candidate as order_candidate
-    from app.services.transaction_ops.tax_correction import candidate as tax_candidate
-    from tests.test_invoice_discount import unpaid_inputs
-    from tests.test_sales_credit import inputs
-    from tests.test_sales_order_alignment import inputs as order_inputs
-    from tests.test_tax_correction import fixture
-
-    if kind == "tax":
-        e, r, v, source = fixture()
-        source.update(adjustments=[], included_tax_total="0", additional_tax_total="1")
-        assert unsupported_source_recipe(source)
-        assert tax_candidate(e, r, v, source) is None
-    else:
-        data = inputs() if kind == "credit" else unpaid_inputs() if kind == "discount" else order_inputs()
-        data["source"].update(adjustments=[], included_tax_total="0", additional_tax_total="1")
-        assert unsupported_source_recipe(data["source"])
-        assert (order_candidate if kind == "sales_order" else credit_candidate)(**data) is None
-
-
-@pytest.mark.parametrize(
-    "source", [{}, {"adjustments": []}, {"adjustments": [], "included_tax_total": "bad", "additional_tax_total": "2"}]
-)
-def test_unknown_source_basis_keeps_full_evidence(source):
-    from app.services.transaction_ops.group_investigation import unsupported_source_recipe
-
-    assert unsupported_source_recipe(source) is False
-
-
 @pytest.mark.parametrize("kind", ["tax", "credit", "discount", "sales_order", "unsupported"])
 async def test_actual_evidence_tool_uses_full_reads_for_supported_shapes_and_refreshes_source_once(kind, monkeypatch):
     from copy import deepcopy
@@ -342,7 +300,8 @@ async def test_actual_evidence_tool_uses_full_reads_for_supported_shapes_and_ref
     result = await tool.execute_accounting_evidence({"case_id": str(case.id)}, context={"group_preparation": True})
     assert result["success"], result
     assert refresh.await_count == 1
-    assert collect.await_args.kwargs == ({"posting_detail": False} if kind == "unsupported" else {})
+    # Unsupported recipes still require posting evidence to choose a treatment.
+    assert collect.await_args.kwargs == {}
     assert result["accounting_evidence"]["source_refresh"] == source
 
 
@@ -482,3 +441,38 @@ def test_unknown_adjustment_collections_do_not_become_absence_or_crash(source):
     )
     assert any("detail is incomplete" in r for r in result["reasons"])
     assert not any("No order-level" in r for r in result["reasons"])
+
+
+def test_model_group_view_retains_all_members_without_repeating_full_evidence():
+    from copy import deepcopy
+
+    from app.services.transaction_ops.group_investigation import model_handoff
+
+    orders = [
+        {
+            "case_id": str(i),
+            "order_reference": f"R{i}",
+            "audit_id": f"audit-{i}",
+            "variance": {"total": str(-i), "tax": "-0.01"},
+            "source": {"currency": "USD", "total": str(100 - i)},
+            "line_changes": [{"facts": "full observed detail " * 200}],
+            "resolution_intents": [{"kind": "tax_reallocation", "record_id": str(i), "executable": False}],
+        }
+        for i in range(55)
+    ]
+    investigation = {
+        "case_count": 55,
+        "financial_writes": 0,
+        "batches": [{"batch_number": 1, "case_count": 55, "orders": orders, "scope": {"currency": "USD"}}],
+    }
+    before = deepcopy(investigation)
+    view = model_handoff(investigation)
+    assert investigation == before
+    compact = view["batches"][0]["orders"]
+    assert len(compact) == 55
+    for expected, actual in zip(orders, compact):
+        for key in ("case_id", "order_reference", "audit_id", "variance", "resolution_intents"):
+            assert actual[key] == expected[key]
+    assert view["batches"][0]["representative_evidence"] == orders[0]
+    assert len(json.dumps(view)) < len(json.dumps(investigation)) / 3
+    assert "not proof" in view["context_projection"]

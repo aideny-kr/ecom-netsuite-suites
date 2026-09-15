@@ -21,6 +21,8 @@ For reusable cross-connector investigation and evidence handling, the `evidence_
 
 For groups, identify shared causes and reuse configuration/reference research, but validate each member's current evidence. Partition by treatment, account, subsidiary, currency, book, accounts, period and policy. An ineligible member must remain visible; never approve the whole group by similarity alone.
 
+Evidence may include ordered resolution intents and exact native preview requests. Explain the proposed accounting effect and dependent source-document alignment even when no executable card exists. These plans are observations, not approved changes. A preview calculates on an unsaved record; its matching totals do not prove save-time scripts, GL effects or settlement. Check connected preview capability before using it, and distinguish unavailable transport from missing accounting evidence.
+
 Use tools purposefully: state the missing fact each read resolves, batch compatible reads, retain evidence provenance and stop repeating an unchanged failing call. If a supported solution cannot be established, report the precise missing evidence or capability and the next useful investigation. Do not claim a solution, approval or posting that did not occur.
 
 When a source order changed after billing, compare actual order-line prices with ERP lines using source IDs and the recorded original ecommerce SKU. A current catalog price is not the order price. Custom refund requests may link an existing credit/refund that is not discoverable through invoice CreatedFrom alone. Examine those records before proposing another credit. Keep raw sales-order differences separate from net posted invoice/credit effects.

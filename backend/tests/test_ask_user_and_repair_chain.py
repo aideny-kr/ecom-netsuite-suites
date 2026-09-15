@@ -67,9 +67,7 @@ def _make_adapter(responses):
     adapter.stream_message = stream
     adapter.create_message = AsyncMock(side_effect=AssertionError("Unexpected extra model hop"))
     adapter.build_assistant_message = MagicMock(return_value={"role": "assistant", "content": []})
-    adapter.build_tool_result_message = MagicMock(
-        return_value={"role": "user", "content": [{"type": "tool_result"}]}
-    )
+    adapter.build_tool_result_message = MagicMock(return_value={"role": "user", "content": [{"type": "tool_result"}]})
     return adapter
 
 

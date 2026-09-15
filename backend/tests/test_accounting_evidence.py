@@ -430,17 +430,29 @@ async def test_model_receipt_keeps_credit_ledger_and_deposit_with_independent_co
         {"account": "100", "accountingbook": "1", "debit": "0", "credit": "110"},
         {"account": "200", "accountingbook": "1", "debit": "110", "credit": "0"},
     ]
-    evidence = {"sections": {
-        "related_refund_documents": {"complete": False, "documents": [
-            {"record_type": "creditmemo", "id": "30", "total": "110", "isTaxable": False},
-        ]},
-        "deposits": [{"record_type": "customerdeposit", "id": "40", "status": "Fully Applied"}],
-        "gl": {"30": {"complete": True, "rows": ledger_rows}},
-    }}
+    evidence = {
+        "sections": {
+            "related_refund_documents": {
+                "complete": False,
+                "documents": [
+                    {"record_type": "creditmemo", "id": "30", "total": "110", "isTaxable": False},
+                ],
+            },
+            "deposits": [{"record_type": "customerdeposit", "id": "40", "status": "Fully Applied"}],
+            "gl": {"30": {"complete": True, "rows": ledger_rows}},
+        }
+    }
     summary = mod.completion_evidence_summary(evidence)
-    result = json.loads(_truncate_tool_result(json.dumps({
-        "success": True, "model_context": {"version": 1, "data": summary},
-    })))
+    result = json.loads(
+        _truncate_tool_result(
+            json.dumps(
+                {
+                    "success": True,
+                    "model_context": {"version": 1, "data": summary},
+                }
+            )
+        )
+    )
     assert result["gl"]["30"]["rows"] == ledger_rows
     assert result["gl"]["30"]["complete"] is True
     assert result["related_refund_graph_complete"] is False

@@ -135,6 +135,23 @@ def summarize(evidence):
         },
         "reasons": reasons,
         "record_links": evidence.get("record_links") or [],
+        "resolution_intents": [
+            {
+                k: intent[k]
+                for k in (
+                    "kind",
+                    "record_type",
+                    "record_id",
+                    "expected_after",
+                    "tax_only",
+                    "depends_on",
+                    "required_transport",
+                    "executable",
+                )
+                if k in intent
+            }
+            for intent in evidence.get("resolution_intents") or []
+        ],
         "historical_refunds": {
             "authority": "Historical leads only; refresh documents/applications before treatment.",
             "request_link_count": len((sections.get("historical_refunds") or {}).get("request_links") or []),
@@ -157,6 +174,7 @@ def handoff(selection, members, reference_hits=0):
             str(scope),
             tuple(evidence.get("reasons") or [member.get("reason")]),
             (evidence.get("source") or {}).get("currency"),
+            tuple((i.get("kind"), i.get("tax_only")) for i in evidence.get("resolution_intents") or []),
         )
         if key not in batches:
             batches[key] = {"reasons": evidence.get("reasons") or [member.get("reason")], "scope": scope, "orders": []}
@@ -172,6 +190,9 @@ def handoff(selection, members, reference_hits=0):
         "group_id": selection["group_id"],
         "scope": selection["scope"],
         "case_count": len(members),
+        "planned_case_count": sum(
+            bool((member.get("investigation_evidence") or {}).get("resolution_intents")) for member in members
+        ),
         "eligible": 0,
         "financial_writes": 0,
         "reference_reads_reused": reference_hits,
@@ -193,6 +214,8 @@ def handoff(selection, members, reference_hits=0):
             "their deltas remain in the scoped evidence. Prepare an exact supported approval card only after "
             "establishing eligibility; "
             "if the adapter cannot express the treatment, identify that specific capability gap and required evidence. "
+            "Returned resolution_intents are concrete planned steps, not approval cards. Explain their expected "
+            "amounts and dependencies; a native preview request calculates on an unsaved record and cannot post. "
             "A null candidate does not prove the order is correct. "
             "Source totals are ecommerce values, not native NetSuite sales-order values. Deferred GL, application "
             "or period sections are unverified: never claim balanced postings or settlement from missing evidence. "
@@ -201,6 +224,40 @@ def handoff(selection, members, reference_hits=0):
             "No empty approval card, no financial writes, no blanket "
             "claim of success. Do not ask the user to authorize investigation already requested."
         ),
+    }
+
+
+def model_handoff(investigation):
+    """Keep every member while projecting repeated detail once per evidence batch.
+
+    The complete manifest and per-case observations stay in DB/session state.
+    This projection is model context only, never approval or execution input.
+    """
+    batches = []
+    for batch in investigation.get("batches", []):
+        orders = batch.get("orders") or []
+        compact = []
+        for order in orders:
+            row = {
+                k: order[k]
+                for k in ("case_id", "order_reference", "audit_id", "variance", "resolution_intents")
+                if k in order
+            }
+            row["currency"] = (order.get("source") or {}).get("currency")
+            compact.append(row)
+        batches.append(
+            {
+                **{k: v for k, v in batch.items() if k != "orders"},
+                "orders": compact,
+                "representative_evidence": orders[0] if orders else None,
+            }
+        )
+    return {
+        **{k: v for k, v in investigation.items() if k != "batches"},
+        "batches": batches,
+        "context_projection": "All member identities, variances, planned steps and audit references are retained. "
+        "Repeated source/invoice/line details are shown once per batch. The representative is not proof for "
+        "other members; read their saved observations when the omitted detail matters. No execution authority.",
     }
 
 
@@ -249,7 +306,13 @@ async def read_observation(db, tenant_id, actor_id, case_id, params, correlation
             k: sections.get(k)
             for k in ("deposits", "invoice_applications", "historical_refunds", "related_refund_documents")
         },
-        "assessment": evidence.get("resolution_assessment"),
+        "assessment": {
+            **(evidence.get("resolution_assessment") or {}),
+            "resolution_intents": evidence.get("resolution_intents") or [],
+            "native_preview_requests": evidence.get("native_preview_requests") or [],
+        }
+        if evidence.get("resolution_intents")
+        else evidence.get("resolution_assessment"),
     }[section]
     await log_event(
         db,
@@ -274,26 +337,3 @@ async def read_observation(db, tenant_id, actor_id, case_id, params, correlation
         "authority": "Historical observation for investigation only; not fresh evidence or an executable proposal. "
         "Missing sections remain unverified. Refresh affected records before preparing/approving writes.",
     }
-
-
-def unsupported_source_recipe(source):
-    """Only defer deep preparation reads when ALL current adapters are impossible.
-
-    Tax correction requires positive INCLUDED tax and zero additional tax.
-    Sales credit, invoice discount, and SO alignment require finalized ORDER
-    adjustments (via source_adjustment_basis). No order adjustments plus positive
-    additional tax therefore excludes all four. Missing/ambiguous values default
-    to full evidence. Extend this predicate when adding a new treatment adapter.
-    """
-    try:
-        included = Decimal(str(source["included_tax_total"]))
-        additional = Decimal(str(source["additional_tax_total"]))
-        return (
-            source.get("adjustments") == []
-            and included.is_finite()
-            and additional.is_finite()
-            and included == 0
-            and additional > 0
-        )
-    except (KeyError, TypeError, ValueError, InvalidOperation):
-        return False

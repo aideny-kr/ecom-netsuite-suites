@@ -1,4 +1,5 @@
 from copy import deepcopy
+from decimal import Decimal
 
 import pytest
 
@@ -265,3 +266,31 @@ def test_malformed_component_is_unverified_instead_of_crashing(extra):
     source, evidence = revision_inputs()
     evidence["sections"]["sales_order"]["line_evidence"]["lines"].append(extra)
     assert source_revision_delta(source, evidence, "10") is None
+
+
+def test_repeated_source_skus_do_not_hide_zero_price_components_or_invent_parent_mapping():
+    from app.services.transaction_ops.line_evidence import source_revision_delta
+
+    source, evidence = revision_inputs()
+    second = deepcopy(source["line_items"][0])
+    second["id"] = "102"
+    source["line_items"].append(second)
+    for key in ("total", "item_total", "tax_total", "additional_tax_total"):
+        if key in source:
+            source[key] = str(Decimal(source[key]) * 2)
+    for document in [evidence["sections"]["sales_order"], *evidence["sections"]["posting_documents"]]:
+        lines = document["line_evidence"]["lines"]
+        second = deepcopy(lines[0])
+        second.update(line=13, lineUniqueKey="201", custcol_fw_solidus_line_id="102")
+        lines.append(second)
+        for key in ("subtotal", "total", "taxTotal"):
+            document[key] = str(Decimal(document[key]) * 2)
+        extra = zero_component(source)
+        extra.update(line=14, lineUniqueKey="202")
+        lines.append(extra)
+    proof = source_revision_delta(source, evidence, "10")
+    assert proof and proof["net_delta"] == "-800"
+    component = proof["additional_zero_value_components"][0]
+    assert component["source_sku_match_count"] == 2
+    assert component["parent_line_mapping_verified"] is False
+    assert component["tax_allocation_verified"] is False

@@ -424,7 +424,6 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
 
         from app.models.audit import AuditEvent
         from app.services.audit_service import log_event
-        from app.services.transaction_ops.group_investigation import unsupported_source_recipe
         from app.services.transaction_ops.source_reader import SourceReadError
         from app.services.transaction_ops.tax_correction import (
             ACCOUNTING_DETAIL_SOURCE_FIELDS,
@@ -440,12 +439,12 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
                 )
             except SourceReadError as exc:
                 source_error = exc
-        options = (
-            {"posting_detail": False} if prefetched_source and unsupported_source_recipe(prefetched_source) else {}
-        )
+        # Recipe eligibility is not an evidence boundary. In particular, a paid
+        # repriced order needs its existing credit/GL evidence before a treatment
+        # can be selected. The collector's native call budget remains enforced.
         evidence = json.loads(
             json.dumps(
-                await collect_accounting_evidence(db, tenant_id, review, case.latest_report_json, **options),
+                await collect_accounting_evidence(db, tenant_id, review, case.latest_report_json),
                 default=str,
             )
         )
@@ -522,6 +521,44 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
                     correction = await prepare(db, tenant_id, case.id, source, review, evidence)
                 except (ValueError, KeyError, NetSuiteEvidenceError) as exc:
                     evidence["blockers"].append(f"sales_order_alignment:{exc}")
+            if correction is None:
+                from app.services.transaction_ops.credit_reallocation import (
+                    build_intent,
+                    collect_support,
+                    solution_summary,
+                )
+
+                try:
+                    support = await collect_support(db, tenant_id, evidence["source_refresh"], review, evidence)
+                    intent = (
+                        build_intent(
+                            tenant_id,
+                            case.id,
+                            evidence["source_refresh"],
+                            review,
+                            evidence,
+                            support,
+                        )
+                        if support
+                        else None
+                    )
+                    if intent:
+                        from app.services.transaction_ops.source_line_alignment import build_intent as alignment_intent
+
+                        evidence["resolution_intents"] = [solution_summary(intent)]
+                        alignment = alignment_intent(evidence["source_refresh"], evidence, intent)
+                        if alignment:
+                            evidence["resolution_intents"].append(alignment)
+                        evidence["credit_reallocation_support"] = support
+                        from app.services.transaction_ops.accounting_preview import for_intent
+
+                        evidence["native_preview_requests"] = [for_intent(intent, review, support["credit"])]
+                        if alignment:
+                            evidence["native_preview_requests"].append(
+                                for_intent(alignment, review, evidence["sections"]["sales_order"])
+                            )
+                except (ValueError, KeyError, NetSuiteEvidenceError) as exc:
+                    evidence["blockers"].append(f"credit_reallocation:{exc}")
             if correction:
                 evidence["assessment"]["correction_ready"] = "ready_for_exact_human_approval"
                 evidence["blockers"] = [

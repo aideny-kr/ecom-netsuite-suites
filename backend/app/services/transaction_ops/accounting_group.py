@@ -41,8 +41,12 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
 
 
-async def bounded_map(items, function, *, stop=None):
+async def bounded_map(items, function, *, stop=None, timeout=None, unfinished=None):
     """Only three workers; no task per member, no shared AsyncSession."""
+    if (timeout is None) != (unfinished is None):
+        raise ValueError("A preparation deadline requires an explicit unfinished result.")
+    if not items:
+        return []
     output = [None] * len(items)
     queue = iter(enumerate(items))
 
@@ -55,7 +59,18 @@ async def bounded_map(items, function, *, stop=None):
 
     tasks = [asyncio.create_task(worker()) for _ in range(min(CONCURRENCY, len(items)))]
     try:
-        await asyncio.gather(*tasks)
+        if timeout is None:
+            await asyncio.gather(*tasks)
+        else:
+            # Preparation is read-only. Preserve completed proposals when one
+            # slow member exhausts its budget; never use this for posting.
+            done, pending = await asyncio.wait(tasks, timeout=timeout)
+            for task in done:
+                task.result()
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            output = [value if value is not None else unfinished(items[i]) for i, value in enumerate(output)]
     finally:
         for task in tasks:
             if not task.done():
@@ -190,8 +205,23 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
 
     try:
         with reference_read_batch() as reads:
-            async with asyncio.timeout(PREPARATION_TIMEOUT):
-                members = await bounded_map(selection["members"], prepare)
+            members = await bounded_map(
+                selection["members"],
+                prepare,
+                timeout=PREPARATION_TIMEOUT,
+                unfinished=lambda member: {
+                    **member,
+                    "preparation_status": "incomplete",
+                    "reason": "Preparation time limit reached. No correction was submitted for this order; "
+                    "continue preparation from fresh evidence.",
+                    "investigation_routes": [
+                        {
+                            "code": "preparation_incomplete",
+                            "next_step": "Resume preparation for this order; completed approvals remain available.",
+                        }
+                    ],
+                },
+            )
     except (asyncio.CancelledError, TimeoutError):
         await asyncio.shield(record_preparation_interrupted(tenant_id, actor_id, session_id, correlation_id, selection))
         raise

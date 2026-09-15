@@ -97,7 +97,9 @@ def compare_source_lines(source, evidence):
             if not sku or sku != target_sku or None in (quantity, target_quantity, price, target_price):
                 result["unverified"].append(f"{document.get('id')}:source_line:{identifier}:values_or_sku_unverified")
                 continue
-            if price == target_price and quantity == target_quantity:
+            tax_detail = tax_observation(line, target)
+            tax_delta = number(tax_detail.get("delta")) if tax_detail else None
+            if price == target_price and quantity == target_quantity and tax_delta in (None, 0):
                 continue
             with localcontext() as context:
                 context.prec = 60
@@ -115,7 +117,7 @@ def compare_source_lines(source, evidence):
                         "source_quantity": str(quantity),
                         "target_quantity": str(target_quantity),
                         "source_updated_at": line.get("updated_at") or source.get("updated_at"),
-                        "tax_observation": tax_observation(line, target),
+                        "tax_observation": tax_detail,
                     }
                 )
     return result
@@ -144,7 +146,7 @@ def _zero_value_components(source_lines, native_lines):
             line.get("custcol_fw_solidus_line_id") not in (None, "")
             or not isinstance(sku, str)
             or not sku
-            or skus[sku] != 1
+            or skus[sku] < 1
             or not isinstance(item_type, dict)
             or item_type.get("id") != "InvtPart"
             or quantity is None
@@ -165,6 +167,8 @@ def _zero_value_components(source_lines, native_lines):
                 "quantity": str(quantity),
                 "amount": "0",
                 "tax_allocation_verified": False,
+                "source_sku_match_count": skus[sku],
+                "parent_line_mapping_verified": False,
             }
         )
     return additional
@@ -193,15 +197,14 @@ def source_revision_delta(source, evidence, record_id):
     try:
         additional = _zero_value_components(source_lines, native_lines)
         if (
-            not changes
-            or source.get("state") != "complete"
+            source.get("state") != "complete"
             or source.get("requires_review") is not False
             or not source.get("updated_at")
             or additional is None
             or len(native_lines) != len(source_lines) + len(additional)
             or number(source.get("included_tax_total")) != 0
-            or number(source.get("ship_total")) != 0
-            or number(document.get("shippingCost")) != 0
+            or number(source.get("ship_total")) is None
+            or number(source.get("ship_total")) != number(document.get("shippingCost"))
             or number(document.get("discountTotal")) != 0
             or source.get("adjustments") != []
             or any(
@@ -222,13 +225,17 @@ def source_revision_delta(source, evidence, record_id):
                 source_items != number(source["item_total"])
                 or target_items != number(document["subtotal"])
                 or source_items - target_items != item_delta
-                or number(source["total"]) != source_items + number(source["tax_total"])
-                or number(document["total"]) != target_items + number(document["taxTotal"])
+                or number(source["total"]) != source_items + number(source["tax_total"]) + number(source["ship_total"])
+                or number(document["total"])
+                != target_items + number(document["taxTotal"]) + number(document["shippingCost"])
                 or gross_delta != item_delta + tax_delta
+                or (item_delta == 0 and tax_delta == 0)
             ):
                 return None
             return {
-                "status": "source_line_repricing_arithmetic_observed",
+                "status": "source_line_repricing_arithmetic_observed"
+                if item_delta
+                else "source_tax_revision_arithmetic_observed",
                 "record_id": identifier,
                 "source_revision": source["updated_at"],
                 "currency": source["currency"],
@@ -239,6 +246,79 @@ def source_revision_delta(source, evidence, record_id):
                 "additional_zero_value_components": additional,
                 "authority": "Observed source revision arithmetic only. Inspect existing credits/applications and "
                 "account policy before choosing a treatment. Source authority and tax legality are not certified.",
+            }
+    except (KeyError, TypeError, ValueError, ArithmeticError):
+        return None
+
+
+def source_tax_refund_delta(source, evidence, record_id):
+    """Header-level tax-only arithmetic; never authorizes editing item lines.
+
+    Older integration records can lack source line IDs or represent a source
+    kit using different native quantities. A credit tax allocation does not
+    require pretending those item mappings have been established.
+    """
+    sections = evidence.get("sections") or {}
+    order = sections.get("sales_order") or {}
+    documents = [order, *(sections.get("posting_documents") or [])]
+    matches = [d for d in documents if str(d.get("id")) == str(record_id)]
+    try:
+        if (
+            not evidence.get("verified_connection_scope")
+            or len(matches) != 1
+            or source.get("number") != order.get("tranId")
+            or source.get("currency") != order.get("currency_code")
+            or source.get("state") != "complete"
+            or source.get("requires_review") is not False
+            or not source.get("updated_at")
+            or source.get("adjustments") != []
+            or number(source.get("included_tax_total")) != 0
+        ):
+            return None
+        document = matches[0]
+        if document.get("currency_code") != source["currency"] or document["line_evidence"].get("complete") is not True:
+            return None
+        with localcontext() as context:
+            context.prec = 60
+            lines = source["line_items"]
+            native_lines = document["line_evidence"]["lines"]
+            if (
+                not lines
+                or not native_lines
+                or any(number(l["price"]) < 0 or number(l["quantity"]) <= 0 for l in lines)
+            ):
+                return None
+            source_items = sum(number(l["price"]) * number(l["quantity"]) for l in lines)
+            native_items = sum(number(l["amount"]) for l in native_lines)
+            shipping = number(source["ship_total"])
+            tax_delta = number(source["tax_total"]) - number(document["taxTotal"])
+            gross_delta = number(source["total"]) - number(document["total"])
+            if (
+                source_items != number(source["item_total"])
+                or native_items != number(document["subtotal"])
+                or source_items != native_items
+                or shipping is None
+                or shipping < 0
+                or shipping != number(document["shippingCost"])
+                or number(document["discountTotal"]) != 0
+                or number(source["total"]) != source_items + shipping + number(source["tax_total"])
+                or number(document["total"]) != native_items + shipping + number(document["taxTotal"])
+                or number(source["tax_total"]) < 0
+                or tax_delta >= 0
+                or gross_delta != tax_delta
+            ):
+                return None
+            return {
+                "status": "source_tax_revision_arithmetic_observed",
+                "record_id": str(record_id),
+                "source_revision": source["updated_at"],
+                "currency": source["currency"],
+                "net_delta": "0",
+                "tax_delta": str(tax_delta),
+                "gross_delta": str(gross_delta),
+                "item_line_amendment_authorized": False,
+                "authority": "Header-level tax-only arithmetic. Source/native item mapping, source tax authority "
+                "and tax legality remain separate; do not reprice or change quantities from this evidence.",
             }
     except (KeyError, TypeError, ValueError, ArithmeticError):
         return None

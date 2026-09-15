@@ -330,6 +330,7 @@ async def collect_accounting_evidence(db, tenant_id, review, report, *, posting_
                 "tal.accountingbook, tal.debit, tal.credit "
                 "FROM transactionaccountingline tal JOIN transaction t ON t.id = tal.transaction "
                 f"WHERE tal.transaction = {identifier} AND t.subsidiary = {subsidiary}",
+                limit=1000,
             )
             if gl is not None:
                 result["sections"].setdefault("gl", {})[identifier] = gl
@@ -388,6 +389,7 @@ async def collect_accounting_evidence(db, tenant_id, review, report, *, posting_
                     "tal.accountingbook, tal.debit, tal.credit "
                     "FROM transactionaccountingline tal JOIN transaction t ON t.id = tal.transaction "
                     f"WHERE tal.transaction = {identifier} AND t.subsidiary = {subsidiary}",
+                    limit=1000,
                 )
                 if gl is not None:
                     result["sections"].setdefault("gl", {})[identifier] = gl
@@ -489,6 +491,7 @@ def completion_evidence_summary(evidence):
         "execution_capabilities": (evidence.get("resolution_assessment") or {}).get("execution_capabilities"),
         "line_comparison": evidence.get("line_comparison"),
         "source_revision_deltas": evidence.get("source_revision_deltas"),
+        "resolution_intents": evidence.get("resolution_intents") or [],
         "projection_limit": "Line identity, tax jurisdiction and treatment policy require full evidence; "
         "this summary does not establish them or authorize any write.",
     }
