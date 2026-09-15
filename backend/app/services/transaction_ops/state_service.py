@@ -73,6 +73,19 @@ def _clock(now=None):
     return value
 
 
+async def run_clock(db, now=None):
+    """Use the same clock as PostgreSQL's immutable run-budget guard.
+
+    Explicit clocks remain available for deterministic internal callers/tests.
+    Host clock drift must not extend a budget or reject a valid first claim.
+    """
+    if now is None:
+        now = await db.scalar(select(func.clock_timestamp()))
+        if not isinstance(now, datetime):
+            raise StateError("run_clock_unavailable")
+    return _clock(now)
+
+
 def business_digest(value) -> str:
     def normalize(item):
         if isinstance(item, Decimal):
@@ -332,7 +345,7 @@ async def create_run(
     automatic_continuation=False,
     human_retry=False,
 ):
-    now = _clock(now)
+    now = await run_clock(db, now)
     if human_retry and (
         request.origin != "manual" or automatic_continuation or not request.review or resume_from_run_id is None
     ):
@@ -539,8 +552,8 @@ def _first_claim_deadline(row, now):
 async def claim_run(db, tenant_id, run_id, *, now=None):
     from app.services.transaction_ops.settlement import is_settlement
 
-    now = _clock(now)
     row = await get_run(db, tenant_id, run_id, lock=True)
+    now = await run_clock(db, now)
     if row.status == "finished":
         await _commit(db, tenant_id)
         return None

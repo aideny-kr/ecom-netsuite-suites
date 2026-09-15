@@ -1,6 +1,6 @@
 """Finite continuations for productive investigations, using the existing queue/leases."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import or_, select
@@ -73,7 +73,7 @@ def next_metadata(previous, now):
 
 
 async def continue_budget_run(db, tenant_id, run_id, *, now=None):
-    now = now or datetime.now(timezone.utc)
+    now = await state_service.run_clock(db, now)
     previous = await state_service.get_run(db, tenant_id, run_id)
     config = await state_service.get_config(db, tenant_id, previous.config_id, lock=True)
     await db.refresh(previous)

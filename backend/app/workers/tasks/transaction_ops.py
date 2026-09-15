@@ -63,9 +63,10 @@ def transaction_ops_run(tenant_id: str, run_id: str):
 def transaction_ops_collect_due():
     async def execute():
         from app.services.transaction_ops.scheduler import collect_due_runs
+        from app.services.transaction_ops.state_service import run_clock
 
         async with worker_async_session() as db:
-            return await collect_due_runs(db, datetime.now(timezone.utc))
+            return await collect_due_runs(db, await run_clock(db))
 
     try:
         return asyncio.run(execute())

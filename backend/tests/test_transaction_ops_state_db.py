@@ -547,3 +547,28 @@ async def test_detect_only_scope_cannot_produce_a_proposal(db, admin_user, mappi
     )
     with pytest.raises(state.StateError, match="actions_disabled"):
         await new_proposal(db, actor, run)
+
+
+@pytest.mark.parametrize("host_offset_seconds", [-2, 2])
+async def test_run_queue_and_claim_use_database_budget_clock(db, admin_user, monkeypatch, host_offset_seconds):
+    actor, _ = admin_user
+    config = await seed_config(db, actor.tenant_id, actor)
+    original_clock = state._clock
+
+    def skewed_host_clock(now=None):
+        value = original_clock(now)
+        return value if now is not None else value + timedelta(seconds=host_offset_seconds)
+
+    monkeypatch.setattr(state, "_clock", skewed_host_clock)
+    run = await state.create_run(
+        db,
+        actor.tenant_id,
+        config.id,
+        RunCreate(evaluation_key=str(uuid4()), order_references=["R123456789"]),
+        actor=actor,
+    )
+    token = await state.claim_run(db, actor.tenant_id, run.id)
+    assert token is not None and run.status == "running"
+    database_now = await db.scalar(text("SELECT clock_timestamp()"))
+    assert run.deadline_at <= database_now + timedelta(seconds=run.config_snapshot["deadline_seconds"])
+    assert run.lease_until <= database_now + timedelta(minutes=3)
