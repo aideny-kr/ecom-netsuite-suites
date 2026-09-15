@@ -1,0 +1,201 @@
+{
+  "scope": "Candidate routing acceptance in an isolated staging process; no application deployment or data-tool execution",
+  "cases": [
+    {
+      "case": "batch-count",
+      "model": "claude-sonnet-5",
+      "route": {
+        "kind": "analytics",
+        "continuation": false
+      },
+      "asks_source": true,
+      "selected": [],
+      "passed": true,
+      "seconds": 1.5,
+      "tokens": 75
+    },
+    {
+      "case": "solidus",
+      "model": "claude-sonnet-5",
+      "route": {
+        "kind": "analytics",
+        "continuation": false
+      },
+      "asks_source": true,
+      "selected": [],
+      "passed": true,
+      "seconds": 1.5,
+      "tokens": 75
+    },
+    {
+      "case": "source-reply",
+      "model": "claude-sonnet-5",
+      "route": {
+        "kind": "analytics",
+        "continuation": true
+      },
+      "asks_source": false,
+      "selected": [
+        "metabase"
+      ],
+      "passed": true,
+      "seconds": 1.29,
+      "tokens": 75
+    },
+    {
+      "case": "explicit-metabase",
+      "model": "claude-sonnet-5",
+      "route": {
+        "kind": "analytics",
+        "continuation": false
+      },
+      "asks_source": false,
+      "selected": [
+        "metabase"
+      ],
+      "passed": true,
+      "seconds": 1.41,
+      "tokens": 75
+    },
+    {
+      "case": "analysis-followup",
+      "model": "claude-sonnet-5",
+      "route": {
+        "kind": "analytics",
+        "continuation": true
+      },
+      "asks_source": false,
+      "selected": [
+        "metabase"
+      ],
+      "passed": true,
+      "seconds": 1.57,
+      "tokens": 75
+    },
+    {
+      "case": "new-analysis-after-case",
+      "model": "claude-sonnet-5",
+      "route": {
+        "kind": "analytics",
+        "continuation": false
+      },
+      "asks_source": true,
+      "selected": [],
+      "passed": true,
+      "seconds": 2.04,
+      "tokens": 75
+    },
+    {
+      "case": "case-entry",
+      "model": "claude-sonnet-5",
+      "route": {
+        "kind": "transaction",
+        "continuation": false
+      },
+      "asks_source": false,
+      "selected": [],
+      "passed": true,
+      "seconds": 1.33,
+      "tokens": 75
+    },
+    {
+      "case": "fix-it",
+      "model": "claude-sonnet-5",
+      "route": {
+        "kind": "transaction",
+        "continuation": true
+      },
+      "asks_source": false,
+      "selected": [],
+      "passed": true,
+      "seconds": 1.35,
+      "tokens": 75
+    },
+    {
+      "case": "continue-investigation",
+      "model": "claude-sonnet-5",
+      "route": {
+        "kind": "transaction",
+        "continuation": true
+      },
+      "asks_source": false,
+      "selected": [],
+      "passed": true,
+      "seconds": 1.38,
+      "tokens": 75
+    },
+    {
+      "case": "show-evidence",
+      "model": "claude-sonnet-5",
+      "route": {
+        "kind": "transaction",
+        "continuation": true
+      },
+      "asks_source": false,
+      "selected": [],
+      "passed": true,
+      "seconds": 1.91,
+      "tokens": 75
+    },
+    {
+      "case": "go-ahead",
+      "model": "claude-sonnet-5",
+      "route": {
+        "kind": "transaction",
+        "continuation": true
+      },
+      "asks_source": false,
+      "selected": [],
+      "passed": true,
+      "seconds": 1.24,
+      "tokens": 75
+    },
+    {
+      "case": "celigo",
+      "model": "claude-sonnet-5",
+      "route": {
+        "kind": "operations",
+        "continuation": false
+      },
+      "asks_source": false,
+      "selected": [],
+      "passed": true,
+      "seconds": 1.36,
+      "tokens": 74
+    },
+    {
+      "case": "script",
+      "model": "claude-sonnet-5",
+      "route": {
+        "kind": "operations",
+        "continuation": false
+      },
+      "asks_source": false,
+      "selected": [],
+      "passed": true,
+      "seconds": 1.34,
+      "tokens": 74
+    },
+    {
+      "case": "new-analysis",
+      "model": "claude-sonnet-5",
+      "route": {
+        "kind": "analytics",
+        "continuation": false
+      },
+      "asks_source": true,
+      "selected": [],
+      "passed": true,
+      "seconds": 1.37,
+      "tokens": 75
+    },
+    {
+      "summary": {
+        "passed": 14,
+        "total": 14,
+        "provider": "anthropic",
+        "model": "claude-sonnet-5"
+      }
+    }
+  ]
+}

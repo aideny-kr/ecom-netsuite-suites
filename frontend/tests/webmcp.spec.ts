@@ -150,19 +150,19 @@ test("native chat uses UI submission, receipts, structured output and route clea
 });
 
 test("native table search changes the visible UI and reports fresh rows", async ({ page }) => {
-  await page.route("**/api/v1/tables/orders?**", async (route) => {
+  await page.route("**/api/v1/tables/payments?**", async (route) => {
     const params = new URL(route.request().url()).searchParams;
     const search = params.get("search") || "";
-    return route.fulfill({ json: { items: [{ id: "row-1", label: search || "all orders" }], page: Number(params.get("page")), page_size: Number(params.get("page_size")), total: 1, pages: 1 } });
+    return route.fulfill({ json: { items: [{ id: "row-1", source_id: search || "all payments" }], page: Number(params.get("page")), page_size: Number(params.get("page_size")), total: 1, pages: 1 } });
   });
-  await page.goto("/tables/orders");
+  await page.goto("/tables/payments");
   await expect.poll(async () => (await listTools(page)).includes("suitestudio_table_get_state")).toBe(true);
   await expect.poll(async () => JSON.parse(await callTool(page, "table_get_state")).ready).toBe(true);
   await callTool(page, "table_set_query", { search: "webmcp fixture", page_size: 10 });
   await expect(page.getByPlaceholder(/search/i).first()).toHaveValue("webmcp fixture");
   await expect.poll(async () => {
     const state = JSON.parse(await callTool(page, "table_get_state"));
-    return state.ready && state.data[0]?.label;
+    return state.ready && state.data[0]?.source_id;
   }).toBe("webmcp fixture");
   await expect(page.getByRole("cell", { name: "webmcp fixture" })).toBeVisible();
 });

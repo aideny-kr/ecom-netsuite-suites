@@ -254,3 +254,28 @@ disposable fixture services; completion/CI evidence will be recorded in the PR.
 Fetched origin/main at 430d5751; it is 99 commits ahead of the tested worktree base.
 The draft PR must reconcile current main and migration successors before release.
 No integration review or release approval is claimed. AGENTS.md remains excluded.
+
+### Current-main integration for PR #260
+
+The pre-integration full backend suite passed: 7,262 tests, 6 skipped, 76.51%
+coverage, in 541 seconds. Full frontend: 1,188 passed.
+
+Merged origin/main at 430d5751 into the feature branch. Resolved table imports
+and query-result fields while preserving the new Orders TransactionWorkspace,
+tenant/filter remounting and error/retry UI. WebMCP remains on TableContent and
+uses its actual visible columns; Orders exposes shared tools only for now.
+Renamed the unpublished receipt migration to 108_chat_submissions and reparented
+it onto current main's 102_schedule_retry_job to preserve one migration head.
+The earlier 100_chat_submissions revision was used only in disposable local tests.
+
+Integrated verification: 1,440 frontend tests passed across 138 files; 134 focused
+backend + seeded-tenant lifecycle tests passed; all 9 native Chrome tests passed.
+Production frontend build and TypeScript passed. Fresh migration from base, one
+head at 108_chat_submissions, downgrade and re-upgrade passed on the task-only
+fixture database. The fixture database was recreated after the pre-integration
+full suite completed, avoiding the old unpublished migration stamp.
+
+The newer layout test also needed its feature-query dependency stubbed; both
+layout responsiveness tests now pass with the native-tool mount present. No
+runtime authentication or feature checks were relaxed. PR #260 remains draft
+for CI and independent release review; no deployment was requested/performed.

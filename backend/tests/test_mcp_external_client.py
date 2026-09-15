@@ -20,6 +20,7 @@ from app.services.mcp_client_service import (
 
 @dataclass
 class FakeConnector:
+    provider: str = "custom"
     server_url: str = "https://example.com/mcp/v1"
     auth_type: str = "none"
     encrypted_credentials: str | None = None
@@ -190,3 +191,23 @@ class TestCallExternalMcpTool:
             result = await call_external_mcp_tool(FakeConnector(), "empty_tool", {})
 
         assert result == {"result": "No content returned"}
+
+
+@pytest.mark.asyncio
+async def test_exact_decimal_results_preserve_financial_lexemes():
+    from decimal import Decimal
+    from types import SimpleNamespace
+
+    session = MagicMock()
+    session.initialize = AsyncMock()
+    session.call_tool = AsyncMock(
+        return_value=SimpleNamespace(
+            isError=False,
+            content=[SimpleNamespace(text='{"amount":9007199254740993.123456,"tax":0.000001}')],
+        )
+    )
+    transport, client = _mock_mcp(session)
+    with transport, client:
+        result = await call_external_mcp_tool(FakeConnector(), "query", {}, parse_decimal=True)
+    assert result["amount"] == Decimal("9007199254740993.123456")
+    assert result["tax"] == Decimal("0.000001")

@@ -162,8 +162,14 @@ async def test_get_exceptions_receives_context_through_governed_dispatch():
     assert out["bucket"] == BUCKET_RULES
     assert out["exception_count"] == 1
     assert out["exceptions"][0]["status"] == "suggested"
-    # The query the tool issued is tenant-scoped to the CALLER's tenant.
-    select_stmts = db.stmts
+    # The query the tool issued is tenant-scoped to the CALLER's tenant. Only
+    # the SELECT counts: governed_execute also issues the `SET LOCAL
+    # app.current_tenant_id` TextClause when it re-establishes tenant context
+    # after the handler returns (a commit inside a handler would otherwise
+    # leave the rest of the turn with no RLS context).
+    from sqlalchemy.sql import Select
+
+    select_stmts = [stmt for stmt in db.stmts if isinstance(stmt, Select)]
     assert len(select_stmts) == 1
     sql, params = _compiled(select_stmts[0])
     assert "reconciliation_results.tenant_id = " in sql

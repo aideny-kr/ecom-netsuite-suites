@@ -854,7 +854,7 @@ export interface EditableSlot {
 
 export interface WriteConfirmationData {
   type: "write_confirmation";
-  mutation_type: "create" | "update" | "delete" | "upsert";
+  mutation_type: "create" | "update" | "delete" | "upsert" | "execute";
   record_type: string;
   record_id: string | null;
   proposed_fields: Record<string, unknown>;
@@ -1058,7 +1058,7 @@ export interface ClarificationOption {
   id: "A" | "B" | "C";
   title: string;
   rationale: string;
-  source: "netsuite" | "bigquery" | "shopify" | "stripe" | "drive";
+  source: "netsuite" | "bigquery" | "metabase" | "shopify" | "stripe" | "drive";
   is_default: boolean;
 }
 

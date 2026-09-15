@@ -7,6 +7,7 @@
         "test": "jest",
         "test:watch": "jest --watch",
         "test:coverage": "jest --coverage",
+        "build:transaction-guard": "node scripts/build-transaction-guard-project.js",
         "validate": "suitecloud project:validate",
         "deploy": "suitecloud project:deploy"
     },

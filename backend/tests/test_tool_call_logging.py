@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -39,6 +40,18 @@ def _info_enabled_like_celery():
     logger.setLevel(logging.INFO)
     yield
     logger.setLevel(previous)
+
+
+@pytest.fixture(autouse=True)
+def _mock_external_tool_audit(monkeypatch):
+    """external_tool_audit.append_event opens its own async_session_factory() session per
+    call, independent of the `db=object()` doubles this module passes around — by design
+    (fail-closed audit, see external_tool_audit.py). These are routing/logging unit tests,
+    not a DB integration test, so patch it rather than let it try a real session (which
+    raises 'Event loop is closed' once this test's own event loop has torn down)."""
+    mock = AsyncMock()
+    monkeypatch.setattr("app.services.chat.external_tool_audit.append_event", mock)
+    return mock
 
 
 async def test_local_tool_success_survives_info_logging(monkeypatch):
@@ -66,7 +79,7 @@ async def test_local_tool_success_survives_info_logging(monkeypatch):
     assert result["rows"] == [["Cash", 42]]
 
 
-async def test_external_tool_success_survives_info_logging(monkeypatch):
+async def test_external_tool_success_survives_info_logging(monkeypatch, _mock_external_tool_audit):
     """A successful EXTERNAL tool call must not raise from the success-log line
     (this branch has no try/except — a logging TypeError propagates)."""
 
@@ -91,3 +104,5 @@ async def test_external_tool_success_survives_info_logging(monkeypatch):
 
     result = json.loads(result_str)
     assert result["data"] == [{"amount": 42}]
+    requested = [c for c in _mock_external_tool_audit.await_args_list if c.kwargs["action"] == "tool.requested"]
+    assert requested, "external call never reached external_tool_audit.append_event"

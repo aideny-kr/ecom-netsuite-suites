@@ -17,12 +17,13 @@ class TestBuildToolInventoryBlock:
     def test_empty_list_returns_empty_string(self):
         assert build_tool_inventory_block([]) == ""
 
-    def test_single_tool_renders_name_and_description(self):
+    def test_tool_index_does_not_duplicate_api_descriptions(self):
         block = build_tool_inventory_block([_tool("netsuite_suiteql", "Run SuiteQL against NetSuite.", "data_table")])
         assert "<available_tools>" in block
         assert "</available_tools>" in block
         assert "netsuite_suiteql" in block
-        assert "Run SuiteQL against NetSuite." in block
+        assert "Run SuiteQL against NetSuite." not in block
+        assert "supplied tool definitions" in block
 
     def test_bigquery_tools_trigger_dialect_warning(self):
         block = build_tool_inventory_block(
@@ -60,7 +61,7 @@ class TestBuildToolInventoryBlock:
             [_tool("ext__shopify_list_orders", "[shopify_mcp] List Shopify orders.", "other")]
         )
         assert "ext__shopify_list_orders" in block
-        assert "shopify_mcp" in block
+        assert "List Shopify orders" not in block
 
     def test_output_is_deterministic_for_same_input(self):
         tools = [

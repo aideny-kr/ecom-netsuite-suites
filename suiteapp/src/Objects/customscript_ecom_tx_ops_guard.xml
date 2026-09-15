@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<restlet scriptid="customscript_ecom_tx_ops_guard">
+    <name>Ecom Transaction Operations Guard</name>
+    <isinactive>F</isinactive>
+    <notifyadmins>F</notifyadmins>
+    <notifyowner>F</notifyowner>
+    <description>Conditional sales-order corrections and pending-approval creation with exact approved values. Each write path requires its explicit enable parameter and platform human approval.</description>
+    <scriptfile>[/SuiteScripts/ecom_tx_ops_guard.js]</scriptfile>
+    <scriptcustomfields>
+        <scriptcustomfield scriptid="custscript_ecom_tx_ops_enabled">
+            <label>Enable approved transaction corrections</label>
+            <fieldtype>CHECKBOX</fieldtype>
+            <defaultchecked>F</defaultchecked>
+        </scriptcustomfield>
+        <scriptcustomfield scriptid="custscript_ecom_tx_create_enabled">
+            <label>Enable approved missing-order creation</label>
+            <fieldtype>CHECKBOX</fieldtype>
+            <defaultchecked>F</defaultchecked>
+        </scriptcustomfield>
+    </scriptcustomfields>
+    <scriptdeployments>
+        <scriptdeployment scriptid="customdeploy_ecom_tx_ops_guard">
+            <title>Ecom Transaction Operations Guard</title>
+            <status>TESTING</status>
+            <loglevel>AUDIT</loglevel>
+            <allroles>F</allroles>
+            <allemployees>F</allemployees>
+        </scriptdeployment>
+    </scriptdeployments>
+</restlet>

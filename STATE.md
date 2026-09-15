@@ -36,8 +36,6 @@ Updated at the end of every task, not "later".
 |---|---|---|---|
 | `feat/dev-loop-and-harness` | T2 | 21 commits, process only — gated ×3, blockers fixed, **frozen** | nothing |
 | `feat/agent-graph-operating-model` | T2 | Track O (22 majors) + reject action, **ungated** | needs Track O decision |
-| `feat/rolling-period` | T2 | **SHIPPED** — squash-merged as main `f74b781f` (PR #209), deployed + live-verified on staging (backend recreated, `alembic current`=`094_dashboard_preference_series` head, FE digest `4a37ebf8`, BUILD_ID baked). Gate ×4: majors 2→3→0 | nothing |
-| `feat/rolling-period-stage2` | T2 | Scheduled compose built: daily Beat sweep, reason enum → `jobs.result_summary`, per-tenant cost ceiling, waiting ribbon lit (DATA-gated on the sweep being enabled). verify **PASS @ `fa793ce6`** (+15 tests). **T2 gate round 1 in flight** | gate verdict → PR |
 
 **SHIPPED 2026-08-17 — `fix/ns-account-switch-and-chat-burst` → PR #194, squashed to
 `54729804`, deployed and live-verified on staging.** Ticket 86bba299w closed. It had
@@ -186,6 +184,26 @@ path — OCR confidence is unquantified and the card cannot show what was misrea
 ## DECIDED — date · chose X over Y · because
 
 Written so the next session does not re-litigate these.
+
+- **2026-09-10 · Rolling period is SHIPPED and RUNNING UNATTENDED — do not resume it** ·
+  because STATE.md previously said "gate round 1 in flight" and pointed "resume here" at a
+  worktree that no longer exists, which is exactly the stale-state trap this file exists to
+  prevent. Final state: **#209** (wall follows a series), **#212** (daily scheduled compose),
+  **#213** (NetSuite returns dates in the ACCOUNT'S format, not ISO — a live bug the operator
+  hit). All on main, all deployed. Branches and worktrees deleted.
+  **Proof it works unattended:** 11 nightly fan-outs on staging, zero non-`done` reasons. On
+  2026-09-05 NetSuite closed July and the sweep composed Framework's July statement by
+  itself (`"period": "Jul 2026", "composed": 1`); every night since is
+  `already_current: 1, composed: 0` — the `(series_id, period)` idempotency key holding on
+  real runs. **The sweep is ON in staging** (`ROLLING_PERIOD_AUTO_COMPOSE_ENABLED=true` in
+  `/opt/ecom-netsuite/.env.production`, backup `.bak-rolling-period-20260901230811`); the
+  kill switch is that flag OR setting the cap to 0 — both feed one predicate,
+  `settings.auto_compose_is_scheduled`, so either also silences the ribbon's promise.
+  **Open follow-ups, no tickets yet:** (1) the tracking ribbon still says "Couldn't reach
+  NetSuite" for ANY resolver failure including ones where NetSuite answered fine — needs a
+  4th `PeriodUnavailableReason`; (2) the fan-out duplicates `report_auto_refresh` /
+  `recon_scheduled_run_all`; (3) with a cap of N, a series past position N still reads
+  "within a day".
 
 - **2026-08-30 · Stage 2 gates the RIBBON DATA on the scheduler being enabled, not just the
   wording** · because the amber ribbon promises a statement "is scheduled", and a promise
@@ -409,38 +427,6 @@ Written so the next session does not re-litigate these.
 
 ## OPEN — needs a human, blocking something
 
-- **`feat/rolling-period-stage2` — resume here.** Worktree
-  `.claude/worktrees/feat-rolling-period` (branch switched), verify PASS @ `fa793ce6`.
-  Stage 1 is SHIPPED and live; this branch is Stage 2. NOTE: a re-parented migration can
-  strand the local DB at a head that SKIPS main's newer migrations, so `alembic upgrade
-  head` no-ops and ~123 celigo tests "fail" — repair with stamp/upgrade/stamp, see memory
-  `reference_worktree_db_stranded_behind_reparented_migrations`.
-  **There is UNCOMMITTED work in the tree** from a round-2 gate-fix agent that was still
-  running when the session ended — do NOT `git checkout --` it:
-  - DONE in tree: MAJOR A (`dashboard-tracking-empty-state.tsx` + `page.tsx` +
-    `dashboard-switcher.tsx`) — selecting a tracking series with no report yet used to
-    dump the user on the generic "nothing published" panel *with the switcher gone*, so
-    there was no way back. Also the resolver GUC-between-queries minor.
-  - IN PROGRESS: **MAJOR B** — `playbooks.py` creates the `ReportSeries` row BEFORE
-    `_execute_sources`, and a tool call in there can COMMIT mid-flight (OAuth token
-    refresh), so a later compose failure leaves a phantom series: zero reports, no audit,
-    still listed in `published_series`. Its two RED tests are already written
-    (`test_compose_playbook_tracking_failed_compose_leaves_no_orphaned_series`,
-    `..._series_conflicting_row_reuses_existing_not_500`) and currently FAIL — that is the
-    TDD red phase, not a regression. **Intended fix:** keep a read-only SELECT pre-check
-    before the compose (so a repeat compose still short-circuits cheaply) and move the
-    get-or-create upsert to AFTER the compose succeeds, immediately before the Report
-    insert — so the row that could be orphaned is never created.
-  - Then: `./scripts/verify.sh` (full — `--quick` is not evidence), then gate round 3
-    **pinned**: `Workflow({name:"code-review-multiangle", args:{target:"feat/rolling-period", base:"origin/main"}})`.
-  - **Do NOT merge** — deployment agents were active as of 2026-08-27, and merging
-    auto-deploys staging. The 093 collision is already resolved (main's
-    `093_recon_reject_labels` landed first; this branch re-parented onto it and merged main in).
-  - Gate history on this branch: round 1 → 2 majors (RLS GUC cleared by an in-request
-    OAuth commit; dashboard GET doing 2 live SuiteQL calls per page load) — both fixed in
-    `bbb28f8f`. Round 2 → 2 majors (the two above). Both rounds valid: target pinned,
-    `codex_used: true`, 0 UNVERIFIED. Expect a round 3 to find more; that has been the
-    pattern all the way through.
 
 - **`feat/rolling-period`'s last full `verify.sh` is RED — on two auth tests this branch
   does not touch.** `test_auth_security.py::TestLoginRateLimit::test_rate_limit_blocks_after_10`

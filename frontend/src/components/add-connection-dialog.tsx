@@ -24,9 +24,11 @@ import { useCreateConnection } from "@/hooks/use-connections";
 import { useToast } from "@/hooks/use-toast";
 import { Plus } from "lucide-react";
 
-type Provider = "shopify" | "stripe" | "netsuite";
+type Provider = "shopify" | "stripe" | "netsuite" | "solidus" | "api";
 
 const credentialFields: Record<Provider, { key: string; label: string }[]> = {
+  solidus: [],
+  api: [],
   shopify: [
     { key: "shop_domain", label: "Shop Domain" },
     { key: "api_key", label: "API Key" },
@@ -53,6 +55,10 @@ export function AddConnectionDialog() {
   const [credentials, setCredentials] = useState<Record<string, string>>({});
   const createConnection = useCreateConnection();
   const { toast } = useToast();
+  const isHttp = provider === "solidus" || provider === "api";
+  function setCredential(key: string, value: string) {
+    setCredentials((current) => ({ ...current, [key]: value }));
+  }
 
   function resetForm() {
     setProvider("");
@@ -65,12 +71,12 @@ export function AddConnectionDialog() {
     if (!provider) return;
 
     try {
-      await createConnection.mutateAsync({
+      const result = await createConnection.mutateAsync({
         provider,
         label,
         credentials,
       });
-      toast({ title: "Connection created successfully" });
+      toast({ title: result.status === "error" ? "Saved — read access needs attention" : "Connection saved", description: result.status === "error" ? "Check the credential and endpoint, then test the connection." : undefined });
       setOpen(false);
       resetForm();
     } catch (err) {
@@ -83,18 +89,18 @@ export function AddConnectionDialog() {
   }
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={(next) => { setOpen(next); if (!next) resetForm(); }}>
       <DialogTrigger asChild>
         <Button className="text-[13px] font-medium">
           <Plus className="mr-2 h-4 w-4" />
           Add Connection
         </Button>
       </DialogTrigger>
-      <DialogContent className="sm:max-w-lg">
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
         <DialogHeader>
           <DialogTitle className="text-lg">Add Connection</DialogTitle>
           <DialogDescription className="text-[13px]">
-            Connect a new platform to sync data.
+            Add a platform or API. Solidus and custom APIs are verified with a read request.
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={onSubmit} className="space-y-4">
@@ -104,7 +110,7 @@ export function AddConnectionDialog() {
               value={provider}
               onValueChange={(v) => {
                 setProvider(v as Provider);
-                setCredentials({});
+                setCredentials(v === "solidus" ? { auth_type: "bearer", api_profile: "solidus_rest" } : v === "api" ? { auth_type: "bearer" } : {});
               }}
             >
               <SelectTrigger className="h-10 text-[13px]">
@@ -114,6 +120,8 @@ export function AddConnectionDialog() {
                 <SelectItem value="shopify">Shopify</SelectItem>
                 <SelectItem value="stripe">Stripe</SelectItem>
                 <SelectItem value="netsuite">NetSuite</SelectItem>
+                <SelectItem value="solidus">Solidus</SelectItem>
+                <SelectItem value="api">Custom API</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -124,13 +132,43 @@ export function AddConnectionDialog() {
             </Label>
             <Input
               id="conn-label"
-              placeholder="e.g., Production Shopify"
+              placeholder="e.g., Framework Solidus"
               value={label}
               onChange={(e) => setLabel(e.target.value)}
               required
               className="h-10 text-[13px]"
             />
           </div>
+
+          {isHttp && (
+            <>
+              {provider === "solidus" && (
+                <label className="block space-y-2 text-[13px]">
+                  API profile
+                  <select className="h-10 w-full rounded-md border bg-background px-3" value={credentials.api_profile} onChange={(e) => setCredentials((current) => ({ ...current, api_profile: e.target.value, base_url: e.target.value === "framework_sync" ? "https://private-direct-access.frame.work/api/" : "" }))}>
+                    <option value="solidus_rest">Solidus REST</option>
+                    <option value="framework_sync">Framework Sync — order investigations</option>
+                  </select>
+                </label>
+              )}
+              <div className="space-y-2">
+                <Label htmlFor="api-base-url">API base URL</Label>
+                <Input id="api-base-url" type="url" value={credentials.base_url || ""} onChange={(e) => setCredential("base_url", e.target.value)} placeholder="https://store.example.com/api/" required />
+              </div>
+              <label className="block space-y-2 text-[13px]">
+                Authentication
+                <select className="h-10 w-full rounded-md border bg-background px-3" value={credentials.auth_type} onChange={(e) => setCredentials((current) => ({ ...current, auth_type: e.target.value, token: "", header_name: "" }))}>
+                  <option value="bearer">Bearer token</option>
+                  <option value="api_key">API key in header</option>
+                  {provider === "api" && <option value="none">None</option>}
+                </select>
+              </label>
+              {credentials.auth_type === "api_key" && <div className="space-y-2"><Label htmlFor="api-header">Authentication header</Label><Input id="api-header" value={credentials.header_name || ""} onChange={(e) => setCredential("header_name", e.target.value)} placeholder="X-API-Key" /></div>}
+              {credentials.auth_type !== "none" && <div className="space-y-2"><Label htmlFor="api-token">API token</Label><Input id="api-token" type="password" autoComplete="new-password" value={credentials.token || ""} onChange={(e) => setCredential("token", e.target.value)} required /></div>}
+              {provider === "api" && <div className="space-y-2"><Label htmlFor="api-test-path">Read endpoint for verification</Label><Input id="api-test-path" value={credentials.test_path || ""} onChange={(e) => setCredential("test_path", e.target.value)} placeholder="v1/health" required /><p className="text-[13px] text-muted-foreground">A relative GET endpoint returning JSON. No URL credentials or query tokens.</p></div>}
+              {provider === "solidus" && <p className="text-[13px] text-muted-foreground">Use a credential with order read access. Framework Sync supports order investigations; standard REST is saved and tested here. Select the authentication configured by your store.</p>}
+            </>
+          )}
 
           {provider &&
             credentialFields[provider].map((field) => (
@@ -168,7 +206,7 @@ export function AddConnectionDialog() {
               disabled={!provider || createConnection.isPending}
               className="text-[13px]"
             >
-              {createConnection.isPending ? "Creating..." : "Create"}
+              {createConnection.isPending ? (isHttp ? "Verifying…" : "Creating…") : isHttp ? "Save and verify" : "Create"}
             </Button>
           </DialogFooter>
         </form>

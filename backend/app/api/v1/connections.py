@@ -177,6 +177,8 @@ async def list_connections(
             auth_type=c.auth_type,
             encryption_key_version=c.encryption_key_version,
             metadata_json=c.metadata_json,
+            error_reason=c.error_reason,
+            last_health_check_at=c.last_health_check_at,
             created_at=c.created_at,
             created_by=str(c.created_by) if c.created_by else None,
         )
@@ -191,21 +193,32 @@ async def create_connection(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     # Check entitlement
-    allowed = await entitlement_service.check_entitlement(db, user.tenant_id, "connections")
+    allowed = await entitlement_service.check_entitlement(
+        db, user.tenant_id, "connections:netsuite" if request.provider == "netsuite" else "connections"
+    )
     if not allowed:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Connection limit reached for your plan",
+            detail="Connections are unavailable for this tenant",
         )
 
-    connection = await connection_service.create_connection(
-        db=db,
-        tenant_id=user.tenant_id,
-        provider=request.provider,
-        label=request.label,
-        credentials=request.credentials,
-        created_by=user.id,
-    )
+    try:
+        connection = await connection_service.create_connection(
+            db=db,
+            tenant_id=user.tenant_id,
+            provider=request.provider,
+            label=request.label,
+            credentials=request.credentials,
+            created_by=user.id,
+        )
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail="Invalid connection settings. Check the public HTTPS URL, authentication and read endpoint.",
+        ) from None
+
+    if request.provider in ("solidus", "api"):
+        await connection_service.test_connection(db, connection.id, user.tenant_id)
 
     await audit_service.log_event(
         db=db,
@@ -229,6 +242,8 @@ async def create_connection(
         auth_type=connection.auth_type,
         encryption_key_version=connection.encryption_key_version,
         metadata_json=connection.metadata_json,
+        error_reason=connection.error_reason,
+        last_health_check_at=connection.last_health_check_at,
         created_at=connection.created_at,
         created_by=str(connection.created_by) if connection.created_by else None,
     )
@@ -297,6 +312,8 @@ async def update_connection(
         auth_type=connection.auth_type,
         encryption_key_version=connection.encryption_key_version,
         metadata_json=connection.metadata_json,
+        error_reason=connection.error_reason,
+        last_health_check_at=connection.last_health_check_at,
         created_at=connection.created_at,
         created_by=str(connection.created_by) if connection.created_by else None,
     )
@@ -396,6 +413,8 @@ async def reconnect_connection(
         auth_type=connection.auth_type,
         encryption_key_version=connection.encryption_key_version,
         metadata_json=connection.metadata_json,
+        error_reason=connection.error_reason,
+        last_health_check_at=connection.last_health_check_at,
         created_at=connection.created_at,
         created_by=str(connection.created_by) if connection.created_by else None,
     )
@@ -408,6 +427,17 @@ async def test_connection(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     result = await connection_service.test_connection(db, connection_id, user.tenant_id)
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="connection",
+        action="connection.test",
+        actor_id=user.id,
+        resource_type="connection",
+        resource_id=str(connection_id),
+        payload={"status": result["status"]},
+    )
+    await db.commit()
     return ConnectionTestResponse(**result)
 
 

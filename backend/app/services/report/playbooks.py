@@ -210,6 +210,24 @@ PLAYBOOKS: dict[str, dict] = {
 }
 
 
+def supports_tracking_mode(playbook_key: str) -> bool:
+    """Whether ``mode="tracking"`` (rolling-period compose) is even meaningful for
+    ``playbook_key`` — the ONE predicate both ``compose_playbook_report`` (below,
+    run time) and ``registry.validate_plan`` (compile time) call, so the two
+    checks can never drift (brief H, item 3 — they used to independently read
+    ``PLAYBOOKS[key]["period_based"]``).
+
+    Reads straight off ``PLAYBOOKS[key]["period_based"]``, defaulting to True
+    (period-based) when an entry omits the flag entirely, matching the
+    pre-existing behaviour for every playbook that predates it. An unknown
+    ``playbook_key`` (no ``PLAYBOOKS`` entry) also returns True on purpose:
+    this predicate only answers "IS tracking mode supported", never "does
+    this playbook exist" — the "Unknown playbook" error is each caller's own
+    responsibility, raised further down its own code path."""
+    meta = PLAYBOOKS.get(playbook_key)
+    return meta is None or meta.get("period_based", True)
+
+
 def _source(report_type: str, period: str) -> dict:
     return {
         "tool": "netsuite_financial_report",
@@ -449,8 +467,7 @@ async def compose_playbook_report(
     # pre-existing behaviour for every playbook that predates this flag. An unknown
     # playbook_key (meta is None) is left to the existing "Unknown playbook" check
     # inside build_playbook_recipe further down — unchanged.
-    playbook_catalog_meta = PLAYBOOKS.get(playbook_key)
-    if mode == "tracking" and playbook_catalog_meta is not None and not playbook_catalog_meta.get("period_based", True):
+    if mode == "tracking" and not supports_tracking_mode(playbook_key):
         raise ValueError(f"playbook '{playbook_key}' has no accounting period — mode='tracking' isn't supported for it")
 
     series_id: uuid.UUID | None = None

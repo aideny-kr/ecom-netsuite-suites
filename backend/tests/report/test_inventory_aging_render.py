@@ -444,16 +444,180 @@ def test_details_summary_is_never_white_on_white():
     assert "color: var(--ink)" in _IA_CSS.split(".ia-section summary", 1)[1].split("}", 1)[0]
 
 
-def test_print_media_unclips_the_collapsible_aged_list():
+def test_page_rule_is_letter_landscape(html):
+    """The approved print layout (iterated against the real delivered report inside
+    the staging container — WeasyPrint is not installed on this dev machine, see
+    report_pdf.py's own docstring): landscape letter, not the WeasyPrint A4-portrait
+    default that clipped every wide table/chart in the delivered PDF."""
+    assert "@page { size: letter landscape" in html
+
+
+def test_print_media_block_carries_the_approved_kpi_mid_table_rules():
+    """The approved print stylesheet's load-bearing rules: the KPI row stays one
+    line of four cards, the trend chart sits beside the by-location table, long
+    tables repeat their header across pages."""
     from app.services.report.report_html import _IA_CSS
 
-    assert "@media print" in _IA_CSS
     print_block = _IA_CSS.split("@media print", 1)[1]
-    assert "details" in print_block
+    assert ".ia-kpis { display: flex" in print_block
+    assert ".ia-mid { display: flex" in print_block
+    assert "thead { display: table-header-group" in print_block
+
+
+def test_no_page_rule_for_a_spec_without_inventory_aging_sections():
+    """Byte-stability: `@page` (and the rest of `_IA_CSS`) is scoped to reports that
+    actually carry an inventory_aging section — every other report type must render
+    unaffected, same additive+conditional gate `_FS_CSS` already uses."""
+    spec = {"title": "Plain report", "sections": [{"type": "narrative", "markdown": "hello"}]}
+    out = render_report_html(spec)
+    assert "@page" not in out
+
+
+def test_print_hides_the_in_body_collapsible_aged_list_the_pdf_appendix_carries_it_instead():
+    """The in-body "All N aged SKUs" `<details>` block used to be FORCE-OPENED in
+    print (delivered PDF: a 786-row list force-expanded mid-report for 60 pages).
+    The approved layout instead HIDES it in print entirely — the PDF's full list
+    lives on its own appendix pages instead (`render_inventory_aging_appendix`,
+    wired at both PDF call sites via `appendix_html`)."""
+    from app.services.report.report_html import _IA_CSS
+
+    print_block = _IA_CSS.split("@media print", 1)[1]
+    assert ".ia-section details { display: none" in print_block
+    assert ":not([open])" not in print_block
+
+
+def test_trend_chart_endpoint_labels_are_one_decimal_and_fit_inside_the_svg():
+    """The first live PDF drew endpoint labels as the raw decimal literal
+    (`26.4535567%`) past the SVG's right edge, so they were clipped on the page (and
+    overflow on screen). The y-axis was already formatted to one decimal; the endpoint
+    labels must be too, and must end inside the viewBox given the right padding. The
+    render fixture's shares happen to be one-decimal literals, so this feeds the live
+    run's seven-decimal ones directly."""
+    import re
+
+    from app.services.report.report_html import _IA_TREND_W, _ia_trend_chart_html
+
+    report = {
+        "locations": [{"location": "Dimerco"}, {"location": "Fedex"}],
+        "trend": {
+            "Dimerco": [{"d": "2026-09-03", "pct_90p": "18.7"}, {"d": "2026-09-10", "pct_90p": "15.2583824"}],
+            "Fedex": [{"d": "2026-09-03", "pct_90p": "23.9"}, {"d": "2026-09-10", "pct_90p": "26.4535567"}],
+        },
+    }
+    svg = _ia_trend_chart_html(report)
+    labels = re.findall(r'<text x="([\d.]+)" y="[\d.]+" fill="#[0-9A-Fa-f]{6}" font-weight="700">([^<]*)</text>', svg)
+    assert [text for _x, text in labels] == ["15.3%", "26.5%"]
+    for x, text in labels:
+        assert float(x) + 7 * len(text) <= _IA_TREND_W, (x, text)  # ~7 viewBox units per glyph at 12px
+
+
+def test_print_layout_fits_the_chart_and_table_pair_under_the_kpis():
+    """Page 1 of the first live PDF was half blank: the chart-plus-table pair is kept
+    whole and did not fit under the KPI cards, and the four watch chips took four
+    lines. In print the chart takes 40 percent beside the table, the chart's axis text
+    is sized for that scale, and chips cap at half the row so they pack two per line."""
+    from app.services.report.report_html import _IA_CSS
+
+    print_block = _IA_CSS.split("@media print", 1)[1]
+    assert ".ia-mid > .chart { flex: 0 0 38%" in print_block
+    assert ".ia-mid table.tnum td { font-size: 12px" in print_block  # the by-location table clipped at 14px cells
+    assert ".ia-chip { font-size: 11px; padding: 4px 8px; box-shadow: none; max-width: calc(50% - 3px)" in print_block
+    assert ".chart .ia-grid text, .chart .ia-xaxis text { font-size: 14px" in print_block
+
+
+def test_top_positions_card_is_kept_whole_in_print(html):
+    """The last row of Largest aged positions landed alone on the next page under a
+    repeated header. The SECTION (heading + card; top 5 per location, bounded) is kept
+    on one page, at a cell density that fits one — keeping only the card whole while
+    it was taller than a page stranded the heading alone on a blank page."""
+    from app.services.report.report_html import _IA_CSS
+
+    assert '<div class="ia-section ia-top"><h2>Largest aged positions' in html
+    print_block = _IA_CSS.split("@media print", 1)[1]
+    assert ".ia-section.ia-top { break-inside: avoid; page-break-inside: avoid; }" in print_block
+    assert ".ia-top table.tnum td { font-size: 12px" in print_block
+    # the short computed highlights list is kept whole too (it split five-and-one across pages)
+    assert '<div class="ia-section ia-hl"><h2>Highlights' in html
+    assert ".ia-section.ia-hl { break-inside: avoid; page-break-inside: avoid; }" in print_block
 
 
 def test_render_report_html_deterministic(spec):
     assert render_report_html(spec) == render_report_html(spec)
+
+
+# ---------------------------------------------------------------------------
+# Item 2 -- the PDF appendix: a standalone document carrying the FULL (unbounded)
+# aged-SKU list, since print now hides the in-body collapsible block (item 1).
+# Renders from the SAME JSON-safe dict form `report_delivery._inventory_aging_model`
+# / `build_inventory_aging_workbook` already consume, never the live dataclass
+# (gate fix #4's "one representation for the rendered model").
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def ia_model(report):
+    from app.services.report.inventory_aging import json_safe as ia_json_safe
+
+    return ia_json_safe(report)
+
+
+def test_appendix_is_a_standalone_document_carrying_the_page_rule(ia_model):
+    from app.services.report.report_html import render_inventory_aging_appendix
+
+    appendix = render_inventory_aging_appendix(ia_model)
+    assert appendix.startswith("<!DOCTYPE html>")
+    assert "@page { size: letter landscape" in appendix
+
+
+def test_appendix_heading_and_group_row_per_location(ia_model, report):
+    from app.services.report.report_html import render_inventory_aging_appendix
+
+    appendix = render_inventory_aging_appendix(ia_model)
+    assert "Appendix" in appendix
+    assert "All aged SKUs" in appendix
+    assert appendix.count('<tr class="group"') == len(report.locations)
+    for loc in report.locations:
+        assert loc.location in appendix
+
+
+def test_appendix_contains_every_aged_item_row_not_just_top_five(ia_model, report):
+    """The appendix draws from `aged_items` (the UNBOUNDED per-location list), not
+    `top_items` (capped at 5) -- same distinction `_ia_top_positions_html`'s own
+    "All N aged SKUs" details block already makes (see its docstring)."""
+    from app.services.report.report_html import render_inventory_aging_appendix
+
+    appendix = render_inventory_aging_appendix(ia_model)
+    total_aged = sum(len(items) for items in report.aged_items.values())
+    assert total_aged == 4  # sanity on the fixture contract (3 Nova + 1 Solace)
+    group_rows = appendix.count('<tr class="group"')
+    header_rows = 1  # _IA_TOP_HEADER's own bare <tr>, also matched by "<tr"
+    assert appendix.count("<tr") - group_rows - header_rows == total_aged
+    for items in report.aged_items.values():
+        for it in items:
+            assert it.sku in appendix
+
+
+def test_appendix_reuses_the_top_header_and_item_row_markup(ia_model):
+    from app.services.report.report_html import _IA_TOP_HEADER, render_inventory_aging_appendix
+
+    appendix = render_inventory_aging_appendix(ia_model)
+    assert _IA_TOP_HEADER in appendix
+    assert appendix.count("<table") == 1
+
+
+def test_appendix_prints_denser_than_the_report_body(ia_model):
+    """The base stylesheet sizes every cell directly (`th,td { font-size:14px }`), so
+    the print block's `table.tnum { font-size: 9px }` never reaches a cell and the
+    report body's tables keep their approved size. The appendix is a different
+    surface -- 786 rows on the first live run, 41 pages at body size -- so it is
+    scoped by its own class and its cells get an explicit smaller size (20 pages
+    for the same rows, measured in the staging container's WeasyPrint)."""
+    from app.services.report.report_html import _IA_CSS, render_inventory_aging_appendix
+
+    appendix = render_inventory_aging_appendix(ia_model)
+    assert '<div class="report ia-appendix">' in appendix
+    print_block = _IA_CSS[_IA_CSS.index("@media print") :]
+    assert ".ia-appendix table.tnum td { font-size: 10px; padding: 2px 4px;" in print_block
+    assert ".ia-appendix table.tnum th { font-size: 8.5px;" in print_block
+    assert ".ia-appendix .tblcard tr.group td { font-size: 9px;" in print_block
 
 
 # ---------------------------------------------------------------------------

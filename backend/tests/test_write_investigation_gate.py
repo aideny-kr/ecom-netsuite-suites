@@ -349,3 +349,14 @@ class TestInvestigationGateScope:
 
         confirmations = [p for t, p in events if t == "confirmation_required"]
         assert confirmations == [], "upsert with no prior metadata call must be gated exactly like create"
+
+
+@pytest.fixture(autouse=True)
+def _netsuite_classification_boundary(monkeypatch):
+    """These write-flow units use NetSuite; connector identity is tested separately."""
+    from app.services.chat.mutation_guard import classify_mutation
+
+    monkeypatch.setattr(
+        "app.services.chat.mutation_guard.classify_connector_mutation",
+        AsyncMock(side_effect=lambda tool_name, *_: classify_mutation(tool_name)),
+    )

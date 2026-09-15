@@ -1,6 +1,7 @@
 """Tests for MCP Connectors CRUD API endpoints."""
 
 import uuid
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
@@ -11,12 +12,20 @@ from httpx import AsyncClient
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def unreachable_mcp(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.mcp_client_service.discover_tools",
+        AsyncMock(side_effect=RuntimeError("unreachable test endpoint")),
+    )
+
+
 @pytest_asyncio.fixture
 async def connector_payload():
     return {
         "provider": "netsuite_mcp",
         "label": "Test NetSuite MCP",
-        "server_url": "https://example.com/mcp/v1/all",
+        "server_url": "https://123456.suitetalk.api.netsuite.com/services/mcp/v1/all",
         "auth_type": "bearer",
         "credentials": {"access_token": "test-token-123"},
     }
@@ -35,9 +44,9 @@ async def test_create_mcp_connector(client: AsyncClient, admin_user, connector_p
     data = resp.json()
     assert data["provider"] == "netsuite_mcp"
     assert data["label"] == "Test NetSuite MCP"
-    assert data["server_url"] == "https://example.com/mcp/v1/all"
+    assert data["server_url"] == "https://123456.suitetalk.api.netsuite.com/services/mcp/v1/all"
     assert data["auth_type"] == "bearer"
-    assert data["status"] == "active"
+    assert data["status"] == "error"
     assert data["is_enabled"] is True
 
 
@@ -63,12 +72,11 @@ async def test_delete_mcp_connector(client: AsyncClient, admin_user, connector_p
     resp = await client.delete(f"/api/v1/mcp-connectors/{connector_id}", headers=headers)
     assert resp.status_code == 204
 
-    # Verify it's revoked (still shows in list but with revoked status)
+    # Deleted connectors disappear from management lists.
     list_resp = await client.get("/api/v1/mcp-connectors", headers=headers)
     connectors = list_resp.json()
     revoked = [c for c in connectors if c["id"] == connector_id]
-    assert len(revoked) == 1
-    assert revoked[0]["status"] == "revoked"
+    assert revoked == []
 
 
 @pytest.mark.asyncio

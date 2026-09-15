@@ -88,7 +88,7 @@ class TestConnectionCRUD:
         resp = await client.delete(f"/api/v1/connections/{fake_id}", headers=headers)
         assert resp.status_code == 404
 
-    async def test_test_connection_stub(self, client: AsyncClient, admin_user):
+    async def test_unsupported_provider_does_not_claim_verification(self, client: AsyncClient, admin_user):
         _, headers = admin_user
         resp = await client.post(
             "/api/v1/connections",
@@ -103,7 +103,7 @@ class TestConnectionCRUD:
 
         resp_test = await client.post(f"/api/v1/connections/{conn_id}/test", headers=headers)
         assert resp_test.status_code == 200
-        assert resp_test.json()["status"] == "ok"
+        assert resp_test.json()["status"] == "unsupported"
 
 
 class TestCeligoGenericDeleteGuard:

@@ -1,10 +1,11 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ConnectionCreate(BaseModel):
+    model_config = ConfigDict(hide_input_in_errors=True)
     # celigo is deliberately excluded: it is reachable only through
     # connect_celigo (app/api/v1/connector_status.py), which builds
     # Connection(...) directly and enforces the feature flag,
@@ -12,7 +13,7 @@ class ConnectionCreate(BaseModel):
     # knows nothing about. Widening this pattern to admit "celigo" would let
     # POST /connections create a Celigo row that bypasses every one of those
     # guards -- see tests/schemas/test_celigo_provider_schemas.py.
-    provider: str = Field(pattern=r"^(shopify|stripe|netsuite)$")
+    provider: str = Field(pattern=r"^(shopify|stripe|netsuite|solidus|api)$")
     label: str = Field(min_length=1, max_length=255)
     credentials: dict
 

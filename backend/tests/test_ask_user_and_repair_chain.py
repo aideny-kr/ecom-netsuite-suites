@@ -120,6 +120,10 @@ def _patches(*, subsidiaries_response=None, generic_execute_result="{}"):
     OWN direct call for ask_user name-verification — a second, separately
     mockable call the production cache makes cheap, see design "asking").
     """
+    # Import before patching tools: otherwise this module can retain our fake
+    # execute_tool_call after teardown and supply options to unrelated tests.
+    from app.services.chat import slot_option_sources
+
     metadata = _metadata()
     subsidiaries_response = (
         subsidiaries_response
@@ -152,8 +156,9 @@ def _patches(*, subsidiaries_response=None, generic_execute_result="{}"):
             return_value=MagicMock(score=4, source="mock"),
         ),
         patch("app.services.chat.tools.execute_tool_call", new_callable=AsyncMock, side_effect=_fake_execute_tool_call),
-        patch(
-            "app.services.chat.slot_option_sources.execute_tool_call",
+        patch.object(
+            slot_option_sources,
+            "execute_tool_call",
             new_callable=AsyncMock,
             side_effect=_fake_execute_tool_call,
         ),
@@ -1271,3 +1276,14 @@ class TestBouncedProposalStillCountsAsUnproposed:
 
         assert len([p for t, p in events if t == "confirmation_required"]) == 1
         assert adapter.forced_calls == [], "a card already reached the human — nothing to force"
+
+
+@pytest.fixture(autouse=True)
+def _netsuite_classification_boundary(monkeypatch):
+    """These write-flow units use NetSuite; connector identity is tested separately."""
+    from app.services.chat.mutation_guard import classify_mutation
+
+    monkeypatch.setattr(
+        "app.services.chat.mutation_guard.classify_connector_mutation",
+        AsyncMock(side_effect=lambda tool_name, *_: classify_mutation(tool_name)),
+    )

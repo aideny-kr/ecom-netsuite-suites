@@ -7,6 +7,7 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.database import set_tenant_context
 from app.core.rate_limit import check_mcp_tool_limit, reset_rate_limits
 from app.mcp.metrics import record_call, record_duration, record_rate_limit_rejection
 from app.services import audit_service
@@ -43,6 +44,46 @@ MCP_REBASELINE_FACTOR = 2
 DEFAULT_TOOL_RATE_LIMIT = 60 * MCP_REBASELINE_FACTOR
 
 TOOL_CONFIGS = {
+    "transaction_ops.groups": {
+        "default_limit": 20,
+        "max_limit": 50,
+        "timeout_seconds": 15,
+        "rate_limit_per_minute": 30,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": ["group_id", "limit", "offset", "review_run_ids", "status", "search"],
+    },
+    "transaction_ops.configs": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 10,
+        "rate_limit_per_minute": 30,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": [],
+    },
+    "transaction_ops.run": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 15,
+        "rate_limit_per_minute": 10,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": ["config_id", "order_references", "window_start", "window_end"],
+    },
+    "transaction_ops.accounting_evidence": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 90,
+        "rate_limit_per_minute": 10,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": ["case_id"],
+    },
+    "transaction_ops.status": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 15,
+        "rate_limit_per_minute": 30,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": ["run_id", "case_id"],
+    },
     "health": {
         "default_limit": None,
         "max_limit": None,
@@ -61,7 +102,7 @@ TOOL_CONFIGS = {
         "timeout_seconds": 30,
         "rate_limit_per_minute": 60,
         "requires_entitlement": "mcp_tools",
-        "allowlisted_params": ["query", "limit"],
+        "allowlisted_params": ["query", "limit", "connection_id", "expected_account_id"],
     },
     "netsuite.suiteql_stub": {
         "default_limit": 100,
@@ -109,7 +150,16 @@ TOOL_CONFIGS = {
         "timeout_seconds": 10,
         "rate_limit_per_minute": 20,
         "requires_entitlement": "mcp_tools",
-        "allowlisted_params": ["name", "schedule_type", "cron", "params"],
+        # Item 6 (gate fix): MUST equal registry.py's own "schedule.create"
+        # params_schema keys exactly — this is the REAL dispatch path
+        # (mcp_server.call_tool -> governed_execute -> validate_params), and
+        # it filters params BEFORE execute_create ever sees them. This used
+        # to omit instruction/timezone/delivery, so a chat-created Scheduled
+        # Job silently fell through to the legacy direct-create path.
+        # tests/test_mcp.py::test_schedule_tool_allowlists_never_drift_from_
+        # the_registry_params_schema asserts this equality so it cannot
+        # drift again.
+        "allowlisted_params": ["instruction", "name", "schedule_type", "cron", "timezone", "delivery", "params"],
     },
     "schedule.list": {
         "default_limit": None,
@@ -125,7 +175,11 @@ TOOL_CONFIGS = {
         "timeout_seconds": 30,
         "rate_limit_per_minute": 20,
         "requires_entitlement": "mcp_tools",
-        "allowlisted_params": ["schedule_id"],
+        # Item 6 (gate fix): MUST equal registry.py's "schedule.run"
+        # params_schema keys — this used to omit use_pending, so "Run once
+        # with this change" (spec §B5) silently ran the APPROVED plan
+        # instead of the pending one through the real dispatch path.
+        "allowlisted_params": ["schedule_id", "use_pending"],
     },
     "netsuite.connectivity": {
         "default_limit": None,
@@ -544,17 +598,41 @@ async def governed_execute(
             return {"error": "VALIDATION_FAILED", "message": error_msg, "tool": tool_name}
 
     # 3. Execute
+    context = {
+        "tenant_id": tenant_id,
+        "actor_id": actor_id,
+        "db": db,
+        "correlation_id": correlation_id,
+        "context_need": context_need,
+        "conversation_id": session_id,
+    }
+    execution_error: Exception | None = None
+    result: dict[str, Any] | None = None
     try:
-        context = {
-            "tenant_id": tenant_id,
-            "actor_id": actor_id,
-            "db": db,
-            "correlation_id": correlation_id,
-            "context_need": context_need,
-            "conversation_id": session_id,
-        }
         result = await execute_fn(validated_params, context=context)
     except Exception as e:
+        execution_error = e
+
+    # Item 5 (delta gate fix E): re-establish tenant context HERE, right
+    # after `execute_fn` returns (success or error path) -- the ONE choke
+    # point every tool call passes through, regardless of which handler ran.
+    # A handler that commits mid-call (e.g. schedule_ops.py's
+    # execute_create/execute_run, both of which snapshot a plan or enqueue a
+    # Celery task before dispatching) clears `SET LOCAL app.current_tenant_id`
+    # on this SAME shared session -- without this, the audit writes below
+    # (both the success `tool.executed` and the failure `tool.failed` event)
+    # silently fail their RLS `WITH CHECK` and are dropped. This used to be
+    # pasted into every handler that needed it (three call sites in
+    # schedule_ops.py); centralising it here means no future handler can
+    # forget it.
+    if db is not None and tenant_id:
+        try:
+            await set_tenant_context(db, str(tenant_id))
+        except Exception:
+            logger.warning("mcp.tenant_context_reset_failed", tool=tool_name, exc_info=True)
+
+    if execution_error is not None:
+        e = execution_error
         duration_ms = (time.monotonic() - start) * 1000
         logger.error(
             "mcp.tool_call",
@@ -595,6 +673,12 @@ async def governed_execute(
 
     # 4. Redact
     redacted = redact_result(result)
+    # Tools can report a handled failure without raising an exception. Preserve
+    # that outcome in telemetry and audit instead of treating every return as success.
+    failed = isinstance(result, dict) and (
+        result.get("success") is False or result.get("isError") is True or bool(result.get("error"))
+    )
+    outcome = "error" if failed else "success"
 
     # 5. Log + metrics
     duration_ms = (time.monotonic() - start) * 1000
@@ -605,9 +689,9 @@ async def governed_execute(
         actor_id=actor_id,
         correlation_id=correlation_id,
         duration_ms=round(duration_ms, 2),
-        status="success",
+        status=outcome,
     )
-    record_call(tool_name, "success")
+    record_call(tool_name, outcome)
     record_duration(tool_name, duration_ms / 1000)
 
     # 6. Audit to DB
@@ -619,14 +703,14 @@ async def governed_execute(
                 db=db,
                 tenant_id=tenant_uuid,
                 category="tool_call",
-                action="tool.executed",
+                action="tool.failed" if failed else "tool.executed",
                 actor_id=actor_uuid,
                 actor_type=actor_type,
                 resource_type="mcp_tool",
                 resource_id=tool_name,
                 correlation_id=correlation_id,
                 payload=create_audit_payload(tool_name, validated_params, result=result),
-                status="success",
+                status=outcome,
             )
         except Exception:
             logger.exception("mcp.audit_write_failed", tool=tool_name)

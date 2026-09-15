@@ -240,6 +240,10 @@ class AnthropicAdapter(BaseLLMAdapter):
             "max_tokens": max_tokens,
             "system": system_blocks,
             "messages": messages,
+            # Cache the growing conversation too, including dynamic context and tool results.
+            # Tool + static-system breakpoints use two of the four available slots.
+            # The pinned SDK predates this top-level option; extra_body passes it to the API.
+            "extra_body": {"cache_control": {"type": "ephemeral"}},
         }
         if tools:
             # Cache tool definitions — they're large and identical every step
@@ -304,6 +308,10 @@ class AnthropicAdapter(BaseLLMAdapter):
             "max_tokens": max_tokens,
             "system": system_blocks,
             "messages": messages,
+            # Cache the growing conversation too, including dynamic context and tool results.
+            # Tool + static-system breakpoints use two of the four available slots.
+            # The pinned SDK predates this top-level option; extra_body passes it to the API.
+            "extra_body": {"cache_control": {"type": "ephemeral"}},
         }
         if tools:
             cached_tools = [_to_api_tool(t) for t in tools]

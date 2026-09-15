@@ -9,7 +9,7 @@ runtime dependency or application model change is required.
 ## Available tools
 
 Every name below has the `suitestudio_` prefix. Discover again after navigation:
-there are 3 shared tools, 10 total on Chat, 6 on a table, and 15 on the Files workspace
+there are 3 shared tools, 10 total on Chat, 6 on a supported table, and 15 on the Files workspace
 (22 while its Chat panel is open).
 
 | Surface | Tools | Behavior |
@@ -17,13 +17,17 @@ there are 3 shared tools, 10 total on Chat, 6 on a table, and 15 on the Files wo
 | Shared | `get_page_context`, `navigate`, `get_connection_status` | Current route/origin, active tenant, available tools, allowed destinations, and stored connection health. Health does not prove live provider connectivity. |
 | General Chat | `chat_get_state`, `chat_create_session`, `chat_select_session` | Inspect readiness and conversations; create or select through existing UI handlers. Creating an empty session is not idempotent. |
 | General Chat | `chat_send_message`, `chat_get_run`, `chat_get_messages`, `chat_cancel_run` | Retry-safe admission, lifecycle/outcome, paginated persisted structured output, and graceful cancellation. Submission may incur model usage under existing permissions. |
-| Tables | `table_get_state`, `table_set_query`, `table_open_row` | Visible search/filter, sorting, pagination and row drawer. Prior-page placeholder rows are withheld while fetching. |
+| Tables (excluding the new Orders workspace) | `table_get_state`, `table_set_query`, `table_open_row` | Visible search/filter, sorting, pagination and row drawer. Prior-page placeholder rows are withheld while fetching. |
 | Files workspace | `workspace_get_state`, `workspace_select`, `workspace_list_files`, `workspace_open_file`, `workspace_read_editor` | Select through existing handlers, inspect a paginated tree and bounded lines of the loaded editor file. |
 | Files workspace | `workspace_search`, `workspace_get_search`, `workspace_get_runs` | Visible search, snippets, and validation/test/deploy status. These tools do not start deployments or save files. |
 
 | Workspace panels | `workspace_set_panel` | Open Chat, Changesets or Runs using the visible panel selector. Rediscover tools after opening Chat. |
 | Workspace drafts | `workspace_list_changesets`, `workspace_open_changeset`, `workspace_read_diff` | Review bounded before/after/unified diffs and baseline drift. No approval, apply or deployment operation. |
 | Workspace Chat | `workspace_chat_get_state`, `workspace_chat_create_session`, `workspace_chat_select_session`, `workspace_chat_send_message`, `workspace_chat_get_run`, `workspace_chat_get_messages`, `workspace_chat_cancel_run` | Same chat lifecycle, scoped to the selected workspace and explicit file context. Registrations are removed when the panel closes or workspace changes. |
+
+The newer Orders/Transactions workspace retains its own UI and currently exposes
+only shared WebMCP tools. Canonical table tools remain on Payments, Refunds,
+Payouts and the other existing table views.
 
 Route tools return bounded JSON diagnostics under `error` when an operation fails.
 Check for that field before treating a result as success. Shared foundation tools
@@ -99,7 +103,7 @@ Close/reopen the Chat panel to rediscover sessions and reconnect to active work.
 
 ## Backend compatibility and safety
 
-- Migration `100_chat_submissions` adds a tenant-scoped receipt table with row-level
+- Migration `108_chat_submissions` adds a tenant-scoped receipt table with row-level
   security. Receipt and user message commit together under a session row lock.
   Retries remain deduplicated after HTTP loss, browser reload and Redis expiry.
 - `POST /api/v1/chat/sessions/{id}/messages` accepts optional UUID `request_id`.
@@ -212,15 +216,20 @@ webmcp-test-redis`.
   search and visible results, workspace editor/diff inspection and context-bound
   workspace chat (including long prompts, retries and panel cleanup), navigation/logout,
   permission denial, fallback without native WebMCP, and navigation/selection races.
-- Frontend: 72 focused unit/hook/composer tests passed; production build, TypeScript and lint
-  passed. Existing image/hook lint warnings remain.
-- Backend: 125 real PostgreSQL/Redis and focused chat/write-confirmation/rate-limit
-  regression tests passed.
+- Frontend: 1,440 full-suite tests passed after integration with main, including
+  the 72 focused WebMCP/auth/hook/composer tests; production build, TypeScript and
+  lint passed. Existing image/hook lint warnings remain.
+- Backend: 134 focused PostgreSQL/Redis and seeded-tenant lifecycle tests passed
+  after integration with main. The pre-integration full suite passed 7,262 tests
+  with six skips and 76.51% coverage; full integrated CI remains a release gate.
+- Migration 108 has a single head after 102_schedule_retry_job; fresh upgrade,
+  downgrade and re-upgrade passed on the dedicated local fixture database.
 - The saved Codex server configuration initialized with both bridge tools. An
   earlier direct MCP smoke test discovered/executed the shared foundation tools.
   Expanded tools were verified through native Chrome, not a second MCP smoke.
-- No shared migration, provider/model call, financial write, PR, merge or deployment
-  was performed. Other agents' services and source changes were preserved.
+- Draft [PR #260](https://github.com/aideny-kr/ecom-netsuite-suites/pull/260)
+  contains the changes. No shared migration, provider/model call, financial write
+  or deployment was performed. Other agents' services and source changes were preserved.
 
 ## Useful next improvements
 

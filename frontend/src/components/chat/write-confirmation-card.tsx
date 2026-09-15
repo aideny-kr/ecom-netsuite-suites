@@ -17,6 +17,7 @@ const MUTATION_ICONS = {
   update: Pencil,
   delete: Trash2,
   upsert: Pencil,
+  execute: Pencil,
 } as const;
 
 const METADATA_KEYS = new Set(["id", "type"]);
@@ -83,7 +84,7 @@ export function WriteConfirmationCard({
   const allSlotsFilled = slots.every((slot) => (slotValues[slot.name] ?? "").trim() !== "");
 
   const visibleProposedFields = Object.entries(data.proposed_fields).filter(
-    ([key]) => !METADATA_KEYS.has(key),
+    ([key]) => data.mutation_type === "execute" || !METADATA_KEYS.has(key),
   );
   const proposedLines = data.proposed_lines ?? [];
 
@@ -249,8 +250,9 @@ export function WriteConfirmationCard({
               Could not be validated
             </p>
             <p className="mt-1 text-[12px] leading-snug text-muted-foreground">
-              NetSuite&apos;s field requirements were unavailable, so this payload was not checked.
-              Review every value before approving.
+              {data.mutation_type === "execute"
+                ? "This external tool may change data. Review the tool and every argument before approving."
+                : "NetSuite's field requirements were unavailable, so this payload was not checked. Review every value before approving."}
             </p>
           </div>
         </div>
@@ -262,7 +264,7 @@ export function WriteConfirmationCard({
             This {data.mutation_type} may or may not have completed
           </p>
           <p className="mt-1 text-[12px] leading-snug text-muted-foreground">
-            NetSuite never confirmed the result
+            {data.mutation_type === "execute" ? "The external server never confirmed the result" : "NetSuite never confirmed the result"}
             {data.error ? ` (${data.error})` : ""}. That is not the same as a rejection — the{" "}
             {data.record_type} may already exist.
           </p>

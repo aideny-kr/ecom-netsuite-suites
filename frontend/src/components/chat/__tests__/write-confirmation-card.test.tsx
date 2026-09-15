@@ -393,3 +393,13 @@ describe("WriteConfirmationCard — indeterminate outcome", () => {
     expect(screen.queryByRole("button", { name: /approve/i })).not.toBeInTheDocument();
   });
 });
+
+
+it("shows every custom MCP argument, including id and type, before approval", () => {
+  const onApprove = vi.fn();
+  render(<WriteConfirmationCard data={{ ...baseCreate, mutation_type: "execute", record_type: "external tool send_money", proposed_fields: { id: "payee-123", type: "transfer", amount: "100.00" }, unvalidated: true }} onConfirm={onApprove} onReject={vi.fn()} />);
+  expect(screen.getByText("payee-123")).toBeInTheDocument();
+  expect(screen.getByText("transfer")).toBeInTheDocument();
+  expect(screen.getByText("100.00")).toBeInTheDocument();
+  expect(onApprove).not.toHaveBeenCalled();
+});
