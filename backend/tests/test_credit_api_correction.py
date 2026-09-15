@@ -1,3 +1,4 @@
+import json
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -35,6 +36,7 @@ def proposed():
     p, _ = prepared()
     p["execution_transport"] = "mcp_record_api"
     p["connector_id"] = str(uuid4())
+    p["wire_record_json"] = json.dumps(api.typed_fields(schema(p["proposed_fields"]), p["proposed_fields"]))
     return p
 
 
@@ -75,7 +77,7 @@ def test_keyed_payload_is_bound_to_connector_record_and_exact_lines():
     p = proposed()
     db = SimpleNamespace(info={"accounting_correction_candidate": p})
     tool = f"ext__{p['connector_id'].replace('-', '')}__ns_updateRecord"
-    data = {"recordType": "creditmemo", "recordId": p["record_id"], "data": p["proposed_fields"]}
+    data = {"recordType": "creditmemo", "recordId": p["record_id"], "data": json.loads(p["wire_record_json"])}
     assert api.review_for_card(db, p["tenant_id"], tool, "creditmemo", normalize_write_payload(data)) == p
     wrong = deepcopy(data)
     wrong["data"]["item"]["items"][0]["amount"] = "399"
@@ -98,7 +100,7 @@ def test_existing_approval_age_does_not_skip_fresh_preflight():
     p["observed_at"] = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
     db = SimpleNamespace(info={"accounting_correction_candidate": p})
     tool = f"ext__{p['connector_id'].replace('-', '')}__ns_updateRecord"
-    data = normalize_write_payload({"recordId": p["record_id"], "data": p["proposed_fields"]})
+    data = normalize_write_payload({"recordId": p["record_id"], "data": json.loads(p["wire_record_json"])})
     with pytest.raises(ValueError):
         api.review_for_card(db, p["tenant_id"], tool, "creditmemo", data)
     assert api.review_for_card(db, p["tenant_id"], tool, "creditmemo", data, check_age=False) == p
@@ -130,6 +132,11 @@ async def test_preparation_preserves_exact_decimals_in_persistable_evidence(monk
     result = await api.prepare(AsyncMock(), p["tenant_id"], p, data[2], None)
     assert json.loads(json.dumps(result))["support"]["credit"]["subtotal"] == "440.00"
     assert result["before"]["subtotal"] == "440.00"
+    from app.services.transaction_ops.state_service import business_digest
+
+    assert business_digest(result)
+    assert isinstance(result["proposed_fields"]["taxRate"], str)
+    assert isinstance(json.loads(result["wire_record_json"])["taxRate"], (int, float))
     assert result["before"]["taxTotal"] == "0.00"
     assert "taxTotal" not in result["support"]["credit"]
     assert "taxTotal" not in p["support"]["credit"]
@@ -177,7 +184,7 @@ async def test_actual_preflight_rejects_changed_evidence_before_dispatch(monkeyp
         connection_active=True,
     )
     raw = schema(p["proposed_fields"])
-    p["proposed_fields"] = api.typed_fields(raw, p["proposed_fields"])
+    p["wire_record_json"] = json.dumps(api.typed_fields(raw, p["proposed_fields"]))
     if drift == "connection":
         review["native_mcp_connector_id"] = str(uuid4())
     elif drift == "source":
@@ -208,7 +215,7 @@ async def test_actual_preflight_rejects_changed_evidence_before_dispatch(monkeyp
 
     monkeypatch.setattr(api, "authenticated_reader", connection)
     tool = f"ext__{p['connector_id'].replace('-', '')}__ns_updateRecord"
-    payload = {"recordType": "creditmemo", "recordId": p["record_id"], "data": p["proposed_fields"]}
+    payload = {"recordType": "creditmemo", "recordId": p["record_id"], "data": json.loads(p["wire_record_json"])}
     db = SimpleNamespace(info={})
     if drift:
         reason = {

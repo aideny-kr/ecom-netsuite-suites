@@ -505,7 +505,12 @@ async def candidate_confirmation(*, db, tenant_id, actor_id, correlation_id, ses
     mutation = "create" if creating_credit else "update"
     operation = "ns_createRecord" if creating_credit else "ns_updateRecord"
     name = f"ext__{p['connector_id'].replace('-', '')}__{operation}"
-    params = {"recordType": p["record_type"], "data": json.dumps(p["proposed_fields"])}
+    params = {
+        "recordType": p["record_type"],
+        "data": p["wire_record_json"]
+        if p.get("execution_transport") == "mcp_record_api"
+        else json.dumps(p["proposed_fields"]),
+    }
     if not creating_credit:
         params["recordId"] = p["record_id"]
     if name not in {t.get("name") for t in tools or []}:

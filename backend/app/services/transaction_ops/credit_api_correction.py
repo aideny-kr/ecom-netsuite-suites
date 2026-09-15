@@ -85,7 +85,9 @@ async def prepare(db, tenant_id, intent, evidence, restriction):
     ) as reader:
         raw = await reader.request("GET", "/record/v1/metadata-catalog/creditMemo")
     proposal = deepcopy(intent)
-    proposal["proposed_fields"] = typed_fields(raw, proposal["proposed_fields"])
+    # Keep exact decimal strings in financial evidence and operation identities.
+    # JSON numeric tokens belong only in the opaque, signed connector payload.
+    proposal["wire_record_json"] = json.dumps(typed_fields(raw, proposal["proposed_fields"]), allow_nan=False)
     proposal.update(
         execution_transport="mcp_record_api",
         connector_schema=schema_contract(raw, proposal["proposed_fields"]),
@@ -127,7 +129,7 @@ def review_for_card(db, tenant_id, tool_name, record_type, normalized, *, check_
         or p["tenant_id"] != str(tenant_id)
         or record_type.lower() != "creditmemo"
         or normalized.record_id != p["record_id"]
-        or normalized.record != p["proposed_fields"]
+        or normalized.record != json.loads(p["wire_record_json"])
         or (check_age and not 0 <= age <= 300)
     ):
         raise ValueError("credit_api_proposal_binding_changed")
@@ -187,7 +189,9 @@ async def validate_approved(db, tenant_id, tool_name, tool_input, p):
         raw = await reader.request("GET", "/record/v1/metadata-catalog/creditMemo")
     if schema_contract(raw, p["proposed_fields"]) != p["connector_schema"]:
         raise ValueError("credit_api_schema_changed")
-    if typed_fields(raw, rebuilt["proposed_fields"]) != p["proposed_fields"]:
+    if rebuilt["proposed_fields"] != p["proposed_fields"] or typed_fields(
+        raw, rebuilt["proposed_fields"]
+    ) != json.loads(p["wire_record_json"]):
         raise ValueError("credit_api_treatment_changed")
 
 

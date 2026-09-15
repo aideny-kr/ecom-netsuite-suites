@@ -662,7 +662,9 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
                                 if correction.get("kind") == "sales_adjustment_credit"
                                 else {"recordId": correction["record_id"]}
                             ),
-                            "data": json.dumps(correction["proposed_fields"]),
+                            "data": correction["wire_record_json"]
+                            if correction.get("execution_transport") == "mcp_record_api"
+                            else json.dumps(correction["proposed_fields"]),
                         },
                         "expected_after": correction["expected_after"],
                         "approval_basis": correction["approval_basis"],

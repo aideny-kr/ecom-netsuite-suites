@@ -76,6 +76,10 @@ def kind_proposal(kind):
         p, data = prepared()
         if kind == "api_credit":
             p["execution_transport"] = "mcp_record_api"
+            from app.services.transaction_ops.credit_api_correction import typed_fields
+            from tests.test_credit_api_correction import schema
+
+            p["wire_record_json"] = json.dumps(typed_fields(schema(p["proposed_fields"]), p["proposed_fields"]))
             p["connector_id"] = proposal()["connector_id"]
             p["connector_schema"] = {"fields_digest": "verified-schema"}
             p["protected_sales_order"] = data[2]["sections"]["sales_order"]
@@ -119,11 +123,15 @@ def inputs(p):
     if p.get("kind") == "sales_adjustment_credit":
         return (
             f"ext__{p['connector_id'].replace('-', '')}__ns_createRecord",
-            {"recordType": "creditmemo", "data": json.dumps(p["proposed_fields"])},
+            {"recordType": "creditmemo", "data": p.get("wire_record_json") or json.dumps(p["proposed_fields"])},
         )
     return (
         f"ext__{p['connector_id'].replace('-', '')}__ns_updateRecord",
-        {"recordType": p["record_type"], "recordId": p["record_id"], "data": json.dumps(p["proposed_fields"])},
+        {
+            "recordType": p["record_type"],
+            "recordId": p["record_id"],
+            "data": p.get("wire_record_json") or json.dumps(p["proposed_fields"]),
+        },
     )
 
 
