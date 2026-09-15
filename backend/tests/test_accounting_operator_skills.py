@@ -13,7 +13,14 @@ from app.services.chat.tools import build_external_tool_definitions, build_local
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "slug", ["accounting_operations", "netsuite_subledger", "accounting_treatments", "accounting_verification"]
+    "slug",
+    [
+        "accounting_operations",
+        "netsuite_subledger",
+        "accounting_treatments",
+        "accounting_verification",
+        "evidence_led_operations",
+    ],
 )
 async def test_load_maintained_skill_and_revision(slug):
     result = await execute({"slug": slug})

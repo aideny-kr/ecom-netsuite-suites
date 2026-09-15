@@ -29,9 +29,10 @@ SOURCE_FIELDS = (
     "payment_state",
     "payments",
 )
+ACCOUNTING_DETAIL_SOURCE_FIELDS = ("taxes", "shipments", "tax_jurisdiction")
 
 
-async def refresh_source(db, tenant_id, scope, reference):
+async def refresh_source(db, tenant_id, scope, reference, *, include_accounting_detail=False):
     import uuid
 
     envelope = await read_framework_order(
@@ -41,8 +42,12 @@ async def refresh_source(db, tenant_id, scope, reference):
         reference,
         source_connection_id=uuid.UUID(scope["source_connection_id"]) if scope.get("source_connection_id") else None,
     )
+    # Preserve the exact source envelope signed by existing correction cards.
+    # Richer investigation detail must not invalidate an unchanged pending
+    # approval simply because a software release added observation fields.
+    fields = SOURCE_FIELDS + ACCOUNTING_DETAIL_SOURCE_FIELDS if include_accounting_detail else SOURCE_FIELDS
     return json.loads(
-        json.dumps({k: envelope["orders"][0][k] for k in SOURCE_FIELDS if k in envelope["orders"][0]}, default=str)
+        json.dumps({k: envelope["orders"][0][k] for k in fields if k in envelope["orders"][0]}, default=str)
     )
 
 

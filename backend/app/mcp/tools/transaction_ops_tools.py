@@ -400,7 +400,18 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
         if "case_id" not in params or set(params) - {"case_id", "observation_id", "section"}:
             raise _ToolError("invalid_parameters")
         if "section" in params and "observation_id" not in params:
-            raise _ToolError("invalid_parameters")
+            return {
+                "success": False,
+                "error": "A saved evidence section requires observation_id from the prior response's audit_id.",
+                "reason": "missing_observation_id",
+                "recovery": {
+                    "saved_read": "Keep case_id and section; add the exact prior audit_id as observation_id. "
+                    "This reuses collected evidence without upstream reads.",
+                    "fresh_read": "If current evidence is needed, send only case_id. "
+                    "That response contains all collected sections and a new audit_id.",
+                },
+                "financial_writes": 0,
+            }
         db, tenant_id, actor = await _authorize(context, create=False)
         case = await case_service.get_case(db, tenant_id, uuid.UUID(str(params["case_id"])))
         if "observation_id" in params:
@@ -415,12 +426,18 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
         from app.services.audit_service import log_event
         from app.services.transaction_ops.group_investigation import unsupported_source_recipe
         from app.services.transaction_ops.source_reader import SourceReadError
-        from app.services.transaction_ops.tax_correction import candidate, refresh_source
+        from app.services.transaction_ops.tax_correction import (
+            ACCOUNTING_DETAIL_SOURCE_FIELDS,
+            candidate,
+            refresh_source,
+        )
 
         prefetched_source, source_error = None, None
         if context.get("group_preparation") is True:
             try:
-                prefetched_source = await refresh_source(db, tenant_id, review["scope"], case.order_reference)
+                prefetched_source = await refresh_source(
+                    db, tenant_id, review["scope"], case.order_reference, include_accounting_detail=True
+                )
             except SourceReadError as exc:
                 source_error = exc
         options = (
@@ -460,9 +477,23 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
             source = (
                 prefetched_source
                 if prefetched_source is not None
-                else await refresh_source(db, tenant_id, review["scope"], case.order_reference)
+                else await refresh_source(
+                    db, tenant_id, review["scope"], case.order_reference, include_accounting_detail=True
+                )
             )
             evidence["source_refresh"] = source
+            from app.services.transaction_ops.line_evidence import compare_source_lines, source_revision_delta
+
+            evidence["line_comparison"] = compare_source_lines(source, evidence)
+            sections = evidence.get("sections") or {}
+            evidence["source_revision_deltas"] = [
+                delta
+                for document in [sections.get("sales_order") or {}, *(sections.get("posting_documents") or [])]
+                if (delta := source_revision_delta(source, evidence, document.get("id"))) is not None
+            ]
+            # Existing recipes retain their signed source shape and exact
+            # revalidation semantics. The full observation remains above.
+            source = {k: v for k, v in source.items() if k not in ACCOUNTING_DETAIL_SOURCE_FIELDS}
             from app.services.transaction_ops.commercial_credits import collect_commercial_credits
 
             await collect_commercial_credits(db, tenant_id, review, case.latest_report_json, source, evidence)
@@ -557,6 +588,30 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
             payload={"evidence": evidence, "correction_candidate": correction},
         )
         evidence["audit_id"] = str(evidence_event.id)
-        return {"success": True, "case_id": str(case.id), "accounting_evidence": evidence}
+        from app.services.transaction_ops.accounting_evidence import completion_evidence_summary
+
+        return {
+            "success": True,
+            "case_id": str(case.id),
+            "accounting_evidence": evidence,
+            "evidence_summary": completion_evidence_summary(evidence),
+            "model_context": {
+                "version": 1,
+                "data": {
+                    "case_id": str(case.id),
+                    "evidence_summary": completion_evidence_summary(evidence),
+                    "record_links": evidence["record_links"],
+                    "detail_access": {
+                        "case_id": str(case.id),
+                        "observation_id": str(evidence_event.id),
+                        "sections": ["source", "documents", "applications", "assessment"],
+                        "instruction": "Use this evidence tool with case_id, observation_id and section for "
+                        "saved detail (no native API calls). Documents include native line/GL evidence. "
+                        "Omitted details are not absent or verified. Use a fresh case-only call when "
+                        "current changed state is required, not merely to inspect this observation.",
+                    },
+                },
+            },
+        }
     except (ValueError, _ToolError, StateError, NetSuiteEvidenceError) as exc:
         return {"success": False, "error": "Accounting case or scoped configuration unavailable.", "reason": str(exc)}

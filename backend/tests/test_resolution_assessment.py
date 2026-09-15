@@ -70,3 +70,21 @@ def test_multiple_invoices_do_not_collapse_to_one_payment_state():
     e = evidence()
     e["sections"]["posting_documents"].append({"id": "11"})
     assert assess(e, {}, {})["facts"]["payment_state"] == "not_established"
+
+
+def test_existing_credit_observation_does_not_infer_tax_or_full_allocation():
+    e = evidence()
+    e["sections"]["related_refund_documents"] = {
+        "complete": False,
+        "documents": [
+            {"record_type": "creditmemo", "id": "20", "total": "440", "applied": "440", "unapplied": "0"},
+            {"record_type": "customerrefund", "id": "21", "total": "440"},
+        ],
+    }
+    e["line_comparison"] = {"changes": [{"source_line_id": "55", "unit_price_delta": "-400"}], "unverified": []}
+    result = assess(e, {}, {})
+    assert result["facts"]["related_credit_refund_records"][0]["id"] == "20"
+    assert "taxTotal" not in result["facts"]["related_credit_refund_records"][0]
+    assert result["facts"]["related_refund_graph_complete"] is False
+    assert result["execution_capabilities"]["exact_proposal_available"] is False
+    assert result["facts"]["line_comparison"] == e["line_comparison"]

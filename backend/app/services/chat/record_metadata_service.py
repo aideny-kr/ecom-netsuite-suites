@@ -7,6 +7,7 @@ rather than assuming the payload is complete.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
@@ -19,7 +20,43 @@ from app.services.chat.tools import execute_tool_call
 logger = logging.getLogger(__name__)
 
 _TTL_SECONDS = 3600
-_cache: dict[tuple[str, str], tuple[float, "RecordMetadata"]] = {}
+_cache: dict[tuple[str, ...], tuple[float, "RecordMetadata"]] = {}
+
+
+def _scoped_cache_key(connector, tenant_id, actor_id, record_type):
+    """Credential/config changes invalidate schema, including within a session.
+
+    Only a connector loaded through the tenant-scoped service may be supplied.
+    The fingerprint is never exposed as model context or written to logs.
+    Authorization still runs at the eventual mutation boundary.
+    """
+    if not connector or connector.status != "active" or not connector.is_enabled:
+        return None
+    revision = hashlib.sha256(
+        json.dumps(
+            {
+                "url": connector.server_url,
+                "credentials": connector.encrypted_credentials,
+                "auth_type": connector.auth_type,
+                "metadata": connector.metadata_json,
+                "updated_at": connector.updated_at,
+            },
+            sort_keys=True,
+            default=str,
+        ).encode()
+    ).hexdigest()
+    return (str(tenant_id), str(actor_id), str(connector.id), record_type, revision)
+
+
+def _remember(key, metadata):
+    # Bound a process-local optimization, never persist authorization here.
+    now = time.monotonic()
+    for expired in [k for k, (at, _) in _cache.items() if now - at >= _TTL_SECONDS]:
+        _cache.pop(expired, None)
+    if len(_cache) >= 512:
+        _cache.pop(min(_cache, key=lambda k: _cache[k][0]))
+    _cache[key] = (now, metadata)
+
 
 # NetSuite has been observed to serialise the required-marker under several
 # names depending on endpoint/version (`ismandatory` on discovered account
@@ -152,7 +189,7 @@ async def prefetch_scoped_invoice_metadata(db, tenant_id, actor_id, proposal, co
         raise ValueError("The accounting record metadata connector/account binding changed.")
     record_type = p["record_type"]
     native_type = "salesOrder" if record_type == "salesorder" else "invoice"
-    key = (p["connector_id"], record_type)
+    key = _scoped_cache_key(connector, tenant_id, actor_id, record_type)
     hit = _cache.get(key)
     if hit and time.monotonic() - hit[0] < _TTL_SECONDS:
         return
@@ -180,7 +217,7 @@ async def prefetch_scoped_invoice_metadata(db, tenant_id, actor_id, proposal, co
             "financial_writes": 0,
         },
     )
-    _cache[key] = (time.monotonic(), metadata)
+    _remember(key, metadata)
 
 
 def _parse_properties_shape(data: dict[str, Any], record_type: str) -> "RecordMetadata | None":
@@ -246,13 +283,17 @@ async def get_record_metadata(
 ) -> RecordMetadata | None:
     """Return metadata for *record_type*, or ``None`` if it cannot be fetched."""
     from app.services.chat.tools import _make_ext_tool_name, parse_external_tool_name
+    from app.services.mcp_connector_service import get_mcp_connector
 
     parsed = parse_external_tool_name(mutation_tool_name)
     if not parsed:
         return None
     connector_id = parsed[0]
 
-    key = (str(connector_id), record_type)
+    connector = await get_mcp_connector(db, connector_id, tenant_id)
+    key = _scoped_cache_key(connector, tenant_id, actor_id, record_type)
+    if key is None:
+        return None
     hit = _cache.get(key)
     if hit and (time.monotonic() - hit[0]) < _TTL_SECONDS:
         return hit[1]
@@ -289,7 +330,7 @@ async def get_record_metadata(
             # None (unknown, never "empty").
             live_meta = _parse_properties_shape(data, record_type)
             if live_meta is not None:
-                _cache[key] = (time.monotonic(), live_meta)
+                _remember(key, live_meta)
                 return live_meta
             return None
         if has_sublists_key and not isinstance(raw_sublists, list):
@@ -343,5 +384,5 @@ async def get_record_metadata(
         return None
 
     # Cache only on the success path — a failed lookup must not be cached.
-    _cache[key] = (time.monotonic(), meta)
+    _remember(key, meta)
     return meta

@@ -9,7 +9,9 @@ from app.services.chat import record_metadata_service as mod
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("record_type", ["invoice", "salesOrder"])
+@pytest.mark.parametrize(
+    "record_type", ["invoice", "salesOrder", "creditMemo", "customerRefund", "customrecord_example"]
+)
 async def test_native_metadata_uses_schema_accept_header(record_type):
     import httpx
 
@@ -48,6 +50,11 @@ async def test_scoped_native_schema_preserves_validation_and_audit(
         "proposed_fields": {"discountItem": {"id": "50"}, "discountRate": -5},
     }
     connector = SimpleNamespace(
+        id=connector_id,
+        encrypted_credentials="test",
+        auth_type="oauth2",
+        metadata_json={},
+        updated_at="v1",
         status="active",
         is_enabled=variant != "disabled",
         server_url="https://999.suitetalk.api.netsuite.com"
@@ -85,7 +92,7 @@ async def test_scoped_native_schema_preserves_validation_and_audit(
             request.assert_awaited_once_with("GET", f"/record/v1/metadata-catalog/{native_type}")
             audit.assert_awaited_once()
             assert audit.call_args.kwargs["actor_id"] == "actor"
-            meta = mod._cache[(str(connector_id), record_type)][1]
+            meta = mod._cache[mod._scoped_cache_key(connector, tenant, "actor", record_type)][1]
             assert meta.requirements_known is False
             assert meta.spec_for("discountRate").type == "number"
     finally:

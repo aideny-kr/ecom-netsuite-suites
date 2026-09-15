@@ -12,6 +12,7 @@ _PATHS = {
     "depositapplication": "depositappl.nl",
     "customerdeposit": "custdep.nl",
     "cashsale": "cashsale.nl",
+    "customerrefund": "custrfnd.nl",
 }
 _ALIASES = {"credmemo.nl": "custcred.nl"}
 _LINK = re.compile(r"\[([^\]]+)\]\((https://[^\s)]+)\)")
@@ -26,6 +27,7 @@ def evidence_record_links(evidence):
     sections = evidence.get("sections", {})
     records = [sections.get("sales_order", {})] + sections.get("posting_documents", []) + sections.get("deposits", [])
     records += list((sections.get("invoice_applications") or {}).get("documents", {}).values())
+    records += (sections.get("related_refund_documents") or {}).get("documents", [])
     links = []
     for doc in records:
         kind, ident = doc.get("record_type"), _id(doc.get("id"))

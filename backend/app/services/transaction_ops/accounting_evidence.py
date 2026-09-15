@@ -3,9 +3,11 @@
 from datetime import datetime, timezone
 
 from app.services.transaction_ops.netsuite_reader import (
+    LINE_FIELDS,
     NetSuiteEvidenceError,
     _collection,
     _id,
+    _sublist,
     authenticated_reader,
 )
 
@@ -55,7 +57,71 @@ DOCUMENT_FIELDS = (
     "location",
     "department",
     "class",
+    "applied",
+    "unapplied",
+    "isTaxable",
+    "custbody_fw_order_number",
 )
+
+
+def historical_refund_context(review, report):
+    """Expose previously collected refund identities without claiming freshness.
+
+    The case comparison already owns this evidence. Omitting its linked credits
+    from investigation made a paid invoice look like it needed a second credit.
+    This projection cannot satisfy current application or write preconditions.
+    """
+    refunds = report.get("refund_evidence") or {}
+    if not isinstance(refunds, dict):
+        return None
+    source, target = refunds.get("source") or {}, refunds.get("target") or {}
+    if not isinstance(source, dict) or not isinstance(target, dict):
+        return None
+    scope = review.get("scope") or {}
+    reference = report.get("order_reference")
+    currency = (report.get("source") or {}).get("currency")
+    if (
+        not reference
+        or not currency
+        or any(
+            part.get("order_reference") != reference or part.get("currency") != currency for part in (source, target)
+        )
+        or target.get("account_id") != scope.get("netsuite_account_id")
+        or target.get("subsidiary_id") != scope.get("subsidiary_id")
+        or target.get("connection_id") != review.get("netsuite_connection_id")
+    ):
+        return None
+    context = {
+        "authority": "Historical comparison evidence. Re-read these identified records and their applications "
+        "before concluding absence, available credit, settlement, or proposing another financial change.",
+        "order_reference": reference,
+        "currency": currency,
+        "source": {k: source.get(k) for k in ("amount", "refund_count", "complete", "observed_at")},
+        "target": {k: target.get(k) for k in ("amount", "refund_count", "complete", "observed_at", "account_id")},
+        "request_links": [],
+    }
+    links = target.get("request_links")
+    if isinstance(links, list):
+        context["links_truncated"] = len(links) > 100
+        for link in links[:100]:
+            if not isinstance(link, dict):
+                continue
+            context["request_links"].append(
+                {
+                    key: link.get(key)
+                    for key in (
+                        "stage",
+                        "amount",
+                        "reason_id",
+                        "refund_id",
+                        "request_id",
+                        "credit_memo_id",
+                        "payment_number",
+                        "source_refund_id",
+                    )
+                }
+            )
+    return context
 
 
 async def collect_accounting_evidence(db, tenant_id, review, report, *, posting_detail=True):
@@ -142,7 +208,10 @@ async def collect_accounting_evidence(db, tenant_id, review, report, *, posting_
                 label,
                 "GET",
                 f"/record/v1/{kind}/{identifier}",
-                params={"expandSubResources": "true"} if posting_detail else None,
+                # Item identity/pricing is needed even in the inexpensive
+                # group pass. Expansion adds no separate API request; GL,
+                # period/tax references and application research remain deferred.
+                params={"expandSubResources": "true"},
             )
             if raw is None:
                 return None
@@ -164,6 +233,34 @@ async def collect_accounting_evidence(db, tenant_id, review, report, *, posting_
             projected = _project(raw, DOCUMENT_FIELDS)
             projected["currency_code"] = currency["symbol"]
             projected["record_type"] = kind.lower()
+            address = raw.get("shippingAddress")
+            if isinstance(address, dict):
+                jurisdiction = _project(address, ("country", "state", "zip"))
+                if jurisdiction:
+                    projected["tax_jurisdiction"] = jurisdiction
+            if kind in {"salesOrder", "invoice", "cashSale", "creditMemo"}:
+                problems = []
+                lines = _sublist(raw, "item", "item_lines", LINE_FIELDS, problems)
+                projected["line_evidence"] = {
+                    "complete": lines is not None and not problems,
+                    "lines": lines,
+                    "problems": problems,
+                    "source": "native_record_item_sublist",
+                }
+            if posting_detail and kind in {"creditMemo", "customerRefund"}:
+                problems = []
+                applications = _sublist(
+                    raw,
+                    "apply",
+                    "applications",
+                    frozenset({"apply", "doc", "line", "amount", "refNum", "type"}),
+                    problems,
+                )
+                projected["application_evidence"] = {
+                    "complete": applications is not None and not problems,
+                    "lines": applications,
+                    "problems": problems,
+                }
             return projected
 
         order = await document("salesOrder", order_id, "sales_order")
@@ -173,6 +270,9 @@ async def collect_accounting_evidence(db, tenant_id, review, report, *, posting_
             result["blockers"].append("native_order_reference_requires_mapping_verification")
             return result
         result["sections"]["sales_order"] = order
+        refund_context = historical_refund_context(review, report)
+        if refund_context is not None:
+            result["sections"]["historical_refunds"] = refund_context
         links = await query(
             "linked_documents",
             "SELECT DISTINCT t.id, t.tranid, t.type, BUILTIN.DF(t.status) AS status_name "
@@ -236,6 +336,66 @@ async def collect_accounting_evidence(db, tenant_id, review, report, *, posting_
         if not posting_detail:
             result["blockers"].append("posting_detail_deferred_until_supported_treatment_is_identified")
             result["deferred_sections"] = ["gl", "deposits", "taxItem", "postingPeriod"]
+        if posting_detail and refund_context:
+            # Historical identifiers are leads, not current allocation proof.
+            # Refresh a bounded set in the already authenticated account. The
+            # full refund graph remains the authority for order allocation.
+            related = {
+                "documents": [],
+                "complete": False,
+                "authority": "Fresh linked-record observations, not a complete refund graph or "
+                "certification of tax treatment. Do not create duplicate credits/refunds. "
+                "Use the scoped refund graph to establish allocation and completeness.",
+            }
+            result["sections"]["related_refund_documents"] = related
+            credit_ids = list(
+                dict.fromkeys(
+                    ident for link in refund_context["request_links"] if (ident := _id(link.get("credit_memo_id")))
+                )
+            )
+            related["additional_credit_ids"] = credit_ids[2:]
+            known_origins = {order_id, *(_ref(doc.get("id")) for doc in result["sections"]["posting_documents"])}
+            refund_ids = set()
+            for identifier in credit_ids[:2]:
+                doc = await document("creditMemo", identifier, f"credit:{identifier}")
+                if doc is None:
+                    continue
+                if not (
+                    doc.get("custbody_fw_order_number") == report.get("order_reference")
+                    or _ref(doc.get("createdFrom")) in known_origins
+                ) or (
+                    doc.get("custbody_fw_order_number")
+                    and doc["custbody_fw_order_number"] != report.get("order_reference")
+                ):
+                    result["blockers"].append(f"credit:{identifier}:order_identity_unverified")
+                    continue
+                related["documents"].append(doc)
+                applications = doc["application_evidence"]
+                for link in refund_context["request_links"]:
+                    refund_id = _id(link.get("refund_id"))
+                    if (
+                        link.get("credit_memo_id") == identifier
+                        and refund_id
+                        and any(
+                            row.get("apply") is True and _ref(row.get("doc")) == refund_id
+                            for row in applications.get("lines") or []
+                        )
+                    ):
+                        refund_ids.add(refund_id)
+                gl = await query(
+                    f"gl:{identifier}",
+                    "SELECT tal.account, BUILTIN.DF(tal.account) AS account_name, "
+                    "tal.accountingbook, tal.debit, tal.credit "
+                    "FROM transactionaccountingline tal JOIN transaction t ON t.id = tal.transaction "
+                    f"WHERE tal.transaction = {identifier} AND t.subsidiary = {subsidiary}",
+                )
+                if gl is not None:
+                    result["sections"].setdefault("gl", {})[identifier] = gl
+            for identifier in sorted(refund_ids, key=int)[:2]:
+                doc = await document("customerRefund", identifier, f"refund:{identifier}")
+                if doc is not None:
+                    related["documents"].append(doc)
+            related["additional_refund_ids"] = sorted(refund_ids, key=int)[2:]
         for row in deposits[:2] if posting_detail else []:
             identifier = _id(row.get("id"))
             if not identifier:
@@ -255,3 +415,58 @@ async def collect_accounting_evidence(db, tenant_id, review, report, *, posting_
         ]
     )
     return result
+
+
+def completion_evidence_summary(evidence):
+    """Small factual receipt for a connector-neutral completion review.
+
+    Do not hide unknowns behind the summary: omitted line/jurisdiction detail
+    still requires the full observation for any conclusion relying on it.
+    """
+    sections = evidence.get("sections") or {}
+    related = sections.get("related_refund_documents") or {}
+    documents = [sections.get("sales_order") or {}] + (sections.get("posting_documents") or [])
+    documents += related.get("documents") or []
+    projected = []
+    fields = (
+        "record_type",
+        "id",
+        "tranId",
+        "status",
+        "total",
+        "taxTotal",
+        "subtotal",
+        "currency_code",
+        "createdFrom",
+        "amountPaid",
+        "amountRemaining",
+        "applied",
+        "unapplied",
+        "isTaxable",
+    )
+    for doc in documents:
+        if not doc:
+            continue
+        entry = {k: doc[k] for k in fields if k in doc}
+        if "application_evidence" in doc:
+            entry["applications"] = doc["application_evidence"]
+        projected.append(entry)
+    return {
+        "audit_id": evidence.get("audit_id"),
+        "observed_at": evidence.get("observed_at"),
+        "scope": evidence.get("verified_connection_scope"),
+        "source": {
+            k: (evidence.get("source_refresh") or {}).get(k)
+            for k in ("number", "currency", "total", "tax_total", "updated_at")
+        },
+        "documents": projected,
+        "related_refund_graph_complete": related.get("complete", False),
+        "blockers": evidence.get("blockers") or [],
+        "assessment": evidence.get("assessment"),
+        "candidate_available": bool(evidence.get("correction_candidate")),
+        "execution_capabilities": (evidence.get("resolution_assessment") or {}).get("execution_capabilities"),
+        "line_comparison": evidence.get("line_comparison"),
+        "source_revision_deltas": evidence.get("source_revision_deltas"),
+        "projection_limit": "Line identity, tax jurisdiction and treatment policy require full evidence; "
+        "this summary does not establish them or authorize any write.",
+    }

@@ -908,6 +908,9 @@ class UnifiedAgent(BaseSpecialistAgent):
         self._routing_error = False
         self._request_kind = None
         self._selected_user_sources = ()
+        from app.core.config import settings
+
+        self._evidence_completion_enabled = settings.CHAT_EVIDENCE_COMPLETION_ENABLED
         self._transaction_workflow = False
         self._metabase_evidence = None
         self._numeric_verification_failed = False

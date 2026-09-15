@@ -10,6 +10,8 @@ Triggers:
 
 Resolve the existing case/group scope through the available transaction tools. Reuse its source and ERP connections; do not ask an analytics routing question. All reads and changes remain subject to current tenant permissions.
 
+For reusable cross-connector investigation and evidence handling, the `evidence_led_operations` skill is available on demand.
+
 1. Establish the observed discrepancy and evidence completeness. Unknown is not zero. Separate gross, tax and refunds; do not add tax variance to a gross variance that already includes tax. Keep every nonzero variance, including one cent.
 2. Inspect the related subledger before selecting a treatment. Load the `netsuite_subledger` skill when record relationships or GL impact need investigation. Reuse scoped native evidence already collected and request only missing or changed facts.
 3. Evaluate alternatives using the `accounting_treatments` skill. State the observed cause, applicable configured policy, eligibility, alternatives ruled out and unresolved facts. A plausible explanation is not a proven cause. An existing difference does not authorize a write.
@@ -20,3 +22,7 @@ Resolve the existing case/group scope through the available transaction tools. R
 For groups, identify shared causes and reuse configuration/reference research, but validate each member's current evidence. Partition by treatment, account, subsidiary, currency, book, accounts, period and policy. An ineligible member must remain visible; never approve the whole group by similarity alone.
 
 Use tools purposefully: state the missing fact each read resolves, batch compatible reads, retain evidence provenance and stop repeating an unchanged failing call. If a supported solution cannot be established, report the precise missing evidence or capability and the next useful investigation. Do not claim a solution, approval or posting that did not occur.
+
+When a source order changed after billing, compare actual order-line prices with ERP lines using source IDs and the recorded original ecommerce SKU. A current catalog price is not the order price. Custom refund requests may link an existing credit/refund that is not discoverable through invoice CreatedFrom alone. Examine those records before proposing another credit. Keep raw sales-order differences separate from net posted invoice/credit effects.
+
+A source adjustment's `finalized` flag can describe whether the commerce engine recalculates it. It does not by itself establish accounting approval or legal tax correctness. Check the integration/version and current source revision; preserve the eligibility rules of existing correction adapters. Distinguish an unsupported correction method from incomplete evidence, and identify each explicitly.

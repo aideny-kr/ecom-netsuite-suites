@@ -105,7 +105,10 @@ def summarize(evidence):
             reasons.append("Source adjustment detail is incomplete; missing values do not establish absence.")
         adjustments = [a for values in collections if isinstance(values, list) for a in values if isinstance(a, dict)]
         if any(a.get("finalized") is not True for a in adjustments):
-            reasons.append("Source includes unfinalized adjustments; establish the finalized accounting basis.")
+            reasons.append(
+                "Source includes adjustments marked unfinalized. Verify source revision and integration semantics; "
+                "this recalculation flag alone does not establish accounting authority."
+            )
         if order_adjustments == []:
             reasons.append("No order-level source adjustment supports the configured sales-discount/credit recipe.")
         if difference(invoice.get("amountPaid"), 0) not in (None, "0"):
@@ -114,6 +117,9 @@ def summarize(evidence):
     return {
         "observed_at": evidence.get("observed_at"),
         "audit_id": evidence.get("audit_id"),
+        "line_changes": (evidence.get("line_comparison") or {}).get("changes", [])[:2],
+        "line_change_count": len((evidence.get("line_comparison") or {}).get("changes") or []),
+        "line_identity_gaps": len((evidence.get("line_comparison") or {}).get("unverified") or []),
         "deferred_sections": evidence.get("deferred_sections") or [],
         "scope": (evidence.get("resolution_assessment") or {}).get("facts", {}).get("scope"),
         "source": {
@@ -129,6 +135,14 @@ def summarize(evidence):
         },
         "reasons": reasons,
         "record_links": evidence.get("record_links") or [],
+        "historical_refunds": {
+            "authority": "Historical leads only; refresh documents/applications before treatment.",
+            "request_link_count": len((sections.get("historical_refunds") or {}).get("request_links") or []),
+            "record_leads": [
+                {k: link.get(k) for k in ("credit_memo_id", "refund_id", "amount")}
+                for link in ((sections.get("historical_refunds") or {}).get("request_links") or [])[:3]
+            ],
+        },
     }
 
 
@@ -215,10 +229,26 @@ async def read_observation(db, tenant_id, actor_id, case_id, params, correlation
         raise ValueError("accounting_observation_unavailable")
     evidence = (event.payload or {}).get("evidence") or {}
     sections = evidence.get("sections") or {}
+    document_section = {
+        k: sections.get(k)
+        for k in (
+            "sales_order",
+            "linked_documents",
+            "posting_documents",
+            "gl",
+            "historical_refunds",
+            "related_refund_documents",
+        )
+    }
+    document_section["line_comparison"] = evidence.get("line_comparison")
+    document_section["source_revision_deltas"] = evidence.get("source_revision_deltas")
     data = {
         "source": evidence.get("source_refresh"),
-        "documents": {k: sections.get(k) for k in ("sales_order", "linked_documents", "posting_documents", "gl")},
-        "applications": {k: sections.get(k) for k in ("deposits", "invoice_applications")},
+        "documents": document_section,
+        "applications": {
+            k: sections.get(k)
+            for k in ("deposits", "invoice_applications", "historical_refunds", "related_refund_documents")
+        },
         "assessment": evidence.get("resolution_assessment"),
     }[section]
     await log_event(

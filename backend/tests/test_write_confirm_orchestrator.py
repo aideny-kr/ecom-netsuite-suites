@@ -181,8 +181,14 @@ def _make_db(confirm_msg, cas_rowcount: int = 1):
     db = MagicMock()
 
     async def _execute(stmt, *args, **kwargs):
+        from app.models.mcp_connector import McpConnector
+
         if isinstance(stmt, Update):
             return MagicMock(rowcount=cas_rowcount)
+        if any(d.get("entity") is McpConnector for d in getattr(stmt, "column_descriptions", [])):
+            # These approval/slot tests use unknown schema. Do not return a
+            # ChatMessage for the metadata service's scoped connector lookup.
+            return _FakeScalarResult(None)
         return _FakeScalarResult(confirm_msg)
 
     db.execute = _execute

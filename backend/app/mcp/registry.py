@@ -134,7 +134,9 @@ TOOL_REGISTRY = {
         "Returns explicit missing evidence; never infers tax legality, root cause or available cash. Read-only. "
         "If correction_candidate is present, use its exact tool/params to display the human approval card; "
         "do not execute or substitute another rate. Reuse returned sections and investigate only missing evidence. "
-        "To inspect an existing observation without repeating network reads, supply its observation_id and section. "
+        "Fresh collection takes only case_id and returns all sections plus audit_id. "
+        "To inspect a saved section without network reads, supply case_id, observation_id=that audit_id, and section. "
+        "Do not send section alone: section ALWAYS requires observation_id. "
         "Saved observations are historical investigation evidence and cannot create an approval candidate.",
         "execute": transaction_ops_tools.execute_accounting_evidence,
         "params_schema": {
@@ -142,7 +144,7 @@ TOOL_REGISTRY = {
             "section": {
                 "type": "string",
                 "enum": ["source", "documents", "applications", "assessment"],
-                "description": "Saved evidence section; defaults to assessment.",
+                "description": "Saved evidence section; requires observation_id. Omit for fresh collection.",
             },
             "case_id": {"type": "string", "required": True, "description": "Durable case UUID from status"},
         },

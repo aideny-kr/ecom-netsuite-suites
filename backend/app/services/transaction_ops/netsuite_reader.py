@@ -246,10 +246,12 @@ class _Reader:
         if self.calls >= self.max_api_calls:
             raise NetSuiteEvidenceError("api_call_budget")
         self.calls += 1
-        metadata_read = method == "GET" and path in {
-            "/record/v1/metadata-catalog/invoice",
-            "/record/v1/metadata-catalog/salesOrder",
-        }
+        # All record schemas use content negotiation. Without this Accept
+        # header NetSuite returns a link catalog, not field metadata. Keep the
+        # record-type path syntax bounded; this does not grant write access.
+        metadata_read = method == "GET" and bool(
+            re.fullmatch(r"/record/v1/metadata-catalog/[A-Za-z][A-Za-z0-9_]{0,127}", path)
+        )
         try:
             async with self.client.stream(
                 method,

@@ -345,6 +345,7 @@ def _build_learned_rules_block(learned_rules: list) -> str:
     return block
 
 
+from app.services.chat.completion_review import CompletionGuard
 from app.services.confidence_extractor import extract_structured_confidence
 from app.services.confidence_service import CompositeScorer
 
@@ -554,6 +555,27 @@ def _truncate_tool_result(result_str: str) -> str:
             if key in parsed and isinstance(parsed[key], str) and len(parsed[key]) > _MAX_ERROR_CHARS:
                 parsed[key] = parsed[key][:_MAX_ERROR_CHARS] + "... (truncated)"
         return json.dumps(parsed, default=str)
+
+    # Producers may provide an explicit, bounded model view while the full
+    # redacted result remains available to interception, audit and persistence.
+    # This is presentation, not evidence certification or tool authorization.
+    view = parsed.get("model_context")
+    if (
+        parsed.get("success") is True
+        and isinstance(view, dict)
+        and view.get("version") == 1
+        and isinstance(view.get("data"), dict)
+        and len(json.dumps(view["data"], default=str)) <= 24_000
+    ):
+        return json.dumps(
+            {
+                **view["data"],
+                "success": True,
+                "detail_projection": "This is a producer-provided summary, not the complete tool result. "
+                "Use its detail-access references for claims requiring omitted evidence.",
+            },
+            default=str,
+        )
 
     # Cap large row-based results (e.g., SuiteQL queries returning hundreds of rows)
     rows = parsed.get("rows")
@@ -907,6 +929,20 @@ class BaseSpecialistAgent(abc.ABC):
         # hop re-enabling thinking would 400 on the blockless step-0 history.
         current_thinking_level = "none" if thinking.is_forced_tool_choice(tool_choice) else thinking_level
 
+        completion = CompletionGuard(
+            enabled=getattr(self, "_evidence_completion_enabled", False),
+            task=task,
+            history=context.get("conversation_history"),
+            prior_results=context.get("prior_results"),
+            audit_context={
+                "db": db,
+                "tenant_id": self.tenant_id,
+                "actor_id": self.user_id,
+                "resource_type": "chat_session",
+                "resource_id": session_id,
+                "correlation_id": self.correlation_id,
+            },
+        )
         tool_calls_log: list[dict] = []
         result_capture = None
         total_input_tokens = 0
@@ -961,7 +997,7 @@ class BaseSpecialistAgent(abc.ABC):
                     # Guard: if step 0 and task contains a SELECT query, the model
                     # is hallucinating from conversation history instead of executing.
                     # Force it to actually call the tool.
-                    if step == 0 and tool_calls_log == [] and _task_contains_query(task):
+                    if not completion.enabled and step == 0 and tool_calls_log == [] and _task_contains_query(task):
                         print(f"[AGENT] {self.agent_name} skipped tool on data query — forcing execution", flush=True)
                         messages.append(adapter.build_assistant_message(response))
                         messages.append(
@@ -986,6 +1022,23 @@ class BaseSpecialistAgent(abc.ABC):
                             messages.append({"role": "user", "content": feedback})
                             continue
                         final_text = evidence.resolve(final_text)
+
+                    checked = await completion.check(
+                        answer=final_text,
+                        adapter=adapter,
+                        model=model,
+                        card_emitted=_write_reached_the_human(self),
+                    )
+                    if checked.usage:
+                        total_input_tokens += checked.usage.input_tokens
+                        total_output_tokens += checked.usage.output_tokens
+                        total_cache_creation += checked.usage.cache_creation_input_tokens
+                        total_cache_read += checked.usage.cache_read_input_tokens
+                    if checked.feedback:
+                        messages.append(adapter.build_assistant_message(response))
+                        messages.append({"role": "user", "content": checked.feedback})
+                        continue
+                    final_text = checked.text
 
                     # Extract confidence BEFORE stripping tag so agent self-score is used
                     # (Haiku fallback only fires when tag is missing)
@@ -1013,7 +1066,7 @@ class BaseSpecialistAgent(abc.ABC):
                     await _maybe_store_query_pattern(db, self.tenant_id, task, tool_calls_log)
 
                     return AgentResult(
-                        success=True,
+                        success=completion.supported,
                         data=final_text,
                         tool_calls_log=tool_calls_log,
                         tokens_used=TokenUsage(
@@ -1107,6 +1160,8 @@ class BaseSpecialistAgent(abc.ABC):
                                 result_str = json.dumps(parsed, default=str)
                             except (json.JSONDecodeError, TypeError):
                                 pass
+
+                    completion.observe(block.name, block.input, result_str)
 
                     from app.services.chat.metabase_results import is_bound_table, nonstream_interceptor
 
@@ -1212,6 +1267,24 @@ class BaseSpecialistAgent(abc.ABC):
                 else:
                     final_text = evidence.resolve(final_text)
 
+            if not getattr(self, "_numeric_verification_failed", False):
+                checked = await completion.check(
+                    answer=final_text,
+                    adapter=adapter,
+                    model=model,
+                    card_emitted=_write_reached_the_human(self),
+                    allow_retry=False,
+                )
+                if checked.usage:
+                    total_input_tokens += checked.usage.input_tokens
+                    total_output_tokens += checked.usage.output_tokens
+                    total_cache_creation += checked.usage.cache_creation_input_tokens
+                    total_cache_read += checked.usage.cache_read_input_tokens
+                final_text = checked.text
+
+            else:
+                completion.supported = False
+
             # Extract confidence BEFORE stripping tag so agent self-score is used
             # (Haiku fallback only fires when tag is missing)
             tools_used = [c.get("tool", "") for c in tool_calls_log]
@@ -1235,7 +1308,7 @@ class BaseSpecialistAgent(abc.ABC):
             await _maybe_store_query_pattern(db, self.tenant_id, task, tool_calls_log)
 
             return AgentResult(
-                success=True,
+                success=completion.supported,
                 data=final_text,
                 tool_calls_log=tool_calls_log,
                 tokens_used=TokenUsage(total_input_tokens, total_output_tokens, total_cache_creation, total_cache_read),
@@ -1383,7 +1456,22 @@ class BaseSpecialistAgent(abc.ABC):
         # hop re-enabling thinking would 400 on the blockless step-0 history.
         current_thinking_level = "none" if thinking.is_forced_tool_choice(tool_choice) else thinking_level
 
+        completion = CompletionGuard(
+            enabled=getattr(self, "_evidence_completion_enabled", False),
+            task=task,
+            history=conversation_history,
+            prior_results=context.get("prior_results"),
+            audit_context={
+                "db": db,
+                "tenant_id": self.tenant_id,
+                "actor_id": self.user_id,
+                "resource_type": "chat_session",
+                "resource_id": session_id,
+                "correlation_id": self.correlation_id,
+            },
+        )
         tool_calls_log: list[dict] = []
+        confirmation_tokens: set[str] = set()
         total_input_tokens = 0
         total_output_tokens = 0
         total_cache_creation = 0
@@ -1437,7 +1525,11 @@ class BaseSpecialistAgent(abc.ABC):
                     tool_choice=step_tool_choice,
                     thinking_level=current_thinking_level,
                 ):
-                    if event_type == "text" and getattr(self, "_metabase_evidence", None) is None:
+                    if (
+                        event_type == "text"
+                        and getattr(self, "_metabase_evidence", None) is None
+                        and not completion.enabled
+                    ):
                         yield "text", payload
                     elif event_type == "response":
                         response = payload
@@ -1474,6 +1566,7 @@ class BaseSpecialistAgent(abc.ABC):
                 # about customers is never forced into proposing a write.
                 if (
                     not response.tool_use_blocks
+                    and not completion.enabled
                     and getattr(self, "_prose_instead_of_write_bounced", False)
                     and not getattr(self, "_write_proposal_forced", False)
                     and not _write_reached_the_human(self)
@@ -1521,7 +1614,7 @@ class BaseSpecialistAgent(abc.ABC):
                     # Guard: if step 0 and task contains a SELECT query, the model
                     # is hallucinating from conversation history instead of executing.
                     # Force it to actually call the tool.
-                    if step == 0 and tool_calls_log == [] and _task_contains_query(task):
+                    if not completion.enabled and step == 0 and tool_calls_log == [] and _task_contains_query(task):
                         print(f"[AGENT] {self.agent_name} skipped tool on data query — forcing execution", flush=True)
                         messages.append(adapter.build_assistant_message(response))
                         messages.append(
@@ -1556,6 +1649,7 @@ class BaseSpecialistAgent(abc.ABC):
                     _pending_write_type = _last_metadata_record_type(tool_calls_log)
                     if (
                         _pending_write_type
+                        and not completion.enabled
                         and not getattr(self, "_transaction_workflow", False)
                         and not _write_reached_the_human(self)
                         and not getattr(self, "_prose_instead_of_write_bounced", False)
@@ -1595,6 +1689,23 @@ class BaseSpecialistAgent(abc.ABC):
                             continue
                         final_text = evidence.resolve(final_text)
 
+                    checked = await completion.check(
+                        answer=final_text,
+                        adapter=adapter,
+                        model=model,
+                        card_emitted=_write_reached_the_human(self),
+                    )
+                    if checked.usage:
+                        total_input_tokens += checked.usage.input_tokens
+                        total_output_tokens += checked.usage.output_tokens
+                        total_cache_creation += checked.usage.cache_creation_input_tokens
+                        total_cache_read += checked.usage.cache_read_input_tokens
+                    if checked.feedback:
+                        messages.append(adapter.build_assistant_message(response))
+                        messages.append({"role": "user", "content": checked.feedback})
+                        continue
+                    final_text = checked.text
+
                     # Extract confidence BEFORE stripping tag so agent self-score is used
                     # (Haiku fallback only fires when tag is missing)
                     tools_used = [c.get("tool", "") for c in tool_calls_log]
@@ -1619,12 +1730,12 @@ class BaseSpecialistAgent(abc.ABC):
 
                     await _maybe_store_query_pattern(db, self.tenant_id, task, tool_calls_log)
 
-                    if evidence is not None:
+                    if evidence is not None or completion.enabled:
                         yield "text", final_text
                     yield (
                         "response",
                         AgentResult(
-                            success=True,
+                            success=completion.supported,
                             data=final_text,
                             tool_calls_log=tool_calls_log,
                             tokens_used=TokenUsage(
@@ -1906,74 +2017,12 @@ class BaseSpecialistAgent(abc.ABC):
 
                             record_type = await describe_target(block.name, db, self.tenant_id)
 
-                        # ── Investigation gate (requirement A) — mechanism,
-                        # not prompt (the write profile's metadata-first
-                        # prose has been ignored live on this branch before).
-                        # Only create/upsert are gated: partial payloads are
-                        # legitimate on update, and metadata cannot yield
-                        # required fields anyway (see write_validator.py's
-                        # honesty rule), so no pre-flight check could ever
-                        # prove a create complete — the gate enforces
-                        # BEHAVIOR (look before composing), the human
-                        # enforces correctness. Bounded by construction: at
-                        # most ONE bounce per (turn, record_type), tracked in
-                        # a per-instance set — a stubborn model's SECOND
-                        # proposal always reaches validation/the card.
-                        if _is_netsuite_write and mutation_type in ("create", "upsert"):
-                            if not hasattr(self, "_investigation_gate_bounced"):
-                                self._investigation_gate_bounced: set[str] = set()
-                            if record_type not in self._investigation_gate_bounced and not _metadata_fetched_this_turn(
-                                tool_calls_log, record_type
-                            ):
-                                self._investigation_gate_bounced.add(record_type)
-                                result_str = json.dumps(
-                                    {
-                                        "unexamined_write": True,
-                                        "instruction": (
-                                            f"Call ns_getRecordTypeMetadata for '{record_type}' first, "
-                                            "resolve any values you need (e.g. ns_getSubsidiaries, or a "
-                                            "SuiteQL lookup), then re-propose this write. If a value the "
-                                            "record needs has several valid options and the user's request "
-                                            "does not say which, do NOT pick one — add "
-                                            "'ask_user': ['<field name>'] to the write call so the user "
-                                            "is shown the real options."
-                                        ),
-                                    }
-                                )
-                                elapsed_ms = int((time.monotonic() - t0) * 1000)
-                                yield (
-                                    "tool_end",
-                                    {
-                                        "tool_name": block.name,
-                                        "step": step,
-                                        "duration_ms": elapsed_ms,
-                                        "success": False,
-                                        "result_summary": (
-                                            f"Investigation required — call ns_getRecordTypeMetadata for "
-                                            f"'{record_type}' before composing this {mutation_type}."
-                                        ),
-                                    },
-                                )
-                                tool_calls_log.append(
-                                    build_tool_call_log_entry(
-                                        step=step,
-                                        agent_name=self.agent_name,
-                                        tool_name=block.name,
-                                        params=block.input,
-                                        result_str=result_str,
-                                        duration_ms=elapsed_ms,
-                                    )
-                                )
-                                tool_results_content.append(
-                                    {
-                                        "type": "tool_result",
-                                        "tool_use_id": block.id,
-                                        "content": result_str,
-                                        "is_error": True,
-                                    }
-                                )
-                                continue
-                        # ── End investigation gate ──
+                        # Schema is obtained by validate_mutation below, which
+                        # reuses the connector-scoped metadata cache. Do not
+                        # require the model to repeat a metadata tool call in
+                        # this turn: evidence sufficiency is a validation
+                        # concern, not a prescribed sequence of model actions.
+                        # Validation, editable slots and exact HITL still run.
 
                         # ── Write validation + bounded repair ──
                         if not hasattr(self, "_write_repair"):
@@ -2383,14 +2432,18 @@ class BaseSpecialistAgent(abc.ABC):
                             # — not "a write tool was called" — is what stands
                             # the prose guard down; see _write_reached_the_human.
                             self._write_confirmation_emitted = True
-                            if accounting_card:
-                                payload.accounting_review = accounting_card
-                                from app.services.transaction_ops.tax_correction import approval_text
+                            duplicate_proposal = payload.confirmation_token in confirmation_tokens
+                            if not duplicate_proposal:
+                                confirmation_tokens.add(payload.confirmation_token)
+                                if accounting_card:
+                                    payload.accounting_review = accounting_card
+                                    from app.services.transaction_ops.tax_correction import approval_text
 
-                                yield "text", "\n\n" + approval_text(accounting_card) + "\n\n"
-                            yield ("confirmation_required", payload.model_dump())
+                                    yield "text", "\n\n" + approval_text(accounting_card) + "\n\n"
+                                yield ("confirmation_required", payload.model_dump())
                             _confirmation_result: dict[str, Any] = {
                                 "confirmation_required": True,
+                                "duplicate_proposal": duplicate_proposal,
                                 "mutation_type": mutation_type,
                                 "record_type": record_type,
                                 "message": (
@@ -2425,6 +2478,7 @@ class BaseSpecialistAgent(abc.ABC):
                                 ),
                             },
                         )
+                        completion.observe(block.name, block.input, result_str)
                         _log_entry = build_tool_call_log_entry(
                             step=step,
                             agent_name=self.agent_name,
@@ -2595,6 +2649,7 @@ class BaseSpecialistAgent(abc.ABC):
                     # report.compose resolves to render the FULL, "uncapped frozen
                     # payload" — must see all rows. Without this, a >500-row result
                     # silently composes a report missing rows 501..N (finding #10).
+                    completion.observe(block.name, block.input, result_str)
                     full_result_str = result_str
                     result_str = _truncate_tool_result(result_str)
 
@@ -2911,7 +2966,11 @@ class BaseSpecialistAgent(abc.ABC):
                 messages=messages,
                 thinking_level=current_thinking_level,
             ):
-                if event_type == "text" and getattr(self, "_metabase_evidence", None) is None:
+                if (
+                    event_type == "text"
+                    and getattr(self, "_metabase_evidence", None) is None
+                    and not completion.enabled
+                ):
                     yield "text", payload
                 elif event_type == "response":
                     response = payload
@@ -2933,6 +2992,24 @@ class BaseSpecialistAgent(abc.ABC):
                     final_text = UNVERIFIED
                 else:
                     final_text = evidence.resolve(final_text)
+
+            if not getattr(self, "_numeric_verification_failed", False):
+                checked = await completion.check(
+                    answer=final_text,
+                    adapter=adapter,
+                    model=model,
+                    card_emitted=_write_reached_the_human(self),
+                    allow_retry=False,
+                )
+                if checked.usage:
+                    total_input_tokens += checked.usage.input_tokens
+                    total_output_tokens += checked.usage.output_tokens
+                    total_cache_creation += checked.usage.cache_creation_input_tokens
+                    total_cache_read += checked.usage.cache_read_input_tokens
+                final_text = checked.text
+
+            else:
+                completion.supported = False
 
             # Extract confidence BEFORE stripping tag so agent self-score is used
             # (Haiku fallback only fires when tag is missing)
@@ -2956,12 +3033,12 @@ class BaseSpecialistAgent(abc.ABC):
 
             await _maybe_store_query_pattern(db, self.tenant_id, task, tool_calls_log)
 
-            if evidence is not None:
+            if evidence is not None or completion.enabled:
                 yield "text", final_text
             yield (
                 "response",
                 AgentResult(
-                    success=True,
+                    success=completion.supported,
                     data=final_text,
                     tool_calls_log=tool_calls_log,
                     tokens_used=TokenUsage(

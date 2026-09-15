@@ -33,6 +33,9 @@ def assess(evidence, report, review, correction=None, references=None):
         payment_state = "partially_paid" if remaining > 0 else "payment_observed_no_remaining_receivable"
     selected = (correction.get("kind") or "invoice_tax") if correction else None
     existing_resolution = evidence.get("commercial_credit_resolution")
+    related = sections.get("related_refund_documents") or {}
+    from app.services.transaction_ops.resolution_plan import KINDS
+
     facts = {
         "scope": review.get("scope"),
         "posting_document_count_observed": len(documents),
@@ -44,6 +47,12 @@ def assess(evidence, report, review, correction=None, references=None):
         "application_evidence_complete": application_complete,
         "application_count": len(links) if isinstance(links, list) else None,
         "root_cause": (evidence.get("assessment") or {}).get("root_cause", "not_verified"),
+        "line_comparison": evidence.get("line_comparison"),
+        "related_credit_refund_records": [
+            {k: doc[k] for k in ("id", "record_type", "total", "taxTotal", "applied", "unapplied") if k in doc}
+            for doc in related.get("documents") or []
+        ],
+        "related_refund_graph_complete": related.get("complete") is True,
     }
     options = [
         {
@@ -101,6 +110,13 @@ def assess(evidence, report, review, correction=None, references=None):
         "version": 1,
         "status": "ready_for_human_approval" if correction else "investigation_required",
         "selected_treatment": selected,
+        "execution_capabilities": {
+            "implemented_correction_kinds": list(KINDS),
+            "exact_proposal_available": correction is not None,
+            "interpretation": "These are implemented executors, not an exhaustive list of legitimate accounting "
+            "treatments. Missing evidence requires investigation; a missing executor requires implementation. "
+            "Neither an observed discrepancy nor repeated reads grants execution or approval.",
+        },
         "facts": facts,
         "alternatives": options,
         "observed_comparison_status": (report.get("balance") or {}).get("status"),
