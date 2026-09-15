@@ -427,6 +427,7 @@ def completion_evidence_summary(evidence):
     related = sections.get("related_refund_documents") or {}
     documents = [sections.get("sales_order") or {}] + (sections.get("posting_documents") or [])
     documents += related.get("documents") or []
+    documents += sections.get("deposits") or []
     projected = []
     fields = (
         "record_type",
@@ -443,6 +444,9 @@ def completion_evidence_summary(evidence):
         "applied",
         "unapplied",
         "isTaxable",
+        "exchangeRate",
+        "taxItem",
+        "postingPeriod",
     )
     for doc in documents:
         if not doc:
@@ -450,7 +454,21 @@ def completion_evidence_summary(evidence):
         entry = {k: doc[k] for k in fields if k in doc}
         if "application_evidence" in doc:
             entry["applications"] = doc["application_evidence"]
+        # Omission is easy to mistake for zero when a gross credit matches.
+        # Make the unknown explicit without fabricating native tax evidence.
+        if "taxTotal" not in doc:
+            entry["tax_total_observation"] = "not_returned; tax effect unknown from this header"
         projected.append(entry)
+    ledger = {}
+    for identifier, observation in list((sections.get("gl") or {}).items())[:4]:
+        rows = observation.get("rows") or []
+        ledger[identifier] = {
+            "rows": rows[:12],
+            "observed_row_count": len(rows),
+            "query_complete": observation.get("complete") is True,
+            "complete": observation.get("complete") is True and len(rows) <= 12,
+            "projection_truncated": len(rows) > 12,
+        }
     return {
         "audit_id": evidence.get("audit_id"),
         "observed_at": evidence.get("observed_at"),
@@ -460,6 +478,10 @@ def completion_evidence_summary(evidence):
             for k in ("number", "currency", "total", "tax_total", "updated_at")
         },
         "documents": projected,
+        "gl": ledger,
+        "gl_documents_projection_truncated": len(sections.get("gl") or {}) > len(ledger),
+        "gl_basis": "Native accounting-book debit/credit values; do not assume transaction-currency amounts. "
+        "Read saved documents detail for omitted rows and establish account classifications before tax conclusions.",
         "related_refund_graph_complete": related.get("complete", False),
         "blockers": evidence.get("blockers") or [],
         "assessment": evidence.get("assessment"),
