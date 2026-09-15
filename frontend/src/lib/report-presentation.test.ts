@@ -11,20 +11,20 @@ describe("frozen report reading presentation", () => {
     const before = parse(html), after = parse(presentReportHtml(html));
     expect(after.querySelector(`.orbital-${family}`)).not.toBeNull();
     for (const selector of ["table", ".ia-kpis", ".fs-kpis", ".narr", ".fs-narr", "summary"]) {
-      expect([...after.querySelectorAll(selector)].map(el => el.textContent)).toEqual([...before.querySelectorAll(selector)].map(el => el.textContent));
+      expect(Array.from(after.querySelectorAll(selector)).map(el => el.textContent)).toEqual(Array.from(before.querySelectorAll(selector)).map(el => el.textContent));
     }
     for (const selector of ["svg", "input", ".fs-good", ".fs-bad"]) {
-      expect([...after.querySelectorAll(selector)].map(el => el.outerHTML)).toEqual([...before.querySelectorAll(selector)].map(el => el.outerHTML));
+      expect(Array.from(after.querySelectorAll(selector)).map(el => el.outerHTML)).toEqual(Array.from(before.querySelectorAll(selector)).map(el => el.outerHTML));
     }
     expect(after.querySelectorAll(".orbital-chart-scroll").length).toBeGreaterThan(0);
-    for (const region of after.querySelectorAll(".orbital-chart-scroll, .orbital-table-scroll")) {
+    for (const region of Array.from(after.querySelectorAll(".orbital-chart-scroll, .orbital-table-scroll"))) {
       expect(region.getAttribute("tabindex")).toBe("0");
       expect(region.getAttribute("aria-label")).toContain("scroll");
     }
   });
   it("exposes complete labels and exact signed values without changing the source narrative/table", () => {
     const doc = parse(presentReportHtml(reportReadingFixture));
-    const rows = [...doc.querySelectorAll(".orbital-drivers tbody tr")];
+    const rows = Array.from(doc.querySelectorAll(".orbital-drivers tbody tr"));
     expect(rows.map(r => r.querySelector("th")?.textContent)).toEqual([
       "10001 - A very long receivables category with an unabridged name", "10002 - Inventory & equipment", "10003 - Zero balance",
     ]);

@@ -113,7 +113,7 @@ describe("SuiteQLToolCard CSV export routing", () => {
 it("shows full-export failures and can export the loaded rows without rerunning the query", async () => {
   exportFromQueryMock.mockRejectedValueOnce(new Error("No active NetSuite connection. Connect your NetSuite account first."));
   render(<SuiteQLToolCard step={buildStep(100, {truncated:true})} />);
-  fireEvent.click(screen.getByRole("button", {name:"Export Excel",exact:true}));
+  fireEvent.click(screen.getByRole("button", {name:"Export Excel"}));
   expect(await screen.findByRole("alert")).toHaveTextContent("No active NetSuite connection");
   expect(screen.getByText(/100 rows already loaded.*partial result/)).toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", {name:"Download loaded rows as Excel"}));

@@ -99,9 +99,9 @@ describe("DataFrameTable downloads", () => {
     const data = makeQueryData({ isMetric: queryText === "net_margin" });
     render(<DataFrameTable data={data} queryText={queryText} />);
     const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
-    fireEvent.click(screen.getByRole("button", {name: "CSV", exact: true}));
+    fireEvent.click(screen.getByRole("button", {name: "CSV"}));
     expect(click).toHaveBeenCalledOnce();
-    fireEvent.click(screen.getByRole("button", {name: "Excel", exact: true}));
+    fireEvent.click(screen.getByRole("button", {name: "Excel"}));
     expect(exportToExcel).toHaveBeenCalledWith(expect.objectContaining({columns:data.columns, rows:data.rows}));
     expect(exportFromQuery).not.toHaveBeenCalled();
     click.mockRestore();
@@ -111,7 +111,7 @@ describe("DataFrameTable downloads", () => {
     exportFromQuery.mockRejectedValueOnce(new Error("No active NetSuite connection"));
     render(<DataFrameTable data={makeQueryData({truncated:true,row_count:100})} queryText="SELECT id FROM transaction" />);
     expect(screen.getByText(/1 loaded rows only/)).toBeVisible();
-    fireEvent.click(screen.getByRole("button", {name:"Excel (loaded rows)",exact:true}));
+    fireEvent.click(screen.getByRole("button", {name:"Excel (loaded rows)"}));
     expect(exportToExcel).toHaveBeenCalledWith(expect.objectContaining({title:expect.stringContaining("loaded-rows")}));
     expect(exportFromQuery).not.toHaveBeenCalled();
     fireEvent.click(screen.getByText("Export full results"));
@@ -123,7 +123,7 @@ describe("DataFrameTable downloads", () => {
   it("shows Excel failures instead of rejecting silently", async () => {
     exportToExcel.mockRejectedValueOnce(new Error("Excel unavailable"));
     render(<DataFrameTable data={makeQueryData()} />);
-    fireEvent.click(screen.getByRole("button", {name:"Excel",exact:true}));
+    fireEvent.click(screen.getByRole("button", {name:"Excel"}));
     expect(await screen.findByRole("alert")).toHaveTextContent("Excel unavailable");
   });
 });
