@@ -73,6 +73,22 @@ class ChatMessage(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     session: Mapped["ChatSession"] = relationship(back_populates="messages")
 
 
+class ChatSubmission(Base, TimestampMixin):
+    """Durable at-most-once admission receipt. No prompt or credentials stored."""
+
+    __tablename__ = "chat_submissions"
+
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("chat_sessions.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    request_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    run_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+
+
 class DocChunk(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "doc_chunks"
     __table_args__ = (Index("ix_doc_chunks_tenant_source", "tenant_id", "source_path"),)

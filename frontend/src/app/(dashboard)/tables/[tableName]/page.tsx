@@ -1,6 +1,8 @@
 "use client";
 
 import { useState, useMemo } from "react";
+import { useWebMcpTools } from "@/hooks/use-webmcp-tools";
+import { createTableTools } from "@/lib/webmcp-table";
 import { useParams } from "next/navigation";
 import { type ColumnDef, type SortingState } from "@tanstack/react-table";
 import { useTableData } from "@/hooks/use-table-data";
@@ -23,7 +25,7 @@ export default function TablePage() {
   const sortBy = sorting[0]?.id;
   const sortOrder = sorting[0]?.desc ? "desc" : "asc";
 
-  const { data, isLoading } = useTableData({
+  const { data, isLoading, isFetching, isPlaceholderData, isError } = useTableData({
     tableName,
     page,
     pageSize,
@@ -52,6 +54,19 @@ export default function TablePage() {
       enableSorting: true,
     }));
   }, [data?.items]);
+
+  useWebMcpTools(`table:${tableName}`, createTableTools(() => ({
+    name: tableName, page, pageSize, search, sortBy, sortOrder,
+    ready: !!data && !isFetching && !isPlaceholderData && !isError,
+    hasError: isError, pages: data?.pages || 1, total: data?.total || 0,
+    columns: data?.items?.length ? Object.keys(data.items[0]) : [], rows: data?.items || [],
+    apply: (query) => {
+      setSearch(query.search); setPage(query.page); setPageSize(query.pageSize);
+      setSorting(query.sortBy ? [{ id: query.sortBy, desc: query.sortOrder === "desc" }] : []);
+      setSelectedRow(null);
+    },
+    selectRow: setSelectedRow,
+  })));
 
   return (
     <div className="space-y-6 animate-fade-in">

@@ -1,11 +1,12 @@
 """Tests for chat run API endpoints (SSE relay + cancel)."""
 
 import uuid
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
+from app.core.database import get_db
 from app.core.dependencies import get_current_user
 from app.main import app
 from app.models.user import User
@@ -16,6 +17,7 @@ from app.models.user import User
 
 _TENANT_ID = uuid.uuid4()
 _USER_ID = uuid.uuid4()
+_SESSION_ID = uuid.uuid4()
 
 
 def _fake_user() -> User:
@@ -27,12 +29,23 @@ def _fake_user() -> User:
 
 
 @pytest.fixture()
-def client():
+def client(mock_db):
     """TestClient with auth overridden."""
     fake_user = _fake_user()
     app.dependency_overrides[get_current_user] = lambda: fake_user
+    app.dependency_overrides[get_db] = lambda: mock_db
     yield TestClient(app)
     app.dependency_overrides.clear()
+
+
+@pytest.fixture()
+def mock_db():
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=_SESSION_ID)
+    db.flush = AsyncMock()
+    db.commit = AsyncMock()
+    db.rollback = AsyncMock()
+    return db
 
 
 @pytest.fixture()
@@ -41,6 +54,9 @@ def mock_rm():
     with patch("app.api.v1.chat_runs.get_run_manager") as factory:
         rm = MagicMock()
         rm.available = True
+        rm.get_session.return_value = str(_SESSION_ID)
+        rm.request_cancel.return_value = True
+        rm.get_outcome.return_value = None
         factory.return_value = rm
         yield rm
 
@@ -153,3 +169,48 @@ class TestCancelEndpoint:
 
         resp = client.post(f"/api/v1/chat/runs/{run_id}/cancel")
         assert resp.status_code == 503
+
+
+@pytest.mark.parametrize("suffix,method", [("", "get"), ("/stream", "get"), ("/cancel", "post")])
+def test_foreign_run_never_reads_or_cancels(client, mock_rm, mock_db, suffix, method):
+    mock_db.scalar.return_value = None
+    response = getattr(client, method)(f"/api/v1/chat/runs/{uuid.uuid4()}{suffix}")
+    assert response.status_code == 404
+    mock_rm.read_events.assert_not_called()
+    mock_rm.request_cancel.assert_not_called()
+    statement = mock_db.scalar.call_args.args[0]
+    params = statement.compile().params.values()
+    assert _TENANT_ID in params and _USER_ID in params and _SESSION_ID in params
+
+
+def test_status_returns_lifecycle(client, mock_rm):
+    mock_rm.get_status.return_value = "cancelling"
+    mock_rm.get_started_at.return_value = 123.0
+    response = client.get(f"/api/v1/chat/runs/{uuid.uuid4()}")
+    assert response.status_code == 200
+    assert response.json()["status"] == "cancelling"
+    assert response.json()["terminal"] is False
+
+
+def test_cancel_race_does_not_overwrite_terminal(client, mock_rm):
+    mock_rm.get_status.return_value = "running"
+    mock_rm.request_cancel.return_value = False
+    assert client.post(f"/api/v1/chat/runs/{uuid.uuid4()}/cancel").status_code == 409
+
+
+def test_terminal_stream_drains_every_page(client, mock_rm):
+    mock_rm.get_status.return_value = "complete"
+    events = [{"id": f"{i}-0", "data": {"type": "text", "content": f"event-{i}"}} for i in range(1, 261)]
+
+    def read(_run, cursor, count, block):
+        start = int(cursor.split("-")[0])
+        return events[start : start + count]
+
+    mock_rm.read_events.side_effect = read
+    response = client.get(f"/api/v1/chat/runs/{uuid.uuid4()}/stream")
+    assert response.status_code == 200
+    assert "event-260" in response.text and response.text.count('"type": "text"') == 260
+
+
+def test_stream_rejects_invalid_cursor(client, mock_rm):
+    assert client.get(f"/api/v1/chat/runs/{uuid.uuid4()}/stream?last_id=bad").status_code == 422
