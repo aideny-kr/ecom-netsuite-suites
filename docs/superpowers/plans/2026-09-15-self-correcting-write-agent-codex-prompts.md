@@ -35,6 +35,7 @@ Non-negotiables for this work:
 - One commit per logical change, never amend, trailer `Co-Authored-By: Codex <noreply@openai.com>`. This is a T2 change (money, HITL, credentials): expect a blocking multi-angle review before merge.
 - Use `python scripts/codegraph.py def|callers|uses <symbol>` to find definitions and callers instead of grep.
 - Do not add new rules files, CLAUDE.md sections, or process documents. Put explanations in docstrings next to the code.
+- Duplicate prevention is a property of ONE side-effect log with a uniqueness constraint on a business-derived work key, never of a single agent's memory or of a prompt. Two chat sessions, a chat and a scheduled job, or two backfill workers must all hit the same claim. Any new write path claims in that log before the external call or it does not ship.
 
 Files you will touch or read (backend/app/services/chat/ unless stated):
   agents/base_agent.py (repair loop ~L1905-2050; WriteRepairState L38-110), write_repair_bound.py, write_outcome.py, write_validation.py, write_validator.py, required_field_registry.py, slot_option_sources.py, write_confirmation_service.py, mutation_guard.py, tools.py (execute_tool_call), ../mcp_client_service.py (timeout → INDETERMINATE_KEY), ../transaction_ops/netsuite_transport.py, ../transaction_ops/recovery.py, ../transaction_ops/executor.py.
@@ -83,9 +84,11 @@ BUILD backend/app/services/chat/write_repair_grounding.py:
    - invalid_reference: resolve the reference the same way `resolve_ask_user_slots` does (real options from the account); return the top candidates by label similarity plus their internal ids and `isinactive`. If exactly one candidate matches, propose it; if several, this becomes `delegate_to_human` with those options as the slot choices.
    - missing_required: consult `required_field_registry` for the record type; if the field has an option source, fetch options; if the model cannot know the value, route to `ask_user` (the existing delegation) rather than inventing one.
    - business_rule: no grounding; produce the human-readable decision ("Period Jul 2026 is closed. Post to the current open period Aug 2026, or stop?") with the concrete alternatives as slot choices.
+   - exemplar (every class except transport / auth / permission): read ONE recent record of the same type from this account (SuiteQL for the latest id, then `ns_getRecord`), redact amounts and PII, and hand the model its SHAPE — which fields are populated, their formats (date, currency, reference-by-id), which custom fields carry values, which sublists exist. This is the move a coding agent makes when it reads a neighbouring file before editing: the customer's account, not the docs, is the ground truth for what a valid record looks like here. Fetch it at most once per proposal and cache it on the repair state.
+   - verbatim: the Grounding always carries the full, untouched `o:errorDetails` (code, message, errorPath) next to the classification. Never summarise or condense the error on its way to the model; a coding agent self-corrects because it sees the whole compiler output, not a one-line paraphrase.
 2. Diversity rule (pre-emptive stall): before a recomposed payload is submitted, compute the `write_repair_bound` fingerprint of the FIELDS NAMED IN `failure.field_hints` (or the whole payload when no hints). If the recomposed payload is unchanged at those fields, refuse the attempt with reason `stall` immediately — do not spend a NetSuite call to learn what you already know. Keep the existing post-hoc stall check as the backstop.
 3. The model's recompose prompt is built from the Grounding object (structured), and the instruction is explicit: "Change only what the grounding indicates. Do not touch fields the human approved unless the grounding names them." Log the diff between attempts.
-4. Local re-validation: every recomposed payload goes through `validate_mutation` again before it can be submitted; a payload that fails local validation never reaches NetSuite.
+4. Local re-validation: every recomposed payload goes through `validate_mutation` again before it can be submitted; a payload that fails local validation never reaches NetSuite. Where a cheap, side-effect-free probe exists, run it too before the live call — a SuiteQL existence check for every reference id in the payload, and an open-period check for the transaction date — so the first live attempt is already the second attempt. (A RESTlet "dry build" — `record.create` in dynamic mode with `setValue` and no `save()` — catches invalid select values and some field-level rules but NOT mandatory-field or save-time workflow errors; use it only as an extra probe, never as proof.)
 
 TESTS (backend/tests/test_write_repair_grounding.py, first):
 - invalid_field with a case-mismatched id (`custbody_Order_Total` vs `custbody_order_total`) grounds to the exact id and the recomposed payload differs only there.
@@ -93,6 +96,8 @@ TESTS (backend/tests/test_write_repair_grounding.py, first):
 - invalid_reference with one candidate proposes it; with three candidates produces a delegate_to_human with those three options.
 - missing_required for `customer.subsidiary` (the one account-evidenced entry in the registry) routes to ask_user with real options from a stubbed metadata call.
 - Diversity rule: identical payload at the hinted fields → `stall` with zero transport calls (assert the fake transport was not called).
+- Exemplar is fetched once per proposal (second failure on the same proposal reuses the cached shape; assert one metadata read) and the recompose prompt contains its field-shape summary and the verbatim errorDetails.
+- Pre-call probes: a payload referencing a non-existent customer id is refused locally with reason `error:reference_absent` and zero write calls.
 - Every test uses fakes for metadata and the LLM; no network.
 
 DONE WHEN: a scripted sandbox drill (`scripts/uat/`, opt-in, real sandbox creds from env) shows a deliberately wrong custom-field id being corrected on the second attempt and a deliberately wrong subsidiary being delegated to the human, with the run's reason trail recorded.
@@ -159,7 +164,8 @@ Bring the transaction_ops recovery discipline to the general chat write path so 
 READ FIRST: mcp_client_service.py L280-365 (INDETERMINATE_KEY), write_outcome.py, transaction_ops/recovery.py + netsuite_transport.py (`read_created_snapshot`, the live re-read guard), transaction_ops/executor.py (`verify_outcome`), and plan §3.7 for the concurrency tiers.
 
 BUILD:
-1. Idempotency on every create: set `externalId` (or a documented custom body field when the record type lacks one) to a work-derived key `ss:{tenant}:{proposal_id}:{attempt_semantic_hash}` BEFORE the call, and write a side-effect log row (`started`) before the call — this is agent-graph.md #10 and the posting-ladder's `netsuite_posting_log`. If V-02 (durable execution) has already added the log, reuse it; otherwise add the minimal table now with a docstring pointing at V-02.
+1. Idempotency on every create, derived from the BUSINESS IDENTITY of the record, never from the proposal or the session: `work_key = business_digest({account, subsidiary, record_type, natural_key})` where `natural_key` is the record's own identity (order reference / tranid / source system id / customer email+subsidiary; for records with no natural key, the approved semantic payload's stable hash). Copy the shape from `transaction_ops/state_service.claim_approved_operation` (its `entity_key`). Set `externalId` (or a documented custom body field when the record type lacks one) to `ss:{tenant}:{record_type}:{work_key}` BEFORE the call. A proposal-scoped key would let two agents that each propose the same customer create it twice — that is the case this exists to prevent.
+1b. Claim before call: INSERT a side-effect log row (`started`, with work_key, proposal_id, correlation_id, wire payload hash) under a UNIQUE (tenant_id, work_key) constraint, commit, then make the external call on a connection returned to the pool — claim-then-release, never `FOR UPDATE` across network I/O (see the orchestrator's `_cas_claim_write_confirmation` comment on Supabase's statement timeout). A unique-violation on insert means another writer already holds or finished this work: stop with reason `duplicate:in_flight` or `duplicate:posted`, and show the human the existing row (its status, internal id, who approved it). This is agent-graph.md #10 and the posting-ladder's `netsuite_posting_log`. If V-02 (durable execution) has already added the log, reuse it; otherwise add the minimal table now with a docstring pointing at V-02.
 2. `reconcile_indeterminate(ctx, proposal) -> "posted" | "absent" | "unknown"`: SuiteQL/`ns_getRecord` by externalId (or by the guard's snapshot for updates), bounded to MAX_GUARD_READ_CALLS, with the same read-only discipline as recovery.py. `posted` → mark success, stamp the internal id, no resubmit. `absent` → the identical wire payload may be retried once (same externalId, so a race cannot double-post). `unknown` → stop with reason `error:reconcile_unknown` and a card that tells the operator exactly what to check.
 3. `auth_expired`: call the existing proactive token refresh path once, retry the same request once, then `stop_escalate`.
 4. `rate_limited`: respect Retry-After; otherwise exponential backoff with jitter (1 s, 2 s, 4 s), max 3; read the account's detected service tier (Standard 5 concurrent) from connection metadata if present and log it; never widen concurrency to "fix" a 429.
@@ -171,6 +177,7 @@ TESTS (backend/tests/test_write_transport_recovery.py, first):
 - Timeout → reconcile read itself times out → `error:reconcile_unknown`, no retry, card produced.
 - 401 → refresh called once → retry once → success; a second 401 → `escalated:auth`.
 - 429 with Retry-After: 2 → sleep is 2 s (fake clock) → retry; four 429s → `budget`.
+- Two different approved cards for the same business identity (two sessions, two users) dispatched concurrently → exactly one external call; the loser stops with `duplicate:in_flight` and its card points at the winner's row. Same work_key from a fresh proposal after the first posted → `duplicate:posted`, zero calls.
 
 DONE WHEN: the existing crash drill `scripts/uat/transaction_ops_crash_drill.py` pattern is mirrored for the chat write path (kill the worker after the stub save; on restart exactly one record exists and the proposal shows `posted`), and the drill is documented as a required T2 gate step in the PR description.
 ```
@@ -190,14 +197,41 @@ Scenarios, each must leave the reason trail described:
 5. Forced timeout (set the tool ceiling to 1 s for the run) → reconcile finds the record → posted, exactly one record in the sandbox.
 6. Role without the permission → `escalated:permission` with a message naming the missing permission; zero retries.
 7. Five parallel writes on a Standard-tier sandbox (5 slots) → some 429s → all complete within budget, none duplicated.
+8. Two agents (two chat sessions, or one chat session and one scheduled job) approve a create for the same customer within the same second → exactly one record in the sandbox; the second shows `duplicate:in_flight` or `duplicate:posted` with the winner's internal id. Then force the same externalId through the raw MCP tool a third time and record NetSuite's exact error code for an existing externalId — that code becomes the server-side backstop mapped to `posted` in Prompt 1's taxonomy.
 
 Record the correlation ids, attempt counts and reasons in the PR; inactivate every test record afterwards (STATE.md lists three leftover test customers in production from an earlier proof — do not repeat that).
 ```
 
 ---
 
+## Prompt 7 — Multi-writer safety: chat, scheduled jobs and backfill workers share one claim
+
+```
+Make duplicate prevention a property of the system, not of any one agent. Today the chat path prevents the SAME card from being approved twice (`_cas_claim_write_confirmation`), and transaction_ops prevents two proposals for the same order (`claim_approved_operation`: tenant row lock, UNIQUE (tenant_id, work_key), in-flight check on account+subsidiary+record_type+order_reference). Nothing prevents two DIFFERENT cards in two sessions, a chat write racing a scheduled job, or two Celery workers in a backfill from posting the same business record. Close that at one choke point.
+
+READ FIRST: transaction_ops/state_service.py L795-860 (`claim_approved_operation`), transaction_ops/executor.py (module docstring: "A duplicate delivery reads durable status. It never obtains another send permit."), orchestrator.py ~L2190-2240 (`_cas_claim_write_confirmation` and the comment on why the claim is not held across I/O), core/redis_lock.py, the posting log from Prompt 5 / V-02, and the V-03 backfill ticket (tier-aware concurrency: Standard 5, Premium 15, Enterprise/Ultimate 20 shared by REST, RESTlets, SOAP and the AI Connector).
+
+BUILD:
+1. One claim function, `posting_log.claim(db, tenant_id, work_key, *, surface, proposal_id, wire_hash) -> Claim | Existing`, used by all three surfaces (chat approve path, transaction_ops executor, backfill worker). It is the ONLY code allowed to insert a `started` row. Chat and transaction_ops call it from their existing approve/execute paths; the backfill calls it per item. Grep for every `ns_createRecord` / `ns_updateRecord` / RESTlet POST dispatch and route it through `claim` or explain in a docstring why a read-only path is exempt.
+2. Backfill lease: work items live in a table with `UNIQUE (tenant_id, job_id, item_key)`; a worker takes items with `SELECT ... FOR UPDATE SKIP LOCKED LIMIT n` in a short transaction, stamps `leased_by`/`lease_expires_at`, commits, then works. A sweeper returns expired leases to the queue; a returned item is reconciled by externalId (Prompt 5's `reconcile_indeterminate`) before it may be sent again. Never a process-local `asyncio.Semaphore` as the only limiter — with N workers that is N×tier.
+3. Per-account concurrency permit in Redis: a counting semaphore keyed `ns_conc:{account_id}` sized from the connection's detected tier (default 5) with a reserve for interactive chat (backfill lanes = tier − 2, never below 1), acquired around the external call with a TTL so a dead worker's permit expires. 429 does not widen it; it triggers Prompt 5's backoff and a metric.
+4. Server-side backstop: every create carries the externalId from Prompt 5. When NetSuite rejects a create because that externalId already exists, classify it as `duplicate:posted`, read the record, stamp the internal id, and never recompose. (Record the exact `o:errorCode` observed in Prompt 6 scenario 8; do not guess it.)
+5. Stale `started` sweeper: a row `started` for longer than the tool ceiling + grace is reconciled by read; `posted` / `absent` / `unknown` written with a reason; `unknown` rows surface on an operator list, never auto-retried.
+
+TESTS (backend/tests/test_posting_log_claim.py and test_backfill_lease.py, first):
+- Two coroutines claim the same work_key concurrently → one Claim, one Existing; exactly one external call.
+- Chat approve and a scheduled job with the same work_key → the second surface gets Existing with the first surface's status and proposal id.
+- Two worker processes (subprocess, real Postgres) lease from one job → disjoint item sets; kill one mid-lease → its items return after expiry, each reconciled by externalId before resend, zero duplicates.
+- Semaphore sized 5 with reserve 2 → at most 3 concurrent backfill calls (fake clock, fake transport); a dead holder's permit expires.
+- externalId-exists rejection → `duplicate:posted`, one read, zero resubmits.
+
+DONE WHEN: the crash drill from Prompt 5 is extended to two writers (two processes approving the same entity while the worker is killed mid-write) and shows exactly one record and one `posted` row; and `python scripts/codegraph.py callers ns_createRecord` (and update/RESTlet equivalents) shows every dispatch site behind `claim`.
+```
+
+---
+
 ## Sequencing and cost
 
-Prompts 1 and 5 are the safety floor and should land first (they remove the duplicate-on-timeout and the model-sees-429 paths). Prompt 2 is where the "tries a different way" behaviour actually appears. Prompt 3 is what keeps HITL honest once repairs resubmit. Prompt 4 is the compounding win. Each is one PR, T2, reviewed before merge; together roughly two to three weeks for one engineer with Codex.
+Prompts 1, 5 and 7 are the safety floor and should land first, in that order: 1 gives every failure a class, 5 removes the duplicate-on-timeout and model-sees-429 paths for one writer, 7 removes duplicates across writers (two sessions, chat vs job, backfill workers) and is what makes the V-03 backfill sellable. Prompt 2 is where the "tries a different way" behaviour actually appears. Prompt 3 is what keeps HITL honest once repairs resubmit. Prompt 4 is the compounding win. Each is one PR, T2, reviewed before merge; together roughly three to four weeks for one engineer with Codex.
 
 What this deliberately does not add: new rules files, prompt-level policy, a bigger repair budget without a class, or any path that writes to NetSuite without the human's approval of the semantic payload.
