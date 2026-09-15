@@ -3,7 +3,7 @@
 import sys
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -49,7 +49,8 @@ def test_run_uses_worker_session_and_shared_runner(monkeypatch):
 
 
 def test_collector_passes_aware_utc_time_to_scheduler(monkeypatch):
-    db = object()
+    database_now = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+    db = SimpleNamespace(scalar=AsyncMock(return_value=database_now))
 
     @asynccontextmanager
     async def session():
@@ -64,6 +65,8 @@ def test_collector_passes_aware_utc_time_to_scheduler(monkeypatch):
     assert result["dispatched"] == 0
     args = collect.call_args.args
     assert args[0] is db and isinstance(args[1], datetime) and args[1].utcoffset().total_seconds() == 0
+    assert args[1] == database_now
+    assert "clock_timestamp" in str(db.scalar.await_args.args[0])
 
 
 def test_budget_worker_publishes_only_the_durable_continuation(monkeypatch):

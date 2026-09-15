@@ -2,7 +2,8 @@
 
 Numbers stay lossless decimal strings; pagination metadata is handled separately.
 Oversized or malformed known fields fail the read instead of silently truncating
-financial evidence. Customer/address fields require explicit create preparation;
+financial evidence. Customer/full-address fields require explicit create preparation;
+only the country/state/postal tax jurisdiction is retained for investigation.
 auth, HTTP and raw-stage objects are always omitted.
 """
 
@@ -60,6 +61,7 @@ country_id country_iso vat_id reverse_charge_status
 )
 _COUNTRY = frozenset("id iso iso3 name".split())
 _STATE = frozenset("id name abbr".split())
+_TAX_JURISDICTION = frozenset("country_id country_iso state_id state_name state_text zipcode".split())
 _SHIPPING_METHOD = frozenset("id name code".split())
 _SHIPPING_RATE = frozenset("id name cost selected shipping_method_id shipping_method_code".split())
 _INVENTORY_UNIT = frozenset("id shipment_id variant_id state".split())
@@ -161,6 +163,20 @@ def project_order(value: dict, *, include_sync_data=False) -> dict:
             "business_entity": lambda v: _object(v, _BUSINESS) if isinstance(v, dict) else _scalar(v),
         },
     )
+    address = value.get("ship_address")
+    if isinstance(address, dict):
+        try:
+            jurisdiction = _object(
+                address,
+                _TAX_JURISDICTION,
+                {"country": lambda v: _object(v, _COUNTRY), "state": lambda v: _object(v, _STATE)},
+            )
+        except ProjectionError:
+            # Optional geographic detail must not break a previously valid
+            # monetary read. Its absence still blocks conclusions needing it.
+            jurisdiction = {"problem": "invalid_source_tax_jurisdiction"}
+        if jurisdiction:
+            projected["tax_jurisdiction"] = jurisdiction
     if include_sync_data:
         projected.update(
             _object(

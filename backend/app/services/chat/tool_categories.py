@@ -26,6 +26,10 @@ Category = Literal[
 ]
 
 _EXACT: dict[str, Category] = {
+    "agent.skill": "rag",
+    "agent_skill": "rag",
+    "transaction_ops.accounting_reference": "rag",
+    "transaction_ops_accounting_reference": "rag",
     "transaction_ops.configs": "control",
     "transaction_ops_configs": "control",
     "transaction_ops.run": "control",
@@ -79,6 +83,7 @@ _EXACT: dict[str, Category] = {
     "report_compose": "report",
     "report.compose": "report",
     "escalate_reasoning": "control",
+    "analytics_calculate": "control",
     # Local celigo.* chat tools (spec docs/superpowers/specs/2026-09-04-celigo-chat-access.md
     # §6, task 3) — their output is row data over a synced snapshot, same interception need as
     # netsuite_suiteql; both spellings so a lookup on either the dotted registry name or the

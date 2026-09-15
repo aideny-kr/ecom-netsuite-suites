@@ -57,7 +57,7 @@ services:
       - workspace_storage:/tmp/workspace_storage
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
-  worker:
+  worker: &worker-runtime
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -78,6 +78,11 @@ services:
     volumes:
       - ./backend:/app
     command: celery -A app.workers.celery_app worker --loglevel=info -Q default,sync,recon,export
+
+  # Keep recovery ticks independent of long scans and financial execution.
+  worker-collectors:
+    <<: *worker-runtime
+    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=2 --prefetch-multiplier=1 -Q recon-control
 
   beat:
     build:

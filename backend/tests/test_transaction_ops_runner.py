@@ -100,6 +100,7 @@ class State:
         if not self.claimable:
             return None
         self.run.status = "running"
+        self.run.lease_token = self.token
         return self.token
 
     async def reserve_budget(self, *args, api_calls=0, orders=0, lease_token=None, **kwargs):
@@ -149,6 +150,134 @@ async def execute(state, source=None, target=None, page=None, enabled=True):
         _enabled=AsyncMock(return_value=enabled),
         _clock=lambda: NOW,
     )
+
+
+@pytest.mark.parametrize("budget, expected", [(100, "done"), (2, "budget")])
+async def test_transient_source_retry_reserves_full_cost_and_keeps_order_cursor(budget, expected):
+    from app.services.transaction_ops.source_reader import SourceReadError
+
+    state = State(budget=budget)
+    reader = AsyncMock(side_effect=[SourceReadError("source_transport_failed"), source_order()])
+    result = await run_investigation(
+        None,
+        state.tenant,
+        state.run_id,
+        _state=state,
+        _source_reader=reader,
+        _target_reader=AsyncMock(return_value=missing_target()),
+        _order_mirror=AsyncMock(),
+        _enabled=AsyncMock(return_value=True),
+        _clock=lambda: NOW,
+    )
+    assert result["termination_reason"] == expected
+    assert state.events[:2] == [("reserve", 2, 1), ("reserve", 2, 0)]
+    assert reader.await_count == (2 if expected == "done" else 1)
+    if expected == "done":
+        assert len(state.reports) == 1
+        assert state.run.progress_json["read_retry_count"] == 1
+    else:
+        assert not state.reports
+        assert state.run.progress_json["pending_refs"] == [REF]
+
+
+async def test_transient_read_without_time_for_backoff_remains_continuable():
+    from app.services.transaction_ops.continuation import next_metadata
+    from app.services.transaction_ops.source_reader import SourceReadError
+
+    state = State()
+    state.run.created_at = NOW
+    state.run.deadline_at = NOW + timedelta(milliseconds=500)
+    state.run.progress_json = {"processed": 1, "scan_count": 1}
+    reader = AsyncMock(side_effect=SourceReadError("source_transport_failed"))
+    result = await run_investigation(
+        None,
+        state.tenant,
+        state.run_id,
+        _state=state,
+        _source_reader=reader,
+        _enabled=AsyncMock(return_value=True),
+        _clock=lambda: NOW,
+    )
+    assert result["termination_reason"] == "budget"
+    reader.assert_awaited_once()
+    assert state.events == [("reserve", 2, 1)]
+    assert state.run.progress_json["pending_refs"] == [REF]
+    assert next_metadata(state.run, NOW)["continuation_part"] == 2
+
+
+async def test_deadline_during_progress_finishes_budget_for_immediate_continuation():
+    from app.services.transaction_ops.state_service import StateError
+
+    state = State()
+    state.run.deadline_at = NOW
+    state.update_progress = AsyncMock(side_effect=StateError("run_lease_lost"))
+    state.finish_run = AsyncMock(wraps=state.finish_run)
+
+    result = await execute(state)
+
+    assert result["status"] == "finished"
+    assert result["termination_reason"] == "budget"
+    assert state.run.status == "finished"
+    state.finish_run.assert_awaited_once()
+    assert state.finish_run.call_args.kwargs["lease_token"] == state.token
+    assert state.events == []  # No provider calls or new spend after expiry.
+
+
+@pytest.mark.parametrize("deadline_passed", [False, True])
+async def test_lost_owner_yields_without_finishing_another_workers_run(deadline_passed):
+    from app.services.transaction_ops.state_service import StateError
+
+    state = State()
+    state.run.deadline_at = NOW if deadline_passed else NOW + timedelta(minutes=1)
+    state.update_progress = AsyncMock(side_effect=StateError("run_lease_lost"))
+    state.finish_run = AsyncMock(side_effect=StateError("run_lease_lost"))
+
+    result = await execute(state)
+
+    assert result["status"] == "yielded"
+    assert result["termination_reason"] == "stall"
+    assert state.run.status == "running"
+    assert state.finish_run.await_count == int(deadline_passed)
+    assert state.events == []
+
+
+async def test_deadline_finalization_does_not_hide_other_state_errors():
+    from app.services.transaction_ops.state_service import StateError
+
+    state = State()
+    state.run.deadline_at = NOW
+    state.update_progress = AsyncMock(side_effect=StateError("run_lease_lost"))
+    state.finish_run = AsyncMock(side_effect=StateError("not_found"))
+
+    with pytest.raises(StateError) as exc:
+        await execute(state)
+    assert exc.value.code == "not_found"
+
+
+@pytest.mark.parametrize("replacement_status", ["running", "done", "budget", "error"])
+async def test_expired_worker_cannot_report_or_continue_a_replacement_owners_result(replacement_status):
+    from app.services.transaction_ops.state_service import StateError
+
+    state = State()
+    state.run.deadline_at = NOW
+
+    async def replaced_during_progress(*args, **kwargs):
+        state.run.lease_token = uuid4() if replacement_status == "running" else None
+        state.run.status = "running" if replacement_status == "running" else "finished"
+        state.run.termination_reason = None if replacement_status == "running" else replacement_status
+        raise StateError("run_lease_lost")
+
+    state.update_progress = AsyncMock(side_effect=replaced_during_progress)
+    state.finish_run = AsyncMock(wraps=state.finish_run)
+    state.get_run = AsyncMock(wraps=state.get_run)
+
+    result = await execute(state)
+
+    assert result["status"] == "yielded"
+    assert result["termination_reason"] == "stall"
+    state.finish_run.assert_not_awaited()
+    assert state.get_run.call_args.kwargs == {"lock": True}
+    assert state.events == []
 
 
 async def test_direct_window_filters_other_entities_before_native_reads_and_uses_keyset():
@@ -396,3 +525,47 @@ async def test_oversize_evidence_is_flagged_without_stalling_the_scan():
     assert report["evidence_limits"]["code"] == "evidence_size_limit"
     assert report["source"]["lines_complete"] is False
     assert state.run.progress_json["processed"] == 1
+
+
+@pytest.mark.parametrize("budget", [15, 1000])
+async def test_commercial_credit_read_reserves_budget_before_native_access(monkeypatch, budget):
+    from app.services.transaction_ops import commercial_credits
+    from tests.test_transaction_balance_report import evidence
+
+    state = State(budget=budget)
+    source, target, config, _, _ = evidence()
+    state.run.config_snapshot.update(config)
+    source["orders"][0].update(
+        state="complete",
+        completed_at=NOW.isoformat(),
+        item_total="100",
+        ship_total="0",
+        total="115",
+        adjustment_total="15",
+        adjustments=[
+            {
+                "id": "9",
+                "adjustable_type": "Spree::Order",
+                "adjustable_id": "100",
+                "finalized": True,
+                "label": "Reseller adjustment",
+                "amount": "-5",
+            }
+        ],
+    )
+    target["orders"][0]["header"].update(total="120", taxTotal="20")
+
+    async def read(*args):
+        assert state.events[-1] == ("reserve", 20, 0)
+        return None  # An unverified credit must retain the real difference.
+
+    reader = AsyncMock(side_effect=read)
+    monkeypatch.setattr(commercial_credits, "read_commercial_credit_for_order", reader)
+    await execute(state, source=source, target=target)
+    assert state.reports[REF]["balance"]["amounts"]["order_total"]["delta"] == "-5.00"
+    if budget == 15:
+        reader.assert_not_awaited()
+        assert state.run.termination_reason == "budget"
+        assert state.run.progress_json["pending_refs"] == [REF]
+    else:
+        reader.assert_awaited_once()

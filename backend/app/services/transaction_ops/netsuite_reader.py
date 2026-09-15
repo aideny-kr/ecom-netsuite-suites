@@ -217,7 +217,8 @@ def _sublist(record: dict, key: str, label: str, fields: frozenset[str], problem
 
 
 class _Reader:
-    def __init__(self, client: httpx.AsyncClient, base: str, token: str, *, max_api_calls=None):
+    def __init__(self, client: httpx.AsyncClient, base: str, token: str, *, max_api_calls=None, read_scope=None):
+        self.read_scope = read_scope
         if max_api_calls is None:
             max_api_calls = MAX_API_CALLS
         if type(max_api_calls) is not int or not 1 <= max_api_calls <= 32:
@@ -230,17 +231,35 @@ class _Reader:
         self.periods: dict[str, dict] = {}
 
     async def request(self, method: str, path: str, *, params=None, body=None) -> dict:
+        from app.services.transaction_ops.read_batch import reference_read
+
+        return await reference_read(
+            self.read_scope,
+            method,
+            path,
+            params,
+            body,
+            lambda: self._request(method, path, params=params, body=body),
+        )
+
+    async def _request(self, method: str, path: str, *, params=None, body=None) -> dict:
         if self.calls >= self.max_api_calls:
             raise NetSuiteEvidenceError("api_call_budget")
         self.calls += 1
+        # All record schemas use content negotiation. Without this Accept
+        # header NetSuite returns a link catalog, not field metadata. Keep the
+        # record-type path syntax bounded; this does not grant write access.
+        metadata_read = method == "GET" and bool(
+            re.fullmatch(r"/record/v1/metadata-catalog/[A-Za-z][A-Za-z0-9_]{0,127}", path)
+        )
         try:
             async with self.client.stream(
                 method,
                 self.base + path,
-                headers=self.headers,
+                headers={**self.headers, **({"Accept": "application/schema+json"} if metadata_read else {})},
                 params=params,
                 json=body,
-                timeout=_TIMEOUT,
+                timeout=httpx.Timeout(120, connect=10, pool=10) if metadata_read else _TIMEOUT,
                 follow_redirects=False,
             ) as response:
                 if response.status_code != 200:
@@ -422,11 +441,15 @@ async def authenticated_reader(db, tenant_id, connection_id, account_id, *, clie
         raise NetSuiteEvidenceError("authentication_failed")
     base = f"https://{account}.suitetalk.api.netsuite.com/services/rest"
 
+    # Partition even identical accounts by tenant, connection and current credential.
+    import hashlib
+
+    read_scope = (str(tenant), str(connection_uuid), account, hashlib.sha256(token.encode()).hexdigest())
     if client is not None:
-        yield _Reader(client, base, token, max_api_calls=max_api_calls)
+        yield _Reader(client, base, token, max_api_calls=max_api_calls, read_scope=read_scope)
     else:
         async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=False) as owned:
-            yield _Reader(owned, base, token, max_api_calls=max_api_calls)
+            yield _Reader(owned, base, token, max_api_calls=max_api_calls, read_scope=read_scope)
 
 
 async def read_netsuite_order(

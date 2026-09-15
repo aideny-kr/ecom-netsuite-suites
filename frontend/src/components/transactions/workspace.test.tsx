@@ -281,16 +281,15 @@ it("preserves source-order browsing when reconciliation access is unavailable", 
 
 it("launches one group investigation with all-member pagination and exact scope", async () => {
   mount();
-  const link = await screen.findByRole("link", { name: "Investigate group →" });
+  const link = await screen.findByRole("link", { name: "Prepare group fixes →" });
   const prompt = new URL(
     link.getAttribute("href")!,
     "https://example.test",
   ).searchParams.get("compose")!;
-  expect(prompt).toContain("transaction_ops.groups");
-  expect(prompt).toContain("every has_next page");
-  expect(prompt).toContain("scope-a");
-  expect(prompt).toContain("Split".toLowerCase());
-  expect(prompt).toContain("Do not approve or execute");
+  expect(prompt).toContain("transaction_ops.accounting_group");
+  expect(prompt).toContain("show every unsupported case separately");
+  expect(prompt).toContain("bounded concurrency and per-order verification and audit");
+  expect(prompt).toContain("Do not treat this request or the group ID as financial approval");
   expect(prompt).toContain('"review_run_ids":["review-a"]');
   expect(prompt).toContain('"status":"needs_review"');
   expect(apiClient.get).toHaveBeenCalledWith(
@@ -433,4 +432,42 @@ it("exports the full filter scope without including pagination parameters", asyn
     click.mockRestore();
     vi.unstubAllGlobals();
   }
+});
+
+it("keeps queued reviews distinct from zero results and opens an earlier saved review without running it", async () => {
+  const normal = vi.mocked(apiClient.get).getMockImplementation()!;
+  const queued = { ...run, id: "queued-review", status: "pending", params_json: { ...run.params_json, review: { id: "new-span", start: "2026-09-07T07:00:00Z", end: "2026-09-14T07:00:00Z" } } };
+  vi.mocked(apiClient.get).mockImplementation(async (path: string) => {
+    if (path.includes("/runs?")) return [queued, run] as never;
+    if (path.includes("queued-review/review")) return { complete: false, status: "running", current_run_status: "pending", completed_slices: 0 } as never;
+    if (path.includes("/review-results?") && path.includes("queued-review")) return { summary: { checked: 0, matched: 0, needs_review: 0, not_verified: 0 }, items: [], total: 0, has_next: false } as never;
+    return normal(path);
+  });
+  mount();
+  await screen.findByText(/Queued · 0 daily slices complete/);
+  expect(screen.getByTestId("stat-checked")).toHaveTextContent("—");
+  expect(screen.getByText(/Waiting for this review’s first results/)).toBeVisible();
+  const select = screen.getByRole("combobox", { name: "Saved review results" }) as HTMLSelectElement;
+  const previous = Array.from(select.options).find(o => o.textContent?.includes("2026-08-31"))!;
+  fireEvent.change(select, { target: { value: previous.value } });
+  await waitFor(() => expect(screen.getByTestId("stat-checked")).toHaveTextContent("8"));
+  expect(await screen.findByText("R123456789")).toBeVisible();
+  expect(apiClient.post).not.toHaveBeenCalled();
+  expect(apiClient.get).toHaveBeenCalledWith("/api/v1/transaction-ops/runs?limit=200&period_reviews_only=true");
+});
+
+it("shows completed daily coverage separately from enabled schedule", async () => {
+  const original = vi.mocked(apiClient.get).getMockImplementation()!;
+  vi.mocked(apiClient.get).mockImplementation(async (path, ...args) => {
+    if (path.endsWith("/daily-status")) return [{
+      config_id: "scope-a", status: "behind", checked_through: "2026-09-07",
+      last_completed_at: "2026-09-08T18:00:00Z", run_id: "daily-complete",
+    }];
+    return original(path, ...args);
+  });
+  render(<QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}><TransactionWorkspace /></QueryClientProvider>);
+  const link = await screen.findByRole("link", { name: "Checked through 2026-09-07" });
+  expect(link).toHaveAttribute("href", "/transaction-operations/runs/daily-complete");
+  expect(screen.getByText(/Behind schedule/)).toBeInTheDocument();
+  expect(screen.getByText(/Daily checks on/)).toBeInTheDocument();
 });

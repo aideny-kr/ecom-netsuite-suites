@@ -5,7 +5,6 @@ customer-data writes. Each provider read is preceded by a committed reservation;
 the cursor is committed before reads and after each persisted observation.
 """
 
-import asyncio
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -26,6 +25,8 @@ from app.services.transaction_ops.normalization import (
     source_entity_key,
 )
 from app.services.transaction_ops.order_reconciliation import reconcile_order
+from app.services.transaction_ops.read_recovery import ReadBudgetExhaustedError, read_with_recovery
+from app.services.transaction_ops.source_eligibility import exclusion_report, payment_failed
 
 
 async def enabled(db, tenant_id):
@@ -50,10 +51,8 @@ class SourceScopeError(ValueError):
 
 def _initial_progress(run):
     current = dict(run.progress_json or {})
-    if current and not current.get("restart_scan"):
-        return current
     refs = list(run.params_json.get("order_references") or [])
-    return {
+    defaults = {
         "pending_refs": refs,
         "page": 1,
         "next_page": None,
@@ -62,6 +61,7 @@ def _initial_progress(run):
         "scan_count": 0,
         "last_source_id": 0,
         "processed": 0,
+        "excluded": 0,
         "restart_scan": False,
         "matched": 0,
         "needs_review": 0,
@@ -80,6 +80,16 @@ def _initial_progress(run):
             else "offset"
         ),
     }
+
+    if current.get("restart_scan"):
+        # A failed scan starts with fresh cursors. Its reporting-cycle identity
+        # still prevents a continuation from opening an extra daily budget.
+        if current.get("schedule_cycle_key"):
+            defaults["schedule_cycle_key"] = current["schedule_cycle_key"]
+        return defaults
+    # New schedules carry metadata before the first provider page. Metadata is
+    # not a populated checkpoint; fill canonical counters/cursors as well.
+    return defaults | current
 
 
 def _page_progress(page, progress, params, config=None):
@@ -175,6 +185,8 @@ def _replica_page_progress(page, progress, params, config):
 
 
 def build_report(source_evidence, target_evidence, config, mapping, *, now, refunds=None):
+    if len(source_evidence.get("orders") or []) == 1 and payment_failed(source_evidence["orders"][0]):
+        return exclusion_report(source_evidence)
     account = config["netsuite_account_id"].replace("_", "-").lower()
     scope = target_evidence.get("scope") or {}
     if scope.get("account_id") != account or scope.get("subsidiary_id") != config["subsidiary_id"]:
@@ -359,13 +371,15 @@ async def run_investigation(
             db, tenant_id, run_id, lease_token=token, api_calls=calls, orders=orders, now=clock()
         )
 
-    async def bounded_read(call):
-        remaining = (run.deadline_at - clock()).total_seconds()
-        if remaining <= 0:
-            call.close()
-            raise TimeoutError
-        async with asyncio.timeout(min(remaining, 170)):
-            return await call
+    async def bounded_read(factory, *, retry_calls=0):
+        return await read_with_recovery(
+            factory,
+            retry_calls=retry_calls,
+            progress=progress,
+            reserve=reserve,
+            save=save,
+            remaining=lambda: (run.deadline_at - clock()).total_seconds(),
+        )
 
     try:
         if not await (_enabled or enabled)(db, tenant_id):
@@ -376,6 +390,25 @@ async def run_investigation(
             {"source_connection_id": UUID(config["source_connection_id"])} if config.get("source_connection_id") else {}
         )
         mapping = TransactionMapping.model_validate(config["mapping_json"])
+        if not (await state.get_config(db, tenant_id, run.config_id)).enabled:
+            return await finish("stall")
+        if run.params_json.get("review"):
+            from app.schemas.transaction_runs import ReviewSpan
+            from app.services.transaction_ops.daily_evidence import completed_daily_windows, covered_until
+
+            span = ReviewSpan.model_validate(run.params_json["review"])
+            daily = await completed_daily_windows(db, run, span)
+            start, end = (_time(run.params_json[k]) for k in ("window_start", "window_end"))
+            if covered_until(start, end, daily) == end:
+                progress.update(
+                    scan_complete=True,
+                    refund_scan_complete=True,
+                    destination_scan_complete=True,
+                    pending_refs=[],
+                    reused_daily_run_ids=[row[2] for row in daily],
+                )
+                await save()
+                return await finish("done")
         await save()
         while True:
             if not (await state.get_config(db, tenant_id, run.config_id)).enabled:
@@ -395,7 +428,7 @@ async def run_investigation(
                             else _refund_page_reader or read_refund_order_page
                         )
                         refund_page = await bounded_read(
-                            refund_scan(
+                            lambda: refund_scan(
                                 db,
                                 tenant_id,
                                 mapping.metabase_replica or mapping.solidus_refund_step_id,
@@ -403,7 +436,8 @@ async def run_investigation(
                                 _time(run.params_json["window_end"]),
                                 after_id=progress.get("refund_after_id", 0),
                                 **({"now": clock()} if mapping.metabase_replica else {}),
-                            )
+                            ),
+                            retry_calls=18 if mapping.metabase_replica else 2,
                         )
                         cursor = refund_page.get("next_after_id")
                         rows = refund_page.get("orders")
@@ -445,7 +479,7 @@ async def run_investigation(
                         if not await reserve(4):
                             return await finish("budget")
                         page = await bounded_read(
-                            (_destination_page_reader or read_changed_orders)(
+                            lambda: (_destination_page_reader or read_changed_orders)(
                                 db,
                                 tenant_id,
                                 UUID(config["netsuite_connection_id"]),
@@ -456,7 +490,8 @@ async def run_investigation(
                                 _time(run.params_json["window_end"]),
                                 after_id=progress.get("destination_after_id", 0),
                                 page_size=20,
-                            )
+                            ),
+                            retry_calls=4,
                         )
                         rows, cursor, complete = (
                             page.get("orders"),
@@ -502,7 +537,7 @@ async def run_investigation(
                     if not await reserve(6):
                         return await finish("budget")
                     page = await bounded_read(
-                        metabase_reader.read_order_page(
+                        lambda: metabase_reader.read_order_page(
                             db,
                             tenant_id,
                             mapping.metabase_replica,
@@ -517,7 +552,8 @@ async def run_investigation(
                                 if subsidiary == config["subsidiary_id"]
                             ),
                             now=clock(),
-                        )
+                        ),
+                        retry_calls=6,
                     )
                     _replica_page_progress(page, progress, run.params_json, config)
                     await save()
@@ -534,7 +570,7 @@ async def run_investigation(
                 if not await reserve(2):
                     return await finish("budget")
                 page = await bounded_read(
-                    page_reader(
+                    lambda: page_reader(
                         db,
                         tenant_id,
                         source_step_id,
@@ -543,7 +579,8 @@ async def run_investigation(
                         page_size=20,
                         **direct_source,
                         **page_options,
-                    )
+                    ),
+                    retry_calls=2,
                 )
                 _page_progress(page, progress, run.params_json, config)
                 await save()
@@ -553,7 +590,8 @@ async def run_investigation(
                 return await finish("budget")
             source_options = {"include_sync_data": True} if mapping.line_identity_mode == "inventory_units" else {}
             source = await bounded_read(
-                source_reader(db, tenant_id, source_step_id, reference, **source_options, **direct_source)
+                lambda: source_reader(db, tenant_id, source_step_id, reference, **source_options, **direct_source),
+                retry_calls=2,
             )
             orders = source.get("orders") or []
             if len(orders) != 1 or orders[0].get("number") != reference:
@@ -574,10 +612,18 @@ async def run_investigation(
                 await (_order_mirror or save_observed_order)(
                     db, tenant_id, direct_source["source_connection_id"], orders[0], _time(source["read_at"])
                 )
+            if payment_failed(orders[0]):
+                await state.record_finding(
+                    db, tenant_id, run_id, reference, exclusion_report(source), lease_token=token, now=clock()
+                )
+                progress["excluded"] += 1
+                progress["pending_refs"] = progress["pending_refs"][1:]
+                await save()
+                continue
             if not await reserve(10):  # At most7 data reads plus ordinary OAuth token maintenance.
                 return await finish("budget")
             targets = await bounded_read(
-                target_reader(
+                lambda: target_reader(
                     db,
                     tenant_id,
                     UUID(config["netsuite_connection_id"]),
@@ -585,9 +631,29 @@ async def run_investigation(
                     config["subsidiary_id"],
                     reference,
                     mapping.reference_field,
-                )
+                ),
+                retry_calls=10,
             )
             report = limit_report(build_report(source, targets, config, mapping, now=clock()), now=clock())
+            from app.services.transaction_ops.commercial_credits import (
+                read_commercial_credit_for_order,
+                source_adjustment_basis,
+            )
+
+            if source_adjustment_basis(orders[0]) and report.get("balance", {}).get("status") == "difference":
+                # At most 4 invoice reads +12 application reads, plus OAuth maintenance.
+                # Reserve before the optional proof, preserving the runner's hard budget.
+                if not await reserve(20):
+                    await state.record_finding(
+                        db, tenant_id, run_id, reference, report, lease_token=token, now=clock(), final=False
+                    )
+                    return await finish("budget")
+                commercial = await bounded_read(
+                    lambda: read_commercial_credit_for_order(db, tenant_id, config, orders[0], targets, report)
+                )
+                if commercial:
+                    targets["commercial_credit_evidence"] = commercial
+                    report["balance"] = reconcile_order(source, targets, config)
             if mapping.solidus_refund_step_id:
                 # Preserve known amounts before extra reads. An exhausted refund
                 # budget must not discard the already-collected order evidence.
@@ -600,7 +666,7 @@ async def run_investigation(
                     return await finish("budget")
                 try:
                     refunds["source"] = await bounded_read(
-                        (_source_refunds_reader or read_solidus_refunds)(
+                        lambda: (_source_refunds_reader or read_solidus_refunds)(
                             db, tenant_id, mapping.solidus_refund_step_id, reference
                         )
                     )
@@ -613,7 +679,7 @@ async def run_investigation(
                         return await finish("budget")
                     try:
                         refunds["target"] = await bounded_read(
-                            (_target_refunds_reader or read_netsuite_refunds)(
+                            lambda: (_target_refunds_reader or read_netsuite_refunds)(
                                 db,
                                 tenant_id,
                                 UUID(config["netsuite_connection_id"]),
@@ -658,7 +724,7 @@ async def run_investigation(
                         if not await reserve(MAX_GUARD_READ_CALLS):
                             return await finish("budget")
                         guard = await bounded_read(
-                            (_guard_reader or read_guard_snapshot)(
+                            lambda: (_guard_reader or read_guard_snapshot)(
                                 db, tenant_id, current_config, targets["orders"][0]["record_id"]
                             )
                         )
@@ -673,7 +739,7 @@ async def run_investigation(
                         if not await reserve(MAX_GUARD_READ_CALLS):
                             return await finish("budget")
                         guard = await bounded_read(
-                            (_create_reader or read_create_preview)(
+                            lambda: (_create_reader or read_create_preview)(
                                 db, tenant_id, current_config, creation.payload_json
                             )
                         )
@@ -681,7 +747,7 @@ async def run_investigation(
                         if not await reserve(MAX_READ_CALLS):
                             return await finish("budget")
                         celigo = await bounded_read(
-                            (_celigo_reader or read_celigo_error_evidence)(
+                            lambda: (_celigo_reader or read_celigo_error_evidence)(
                                 db, tenant_id, current_config.target_step_id, reference
                             )
                         )
@@ -696,7 +762,11 @@ async def run_investigation(
                     raise
                 except Exception:
                     report = {**report, "automation": {"status": "blocked", "code": "action_evidence_unavailable"}}
-            await state.record_finding(db, tenant_id, run_id, reference, report, lease_token=token, now=clock())
+            finding = await state.record_finding(
+                db, tenant_id, run_id, reference, report, lease_token=token, now=clock()
+            )
+            if settlement and run.params_json.get("approval_message_id"):
+                report = finding.report_json
             progress["processed"] += 1
             balance_status = report["balance"]["status"]
             group = (
@@ -709,6 +779,8 @@ async def run_investigation(
             progress[group] = progress.get(group, 0) + 1
             progress["pending_refs"] = progress["pending_refs"][1:]
             await save()
+    except ReadBudgetExhaustedError:
+        return await finish("budget")
     except FeatureRevokedError:
         return await finish("stall")
     except SourceScopeError:
@@ -723,6 +795,17 @@ async def run_investigation(
         return await finish("budget" if clock() >= run.deadline_at else "error")
     except state_service.StateError as exc:
         if exc.code == "run_lease_lost":
+            if clock() >= run.deadline_at:
+                try:
+                    # A progress write can meet the deadline before the next
+                    # budget reservation. Keep this row lock through finish:
+                    # its idempotent terminal-row path does not check ownership.
+                    current = await state.get_run(db, tenant_id, run_id, lock=True)
+                    if current.status == "running" and current.lease_token == token:
+                        return await finish("budget")
+                except state_service.StateError as finish_exc:
+                    if finish_exc.code != "run_lease_lost":
+                        raise
             return {"run_id": str(run_id), "status": "yielded", "termination_reason": "stall"}
         raise
     except Exception:

@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.services.chat.llm_adapter import LLMResponse
+from app.services.chat.llm_adapter import LLMResponse, ToolUseBlock
 from app.services.confidence_extractor import ConfidenceAssessment
 
 
@@ -25,6 +25,27 @@ class _RecordingAdapter:
 
     def __init__(self):
         self.levels: list[str | None] = []
+
+    def force_tool_choice(self, name, model=None):
+        return {"type": "tool", "name": name}
+
+    async def create_message(self, **kwargs):
+        # The real UnifiedAgent now classifies even with one data source when
+        # accounting tools are present; this adapter also models that call.
+        assert kwargs["tools"][0]["name"] == "route_request"
+        return LLMResponse(
+            tool_use_blocks=[
+                ToolUseBlock(
+                    id="route",
+                    name="route_request",
+                    input={
+                        "kind": "conversation",
+                        "continuation": False,
+                        "source_intent": {"action": "unchanged", "sources": [], "excluded": []},
+                    },
+                )
+            ]
+        )
 
     async def stream_message(self, **kwargs):
         self.levels.append(kwargs.get("thinking_level"))
@@ -50,7 +71,8 @@ async def test_run_streaming_passes_thinking_level_to_adapter():
     )
     adapter = _RecordingAdapter()
 
-    # Drive a single no-tool turn; assert the level we passed reached the adapter.
+    # Select the source explicitly so the separate source-selection gate does
+    # not short-circuit this test of the adapter's thinking-level carrier.
     with (
         patch(
             "app.services.policy_service.get_active_policy",
@@ -64,7 +86,7 @@ async def test_run_streaming_passes_thinking_level_to_adapter():
         ),
     ):
         gen = agent.run_streaming(
-            task="hello",
+            task="Explain NetSuite invoice terms.",
             context={},
             db=None,
             adapter=adapter,

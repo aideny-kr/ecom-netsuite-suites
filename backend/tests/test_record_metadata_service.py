@@ -1,5 +1,7 @@
 import json
 import logging
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -19,9 +21,20 @@ _META = {
 
 
 @pytest.fixture(autouse=True)
-def _clear():
+def _clear(monkeypatch):
+    connector = SimpleNamespace(
+        id="a" * 32,
+        status="active",
+        is_enabled=True,
+        server_url="https://123.suitetalk.api.netsuite.com",
+        encrypted_credentials="test-credential-revision",
+        auth_type="oauth2",
+        metadata_json={},
+        updated_at="2026-09-14",
+    )
+    monkeypatch.setattr("app.services.mcp_connector_service.get_mcp_connector", AsyncMock(return_value=connector))
     svc.clear_metadata_cache()
-    yield
+    yield connector
     svc.clear_metadata_cache()
 
 
@@ -403,3 +416,49 @@ async def test_no_warning_when_at_least_one_field_carries_a_marker(monkeypatch, 
     assert meta is not None
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert warnings == []
+
+
+@pytest.mark.parametrize("change", ["tenant", "actor", "credentials", "account", "config", "revision"])
+async def test_cached_schema_does_not_cross_changed_scope(monkeypatch, _clear, change):
+    execute = AsyncMock(return_value=json.dumps(_META))
+    monkeypatch.setattr(svc, "execute_tool_call", execute)
+    kw = dict(
+        record_type="customer",
+        mutation_tool_name=EXT,
+        tenant_id="tenant1",
+        actor_id="actor1",
+        correlation_id="c",
+        db=None,
+        session_id="s",
+    )
+    assert await svc.get_record_metadata(**kw)
+    if change in {"tenant", "actor"}:
+        kw[change + "_id"] = "changed"
+    else:
+        attr = {
+            "credentials": "encrypted_credentials",
+            "account": "server_url",
+            "config": "metadata_json",
+            "revision": "updated_at",
+        }[change]
+        setattr(_clear, attr, {"role": "changed"} if change == "config" else "changed")
+    assert await svc.get_record_metadata(**kw)
+    assert execute.await_count == 2
+
+
+async def test_disabling_connector_invalidates_existing_schema_without_upstream_call(monkeypatch, _clear):
+    execute = AsyncMock(return_value=json.dumps(_META))
+    monkeypatch.setattr(svc, "execute_tool_call", execute)
+    kw = dict(
+        record_type="customer",
+        mutation_tool_name=EXT,
+        tenant_id="tenant",
+        actor_id="actor",
+        correlation_id="c",
+        db=None,
+        session_id="s",
+    )
+    assert await svc.get_record_metadata(**kw)
+    _clear.is_enabled = False
+    assert await svc.get_record_metadata(**kw) is None
+    assert execute.await_count == 1

@@ -129,36 +129,6 @@ def _validation_failure_detail(validation: ValidationResult) -> str:
 
 _WRITE_TOOL_SUFFIXES = ("ns_createRecord", "ns_updateRecord", "ns_upsertRecord", "ns_deleteRecord")
 
-# What the forced write-proposal hop may put on the model's menu — a strict
-# subset of the above, deliberately WITHOUT ns_deleteRecord. Forcing means the
-# model must pick one of these, so anything listed here can be manufactured
-# from a turn that never asked for it; a spurious delete proposal is a far
-# worse outcome than declining to force. Deletes still work by the ordinary
-# path, they just never get compelled. See _forced_write_tool_subset.
-_FORCEABLE_WRITE_TOOLS = ("ns_createRecord", "ns_updateRecord", "ns_upsertRecord")
-
-# The escape hatch on the forced hop's menu. A T2 gate major on this branch
-# established the constraint that governs here: "What fields does a customer
-# record require?" is correctly answered by fetching metadata and replying in
-# prose, so a guard that fires on metadata-then-prose CANNOT distinguish a
-# dodged write from an answered question, and must let the model decline.
-#
-# Forcing a tool choice removes prose as an exit — which would re-create that
-# major by coercing a write card in reply to a question. So the decline stays
-# available, but as a TOOL rather than as narration: the model can still say
-# "nothing to write here", it just has to say it in a form the server can
-# read. Never dispatched; seeing it chosen means "leave the prose alone".
-_DECLINE_WRITE_TOOL = "no_write_was_requested"
-_DECLINE_WRITE_TOOL_DEF = {
-    "name": _DECLINE_WRITE_TOOL,
-    "description": (
-        "Choose this if the user did NOT ask for a record to be created or changed — for "
-        "example they asked what fields a record type has, or any other informational "
-        "question. Choosing this leaves your written answer exactly as you wrote it."
-    ),
-    "input_schema": {"type": "object", "properties": {}},
-}
-
 
 def _bare_tool_name(logged_tool: Any) -> str:
     """Strip the `ext__<connector>__` prefix off a logged tool name.
@@ -182,26 +152,11 @@ def _bare_tool_name(logged_tool: Any) -> str:
     return parsed[1] if parsed else name
 
 
-def _write_proposed_this_turn(tool_calls_log: list[dict[str, Any]]) -> bool:
-    """True if the model has already proposed a NetSuite write this turn."""
-    return any(_bare_tool_name(e.get("tool")) in _WRITE_TOOL_SUFFIXES for e in tool_calls_log or [])
-
-
 def _last_metadata_call(tool_calls_log: list[dict[str, Any]]) -> tuple[str | None, str] | None:
-    """The turn's most recent USABLE ``ns_getRecordTypeMetadata`` call, as
-    ``(connector_id, record_type)`` — or None if there wasn't one.
+    """Resolve the latest schema lookup for selector guidance only.
 
-    Single resolver on purpose. The connector and the record type are two facts
-    about ONE tool call, and reading them from separately-scanned entries let
-    them disagree: a malformed follow-up metadata call (no ``recordType``)
-    would move the connector without moving the record type, so the forced
-    write hop could offer connector B's tools under an instruction naming
-    connector A's record. Both callers now read the same entry or neither does.
-
-    "Usable" means it carries a record type — an entry without one cannot name
-    a write, so it is skipped rather than allowed to win by recency.
-    ``connector_id`` is None for a non-external tool name, which callers must
-    treat as "cannot resolve a connector".
+    A metadata read is not write intent or authorization. Connector and record
+    type must come from the same usable entry; malformed lookups are skipped.
     """
     from app.services.chat.tools import parse_external_tool_name
 
@@ -233,103 +188,8 @@ def _last_metadata_record_type(tool_calls_log: list[dict[str, Any]]) -> str | No
 
 
 def _write_reached_the_human(agent: Any) -> bool:
-    """True only once a confirmation card has actually been shown this turn.
-
-    This replaced `_write_proposed_this_turn` as the prose guard's stand-down
-    condition, and the difference is the whole bug. That helper asks "was a
-    write tool called this turn", which is True for a proposal the
-    investigation gate REJECTED — a write nobody ever saw.
-
-    Caught live on staging 2026-08-28 only after instrumenting the branch:
-
-        [FORCE_WRITE] prose branch step=2
-          tools_so_far=['..._ns_createRecord', '..._ns_getRecordTypeMetadata']
-          pending_write_type='customer' already_bounced=False
-
-    The model called ns_createRecord before fetching metadata, the gate
-    bounced it, the model fetched metadata and then answered in prose. Both
-    guard stages stood down because a write "had been proposed", so the
-    operator got a question and no card — and `already_bounced=False` shows
-    stage 1 never ran either. The guard exists precisely for turns where
-    nothing reached the human, so that is what it must test.
-    """
+    """A called or rejected mutation is not a displayed confirmation card."""
     return bool(getattr(agent, "_write_confirmation_emitted", False))
-
-
-def _forced_write_tool_subset(
-    tool_calls_log: list[dict[str, Any]],
-    tool_definitions: list[dict[str, Any]] | None,
-) -> list[dict[str, Any]]:
-    """The tool menu for the forced write-proposal hop: ONLY the write tools of
-    the connector this turn already fetched record metadata from.
-
-    Two properties earn the narrowness, and both were live failures first:
-
-    * **No read tool on the menu.** Given the whole toolset and a "you must
-      call something" tool_choice, the model has an escape hatch — call
-      ns_getSubsidiaries again, learn nothing new, and answer in prose anyway.
-      Removing chat as an option only works if the alternatives all constitute
-      a proposal.
-    * **No other connector's write tools.** A tenant with both a sandbox and a
-      production connection has two ns_createRecord tools. Forcing a write
-      must never widen the account the model already chose — that would turn a
-      UX fix into a wrong-account write, which is the failure this branch's
-      environment labelling exists to prevent.
-
-    Returns ``[]`` — meaning DO NOT FORCE — when the turn shows no metadata
-    call (no declared write intent to act on) or when that connector exposes
-    no write tools at all. Callers must treat an empty list as "leave the
-    model's prose alone": a forced tool_choice over an empty tool list is an
-    API error, and a read-only connector is an ordinary configuration here.
-    """
-    from app.services.chat.tools import parse_external_tool_name
-
-    # Connector and record type come from the SAME log entry, so the forced
-    # menu and the instruction text can never describe different connectors.
-    # They used to be resolved independently — this function took the most
-    # recent metadata call of any shape, while the instruction took the most
-    # recent one carrying a recordType — so a malformed follow-up call could
-    # offer connector B's write tools under an instruction naming connector A's
-    # record type. Two resolvers for one fact is the same shape as every other
-    # defect on this branch; there is now one.
-    resolved = _last_metadata_call(tool_calls_log)
-    if resolved is None:
-        return []
-    connector_id = resolved[0]
-
-    subset: list[dict[str, Any]] = []
-    for tool in tool_definitions or []:
-        parsed = parse_external_tool_name(str(tool.get("name", "")))
-        if not parsed:
-            continue
-        if str(parsed[0]) == connector_id and parsed[1] in _FORCEABLE_WRITE_TOOLS:
-            subset.append(tool)
-    return subset
-
-
-def _metadata_fetched_this_turn(tool_calls_log: list[dict[str, Any]], record_type: str) -> bool:
-    """True if `tool_calls_log` already contains a prior `ns_getRecordTypeMetadata`
-    call for *record_type* earlier in this turn.
-
-    Backs the investigation gate (agentic-repair design requirement A): a
-    create/upsert proposal reaching the mutation intercept with no prior
-    same-turn metadata lookup for its own record type is bounced back to the
-    model rather than validated. Matches on `record_type` only — a metadata
-    call logged for a DIFFERENT record type does not satisfy this one's gate.
-    """
-    from app.services.chat.tools import parse_external_tool_name
-
-    for entry in tool_calls_log:
-        parsed = parse_external_tool_name(entry.get("tool", ""))
-        if not parsed:
-            continue
-        _, raw_name = parsed
-        if raw_name != "ns_getRecordTypeMetadata":
-            continue
-        params = entry.get("params") or {}
-        if params.get("recordType") == record_type:
-            return True
-    return False
 
 
 def _build_learned_rules_block(learned_rules: list) -> str:
@@ -345,6 +205,7 @@ def _build_learned_rules_block(learned_rules: list) -> str:
     return block
 
 
+from app.services.chat.completion_review import CompletionGuard
 from app.services.confidence_extractor import extract_structured_confidence
 from app.services.confidence_service import CompositeScorer
 
@@ -419,30 +280,6 @@ def build_current_date_block(user_timezone: str | None) -> str:
     except Exception:
         # Date injection must NEVER break a turn
         return ""
-
-
-# Pattern to detect data queries that MUST be executed, not answered from memory
-_QUERY_PATTERN = re.compile(r"\bSELECT\b", re.IGNORECASE)
-_DATA_QUESTION_KEYWORDS = {
-    "how many",
-    "total",
-    "count",
-    "sum",
-    "average",
-    "quantity",
-    "revenue",
-    "sales",
-    "orders",
-    "inventory",
-}
-
-
-def _task_contains_query(task: str) -> bool:
-    """Check if the task contains a SQL query or data question that requires tool execution."""
-    if _QUERY_PATTERN.search(task):
-        return True
-    task_lower = task.lower()
-    return any(kw in task_lower for kw in _DATA_QUESTION_KEYWORDS)
 
 
 _MIN_ENTITY_CONFIDENCE = 0.70  # Minimum pg_trgm similarity for entity resolver matches
@@ -554,6 +391,45 @@ def _truncate_tool_result(result_str: str) -> str:
             if key in parsed and isinstance(parsed[key], str) and len(parsed[key]) > _MAX_ERROR_CHARS:
                 parsed[key] = parsed[key][:_MAX_ERROR_CHARS] + "... (truncated)"
         return json.dumps(parsed, default=str)
+
+    # Producers may provide an explicit, bounded model view while the full
+    # redacted result remains available to interception, audit and persistence.
+    # This is presentation, not evidence certification or tool authorization.
+    view = parsed.get("model_context")
+    if (
+        parsed.get("success") is True
+        and not parsed.get("error")
+        and parsed.get("isError") is not True
+        and not parsed.get("outcome_indeterminate")
+        and parsed.get("status") not in ("error", "failed", "indeterminate")
+        and isinstance(view, dict)
+        and view.get("version") == 1
+        and isinstance(view.get("data"), dict)
+        and len(json.dumps(view["data"], default=str)) <= 24_000
+    ):
+        projected = {
+            **view["data"],
+            "success": True,
+            "detail_projection": "This is a producer-provided summary, not the complete tool result. "
+            "Use its detail-access references for claims requiring omitted evidence.",
+        }
+        # Producers cannot make known partial coverage or scope disappear in
+        # their smaller view. This affects model context only, never auditing.
+        for key in (
+            "complete",
+            "truncated",
+            "rows_truncated",
+            "hasMore",
+            "warnings",
+            "scope",
+            "observed_at",
+            "outcome_indeterminate",
+        ):
+            if key in parsed:
+                projected[key] = parsed[key]
+        encoded = json.dumps(projected, default=str)
+        if len(encoded) <= 24_000:
+            return encoded
 
     # Cap large row-based results (e.g., SuiteQL queries returning hundreds of rows)
     rows = parsed.get("rows")
@@ -907,7 +783,22 @@ class BaseSpecialistAgent(abc.ABC):
         # hop re-enabling thinking would 400 on the blockless step-0 history.
         current_thinking_level = "none" if thinking.is_forced_tool_choice(tool_choice) else thinking_level
 
+        completion = CompletionGuard(
+            enabled=getattr(self, "_evidence_completion_enabled", False),
+            task=task,
+            history=context.get("conversation_history"),
+            prior_results=context.get("prior_results"),
+            audit_context={
+                "db": db,
+                "tenant_id": self.tenant_id,
+                "actor_id": self.user_id,
+                "resource_type": "chat_session",
+                "resource_id": session_id,
+                "correlation_id": self.correlation_id,
+            },
+        )
         tool_calls_log: list[dict] = []
+        result_capture = None
         total_input_tokens = 0
         total_output_tokens = 0
         total_cache_creation = 0
@@ -957,24 +848,6 @@ class BaseSpecialistAgent(abc.ABC):
 
                 # Pure text response — agent is done
                 if not response.tool_use_blocks:
-                    # Guard: if step 0 and task contains a SELECT query, the model
-                    # is hallucinating from conversation history instead of executing.
-                    # Force it to actually call the tool.
-                    if step == 0 and tool_calls_log == [] and _task_contains_query(task):
-                        print(f"[AGENT] {self.agent_name} skipped tool on data query — forcing execution", flush=True)
-                        messages.append(adapter.build_assistant_message(response))
-                        messages.append(
-                            {
-                                "role": "user",
-                                "content": (
-                                    "Execute the requested query using the available tools for the user's selected "
-                                    "data source. Do not answer from memory or switch sources. Obtain completed "
-                                    "server aggregates for counts and calculated summaries."
-                                ),
-                            }
-                        )
-                        continue
-
                     final_text = "\n".join(response.text_blocks) if response.text_blocks else ""
 
                     evidence = getattr(self, "_metabase_evidence", None)
@@ -985,6 +858,23 @@ class BaseSpecialistAgent(abc.ABC):
                             messages.append({"role": "user", "content": feedback})
                             continue
                         final_text = evidence.resolve(final_text)
+
+                    checked = await completion.check(
+                        answer=final_text,
+                        adapter=adapter,
+                        model=model,
+                        card_emitted=_write_reached_the_human(self),
+                    )
+                    if checked.usage:
+                        total_input_tokens += checked.usage.input_tokens
+                        total_output_tokens += checked.usage.output_tokens
+                        total_cache_creation += checked.usage.cache_creation_input_tokens
+                        total_cache_read += checked.usage.cache_read_input_tokens
+                    if checked.feedback:
+                        messages.append(adapter.build_assistant_message(response))
+                        messages.append({"role": "user", "content": checked.feedback})
+                        continue
+                    final_text = checked.text
 
                     # Extract confidence BEFORE stripping tag so agent self-score is used
                     # (Haiku fallback only fires when tag is missing)
@@ -1012,7 +902,7 @@ class BaseSpecialistAgent(abc.ABC):
                     await _maybe_store_query_pattern(db, self.tenant_id, task, tool_calls_log)
 
                     return AgentResult(
-                        success=True,
+                        success=completion.supported,
                         data=final_text,
                         tool_calls_log=tool_calls_log,
                         tokens_used=TokenUsage(
@@ -1084,6 +974,8 @@ class BaseSpecialistAgent(abc.ABC):
                         result_str = json.dumps(
                             {"error": f"Policy blocked: {policy_result.get('reason', 'Not allowed')}"}
                         )
+                    elif block.name == "analytics_calculate" and getattr(self, "_metabase_evidence", None) is not None:
+                        result_str = json.dumps(self._metabase_evidence.calculate(block.input))
                     else:
                         result_str = await execute_tool_call(
                             tool_name=block.name,
@@ -1105,12 +997,33 @@ class BaseSpecialistAgent(abc.ABC):
                             except (json.JSONDecodeError, TypeError):
                                 pass
 
+                    completion.observe(block.name, block.input, result_str)
+
+                    from app.services.chat.metabase_results import is_bound_table, nonstream_interceptor
+
+                    captured_result_id = None
+                    if session_id and result_capture is None:
+                        try:
+                            bound = is_bound_table(json.loads(result_str))
+                        except (TypeError, ValueError):
+                            bound = False
+                        if bound:
+                            result_capture = await nonstream_interceptor(db, self.tenant_id, session_id, tool_calls_log)
+                    if result_capture is not None:
+                        _, stamped = result_capture(block.name, result_str, block.input, result_str)
+                        try:
+                            captured_result_id = json.loads(stamped).get("result_id")
+                        except (TypeError, ValueError, AttributeError):
+                            pass
                     evidence = getattr(self, "_metabase_evidence", None)
-                    grounded_result = (
-                        evidence.observe(block.name, block.input, result_str)
-                        if evidence is not None and block.name in evidence.tool_names
-                        else None
-                    )
+                    grounded_result = None
+                    if evidence is not None:
+                        if block.name in evidence.tool_names:
+                            grounded_result = evidence.observe(
+                                block.name, block.input, result_str, result_id=captured_result_id
+                            )
+                        elif block.name == "pivot_query_result":
+                            grounded_result = evidence.observe_pivot(result_str)
 
                     if grounded_result == result_str:
                         grounded_result = None
@@ -1137,6 +1050,8 @@ class BaseSpecialistAgent(abc.ABC):
                             duration_ms=elapsed_ms,
                         )
                     )
+                    if isinstance(captured_result_id, str):
+                        tool_calls_log[-1]["result_id"] = captured_result_id
 
                     tool_results_content.append(
                         {
@@ -1188,6 +1103,24 @@ class BaseSpecialistAgent(abc.ABC):
                 else:
                     final_text = evidence.resolve(final_text)
 
+            if not getattr(self, "_numeric_verification_failed", False):
+                checked = await completion.check(
+                    answer=final_text,
+                    adapter=adapter,
+                    model=model,
+                    card_emitted=_write_reached_the_human(self),
+                    allow_retry=False,
+                )
+                if checked.usage:
+                    total_input_tokens += checked.usage.input_tokens
+                    total_output_tokens += checked.usage.output_tokens
+                    total_cache_creation += checked.usage.cache_creation_input_tokens
+                    total_cache_read += checked.usage.cache_read_input_tokens
+                final_text = checked.text
+
+            else:
+                completion.supported = False
+
             # Extract confidence BEFORE stripping tag so agent self-score is used
             # (Haiku fallback only fires when tag is missing)
             tools_used = [c.get("tool", "") for c in tool_calls_log]
@@ -1211,7 +1144,7 @@ class BaseSpecialistAgent(abc.ABC):
             await _maybe_store_query_pattern(db, self.tenant_id, task, tool_calls_log)
 
             return AgentResult(
-                success=True,
+                success=completion.supported,
                 data=final_text,
                 tool_calls_log=tool_calls_log,
                 tokens_used=TokenUsage(total_input_tokens, total_output_tokens, total_cache_creation, total_cache_read),
@@ -1228,95 +1161,6 @@ class BaseSpecialistAgent(abc.ABC):
                 tokens_used=TokenUsage(total_input_tokens, total_output_tokens, total_cache_creation, total_cache_read),
                 agent_name=self.agent_name,
             )
-
-    async def _compose_forced_write_proposal(
-        self,
-        *,
-        adapter: Any,
-        model: str,
-        prompt_parts: Any,
-        task: str,
-        tool_calls_log: list[dict[str, Any]],
-    ) -> Any | None:
-        """One extra hop whose only possible output is a write proposal.
-
-        Deliberately built on a FRESH, minimal message list rather than the
-        turn's own history. Two reasons, one of them a hard API constraint:
-
-        * A forced tool_choice is incompatible with extended thinking, and
-          this turn has been running with thinking on — replaying its history
-          (which carries thinking blocks) under a forced choice is the exact
-          combination `thinking.is_forced_tool_choice` exists to keep apart.
-          A clean list is ours to construct, so the question never arises.
-        * The model does not need the history. It needs the record type and
-          the values the user gave, both of which are in *task*; every
-          required field it cannot supply is filled by the server's own slot
-          declaration from the curated registry, not by the model guessing.
-
-        Returns ``None`` — meaning leave the model's prose alone — on any
-        failure, on a connector with no forceable write tools, and when the
-        turn shows no declared write intent. This hop may never be the reason
-        a turn breaks: the worst case it is allowed to produce is the
-        behaviour we already have.
-        """
-        # print(flush=True), not logger.info: structlog does not surface stdlib
-        # logger calls in container logs (.claude/rules/sqlalchemy-fastapi.md
-        # #8). A guard whose firing cannot be observed in production is how
-        # this path's first live diagnosis went wrong — absence of a marker
-        # was read as absence of the call, when the marker could never appear.
-        forced_tools = _forced_write_tool_subset(tool_calls_log, self.tool_definitions)
-        print(
-            f"[FORCE_WRITE] hop entered: menu={len(forced_tools)} "
-            f"record_type={_last_metadata_record_type(tool_calls_log)!r}",
-            flush=True,
-        )
-        if not forced_tools:
-            print("[FORCE_WRITE] no forceable write tool for that connector — leaving prose alone", flush=True)
-            return None
-
-        record_type = _last_metadata_record_type(tool_calls_log) or "record"
-        instruction = (
-            f"Compose the {record_type} write the user asked for, as a tool call. Include every "
-            "field value the user actually gave you. For each REQUIRED field whose value you "
-            'cannot determine from what they said, add "ask_user": ["<field name>"] to the SAME '
-            "tool call — the server looks up the real options and renders them as a dropdown on "
-            "the confirmation card the user has to approve anyway. In ask_user send field NAMES "
-            "only, never values and never your own list of options. Do not invent a value for a "
-            "field the user did not specify: an unanswered field belongs in ask_user."
-        )
-
-        try:
-            forced = await adapter.create_message(
-                model=model,
-                max_tokens=4096,
-                system=prompt_parts.static,
-                system_dynamic=prompt_parts.dynamic,
-                messages=[{"role": "user", "content": f"Task: {task}\n\n{instruction}"}],
-                tools=[*forced_tools, _DECLINE_WRITE_TOOL_DEF],
-                tool_choice={"type": "any"},
-                thinking_level="none",
-            )
-        except Exception:
-            logger.warning("forced write-proposal composition failed", exc_info=True)
-            import traceback
-
-            print(f"[FORCE_WRITE] hop FAILED: {traceback.format_exc()[-400:]}", flush=True)
-            return None
-
-        blocks = getattr(forced, "tool_use_blocks", None) or []
-        if not blocks:
-            return None
-        # The model used its decline. Return None so the turn delivers the
-        # answer it already wrote — the escape hatch only works if choosing it
-        # actually leaves the prose alone. `_DECLINE_WRITE_TOOL` must never
-        # reach the dispatcher: it is a local signal, not a real tool.
-        if all(getattr(b, "name", "") == _DECLINE_WRITE_TOOL for b in blocks):
-            print("[FORCE_WRITE] model DECLINED — no write was requested", flush=True)
-            return None
-        # A mixed response would otherwise dispatch the synthetic name and
-        # fail the whole turn on an unknown tool.
-        forced.tool_use_blocks = [b for b in blocks if getattr(b, "name", "") != _DECLINE_WRITE_TOOL]
-        return forced
 
     async def run_streaming(
         self,
@@ -1359,7 +1203,22 @@ class BaseSpecialistAgent(abc.ABC):
         # hop re-enabling thinking would 400 on the blockless step-0 history.
         current_thinking_level = "none" if thinking.is_forced_tool_choice(tool_choice) else thinking_level
 
+        completion = CompletionGuard(
+            enabled=getattr(self, "_evidence_completion_enabled", False),
+            task=task,
+            history=conversation_history,
+            prior_results=context.get("prior_results"),
+            audit_context={
+                "db": db,
+                "tenant_id": self.tenant_id,
+                "actor_id": self.user_id,
+                "resource_type": "chat_session",
+                "resource_id": session_id,
+                "correlation_id": self.correlation_id,
+            },
+        )
         tool_calls_log: list[dict] = []
+        confirmation_tokens: set[str] = set()
         total_input_tokens = 0
         total_output_tokens = 0
         total_cache_creation = 0
@@ -1388,6 +1247,7 @@ class BaseSpecialistAgent(abc.ABC):
 
         try:
             patched_files: set[str] = set()  # Dedup workspace_propose_patch per file
+            group_followup_used = False
             for step in range(self.max_steps):
                 # Check cancel flag between steps (background run graceful stop)
                 if run_id and step > 0:
@@ -1412,7 +1272,11 @@ class BaseSpecialistAgent(abc.ABC):
                     tool_choice=step_tool_choice,
                     thinking_level=current_thinking_level,
                 ):
-                    if event_type == "text" and getattr(self, "_metabase_evidence", None) is None:
+                    if (
+                        event_type == "text"
+                        and getattr(self, "_metabase_evidence", None) is None
+                        and not completion.enabled
+                    ):
                         yield "text", payload
                     elif event_type == "response":
                         response = payload
@@ -1427,136 +1291,10 @@ class BaseSpecialistAgent(abc.ABC):
                 total_cache_creation += response.usage.cache_creation_input_tokens
                 total_cache_read += response.usage.cache_read_input_tokens
 
-                # ── Forced write-proposal composition (stage 2 of the
-                # prose-instead-of-proposing guard) ──
-                # Stage 1 below ASKS the model to propose instead of talking.
-                # It complies about a third of the time: driven live on
-                # staging 2026-08-28, one identical create prompt over three
-                # runs produced 1 card and 2 prose endings, plus two operator
-                # runs that both ended in prose. Asking harder is not an
-                # option we still have — this is the fifth prompt-shaped
-                # attempt at the same behaviour, and `.claude/rules/
-                # agent-graph.md` is explicit that a guardrail is code at the
-                # choke point, never prompt prose.
-                #
-                # So stage 2 stops asking and removes chat from the menu: one
-                # extra hop offering ONLY that connector's write tools with a
-                # forced tool_choice. The model still decides the operation
-                # and composes the payload; it simply cannot end the turn by
-                # narrating a question at an operator who has no way to answer
-                # one. Runs at most once per turn, and only AFTER stage 1 has
-                # already been ignored, so a turn that merely asked a question
-                # about customers is never forced into proposing a write.
-                if (
-                    not response.tool_use_blocks
-                    and getattr(self, "_prose_instead_of_write_bounced", False)
-                    and not getattr(self, "_write_proposal_forced", False)
-                    and not _write_reached_the_human(self)
-                ):
-                    self._write_proposal_forced = True
-                    print("[FORCE_WRITE] stage2 triggered", flush=True)
-                    _forced = await self._compose_forced_write_proposal(
-                        adapter=adapter,
-                        model=model,
-                        prompt_parts=prompt_parts,
-                        task=task,
-                        tool_calls_log=tool_calls_log,
-                    )
-                    if _forced is not None and _forced.tool_use_blocks:
-                        # Swap in the composed proposal and fall through to the
-                        # ordinary tool-handling path below — the mutation
-                        # intercept, the investigation gate, the HITL card and
-                        # the slot declaration all run exactly as they would
-                        # for a proposal the model had volunteered. Nothing
-                        # about the write is decided here.
-                        total_input_tokens += _forced.usage.input_tokens
-                        total_output_tokens += _forced.usage.output_tokens
-                        print(
-                            f"[FORCE_WRITE] PROPOSAL COMPOSED: {[b.name for b in _forced.tool_use_blocks]}",
-                            flush=True,
-                        )
-                        response = _forced
-                # ── End forced write-proposal composition ──
-
-                # Pure text response — done
+                # Tool choice belongs to the agent. A keyword or schema read
+                # does not establish a need for another query or a write.
+                # Actual mutations still pass validation and exact HITL below.
                 if not response.tool_use_blocks:
-                    # Only on turns that declared write intent — an ordinary
-                    # answered question must not log. Kept in production
-                    # deliberately: this guard's first live diagnosis was wrong
-                    # for two deploys because every branch of it was silent.
-                    if _last_metadata_record_type(tool_calls_log):
-                        print(
-                            f"[FORCE_WRITE] prose on a write turn step={step} "
-                            f"record_type={_last_metadata_record_type(tool_calls_log)!r} "
-                            f"card_reached_human={_write_reached_the_human(self)} "
-                            f"already_bounced={getattr(self, '_prose_instead_of_write_bounced', False)}",
-                            flush=True,
-                        )
-                    # Guard: if step 0 and task contains a SELECT query, the model
-                    # is hallucinating from conversation history instead of executing.
-                    # Force it to actually call the tool.
-                    if step == 0 and tool_calls_log == [] and _task_contains_query(task):
-                        print(f"[AGENT] {self.agent_name} skipped tool on data query — forcing execution", flush=True)
-                        messages.append(adapter.build_assistant_message(response))
-                        messages.append(
-                            {
-                                "role": "user",
-                                "content": (
-                                    "Execute the requested query using the available tools for the user's selected "
-                                    "data source. Do not answer from memory or switch sources. Obtain completed "
-                                    "server aggregates for counts and calculated summaries."
-                                ),
-                            }
-                        )
-                        continue
-
-                    # ── Prose-instead-of-proposing guard ──
-                    # The model called ns_getRecordTypeMetadata — declaring in
-                    # its own tool call that it means to write — and then
-                    # answered in chat without proposing anything. Observed
-                    # live three times: the operator is asked a question in
-                    # prose, the confirmation card never appears, and the slot
-                    # form stays unreachable. Neither the server-declared slot
-                    # (needs a proposal to attach to) nor the ns_selector_app
-                    # redirect (needs a selector call) can reach this path —
-                    # both hang off a tool call that never happens.
-                    #
-                    # The trigger is the model's OWN behaviour, not a guess at
-                    # user intent: it looked up how to write a record type and
-                    # then wrote nothing. Same shape as the step-0 query guard
-                    # directly above, and bounded the same way — ONE re-entry
-                    # per turn, so a model that answers in prose twice still
-                    # finishes instead of looping.
-                    _pending_write_type = _last_metadata_record_type(tool_calls_log)
-                    if (
-                        _pending_write_type
-                        and not _write_reached_the_human(self)
-                        and not getattr(self, "_prose_instead_of_write_bounced", False)
-                    ):
-                        self._prose_instead_of_write_bounced = True
-                        print(
-                            f"[FORCE_WRITE] stage1 bounce fired for {_pending_write_type!r}",
-                            flush=True,
-                        )
-                        messages.append(adapter.build_assistant_message(response))
-                        messages.append(
-                            {
-                                "role": "user",
-                                "content": (
-                                    f"IF the user asked you to create or change a {_pending_write_type}: do NOT "
-                                    "ask them about it in chat — they cannot act on a question here. Call the "
-                                    "write tool now with every field you already know, and for each required "
-                                    'value you cannot determine add "ask_user": ["<field name>"] to that same '
-                                    "tool call. The server fetches the real options itself and renders them as a "
-                                    "dropdown on the confirmation card they must approve anyway. Send field "
-                                    "NAMES only — never values, never your own list of options.\n\n"
-                                    "IF the user only asked a question and did not request a write, ignore all "
-                                    "of the above and simply answer them."
-                                ),
-                            }
-                        )
-                        continue
-                    # ── End prose-instead-of-proposing guard ──
                     final_text = "\n".join(response.text_blocks) if response.text_blocks else ""
 
                     evidence = getattr(self, "_metabase_evidence", None)
@@ -1567,6 +1305,23 @@ class BaseSpecialistAgent(abc.ABC):
                             messages.append({"role": "user", "content": feedback})
                             continue
                         final_text = evidence.resolve(final_text)
+
+                    checked = await completion.check(
+                        answer=final_text,
+                        adapter=adapter,
+                        model=model,
+                        card_emitted=_write_reached_the_human(self),
+                    )
+                    if checked.usage:
+                        total_input_tokens += checked.usage.input_tokens
+                        total_output_tokens += checked.usage.output_tokens
+                        total_cache_creation += checked.usage.cache_creation_input_tokens
+                        total_cache_read += checked.usage.cache_read_input_tokens
+                    if checked.feedback:
+                        messages.append(adapter.build_assistant_message(response))
+                        messages.append({"role": "user", "content": checked.feedback})
+                        continue
+                    final_text = checked.text
 
                     # Extract confidence BEFORE stripping tag so agent self-score is used
                     # (Haiku fallback only fires when tag is missing)
@@ -1592,12 +1347,12 @@ class BaseSpecialistAgent(abc.ABC):
 
                     await _maybe_store_query_pattern(db, self.tenant_id, task, tool_calls_log)
 
-                    if evidence is not None:
+                    if evidence is not None or completion.enabled:
                         yield "text", final_text
                     yield (
                         "response",
                         AgentResult(
-                            success=True,
+                            success=completion.supported,
                             data=final_text,
                             tool_calls_log=tool_calls_log,
                             tokens_used=TokenUsage(
@@ -1794,6 +1549,52 @@ class BaseSpecialistAgent(abc.ABC):
                     if mutation_type is not None:
                         record_type = block.input.get("recordType", "unknown")
 
+                        # Case/group corrections obtain their exact cards from
+                        # the guarded accounting tools below. Generic metadata
+                        # validation cannot establish treatment eligibility.
+                        if getattr(self, "_transaction_workflow", False):
+                            result_str = json.dumps(
+                                {
+                                    "error": "accounting_adapter_required",
+                                    "financial_writes": 0,
+                                    "instruction": "Use transaction_ops_accounting_evidence for the case or "
+                                    "transaction_ops_accounting_group for the selected group. These tools prepare "
+                                    "supported exact approval cards. If no proposal is available, investigate the "
+                                    "specific missing evidence or capability. Do not retry a generic write or "
+                                    "substitute a journal, credit, refund, replay or arbitrary API operation.",
+                                }
+                            )
+                            elapsed_ms = int((time.monotonic() - t0) * 1000)
+                            yield (
+                                "tool_end",
+                                {
+                                    "tool_name": block.name,
+                                    "step": step,
+                                    "duration_ms": elapsed_ms,
+                                    "success": False,
+                                    "result_summary": "A supported accounting treatment is required.",
+                                },
+                            )
+                            tool_calls_log.append(
+                                build_tool_call_log_entry(
+                                    step=step,
+                                    agent_name=self.agent_name,
+                                    tool_name=block.name,
+                                    params=block.input,
+                                    result_str=result_str,
+                                    duration_ms=elapsed_ms,
+                                )
+                            )
+                            tool_results_content.append(
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": block.id,
+                                    "content": result_str,
+                                    "is_error": True,
+                                }
+                            )
+                            continue
+
                         # ── ask_user hint pop (requirement C) — MUST happen
                         # before anything else touches tool_input: this key
                         # must never reach NetSuite, the signed HMAC
@@ -1833,74 +1634,12 @@ class BaseSpecialistAgent(abc.ABC):
 
                             record_type = await describe_target(block.name, db, self.tenant_id)
 
-                        # ── Investigation gate (requirement A) — mechanism,
-                        # not prompt (the write profile's metadata-first
-                        # prose has been ignored live on this branch before).
-                        # Only create/upsert are gated: partial payloads are
-                        # legitimate on update, and metadata cannot yield
-                        # required fields anyway (see write_validator.py's
-                        # honesty rule), so no pre-flight check could ever
-                        # prove a create complete — the gate enforces
-                        # BEHAVIOR (look before composing), the human
-                        # enforces correctness. Bounded by construction: at
-                        # most ONE bounce per (turn, record_type), tracked in
-                        # a per-instance set — a stubborn model's SECOND
-                        # proposal always reaches validation/the card.
-                        if _is_netsuite_write and mutation_type in ("create", "upsert"):
-                            if not hasattr(self, "_investigation_gate_bounced"):
-                                self._investigation_gate_bounced: set[str] = set()
-                            if record_type not in self._investigation_gate_bounced and not _metadata_fetched_this_turn(
-                                tool_calls_log, record_type
-                            ):
-                                self._investigation_gate_bounced.add(record_type)
-                                result_str = json.dumps(
-                                    {
-                                        "unexamined_write": True,
-                                        "instruction": (
-                                            f"Call ns_getRecordTypeMetadata for '{record_type}' first, "
-                                            "resolve any values you need (e.g. ns_getSubsidiaries, or a "
-                                            "SuiteQL lookup), then re-propose this write. If a value the "
-                                            "record needs has several valid options and the user's request "
-                                            "does not say which, do NOT pick one — add "
-                                            "'ask_user': ['<field name>'] to the write call so the user "
-                                            "is shown the real options."
-                                        ),
-                                    }
-                                )
-                                elapsed_ms = int((time.monotonic() - t0) * 1000)
-                                yield (
-                                    "tool_end",
-                                    {
-                                        "tool_name": block.name,
-                                        "step": step,
-                                        "duration_ms": elapsed_ms,
-                                        "success": False,
-                                        "result_summary": (
-                                            f"Investigation required — call ns_getRecordTypeMetadata for "
-                                            f"'{record_type}' before composing this {mutation_type}."
-                                        ),
-                                    },
-                                )
-                                tool_calls_log.append(
-                                    build_tool_call_log_entry(
-                                        step=step,
-                                        agent_name=self.agent_name,
-                                        tool_name=block.name,
-                                        params=block.input,
-                                        result_str=result_str,
-                                        duration_ms=elapsed_ms,
-                                    )
-                                )
-                                tool_results_content.append(
-                                    {
-                                        "type": "tool_result",
-                                        "tool_use_id": block.id,
-                                        "content": result_str,
-                                        "is_error": True,
-                                    }
-                                )
-                                continue
-                        # ── End investigation gate ──
+                        # Schema is obtained by validate_mutation below, which
+                        # reuses the connector-scoped metadata cache. Do not
+                        # require the model to repeat a metadata tool call in
+                        # this turn: evidence sufficiency is a validation
+                        # concern, not a prescribed sequence of model actions.
+                        # Validation, editable slots and exact HITL still run.
 
                         # ── Write validation + bounded repair ──
                         if not hasattr(self, "_write_repair"):
@@ -2142,7 +1881,7 @@ class BaseSpecialistAgent(abc.ABC):
                         # blocking the SSE stream on slow MCP calls)
                         current_record: dict[str, Any] | None = None
                         accounting_card = None
-                        if _is_netsuite_write and mutation_type == "update":
+                        if _is_netsuite_write and mutation_type in ("update", "create"):
                             from app.services.chat.write_payload import normalize_write_payload
                             from app.services.transaction_ops.tax_correction import review_for_card
 
@@ -2152,9 +1891,10 @@ class BaseSpecialistAgent(abc.ABC):
                                 )
                             except ValueError as exc:
                                 if validation is None:
-                                    validation = ValidationResult(ok=False)
-                                validation.invariant_errors.append(str(exc))
-                                validation.ok = False
+                                    validation = ValidationResult(ok=False, invariant_errors=[str(exc)])
+                                else:
+                                    validation.invariant_errors.append(str(exc))
+                                    validation.ok = False
                             if accounting_card:
                                 current_record = accounting_card["before"]
                         if mutation_type in ("update", "upsert") and accounting_card is None:
@@ -2309,14 +2049,18 @@ class BaseSpecialistAgent(abc.ABC):
                             # — not "a write tool was called" — is what stands
                             # the prose guard down; see _write_reached_the_human.
                             self._write_confirmation_emitted = True
-                            if accounting_card:
-                                payload.accounting_review = accounting_card
-                                from app.services.transaction_ops.tax_correction import approval_text
+                            duplicate_proposal = payload.confirmation_token in confirmation_tokens
+                            if not duplicate_proposal:
+                                confirmation_tokens.add(payload.confirmation_token)
+                                if accounting_card:
+                                    payload.accounting_review = accounting_card
+                                    from app.services.transaction_ops.tax_correction import approval_text
 
-                                yield "text", "\n\n" + approval_text(accounting_card) + "\n\n"
-                            yield ("confirmation_required", payload.model_dump())
+                                    yield "text", "\n\n" + approval_text(accounting_card) + "\n\n"
+                                yield ("confirmation_required", payload.model_dump())
                             _confirmation_result: dict[str, Any] = {
                                 "confirmation_required": True,
+                                "duplicate_proposal": duplicate_proposal,
                                 "mutation_type": mutation_type,
                                 "record_type": record_type,
                                 "message": (
@@ -2351,6 +2095,7 @@ class BaseSpecialistAgent(abc.ABC):
                                 ),
                             },
                         )
+                        completion.observe(block.name, block.input, result_str)
                         _log_entry = build_tool_call_log_entry(
                             step=step,
                             agent_name=self.agent_name,
@@ -2493,6 +2238,8 @@ class BaseSpecialistAgent(abc.ABC):
                         result_str = json.dumps(
                             {"error": f"Policy blocked: {policy_result.get('reason', 'Not allowed')}"}
                         )
+                    elif block.name == "analytics_calculate" and getattr(self, "_metabase_evidence", None) is not None:
+                        result_str = json.dumps(self._metabase_evidence.calculate(block.input))
                     else:
                         result_str = await execute_tool_call(
                             tool_name=block.name,
@@ -2519,6 +2266,7 @@ class BaseSpecialistAgent(abc.ABC):
                     # report.compose resolves to render the FULL, "uncapped frozen
                     # payload" — must see all rows. Without this, a >500-row result
                     # silently composes a report missing rows 501..N (finding #10).
+                    completion.observe(block.name, block.input, result_str)
                     full_result_str = result_str
                     result_str = _truncate_tool_result(result_str)
 
@@ -2571,11 +2319,26 @@ class BaseSpecialistAgent(abc.ABC):
                     # idempotent over an interceptor that already condensed a metric (the
                     # condensed string carries no suppress_llm_value flag).
                     llm_result_str = _suppress_metric_value_for_llm(llm_result_str)
+                    intercepted_result_id = None
+                    try:
+                        intercepted = json.loads(llm_result_str)
+                        if isinstance(intercepted, dict):
+                            intercepted_result_id = intercepted.get("result_id")
+                    except (ValueError, TypeError):
+                        pass
                     evidence = getattr(self, "_metabase_evidence", None)
                     if evidence is not None and block.name in evidence.tool_names:
-                        grounded_result = evidence.observe(block.name, block.input, full_result_str)
+                        grounded_result = evidence.observe(
+                            block.name, block.input, full_result_str, result_id=intercepted_result_id
+                        )
                         if grounded_result != full_result_str:
                             llm_result_str = _suppress_metric_value_for_llm(grounded_result)
+                    elif evidence is not None and block.name == "pivot_query_result":
+                        grounded_result = evidence.observe_pivot(
+                            full_result_str, displayed=intercepted_result_id is not None
+                        )
+                        if grounded_result != full_result_str:
+                            llm_result_str = grounded_result
 
                     tool_calls_log.append(
                         build_tool_call_log_entry(
@@ -2590,6 +2353,8 @@ class BaseSpecialistAgent(abc.ABC):
                             duration_ms=elapsed_ms,
                         )
                     )
+                    if isinstance(intercepted_result_id, str):
+                        tool_calls_log[-1]["result_id"] = intercepted_result_id
 
                     tool_results_content.append(
                         {
@@ -2602,11 +2367,26 @@ class BaseSpecialistAgent(abc.ABC):
                     # The supported accounting payload is already deterministic. Route it
                     # through the existing validator/HITL card instead of asking the model
                     # to repeat it in another hop (which can hallucinate a card in prose).
-                    if block.name == "transaction_ops_accounting_evidence" and not _had_error:
+                    if not _had_error and block.name in {
+                        "transaction_ops_status",
+                        "transaction_ops_accounting_evidence",
+                        "transaction_ops_accounting_group",
+                    }:
+                        self._transaction_workflow = True
+                    if (
+                        block.name in {"transaction_ops_accounting_evidence", "transaction_ops_accounting_group"}
+                        and not _had_error
+                    ):
+                        from app.services.transaction_ops.accounting_group import prepare_group_confirmation
                         from app.services.transaction_ops.tax_correction import candidate_confirmation
 
                         try:
-                            prepared = await candidate_confirmation(
+                            prepare_confirmation = (
+                                prepare_group_confirmation
+                                if block.name == "transaction_ops_accounting_group"
+                                else candidate_confirmation
+                            )
+                            prepared = await prepare_confirmation(
                                 db=db,
                                 tenant_id=self.tenant_id,
                                 actor_id=self.user_id,
@@ -2635,6 +2415,72 @@ class BaseSpecialistAgent(abc.ABC):
                                 ),
                             )
                             return
+                        if not prepared and block.name == "transaction_ops_accounting_group":
+                            investigation = db.info.get("accounting_group_investigation")
+                            if investigation:
+                                # Feed the actual evidence back into the same agent loop.
+                                # A zero-candidate result is not a confirmation or success.
+                                if not group_followup_used:
+                                    from app.services.transaction_ops.group_investigation import (
+                                        observation_preview,
+                                        representative_reads,
+                                    )
+
+                                    group_followup_used = True
+                                    details = []
+                                    read_name = "transaction_ops_accounting_evidence"
+                                    for read_params in representative_reads(investigation, tools):
+                                        read_start = time.monotonic()
+                                        read_policy = policy_evaluate(active_policy, read_name, read_params)
+                                        if not read_policy["allowed"]:
+                                            read_result = json.dumps({"error": "Policy blocked saved-evidence read"})
+                                        else:
+                                            read_result = await execute_tool_call(
+                                                tool_name=read_name,
+                                                tool_input=read_params,
+                                                tenant_id=self.tenant_id,
+                                                actor_id=self.user_id,
+                                                correlation_id=self.correlation_id,
+                                                db=db,
+                                                context_need=getattr(self, "_context_need", None),
+                                                session_id=session_id,
+                                            )
+                                            if active_policy and active_policy.blocked_fields:
+                                                read_result = json.dumps(
+                                                    redact_output(active_policy, json.loads(read_result)), default=str
+                                                )
+                                        # Bound extra model context. Full observations remain in their scoped audit.
+                                        preview = observation_preview(read_result)
+                                        details.append({**read_params, "result_preview": preview})
+                                        tool_calls_log.append(
+                                            build_tool_call_log_entry(
+                                                step=step,
+                                                agent_name=self.agent_name,
+                                                tool_name=read_name,
+                                                params=read_params,
+                                                result_str=preview,
+                                                duration_ms=int((time.monotonic() - read_start) * 1000),
+                                            )
+                                        )
+                                    investigation["representative_observations"] = details
+                                    investigation["representative_instruction"] = (
+                                        "The saved source and document details below have already been inspected for "
+                                        "up to four distinct batches. Use their actual line/adjustment facts to explain "
+                                        "the cause; fetch only missing evidence. Do not ask permission to continue the "
+                                        "requested investigation. Representatives do not verify the remaining orders."
+                                    )
+                                from app.services.transaction_ops.group_investigation import model_handoff
+
+                                tool_results_content[-1]["content"] = json.dumps(
+                                    model_handoff(investigation), default=str
+                                )
+                                yield (
+                                    "tool_status",
+                                    (
+                                        f"Evidence checked for {investigation['case_count']} orders. "
+                                        "Investigating why corrections are not ready…"
+                                    ),
+                                )
                         if prepared:
                             card, note = prepared
                             self._write_confirmation_emitted = True
@@ -2679,6 +2525,7 @@ class BaseSpecialistAgent(abc.ABC):
                     if (
                         getattr(self, "_context_need", None) != "full"
                         and not _metabase_analysis
+                        and not getattr(self, "_transaction_workflow", False)
                         and skippable
                         and _has_successful_data_result([result_str])
                     ):
@@ -2707,6 +2554,7 @@ class BaseSpecialistAgent(abc.ABC):
                 if (
                     getattr(self, "_context_need", None) != "full"
                     and not _metabase_analysis
+                    and not getattr(self, "_transaction_workflow", False)
                     and step >= 1
                     and _has_successful_data_result(raw_result_strings)
                 ):
@@ -2739,7 +2587,11 @@ class BaseSpecialistAgent(abc.ABC):
                 messages=messages,
                 thinking_level=current_thinking_level,
             ):
-                if event_type == "text" and getattr(self, "_metabase_evidence", None) is None:
+                if (
+                    event_type == "text"
+                    and getattr(self, "_metabase_evidence", None) is None
+                    and not completion.enabled
+                ):
                     yield "text", payload
                 elif event_type == "response":
                     response = payload
@@ -2761,6 +2613,24 @@ class BaseSpecialistAgent(abc.ABC):
                     final_text = UNVERIFIED
                 else:
                     final_text = evidence.resolve(final_text)
+
+            if not getattr(self, "_numeric_verification_failed", False):
+                checked = await completion.check(
+                    answer=final_text,
+                    adapter=adapter,
+                    model=model,
+                    card_emitted=_write_reached_the_human(self),
+                    allow_retry=False,
+                )
+                if checked.usage:
+                    total_input_tokens += checked.usage.input_tokens
+                    total_output_tokens += checked.usage.output_tokens
+                    total_cache_creation += checked.usage.cache_creation_input_tokens
+                    total_cache_read += checked.usage.cache_read_input_tokens
+                final_text = checked.text
+
+            else:
+                completion.supported = False
 
             # Extract confidence BEFORE stripping tag so agent self-score is used
             # (Haiku fallback only fires when tag is missing)
@@ -2784,12 +2654,12 @@ class BaseSpecialistAgent(abc.ABC):
 
             await _maybe_store_query_pattern(db, self.tenant_id, task, tool_calls_log)
 
-            if evidence is not None:
+            if evidence is not None or completion.enabled:
                 yield "text", final_text
             yield (
                 "response",
                 AgentResult(
-                    success=True,
+                    success=completion.supported,
                     data=final_text,
                     tool_calls_log=tool_calls_log,
                     tokens_used=TokenUsage(

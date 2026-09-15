@@ -5,7 +5,7 @@ from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, model_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.models.transaction_ops import TransactionRun
 from app.models.user import User
@@ -45,7 +45,12 @@ async def create_review(db, tenant_id, config_id, request, *, actor):
         mapping = TransactionMapping.model_validate(config.mapping_json)
         policy = mapping.reconciliation_policy or ReconciliationPolicy()
         scope = review_window(
-            request.period, utc_now(), policy.timezone_name, start_date=request.start_date, end_date=request.end_date
+            request.period,
+            utc_now(),
+            policy.timezone_name,
+            start_date=request.start_date,
+            end_date=request.end_date,
+            basis=policy.review_basis,
         )
     except ValueError:
         raise state.StateError("invalid_review_period", 422) from None
@@ -56,6 +61,7 @@ async def create_review(db, tenant_id, config_id, request, *, actor):
         TransactionRun.config_id == config_id,
         TransactionRun.params_json["review"]["start"].astext == contract["start"],
         TransactionRun.params_json["review"]["end"].astext == contract["end"],
+        func.coalesce(TransactionRun.params_json["window_basis"].astext, "updated_at") == scope["window_basis"],
     )
     # A retried HTTP request must return the same attempt even after it finishes.
     existing = await db.scalar(
@@ -123,7 +129,7 @@ async def continue_review(db, tenant_id, run_id):
         evaluation_key=f"review:{span.id}:{start.isoformat()}",
         window_start=start,
         window_end=end,
-        window_basis="completed_at",
+        window_basis=previous.params_json.get("window_basis", "completed_at"),
         review=span,
     )
     child = await db.scalar(
@@ -148,6 +154,7 @@ async def continue_review(db, tenant_id, run_id):
             TransactionRun.tenant_id == tenant_id,
             TransactionRun.config_id == config.id,
             TransactionRun.status.in_(["pending", "running"]),
+            TransactionRun.origin != "schedule",
         )
         .limit(1)
     )
@@ -196,21 +203,27 @@ async def review_status(db, tenant_id, run_id):
         previous = slices.get(key)
         if previous is None or _slice_rank(run) > _slice_rank(previous):
             slices[key] = run
-    completed_until = span.start
-    completed_slices = 0
-    for (start, end), run in sorted(slices.items()):
-        if start != completed_until or run.termination_reason != "done" or not run.progress_json.get("scan_complete"):
-            break
-        if not run.progress_json.get("refund_scan_complete"):
-            break
-        completed_until = end
-        completed_slices += 1
+    from app.services.transaction_ops.daily_evidence import completed_daily_windows, covered_days, covered_until
+
+    daily_windows = await completed_daily_windows(db, root, span)
+    own_windows = [
+        (start, end, str(run.id))
+        for (start, end), run in slices.items()
+        if run.termination_reason == "done"
+        and run.progress_json.get("scan_complete")
+        and run.progress_json.get("refund_scan_complete")
+    ]
+    windows = own_windows + daily_windows
+    completed_until = covered_until(span.start, span.end, windows)
+    policy = (getattr(root, "config_snapshot", None) or {}).get("mapping_json", {}).get("reconciliation_policy") or {}
+    completed_slices = covered_days(span.start, span.end, windows, policy.get("timezone_name", "America/Los_Angeles"))
     complete = completed_until == span.end and len(runs) <= 512
     active = next((r for r in reversed(runs) if r.status in ("pending", "running")), None)
     return {
         "review_id": str(span.id),
         "period_start": span.model_dump(mode="json")["start"],
         "period_end": span.model_dump(mode="json")["end"],
+        "window_basis": root.params_json.get("window_basis", "completed_at"),
         "completed_until": completed_until.isoformat().replace("+00:00", "Z"),
         "complete": complete,
         # A finished scan is neither a replica watermark nor an accounting sign-off.
@@ -220,9 +233,11 @@ async def review_status(db, tenant_id, run_id):
         "financial_status": "not_certified",
         "status": "complete" if complete else "running" if active else "needs_attention",
         "completed_slices": completed_slices,
+        "reused_daily_windows": len(daily_windows),
         "run_count": len(runs[:512]),
         "truncated": len(runs) > 512,
         "current_run_id": str(active.id) if active else str(slices[max(slices)].id),
+        "current_run_status": active.status if active else slices[max(slices)].status,
         "slices": [
             {
                 "start": start.isoformat(),
@@ -276,6 +291,9 @@ async def review_results(db, tenant_id, run_id, *, limit=25, offset=0, status=No
         .mappings()
         .all()
     )
+    from app.services.transaction_ops.accounting_projection import project_rows
+
+    rows = await project_rows(db, tenant_id, rows)
     items = []
     for row in rows:
         report = row["report_json"]

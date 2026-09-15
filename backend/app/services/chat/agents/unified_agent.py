@@ -560,7 +560,7 @@ class UnifiedAgent(BaseSpecialistAgent):
             parts.append(pp_block)
 
         # NetSuite record deep links
-        if self._netsuite_account_slug:
+        if self._netsuite_account_slug and not getattr(self, "_transaction_workflow", False):
             parts.append(
                 f"\n<record_links>\n"
                 f"When referencing NetSuite records, include a clickable link using this pattern:\n"
@@ -727,10 +727,14 @@ class UnifiedAgent(BaseSpecialistAgent):
 
             skills = get_all_skills_metadata()
             if skills:
-                skills_block = "\n<available_skills>\nThe user can invoke these skills via slash commands:\n"
+                skills_block = (
+                    "\n<available_skills>\nLoad relevant specialist instructions on demand using the available "
+                    "skill-loading tool and exact slug. Users can also invoke slash commands. "
+                    "Do not load every skill or reread an unchanged skill already in this turn's context.\n"
+                )
                 for s in skills:
                     primary_trigger = next((t for t in s["triggers"] if t.startswith("/")), s["triggers"][0])
-                    skills_block += f"- `{primary_trigger}` — {s['name']}: {s['description']}\n"
+                    skills_block += f"- `{s['slug']}` ({primary_trigger}) — {s['name']}: {s['description']}\n"
                 skills_block += "</available_skills>"
                 parts.append(skills_block)
 
@@ -764,10 +768,19 @@ class UnifiedAgent(BaseSpecialistAgent):
                 "Use the operation's authorized connection context; all execution and approval checks still apply."
             )
         if getattr(self, "_transaction_workflow", False):
+            from app.services.chat.skills import get_skill_instructions
+
+            if not self._active_skill or self._active_skill["slug"] != "accounting_operations":
+                parts.append(
+                    "\n<accounting_operations>\n"
+                    + (get_skill_instructions("accounting_operations") or "")
+                    + "\n</accounting_operations>"
+                )
             parts.append(
                 "\nThis request selects a transaction case/group workflow, not a standalone database query. "
-                "Start with transaction_ops_status for the exact case or transaction_ops_groups "
-                "for the exact group and supplied scope, then transaction_ops_accounting_evidence for a case. Resolve connections from that authorized evidence; "
+                "Start with transaction_ops_status for the exact case or transaction_ops_accounting_group "
+                "for the exact group and supplied scope. Use transaction_ops_accounting_evidence for case evidence. "
+                "Resolve connections from that authorized evidence; "
                 "do not ask which data source to use. Continue targeted read-only investigation when evidence "
                 "is incomplete without asking discretionary permission. Prepare only supported exact changes "
                 "for human approval; this request is not financial approval."
@@ -788,7 +801,11 @@ class UnifiedAgent(BaseSpecialistAgent):
         # Lazy import to avoid circular: orchestrator imports unified_agent.
         from app.services.chat.orchestrator import _assemble_system_prompt
 
-        return _assemble_system_prompt(template=prompt, tool_definitions=self._tool_defs or [])
+        return _assemble_system_prompt(
+            template=prompt,
+            tool_definitions=self._tool_defs or [],
+            include_connected_skills=not getattr(self, "_transaction_workflow", False),
+        )
 
     @property
     def tool_definitions(self) -> list[dict]:
@@ -810,8 +827,7 @@ class UnifiedAgent(BaseSpecialistAgent):
         from app.services.chat.skills import match_skill
 
         matched = match_skill(task)
-        if matched:
-            self._active_skill = matched
+        self._active_skill = matched
 
         vernacular = context.get("tenant_vernacular", "")
         if vernacular:
@@ -892,13 +908,18 @@ class UnifiedAgent(BaseSpecialistAgent):
         self._routing_error = False
         self._request_kind = None
         self._selected_user_sources = ()
+        from app.core.config import settings
+
+        self._evidence_completion_enabled = settings.CHAT_EVIDENCE_COMPLETION_ENABLED
         self._transaction_workflow = False
         self._metabase_evidence = None
         self._numeric_verification_failed = False
+        if self._tool_defs is not None:
+            self._tool_defs = [tool for tool in self._tool_defs if tool.get("name") != "analytics_calculate"]
 
     def _configure_metabase_evidence(self, selection):
         from app.services.chat.metabase_context import metabase_tool_names
-        from app.services.chat.metabase_evidence import MetabaseEvidence
+        from app.services.chat.metabase_evidence import CALCULATOR_TOOL, MetabaseEvidence
         from app.services.chat.tool_inventory import available_data_sources
 
         selected = set(selection.selected_sources) or set(available_data_sources(self._tool_defs or []))
@@ -906,6 +927,7 @@ class UnifiedAgent(BaseSpecialistAgent):
             names = metabase_tool_names(self._tool_defs or [])
             if names:
                 self._metabase_evidence = MetabaseEvidence(names)
+                self._tool_defs = [*(self._tool_defs or []), CALCULATOR_TOOL]
 
     def _plan_source_selection(self, source):
         from app.services.chat.request_routing import RequestContext
@@ -924,13 +946,29 @@ class UnifiedAgent(BaseSpecialistAgent):
 
         history = context.get("source_selection_history", history) or []
         task = context.get("source_selection_task", task)
-        if len(available_data_sources(self._tool_defs or [])) < 2 and not metabase_tool_names(self._tool_defs or []):
+        tool_names = {t.get("name", "").replace(".", "_") for t in self._tool_defs or []}
+        has_transaction_tools = bool(
+            tool_names & {"transaction_ops_status", "transaction_ops_groups", "transaction_ops_accounting_evidence"}
+        )
+        # Source count only decides whether an analytics choice is necessary.
+        # Accounting intent must still be established before the first tool call.
+        if (
+            len(available_data_sources(self._tool_defs or [])) < 2
+            and not metabase_tool_names(self._tool_defs or [])
+            and not has_transaction_tools
+        ):
             return SourceSelection()
         if self._context_need.lower() in {"docs", "workspace"}:
             route = RequestRoute(kind="conversation", continuation=True)
         else:
             try:
-                routing = await classify_request(task=task, history=history, adapter=adapter, model=model)
+                routing = await classify_request(
+                    task=task,
+                    history=history,
+                    adapter=adapter,
+                    model=model,
+                    available_sources=available_data_sources(self._tool_defs or []),
+                )
                 route = routing.route
                 self._routing_usage = routing.usage
             except Exception as exc:
@@ -1017,6 +1055,10 @@ class UnifiedAgent(BaseSpecialistAgent):
         )
         self._selected_user_sources = selection.selected_sources
         self._transaction_workflow = selection.transaction_workflow
+        if self._transaction_workflow:
+            from app.services.chat.transaction_context import transaction_tools
+
+            self._tool_defs = transaction_tools(self._tool_defs or [])
         self._configure_metabase_evidence(selection)
         if selection.question:
             return self._finish_source_routing(
@@ -1089,6 +1131,10 @@ class UnifiedAgent(BaseSpecialistAgent):
         )
         self._selected_user_sources = selection.selected_sources
         self._transaction_workflow = selection.transaction_workflow
+        if self._transaction_workflow:
+            from app.services.chat.transaction_context import transaction_tools
+
+            self._tool_defs = transaction_tools(self._tool_defs or [])
         self._configure_metabase_evidence(selection)
         if selection.question:
             yield "text", selection.question

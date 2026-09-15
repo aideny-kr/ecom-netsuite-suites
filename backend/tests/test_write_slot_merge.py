@@ -565,8 +565,12 @@ def _make_db(confirm_msg: ChatMessage) -> MagicMock:
     db = MagicMock()
 
     async def _execute(stmt, *args, **kwargs):
+        from app.models.mcp_connector import McpConnector
+
         if isinstance(stmt, Update):
             return MagicMock(rowcount=1)
+        if any(d.get("entity") is McpConnector for d in getattr(stmt, "column_descriptions", [])):
+            return _FakeResult(None)  # Unknown schema; never return a ChatMessage as a connector.
         return _FakeResult(confirm_msg)
 
     db.execute = _execute

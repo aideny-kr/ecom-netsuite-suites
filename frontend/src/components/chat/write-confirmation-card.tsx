@@ -4,6 +4,9 @@ import { useState } from "react";
 import { Plus, Pencil, Trash2, AlertTriangle, Check, X, Loader2 } from "lucide-react";
 import type { WriteConfirmationData, EditableSlot } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { AccountingConfirmationCard } from "./accounting-confirmation-card";
+import { AccountingGroupCard } from "./accounting-group-card";
+import { AccountingOrderPlanCard } from "./accounting-order-plan-card";
 
 interface WriteConfirmationCardProps {
   data: WriteConfirmationData;
@@ -41,6 +44,14 @@ export function WriteConfirmationCard({
   disabled = false,
 }: WriteConfirmationCardProps) {
   const [slotValues, setSlotValues] = useState<Record<string, string>>({});
+
+  if (data.accounting_group) {
+    return <AccountingGroupCard data={data} onConfirm={() => onConfirm({})} onReject={onReject} disabled={disabled} />;
+  }
+
+  if (data.accounting_review && (data.accounting_review.kind === "sales_adjustment_credit" || !data.editable_slots?.length)) {
+    return <AccountingOrderPlanCard key={data.confirmation_token} data={data}><AccountingConfirmationCard data={data} onConfirm={() => onConfirm({})} onReject={onReject} disabled={disabled} /></AccountingOrderPlanCard>;
+  }
 
   const MutationIcon = MUTATION_ICONS[data.mutation_type];
   const isPending = data.status === "pending";

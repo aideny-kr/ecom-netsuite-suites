@@ -38,6 +38,7 @@ _MUTATION_TOOL_NAMES: dict[str, str] = {
     **_NETSUITE_MUTATION_TOOL_NAMES,
     **CELIGO_WRITE_VERBS,
 }
+_INTERNAL_MUTATIONS = {"transaction_ops_accounting_amendment_apply": "update"}
 
 # Record types that are safe to create/update/delete via AI-initiated flows.
 # Record types that must NEVER be mutated by the agent — system/security records.
@@ -83,6 +84,8 @@ def classify_mutation(tool_name: str) -> str | None:
     Prefer this over calling ``is_mutation_tool`` + ``get_mutation_type``
     separately to avoid a redundant parse.
     """
+    if tool_name in _INTERNAL_MUTATIONS:
+        return _INTERNAL_MUTATIONS[tool_name]
     raw = _raw_tool_name(tool_name)
     if raw is None:
         return None

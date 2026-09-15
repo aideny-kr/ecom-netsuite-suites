@@ -26,6 +26,9 @@ def condense_status(result):
                     "history",
                     "resolution_history",
                     "resolution_examples",
+                    "accounting_resolution_history",
+                    "accounting_resolution_examples",
+                    "accounting_resolution_usage",
                     "resolution_usage",
                     "resolution_history_url",
                     "truncated",
@@ -43,6 +46,9 @@ def condense_status(result):
             "Pending proposals need exact-change human approval on the review page; "
             "approved does not mean executed or verified. Follow continuation_run_id when present. "
             "A succeeded settlement check verifies order total, tax and refunds, not payment/payout clearance. "
-            "Historical approvals never authorize a new change.",
+            "Historical approvals never authorize a new change. "
+            "Use resolution_plan and completion in accounting history to continue the whole order, including "
+            "its sales order and posting records. A prepared dependent correction needs its own exact approval. "
+            "Do not repost an operation with recorded execution or ask the user to restart a completed investigation.",
         }
     )

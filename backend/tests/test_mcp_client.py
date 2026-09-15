@@ -18,12 +18,15 @@ TENANT_ID = str(uuid.uuid4())
 ACTOR_ID = str(uuid.uuid4())
 
 EXPECTED_TOOLS = {
+    "agent.skill",
+    "transaction_ops.accounting_reference",
     "health",
     "transaction_ops.configs",
     "transaction_ops.run",
     "transaction_ops.status",
     "transaction_ops.groups",
     "transaction_ops.accounting_evidence",
+    "transaction_ops.accounting_group",
     "netsuite.suiteql",
     "netsuite.suiteql_stub",
     "netsuite.financial_report",

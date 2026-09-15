@@ -1,7 +1,7 @@
 """Authenticated transaction configuration, investigations and human decisions.
 
-Run creation is durable queueing only. Provider execution/worker registration
-belongs to the runner; no request body can provide an approval actor.
+Run creation persists before bounded broker publication. Provider execution
+belongs to the worker; no request body can provide an approval actor.
 """
 
 from typing import Annotated, Literal
@@ -26,7 +26,7 @@ from app.schemas.transaction_runs import (
     RunCreate,
     RunOut,
 )
-from app.services.transaction_ops import case_service, order_actions, period_review
+from app.services.transaction_ops import case_service, order_actions, period_review, scheduler
 from app.services.transaction_ops import state_service as service
 from app.services.transaction_ops.period_review import PeriodReview
 
@@ -42,6 +42,14 @@ Manager = Annotated[User, Depends(require_permission("connections.manage"))]
 
 def _http_error(exc):
     return HTTPException(status_code=exc.http_status, detail={"code": exc.code})
+
+
+async def _publish_pending(run, tenant_id):
+    if run.status == "pending":
+        # Creation has committed. Publication is bounded and deduplicated;
+        # failures leave this durable run available to scheduler recovery.
+        await scheduler._dispatch(tenant_id, run.id, {"dispatched": 0, "dispatch_failed": 0})
+    return run
 
 
 class OrderInvestigation(BaseModel):
@@ -76,6 +84,13 @@ async def reconcile_source(request: SourceReconciliation, user: Reader, db: Data
         raise HTTPException(status_code=422, detail={"code": "invalid_reconciliation_window"}) from None
 
 
+@router.get("/daily-status")
+async def daily_status(user: Reader, db: Database):
+    from app.services.transaction_ops.daily_status import daily_status as read_status
+
+    return await read_status(db, user.tenant_id)
+
+
 @router.get("/configs", response_model=list[ConfigOut])
 async def list_configs(user: Reader, db: Database):
     return await service.list_configs(db, user.tenant_id)
@@ -105,6 +120,41 @@ async def control_config(config_id: UUID, request: ConfigControl, user: Manager,
         raise _http_error(exc) from None
 
 
+class AccountingProfileUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    # A required null explicitly disables the current treatment.
+    sales_credit_profile: dict | None
+
+
+class NativeAccountingProfileUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    profile: dict | None
+
+
+@router.put("/configs/{config_id}/native-accounting-profile")
+async def configure_native_accounting_profile(
+    config_id: UUID, request: NativeAccountingProfileUpdate, user: Manager, db: Database
+):
+    from app.services.transaction_ops.native_accounting_profile import configure_profile
+
+    try:
+        return await configure_profile(db, user.tenant_id, config_id, request.profile, actor=user)
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
+@router.put("/configs/{config_id}/accounting-profile")
+async def configure_accounting_profile(config_id: UUID, request: AccountingProfileUpdate, user: Manager, db: Database):
+    from app.services.transaction_ops.accounting_profiles import configure_sales_credit_profile
+
+    try:
+        return await configure_sales_credit_profile(
+            db, user.tenant_id, config_id, request.sales_credit_profile, actor=user
+        )
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
 @router.post("/configs/{config_id}/runs", response_model=RunOut, status_code=202)
 async def create_run(config_id: UUID, request: RunCreate, user: Reader, db: Database):
     if request.origin == "schedule":
@@ -112,7 +162,8 @@ async def create_run(config_id: UUID, request: RunCreate, user: Reader, db: Data
     if request.review is not None:
         raise HTTPException(status_code=422, detail={"code": "review_scope_is_server_owned"})
     try:
-        return await service.create_run(db, user.tenant_id, config_id, request, actor=user)
+        run = await service.create_run(db, user.tenant_id, config_id, request, actor=user)
+        return await _publish_pending(run, user.tenant_id)
     except service.StateError as exc:
         raise _http_error(exc) from None
 
@@ -120,16 +171,23 @@ async def create_run(config_id: UUID, request: RunCreate, user: Reader, db: Data
 @router.post("/configs/{config_id}/review", response_model=RunOut, status_code=202)
 async def review_period(config_id: UUID, request: PeriodReview, user: Reader, db: Database):
     try:
-        return await period_review.create_review(db, user.tenant_id, config_id, request, actor=user)
+        run = await period_review.create_review(db, user.tenant_id, config_id, request, actor=user)
+        return await _publish_pending(run, user.tenant_id)
     except service.StateError as exc:
         raise _http_error(exc) from None
 
 
 @router.get("/runs", response_model=list[RunOut])
 async def list_runs(
-    user: Reader, db: Database, config_id: UUID | None = None, limit: Annotated[int, Query(ge=1, le=200)] = 100
+    user: Reader,
+    db: Database,
+    config_id: UUID | None = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 100,
+    period_reviews_only: bool = False,
 ):
-    return await service.list_runs(db, user.tenant_id, config_id=config_id, limit=limit)
+    return await service.list_runs(
+        db, user.tenant_id, config_id=config_id, limit=limit, period_reviews_only=period_reviews_only
+    )
 
 
 @router.get("/runs/{run_id}", response_model=RunOut)
@@ -267,7 +325,13 @@ async def list_cases(
 @router.get("/cases/{case_id}", response_model=CaseOut)
 async def get_case(case_id: UUID, user: Reader, db: Database):
     try:
-        return await case_service.get_case(db, user.tenant_id, case_id)
+        from app.services.transaction_ops.accounting_projection import project_rows
+
+        case = await case_service.get_case(db, user.tenant_id, case_id)
+        rows = await project_rows(
+            db, user.tenant_id, [{"report_json": {**case.latest_report_json, "case_id": str(case.id)}}]
+        )
+        return CaseOut.model_validate(case).model_copy(update={"latest_report_json": rows[0]["report_json"]})
     except service.StateError as exc:
         raise _http_error(exc) from None
 

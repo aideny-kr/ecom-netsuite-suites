@@ -1638,14 +1638,17 @@ async def test_sweep_fanout_dispatches_with_broker_priority(db: AsyncSession, mo
     `test_fanout_dispatches_one_per_active_tenant` uses for the identical
     fan-out shape."""
     tenant = await create_test_tenant(db, name="Sweep Priority Co")
+    await _seed_job_schedule(
+        db, tenant, plan_json={"steps": []}, next_run_at=datetime.now(timezone.utc) - timedelta(minutes=1)
+    )
     await db.flush()
 
     sent: list[dict] = []
     monkeypatch.setattr(
         scheduled_jobs.celery_app,
         "send_task",
-        lambda name, kwargs=None, queue=None, priority=None, **_: sent.append(
-            {"name": name, "kwargs": kwargs, "queue": queue, "priority": priority}
+        lambda name, kwargs=None, queue=None, priority=None, expires=None, **_: sent.append(
+            {"name": name, "kwargs": kwargs, "queue": queue, "priority": priority, "expires": expires}
         ),
     )
 
@@ -1658,6 +1661,64 @@ async def test_sweep_fanout_dispatches_with_broker_priority(db: AsyncSession, mo
     assert call["name"] == "tasks.scheduled_jobs_sweep"
     assert call["queue"] == "sync"
     assert call["priority"] == SCHEDULED_JOBS_SWEEP_PRIORITY == 3
+    assert call["expires"] == 120
+
+
+async def test_sweep_fanout_only_queues_tenants_with_due_approved_jobs(db: AsyncSession, monkeypatch):
+    now = datetime.now(timezone.utc)
+    due = now - timedelta(minutes=1)
+    sent = []
+    monkeypatch.setattr(scheduled_jobs.celery_app, "send_task", lambda *args, **kwargs: sent.append(kwargs))
+    expected = set()
+    seeded = set()
+    for condition in (
+        "due",
+        "second_due_tenant",
+        "future",
+        "paused",
+        "draft",
+        "inactive_job",
+        "inactive_tenant",
+        "no_date",
+        "other_type",
+        "no_jobs",
+    ):
+        tenant = await create_test_tenant(db, name=f"Sweep {condition}")
+        seeded.add(str(tenant.id))
+        if condition == "no_jobs":
+            continue
+        schedule = await _seed_job_schedule(db, tenant, plan_json={"steps": []}, next_run_at=due)
+        if condition in {"due", "second_due_tenant"}:
+            expected.add(str(tenant.id))
+            # Multiple due schedules must not publish duplicate tenant sweeps.
+            await _seed_job_schedule(db, tenant, plan_json={"steps": []}, next_run_at=due)
+        elif condition == "future":
+            schedule.next_run_at = now + timedelta(minutes=1)
+        elif condition == "paused":
+            schedule.paused_at = now
+        elif condition == "draft":
+            schedule.plan_status = "draft"
+        elif condition == "inactive_job":
+            schedule.is_active = False
+        elif condition == "inactive_tenant":
+            tenant.is_active = False
+        elif condition == "no_date":
+            schedule.next_run_at = None
+        elif condition == "other_type":
+            schedule.schedule_type = "reconciliation"
+    await db.flush()
+
+    await collect_and_dispatch(db, now=now)
+
+    actual = [item["kwargs"]["tenant_id"] for item in sent if item["kwargs"]["tenant_id"] in seeded]
+    assert set(actual) == expected
+    assert len(actual) == len(expected)
+    assert not list(await db.scalars(select(Job).where(Job.tenant_id.in_([uuid.UUID(value) for value in seeded]))))
+    # Collection neither claims nor advances schedules; an expired/broker-lost
+    # sweep can be published again, leaving actual claim/idempotency to the worker.
+    sent.clear()
+    await collect_and_dispatch(db, now=now)
+    assert {item["kwargs"]["tenant_id"] for item in sent if item["kwargs"]["tenant_id"] in seeded} == expected
 
 
 async def test_finalize_run_schedule_select_carries_for_update_lock(db: AsyncSession, monkeypatch):

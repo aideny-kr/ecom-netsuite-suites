@@ -65,6 +65,8 @@ class Settings(BaseSettings):
 
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_MODEL: str = "claude-sonnet-5"
+    # Staged rollout of evidence-based answer review; no mutation permission changes.
+    CHAT_EVIDENCE_COMPLETION_ENABLED: bool = False
     # OpenRouter gateway — env only, never a shell export (key-billing leak risk).
     OPENROUTER_API_KEY: str = ""
     DEFAULT_AI_PROVIDER: str = "anthropic"

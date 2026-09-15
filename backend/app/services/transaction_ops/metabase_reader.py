@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
 
 from app.models.mcp_connector import McpConnector
+from app.services.chat.write_outcome import INDETERMINATE_KEY
 from app.services.mcp_client_service import call_external_mcp_tool
 from app.services.metabase_oauth_service import is_metabase
 from app.services.public_http import validate_endpoint
@@ -188,6 +189,10 @@ async def _rows(db, tenant_id, binding, table, filters, limit, *, now):
                 db,
                 parse_decimal=True,
             )
+        # This is a fixed SELECT query, so an indeterminate transport outcome
+        # permits a bounded read retry. The generic MCP write policy is intact.
+        if isinstance(result, dict) and result.get(INDETERMINATE_KEY) is True:
+            raise ReplicaReadError("replica_transport_failed")
         if len(str(result)) > 2_000_000:
             raise ReplicaReadError("replica_response_too_large")
         started = datetime.fromisoformat(result["started_at"])
@@ -218,7 +223,9 @@ async def _rows(db, tenant_id, binding, table, filters, limit, *, now):
         return records
     except ReplicaReadError:
         raise
-    except (KeyError, TypeError, ValueError, TimeoutError):
+    except TimeoutError:
+        raise ReplicaReadError("replica_transport_failed") from None
+    except (KeyError, TypeError, ValueError):
         raise ReplicaReadError() from None
 
 

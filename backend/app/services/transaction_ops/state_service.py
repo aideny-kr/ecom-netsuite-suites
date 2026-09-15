@@ -73,6 +73,19 @@ def _clock(now=None):
     return value
 
 
+async def run_clock(db, now=None):
+    """Use the same clock as PostgreSQL's immutable run-budget guard.
+
+    Explicit clocks remain available for deterministic internal callers/tests.
+    Host clock drift must not extend a budget or reject a valid first claim.
+    """
+    if now is None:
+        now = await db.scalar(select(func.clock_timestamp()))
+        if not isinstance(now, datetime):
+            raise StateError("run_clock_unavailable")
+    return _clock(now)
+
+
 def business_digest(value) -> str:
     def normalize(item):
         if isinstance(item, Decimal):
@@ -332,7 +345,7 @@ async def create_run(
     automatic_continuation=False,
     human_retry=False,
 ):
-    now = _clock(now)
+    now = await run_clock(db, now)
     if human_retry and (
         request.origin != "manual" or automatic_continuation or not request.review or resume_from_run_id is None
     ):
@@ -348,7 +361,7 @@ async def create_run(
     if request.window_basis == "completed_at" and not (config.mapping_json or {}).get("metabase_replica"):
         raise StateError("period_reader_unavailable", 422)
     # Preserve idempotency for requests made before calendar cohorts were added.
-    excluded = {"window_basis"} if request.window_basis == "updated_at" else set()
+    excluded = {"window_basis"} if request.window_basis == "updated_at" and request.review is None else set()
     if request.review is None:
         excluded.add("review")
     elif request.review.end > now:
@@ -379,6 +392,22 @@ async def create_run(
         ):
             raise StateError("invalid_run_continuation")
         initial_progress = _bounded_json(previous.progress_json)
+        if request.origin == "schedule":
+            initial_progress["evidence_root_id"] = str(
+                uuid.UUID(
+                    initial_progress.get("evidence_root_id")
+                    or initial_progress.get("continuation_root_id")
+                    or str(previous.id)
+                )
+            )
+            if automatic_continuation and not initial_progress.get("schedule_cycle_key"):
+                from app.services.transaction_ops.scheduler import _cycle_key
+
+                initial_progress["schedule_cycle_key"] = _cycle_key(config, previous)
+            if not automatic_continuation:
+                # A new scheduled cycle must earn subsequent parts through new
+                # work; cumulative evidence is not new productivity.
+                initial_progress["schedule_cycle_key"] = request.evaluation_key
         for field in list(initial_progress):
             if field.startswith("continuation_"):
                 initial_progress.pop(field)
@@ -416,6 +445,13 @@ async def create_run(
             initial_progress.update(metadata)
     elif automatic_continuation:
         raise StateError("invalid_run_continuation")
+    if request.origin == "schedule":
+        initial_progress.setdefault("schedule_cycle_key", request.evaluation_key)
+        if resume_from_run_id is not None and not automatic_continuation:
+            initial_progress["continuation_baseline"] = {
+                field: initial_progress.get(field, 0)
+                for field in ("processed", "scan_count", "refund_scan_count", "outside_scope", "destination_scan_count")
+            }
     row = TransactionRun(
         tenant_id=tenant_id,
         config_id=config.id,
@@ -442,13 +478,31 @@ async def get_run(db, tenant_id, run_id, *, lock=False):
     return await _one(db, tenant_id, TransactionRun, run_id, lock=lock)
 
 
-async def list_runs(db, tenant_id, *, config_id=None, runnable_only=False, limit=100):
+async def list_runs(db, tenant_id, *, config_id=None, runnable_only=False, period_reviews_only=False, limit=100):
     await set_tenant_context(db, str(tenant_id))
     query = select(TransactionRun).where(TransactionRun.tenant_id == tenant_id)
     if config_id:
         query = query.where(TransactionRun.config_id == config_id)
     if runnable_only:
         query = query.where(TransactionRun.status.in_(("pending", "running")))
+    if period_reviews_only:
+        # Select one representative per saved review BEFORE limiting. Daily
+        # scans and continuations must not push older review cohorts off-screen.
+        review_id = TransactionRun.params_json["review"]["id"].astext
+        latest = (
+            query.where(review_id.is_not(None))
+            .distinct(TransactionRun.config_id, review_id)
+            .order_by(TransactionRun.config_id, review_id, TransactionRun.created_at.desc(), TransactionRun.id.desc())
+            .subquery()
+        )
+        model = aliased(TransactionRun, latest)
+        return list(
+            (
+                await db.scalars(
+                    select(model).order_by(model.created_at.desc(), model.id.desc()).limit(min(200, max(1, limit)))
+                )
+            )
+        )
     return list(
         (await db.execute(query.order_by(TransactionRun.created_at.desc()).limit(min(200, max(1, limit))))).scalars()
     )
@@ -498,8 +552,8 @@ def _first_claim_deadline(row, now):
 async def claim_run(db, tenant_id, run_id, *, now=None):
     from app.services.transaction_ops.settlement import is_settlement
 
-    now = _clock(now)
     row = await get_run(db, tenant_id, run_id, lock=True)
+    now = await run_clock(db, now)
     if row.status == "finished":
         await _commit(db, tenant_id)
         return None
@@ -621,6 +675,12 @@ async def record_finding(db, tenant_id, run_id, order_reference, report_json, *,
     )
     run = await get_run(db, tenant_id, run_id, lock=True)
     _lease(run, lease_token, now)
+    if run.origin == "recovery" and run.params_json.get("approval_message_id"):
+        from app.services.transaction_ops.accounting_recheck import bound_report
+
+        request = request.model_copy(
+            update={"report_json": await bound_report(db, tenant_id, run, request.report_json, now=now)}
+        )
     row = (
         await db.execute(
             select(TransactionFinding).where(
@@ -643,13 +703,31 @@ async def record_finding(db, tenant_id, run_id, order_reference, report_json, *,
     if case is not None:
         row.report_json = {**row.report_json, "case_id": str(case.id)}
         await db.flush()
+    from app.services.transaction_ops.source_eligibility import excluded_report
+
+    if final and excluded_report(row.report_json):
+        await _audit(
+            db,
+            tenant_id,
+            "source.excluded",
+            run,
+            payload={
+                "finding_id": str(row.id),
+                "order_reference": order_reference,
+                **row.report_json["source_eligibility"],
+            },
+        )
     await _commit(db, tenant_id)
     return row
 
 
 async def unseen_references(db, tenant_id, run_id, references):
     run = await get_run(db, tenant_id, run_id)
-    root = uuid.UUID((run.progress_json or {}).get("continuation_root_id") or str(run.id))
+    root = uuid.UUID(
+        (run.progress_json or {}).get("evidence_root_id")
+        or (run.progress_json or {}).get("continuation_root_id")
+        or str(run.id)
+    )
     seen = set(
         (
             await db.scalars(
@@ -663,7 +741,8 @@ async def unseen_references(db, tenant_id, run_id, references):
                     TransactionFinding.order_reference.in_(references),
                     TransactionRun.config_id == run.config_id,
                     (TransactionRun.id == root)
-                    | (TransactionRun.progress_json["continuation_root_id"].astext == str(root)),
+                    | (TransactionRun.progress_json["continuation_root_id"].astext == str(root))
+                    | (TransactionRun.progress_json["evidence_root_id"].astext == str(root)),
                 )
             )
         ).all()

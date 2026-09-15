@@ -33,6 +33,7 @@ import { OrdersPage } from "./orders-page";
 import { configForRun } from "./review-scope";
 import {
   useReviewRuns,
+  useDailyStatus,
   useRunHistory,
   usePeriodData,
   useCases,
@@ -57,6 +58,15 @@ const runLink = (id: string) =>
 function span(run: TransactionRun) {
   return objectValue(run.params_json.review);
 }
+function dateBasis(run: TransactionRun) {
+  return run.params_json.window_basis ?? (span(run).id ? "completed_at" : "updated_at");
+}
+function dateBasisLabel(run: TransactionRun) {
+  return dateBasis(run) === "updated_at" ? "Source update date (updated_at)" : "Order completion date (completed_at)";
+}
+function reviewKey(run: TransactionRun) {
+  return JSON.stringify([span(run).start, span(run).end, dateBasis(run)]);
+}
 export function TransactionWorkspace() {
   const access = useTransactionAccess();
   if (!access.allowed && !access.loading && !access.error)
@@ -71,6 +81,7 @@ function Workspace() {
   const access = useTransactionAccess();
   const configs = useTransactionConfigs();
   const runs = useReviewRuns();
+  const daily = useDailyStatus();
   const start = useStartPeriodReview();
   const investigate = useBulkCaseInvestigation();
   const [entity, setEntity] = useState("");
@@ -78,6 +89,7 @@ function Workspace() {
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [pinned, setPinned] = useState<TransactionRun[]>([]);
+  const [savedReview, setSavedReview] = useState("");
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState("");
   const [tab, setTab] = useState("Orders");
@@ -113,11 +125,19 @@ function Workspace() {
     [runs.data],
   );
   const candidates = [...pinned, ...reviewRuns];
+  const savedReviews = Array.from(
+    new Map(
+      candidates
+        .filter((r) => scopes.some((c) => c.id === currentConfig(r)?.id))
+        .map((r) => [reviewKey(r), r]),
+    ).values(),
+  );
   const pinnedSelection = pinned.filter(
     (r) => !entity || (currentConfig(r)?.id || r.config_id) === entity,
   );
   const anchor =
     pinnedSelection[0] ||
+    savedReviews.find((r) => reviewKey(r) === savedReview) ||
     candidates.find((r) => scopes.some((c) => c.id === currentConfig(r)?.id));
   const selectedRuns = pinnedSelection.length
     ? pinnedSelection
@@ -126,7 +146,8 @@ function Workspace() {
           (r) =>
             currentConfig(r)?.id === c.id &&
             span(r).start === (anchor && span(anchor).start) &&
-            span(r).end === (anchor && span(anchor).end),
+            span(r).end === (anchor && span(anchor).end) &&
+            dateBasis(r) === (anchor && dateBasis(anchor)),
         );
         return found ? [found] : [];
       });
@@ -177,6 +198,14 @@ function Workspace() {
         selectedRuns[0]?.config_id,
     })),
   );
+  const waitingForResults =
+    totals?.checked === 0 &&
+    selectedRuns.length > 0 &&
+    data.coverage.some((q, i) =>
+      q.data
+        ? q.data.status === "running"
+        : selectedRuns[i]?.status === "pending" || selectedRuns[i]?.status === "running",
+    );
   const failure =
     error ||
     configs.error ||
@@ -220,6 +249,7 @@ function Workspace() {
     }
     if (alive.current) {
       if (queued.length) {
+        setSavedReview(reviewKey(queued[0]));
         setPinned(queued);
         setOffset(0);
       }
@@ -298,6 +328,7 @@ function Workspace() {
               onChange={(e) => {
                 setEntity(e.target.value);
                 setPinned([]);
+                setSavedReview("");
                 setOffset(0);
                 setHistoryOffset(0);
               }}
@@ -344,8 +375,9 @@ function Workspace() {
           </Button>
         </div>
         <p className="mt-4 text-[13px] text-muted-foreground">
-          Orders completed in the selected period, compared with current
-          NetSuite records. Refund activity also checks older orders. Calendar
+          Source activity in the selected period, compared with current
+          NetSuite records. Each review records its source date basis.
+          Refund activity also checks older orders. Calendar
           boundaries use the configured business timezone.
         </p>
         <p className="mt-2 text-[13px]">
@@ -356,10 +388,22 @@ function Workspace() {
           · Replica freshness is unverified; a completed scan is not financial
           certification.
         </p>
+        <div className="mt-2 flex flex-wrap gap-x-6 gap-y-2 text-[13px]" aria-label="Daily scan coverage">
+          {scopes.map((scope) => {
+            const coverage = Array.isArray(daily.data) ? daily.data.find((row) => row.config_id === scope.id) : undefined;
+            const label = coverage?.checked_through ? `Checked through ${coverage.checked_through}` : "No completed daily scan verified";
+            const state = coverage?.status === "behind" ? " · Behind schedule" : coverage?.status === "paused" ? " · Paused" : "";
+            return <span key={scope.id}>
+              {scope.name}: {daily.error ? "Daily coverage unavailable" : daily.isLoading ? "Loading daily coverage…" : <>
+                {coverage?.run_id ? <Link className="text-primary underline" href={runLink(coverage.run_id)}>{label}</Link> : label}{state}
+              </>}
+            </span>;
+          })}
+        </div>
         {anchor && (
           <p className="mt-2 text-[13px] text-muted-foreground">
             Viewing {dateLabel(span(anchor).start)} →{" "}
-            {dateLabel(span(anchor).end)} (end exclusive). Results available for{" "}
+            {dateLabel(span(anchor).end)} (end exclusive). {dateBasisLabel(anchor)}. Review jobs available for{" "}
             {selectedRuns.length} of{" "}
             {Math.max(scopes.length, selectedRuns.length)} selected entities.
           </p>
@@ -370,6 +414,32 @@ function Workspace() {
             results.
           </p>
         )}
+        {savedReviews.length > 0 && (
+          <label className="mt-4 flex flex-wrap items-center gap-3 text-[13px]">
+            Saved review results
+            <select
+              aria-label="Saved review results"
+              className={`${input} max-w-full`}
+              value={anchor ? reviewKey(anchor) : ""}
+              disabled={starting}
+              onChange={(e) => {
+                setSavedReview(e.target.value);
+                setPinned([]);
+                setOffset(0);
+                setSearch("");
+                setStatus("");
+                setSelectedCases([]);
+              }}
+            >
+              {savedReviews.map((r) => (
+                <option key={reviewKey(r)} value={reviewKey(r)}>
+                  {dateLabel(span(r).start)} → {dateLabel(span(r).end)} · {dateBasisLabel(r)}
+                </option>
+              ))}
+            </select>
+            <span className="text-muted-foreground">Open an earlier review while a new scan is queued or running.</span>
+          </label>
+        )}
         <div className="mt-3 flex flex-wrap gap-x-6 gap-y-2 text-[13px]">
           {data.coverage.map((q, i) => (
             <span key={selectedRuns[i].id}>
@@ -377,7 +447,7 @@ function Workspace() {
               {q.error
                 ? "Coverage unavailable"
                 : q.data
-                  ? `${q.data.complete ? "Scan complete" : q.data.status === "running" ? "Scanning" : "Needs attention"} · ${q.data.completed_slices} daily slices complete`
+                  ? `${q.data.complete ? "Scan complete" : (q.data.current_run_status || selectedRuns[i]?.status) === "pending" ? "Queued" : q.data.status === "running" ? "Scanning" : "Needs attention"} · ${q.data.completed_slices} daily slices complete`
                   : "Loading coverage…"}
             </span>
           ))}
@@ -418,12 +488,18 @@ function Workspace() {
               data-testid={`stat-${key}`}
               className="my-2 text-3xl font-semibold tabular-nums"
             >
-              {totals?.[key] ?? "—"}
+              {waitingForResults ? "—" : totals?.[key] ?? "—"}
             </p>
             <p className="text-xs text-muted-foreground">{note}</p>
           </div>
         ))}
       </div>
+      {waitingForResults && (
+        <p role="status" className="rounded-xl border bg-muted/20 p-4 text-[13px]">
+          Waiting for this review’s first results. Queued reviews start when a scan worker is available.
+          You can open saved review results above or use Cases to inspect existing issues.
+        </p>
+      )}
       <div
         role="tablist"
         aria-label="Transaction views"
@@ -742,6 +818,7 @@ function Workspace() {
                     </td>
                     <td className="p-4">
                       {runState(r.status, r.termination_reason)}
+                      <p className="mt-1 text-xs text-muted-foreground">{dateBasisLabel(r)}</p>
                     </td>
                     <td className="space-x-4 p-4">
                       <Link

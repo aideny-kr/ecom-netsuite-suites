@@ -3,6 +3,7 @@
 import json
 from copy import deepcopy
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import select
@@ -33,6 +34,33 @@ def evidence():
         source_observed_at="2026-09-10T00:52:06+00:00", target_observed_at="2026-09-10T00:52:09+00:00"
     )
     return result
+
+
+async def test_ambiguous_configuration_never_suggests_source_connection_as_netsuite():
+    import uuid
+
+    from app.services.transaction_ops.accounting_evidence import collect_accounting_evidence
+
+    scope = {
+        "source_connection_id": str(uuid.uuid4()),
+        "source_step_id": None,
+        "netsuite_account_id": "6738075",
+        "subsidiary_id": "2",
+        "record_type": "salesorder",
+    }
+    configs = [SimpleNamespace(**scope, enabled=True) for _ in range(2)]
+    db = AsyncMock()
+    db.scalars.return_value = configs
+    with patch("app.services.transaction_ops.accounting_review.set_tenant_context", new=AsyncMock()):
+        context = await accounting_context(db, uuid.uuid4(), scope)
+    assert context["configuration_status"] == "ambiguous"
+    assert "query_scope_params" not in context
+    assert "Never substitute scope.source_connection_id" in context["read_only_next_step"]
+    with patch("app.services.transaction_ops.accounting_evidence.authenticated_reader") as reader:
+        result = await collect_accounting_evidence(db, uuid.uuid4(), context, {})
+    reader.assert_not_called()
+    assert result["blockers"] == ["ambiguous_reconciliation_configuration"]
+    assert result["assessment"]["correction_ready"] is False
 
 
 def test_agent_receives_known_metrics_despite_repair_blockers_without_recomputing_money():

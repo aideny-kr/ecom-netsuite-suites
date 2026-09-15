@@ -36,6 +36,10 @@ def _refund(evidence, reference, currency, precision):
 
 
 def reconcile_order(source_evidence, target_evidence, config, *, refunds=None):
+    from app.services.transaction_ops.source_eligibility import exclusion_report, payment_failed
+
+    if len(source_evidence.get("orders") or []) == 1 and payment_failed(source_evidence["orders"][0]):
+        return exclusion_report(source_evidence)["balance"]
     with localcontext() as context:
         context.prec = 60
         return _reconcile(source_evidence, target_evidence, config, refunds or {})
@@ -133,6 +137,30 @@ def _reconcile(source_evidence, target_evidence, config, refunds):
                 values[key] = (left, right - adjustment)
         if values != original_values:
             adjustments.extend(credits)
+    if not credits:
+        from app.services.transaction_ops.commercial_credits import verified_commercial_adjustment
+
+        commercial = verified_commercial_adjustment(source, target_evidence, config)
+        if commercial:
+            left, right = values["order_total"]
+            amount = _amount(
+                commercial["discount_amount"]
+                if commercial["kind"] == "posted_invoice_discount"
+                else commercial["credit_amount"],
+                precision,
+            )
+            if left is not None and right is not None and amount is not None and right - amount == left:
+                # A posting adjustment reconciles the invoice, not the source
+                # sales-order record. Keep its outstanding variance visible.
+                result["posting_reconciliation"] = {
+                    "status": "matched",
+                    "source": f"{left:.{precision}f}",
+                    "net_posting_total": f"{right - amount:.{precision}f}",
+                    "delta": f"{Decimal(0):.{precision}f}",
+                    "basis": commercial["kind"],
+                    "sales_order_alignment": "required",
+                }
+                adjustments.append(commercial)
     if adjustments:
         result["adjustments"] = adjustments
         result["original_amounts"] = {

@@ -25,6 +25,10 @@ def source_fingerprint(source):
 
 
 def plan_proposal(report, targets, config, *, now, guard=None, celigo=None, creation=None):
+    from app.services.transaction_ops.source_eligibility import FAILED_PAYMENT, excluded_report
+
+    if excluded_report(report):
+        raise PlanningError(FAILED_PAYMENT)
     if not config.enabled or config.mapping_json.get("action_mode", "detect_only") != "propose_actions":
         raise PlanningError("actions_disabled")
     source = TransactionSnapshot.model_validate(report["source"])

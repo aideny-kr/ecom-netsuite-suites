@@ -46,6 +46,13 @@ _SEARCH_FIELDS = {
 def _predicates(model, tenant_id: UUID, filters, search, date_from=None, date_to=None):
     # Explicit isolation is required even when a DB owner/bypass role runs the API.
     predicates = [model.tenant_id == tenant_id]
+    if model is Order:
+        predicates.append(
+            or_(
+                Order.source != "solidus",
+                func.coalesce(Order.raw_data["order"]["payment_state"].astext, "") != "failed",
+            )
+        )
     if date_from or date_to:
         if model is not Order or (date_from and date_to and date_from >= date_to):
             raise ValueError("Invalid date bounds")

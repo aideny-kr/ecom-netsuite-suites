@@ -203,3 +203,44 @@ def test_native_direct_query_inventory_avoids_session_scoped_handles():
     native.discovered_tools = [tool for tool in native.discovered_tools if tool["name"] != "query"]
     names = {tool["name"].rsplit("__", 1)[-1] for tool in build_external_tool_definitions([native])}
     assert "construct_query" in names and "execute_query" in names
+
+
+def test_advertised_mbql_schema_rejects_sql_and_preserves_native_metadata():
+    from copy import deepcopy
+
+    from jsonschema import ValidationError, validate
+
+    from app.services.chat.tools import build_external_tool_definitions
+
+    schema = {
+        "type": "object",
+        "properties": {
+            "query": {"type": "object"},
+            "query_handle": {"type": "string"},
+            "continuation_token": {"type": "string"},
+        },
+    }
+    original = deepcopy(schema)
+    conn = connector(discovered_tools=[{"name": "query", "input_schema": schema}])
+    advertised = build_external_tool_definitions([conn])[0]["input_schema"]
+    validate(
+        {
+            "query": {
+                "lib/type": "mbql/query",
+                "stages": [{"lib/type": "mbql.stage/mbql", "source-table": ["db", "public", "orders"]}],
+            }
+        },
+        advertised,
+    )
+    validate({"query": None, "query_handle": "opaque"}, advertised)
+    for query in [
+        "SELECT * FROM orders",
+        {"type": "native", "native": {"query": "SELECT 1"}},
+        {"lib/type": "mbql/query", "stages": []},
+    ]:
+        with pytest.raises(ValidationError):
+            validate({"query": query}, advertised)
+    assert advertised["properties"]["continuation_token"] == original["properties"]["continuation_token"]
+    assert schema == original
+    unrelated = connector(auth_type="bearer", discovered_tools=[{"name": "query", "input_schema": schema}])
+    assert build_external_tool_definitions([unrelated])[0]["input_schema"] == original

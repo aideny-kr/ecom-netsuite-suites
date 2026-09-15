@@ -7,6 +7,7 @@ rather than assuming the payload is complete.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
@@ -19,7 +20,43 @@ from app.services.chat.tools import execute_tool_call
 logger = logging.getLogger(__name__)
 
 _TTL_SECONDS = 3600
-_cache: dict[tuple[str, str], tuple[float, "RecordMetadata"]] = {}
+_cache: dict[tuple[str, ...], tuple[float, "RecordMetadata"]] = {}
+
+
+def _scoped_cache_key(connector, tenant_id, actor_id, record_type):
+    """Credential/config changes invalidate schema, including within a session.
+
+    Only a connector loaded through the tenant-scoped service may be supplied.
+    The fingerprint is never exposed as model context or written to logs.
+    Authorization still runs at the eventual mutation boundary.
+    """
+    if not connector or connector.status != "active" or not connector.is_enabled:
+        return None
+    revision = hashlib.sha256(
+        json.dumps(
+            {
+                "url": connector.server_url,
+                "credentials": connector.encrypted_credentials,
+                "auth_type": connector.auth_type,
+                "metadata": connector.metadata_json,
+                "updated_at": connector.updated_at,
+            },
+            sort_keys=True,
+            default=str,
+        ).encode()
+    ).hexdigest()
+    return (str(tenant_id), str(actor_id), str(connector.id), record_type, revision)
+
+
+def _remember(key, metadata):
+    # Bound a process-local optimization, never persist authorization here.
+    now = time.monotonic()
+    for expired in [k for k, (at, _) in _cache.items() if now - at >= _TTL_SECONDS]:
+        _cache.pop(expired, None)
+    if len(_cache) >= 512:
+        _cache.pop(min(_cache, key=lambda k: _cache[k][0]))
+    _cache[key] = (now, metadata)
+
 
 # NetSuite has been observed to serialise the required-marker under several
 # names depending on endpoint/version (`ismandatory` on discovered account
@@ -120,6 +157,70 @@ def clear_metadata_cache() -> None:
     _cache.clear()
 
 
+async def prefetch_scoped_invoice_metadata(db, tenant_id, actor_id, proposal, correlation_id):
+    """Read the same native schema directly for an evidence-bound invoice update.
+
+    The NetSuite MCP metadata tool can hit its upstream response-time ceiling
+    on large invoice schemas. Use the explicitly selected REST connection;
+    never guess another account or treat a timeout as a permissive schema.
+    Normal curated requirements and write validation still run afterward.
+    """
+    from urllib.parse import urlsplit
+    from uuid import UUID
+
+    from app.services.audit_service import log_event
+    from app.services.mcp_connector_service import get_mcp_connector
+    from app.services.transaction_ops.netsuite_reader import authenticated_reader
+
+    p = proposal or {}
+    if p.get("tenant_id") != str(tenant_id) or (p.get("kind"), p.get("record_type")) not in {
+        ("invoice_sales_adjustment", "invoice"),
+        ("sales_order_source_alignment", "salesorder"),
+        ("credit_tax_reallocation", "creditmemo"),
+    }:
+        raise ValueError("Native accounting record metadata requires the current scoped accounting proposal.")
+    connector = await get_mcp_connector(db, UUID(p["connector_id"]), tenant_id)
+    account = p["scope"]["netsuite_account_id"]
+    if (
+        not connector
+        or connector.status != "active"
+        or not connector.is_enabled
+        or urlsplit(connector.server_url).hostname != f"{account}.suitetalk.api.netsuite.com"
+    ):
+        raise ValueError("The accounting record metadata connector/account binding changed.")
+    record_type = p["record_type"]
+    native_type = {"salesorder": "salesOrder", "creditmemo": "creditMemo", "invoice": "invoice"}[record_type]
+    key = _scoped_cache_key(connector, tenant_id, actor_id, record_type)
+    hit = _cache.get(key)
+    if hit and time.monotonic() - hit[0] < _TTL_SECONDS:
+        return
+    async with authenticated_reader(db, tenant_id, p["connection_id"], account, max_api_calls=1) as reader:
+        raw = await reader.request("GET", f"/record/v1/metadata-catalog/{native_type}")
+    metadata = _parse_properties_shape({"metadata": raw}, record_type)
+    if metadata is None or not all(metadata.spec_for(k) for k in p["proposed_fields"]):
+        raise ValueError("The connected account did not provide usable accounting discount metadata.")
+    await log_event(
+        db,
+        tenant_id,
+        category="transaction_ops",
+        action="accounting_correction.metadata.read",
+        actor_id=actor_id,
+        resource_type="transaction_case",
+        resource_id=p["case_id"],
+        correlation_id=correlation_id,
+        payload={
+            "account_id": account,
+            "connection_id": p["connection_id"],
+            "connector_id": p["connector_id"],
+            "record_type": record_type,
+            "source": "native_rest_schema",
+            "requirements_known": metadata.requirements_known,
+            "financial_writes": 0,
+        },
+    )
+    _remember(key, metadata)
+
+
 def _parse_properties_shape(data: dict[str, Any], record_type: str) -> "RecordMetadata | None":
     """Parse the live `ns_getRecordTypeMetadata` response shape:
     ``{"success": true, "metadata": {"type": "object", "properties": {name:
@@ -183,13 +284,17 @@ async def get_record_metadata(
 ) -> RecordMetadata | None:
     """Return metadata for *record_type*, or ``None`` if it cannot be fetched."""
     from app.services.chat.tools import _make_ext_tool_name, parse_external_tool_name
+    from app.services.mcp_connector_service import get_mcp_connector
 
     parsed = parse_external_tool_name(mutation_tool_name)
     if not parsed:
         return None
     connector_id = parsed[0]
 
-    key = (str(connector_id), record_type)
+    connector = await get_mcp_connector(db, connector_id, tenant_id)
+    key = _scoped_cache_key(connector, tenant_id, actor_id, record_type)
+    if key is None:
+        return None
     hit = _cache.get(key)
     if hit and (time.monotonic() - hit[0]) < _TTL_SECONDS:
         return hit[1]
@@ -226,7 +331,7 @@ async def get_record_metadata(
             # None (unknown, never "empty").
             live_meta = _parse_properties_shape(data, record_type)
             if live_meta is not None:
-                _cache[key] = (time.monotonic(), live_meta)
+                _remember(key, live_meta)
                 return live_meta
             return None
         if has_sublists_key and not isinstance(raw_sublists, list):
@@ -280,5 +385,5 @@ async def get_record_metadata(
         return None
 
     # Cache only on the success path — a failed lookup must not be cached.
-    _cache[key] = (time.monotonic(), meta)
+    _remember(key, meta)
     return meta

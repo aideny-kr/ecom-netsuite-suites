@@ -1,4 +1,6 @@
 from app.mcp.tools import (
+    accounting_reference,
+    agent_skill,
     bigquery_tools,
     celigo_flow_map,
     cross_source_tool,
@@ -32,6 +34,34 @@ from app.mcp.tools import (
 )
 
 TOOL_REGISTRY = {
+    "transaction_ops.accounting_reference": {
+        "description": (
+            "Research current Oracle NetSuite documentation for an authorized accounting case. "
+            "Uses a fixed topic query without sending case details to public search, returns at most two "
+            "reference excerpts and records source provenance. Product guidance is not approval or account evidence."
+        ),
+        "execute": accounting_reference.execute,
+        "params_schema": {
+            "case_id": {"type": "string", "required": True, "description": "Exact transaction case UUID."},
+            "topic": {
+                "type": "string",
+                "required": True,
+                "enum": list(accounting_reference.TOPICS),
+                "description": "Product behavior to research; never put customer data in this parameter.",
+            },
+        },
+    },
+    "agent.skill": {
+        "description": (
+            "Load a maintained application skill on demand using its exact catalog slug. "
+            "Use for accounting operations, subledger investigation, treatment selection, "
+            "verification or other listed specialist workflows. Read-only guidance; grants no approval."
+        ),
+        "execute": agent_skill.execute,
+        "params_schema": {
+            "slug": {"type": "string", "required": True, "description": "Exact slug from available_skills."},
+        },
+    },
     "transaction_ops.groups": {
         "description": (
             "Group reconciliation cases by entity, source, currency, variance direction and credit context. "
@@ -81,16 +111,42 @@ TOOL_REGISTRY = {
             "window_end": {"type": "string", "description": "ISO timestamp with timezone; use with window_start"},
         },
     },
+    "transaction_ops.accounting_group": {
+        "description": "Prepare exact supported accounting corrections for ALL current members of an issue group, "
+        "including invoice-tax corrections and configured missing Sales Adjustments credits. "
+        "Use for fixing a group together. Supply the exact group_id and the SAME review_run_ids/status/search "
+        "used to list it. The server reads each case with bounded concurrency, validates each correction and "
+        "displays one human approval card with per-order changes and unsupported cases. No financial writes. "
+        "Do not loop through individual accounting_evidence calls for this task. Human-approved changes execute "
+        "up to three at a time with independent invoice/GL verification and per-order approval audits.",
+        "execute": transaction_ops_tools.execute_accounting_group,
+        "params_schema": {
+            "group_id": {"type": "string", "required": True},
+            "review_run_ids": {"type": "array", "items": {"type": "string"}},
+            "status": {"type": "string"},
+            "search": {"type": "string"},
+        },
+    },
     "transaction_ops.accounting_evidence": {
         "description": "Read scoped native accounting evidence for a transaction case in one bounded call. "
         "Use FIRST after investigation status, before ad-hoc SuiteQL. Returns native lifecycle labels, linked "
         "invoices/cash sales, tax defaults versus transaction rates, posting-period locks, GL and deposits. "
         "Returns explicit missing evidence; never infers tax legality, root cause or available cash. Read-only. "
         "If correction_candidate is present, use its exact tool/params to display the human approval card; "
-        "do not execute or substitute another rate. Reuse returned sections and investigate only missing evidence.",
+        "do not execute or substitute another rate. Reuse returned sections and investigate only missing evidence. "
+        "Fresh collection takes only case_id and returns all sections plus audit_id. "
+        "To inspect a saved section without network reads, supply case_id, observation_id=that audit_id, and section. "
+        "Do not send section alone: section ALWAYS requires observation_id. "
+        "Saved observations are historical investigation evidence and cannot create an approval candidate.",
         "execute": transaction_ops_tools.execute_accounting_evidence,
         "params_schema": {
-            "case_id": {"type": "string", "required": True, "description": "Durable case UUID from status"}
+            "observation_id": {"type": "string", "description": "Exact audit_id from previously collected evidence."},
+            "section": {
+                "type": "string",
+                "enum": ["source", "documents", "applications", "assessment"],
+                "description": "Saved evidence section; requires observation_id. Omit for fresh collection.",
+            },
+            "case_id": {"type": "string", "required": True, "description": "Durable case UUID from status"},
         },
     },
     "transaction_ops.status": {
@@ -142,16 +198,26 @@ TOOL_REGISTRY = {
     },
     "pivot.query_result": {
         "description": (
-            "Pivot a query result into a crosstab table. Works with both SuiteQL and BigQuery. "
-            "Re-executes the query without row limits and pivots server-side. Use this INSTEAD "
-            "of building CASE WHEN pivot SQL manually."
+            "Pivot a query result into a crosstab table. For Metabase/Solidus, pass result_id "
+            "and control_result_id from completed queries on the chosen connector; cells retain "
+            "server aggregates (aggregation='identity', include_total=false). This path never "
+            "requeries or switches sources. For SuiteQL/BigQuery, pass query and dialect instead. "
+            "Do not mix the two input modes or build CASE WHEN pivot SQL manually."
         ),
         "execute": pivot_tool.execute,
         "params_schema": {
             "query": {
                 "type": "string",
-                "required": True,
+                "required": False,
                 "description": "SQL query to pivot. Row limits (FETCH FIRST / LIMIT) stripped automatically.",
+            },
+            "result_id": {
+                "type": "string",
+                "description": "Metabase result ID (rN) from this conversation; use instead of query/dialect.",
+            },
+            "control_result_id": {
+                "type": "string",
+                "description": "Completed ungrouped control result ID on the same Metabase connector and query scope.",
             },
             "row_field": {
                 "type": "string",
@@ -171,20 +237,23 @@ TOOL_REGISTRY = {
             "aggregation": {
                 "type": "string",
                 "required": False,
-                "default": "sum",
-                "description": "Aggregation: 'sum', 'count', 'avg', 'max', 'min'",
+                "description": (
+                    "Metabase result_id: 'identity' (default), preserving server aggregates. "
+                    "SQL query: 'sum' (default), 'count', 'avg', 'max', 'min'."
+                ),
             },
             "include_total": {
                 "type": "boolean",
                 "required": False,
-                "default": True,
-                "description": "Add a Total column",
+                "description": (
+                    "Add a Total column. Defaults false for Metabase, true for SQL. "
+                    "Metabase totals only for validated additive sum/count measures."
+                ),
             },
             "dialect": {
                 "type": "string",
                 "required": False,
-                "default": "suiteql",
-                "description": "SQL dialect: 'suiteql' or 'bigquery'",
+                "description": "SQL query mode only: 'suiteql' (default) or 'bigquery'. Omit when using result_id.",
             },
         },
     },
@@ -1054,7 +1123,7 @@ TOOL_REGISTRY = {
     # `test_celigo_chat_tools.py`'s static test).
     "celigo.integrations": {
         "description": (
-            "List the tenant's production Celigo integrations from last night's synced snapshot — "
+            "List the tenant's production Celigo integrations from the latest available synced snapshot — "
             "one row per integration with its flow counts, open-error rollup, and how recently its "
             "error counts were last verified."
         ),
@@ -1063,7 +1132,7 @@ TOOL_REGISTRY = {
     },
     "celigo.flows": {
         "description": (
-            "List production Celigo flows from last night's synced snapshot — one row per flow with "
+            "List production Celigo flows from the latest available synced snapshot — one row per flow with "
             "its schedule, whether it is on pace or stalled, and its open-error rollup. Optionally "
             "scope to one integration (by id or a name fragment) and filter to flows with open "
             "errors or a stalled run state."
@@ -1098,7 +1167,7 @@ TOOL_REGISTRY = {
     "celigo.flow_steps": {
         "description": (
             "Show how one production Celigo flow is built, in run order — one row per step or "
-            "router, from last night's synced snapshot: what it does, which branch it belongs to, "
+            "router, from the latest available synced snapshot: what it does, which branch it belongs to, "
             "its open-error count, and which named scripts attach to it (never their code)."
         ),
         "execute": celigo_flow_map.execute_flow_steps,
@@ -1112,7 +1181,7 @@ TOOL_REGISTRY = {
     },
     "celigo.flow_errors": {
         "description": (
-            "List the root causes behind a production Celigo flow's errors from last night's synced "
+            "List the root causes behind a production Celigo flow's errors from the latest available synced "
             "snapshot — one row per distinct cause with how often it has occurred, when it was first "
             "and last seen, and one sample message. Omit the flow to see root causes across every "
             "production flow, or list resolved causes instead of open ones."

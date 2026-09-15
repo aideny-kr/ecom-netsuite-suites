@@ -19,7 +19,10 @@ prompt_fragment: |
      grouped by root cause.
   2. The map is a nightly snapshot of production only. Every result carries its own honesty
      markers -- snapshot age, unchecked-error flags, stall verdicts. Relay every one of them to
-     the user verbatim before you interpret anything.
+     the user verbatim before you interpret anything. A nightly schedule does not prove the
+     last sync succeeded. Use the returned as-of time and computed age; never describe it as
+     "last night", "today", or current merely because a sync is scheduled nightly. If the user
+     needs current state, use an available live read tool or explain the freshness limitation.
   3. Results are rendered directly in the interface as soon as a tool runs. Never restate, sum,
      or rank the numbers in prose -- interpret what they mean instead of repeating them.
   4. A zero shown beside "not fully checked" is not a verified zero. Say so plainly rather than
