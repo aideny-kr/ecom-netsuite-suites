@@ -28,14 +28,24 @@ async def execute(params, context=None, **kwargs):
     if key in cache:
         return {**cache[key], "reused": True}
     budget_key = (str(tenant_id), context.get("correlation_id"))
+    # Public product mechanics can be reused across a group. Authorization
+    # and the audit receipt stay case-specific, so one case's cached output
+    # can never be returned as another case's provenance.
+    document_key = (*budget_key, params["topic"])
+    documents = db.info.setdefault("accounting_reference_documents", {})
     used = db.info.setdefault("accounting_reference_budget", {})
-    if used.get(budget_key, 0) >= 2:
-        return {
-            "success": False,
-            "error": "Research budget reached. Reuse recorded sources and identify remaining evidence gaps.",
-        }
-    used[budget_key] = used.get(budget_key, 0) + 1
-    result = await research(params["topic"])
+    document_reused = document_key in documents
+    if document_reused:
+        result = documents[document_key]
+    else:
+        if used.get(budget_key, 0) >= 2:
+            return {
+                "success": False,
+                "error": "Research budget reached. Reuse recorded sources and identify remaining evidence gaps.",
+            }
+        used[budget_key] = used.get(budget_key, 0) + 1
+        result = await research(params["topic"])
+        documents[document_key] = result
     event = await log_event(
         db,
         tenant_id,
@@ -47,6 +57,12 @@ async def execute(params, context=None, **kwargs):
         correlation_id=context.get("correlation_id"),
         payload=result,
     )
-    output = {"success": True, "case_id": str(case.id), "audit_id": str(event.id), **result}
+    output = {
+        "success": True,
+        "case_id": str(case.id),
+        "audit_id": str(event.id),
+        "document_reused": document_reused,
+        **result,
+    }
     cache[key] = output
     return output

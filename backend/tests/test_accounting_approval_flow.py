@@ -128,7 +128,6 @@ async def test_agent_emits_exact_accounting_card_without_executing_or_duplicate_
     execute = AsyncMock()
     with (
         patch("app.services.policy_service.get_active_policy", AsyncMock(return_value=None)),
-        patch("app.services.chat.agents.base_agent._metadata_fetched_this_turn", return_value=True),
         patch(
             "app.services.chat.agents.base_agent.validate_mutation", AsyncMock(return_value=ValidationResult(ok=True))
         ),

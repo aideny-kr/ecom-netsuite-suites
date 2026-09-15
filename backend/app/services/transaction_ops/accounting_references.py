@@ -15,6 +15,7 @@ TOPICS = {
     "credit_applications": "NetSuite applying customer credit memo invoice",
     "deposit_applications": "NetSuite applying customer deposit invoice",
     "refunds": "NetSuite customer refund credit memo cash refund differences",
+    "credit_taxation": "NetSuite REST credit memo taxation SuiteTax keyed item update",
     "tax_rounding": "NetSuite transaction tax rounding discount tax calculation",
     "posting_periods": "NetSuite posting period closed locked transaction changes",
     "invoice_transform": "NetSuite REST invoice transform creditMemo",
@@ -26,6 +27,13 @@ _MAX_BYTES = 160_000
 # Reuse a verified product-specific entry point, read afresh. Generic search
 # ranked SOAP initialize documentation for this REST operation in live UAT.
 _MAINTAINED = {
+    "credit_taxation": [
+        {
+            "url": "https://docs.oracle.com/en/cloud/saas/netsuite/ns-online-help/article_164460021767.html",
+            "title": "Credit Memo — REST taxation features and keyed line updates",
+            "product_surface": "REST Web Services",
+        }
+    ],
     "invoice_transform": [
         {
             "url": "https://docs.oracle.com/en/cloud/saas/netsuite/ns-online-help/section_157901123882.html",

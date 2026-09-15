@@ -144,3 +144,53 @@ async def test_arbitrary_customer_text_cannot_enter_public_query(monkeypatch):
     result = await tool.execute({"case_id": str(uuid4()), "topic": "customer@email.test invoice123"})
     assert result["success"] is False
     authorize.assert_not_awaited()
+
+
+async def test_group_reuses_public_research_with_separate_authorized_case_receipts(monkeypatch):
+    from app.services import audit_service
+    from app.services.transaction_ops import case_service
+
+    tenant, actor = uuid4(), SimpleNamespace(id=uuid4())
+    cases = [uuid4(), uuid4(), uuid4()]
+    db = SimpleNamespace(info={})
+    monkeypatch.setattr(tool, "_authorize", AsyncMock(return_value=(db, tenant, actor)))
+    get_case = AsyncMock(side_effect=lambda _db, _tenant, cid: SimpleNamespace(id=cid))
+    monkeypatch.setattr(case_service, "get_case", get_case)
+    research = AsyncMock(return_value={"status": "references_found", "sources": [{"url": URL}]})
+    monkeypatch.setattr(tool, "research", research)
+    receipts = [uuid4(), uuid4(), uuid4()]
+    audit = AsyncMock(side_effect=[SimpleNamespace(id=rid) for rid in receipts])
+    monkeypatch.setattr(audit_service, "log_event", audit)
+    outputs = [
+        await tool.execute({"case_id": str(cid), "topic": "credit_taxation"}, context={"correlation_id": "group"})
+        for cid in cases
+    ]
+    research.assert_awaited_once_with("credit_taxation")
+    assert [o["case_id"] for o in outputs] == list(map(str, cases))
+    assert [o["audit_id"] for o in outputs] == list(map(str, receipts))
+    assert [o["document_reused"] for o in outputs] == [False, True, True]
+    assert get_case.await_count == 3
+    assert [c.kwargs["resource_id"] for c in audit.await_args_list] == list(map(str, cases))
+    assert all(c.kwargs["actor_id"] == actor.id for c in audit.await_args_list)
+    assert db.info["accounting_reference_budget"][(str(tenant), "group")] == 1
+
+    get_case.side_effect = _ToolError("case_not_authorized")
+    denied = await tool.execute(
+        {"case_id": str(uuid4()), "topic": "credit_taxation"}, context={"correlation_id": "group"}
+    )
+    assert denied["success"] is False
+    assert audit.await_count == 3 and research.await_count == 1
+
+
+async def test_credit_taxation_uses_current_rest_reference_without_public_customer_search(monkeypatch):
+    from app.mcp.tools import web_search
+
+    search = AsyncMock(side_effect=AssertionError("Unexpected search"))
+    read = AsyncMock(return_value={"excerpt": "Product feature limits", "document_sha256": "hash"})
+    monkeypatch.setattr(web_search, "execute", search)
+    monkeypatch.setattr(mod, "_read", read)
+    result = await mod.research("credit_taxation")
+    read.assert_awaited_once_with(mod._MAINTAINED["credit_taxation"][0]["url"])
+    search.assert_not_awaited()
+    assert result["sources"][0]["product_surface"] == "REST Web Services"
+    assert result["query"] is None
