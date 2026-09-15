@@ -24,6 +24,7 @@ import {
 import { DeleteReportDialog } from "../delete-report-dialog";
 import { useAuth } from "@/providers/auth-provider";
 import { canManageReport, fmtStamp } from "@/lib/report-utils";
+import { presentReportHtml } from "@/lib/report-presentation";
 
 export default function ReportViewPage() {
   const { id } = useParams<{ id: string }>();
@@ -64,7 +65,7 @@ export default function ReportViewPage() {
       .then((reportHtml) => {
         if (cancelled) return;
         setHtml(reportHtml);
-        url = URL.createObjectURL(new Blob([reportHtml], { type: "text/html" }));
+        url = URL.createObjectURL(new Blob([presentReportHtml(reportHtml)], { type: "text/html" }));
         setBlobUrl((old) => {
           if (old) URL.revokeObjectURL(old); // never leak the previous blob
           return url;
@@ -144,7 +145,7 @@ export default function ReportViewPage() {
           </span>
         )}
         {actionMsg && <span className="text-[13px] text-destructive">{actionMsg}</span>}
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto flex max-w-full flex-wrap items-center gap-2">
           {versions && versions.length > 1 && (
             <select
               aria-label="Report version"
@@ -207,12 +208,12 @@ export default function ReportViewPage() {
               {report.dashboard_pinned_at ? (
                 <>
                   <PinOff className="h-4 w-4 mr-1" />
-                  Unpublish from dashboard
+                  Unpublish from Command Center
                 </>
               ) : (
                 <>
                   <Pin className="h-4 w-4 mr-1" />
-                  Publish to dashboard
+                  Publish to Command Center
                 </>
               )}
             </Button>

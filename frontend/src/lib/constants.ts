@@ -89,19 +89,16 @@ export const PLAN_TIERS: Record<
 };
 
 export const NAV_ITEMS = [
-  { label: "Dashboard", href: "/dashboard", icon: "LayoutDashboard" as const, featureFlag: null },
-  { label: "Connections", href: "/connections", icon: "Plug" as const, featureFlag: null },
-  { label: "Audit Log", href: "/audit", icon: "ScrollText" as const, featureFlag: null },
+  { label: "Command Center", href: "/dashboard", icon: "LayoutDashboard" as const, featureFlag: null },
   { label: "Chat", href: "/chat", icon: "MessageSquare" as const, featureFlag: "chat" },
+  { label: "Workflows", href: "/scheduled-jobs", icon: "CalendarClock" as const, featureFlag: null },
   { label: "Skills", href: "/skills", icon: "Sparkles" as const, featureFlag: "chat" },
-  { label: "Saved Queries", href: "/queries", icon: "Database" as const, featureFlag: "analytics_export" },
-  { label: "Dev Workspace", href: "/workspace", icon: "Code" as const, featureFlag: "workspace" },
-  { label: "Reconciliation", href: "/reconciliation", icon: "Scale" as const, featureFlag: "reconciliation" },
-  { label: "Transaction Operations", href: "/transaction-operations", icon: "Scale" as const, featureFlag: "reconciliation" },
-  { label: "Memory", href: "/memory", icon: "Network" as const, featureFlag: null },
+  { label: "Developer workspace", href: "/workspace", icon: "Code" as const, featureFlag: "workspace" },
+  { label: "Transactions", href: "/transactions", icon: "Table2" as const, featureFlag: null },
   { label: "Reports", href: "/reports", icon: "FileBarChart" as const, featureFlag: null },
-  { label: "Scheduled jobs", href: "/scheduled-jobs", icon: "CalendarClock" as const, featureFlag: null },
   { label: "Settings", href: "/settings", icon: "Settings" as const, featureFlag: null },
+  { label: "Saved Queries", href: "/queries", icon: "Database" as const, featureFlag: "analytics_export" },
+  { label: "Audit Log", href: "/audit", icon: "ScrollText" as const, featureFlag: null },
 ] as const;
 
 export const ADMIN_NAV_ITEMS = [
