@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<restlet scriptid="customscript_ecom_acct_amend">
+    <name>Native accounting amendment guard</name>
+    <isinactive>F</isinactive>
+    <notifyadmins>F</notifyadmins>
+    <notifyowner>F</notifyowner>
+    <description>Conditional credit tax and sales-order amendments. Application claims require exact human approval; native values and record versions are checked before save. Disabled by default.</description>
+    <scriptfile>[/SuiteScripts/ecom_accounting_amendment_guard.js]</scriptfile>
+    <scriptcustomfields>
+        <scriptcustomfield scriptid="custscript_ecom_acct_amend_enabled">
+            <label>Enable approved accounting amendments</label>
+            <fieldtype>CHECKBOX</fieldtype>
+            <defaultchecked>F</defaultchecked>
+        </scriptcustomfield>
+    </scriptcustomfields>
+    <scriptdeployments>
+        <scriptdeployment scriptid="customdeploy_ecom_acct_amend">
+            <title>Native accounting amendment guard</title>
+            <status>TESTING</status>
+            <loglevel>AUDIT</loglevel>
+            <allroles>F</allroles>
+            <allemployees>F</allemployees>
+        </scriptdeployment>
+    </scriptdeployments>
+</restlet>
