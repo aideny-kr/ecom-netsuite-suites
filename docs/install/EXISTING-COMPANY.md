@@ -123,15 +123,18 @@ checksums. Partial archives cannot be imported. Stored generated columns are
 recomputed and their complete row contents are checked against the source too.
 
 Provision a fresh independent PostgreSQL cluster with the same major version and
-matching supported extensions. Load a reviewed **schema-only** copy, without seed
-rows, into the destination. Compare actual source schema drift with migrations;
-never drop source-only columns to make a restore pass. Columns, defaults, primary
+matching supported extensions. Provision its schema using the native-migration
+procedure below, leaving every destination table empty. A reviewed schema-only
+restore is usable only if it passes the same exact schema comparison. Compare
+actual source drift with migrations; never drop source-only columns to make a restore pass. Columns, defaults, primary
 and foreign keys, indexes, triggers, policies and application functions must match.
 The supported application extensions are plpgsql, vector, pgcrypto, uuid-ossp,
 pg_trgm and btree_gin. Managed platform schemas/extensions are outside this public
 application snapshot; separately review any application dependency on them. Views,
 materialized views, sequences, identity columns, virtual generated columns and
-custom binary types other than vector require an explicit design before support.
+types outside the explicit portable builtin/array allowlist (including money,
+name, xml, tsvector and range types), and custom binary types other than vector
+require an explicit design before support.
 
 Export with `--policy`, `--archive` and `--report`, each pointing to a private path.
 All output paths must be new. Review the completed archive's SHA256 separately.
@@ -165,8 +168,9 @@ timeouts are explicitly fifteen minutes. An interrupted export must start again.
 Database encoding, locale/provider/version and column collations must also match.
 Collatable keys use C ordering for deterministic checksums. Only the explicit
 portable builtin type allowlist (and their arrays) plus vector is supported;
-cluster-local identifiers such as oid/regclass are refused. Public rules and
-ALWAYS/REPLICA triggers are refused because replica mode would not suppress them.
+cluster-local identifiers such as oid/regclass are refused. Public rules are
+unsupported schema and are refused. ALWAYS/REPLICA triggers are refused because
+replica mode would not suppress them.
 The same one-MiB frame limit is enforced during export and restore.
 
 A schema dump can reparse equivalent CHECK/index expressions into a different

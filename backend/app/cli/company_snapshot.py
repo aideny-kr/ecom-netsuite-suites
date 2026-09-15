@@ -408,7 +408,7 @@ async def restore_snapshot(conn, policy, source, *, database, cluster):
             raise ValueError("Snapshot lacks source identity")
         if origin["cluster"] == cluster:
             raise ValueError("Source and destination must be independently initialized clusters")
-        async with conn.transaction():
+        async with conn.transaction(isolation="read_committed"):
             if await database_identity(conn) != {"database": database, "cluster": cluster}:
                 raise ValueError("Destination database/cluster does not match provisioning record")
             await conn.execute("SET LOCAL lock_timeout='5s'")

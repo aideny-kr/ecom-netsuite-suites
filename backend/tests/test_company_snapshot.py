@@ -446,3 +446,30 @@ async def test_restore_locks_schema_before_validating_it(snapshot_db, snapshot_s
     monkeypatch.setattr(api, "schema_inventory", race)
     await api.restore_snapshot(snapshot_db, snapshot_seed, archive, **identity)
     assert blocked
+
+
+async def test_restore_overrides_repeatable_read_database_default(snapshot_db, snapshot_seed, monkeypatch):
+    api = module()
+    archive, identity = await make_archive(snapshot_db, snapshot_seed, monkeypatch)
+    await empty_synthetic_target(snapshot_db)
+    await snapshot_db.execute("SET default_transaction_isolation='repeatable read'")
+    original = api.database_identity
+
+    async def race(conn):
+        result = await original(conn)
+        dsn = (
+            make_url(_test_db_url)
+            .set(drivername="postgresql", database=identity["database"])
+            .render_as_string(hide_password=False)
+        )
+        writer = await asyncpg.connect(dsn)
+        try:
+            await writer.execute("ALTER TABLE jobs ADD COLUMN unreviewed text")
+        finally:
+            await writer.close()
+        return result
+
+    monkeypatch.setattr(api, "database_identity", race)
+    with pytest.raises(ValueError, match="schema"):
+        await api.restore_snapshot(snapshot_db, snapshot_seed, archive, **identity)
+    assert await snapshot_db.fetchval("SELECT count(*) FROM jobs") == 0
