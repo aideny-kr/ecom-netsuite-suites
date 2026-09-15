@@ -703,6 +703,20 @@ async def record_finding(db, tenant_id, run_id, order_reference, report_json, *,
     if case is not None:
         row.report_json = {**row.report_json, "case_id": str(case.id)}
         await db.flush()
+    from app.services.transaction_ops.source_eligibility import excluded_report
+
+    if final and excluded_report(row.report_json):
+        await _audit(
+            db,
+            tenant_id,
+            "source.excluded",
+            run,
+            payload={
+                "finding_id": str(row.id),
+                "order_reference": order_reference,
+                **row.report_json["source_eligibility"],
+            },
+        )
     await _commit(db, tenant_id)
     return row
 

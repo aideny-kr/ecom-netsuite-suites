@@ -137,7 +137,9 @@ async def record_page(db, tenant_id, view, *, limit=50, offset=0, config_id=None
     }[view]
     query = select(model).where(model.tenant_id == tenant_id)
     if view == "cases":
-        query = query.where(model.status == "open")
+        from app.services.transaction_ops.source_eligibility import eligible_reports
+
+        query = query.where(model.status == "open", eligible_reports(model.latest_report_json))
         ordering = (model.last_observed_at.desc(), model.id)
     else:
         ordering = (model.created_at.desc(), model.id)

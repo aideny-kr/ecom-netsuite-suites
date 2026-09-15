@@ -5,7 +5,8 @@ from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 
 from app.schemas.transaction_ops import _decimal
-from app.services.transaction_ops.source_reader import read_framework_order
+from app.services.transaction_ops.source_eligibility import FAILED_PAYMENT, payment_failed
+from app.services.transaction_ops.source_reader import SourceReadError, read_framework_order
 
 SOURCE_FIELDS = (
     "business_entity",
@@ -42,6 +43,8 @@ async def refresh_source(db, tenant_id, scope, reference, *, include_accounting_
         reference,
         source_connection_id=uuid.UUID(scope["source_connection_id"]) if scope.get("source_connection_id") else None,
     )
+    if payment_failed(envelope["orders"][0]):
+        raise SourceReadError(FAILED_PAYMENT)
     # Preserve the exact source envelope signed by existing correction cards.
     # Richer investigation detail must not invalidate an unchanged pending
     # approval simply because a software release added observation fields.
@@ -60,6 +63,7 @@ def candidate(evidence, report, review, source):
     try:
         if (
             not review.get("native_mcp_connector_id")
+            or payment_failed(source)
             or source.get("state") != "complete"
             or source.get("requires_review") not in (False, None)
             or not source.get("completed_at")

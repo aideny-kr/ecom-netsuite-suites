@@ -12,6 +12,7 @@ from sqlalchemy import String, case, cast, func, select, union_all
 
 from app.core.database import set_tenant_context
 from app.models.transaction_ops import TransactionCase as Case
+from app.services.transaction_ops.source_eligibility import eligible_reports
 from app.services.transaction_ops.state_service import StateError
 
 METRICS = ("order_total", "tax", "refunds")
@@ -40,7 +41,9 @@ async def _source(db, tenant_id, review_run_ids=None, status=None, search=""):
             Case.scope_json,
             Case.latest_report_json,
             Case.last_observed_at,
-        ).where(Case.tenant_id == tenant_id, Case.status == "open").subquery(), "all_open"
+        ).where(
+            Case.tenant_id == tenant_id, Case.status == "open", eligible_reports(Case.latest_report_json)
+        ).subquery(), "all_open"
     if not isinstance(review_run_ids, list) or not 1 <= len(review_run_ids) <= 20:
         raise StateError("invalid_group_scope", 422)
     try:

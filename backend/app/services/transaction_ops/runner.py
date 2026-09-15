@@ -26,6 +26,7 @@ from app.services.transaction_ops.normalization import (
 )
 from app.services.transaction_ops.order_reconciliation import reconcile_order
 from app.services.transaction_ops.read_recovery import ReadBudgetExhaustedError, read_with_recovery
+from app.services.transaction_ops.source_eligibility import exclusion_report, payment_failed
 
 
 async def enabled(db, tenant_id):
@@ -60,6 +61,7 @@ def _initial_progress(run):
         "scan_count": 0,
         "last_source_id": 0,
         "processed": 0,
+        "excluded": 0,
         "restart_scan": False,
         "matched": 0,
         "needs_review": 0,
@@ -183,6 +185,8 @@ def _replica_page_progress(page, progress, params, config):
 
 
 def build_report(source_evidence, target_evidence, config, mapping, *, now, refunds=None):
+    if len(source_evidence.get("orders") or []) == 1 and payment_failed(source_evidence["orders"][0]):
+        return exclusion_report(source_evidence)
     account = config["netsuite_account_id"].replace("_", "-").lower()
     scope = target_evidence.get("scope") or {}
     if scope.get("account_id") != account or scope.get("subsidiary_id") != config["subsidiary_id"]:
@@ -608,6 +612,14 @@ async def run_investigation(
                 await (_order_mirror or save_observed_order)(
                     db, tenant_id, direct_source["source_connection_id"], orders[0], _time(source["read_at"])
                 )
+            if payment_failed(orders[0]):
+                await state.record_finding(
+                    db, tenant_id, run_id, reference, exclusion_report(source), lease_token=token, now=clock()
+                )
+                progress["excluded"] += 1
+                progress["pending_refs"] = progress["pending_refs"][1:]
+                await save()
+                continue
             if not await reserve(10):  # At most7 data reads plus ordinary OAuth token maintenance.
                 return await finish("budget")
             targets = await bounded_read(

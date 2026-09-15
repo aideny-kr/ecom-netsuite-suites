@@ -4,6 +4,7 @@ from sqlalchemy import and_, func, or_, select, tuple_
 
 from app.models.transaction_ops import TransactionFinding as Finding
 from app.models.transaction_ops import TransactionRun as Run
+from app.services.transaction_ops.source_eligibility import eligible_reports
 
 
 def current_review_evidence(cohort, tenant_id, snapshot):
@@ -104,7 +105,8 @@ async def period_evidence(db, tenant_id, run_id):
     # Deduplicate narrow IDs before loading potentially large evidence blobs.
     cohort = select(cohort, f.report_json).join(f, (f.id == cohort.c.id) & (f.tenant_id == tenant_id)).subquery()
     latest = current_review_evidence(cohort, tenant_id, root.config_snapshot)
-    return latest, span
+    # Filter after winner selection: never resurrect a superseded exception.
+    return select(latest).where(eligible_reports(latest.c.report_json)).subquery(), span
 
 
 def result_category(latest):

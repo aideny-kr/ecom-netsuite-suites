@@ -115,6 +115,19 @@ async def test_native_observation_bridges_omitted_rest_handling_through_verified
     execution_case.case.dispatch.assert_awaited_once()
 
 
+async def test_failed_payment_after_approval_stops_before_netsuite_reads_or_writes(db, execution_case):
+    case = execution_case.case
+    case.source = deepcopy(case.source)
+    case.source["orders"][0]["payment_state"] = "failed"
+    case.read_source.return_value = case.source
+    result = await execute(db, execution_case)
+    assert result["status"] == "failed"
+    case.read_target.assert_not_awaited()
+    case.dispatch.assert_not_awaited()
+    row = await operation(db, execution_case)
+    assert row.result_json["code"] == "source_payment_failed"
+
+
 @pytest.mark.parametrize("change", ["source_amount", "source_version", "target_version", "target_currency"])
 async def test_changed_approved_evidence_stops_before_every_external_write(db, execution_case, change):
     case = execution_case.case

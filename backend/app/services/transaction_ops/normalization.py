@@ -169,6 +169,10 @@ def _normalize_framework(evidence, *, mapping, account_id, subsidiary_id):
     if not isinstance(orders, list) or len(orders) != 1:
         raise ValueError("Exactly one Framework order is required")
     order = orders[0]
+    from app.services.transaction_ops.source_eligibility import FAILED_PAYMENT, payment_failed
+
+    if payment_failed(order):
+        raise ValueError(FAILED_PAYMENT)
     observed_at = _time(evidence["read_at"])
     raw_lines, raw_shipments = order.get("line_items"), order.get("shipments")
     if not isinstance(raw_lines, list) or not raw_lines or not isinstance(raw_shipments, list):

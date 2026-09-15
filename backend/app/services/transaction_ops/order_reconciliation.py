@@ -36,6 +36,10 @@ def _refund(evidence, reference, currency, precision):
 
 
 def reconcile_order(source_evidence, target_evidence, config, *, refunds=None):
+    from app.services.transaction_ops.source_eligibility import exclusion_report, payment_failed
+
+    if len(source_evidence.get("orders") or []) == 1 and payment_failed(source_evidence["orders"][0]):
+        return exclusion_report(source_evidence)["balance"]
     with localcontext() as context:
         context.prec = 60
         return _reconcile(source_evidence, target_evidence, config, refunds or {})

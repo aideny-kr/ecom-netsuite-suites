@@ -9,9 +9,12 @@ from sqlalchemy.dialects.postgresql import insert
 
 from app.core.database import set_tenant_context
 from app.models.transaction_ops import TransactionCase, TransactionCaseObservation, TransactionOperation
+from app.services.transaction_ops.source_eligibility import eligible_reports, excluded_report
 
 
 def _cleared(report, now):
+    if excluded_report(report):
+        return False
     try:
         balance = report["balance"]
         # Financial matching is independent of repair readiness. Detail-only
@@ -58,7 +61,8 @@ async def observe_finding(db, tenant_id, run, finding, *, now):
     }
     scope["netsuite_account_id"] = str(scope["netsuite_account_id"]).replace("_", "-").lower()
     key = business_digest({**scope, "order_reference": finding.order_reference})
-    cleared = _cleared(report, now)
+    excluded = excluded_report(report)
+    cleared = not excluded and _cleared(report, now)
     if cleared:
         entity_key = business_digest(
             {
@@ -84,7 +88,7 @@ async def observe_finding(db, tenant_id, run, finding, *, now):
         .with_for_update()
     )
     if case is None:
-        if cleared:
+        if cleared or excluded:
             return None
         await db.execute(
             insert(TransactionCase)
@@ -133,6 +137,7 @@ async def observe_finding(db, tenant_id, run, finding, *, now):
             "run_id": str(run.id),
             "observation_id": str(observation_id),
             "reconciliation_verified": cleared,
+            "source_eligible": not excluded,
             "observed_at": now.isoformat(),
             "verification_scope": "order_total_tax_refunds",
             "became_current": now >= case.last_observed_at,
@@ -146,6 +151,14 @@ async def observe_finding(db, tenant_id, run, finding, *, now):
         if prior != case.status:
             await _audit(
                 db, tenant_id, "case.reconciled" if cleared else "case.reopened", case, payload={"run_id": str(run.id)}
+            )
+        if excluded:
+            await _audit(
+                db,
+                tenant_id,
+                "case.excluded",
+                case,
+                payload={"run_id": str(run.id), **report["source_eligibility"]},
             )
     await db.flush()
     return case
@@ -165,7 +178,9 @@ async def get_case(db, tenant_id, case_id):
 
 async def list_cases(db, tenant_id, *, status=None, limit=100, offset=0):
     await set_tenant_context(db, str(tenant_id))
-    query = select(TransactionCase).where(TransactionCase.tenant_id == tenant_id)
+    query = select(TransactionCase).where(
+        TransactionCase.tenant_id == tenant_id, eligible_reports(TransactionCase.latest_report_json)
+    )
     if status:
         query = query.where(TransactionCase.status == status)
     return list(
