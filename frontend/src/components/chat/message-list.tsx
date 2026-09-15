@@ -4,8 +4,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState, useMemo, memo, use
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
-import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
+import { lazy, Suspense } from "react";
 import { useCreateSavedQuery } from "@/hooks/use-saved-queries";
 import { cn } from "@/lib/utils";
 import { tokenUsageSummary } from "@/lib/token-usage";
@@ -33,24 +32,17 @@ import { PricingConfigSection } from "@/components/settings/pricing-config-secti
 import { InstructionPanel } from "@/components/chat/instruction-panel";
 import { TemplateSlot } from "@/components/chat/template-slot";
 import { useAgentInstructions, useUpdateAgentInstructions } from "@/hooks/use-agent-instructions";
-import { FileCode, Bookmark, Check, Loader2, Copy, ThumbsUp, ThumbsDown, User, Zap } from "lucide-react";
+import { FileCode, Bookmark, Check, Loader2, Copy, ThumbsUp, ThumbsDown, User, Zap, Orbit } from "lucide-react";
 import { ConfidenceBadge } from "@/components/chat/confidence-badge";
 import { ImportanceBanner } from "@/components/chat/importance-banner";
 import { useChatFeedback } from "@/hooks/use-chat-feedback";
 import { StreamingToolCard } from "@/components/chat/streaming-tool-card";
 
-/** Framework-inspired gear/module icon used as AI assistant avatar.
- *  A square with notches on each side — resembles the Framework Computer logo. */
+const CodeHighlight = lazy(() => import("./code-highlight"));
+
+/** Shared Orbital mark for assistant messages and the empty conversation. */
 function FrameworkIcon({ className }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 24 24" fill="currentColor" className={className}>
-      <path
-        fillRule="evenodd"
-        clipRule="evenodd"
-        d="M8 1a1 1 0 0 0-1 1v2H4a2 2 0 0 0-2 2v1a1 1 0 0 0 1 1h2v8H3a1 1 0 0 0-1 1v1a2 2 0 0 0 2 2h3v2a1 1 0 0 0 1 1h2a1 1 0 0 0 1-1v-2h2v2a1 1 0 0 0 1 1h2a1 1 0 0 0 1-1v-2h3a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1h-2V8h2a1 1 0 0 0 1-1V6a2 2 0 0 0-2-2h-3V2a1 1 0 0 0-1-1h-2a1 1 0 0 0-1 1v2h-2V2a1 1 0 0 0-1-1H8zm1 7a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V9a1 1 0 0 0-1-1H9z"
-      />
-    </svg>
-  );
+  return <Orbit className={className} strokeWidth={1.5} aria-hidden="true" />;
 }
 
 /** Shared markdown components with syntax-highlighted code blocks */
@@ -84,26 +76,16 @@ function makeMdComponents(isTerminal: boolean): Components {
             <span>{language}</span>
             <button
               onClick={() => navigator.clipboard.writeText(codeString)}
-              className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 hover:text-foreground"
+              className="opacity-70 hover:opacity-100 focus-visible:opacity-100 transition-opacity flex items-center gap-1 hover:text-foreground"
             >
               <Copy className="h-3 w-3" />
               Copy
             </button>
           </div>
           <div className="overflow-x-auto scrollbar-thin">
-            <SyntaxHighlighter
-              style={oneDark}
-              language={language}
-              PreTag="div"
-              customStyle={{
-                margin: 0,
-                borderRadius: 0,
-                fontSize: "13px",
-                lineHeight: "1.5",
-              }}
-            >
-              {codeString}
-            </SyntaxHighlighter>
+            <Suspense fallback={<pre className="m-0 whitespace-pre p-4 text-[13px] leading-normal"><code>{codeString}</code></pre>}>
+              <CodeHighlight content={codeString} language={language} />
+            </Suspense>
           </div>
         </div>
       );
@@ -458,7 +440,7 @@ function AssistantNarrativeBubble({ content, isTerminal = false }: { content: st
   return (
     <div className={cn(
       isTerminal
-        ? "max-w-full bg-[var(--card)] border border-[var(--chat-surface-mid)] shadow-sm p-8 rounded-sm shadow-[0_20px_40px_rgba(255,102,0,0.04)] relative overflow-hidden md:max-w-[75%]"
+        ? "max-w-full bg-card border border-[var(--chat-surface-mid)] shadow-sm p-4 md:p-8 rounded-xl  relative overflow-hidden md:max-w-[75%]"
         : "max-w-full rounded-2xl bg-muted/60 px-4 py-3 md:max-w-[75%]",
     )}>
       {isTerminal && (
@@ -646,6 +628,7 @@ export function StreamingThinkingBlock({ content, isActive, isTerminal = false }
 }
 
 interface MessageListProps {
+  emptyState?: React.ReactNode;
   messages: ChatMessage[];
   isLoading: boolean;
   pendingUserMessage?: string | null;
@@ -683,6 +666,7 @@ interface MessageListProps {
 }
 
 export function MessageList({
+  emptyState,
   messages,
   isLoading,
   pendingUserMessage,
@@ -849,9 +833,9 @@ export function MessageList({
 
     if (isTerminal) {
       return (
-        <div className="flex h-full items-start px-0 py-4">
+        <div className="flex h-full items-start px-5 pb-6 pt-16 md:px-10 md:pt-10">
           <div className="max-w-4xl">
-            <h1 className="font-headline font-black text-[3.5rem] leading-none -tracking-[0.02em] text-foreground mb-4">
+            <h1 className="font-headline font-semibold text-3xl md:text-4xl leading-tight tracking-tight text-foreground mb-4">
               {(() => {
                 const name = brandName || "Suite Studio AI";
                 const aiIndex = name.indexOf("AI");
@@ -874,16 +858,17 @@ export function MessageList({
         </div>
       );
     }
+    if (emptyState) return <>{emptyState}</>;
     return (
       <div className="flex h-full items-center justify-center">
-        <div className="text-center">
+        <div className="text-center px-5">
           <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10">
             <FrameworkIcon className="h-6 w-6 text-primary" />
           </div>
-          <h3 className="text-lg font-semibold text-foreground">
-            How can I help?
+          <h3 className="text-2xl font-medium tracking-tight text-foreground">
+            What would you like to work on?
           </h3>
-          <p className="mt-1.5 max-w-xs text-[14px] leading-relaxed text-muted-foreground">
+          <p className="mx-auto mt-3 max-w-sm text-[14px] leading-relaxed text-muted-foreground">
             Ask questions about your business operations, data, or docs.
           </p>
         </div>
@@ -912,8 +897,8 @@ export function MessageList({
       className={cn(
         "h-full min-h-0 min-w-0 overflow-auto",
         isTerminal
-          ? "px-10 py-8 space-y-8"
-          : "px-6 py-6 space-y-5 scrollbar-thin",
+          ? "px-4 py-12 space-y-6 md:px-10 md:py-8 md:space-y-8"
+          : "px-4 py-12 space-y-5 scrollbar-thin md:px-7 md:py-8",
       )}
       style={{ scrollbarGutter: "stable" }}
       data-testid="message-list"
@@ -1040,7 +1025,7 @@ export function MessageList({
       {!shouldRenderStreamingMessage && (isWaitingForReply || streamBlocks.length > 0) && (
         <div className="flex min-w-0 justify-start gap-3">
           {isTerminal ? (
-            <div className="w-10 h-10 bg-[var(--card)] flex-shrink-0 flex items-center justify-center border border-[var(--chat-surface-mid)]">
+            <div className="w-10 h-10 bg-card flex-shrink-0 flex items-center justify-center border border-[var(--chat-surface-mid)]">
               <Zap className="h-4 w-4 text-[var(--chat-accent)]" />
             </div>
           ) : (
@@ -1230,7 +1215,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
     return (
       <div className="flex min-w-0 justify-start gap-3">
         {isTerminal ? (
-          <div className="w-10 h-10 bg-[var(--card)] flex-shrink-0 flex items-center justify-center border border-[var(--chat-surface-mid)]">
+          <div className="w-10 h-10 bg-card flex-shrink-0 flex items-center justify-center border border-[var(--chat-surface-mid)]">
             <Zap className="h-4 w-4 text-[var(--chat-accent)]" />
           </div>
         ) : (
@@ -1275,7 +1260,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
     return (
       <div className="flex min-w-0 justify-start gap-3">
         {isTerminal ? (
-          <div className="w-10 h-10 bg-[var(--card)] flex-shrink-0 flex items-center justify-center border border-[var(--chat-surface-mid)]">
+          <div className="w-10 h-10 bg-card flex-shrink-0 flex items-center justify-center border border-[var(--chat-surface-mid)]">
             <Zap className="h-4 w-4 text-[var(--chat-accent)]" />
           </div>
         ) : (
@@ -1307,7 +1292,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   return (
     <div className="flex min-w-0 justify-start gap-3">
       {isTerminal ? (
-        <div className="w-10 h-10 bg-[var(--card)] flex-shrink-0 flex items-center justify-center border border-[var(--chat-surface-mid)]">
+        <div className="w-10 h-10 bg-card flex-shrink-0 flex items-center justify-center border border-[var(--chat-surface-mid)]">
           <Zap className="h-4 w-4 text-[var(--chat-accent)]" />
         </div>
       ) : (

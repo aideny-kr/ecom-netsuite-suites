@@ -29,6 +29,7 @@ import { Pagination } from "./pagination";
 import { ReportDownload } from "./report-download";
 import { IssueGroups } from "./issue-groups";
 import { Variance, deltaValue } from "./variance";
+import type { TransactionView } from "./navigation";
 import { OrdersPage } from "./orders-page";
 import { configForRun } from "./review-scope";
 import {
@@ -63,17 +64,18 @@ function dateBasis(run: TransactionRun) {
 function dateBasisLabel(run: TransactionRun) {
   return dateBasis(run) === "updated_at" ? "Source update date (updated_at)" : "Order completion date (completed_at)";
 }
-export function TransactionWorkspace() {
+type WorkspaceNavigation = { view?: TransactionView; onViewChange?: (view: TransactionView) => void };
+export function TransactionWorkspace({ view, onViewChange }: WorkspaceNavigation = {}) {
   const access = useTransactionAccess();
-  if (!access.allowed && !access.loading && !access.error)
+  if (!access.allowed && !access.loading && !access.error && (!view || view === "records"))
     return <OrdersPage key={access.tenantId} />;
   return (
     <TransactionAccessBoundary>
-      <Workspace key={access.tenantId} />
+      <Workspace key={access.tenantId} view={view} onViewChange={onViewChange} />
     </TransactionAccessBoundary>
   );
 }
-function Workspace() {
+function Workspace({ view, onViewChange }: WorkspaceNavigation) {
   const access = useTransactionAccess();
   const configs = useTransactionConfigs();
   const runs = useReviewRuns();
@@ -86,7 +88,12 @@ function Workspace() {
   const [pinned, setPinned] = useState<TransactionRun[]>([]);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState("");
-  const [tab, setTab] = useState("Orders");
+  const [localTab, setLocalTab] = useState("Orders");
+  const tab = view === "cases" ? "Cases" : view === "approvals" ? "Fix approvals" : view === "history" ? "Run history" : view === "reconcile" && !["Orders", "Refunds"].includes(localTab) ? "Orders" : localTab;
+  const setTab = (next: string) => {
+    setLocalTab(next);
+    if (view && onViewChange) onViewChange(next === "Cases" ? "cases" : next === "Fix approvals" ? "approvals" : next === "Run history" ? "history" : "reconcile");
+  };
   const [offset, setOffset] = useState(0);
   const [size, setSize] = useState(50);
   const [caseSize, setCaseSize] = useState(50);
@@ -99,7 +106,10 @@ function Workspace() {
   const [status, setStatus] = useState("");
   const [selectedCases, setSelectedCases] = useState<string[]>([]);
   const [caseId, setCaseId] = useState("");
+  useEffect(() => { setCaseId(""); }, [view]);
   const [browse, setBrowse] = useState(false);
+  const [recordsVisited, setRecordsVisited] = useState(view === "records");
+  useEffect(() => { if (view === "records") setRecordsVisited(true); }, [view]);
   const completed = useRef(new Map<string, TransactionRun>());
   const keys = useRef(new Map<string, string>());
   const batchKey = useRef<{ selection: string; key: string }>();
@@ -252,7 +262,7 @@ function Workspace() {
       /* Mutation error is displayed with its retry state. */
     }
   }
-  if (browse)
+  if (browse && !view)
     return (
       <div className="space-y-5">
         <Button variant="outline" onClick={() => setBrowse(false)}>
@@ -262,21 +272,26 @@ function Workspace() {
       </div>
     );
   return (
-    <div className="animate-fade-in space-y-6">
+    <>
+    {(recordsVisited || view === "records") && <div hidden={view !== "records"}><OrdersPage active={view === "records"} /></div>}
+    <div className="animate-fade-in space-y-6" hidden={view === "records"}>
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">
-            Transactions
-          </h1>
+          <h2 className="text-xl font-medium tracking-tight">
+            {view === "cases" ? "Open cases" : view === "approvals" ? "Order correction approvals" : view === "history" ? "Order review history" : "Order consistency"}
+          </h2>
           <p className="mt-2 text-[15px] text-muted-foreground">
-            Review a period, investigate differences, and approve verified
-            fixes.
+            {view === "cases" ? "Investigate open differences across periods and entities."
+              : view === "approvals" ? "Review exact proposed corrections and their evidence before approving."
+              : view === "history" ? "Inspect previous order reviews and reopen their results."
+              : "Compare order totals, tax and refunds across systems for a selected period."}
           </p>
         </div>
-        <Button variant="outline" onClick={() => setBrowse(true)}>
+        <Button variant="outline" onClick={() => view && onViewChange ? onViewChange("records") : setBrowse(true)}>
           Browse source orders
         </Button>
       </header>
+      <div className="space-y-6" hidden={!!view && view !== "reconcile"}>
       <section
         className="rounded-xl border bg-card p-5 shadow-soft"
         aria-label="Period review"
@@ -432,12 +447,14 @@ function Workspace() {
           </div>
         ))}
       </div>
+      </div>
       <div
+        hidden={!!view && view !== "reconcile"}
         role="tablist"
         aria-label="Transaction views"
-        className="flex gap-6 overflow-x-auto border-b"
+        className={view && view !== "reconcile" ? "hidden" : "flex gap-6 overflow-x-auto border-b"}
       >
-        {["Orders", "Refunds", "Cases", "Run history", "Fix approvals"].map(
+        {(view ? ["Orders", "Refunds"] : ["Orders", "Refunds", "Cases", "Run history", "Fix approvals"]).map(
           (name) => (
             <button
               role="tab"
@@ -823,8 +840,9 @@ function Workspace() {
         total. Fixes require exact human approval and independent execution
         verification.
       </footer>
-      <CaseDrawer id={caseId} close={() => setCaseId("")} />
+      <CaseDrawer id={view === "records" ? "" : caseId} close={() => setCaseId("")} />
     </div>
+    </>
   );
 }
 function ResultRow({

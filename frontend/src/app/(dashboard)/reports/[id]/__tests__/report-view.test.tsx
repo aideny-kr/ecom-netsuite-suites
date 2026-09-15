@@ -295,13 +295,13 @@ it("cancelling the confirm dialog does not call delete", async () => {
 it("shows 'Publish to dashboard' for an unpublished report when the user can manage it", async () => {
   mockReport({ dashboard_pinned_at: null });
   const { findByRole } = renderPage();
-  expect(await findByRole("button", { name: /publish to dashboard/i })).toBeTruthy();
+  expect(await findByRole("button", { name: /publish to Command Center/i })).toBeTruthy();
 });
 
 it("shows 'Unpublish from dashboard' for a published report", async () => {
   mockReport({ dashboard_pinned_at: "2026-07-20T10:00:00Z" });
   const { findByRole } = renderPage();
-  expect(await findByRole("button", { name: /unpublish from dashboard/i })).toBeTruthy();
+  expect(await findByRole("button", { name: /unpublish from Command Center/i })).toBeTruthy();
 });
 
 it("hides the publish button for a non-creator, non-admin user", async () => {
@@ -309,7 +309,7 @@ it("hides the publish button for a non-creator, non-admin user", async () => {
   mockReport({ dashboard_pinned_at: null });
   const { findByText, queryByRole } = renderPage();
   await findByText(/data as of/i); // metadata loaded
-  expect(queryByRole("button", { name: /publish to dashboard/i })).toBeNull();
+  expect(queryByRole("button", { name: /publish to Command Center/i })).toBeNull();
 });
 
 it("clicking Publish to dashboard POSTs /pin and disables the button while pending", async () => {
@@ -318,7 +318,7 @@ it("clicking Publish to dashboard POSTs /pin and disables the button while pendi
     path.endsWith("/pin") ? new Promise(() => {}) : Promise.resolve(_report())
   );
   const { findByRole } = renderPage();
-  const btn = (await findByRole("button", { name: /publish to dashboard/i })) as HTMLButtonElement;
+  const btn = (await findByRole("button", { name: /publish to Command Center/i })) as HTMLButtonElement;
   fireEvent.click(btn);
   await waitFor(() => expect(api.post).toHaveBeenCalledWith("/api/v1/reports/abc/pin"));
   await waitFor(() => expect(btn.disabled).toBe(true));
@@ -328,7 +328,7 @@ it("clicking Unpublish from dashboard DELETEs /pin", async () => {
   mockReport({ dashboard_pinned_at: "2026-07-20T10:00:00Z" });
   api.delete.mockResolvedValue(_report({ dashboard_pinned_at: null }));
   const { findByRole } = renderPage();
-  const btn = await findByRole("button", { name: /unpublish from dashboard/i });
+  const btn = await findByRole("button", { name: /unpublish from Command Center/i });
   fireEvent.click(btn);
   await waitFor(() => expect(api.delete).toHaveBeenCalledWith("/api/v1/reports/abc/pin"));
 });

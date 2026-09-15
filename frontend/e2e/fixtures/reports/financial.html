@@ -1,0 +1,223 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Income Statement</title><style>
+:root { --bg:#FAF9F6; --ink:#111; --border:#000; --card:#FFF; --accent:hsl(240 6% 10%); --accent-ink:#fff; }
+* { box-sizing:border-box; }
+body { margin:0; background:var(--bg); color:var(--ink);
+  font-family:'Inter',system-ui,-apple-system,sans-serif; line-height:1.5; }
+.report { max-width:840px; margin:0 auto; padding:48px 32px; }
+h1,h2,h3 { font-weight:800; letter-spacing:-0.02em; margin:1.4em 0 0.4em; }
+h1 { font-size:38px; } h2 { font-size:26px; } h3 { font-size:20px; }
+.nb-card { background:var(--card); border:3px solid var(--border); box-shadow:6px 6px 0 var(--border);
+  padding:24px; margin:24px 0; }
+.metric { display:flex; flex-direction:column; gap:4px; }
+.metric .value { font-size:44px; font-weight:800; }
+.metric .label { font-size:14px; font-weight:700; text-transform:uppercase; letter-spacing:0.04em; }
+.metric .foot { font-size:12px; color:#666; }
+.accent-bar { height:10px; background:var(--accent); border:3px solid var(--border); margin:0 0 24px; }
+table { width:100%; border-collapse:collapse; }
+th,td { border:2px solid var(--border); padding:8px 12px; text-align:left; font-size:14px; }
+th { background:var(--accent); font-weight:800; color:var(--accent-ink); }
+td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.divider { height:0; border-top:3px solid var(--border); margin:32px 0; }
+.svg-wrap { overflow:auto; }
+.prov { font-size:12px; color:#666; border-top:2px dashed #999; margin-top:48px; padding-top:12px; }
+.stamp { font-size:12px; color:#666; margin-top:32px; }
+/* Slice D — sticky table headers. The overflow-x wrapper forces computed overflow-y,
+   so a document-relative sticky thead can never engage; the table card is instead a
+   capped-height scroll region and the thead sticks to ITS scroll box. Short tables
+   are unaffected (max-height only caps). th's opaque accent background keeps rows
+   from bleeding through; the inset shadow re-draws the border that border-collapse
+   detaches from a stuck header. */
+.table-wrap { max-height:70vh; overflow-y:auto; }
+.table-wrap thead th { position:sticky; top:0; z-index:1; box-shadow:inset 0 -2px 0 var(--border); }
+/* Slice D — chart legend (emitted by report_charts after each multi-series svg). */
+.chart-legend { display:flex; flex-wrap:wrap; gap:8px 16px; margin-top:12px; font-size:13px; font-weight:600; }
+.chart-legend label { display:inline-flex; align-items:center; gap:6px; cursor:pointer; }
+.chart-legend .swatch { width:12px; height:12px; border:2px solid var(--border); display:inline-block; }
+/* Slice D — CSS-only series toggles: unchecking the legend's ser-j checkbox hides
+   that series' <g class="ser-j"> groups. :has() is load-bearing (CSS has no parent
+   combinator; id/for label pairs would collide across a report's charts); browsers
+   without :has() degrade to inert checkboxes. Plain literals, NOT generated — and
+   note this whole string passes through percent-formatting, so a percent sign in
+   ANY rule or comment here must be doubled (this comment learned that first-hand).
+   Rules exist for ser-0..ser-11 = report_charts._MAX_TOGGLE_SERIES — the legend
+   stops emitting checkboxes past that cap (a rule-less checkbox is a dead control)
+   and a drift test binds the two. */
+.nb-card:has(input.ser-0:not(:checked)) svg .ser-0 { display:none; }
+.nb-card:has(input.ser-1:not(:checked)) svg .ser-1 { display:none; }
+.nb-card:has(input.ser-2:not(:checked)) svg .ser-2 { display:none; }
+.nb-card:has(input.ser-3:not(:checked)) svg .ser-3 { display:none; }
+.nb-card:has(input.ser-4:not(:checked)) svg .ser-4 { display:none; }
+.nb-card:has(input.ser-5:not(:checked)) svg .ser-5 { display:none; }
+.nb-card:has(input.ser-6:not(:checked)) svg .ser-6 { display:none; }
+.nb-card:has(input.ser-7:not(:checked)) svg .ser-7 { display:none; }
+.nb-card:has(input.ser-8:not(:checked)) svg .ser-8 { display:none; }
+.nb-card:has(input.ser-9:not(:checked)) svg .ser-9 { display:none; }
+.nb-card:has(input.ser-10:not(:checked)) svg .ser-10 { display:none; }
+.nb-card:has(input.ser-11:not(:checked)) svg .ser-11 { display:none; }
+/* Slice D — print. Un-clip the scroll regions (a stuck thead prints frozen mid-page
+   and overflow-y clips rows off the paper), keep card/accent colors where the engine
+   honors print-color-adjust (borders + weight-800 text stay legible where it strips
+   them), hide the legend checkbox WIDGETS but keep swatch+label — the printed page
+   shows exactly the series toggled on (WYSIWYG). Long tables paginate; the browser
+   repeats <thead> per page natively. */
+@media print {
+  body { background:#fff; print-color-adjust:exact; -webkit-print-color-adjust:exact; }
+  .nb-card { box-shadow:none; break-inside:avoid; page-break-inside:avoid; }
+  .svg-wrap, .table-wrap { overflow:visible; max-height:none; }
+  .table-wrap { break-inside:auto; page-break-inside:auto; }
+  /* engines that IGNORE print-color-adjust strip backgrounds — a computed light
+     --accent-ink would then print white-on-white; pin light header + dark ink so
+     printed headers are legible on every engine */
+  thead th { position:static; background:#eee; color:var(--ink); }
+  .chart-legend input { display:none; }
+  .report { max-width:100%; padding:0; }
+}
+
+:root { --fs-good:#0A7A3D; --fs-bad:#B3261E; --fs-warn:#E8A13C; --fs-soft:#EFEDE7; }
+/* Base tone rules — .fs-good/.fs-bad are applied DIRECTLY as a <td> class on statement/
+   quad delta cells (_fs_delta_tone) and KPI deltas (_fs_sign_tone), not only alongside
+   .fs-chip/.fs-dot/.fs-delta below. Those are scoped COMPANION rules for their own
+   compound selectors; without this unscoped base rule a bare `class="num fs-good"` cell
+   matches nothing and renders in the default ink color — exactly the bug a live review
+   caught (statement + quad Δ$/Δ% cells rendering colorless). A drift test binds this. */
+.fs-good { color:var(--fs-good); }
+.fs-bad { color:var(--fs-bad); }
+.fs-meta { display:flex; gap:8px; flex-wrap:wrap; margin:4px 0 14px; }
+.fs-chip { font-size:11px; font-weight:700; border:2px solid var(--border); padding:3px 8px; background:var(--card); }
+.fs-chip.fs-dark { background:var(--accent); color:var(--accent-ink); }
+.fs-chip.fs-good { border-color:var(--fs-good); color:var(--fs-good); }
+.fs-chip.fs-bad { border-color:var(--fs-bad); color:var(--fs-bad); }
+
+.fs-watch { display:flex; gap:10px; flex-wrap:wrap; margin:12px 0 22px; }
+.fs-witem { display:flex; align-items:center; gap:8px; border:2px solid var(--border);
+  background:var(--card); padding:7px 10px; font-size:12.5px; font-weight:600; }
+.fs-dot { width:9px; height:9px; border:2px solid var(--border); display:inline-block; flex:none; }
+.fs-dot.fs-bad { background:var(--fs-bad); }
+.fs-dot.fs-warn { background:var(--fs-warn); }
+.fs-dot.fs-good { background:var(--fs-good); }
+
+/* KPI card grid — label -> large value -> MoM/YoY delta -> sparkline (design rule #4). */
+.fs-kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:14px; margin:6px 0 22px; }
+.fs-kpi { padding:14px 16px 12px; margin:0; position:relative; }
+.fs-kpi-lbl { font-size:11px; font-weight:700; letter-spacing:.07em; text-transform:uppercase; color:#666; }
+.fs-kpi-val { font-size:27px; font-weight:800; letter-spacing:-0.02em; margin-top:3px; }
+.fs-kpi-sub { font-size:11.5px; color:#666; margin-top:1px; }
+.fs-delta { font-size:12px; font-weight:700; }
+.fs-delta.fs-good { color:var(--fs-good); }
+.fs-delta.fs-bad { color:var(--fs-bad); }
+.fs-spark { position:absolute; right:12px; bottom:10px; opacity:.9; }
+
+/* EYEBALL-GATE FIX (F1, round 1): the trend card is emitted FIRST (see
+   _financial_statement_html) so it should already own the wider track -- but every
+   .fs-quad cell carries white-space:nowrap (the generic td.num,th.num rule), making the
+   quad table's min-content width (~587px unwrapped, at the base stylesheet's 8px/12px
+   cell padding) exceed its "fair share" of a plain fr split. A plain `fr` track's
+   automatic minimum size defaults to its item's content size unless overridden, so the
+   un-shrinkable quad ate space FROM the trend track regardless of the declared ratio --
+   trend rendered in an unreadable ~170px sliver. minmax(0, Nfr) overrides that automatic
+   per-item minimum (the grid-native equivalent of min-width:0), so the tracks actually
+   honor their weights.
+   EYEBALL-GATE FIX (F1, round 2): a 3:1 ratio cleared the trend floor but over-shrank
+   the quad (~190px) -- its own "the four-column read" showed ZERO columns at rest.
+   Tightening the quad's typography to the mock's scale (6px/8px cell padding) helped
+   but wasn't sufficient on its own: at .report's ORIGINAL 840px max-width, the two
+   floors (trend >=520px, quad's own unwrapped content ~443px + card padding) sum to
+   more than the 758px .fs-mid actually has to split -- no ratio or reasonable
+   typography closes a structural ~250px deficit (confirmed empirically, not guessed).
+   EYEBALL-GATE FIX (F1, round 3): the real fix is canvas width, not the ratio. The
+   approved mock's own canvas is 1060px, not 840px -- .report--wide (below) raises the
+   ceiling to the DISPATCH-STATED 1120px cap for statement pages ONLY (never the shared
+   .report default, which stays 840px for byte-stability on every other report type).
+   The mock's OWN 1.5:1 ratio (tried first, empirically) still left the quad ~82px
+   short of its own unwrapped content width even at this wider canvas -- solved
+   algebraically from two measured constants (this .fs-mid's total avail width and the
+   quad table's own natural width, both empirical, not estimated) for the ratio window
+   that clears BOTH floors simultaneously: trend >= 520px AND quad-card >= quad's own
+   ~483px need (443px table + 2*20px card padding). 1.1:1 sits solidly inside that
+   window with margin on both sides. .fs-scroll stays as the safety net, not the
+   primary mechanism, now that both the ceiling and the ratio are sized correctly. */
+.report--wide { max-width:1120px; }
+@media print { .report--wide { max-width:100%; } }
+.fs-mid { display:grid; grid-template-columns:minmax(0,1.1fr) minmax(0,1fr); gap:18px; margin-bottom:22px; }
+/* minor[6]: BS/TB have only a quad, no trend chart -- span it, don't leave a dead column */
+.fs-mid--single { grid-template-columns:1fr; }
+@media (max-width:900px) { .fs-mid { grid-template-columns:1fr; } }
+.fs-scroll { overflow-x:auto; }
+.fs-legend { display:flex; gap:16px; flex-wrap:wrap; font-size:12px; font-weight:600; margin-top:8px; }
+.fs-sw { width:12px; height:12px; border:2px solid var(--border); display:inline-block;
+  margin-right:5px; vertical-align:-1px; }
+
+/* Variance quad (design rule #5): Actual | Prior | Delta $ | Delta % — reuses the same
+   fs-sub/fs-formula/fs-net emphasis classes as the statement table below (both are built
+   from the same _quad_row-shaped model dict). Cell padding tightened to the mock's own
+   scale (6px 8px, vs the base stylesheet's 8px 12px); the label column is deliberately
+   NOT forced nowrap (only the numeric/.num cells are, via the pre-existing generic
+   td.num,th.num rule) -- a two-word metric label wrapping onto 2 lines is normal in a
+   compact card and narrows the table's overall min-content width meaningfully more
+   than tighter padding alone. .fs-mid > .nb-card gets its own tighter card padding too
+   (below) -- both are what actually let the card fit its own "four-column read"
+   unscrolled at .report--wide's width. */
+.fs-mid > .nb-card { padding:18px 20px; }
+table.fs-quad th, table.fs-quad td { border:none; border-bottom:1px solid #ddd; font-size:12.5px; padding:6px 8px; }
+table.fs-quad th { text-transform:uppercase; font-size:10.5px; letter-spacing:.06em; color:#666;
+  background:transparent; border-bottom:2px solid var(--border); }
+table.fs-quad tr:last-child td { border-bottom:none; border-top:2px solid var(--border); font-weight:800; }
+
+/* Statement table (design rule #6): section headers -> indented account detail (muted
+   acct number) -> bold subtotals -> formula rows -> emphasized net row. Clean GAAP look
+   (no per-cell grid) overriding the generic boxed th/td rules, scoped to .fs-stmt only. */
+table.fs-stmt th, table.fs-stmt td { border:none; border-bottom:1px solid #ddd; }
+table.fs-stmt thead th { background:var(--accent); color:var(--accent-ink); border-bottom:2px solid var(--border); }
+table.fs-stmt tr.fs-sec td { background:var(--fs-soft); border-top:2px solid var(--border); border-bottom:none;
+  font-weight:800; font-size:12px; letter-spacing:.05em; text-transform:uppercase; }
+table.fs-stmt tr.fs-sec label.fs-sec-lbl { cursor:pointer; display:inline-flex; align-items:center;
+  gap:6px; user-select:none; }
+table.fs-stmt tr.fs-sec .car { display:inline-block; width:12px; transition:transform .12s; }
+@media (prefers-reduced-motion:reduce) { table.fs-stmt tr.fs-sec .car { transition:none; } }
+table.fs-stmt tr.fs-sec:has(input:not(:checked)) .car { transform:rotate(-90deg); }
+table.fs-stmt tr.fs-acct td:first-child { padding-left:26px; font-weight:400; }
+table.fs-stmt .fs-acct-no { color:#666; font-size:11px; margin-right:7px; }
+table.fs-stmt tr.fs-acct:hover td { background:#f4f2ec; }
+table.fs-stmt .fs-pct { color:#666; font-size:12px; }
+table.fs-stmt tr.fs-sub td, table.fs-quad tr.fs-sub td { font-weight:700;
+  border-top:2px solid var(--border); background:#fff; }
+table.fs-stmt tr.fs-formula td, table.fs-quad tr.fs-formula td { font-weight:800;
+  background:var(--fs-soft); border-top:3px solid var(--border); }
+table.fs-stmt tr.fs-net td, table.fs-quad tr.fs-net td { font-weight:800; font-size:14.5px; background:var(--accent);
+  color:var(--accent-ink); border-top:3px solid var(--border); }
+tr.fs-check td { font-style:italic; font-size:12.5px; padding:8px 10px; border-top:2px solid var(--border); }
+tr.fs-check.fs-good td { color:var(--fs-good); }
+tr.fs-check.fs-bad td { color:var(--fs-bad); }
+
+/* CSS-only collapse (design rule #14): a hidden-in-plain-sight checkbox wrapped by its
+   own <label> (no id/for — several statement tables per report would collide) toggles
+   that section's account rows via :has(); the subtotal row (no fs-of-N class) always
+   stays visible even when collapsed. Rules exist for fs-sec-0..fs-sec-{cap-1} =
+   _MAX_STATEMENT_SECTIONS (income_statement's 5 sections, the most any current
+   statement type produces) — a section past the cap degrades to a non-interactive
+   (always-expanded) header, same pattern as report_charts' ser-j legend cap. A drift
+   test binds the two. */
+table.fs-stmt:has(input.fs-sec-0:not(:checked)) tr.fs-of-0 { display:none; }
+table.fs-stmt:has(input.fs-sec-1:not(:checked)) tr.fs-of-1 { display:none; }
+table.fs-stmt:has(input.fs-sec-2:not(:checked)) tr.fs-of-2 { display:none; }
+table.fs-stmt:has(input.fs-sec-3:not(:checked)) tr.fs-of-3 { display:none; }
+table.fs-stmt:has(input.fs-sec-4:not(:checked)) tr.fs-of-4 { display:none; }
+
+.fs-twocol { display:grid; grid-template-columns:1fr 1fr; gap:18px; margin:22px 0; }
+@media (max-width:900px) { .fs-twocol { grid-template-columns:1fr; } }
+.fs-hl { margin:0; padding-left:18px; }
+.fs-hl li { font-size:13px; margin-bottom:9px; line-height:1.5; }
+.fs-narr p { font-size:13.5px; line-height:1.65; margin:0 0 10px; }
+
+/* Print (design rule #15): a financial statement prints FULLY EXPANDED regardless of
+   on-screen collapse state — !important beats the :has() display:none rules above,
+   which have no media qualifier and would otherwise still apply while printing whatever
+   the on-screen checked state happened to be. Checkbox + chevron affordance (nothing to
+   click on paper) is hidden; card colors already print via the base stylesheet's
+   print-color-adjust:exact. */
+@media print {
+  table.fs-stmt tr.fs-acct { display:table-row !important; }
+  table.fs-stmt input.fs-sec-cb, table.fs-stmt .car { display:none; }
+  .fs-scroll { overflow:visible; }
+}
+</style></head><body><div class="report report--wide"><div class="accent-bar"></div><h1>Income Statement</h1><div class="fs"><div class="fs-meta"><span class="fs-chip fs-dark">Jun 2026</span><span class="fs-chip">vs May 2026</span><span class="fs-chip">vs Jun 2025 YoY</span></div><div class="fs-watch"><span class="fs-witem"><span class="fs-dot fs-good"></span>GP margin +0.7pp MoM (25.9% vs 25.2%)</span><span class="fs-witem"><span class="fs-dot fs-good"></span>Product Sales +$300,000 MoM (+2.4%)</span><span class="fs-witem"><span class="fs-dot fs-warn"></span>Marketing Expense +$180,000 MoM (+90.0%)</span></div><div class="fs-kpis"><div class="nb-card fs-kpi"><div class="fs-kpi-lbl">Revenue</div><div class="fs-kpi-val num">$13,500,000</div><div class="fs-kpi-sub num"><span class="fs-delta fs-good">▲ +2.4% MoM</span> · +15.4% YoY</div><svg class="fs-spark" width="64" height="26" viewBox="0 0 64 26" aria-hidden="true"><polyline points="0.0,26.0 12.8,21.4 25.6,16.8 38.4,11.5 51.2,4.8 64.0,0.0" fill="none" stroke="#4348c8" stroke-width="2.5"/><circle cx="64.0" cy="0.0" r="3" fill="#4348c8"/></svg></div><div class="nb-card fs-kpi"><div class="fs-kpi-lbl">Gross profit</div><div class="fs-kpi-val num">$3,500,000</div><div class="fs-kpi-sub num">25.9% margin · <span class="fs-delta fs-good">▲ +5.4% MoM</span> · +16.7% YoY</div><svg class="fs-spark" width="64" height="26" viewBox="0 0 64 26" aria-hidden="true"><polyline points="0.0,26.0 12.8,18.9 25.6,11.8 38.4,7.1 51.2,8.4 64.0,0.0" fill="none" stroke="#111111" stroke-width="2.5"/><circle cx="64.0" cy="0.0" r="3" fill="#111111"/></svg></div><div class="nb-card fs-kpi"><div class="fs-kpi-lbl">Operating income</div><div class="fs-kpi-val num">$1,800,000</div><div class="fs-kpi-sub num">13.3% margin · <span class="fs-delta fs-bad">▼ −2.8% MoM</span> · +20.0% YoY</div><svg class="fs-spark" width="64" height="26" viewBox="0 0 64 26" aria-hidden="true"><polyline points="0.0,26.0 12.8,19.1 25.6,12.2 38.4,8.2 51.2,0.0 64.0,3.0" fill="none" stroke="#111111" stroke-width="2.5"/><circle cx="64.0" cy="3.0" r="3" fill="#111111"/></svg></div><div class="nb-card fs-kpi"><div class="fs-kpi-lbl">Net income</div><div class="fs-kpi-val num">$1,805,000</div><div class="fs-kpi-sub num">13.4% margin · <span class="fs-delta fs-bad">▼ −2.8% MoM</span> · +20.1% YoY</div><svg class="fs-spark" width="64" height="26" viewBox="0 0 64 26" aria-hidden="true"><polyline points="0.0,26.0 12.8,19.1 25.6,12.2 38.4,8.1 51.2,0.0 64.0,3.0" fill="none" stroke="#0A7A3D" stroke-width="2.5"/><circle cx="64.0" cy="3.0" r="3" fill="#0A7A3D"/></svg></div></div><div class="fs-mid"><div class="nb-card"><h3>Trend <small>· exact values on hover</small></h3><div class="fs-scroll"><svg width="620" height="240" viewBox="0 0 620 240" style="width:100%;height:auto;display:block" role="img" aria-label="Statement trend"><line x1="56" y1="206.0" x2="592" y2="206.0" stroke="#000" stroke-width="2"/><text x="48" y="28.0" font-size="10" text-anchor="end" fill="#666">$13.5M</text><text x="48" y="210.0" font-size="10" text-anchor="end" fill="#666">$0</text><line x1="56" y1="206.0" x2="592" y2="206.0" stroke="#e4e1d8" stroke-width="1"/><polyline points="56.0,46.9 163.2,42.9 270.4,38.8 377.6,34.1 484.8,28.3 592.0,24.0" fill="none" stroke="#4348c8" stroke-width="3"/><circle cx="56.0" cy="46.9" r="4.5" fill="#4348c8" stroke="#000" stroke-width="1.5"><title>Jan 2026 — Revenue: $11,800,000</title></circle><circle cx="163.2" cy="42.9" r="4.5" fill="#4348c8" stroke="#000" stroke-width="1.5"><title>Feb 2026 — Revenue: $12,100,000</title></circle><circle cx="270.4" cy="38.8" r="4.5" fill="#4348c8" stroke="#000" stroke-width="1.5"><title>Mar 2026 — Revenue: $12,400,000</title></circle><circle cx="377.6" cy="34.1" r="4.5" fill="#4348c8" stroke="#000" stroke-width="1.5"><title>Apr 2026 — Revenue: $12,750,000</title></circle><circle cx="484.8" cy="28.3" r="4.5" fill="#4348c8" stroke="#000" stroke-width="1.5"><title>May 2026 — Revenue: $13,183,000</title></circle><circle cx="592.0" cy="24.0" r="4.5" fill="#4348c8" stroke="#000" stroke-width="1.5"><title>Jun 2026 — Revenue: $13,500,000</title></circle><polyline points="56.0,166.2 163.2,164.2 270.4,162.2 377.6,160.8 484.8,161.2 592.0,158.8" fill="none" stroke="#111111" stroke-width="3"/><circle cx="56.0" cy="166.2" r="4.5" fill="#111111" stroke="#000" stroke-width="1.5"><title>Jan 2026 — Gross Profit: $2,950,000</title></circle><circle cx="163.2" cy="164.2" r="4.5" fill="#111111" stroke="#000" stroke-width="1.5"><title>Feb 2026 — Gross Profit: $3,100,000</title></circle><circle cx="270.4" cy="162.2" r="4.5" fill="#111111" stroke="#000" stroke-width="1.5"><title>Mar 2026 — Gross Profit: $3,250,000</title></circle><circle cx="377.6" cy="160.8" r="4.5" fill="#111111" stroke="#000" stroke-width="1.5"><title>Apr 2026 — Gross Profit: $3,350,000</title></circle><circle cx="484.8" cy="161.2" r="4.5" fill="#111111" stroke="#000" stroke-width="1.5"><title>May 2026 — Gross Profit: $3,322,000</title></circle><circle cx="592.0" cy="158.8" r="4.5" fill="#111111" stroke="#000" stroke-width="1.5"><title>Jun 2026 — Gross Profit: $3,500,000</title></circle><polyline points="56.0,187.1 163.2,185.5 270.4,183.9 377.6,182.9 484.8,181.0 592.0,181.7" fill="none" stroke="#6b46c1" stroke-width="3"/><circle cx="56.0" cy="187.1" r="4.5" fill="#6b46c1" stroke="#000" stroke-width="1.5"><title>Jan 2026 — Operating Income: $1,400,000</title></circle><circle cx="163.2" cy="185.5" r="4.5" fill="#6b46c1" stroke="#000" stroke-width="1.5"><title>Feb 2026 — Operating Income: $1,520,000</title></circle><circle cx="270.4" cy="183.9" r="4.5" fill="#6b46c1" stroke="#000" stroke-width="1.5"><title>Mar 2026 — Operating Income: $1,640,000</title></circle><circle cx="377.6" cy="182.9" r="4.5" fill="#6b46c1" stroke="#000" stroke-width="1.5"><title>Apr 2026 — Operating Income: $1,710,000</title></circle><circle cx="484.8" cy="181.0" r="4.5" fill="#6b46c1" stroke="#000" stroke-width="1.5"><title>May 2026 — Operating Income: $1,852,000</title></circle><circle cx="592.0" cy="181.7" r="4.5" fill="#6b46c1" stroke="#000" stroke-width="1.5"><title>Jun 2026 — Operating Income: $1,800,000</title></circle><polyline points="56.0,187.1 163.2,185.5 270.4,183.8 377.6,182.9 484.8,181.0 592.0,181.7" fill="none" stroke="#0A7A3D" stroke-width="3"/><circle cx="56.0" cy="187.1" r="4.5" fill="#0A7A3D" stroke="#000" stroke-width="1.5"><title>Jan 2026 — Net Income: $1,403,000</title></circle><circle cx="163.2" cy="185.5" r="4.5" fill="#0A7A3D" stroke="#000" stroke-width="1.5"><title>Feb 2026 — Net Income: $1,523,500</title></circle><circle cx="270.4" cy="183.8" r="4.5" fill="#0A7A3D" stroke="#000" stroke-width="1.5"><title>Mar 2026 — Net Income: $1,644,000</title></circle><circle cx="377.6" cy="182.9" r="4.5" fill="#0A7A3D" stroke="#000" stroke-width="1.5"><title>Apr 2026 — Net Income: $1,714,500</title></circle><circle cx="484.8" cy="181.0" r="4.5" fill="#0A7A3D" stroke="#000" stroke-width="1.5"><title>May 2026 — Net Income: $1,856,700</title></circle><circle cx="592.0" cy="181.7" r="4.5" fill="#0A7A3D" stroke="#000" stroke-width="1.5"><title>Jun 2026 — Net Income: $1,805,000</title></circle><text x="56.0" y="224.0" font-size="11" text-anchor="middle" fill="#444">Jan 2026</text><text x="163.2" y="224.0" font-size="11" text-anchor="middle" fill="#444">Feb 2026</text><text x="270.4" y="224.0" font-size="11" text-anchor="middle" fill="#444">Mar 2026</text><text x="377.6" y="224.0" font-size="11" text-anchor="middle" fill="#444">Apr 2026</text><text x="484.8" y="224.0" font-size="11" text-anchor="middle" fill="#444">May 2026</text><text x="592.0" y="224.0" font-size="11" text-anchor="middle" fill="#444">Jun 2026</text></svg></div><div class="fs-legend"><span><span class="fs-sw" style="background:#4348c8"></span>Revenue</span><span><span class="fs-sw" style="background:#111111"></span>Gross Profit</span><span><span class="fs-sw" style="background:#6b46c1"></span>Operating Income</span><span><span class="fs-sw" style="background:#0A7A3D"></span>Net Income</span></div></div><div class="nb-card"><h3>Variance vs May 2026 <small>· the four-column read</small></h3><div class="fs-scroll"><table class="fs-quad num"><thead><tr><th>Metric</th><th>Jun 2026</th><th>May 2026</th><th>Δ $</th><th>Δ %</th></tr></thead><tbody><tr class="fs-sub"><td>Revenue</td><td class="num">$13,500,000</td><td class="num">$13,183,000</td><td class="num fs-good">+$317,000</td><td class="num fs-good">+2.4%</td></tr><tr class="fs-formula"><td>Gross Profit</td><td class="num">$3,500,000</td><td class="num">$3,322,000</td><td class="num fs-good">+$178,000</td><td class="num fs-good">+5.4%</td></tr><tr class="fs-formula"><td>Operating Income</td><td class="num">$1,800,000</td><td class="num">$1,852,000</td><td class="num fs-bad">−$52,000</td><td class="num fs-bad">−2.8%</td></tr><tr class="fs-net"><td>Net Income</td><td class="num">$1,805,000</td><td class="num">$1,856,700</td><td class="num fs-bad">−$51,700</td><td class="num fs-bad">−2.8%</td></tr></tbody></table></div></div></div><div class="nb-card"><h3>Statement of Income <small>· every account, nothing truncated</small></h3><div class="fs-scroll"><table class="fs-stmt num"><thead><tr><th>Account</th><th>Jun 2026</th><th>May 2026</th><th>Δ $</th><th>% of rev</th></tr></thead><tbody><tr class="fs-sec"><td colspan="5"><label class="fs-sec-lbl"><input type="checkbox" class="fs-sec-cb fs-sec-0" checked><span class="car">▾</span> Revenue</label></td></tr><tr class="fs-acct fs-of-0"><td><span class="fs-acct-no">4000</span>Product Sales</td><td class="num">$12,600,000</td><td class="num">$12,300,000</td><td class="num fs-good">+$300,000</td><td class="num fs-pct">93.3%</td></tr><tr class="fs-acct fs-of-0"><td><span class="fs-acct-no">4010</span>Subscription Revenue</td><td class="num">$700,000</td><td class="num">$680,000</td><td class="num fs-good">+$20,000</td><td class="num fs-pct">5.2%</td></tr><tr class="fs-acct fs-of-0"><td><span class="fs-acct-no">4020</span>Shipping Revenue</td><td class="num">$250,000</td><td class="num">$240,000</td><td class="num fs-good">+$10,000</td><td class="num fs-pct">1.9%</td></tr><tr class="fs-acct fs-of-0"><td><span class="fs-acct-no">4030</span>Gift Card Redemptions</td><td class="num">$50,000</td><td class="num">$48,000</td><td class="num fs-good">+$2,000</td><td class="num fs-pct">0.4%</td></tr><tr class="fs-acct fs-of-0"><td><span class="fs-acct-no">4040</span>Other Sales</td><td class="num">$150,000</td><td class="num">$145,000</td><td class="num fs-good">+$5,000</td><td class="num fs-pct">1.1%</td></tr><tr class="fs-acct fs-of-0"><td><span class="fs-acct-no">4900</span>Sales Returns and Allowances</td><td class="num">($250,000)</td><td class="num">($230,000)</td><td class="num fs-good">−$20,000</td><td class="num fs-pct">−1.9%</td></tr><tr class="fs-sub"><td>Total Revenue</td><td class="num">$13,500,000</td><td class="num">$13,183,000</td><td class="num fs-good">+$317,000</td><td class="num fs-pct">100.0%</td></tr><tr class="fs-sec"><td colspan="5"><label class="fs-sec-lbl"><input type="checkbox" class="fs-sec-cb fs-sec-1" checked><span class="car">▾</span> Cost of Goods Sold</label></td></tr><tr class="fs-acct fs-of-1"><td><span class="fs-acct-no">5000</span>Cost of Goods Sold</td><td class="num">($8,700,000)</td><td class="num">($8,600,000)</td><td class="num fs-bad">+$100,000</td><td class="num fs-pct">64.4%</td></tr><tr class="fs-acct fs-of-1"><td><span class="fs-acct-no">5010</span>Freight In</td><td class="num">($600,000)</td><td class="num">($580,000)</td><td class="num fs-bad">+$20,000</td><td class="num fs-pct">4.4%</td></tr><tr class="fs-acct fs-of-1"><td><span class="fs-acct-no">5020</span>Merchant Processing Fees</td><td class="num">($400,000)</td><td class="num">($390,000)</td><td class="num fs-bad">+$10,000</td><td class="num fs-pct">3.0%</td></tr><tr class="fs-acct fs-of-1"><td><span class="fs-acct-no">5030</span>Duty and Tariffs</td><td class="num">($200,000)</td><td class="num">($195,000)</td><td class="num fs-bad">+$5,000</td><td class="num fs-pct">1.5%</td></tr><tr class="fs-acct fs-of-1"><td><span class="fs-acct-no">5040</span>Packaging Costs</td><td class="num">($70,000)</td><td class="num">($68,000)</td><td class="num fs-bad">+$2,000</td><td class="num fs-pct">0.5%</td></tr><tr class="fs-acct fs-of-1"><td><span class="fs-acct-no">5050</span>Inventory Shrinkage</td><td class="num">($30,000)</td><td class="num">($28,000)</td><td class="num fs-bad">+$2,000</td><td class="num fs-pct">0.2%</td></tr><tr class="fs-sub"><td>Total Cost of Goods Sold</td><td class="num">($10,000,000)</td><td class="num">($9,861,000)</td><td class="num fs-bad">+$139,000</td><td class="num fs-pct">74.1%</td></tr><tr class="fs-formula"><td>Gross Profit</td><td class="num">$3,500,000</td><td class="num">$3,322,000</td><td class="num fs-good">+$178,000</td><td class="num fs-pct">25.9%</td></tr><tr class="fs-sec"><td colspan="5"><label class="fs-sec-lbl"><input type="checkbox" class="fs-sec-cb fs-sec-2" checked><span class="car">▾</span> Operating Expense</label></td></tr><tr class="fs-acct fs-of-2"><td><span class="fs-acct-no">6000</span>Salaries and Wages</td><td class="num">($650,000)</td><td class="num">($630,000)</td><td class="num fs-bad">+$20,000</td><td class="num fs-pct">4.8%</td></tr><tr class="fs-acct fs-of-2"><td><span class="fs-acct-no">6010</span>Marketing Expense</td><td class="num">($380,000)</td><td class="num">($200,000)</td><td class="num fs-bad">+$180,000</td><td class="num fs-pct">2.8%</td></tr><tr class="fs-acct fs-of-2"><td><span class="fs-acct-no">6020</span>Rent Expense</td><td class="num">($150,000)</td><td class="num">($150,000)</td><td class="num">$0</td><td class="num fs-pct">1.1%</td></tr><tr class="fs-acct fs-of-2"><td><span class="fs-acct-no">6030</span>Software Subscriptions</td><td class="num">($120,000)</td><td class="num">($110,000)</td><td class="num fs-bad">+$10,000</td><td class="num fs-pct">0.9%</td></tr><tr class="fs-acct fs-of-2"><td><span class="fs-acct-no">6040</span>Professional Fees</td><td class="num">($90,000)</td><td class="num">($85,000)</td><td class="num fs-bad">+$5,000</td><td class="num fs-pct">0.7%</td></tr><tr class="fs-acct fs-of-2"><td><span class="fs-acct-no">6050</span>Travel and Entertainment</td><td class="num">($60,000)</td><td class="num">($55,000)</td><td class="num fs-bad">+$5,000</td><td class="num fs-pct">0.4%</td></tr><tr class="fs-acct fs-of-2"><td><span class="fs-acct-no">6060</span>Insurance</td><td class="num">($50,000)</td><td class="num">($48,000)</td><td class="num fs-bad">+$2,000</td><td class="num fs-pct">0.4%</td></tr><tr class="fs-acct fs-of-2"><td><span class="fs-acct-no">6070</span>Utilities</td><td class="num">($40,000)</td><td class="num">($38,000)</td><td class="num fs-bad">+$2,000</td><td class="num fs-pct">0.3%</td></tr><tr class="fs-acct fs-of-2"><td><span class="fs-acct-no">6080</span>Office Supplies</td><td class="num">($35,000)</td><td class="num">($33,000)</td><td class="num fs-bad">+$2,000</td><td class="num fs-pct">0.3%</td></tr><tr class="fs-acct fs-of-2"><td><span class="fs-acct-no">6090</span>Depreciation Expense</td><td class="num">($60,000)</td><td class="num">($60,000)</td><td class="num">$0</td><td class="num fs-pct">0.4%</td></tr><tr class="fs-acct fs-of-2"><td><span class="fs-acct-no">6100</span>Bad Debt Expense</td><td class="num">($35,000)</td><td class="num">($33,000)</td><td class="num fs-bad">+$2,000</td><td class="num fs-pct">0.3%</td></tr><tr class="fs-acct fs-of-2"><td><span class="fs-acct-no">6110</span>Employee Benefits</td><td class="num">($30,000)</td><td class="num">($28,000)</td><td class="num fs-bad">+$2,000</td><td class="num fs-pct">0.2%</td></tr><tr class="fs-sub"><td>Total Operating Expense</td><td class="num">($1,700,000)</td><td class="num">($1,470,000)</td><td class="num fs-bad">+$230,000</td><td class="num fs-pct">12.6%</td></tr><tr class="fs-formula"><td>Operating Income</td><td class="num">$1,800,000</td><td class="num">$1,852,000</td><td class="num fs-bad">−$52,000</td><td class="num fs-pct">13.3%</td></tr><tr class="fs-sec"><td colspan="5"><label class="fs-sec-lbl"><input type="checkbox" class="fs-sec-cb fs-sec-3" checked><span class="car">▾</span> Other Income</label></td></tr><tr class="fs-acct fs-of-3"><td><span class="fs-acct-no">8000</span>Interest Income</td><td class="num">$12,000</td><td class="num">$11,000</td><td class="num fs-good">+$1,000</td><td class="num fs-pct">0.1%</td></tr><tr class="fs-acct fs-of-3"><td><span class="fs-acct-no">8010</span>FX Gain</td><td class="num">$5,000</td><td class="num">$4,500</td><td class="num fs-good">+$500</td><td class="num fs-pct">0.0%</td></tr><tr class="fs-acct fs-of-3"><td><span class="fs-acct-no">8020</span>Misc Income</td><td class="num">$3,000</td><td class="num">$3,200</td><td class="num fs-bad">−$200</td><td class="num fs-pct">0.0%</td></tr><tr class="fs-sub"><td>Total Other Income</td><td class="num">$20,000</td><td class="num">$18,700</td><td class="num fs-good">+$1,300</td><td class="num fs-pct">0.1%</td></tr><tr class="fs-sec"><td colspan="5"><label class="fs-sec-lbl"><input type="checkbox" class="fs-sec-cb fs-sec-4" checked><span class="car">▾</span> Other Expense</label></td></tr><tr class="fs-acct fs-of-4"><td><span class="fs-acct-no">9000</span>Interest Expense</td><td class="num">($9,000)</td><td class="num">($8,500)</td><td class="num fs-bad">+$500</td><td class="num fs-pct">0.1%</td></tr><tr class="fs-acct fs-of-4"><td><span class="fs-acct-no">9010</span>Bank Fees</td><td class="num">($4,000)</td><td class="num">($3,800)</td><td class="num fs-bad">+$200</td><td class="num fs-pct">0.0%</td></tr><tr class="fs-acct fs-of-4"><td><span class="fs-acct-no">9020</span>Loss on FX</td><td class="num">($2,000)</td><td class="num">($1,700)</td><td class="num fs-bad">+$300</td><td class="num fs-pct">0.0%</td></tr><tr class="fs-sub"><td>Total Other Expense</td><td class="num">($15,000)</td><td class="num">($14,000)</td><td class="num fs-bad">+$1,000</td><td class="num fs-pct">0.1%</td></tr><tr class="fs-net"><td>Net Income</td><td class="num">$1,805,000</td><td class="num">$1,856,700</td><td class="num fs-bad">−$51,700</td><td class="num fs-pct">13.4%</td></tr></tbody></table></div></div><div class="fs-twocol"><div class="nb-card"><h3>Highlights <small>· computed, materiality-gated</small></h3><ul class="fs-hl"><li>Net income −$51,700 MoM, driven by Product Sales +$300,000</li><li>Gross margin +0.7pp MoM, driven by Cost of Goods Sold +$100,000</li><li>Operating expense +$230,000 MoM, driven by Marketing Expense +$180,000</li></ul></div><div class="nb-card fs-narr"><h3>Narrative <small>· every figure tool-computed</small></h3><p>Income Statement for Jun 2026: revenue was $13,500,000, +2.4% month-over-month, delivering net income of $1,805,000 (13.4% margin).</p><p>Gross margin was 25.9%, +0.7pp MoM, with operating expenses of $1,700,000, +$230,000 MoM.</p></div></div></div></div></body></html>

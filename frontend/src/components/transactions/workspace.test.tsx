@@ -433,3 +433,37 @@ it("exports the full filter scope without including pagination parameters", asyn
     vi.unstubAllGlobals();
   }
 });
+
+it("preserves review context across the unified views and does not queue work on navigation", async () => {
+  const client = new QueryClient({defaultOptions:{queries:{retry:false}}});
+  const change = vi.fn();
+  const ui = (view: "reconcile" | "cases" | "records" | "history") => <QueryClientProvider client={client}><TransactionWorkspace view={view} onViewChange={change} /></QueryClientProvider>;
+  const {rerender} = render(ui("reconcile"));
+  await screen.findByText("R123456789");
+  fireEvent.change(screen.getByRole("combobox", {name:"Review period"}), {target:{value:"last_month"}});
+  rerender(ui("cases"));
+  expect(await screen.findByRole("heading", {name:"Open cases"})).toBeVisible();
+  expect(screen.getByRole("combobox", {name:"Review period",hidden:true})).not.toBeVisible();
+  rerender(ui("records"));
+  expect(screen.getByText("Imported source orders")).toBeVisible();
+  rerender(ui("reconcile"));
+  expect(screen.getByRole("combobox", {name:"Review period"})).toHaveValue("last_month");
+  expect(screen.getByText("Imported source orders")).not.toBeVisible();
+  rerender(ui("history"));
+  fireEvent.click(await screen.findByRole("button", {name:"View period"}));
+  expect(change).toHaveBeenCalledWith("reconcile");
+  expect(apiClient.post).not.toHaveBeenCalled();
+});
+
+it("closes the portaled case drawer on view navigation without submitting a decision", async () => {
+  const client = new QueryClient({defaultOptions:{queries:{retry:false}}});
+  const ui = (view: "reconcile" | "records") => <QueryClientProvider client={client}><TransactionWorkspace view={view} /></QueryClientProvider>;
+  const {rerender} = render(ui("reconcile"));
+  fireEvent.click(await screen.findByRole("button", {name:"Review case →"}));
+  expect(screen.getByRole("dialog")).toBeVisible();
+  rerender(ui("records"));
+  await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  rerender(ui("reconcile"));
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(apiClient.post).not.toHaveBeenCalled();
+});

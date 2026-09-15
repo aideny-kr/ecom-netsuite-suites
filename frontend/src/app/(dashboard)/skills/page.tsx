@@ -28,12 +28,12 @@ export default function SkillsPage() {
   }, [skills, search]);
 
   return (
-    <div className="animate-fade-in space-y-8 p-8">
-      <div className="flex items-center gap-3">
-        <Sparkles className="h-6 w-6 text-muted-foreground" />
+    <div className="animate-fade-in space-y-8">
+      <div>
         <div>
-          <h1 className="text-2xl font-bold text-foreground">Skills</h1>
-          <p className="text-[13px] text-muted-foreground">
+          <p className="orbital-eyebrow">Expertise to reuse</p>
+          <h1 className="mt-2 text-2xl font-medium text-foreground">Skills</h1>
+          <p className="mt-2 text-[13px] text-muted-foreground">
             Slash commands you can run in chat. Search, then send one straight to the
             composer.
           </p>

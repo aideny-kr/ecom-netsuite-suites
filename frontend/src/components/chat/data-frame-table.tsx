@@ -43,6 +43,8 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
   const [sortDir, setSortDir] = useState<SortDirection>(null);
   const [copied, setCopied] = useState(false);
   const [showQuery, setShowQuery] = useState(false);
+  const [exportError, setExportError] = useState("");
+  const isPartial = !!truncated || row_count > rows.length;
   const isBigQuery = useMemo(
     () => !!queryText && (queryText.includes("`") || queryText.toLowerCase().includes("frameworkreporting")),
     [queryText],
@@ -90,43 +92,50 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
     setTimeout(() => setCopied(false), 2000);
   }, [columns, sortedRows]);
 
-  const handleDownloadCSV = useCallback(() => {
-    // If we have a SuiteQL query (not a metric key, not saved search, not BigQuery),
-    // re-execute server-side for full results (up to 50K rows)
-    if (!isMetric && queryText && !queryText.startsWith("Saved Search:") && !isBigQuery) {
-      exportFromQuery({
-        queryText,
-        title: `query-results-${new Date().toISOString().slice(0, 10)}`,
-        format: "csv",
-      });
-      return;
+  // Export the received snapshot. A query string does not imply a direct REST
+  // connection, and rerunning can change the data the user intended to download.
+  const handleExport = async (format: "csv" | "xlsx", rerun = false) => {
+    if (isExporting) return;
+    setExportError("");
+    const title = `query-results${isPartial && !rerun ? "-loaded-rows" : ""}-${new Date().toISOString().slice(0, 10)}`;
+    try {
+      if (rerun && queryText) {
+        await exportFromQuery({ queryText, title, format });
+        return;
+      }
+      if (format === "xlsx") {
+        await exportToExcel({ columns, rows: rows as unknown[][], title });
+        return;
+      }
+      const escape = (v: unknown) => {
+        const s = String(v ?? "");
+        return /[,"\r\n]/.test(s)
+          ? `"${s.replace(/"/g, '""')}"`
+          : s;
+      };
+      const csv = [columns, ...rows]
+        .map((row) => (row as unknown[]).map(escape).join(","))
+        .join("\r\n");
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${title}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : "Download failed. Please try again.");
     }
-    // Saved searches and no-query results: export client-side rows
-    const escape = (v: unknown) => {
-      const s = String(v ?? "");
-      return s.includes(",") || s.includes('"') || s.includes("\n")
-        ? `"${s.replace(/"/g, '""')}"`
-        : s;
-    };
-    const header = columns.map(escape).join(",");
-    const body = rows
-      .map((row) => (row as unknown[]).map(escape).join(","))
-      .join("\n");
-    const blob = new Blob([`${header}\n${body}`], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `query-results-${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-  }, [columns, rows, queryText, exportFromQuery, isMetric, isBigQuery]);
+  };
 
   if (columns.length === 0) return null;
 
   return (
-    <div className="my-3 overflow-hidden rounded-xl border bg-card shadow-soft">
+    <div className="my-3 overflow-hidden rounded-xl border bg-card shadow-soft" data-testid="data-frame-table">
       {/* Header */}
-      <div className="flex items-center justify-between border-b px-4 py-3">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b px-4 py-3">
         <div className="flex items-center gap-2">
           <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary/10">
             <svg
@@ -168,43 +177,46 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
             {copied ? "Copied" : "Copy"}
           </button>
           <button
-            onClick={handleDownloadCSV}
+            onClick={() => void handleExport("csv")}
+            disabled={isExporting}
             className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-[var(--chat-accent)] hover:text-white"
-            title="Download as CSV"
+            title={isPartial ? "Download loaded rows as CSV" : "Download as CSV"}
           >
             <Download className="h-3 w-3" />
-            CSV
+            {isPartial ? "CSV (loaded rows)" : "CSV"}
           </button>
           <button
-            onClick={() => {
-              const title = `query-results-${new Date().toISOString().slice(0, 10)}`;
-              if (!isMetric && queryText && !isBigQuery) {
-                exportFromQuery({
-                  queryText,
-                  title,
-                  format: "xlsx",
-                });
-              } else {
-                exportToExcel({
-                  columns,
-                  rows: rows as unknown[][],
-                  title,
-                });
-              }
-            }}
+            onClick={() => void handleExport("xlsx")}
             disabled={isExporting}
             className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-[var(--chat-accent)] hover:text-white disabled:opacity-50"
-            title="Export as Excel"
+            title={isPartial ? "Download loaded rows as Excel" : "Export as Excel"}
           >
             {isExporting ? (
               <Loader2 className="h-3 w-3 animate-spin" />
             ) : (
               <FileSpreadsheet className="h-3 w-3" />
             )}
-            Excel
+            {isPartial ? "Excel (loaded rows)" : "Excel"}
           </button>
         </div>
       </div>
+
+      {isPartial && (
+        <div className="space-y-2 border-b bg-muted/20 px-4 py-3 text-xs text-muted-foreground">
+          <p>Downloads include the {rows.length.toLocaleString()} loaded rows only. This result is partial.</p>
+          {!isMetric && queryText && !queryText.startsWith("Saved Search:") && !isBigQuery && (
+            <details>
+              <summary className="cursor-pointer font-medium text-foreground">Export full results</summary>
+              <p className="my-2">Re-running the query currently requires a direct NetSuite connection.</p>
+              <div className="flex gap-4">
+                <button disabled={isExporting} onClick={() => void handleExport("csv", true)} className="text-primary underline underline-offset-4 disabled:opacity-50">Re-run for full CSV</button>
+                <button disabled={isExporting} onClick={() => void handleExport("xlsx", true)} className="text-primary underline underline-offset-4 disabled:opacity-50">Re-run for full Excel</button>
+              </div>
+            </details>
+          )}
+        </div>
+      )}
+      {exportError && <p role="alert" className="border-b px-4 py-3 text-xs text-destructive">{exportError}</p>}
 
       {/* Query — hidden for metric tables (query is a metric key, not SQL) */}
       {!isMetric && queryText && (
