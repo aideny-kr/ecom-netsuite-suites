@@ -265,6 +265,9 @@ def _stable(value):
 
 
 async def validate_approved(db, tenant_id, tool_name, params, proposal):
+    from app.services.transaction_ops.case_resolution_scope import validate
+
+    await validate(db, tenant_id, proposal)
     validate_binding(tenant_id, tool_name, params, proposal)
     source, review, evidence, support, profile = await _fresh(db, tenant_id, proposal)
     if _stable(support) != _stable(proposal["support"]):

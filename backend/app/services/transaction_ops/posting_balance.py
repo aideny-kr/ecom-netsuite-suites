@@ -138,7 +138,9 @@ def repriced_credit_balance(source, review, evidence, support, report, *, field_
                 "currency": source["currency"],
                 "amounts": amounts,
                 "sales_order_alignment": {
-                    "status": "required" if any(_money(v["delta"]) for v in alignment.values()) else "matched",
+                    "status": "observed_difference"
+                    if any(_money(v["delta"]) for v in alignment.values())
+                    else "matched",
                     "record_id": str(order["id"]),
                     "amounts": alignment,
                 },
@@ -151,7 +153,8 @@ def repriced_credit_balance(source, review, evidence, support, report, *, field_
                 "source_refunds_observed_at": source_refunds.get("observed_at"),
                 "accounting_book": book,
                 "source_revision": source["updated_at"],
-                "interpretation": "Invoice less the owned existing credit. Sales-order alignment is separate. "
+                "interpretation": "Invoice less the owned existing credit. A current-source difference does not "
+                "establish an error in the original sales order. "
                 "This is observed accounting evidence, not tax-policy approval or cash settlement certification.",
             }
     except (KeyError, TypeError, ValueError, ArithmeticError):

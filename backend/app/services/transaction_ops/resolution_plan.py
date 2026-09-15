@@ -25,6 +25,23 @@ def fingerprint(value):
 
 
 def rules_fingerprint(proposal):
+    if proposal.get("execution_transport") == "mcp_record_api":
+        return fingerprint(
+            {
+                k: proposal.get(k)
+                for k in (
+                    "scope",
+                    "config_id",
+                    "connector_id",
+                    "connector_schema",
+                    "resolution_scope",
+                    "accounting_book",
+                    "ar_account",
+                    "tax_account",
+                    "sales_adjustment_account",
+                )
+            }
+        )
     if proposal.get("kind") in {"credit_tax_reallocation", "sales_order_line_alignment"}:
         return fingerprint(
             {
@@ -164,6 +181,28 @@ def proposal_plan(proposal, report):
             target_total=predecessor["expected_after"]["total"],
             evidence_basis="verified_existing_credit_tax_allocation",
         )
+    restriction = proposal.get("resolution_scope")
+    protected = (restriction or {}).get("preserve_records") or []
+    if proposal.get("execution_transport") == "mcp_record_api":
+        protected = [
+            {"record_type": "invoice", "record_id": invoice_id},
+            {"record_type": "salesorder", "record_id": order_id},
+        ]
+    preserve_only = bool(protected and not order_step)
+    dependent = (
+        {
+            "id": "preserved_records",
+            "title": "Verify protected records remain unchanged",
+            "status": "waiting",
+            "depends_on": ["posting"],
+            "read_only": True,
+            "records": protected,
+            "note": "This correction preserves these records. "
+            "A separate amendment needs independent evidence and approval.",
+        }
+        if preserve_only
+        else sales_order
+    )
     return {
         "version": 1,
         "plan_id": plan_id,
@@ -179,12 +218,12 @@ def proposal_plan(proposal, report):
         "approval": {"mode": "human", "policy_id": None, "automatic_approval_enabled": False},
         "steps": [
             posting,
-            sales_order,
+            dependent,
             {
                 "id": "reconcile",
                 "title": "Reconcile the complete order",
                 "status": "waiting",
-                "depends_on": ["posting", "sales_order"],
+                "depends_on": ["posting", dependent["id"]],
                 "verification_scope": "order_total_tax_refunds",
             },
         ],

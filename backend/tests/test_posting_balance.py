@@ -43,7 +43,7 @@ def test_net_and_tax_reclassification_has_zero_gross_variance_and_separate_order
     assert args == before
 
 
-def test_corrected_credit_matches_posting_but_keeps_stale_order_open_even_with_locked_period():
+def test_corrected_credit_matches_posting_without_inferring_original_order_error():
     args = inputs()
     support = args[3]
     support["period"].update(closed=True, arLocked=True, allLocked=True)
@@ -52,7 +52,7 @@ def test_corrected_credit_matches_posting_but_keeps_stale_order_open_even_with_l
     support["credit_gl"]["rows"].append({"account": "13", "accountingbook": "1", "debit": "40"})
     result = repriced_credit_balance(*args)
     assert result["status"] == "matched"
-    assert result["sales_order_alignment"]["status"] == "required"
+    assert result["sales_order_alignment"]["status"] == "observed_difference"
 
 
 def test_reported_433_80_credit_preserves_gross_and_exposes_33_80_tax_reclassification():

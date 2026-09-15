@@ -197,6 +197,17 @@ def is_tax_update(record_type, fields):
 
 
 def review_for_card(db, tenant_id, tool_name, record_type, normalized):
+    info = getattr(db, "info", {})
+    cached = info.get("accounting_correction_candidate") if isinstance(info, dict) else None
+    if (
+        record_type.lower() == "creditmemo"
+        and normalized.record_id
+        and isinstance(cached, dict)
+        and cached.get("execution_transport") == "mcp_record_api"
+    ):
+        from app.services.transaction_ops.credit_api_correction import review_for_card as credit_review
+
+        return credit_review(db, tenant_id, tool_name, record_type, normalized)
     from app.services.transaction_ops import sales_order_alignment
 
     if sales_order_alignment.is_update(record_type, normalized):
@@ -282,6 +293,10 @@ async def revalidate(db, tenant_id, proposal):
 
 
 async def verify_after(db, tenant_id, proposal, receipt=None):
+    if proposal.get("execution_transport") == "mcp_record_api":
+        from app.services.transaction_ops.credit_api_correction import verify_after as verify_credit
+
+        return await verify_credit(db, tenant_id, proposal, receipt)
     if proposal.get("kind") in {"credit_tax_reallocation", "sales_order_line_alignment"}:
         from app.services.transaction_ops.native_accounting_service import verify_after as verify_native
 
@@ -358,6 +373,14 @@ async def verify_after(db, tenant_id, proposal, receipt=None):
 
 
 async def validate_approved(db, tenant_id, tool_name, tool_input, proposal):
+    if proposal and proposal.get("case_id"):
+        from app.services.transaction_ops.case_resolution_scope import validate
+
+        await validate(db, tenant_id, proposal)
+    if (proposal or {}).get("execution_transport") == "mcp_record_api":
+        from app.services.transaction_ops.credit_api_correction import validate_approved as validate_credit
+
+        return await validate_credit(db, tenant_id, tool_name, tool_input, proposal)
     if tool_name == "transaction_ops_accounting_amendment_apply":
         from app.services.transaction_ops.native_accounting_service import validate_binding
 
@@ -418,6 +441,11 @@ async def validate_approved(db, tenant_id, tool_name, tool_input, proposal):
 
 
 def approval_text(p):
+    if p.get("execution_transport") == "mcp_record_api":
+        return (
+            f"Correct existing credit allocation for {p['order_reference']}. "
+            "The invoice and sales order are preserved. Review the exact amounts and accounting basis below."
+        )
     if p.get("kind") == "sales_order_source_alignment":
         return (
             f"Align sales order {p['order_reference']} with the finalized source. "
@@ -463,7 +491,13 @@ async def candidate_confirmation(*, db, tenant_id, actor_id, correlation_id, ses
         return None
     if not p or p.get("case_id") != case_id:
         return None
-    if p.get("kind") in {"credit_tax_reallocation", "sales_order_line_alignment"}:
+    from app.services.transaction_ops.case_resolution_scope import validate
+
+    await validate(db, tenant_id, p)
+    if (
+        p.get("kind") in {"credit_tax_reallocation", "sales_order_line_alignment"}
+        and p.get("execution_transport") != "mcp_record_api"
+    ):
         from app.services.transaction_ops.native_accounting_service import confirmation
 
         return await confirmation(db, tenant_id, actor_id, session_id, p, policy, correlation_id)
@@ -481,7 +515,10 @@ async def candidate_confirmation(*, db, tenant_id, actor_id, correlation_id, ses
         raise ValueError("The configured policy blocks this correction.")
     if await classify_connector_mutation(name, db, tenant_id) != mutation:
         raise ValueError("The scoped connector does not expose a verified update operation.")
-    if p.get("kind") in {"invoice_sales_adjustment", "sales_order_source_alignment"}:
+    if (
+        p.get("kind") in {"invoice_sales_adjustment", "sales_order_source_alignment"}
+        or p.get("execution_transport") == "mcp_record_api"
+    ):
         from app.services.chat.record_metadata_service import prefetch_scoped_invoice_metadata
 
         await prefetch_scoped_invoice_metadata(db, tenant_id, actor_id, p, correlation_id)

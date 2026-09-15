@@ -190,6 +190,27 @@ async def prepare_next(db, tenant_id, message, actor_id):
     from app.services.transaction_ops.tax_correction import candidate_confirmation
 
     p = message.structured_output["accounting_review"]
+    from app.services.transaction_ops.case_resolution_scope import load
+
+    restriction = await load(db, tenant_id, p["case_id"])
+    if restriction and restriction["allowed_mutations"] == [
+        {k: p.get(k) for k in ("kind", "record_type", "record_id")}
+    ]:
+        return None, {
+            "status": "scope_complete",
+            "reasons": [
+                "No additional record amendments are authorized by this case scope. "
+                "Verify the correction and preserve the invoice and sales order."
+            ],
+        }
+    if p.get("execution_transport") == "mcp_record_api":
+        return None, {
+            "status": "independent_review_required",
+            "reasons": [
+                "The credit correction does not establish an error in the original invoice or sales order. "
+                "Investigate any remaining discrepancy independently before proposing another amendment."
+            ],
+        }
     db.info.pop("accounting_correction_candidate", None)
     result = await execute_accounting_evidence(
         {"case_id": p["case_id"]},

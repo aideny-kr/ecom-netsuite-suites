@@ -337,6 +337,7 @@ async def collect_support(db, tenant_id, source, review, evidence, *, field_map=
 
 def solution_summary(intent):
     """Bounded, exact treatment for investigation; never implies a ready card."""
+    api = intent.get("execution_transport") == "mcp_record_api"
     return {
         "kind": KIND,
         "status": intent["status"],
@@ -353,9 +354,12 @@ def solution_summary(intent):
         "approval_basis": intent["approval_basis"],
         "remaining_requirements": [
             "Verify account tax treatment and source authority.",
-            "Enable the account-scoped native amendment connection and validate its unsaved tax preview.",
+            "Validate the connected MCP update schema and exact keyed-line payload."
+            if api
+            else "Verify the available connector supports the required exact amendment.",
             "Obtain exact human approval after fresh source, ledger and application preflight.",
-            "Prepare the separate sales-order alignment; retain the paid invoice and existing cash/refund records.",
+            "Preserve the invoice, sales order and existing cash/refund records during this correction. "
+            "Any separate original-order error needs independent evidence and approval.",
         ],
         "executable": False,
         "financial_write_authorized": False,

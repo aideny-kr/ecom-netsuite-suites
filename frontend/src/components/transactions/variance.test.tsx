@@ -18,7 +18,9 @@ it("shows the posting amounts and keeps the non-posting order alignment separate
   expect(posting.getByText("+33.80")).toBeInTheDocument();
   expect(posting.getByText("3621.20")).toBeInTheDocument();
   expect(posting.queryByText("-433.80")).not.toBeInTheDocument();
-  expect(screen.getByText(/alignment needed/)).toBeInTheDocument();
+  expect(screen.getByText(/original order comparison/)).toBeInTheDocument();
+  expect(screen.getByText(/only if separate evidence/)).toBeInTheDocument();
+  expect(screen.queryByText(/alignment needed/)).not.toBeInTheDocument();
   expect(screen.getByText("-433.80")).toBeInTheDocument();
 });
 

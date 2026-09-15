@@ -74,9 +74,10 @@ export function PostingBalanceComparison({ posting }: { posting: Record<string, 
       })}</tbody>
     </table>
     <div className="border-t pt-2 text-muted-foreground">
-      <p className="font-medium">Sales order · non-posting{alignment.status === "required" ? " · alignment needed" : " · aligned"}</p>
-      {alignment.status === "required" && <p className="mt-1">Total variance <span className="font-mono">{deltaValue(objectValue(orderAmounts.order_total).delta).text}</span>
+      <p className="font-medium">Sales order · non-posting{alignment.status === "matched" ? " · amounts agree" : " · original order comparison"}</p>
+      {alignment.status !== "matched" && <p className="mt-1">Current source − original order <span className="font-mono">{deltaValue(objectValue(orderAmounts.order_total).delta).text}</span>
         {" · Tax "}<span className="font-mono">{deltaValue(objectValue(orderAmounts.tax).delta).text}</span></p>}
+      {alignment.status !== "matched" && <p className="mt-1">A later credit can explain this difference. Amend the original order only if separate evidence shows it was incorrect.</p>}
       {typeof posting.observed_at === "string" && <p className="mt-1">Accounting evidence: {posting.observed_at.replace("T", " ").replace(/\.\d+(?:\+00:00|Z)$/, " UTC")}</p>}
     </div>
   </div>;

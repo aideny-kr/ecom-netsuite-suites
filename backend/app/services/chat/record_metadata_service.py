@@ -176,6 +176,7 @@ async def prefetch_scoped_invoice_metadata(db, tenant_id, actor_id, proposal, co
     if p.get("tenant_id") != str(tenant_id) or (p.get("kind"), p.get("record_type")) not in {
         ("invoice_sales_adjustment", "invoice"),
         ("sales_order_source_alignment", "salesorder"),
+        ("credit_tax_reallocation", "creditmemo"),
     }:
         raise ValueError("Native accounting record metadata requires the current scoped accounting proposal.")
     connector = await get_mcp_connector(db, UUID(p["connector_id"]), tenant_id)
@@ -188,7 +189,7 @@ async def prefetch_scoped_invoice_metadata(db, tenant_id, actor_id, proposal, co
     ):
         raise ValueError("The accounting record metadata connector/account binding changed.")
     record_type = p["record_type"]
-    native_type = "salesOrder" if record_type == "salesorder" else "invoice"
+    native_type = {"salesorder": "salesOrder", "creditmemo": "creditMemo", "invoice": "invoice"}[record_type]
     key = _scoped_cache_key(connector, tenant_id, actor_id, record_type)
     hit = _cache.get(key)
     if hit and time.monotonic() - hit[0] < _TTL_SECONDS:

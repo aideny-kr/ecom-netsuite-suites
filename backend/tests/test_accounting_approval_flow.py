@@ -70,10 +70,18 @@ async def test_group_handoff_emits_one_real_card_without_another_model_hop():
 
 
 def kind_proposal(kind):
-    if kind == "native_credit":
+    if kind in {"native_credit", "api_credit"}:
         from tests.test_native_accounting_service import prepared
 
-        return prepared()[0]
+        p, data = prepared()
+        if kind == "api_credit":
+            p["execution_transport"] = "mcp_record_api"
+            p["connector_id"] = proposal()["connector_id"]
+            p["connector_schema"] = {"fields_digest": "verified-schema"}
+            p["protected_sales_order"] = data[2]["sections"]["sales_order"]
+            for key in ("native_profile", "native_request", "native_preview"):
+                p.pop(key)
+        return p
     if kind == "sales_order":
         from app.services.transaction_ops.sales_order_alignment import build_candidate as build_order
         from tests.test_sales_order_alignment import inputs as order_inputs
@@ -101,7 +109,10 @@ def kind_proposal(kind):
 
 
 def inputs(p):
-    if p.get("kind") in {"credit_tax_reallocation", "sales_order_line_alignment"}:
+    if (
+        p.get("kind") in {"credit_tax_reallocation", "sales_order_line_alignment"}
+        and p.get("execution_transport") != "mcp_record_api"
+    ):
         from app.services.transaction_ops.native_accounting_service import TOOL, signed_input
 
         return TOOL, signed_input(p)
@@ -178,12 +189,12 @@ async def test_agent_emits_exact_accounting_card_without_executing_or_duplicate_
     "kind,outcome",
     [
         (kind, outcome)
-        for kind in ("tax", "credit", "discount", "sales_order", "native_credit")
+        for kind in ("tax", "credit", "discount", "sales_order", "native_credit", "api_credit")
         for outcome in ("stale", "verified", "unverified", "rejected")
     ]
     + [
         (kind, outcome)
-        for kind in ("credit", "discount", "sales_order", "native_credit")
+        for kind in ("credit", "discount", "sales_order", "native_credit", "api_credit")
         for outcome in ("unknown_verified", "unknown_missing", "unreadable_verified")
     ],
 )
@@ -329,7 +340,7 @@ async def test_approval_preflight_execution_verification_and_actor_audit(outcome
             recheck.assert_not_awaited()
 
 
-@pytest.mark.parametrize("kind", ["tax", "credit", "discount", "sales_order"])
+@pytest.mark.parametrize("kind", ["tax", "credit", "discount", "sales_order", "api_credit"])
 @pytest.mark.parametrize("blocked", [None, "validation", "policy", "tenant", "unavailable_tool"])
 async def test_fresh_evidence_generates_real_card_without_second_model_hop(blocked, kind):
     p = kind_proposal(kind)
@@ -337,6 +348,7 @@ async def test_fresh_evidence_generates_real_card_without_second_model_hop(block
     name, params = inputs(p)
     db = AsyncMock(spec=AsyncSession)
     db.info = {}
+    db.scalar.return_value = None  # No persisted case-specific scope restriction.
     agent = UnifiedAgent(tenant_id=_TENANT_ID, user_id=_USER_ID, correlation_id=str(uuid.uuid4()))
     read_name = "transaction_ops_accounting_evidence"
     agent._tool_defs = [{"name": read_name}]
@@ -401,7 +413,7 @@ async def test_fresh_evidence_generates_real_card_without_second_model_hop(block
         assert len(cards) == 1
         assert cards[0]["record_id"] == (None if kind == "credit" else p["record_id"])
         assert cards[0]["target_account"] == p["scope"]["netsuite_account_id"]
-        assert cards[0]["target_environment"] == "PRODUCTION"
+        assert cards[0]["target_environment"] == ("SANDBOX" if kind == "api_credit" else "PRODUCTION")
         assert cards[0]["tool_input"] == params
         assert cards[0]["accounting_review"] == p
         result = next(v for k, v in events if k == "response")

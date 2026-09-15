@@ -419,6 +419,9 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
 
             db.info.pop("accounting_correction_candidate", None)
             return await read_observation(db, tenant_id, actor.id, case.id, params, context.get("correlation_id"))
+        from app.services.transaction_ops import case_resolution_scope
+
+        restriction = await case_resolution_scope.load(db, tenant_id, case.id)
         review = await accounting_context(db, tenant_id, case.scope_json, case.latest_report_json)
         native_profile = review.get("native_accounting_profile")
         native_fields = native_profile["fields"] if native_profile else None
@@ -576,6 +579,8 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
                         alignment = alignment_intent(
                             evidence["source_refresh"], evidence, intent, field_map=native_fields
                         )
+                        if alignment and not case_resolution_scope.allows(restriction, alignment):
+                            alignment = None
                         if alignment:
                             evidence["resolution_intents"].append(alignment)
                         evidence["credit_reallocation_support"] = support
@@ -590,11 +595,13 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
                                     alignment, review, evidence["sections"]["sales_order"], field_map=native_fields
                                 )
                             )
-                        if native_profile:
-                            from app.services.transaction_ops.native_accounting_service import preview_candidate
+                        from app.services.transaction_ops.credit_api_correction import prepare as prepare_credit_api
 
-                            correction = await preview_candidate(db, tenant_id, intent, review, native_profile)
-                    elif native_profile and support:
+                        correction = await prepare_credit_api(db, tenant_id, intent, evidence, restriction)
+                        if correction:
+                            evidence["native_preview_requests"] = []
+                            evidence["resolution_intents"] = [solution_summary(correction)]
+                    elif native_profile and support and restriction is None:
                         from app.services.transaction_ops.native_accounting_service import prepare_alignment
 
                         correction = await prepare_alignment(
@@ -609,7 +616,17 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
                         )
                 except (ValueError, KeyError, NetSuiteEvidenceError) as exc:
                     evidence["blockers"].append(f"credit_reallocation:{exc}")
+            if correction and not case_resolution_scope.allows(restriction, correction):
+                correction = None
+                evidence["blockers"].append("outside_case_resolution_scope")
+            if restriction:
+                evidence["resolution_scope"] = restriction
+                evidence["resolution_intents"] = [
+                    i for i in evidence.get("resolution_intents", []) if case_resolution_scope.allows(restriction, i)
+                ]
             if correction:
+                if restriction:
+                    correction["resolution_scope"] = restriction
                 evidence["assessment"]["correction_ready"] = "ready_for_exact_human_approval"
                 evidence["blockers"] = [
                     b
