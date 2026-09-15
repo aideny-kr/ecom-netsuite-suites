@@ -40,3 +40,38 @@ def test_noninteractive_bootstrap_does_not_accept_or_echo_password():
     assert result.returncode == 1
     assert "interactive terminal" in result.stderr
     assert secret not in result.stdout + result.stderr
+
+
+def test_adoption_cli_requires_explicit_destination_identity():
+    result = subprocess.run(
+        [sys.executable, "-m", "app.cli.company", "adopt-existing"],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "SINGLE_COMPANY": "true"},
+    )
+    assert result.returncode == 1
+    assert "--expected-database, --tenant-id and --tenant-slug" in result.stderr
+
+
+def test_adoption_cli_refuses_wrong_database_without_printing_connection_details():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "app.cli.company",
+            "adopt-existing",
+            "--expected-database",
+            "wrong-db",
+            "--tenant-id",
+            "11111111-1111-1111-1111-111111111111",
+            "--tenant-slug",
+            "synthetic",
+            "--apply",
+        ],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "SINGLE_COMPANY": "true"},
+    )
+    assert result.returncode == 1
+    assert "Destination database does not match" in result.stderr
+    assert os.environ["DATABASE_URL"] not in result.stdout + result.stderr

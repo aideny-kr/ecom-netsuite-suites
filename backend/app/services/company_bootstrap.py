@@ -26,6 +26,90 @@ _SYSTEM_TENANT = uuid.UUID(int=0)  # Migration 080 seeds the shared metric catal
 _COMPANY_FLAGS = {"mcp_tools", "byok_ai", "custom_branding", "reconciliation", "celigo", "recon_resolution_ui"}
 
 
+async def adopt_existing_company(
+    db: AsyncSession,
+    *,
+    expected_tenant_id: uuid.UUID,
+    expected_slug: str,
+    expected_database: str,
+    apply: bool = False,
+) -> tuple[Tenant, bool]:
+    """Convert an already-isolated company; preview by default, never extract/delete.
+
+    The operator supplies the exact destination database, company UUID and slug.
+    Only the commercial plan/expiry change. Company configuration, permissions,
+    feature flags, credentials, schedules, approvals and workspace files survive.
+    This service owns its transaction and must use an otherwise clean session.
+    """
+    if not settings.SINGLE_COMPANY:
+        raise ValueError("Existing-company adoption requires SINGLE_COMPANY=true")
+    if db.new or db.dirty or db.deleted:
+        raise ValueError("Adoption requires a clean operator session")
+    if not expected_database or not expected_slug or expected_tenant_id == _SYSTEM_TENANT:
+        raise ValueError("An explicit destination database and company identity are required")
+    try:
+        database = (await db.execute(text("SELECT current_database()"))).scalar_one()
+        if database != expected_database:
+            raise ValueError("Destination database does not match the expected database")
+        # Serialize with bootstrap; block concurrent tenant creation until commit.
+        # row_security=off raises if RLS would hide a second company from this
+        # inventory. This command needs operator authority, never runtime bypass.
+        await db.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": _BOOTSTRAP_LOCK})
+        await db.execute(text("SET LOCAL row_security = off"))
+        await db.execute(text("LOCK TABLE tenants IN SHARE ROW EXCLUSIVE MODE"))
+        tenants = (await db.execute(select(Tenant).where(Tenant.id != _SYSTEM_TENANT).limit(2))).scalars().all()
+        if len(tenants) != 1:
+            raise ValueError("Adoption requires exactly one company in an isolated database; export/import first")
+        tenant = tenants[0]
+        if tenant.id != expected_tenant_id or tenant.slug != expected_slug:
+            raise ValueError("Company identity does not match the expected UUID and slug")
+        if not tenant.is_active:
+            raise ValueError("The company is deactivated; adoption will not reactivate it")
+        await set_tenant_context(db, str(tenant.id))
+        admin = (
+            await db.execute(
+                select(User.id)
+                .join(UserRole, UserRole.user_id == User.id)
+                .join(Role, Role.id == UserRole.role_id)
+                .where(
+                    User.tenant_id == tenant.id,
+                    UserRole.tenant_id == tenant.id,
+                    User.is_active.is_(True),
+                    Role.name == "admin",
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if admin is None:
+            raise ValueError("An active company administrator is required; adoption will not grant roles")
+        changed = tenant.plan != "self_hosted" or tenant.plan_expires_at is not None
+        if not apply or not changed:
+            # Release locks even for previews and idempotent reruns. No DML.
+            await db.commit()
+            return tenant, False
+        previous = {
+            "plan": tenant.plan,
+            "plan_expires_at": (tenant.plan_expires_at.isoformat() if tenant.plan_expires_at else None),
+        }
+        tenant.plan = "self_hosted"
+        tenant.plan_expires_at = None
+        await log_event(
+            db,
+            tenant.id,
+            category="auth",
+            action="company.adopt",
+            actor_type="system",
+            resource_type="tenant",
+            resource_id=str(tenant.id),
+            payload={"before": previous, "after": {"plan": "self_hosted", "plan_expires_at": None}},
+        )
+        await db.commit()
+        return tenant, True
+    except Exception:
+        await db.rollback()
+        raise
+
+
 async def validate_company_database(db: AsyncSession) -> Tenant:
     """Fail closed if dedicated mode points at an empty or shared database."""
     tenants = (await db.execute(select(Tenant).where(Tenant.id != _SYSTEM_TENANT).limit(2))).scalars().all()

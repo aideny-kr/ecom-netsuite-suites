@@ -94,5 +94,9 @@ never delete tenants to make the check pass. If a workflow cannot compile, check
 the AI key, connected data sources and supported step types. Refer to job run
 history for budget/error/approval outcomes.
 
+For a hosted company with existing users and data, follow
+[Existing company preparation](EXISTING-COMPANY.md). The guarded adoption command
+only converts an already-isolated database; it does not export or restore data.
+
 The implementation does not change the repository's license, publish code,
 migrate Framework, or deploy customer hosting. Those remain separate work.
