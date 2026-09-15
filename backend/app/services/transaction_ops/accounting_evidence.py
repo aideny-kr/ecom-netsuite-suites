@@ -509,6 +509,25 @@ def completion_evidence_summary(evidence):
         "assessment": evidence.get("assessment"),
         "candidate_available": bool(evidence.get("correction_candidate")),
         "execution_capabilities": (evidence.get("resolution_assessment") or {}).get("execution_capabilities"),
+        "solution_status": (evidence.get("resolution_assessment") or {}).get("status"),
+        "selected_treatment": (evidence.get("resolution_assessment") or {}).get("selected_treatment"),
+        "posting_balance": {
+            k: v
+            for k, v in (evidence.get("posting_balance") or {}).items()
+            if k
+            in {
+                "status",
+                "basis",
+                "currency",
+                "amounts",
+                "sales_order_alignment",
+                "observed_at",
+                "accounting_book",
+                "interpretation",
+            }
+        }
+        if isinstance(evidence.get("posting_balance"), dict)
+        else None,
         "line_comparison": evidence.get("line_comparison"),
         "source_revision_deltas": evidence.get("source_revision_deltas"),
         "resolution_intents": evidence.get("resolution_intents") or [],

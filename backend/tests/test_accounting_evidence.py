@@ -10,6 +10,29 @@ def collection(rows, complete=True):
     return dict(items=rows, count=len(rows), totalResults=len(rows), hasMore=not complete)
 
 
+def test_model_summary_retains_correct_posting_comparison_and_solution_without_implying_approval():
+    posting = {
+        "amounts": {"order_total": {"delta": "0.00"}, "tax": {"delta": "-33.80"}},
+        "sales_order_alignment": {"amounts": {"order_total": {"delta": "-433.80"}}},
+    }
+    result = mod.completion_evidence_summary(
+        {
+            "posting_balance": {**posting, "internal_debug": "omit from model context"},
+            "resolution_assessment": {
+                "status": "solution_identified",
+                "selected_treatment": "credit_tax_reallocation",
+            },
+        }
+    )
+    assert result["posting_balance"] == posting
+    assert result["solution_status"] == "solution_identified"
+    assert result["selected_treatment"] == "credit_tax_reallocation"
+    assert result["candidate_available"] is False
+    empty = mod.completion_evidence_summary({})
+    assert empty["posting_balance"] is None
+    assert empty["solution_status"] is None and empty["selected_treatment"] is None
+
+
 @pytest.fixture
 def native(monkeypatch):
     documents = {
