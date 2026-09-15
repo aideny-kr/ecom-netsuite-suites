@@ -11,12 +11,18 @@ from tests.test_native_accounting_service import prepared
 
 
 def schema(fields):
-    props = {k: {"type": "number"} for k in fields}
+    props = {
+        k: {"type": "boolean" if isinstance(v, bool) else "object" if isinstance(v, dict) else "number"}
+        for k, v in fields.items()
+    }
     props["item"] = {
         "properties": {
             "items": {
                 "items": {
-                    "properties": {k: {"type": "number"} for k in fields["item"]["items"][0]},
+                    "properties": {
+                        k: {"type": "boolean" if isinstance(v, bool) else "integer" if k == "line" else "number"}
+                        for k, v in fields["item"]["items"][0].items()
+                    },
                     "x-ns-sublistkey": {"value": {"existing": ["line"]}},
                 }
             }
@@ -171,6 +177,7 @@ async def test_actual_preflight_rejects_changed_evidence_before_dispatch(monkeyp
         connection_active=True,
     )
     raw = schema(p["proposed_fields"])
+    p["proposed_fields"] = api.typed_fields(raw, p["proposed_fields"])
     if drift == "connection":
         review["native_mcp_connector_id"] = str(uuid4())
     elif drift == "source":
@@ -218,3 +225,22 @@ async def test_actual_preflight_rejects_changed_evidence_before_dispatch(monkeyp
     else:
         await api.validate_approved(db, p["tenant_id"], tool, payload, p)
         assert reader.request.await_args.args == ("GET", "/record/v1/metadata-catalog/creditMemo")
+
+
+def test_mcp_payload_uses_exact_json_numbers_for_numeric_schema_fields():
+    import json
+    from decimal import Decimal
+
+    p = proposed()
+    p["proposed_fields"]["taxRate"] = "8.4500000"
+    p["proposed_fields"]["item"]["items"][0].update(rate="400.01", amount="400.01")
+    fields = api.typed_fields(schema(p["proposed_fields"]), p["proposed_fields"])
+    parsed = json.loads(json.dumps(fields), parse_float=Decimal)
+    assert parsed["taxRate"] == Decimal("8.4500000")
+    assert parsed["item"]["items"][0]["amount"] == Decimal("400.01")
+    assert isinstance(parsed["item"]["items"][0]["line"], int)
+    assert parsed["item"]["items"][0]["isTaxable"] is True
+    assert isinstance(parsed["taxItem"]["id"], str)
+    assert not isinstance(fields["taxRate"], str)
+    with pytest.raises(ValueError, match="precision_loss"):
+        api.typed_fields({"properties": {"rate": {"type": "number"}}}, {"rate": "0.1234567890123456789"})

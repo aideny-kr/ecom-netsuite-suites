@@ -22,6 +22,37 @@ def _json(value):
     return json.loads(json.dumps(value, default=str))
 
 
+def typed_fields(raw, fields):
+    """Serialize numeric schema fields as JSON numbers without changing value.
+
+    Accounting arithmetic stays Decimal. At the connector boundary require the
+    JSON number to round-trip to exactly the same decimal; reject precision loss.
+    Reference IDs remain strings and booleans remain booleans.
+    """
+
+    def convert(value, spec):
+        kind = spec.get("type")
+        if kind in ("number", "integer"):
+            if isinstance(value, bool):
+                raise ValueError("credit_api_invalid_numeric_field")
+            amount = Decimal(str(value))
+            if not amount.is_finite() or (kind == "integer" and amount != amount.to_integral_value()):
+                raise ValueError("credit_api_invalid_numeric_field")
+            number = int(amount) if amount == amount.to_integral_value() else float(amount)
+            # MCP uses JavaScript numbers: integers must also fit its exact range.
+            if abs(amount) > 2**53 - 1 or Decimal(json.dumps(number, allow_nan=False)) != amount:
+                raise ValueError("credit_api_numeric_precision_loss")
+            return number
+        if isinstance(value, dict):
+            props = spec.get("properties") or {}
+            return {k: convert(v, props.get(k) or {}) for k, v in value.items()}
+        if isinstance(value, list):
+            return [convert(v, spec.get("items") or {}) for v in value]
+        return value
+
+    return convert(fields, raw)
+
+
 def schema_contract(raw, fields):
     props = raw.get("properties") or {}
     item = (((props.get("item") or {}).get("properties") or {}).get("items") or {}).get("items") or {}
@@ -54,6 +85,7 @@ async def prepare(db, tenant_id, intent, evidence, restriction):
     ) as reader:
         raw = await reader.request("GET", "/record/v1/metadata-catalog/creditMemo")
     proposal = deepcopy(intent)
+    proposal["proposed_fields"] = typed_fields(raw, proposal["proposed_fields"])
     proposal.update(
         execution_transport="mcp_record_api",
         connector_schema=schema_contract(raw, proposal["proposed_fields"]),
@@ -147,9 +179,7 @@ async def validate_approved(db, tenant_id, tool_name, tool_input, p):
     if _stable(support) != _stable(p["support"]):
         raise ValueError("credit_api_subledger_changed")
     rebuilt = build_intent(tenant_id, p["case_id"], source, review, evidence, support)
-    if not rebuilt or any(
-        rebuilt[k] != p[k] for k in ("record_id", "proposed_fields", "expected_after", "expected_ledger")
-    ):
+    if not rebuilt or any(rebuilt[k] != p[k] for k in ("record_id", "expected_after", "expected_ledger")):
         raise ValueError("credit_api_treatment_changed")
     async with authenticated_reader(
         db, tenant_id, p["connection_id"], p["scope"]["netsuite_account_id"], max_api_calls=1
@@ -157,6 +187,8 @@ async def validate_approved(db, tenant_id, tool_name, tool_input, p):
         raw = await reader.request("GET", "/record/v1/metadata-catalog/creditMemo")
     if schema_contract(raw, p["proposed_fields"]) != p["connector_schema"]:
         raise ValueError("credit_api_schema_changed")
+    if typed_fields(raw, rebuilt["proposed_fields"]) != p["proposed_fields"]:
+        raise ValueError("credit_api_treatment_changed")
 
 
 def verify_evidence(p, support):
@@ -198,7 +230,7 @@ def verify_evidence(p, support):
         if old.get(key) != after.get(key):
             raise ValueError("credit_api_line_identity_changed")
     if (
-        any(Decimal(str(after[k])) != Decimal(amendment[k]) for k in ("amount", "rate"))
+        any(Decimal(str(after[k])) != Decimal(str(amendment[k])) for k in ("amount", "rate"))
         or after.get("isTaxable") is not True
     ):
         raise ValueError("credit_api_line_values_mismatch")
