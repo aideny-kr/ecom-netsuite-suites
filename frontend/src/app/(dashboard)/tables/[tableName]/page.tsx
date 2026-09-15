@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useMemo } from "react";
-import { useParams, useSearchParams } from "next/navigation";
+import { useParams, useSearchParams, useRouter } from "next/navigation";
 import { type SortingState } from "@tanstack/react-table";
 import { useTableData } from "@/hooks/use-table-data";
 import { DataTable } from "@/components/data-table";
@@ -12,6 +12,7 @@ import { RowDetailDrawer } from "@/components/row-detail-drawer";
 import { transactionColumns } from "@/components/transactions/columns";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/providers/auth-provider";
+import { parseTransactionView } from "@/components/transactions/navigation";
 import { TransactionWorkspace } from "@/components/transactions/workspace";
 
 export default function TablePage() {
@@ -19,8 +20,12 @@ export default function TablePage() {
   const tableName = params.tableName;
   const { user } = useAuth();
   const searchParams = useSearchParams();
+  const router = useRouter();
   const payoutId = tableName === "payout_lines" ? searchParams.get("payout_id") : null;
-  if (tableName === "orders") return <TransactionWorkspace key={user?.tenant_id} />;
+  if (tableName === "orders") return <TransactionWorkspace key={user?.tenant_id} view={parseTransactionView(searchParams.get("view"))} onViewChange={view => {
+    const params = new URLSearchParams(searchParams.toString()); params.set("view", view);
+    router.push(`/tables/orders?${params}`, { scroll: false });
+  }} />;
   return <TableContent key={`${user?.tenant_id}:${tableName}:${payoutId}`} tableName={tableName} payoutId={payoutId} />;
 }
 

@@ -1,5 +1,10 @@
 "use client";
 
+import Link from "next/link";
+import { usePathname } from "next/navigation";
+import { SettingsSections, SettingsSection } from "@/components/settings/settings-sections";
+import { ConnectionGroup } from "@/components/settings/connection-group";
+import { ConnectionOverview } from "@/components/settings/connection-overview";
 import { useState, useEffect, useCallback, Component, type ReactNode, type ErrorInfo } from "react";
 import {
   useMcpConnectors,
@@ -62,7 +67,6 @@ import { JobsSection } from "@/components/settings/jobs-section";
 import { NetSuiteConnectionsSection } from "@/components/settings/netsuite-connections-section";
 import { BigQueryConnectionSection } from "@/components/settings/bigquery-connection-section";
 import { DataSourceConnectorsSection } from "@/components/settings/data-source-connectors-section";
-import CeligoConnectorCard from "@/components/settings/celigo-connector-card";
 
 import { usePermissions } from "@/hooks/use-permissions";
 import { useAuth } from "@/providers/auth-provider";
@@ -958,7 +962,7 @@ function TenantProfileSection() {
       );
       setProfile(updated);
       setIsEditing(false);
-      toast({ title: "Tenant profile saved" });
+      toast({ title: "Company profile saved" });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to save profile");
     } finally {
@@ -972,7 +976,7 @@ function TenantProfileSection() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
-          <h3 className="text-lg font-semibold">Tenant Profile</h3>
+          <h3 className="text-lg font-semibold">Company profile</h3>
           <p className="mt-0.5 text-[13px] text-muted-foreground">
             Your business profile used for AI context
           </p>
@@ -1018,6 +1022,7 @@ function TenantProfileSection() {
                 {INDUSTRIES.map((ind) => (
                   <button
                     key={ind}
+                    aria-pressed={industry === ind}
                     onClick={() => setIndustry(ind)}
                     className={`rounded-lg border px-3 py-2 text-[13px] text-left transition-colors ${industry === ind
                       ? "border-primary bg-primary/5 text-foreground"
@@ -1037,6 +1042,7 @@ function TenantProfileSection() {
               <textarea
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
+                aria-label="Business description"
                 placeholder="Describe your business..."
                 className="w-full rounded-lg border bg-background px-3 py-2 text-[13px] placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring min-h-[80px] resize-none"
               />
@@ -1053,6 +1059,7 @@ function TenantProfileSection() {
                 {TEAM_SIZES.map((size) => (
                   <button
                     key={size}
+                    aria-pressed={teamSize === size}
                     onClick={() => setTeamSize(size)}
                     className={`rounded-full border px-4 py-1.5 text-[12px] font-medium transition-colors ${teamSize === size
                       ? "border-primary bg-primary/5 text-foreground"
@@ -1066,7 +1073,7 @@ function TenantProfileSection() {
             </div>
 
             {error && (
-              <p className="text-[12px] text-destructive">{error}</p>
+              <p role="alert" className="text-[12px] text-destructive">{error}</p>
             )}
 
             <div className="flex items-center gap-2 pt-1">
@@ -1257,7 +1264,7 @@ function SoulSection() {
             </div>
 
             {error && (
-              <p className="text-[12px] text-destructive">{error}</p>
+              <p role="alert" className="text-[12px] text-destructive">{error}</p>
             )}
 
             <div className="flex items-center gap-2 pt-1">
@@ -2618,7 +2625,7 @@ function GovernancePolicySection() {
             </div>
 
             {error && (
-              <p className="text-[12px] text-destructive">{error}</p>
+              <p role="alert" className="text-[12px] text-destructive">{error}</p>
             )}
 
             <div className="flex items-center gap-2 pt-1">
@@ -2810,21 +2817,23 @@ class SectionErrorBoundary extends Component<
 // ---------------------------------------------------------------------------
 
 export default function SettingsPage() {
+  const initialSection = usePathname() === "/connections" ? "connections" : "workspace";
   const showBranding = useFeature("custom_branding");
-  const showCeligo = useFeature("celigo");
   const { isAdmin } = usePermissions();
   const { user } = useAuth();
 
   return (
     <div className="space-y-8 animate-fade-in">
       <div>
-        <h2 className="text-2xl font-semibold tracking-tight">Settings</h2>
-        <p className="mt-1 text-[15px] text-muted-foreground">
+        <p className="orbital-eyebrow">Workspace configuration</p>
+        <h1 className="mt-2 text-2xl font-medium tracking-tight">Settings</h1>
+        <p className="mt-2 text-[13px] text-muted-foreground">
           Configure your workspace and integrations
         </p>
       </div>
 
-      {/* My Account — visible to all */}
+      <SettingsSections initialSection={initialSection}>
+        <SettingsSection id="workspace" label="Workspace">
       {user && (
         <div className="rounded-xl border bg-card p-5 shadow-soft">
           <h3 className="text-lg font-semibold">My Account</h3>
@@ -2850,71 +2859,38 @@ export default function SettingsPage() {
         </div>
       )}
 
-      {/* Connection Status — non-admin only (admins see full management section) */}
-      {!isAdmin && <ConnectionStatusSection />}
-
-      {/* Plan Info Section — visible to all */}
-      <PlanInfoSection />
-
-      {/* Admin-only sections */}
-      {isAdmin && (
-        <>
-          {/* Branding Section */}
-          {showBranding && <BrandingSection />}
-
-          {/* AI Configuration Section */}
-          <AiConfigSection />
-
-          {/* Chat Settings (MCP Financial toggle) */}
-          <ChatSettingsSection />
-
-          {/* Tenant Profile Section */}
-          <TenantProfileSection />
-
-          {/* AI Personality & Core Logic (Soul) Section */}
-          <SoulSection />
-
-          {/* Team Section */}
-          <SectionErrorBoundary name="Team">
-            <TeamSection />
-          </SectionErrorBoundary>
-
-          {/* Scheduled Jobs */}
-          <SectionErrorBoundary name="Scheduled Jobs">
-            <JobsSection />
-          </SectionErrorBoundary>
-
-          {/* Connection & integration sections */}
-          <SectionErrorBoundary name="NetSuite Connections">
-            <NetSuiteConnectionsSection />
-          </SectionErrorBoundary>
-          <SectionErrorBoundary name="BigQuery">
-            <BigQueryConnectionSection />
-          </SectionErrorBoundary>
-          <SectionErrorBoundary name="Data Source Connectors">
-            <DataSourceConnectorsSection />
-          </SectionErrorBoundary>
-          <SectionErrorBoundary name="NetSuite Metadata">
-            <NetSuiteMetadataSection />
-          </SectionErrorBoundary>
-          <SectionErrorBoundary name="SuiteScript Files">
-            <SuiteScriptFilesSection />
-          </SectionErrorBoundary>
-          <SectionErrorBoundary name="Governance Policy">
-            <GovernancePolicySection />
-          </SectionErrorBoundary>
-          {/* Connecting/disconnecting Celigo is configuration and belongs here.
-              The flow map itself lives on the workspace ("Celigo flows" surface)
-              -- it is a diagnostic tool used beside script source, not a
-              setting, and Settings is not where anyone goes to ask why a charge
-              went unmatched. */}
-          {showCeligo && (
-            <SectionErrorBoundary name="Celigo">
-              <CeligoConnectorCard />
-            </SectionErrorBoundary>
-          )}
-        </>
-      )}
+          <PlanInfoSection />
+          {isAdmin && <>
+            <TenantProfileSection />
+            {showBranding && <BrandingSection />}
+          </>}
+        </SettingsSection>
+        <SettingsSection id="connections" label="Connections">
+          <ConnectionOverview />
+          {!isAdmin && <ConnectionStatusSection />}
+          {isAdmin && <>
+            <ConnectionGroup title="NetSuite" description="API access and agent tools, with separate authorizations and verification."><SectionErrorBoundary name="NetSuite Connections"><NetSuiteConnectionsSection /></SectionErrorBoundary></ConnectionGroup>
+            <ConnectionGroup title="BigQuery" description="Project, service account, datasets and query location."><SectionErrorBoundary name="BigQuery"><BigQueryConnectionSection /></SectionErrorBoundary></ConnectionGroup>
+            <ConnectionGroup title="Data sources & exports" description="Stripe reconciliation, NetSuite deposits and Google Sheets."><SectionErrorBoundary name="Data Source Connectors"><DataSourceConnectorsSection /></SectionErrorBoundary></ConnectionGroup>
+          </>}
+        </SettingsSection>
+        <SettingsSection id="agent" label="Agent">
+          <div className="rounded-xl border bg-card p-5"><h3 className="font-semibold">Skills and company context</h3><p className="mt-2 text-sm text-muted-foreground">Browse expertise in <Link className="text-primary underline" href="/skills">Skills</Link> and review saved context in <Link className="text-primary underline" href="/settings#workspace">Company profile</Link>.</p></div>
+          {isAdmin && <><AiConfigSection /><ChatSettingsSection /><SoulSection /><SectionErrorBoundary name="Governance Policy"><GovernancePolicySection /></SectionErrorBoundary></>}
+          {!isAdmin && <p className="text-sm text-muted-foreground">An administrator manages agent configuration and approval policy.</p>}
+        </SettingsSection>
+        <SettingsSection id="team" label="Team & access">
+          {isAdmin ? <SectionErrorBoundary name="Team"><TeamSection /></SectionErrorBoundary> : <p className="text-sm text-muted-foreground">Contact your administrator to manage team members and access. Your current role is shown in Workspace.</p>}
+        </SettingsSection>
+        <SettingsSection id="advanced" label="Advanced">
+          <div className="rounded-xl border bg-card p-5"><h3 className="font-semibold">Activity and maintenance</h3><p className="mt-2 text-sm text-muted-foreground"><Link className="text-primary underline" href="/audit">Open audit log</Link> or <Link className="text-primary underline" href="/scheduled-jobs">manage workflows and run history</Link>.</p></div>
+          {isAdmin && <>
+            <SectionErrorBoundary name="Scheduled Jobs"><JobsSection /></SectionErrorBoundary>
+            <SectionErrorBoundary name="NetSuite Metadata"><NetSuiteMetadataSection /></SectionErrorBoundary>
+            <SectionErrorBoundary name="SuiteScript Files"><SuiteScriptFilesSection /></SectionErrorBoundary>
+          </>}
+        </SettingsSection>
+      </SettingsSections>
 
     </div>
   );

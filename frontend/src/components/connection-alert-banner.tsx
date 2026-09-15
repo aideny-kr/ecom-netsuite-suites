@@ -1,6 +1,7 @@
 "use client";
 
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import Link from "next/link";
 import { AlertTriangle, X } from "lucide-react";
 import { apiClient } from "@/lib/api-client";
 import { useConnectionAlerts } from "@/hooks/use-connection-alerts";
@@ -23,12 +24,12 @@ export function ConnectionAlertBanner() {
   const label = alert.connection_type === "mcp" ? "MCP" : "NetSuite";
 
   return (
-    <div className="bg-destructive/10 border-b border-destructive/20 px-4 py-3">
-      <div className="flex items-center gap-3 max-w-screen-xl mx-auto">
+    <div className="orbital-notice mx-4 mt-4 shrink-0 md:mx-8" data-tone="error" role="status">
+      <div className="flex w-full items-center gap-3">
         <AlertTriangle className="h-4 w-4 text-destructive shrink-0" />
-        <p className="text-[13px] text-destructive flex-1">
-          {label} connection lost — OAuth token refresh failed. Re-authorize in
-          Settings → Connections.
+        <p className="text-[13px] text-foreground flex-1">
+          {label} connection lost — OAuth token refresh failed.{" "}
+          <Link href="/settings#connections">Reconnect in Settings</Link>.
           {alerts.length > 1 && (
             <span className="text-destructive/70">
               {" "}

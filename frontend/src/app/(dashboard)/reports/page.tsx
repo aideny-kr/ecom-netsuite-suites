@@ -21,8 +21,9 @@ export default function ReportsPage() {
   return (
     <div className="space-y-6 animate-fade-in">
       <div>
-        <h2 className="text-2xl font-semibold tracking-tight">Reports</h2>
-        <p className="mt-1 text-[15px] text-muted-foreground">
+        <p className="orbital-eyebrow">Outputs and evidence</p>
+        <h1 className="mt-2 text-2xl font-medium tracking-tight">Reports</h1>
+        <p className="mt-2 text-[13px] text-muted-foreground">
           Published reports composed from your analytics
         </p>
       </div>
@@ -43,7 +44,7 @@ export default function ReportsPage() {
             <Link
               key={report.id}
               href={`/reports/${report.id}`}
-              className="group flex items-center gap-4 rounded-xl border bg-card p-5 shadow-soft transition-colors hover:bg-muted/30"
+              className="orbital-entry group flex items-center gap-4 rounded-xl border bg-card p-5"
             >
               <FileBarChart aria-hidden className="h-5 w-5 shrink-0 text-muted-foreground" />
               <div className="min-w-0 flex-1">
@@ -64,7 +65,7 @@ export default function ReportsPage() {
                 <button
                   type="button"
                   aria-label="Delete report"
-                  className="shrink-0 rounded-md p-1 text-muted-foreground opacity-0 transition-opacity hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100"
+                  className="shrink-0 rounded-md p-1 text-muted-foreground opacity-70 transition-opacity hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100"
                   onClick={(e) => {
                     e.preventDefault();
                     e.stopPropagation();

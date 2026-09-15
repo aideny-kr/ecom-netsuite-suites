@@ -601,9 +601,11 @@ export default function WorkspacePage() {
   // ── Render ──────────────────────────────────────────────────────────
   return (
     <TooltipProvider delayDuration={300}>
-      <div className="flex h-full flex-col">
+      <div className="flex h-full min-h-0 flex-col gap-5 p-4 md:p-7">
+        <header className="shrink-0"><p className="orbital-eyebrow">Build with context</p><h1 className="mt-2 text-2xl font-medium">Developer workspace</h1><p className="mt-2 text-[13px] text-muted-foreground">Edit files, work with your agent, and review changes before release.</p></header>
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border bg-card">
         {/* ═══ Toolbar ═══ */}
-        <div className="flex items-center gap-2 border-b px-3 py-1.5 bg-background shrink-0">
+        <div className="flex flex-wrap items-center gap-2 border-b px-3 py-2.5 bg-card shrink-0">
           <WorkspaceSelector
             workspaces={workspaces}
             selectedId={selectedWorkspaceId}
@@ -1287,6 +1289,7 @@ export default function WorkspacePage() {
             <Loader2 className="h-6 w-6 animate-spin text-muted-foreground/50" />
           </div>
         )}
+        </div>
       </div>
     </TooltipProvider>
   );

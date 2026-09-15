@@ -12,6 +12,7 @@ import type { ChartData } from "@/lib/types";
 import type { ChatSession, ChatSessionDetail, ChatMessage, StreamingToolCall } from "@/lib/types";
 import { SessionSidebar } from "@/components/chat/session-sidebar";
 import { MessageList } from "@/components/chat/message-list";
+import { ChatWelcome } from "@/components/chat/chat-welcome";
 import { ChatInput } from "@/components/chat/chat-input";
 import { useWorkspaces } from "@/hooks/use-workspace";
 import { useAgents } from "@/hooks/use-agents";
@@ -20,6 +21,12 @@ import { AlertCircle, X, PanelLeftOpen } from "lucide-react";
 export default function ChatPage() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [chatSidebarCollapsed, setChatSidebarCollapsed] = useState(false);
+  useEffect(() => {
+    const compact = window.matchMedia("(max-width: 767px)");
+    const sync = () => setChatSidebarCollapsed(compact.matches);
+    sync(); compact.addEventListener("change", sync);
+    return () => compact.removeEventListener("change", sync);
+  }, []);
   const searchParams = useSearchParams();
   const pinnedAgentId = searchParams?.get("agent") || null;
   const prefillMessage = searchParams?.get("prefill") || null;
@@ -673,21 +680,26 @@ export default function ChatPage() {
   );
 
   return (
-    <div className="flex h-full min-h-0 w-full min-w-0 animate-fade-in">
+    <div className="relative flex h-full min-h-0 w-full min-w-0 flex-col gap-5 p-4 md:p-7">
+      <header className="shrink-0"><p className="orbital-eyebrow">Your workspace</p><h1 className="mt-2 text-2xl font-medium">Chat</h1><p className="mt-2 text-[13px] text-muted-foreground">Ask a question, work through an idea, or continue a conversation.</p></header>
+      <div className="relative flex min-h-0 flex-1 gap-4">
+      {!chatSidebarCollapsed && <button className="absolute inset-0 z-10 bg-black/40 md:hidden" aria-label="Close chat history" onClick={() => setChatSidebarCollapsed(true)} />}
+      <div className="max-md:absolute max-md:inset-y-0 max-md:left-0 max-md:z-20">
       <SessionSidebar
-        variant="terminal"
+        variant="default"
         sessions={sessions}
         activeSessionId={activeSessionId}
-        onSelectSession={handleSelectSession}
+        onSelectSession={(id) => { handleSelectSession(id); if (window.matchMedia("(max-width: 767px)").matches) setChatSidebarCollapsed(true); }}
         onNewChat={handleNewChat}
         collapsed={chatSidebarCollapsed}
         onToggle={() => setChatSidebarCollapsed(!chatSidebarCollapsed)}
       />
-      <div className="relative flex min-w-0 flex-1 flex-col bg-[var(--chat-surface)]">
+      </div>
+      <div className="relative flex min-w-0 flex-1 flex-col overflow-hidden rounded-lg border bg-card">
         {chatSidebarCollapsed && (
           <button
             onClick={() => setChatSidebarCollapsed(false)}
-            className="absolute left-10 top-2 z-10 rounded-md p-1.5 text-[var(--chat-accent)] transition-colors hover:bg-[var(--chat-surface-mid)]"
+            className="absolute left-3 top-3 z-10 rounded-md border border-input bg-card p-2 text-primary transition-colors hover:border-primary hover:bg-accent"
             aria-label="Open chat history"
           >
             <PanelLeftOpen className="h-4 w-4" />
@@ -695,7 +707,8 @@ export default function ChatPage() {
         )}
         <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
           <MessageList
-            variant="terminal"
+            emptyState={<ChatWelcome />}
+            variant="default"
             messages={sessionDetail?.messages || []}
             isLoading={isLoadingDetail && !!activeSessionId}
             pendingUserMessage={pendingMessage}
@@ -747,7 +760,7 @@ export default function ChatPage() {
           </div>
         )}
         <ChatInput
-          variant="terminal"
+          variant="default"
           onSend={handleSend}
           onStop={handleStop}
           isLoading={isStreaming || createSession.isPending}
@@ -755,6 +768,7 @@ export default function ChatPage() {
           workspaceId={workspaces[0]?.id || null}
           initialMessage={composeMessage}
         />
+      </div>
       </div>
     </div>
   );
