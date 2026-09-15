@@ -79,7 +79,13 @@ async def candidates(db, tenant_id, now, *, limit):
                     ChatMessage.tenant_id == tenant_id,
                     or_(
                         so["accounting_review"]["kind"].astext.in_(
-                            ("sales_adjustment_credit", "invoice_sales_adjustment", "sales_order_source_alignment")
+                            (
+                                "sales_adjustment_credit",
+                                "invoice_sales_adjustment",
+                                "sales_order_source_alignment",
+                                "credit_tax_reallocation",
+                                "sales_order_line_alignment",
+                            )
                         ),
                         and_(
                             so["accounting_review"]["record_type"].astext == "invoice",

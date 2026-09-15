@@ -930,7 +930,19 @@ export interface SalesOrderAlignmentReview extends Omit<SalesCreditReview, "kind
   expected_after: { total: string; subtotal: string; taxTotal: string; discountTotal: string };
 }
 
-export type AccountingReview = InvoiceTaxReview | SalesCreditReview | InvoiceDiscountReview | SalesOrderAlignmentReview;
+interface NativeAccountingReviewBase extends AccountingReviewBase {
+  source: Record<string, unknown>;
+  invoice_id: string;
+  sales_adjustment_account: string;
+  tax_account: string;
+  expected_after: { total: string; subtotal: string; taxTotal: string };
+}
+
+export type NativeAccountingReview =
+  | (NativeAccountingReviewBase & { kind: "credit_tax_reallocation" })
+  | (NativeAccountingReviewBase & { kind: "sales_order_line_alignment" });
+
+export type AccountingReview = InvoiceTaxReview | SalesCreditReview | InvoiceDiscountReview | SalesOrderAlignmentReview | NativeAccountingReview;
 
 export interface AccountingGroup {
   group_id: string;
@@ -965,6 +977,7 @@ export interface WriteConfirmationData {
     sales_order?: Record<string, unknown>;
     credit_memo_id?: string;
     resolution?: Record<string, unknown>;
+    after?: { body: Record<string, unknown>; lines: Record<string, unknown>[] };
   } | null;
   accounting_group?: AccountingGroup | null;
   accounting_group_dispatch?: {

@@ -2545,8 +2545,16 @@ async def run_chat_turn(
                             from app.services.chat.tools import parse_external_tool_name as _parse_ext
                             from app.services.mcp_connector_service import get_mcp_connector as _get_conn
 
+                            _native_review = _so.get("accounting_review") or {}
+                            _native_amendment = _native_review.get("kind") in {
+                                "credit_tax_reallocation",
+                                "sales_order_line_alignment",
+                            }
                             _new_id = (
-                                _exec_result.get("recordId") or _exec_result.get("id") or _exec_result.get("internalId")
+                                _exec_result.get("recordId")
+                                or _exec_result.get("id")
+                                or _exec_result.get("internalId")
+                                or (_exec_result.get("record_id") if _native_amendment else None)
                                 if isinstance(_exec_result, dict)
                                 else None
                             )
@@ -2564,14 +2572,14 @@ async def run_chat_turn(
                                 # in production for a record deliberately kept
                                 # out of it. The connector id is recoverable
                                 # from the signed tool_name.
-                                _acct = None
+                                _acct = _native_review["scope"]["netsuite_account_id"] if _native_amendment else None
                                 _parsed_conn = _parse_ext(tool_name)
                                 if _parsed_conn:
                                     _conn_row = await _get_conn(db, _parsed_conn[0], tenant_id)
                                     _acct = (
                                         ((_conn_row.metadata_json or {}) or {}).get("account_id") if _conn_row else None
                                     )
-                                if not _acct:
+                                if not _acct and not _native_amendment:
                                     # Single-connector tenants have no
                                     # ambiguity; fall back rather than drop the
                                     # link entirely.
@@ -2604,11 +2612,23 @@ async def run_chat_turn(
 
                 _credit_recovery = _write_outcome == "indeterminate" and (_so.get("accounting_review") or {}).get(
                     "kind"
-                ) in {"sales_adjustment_credit", "invoice_sales_adjustment", "sales_order_source_alignment"}
+                ) in {
+                    "sales_adjustment_credit",
+                    "invoice_sales_adjustment",
+                    "sales_order_source_alignment",
+                    "credit_tax_reallocation",
+                    "sales_order_line_alignment",
+                }
                 if _so.get("accounting_execution") and isinstance(_exec_result, dict):
                     # Retain a returned native identity even when verification
                     # fails, so later recovery cannot ignore a conflicting receipt.
-                    _receipt_ids = {k: _exec_result[k] for k in ("recordId", "id", "internalId") if _exec_result.get(k)}
+                    _receipt_keys = ("recordId", "id", "internalId")
+                    if (_so.get("accounting_review") or {}).get("kind") in {
+                        "credit_tax_reallocation",
+                        "sales_order_line_alignment",
+                    }:
+                        _receipt_keys += ("record_id", "record_type", "work_key", "reservation_audit_id")
+                    _receipt_ids = {k: _exec_result[k] for k in _receipt_keys if _exec_result.get(k)}
                     _so = {
                         **_so,
                         "accounting_execution": {**_so["accounting_execution"], "receipt": _receipt_ids},
@@ -2621,6 +2641,8 @@ async def run_chat_turn(
                             "sales_adjustment_credit",
                             "invoice_sales_adjustment",
                             "sales_order_source_alignment",
+                            "credit_tax_reallocation",
+                            "sales_order_line_alignment",
                         }:
                             async with asyncio.timeout(90):
                                 _verification = await verify_after(
@@ -2661,13 +2683,33 @@ async def run_chat_turn(
                             _exec_succeeded = True
                             _exec_error = None
                             _confirm_content = "The approved accounting change was verified using fresh NetSuite reads."
+                        if (
+                            _so["accounting_review"].get("kind")
+                            in {"credit_tax_reallocation", "sales_order_line_alignment"}
+                            and not _updated_so_record_url
+                        ):
+                            from app.services.chat.netsuite_record_url import build_record_url
+
+                            _native_p = _so["accounting_review"]
+                            _updated_so_record_url = build_record_url(
+                                _native_p["scope"]["netsuite_account_id"],
+                                _native_p["record_type"],
+                                _native_p["record_id"],
+                            )
+                            if _updated_so_record_url:
+                                _confirm_content += f"\n\n[View {_native_p['record_type']} {_native_p['record_id']} in NetSuite]({_updated_so_record_url})"
                         _confirm_content += (
                             "\n\nThe Sales Adjustments credit, exact invoice application and GL entries were "
                             "independently re-read and verified. No cash refund was issued."
                             if _so["accounting_review"].get("kind") == "sales_adjustment_credit"
+                            else "\n\nExisting credit tax allocation and GL were independently verified. "
+                            "The gross credit, refund, applications and paid invoice remain unchanged. "
+                            "Sales-order alignment and full reconciliation follow separately."
+                            if _so["accounting_review"].get("kind") == "credit_tax_reallocation"
                             else "\n\nSales-order amendment independently re-read and verified; "
                             "the linked invoice, GL, billing and fulfillment evidence remain unchanged."
-                            if _so["accounting_review"].get("kind") == "sales_order_source_alignment"
+                            if _so["accounting_review"].get("kind")
+                            in {"sales_order_source_alignment", "sales_order_line_alignment"}
                             else "\n\nInvoice total, tax and GL were independently re-read and verified. "
                             "Sales-order reconciliation and deposit/cash settlement remain separate checks; no additional money was moved."
                         )

@@ -202,6 +202,46 @@ async def test_expanded_native_lines_are_available_for_identity_and_price_invest
     assert native[0].calls == 7  # No additional upstream read for already expanded lines.
 
 
+async def test_explicit_customer_fields_preserve_native_financial_and_lifecycle_fields(native):
+    from tests.test_native_accounting_profile import profile
+
+    fields = profile()["fields"]
+    doc = native[1]["invoice/20"]
+    doc[fields["order_reference"]] = "R123"
+    doc["custbody_fw_order_number"] = "OTHER"
+    doc["item"] = {
+        "items": [
+            {
+                "line": 1,
+                "lineUniqueKey": "200",
+                "quantity": "1",
+                "quantityBilled": "1",
+                "quantityFulfilled": "1",
+                "rate": "900",
+                "amount": "900",
+                fields["source_line_id"]: "100",
+                fields["original_sku"]: "SKU",
+                fields["vat_amount"]: "84.02",
+                "custcol_fw_vat_amount": "WRONG",
+                "custcol_unrelated_private": "omit",
+            }
+        ],
+        "links": [],
+    }
+    result = await mod.collect_accounting_evidence(
+        None, "tenant", review(), dict(order_reference="R123", source=dict(currency="USD")), field_map=fields
+    )
+    invoice = result["sections"]["posting_documents"][0]
+    assert invoice["total"] == "984.02" and invoice["taxTotal"] == "84.02"
+    assert invoice["createdFrom"]["id"] == "10" and invoice["postingPeriod"]["id"] == "40"
+    assert invoice[fields["order_reference"]] == "R123"
+    assert "custbody_fw_order_number" not in invoice
+    line = invoice["line_evidence"]["lines"][0]
+    assert all(line[k] == "1" for k in ("quantity", "quantityBilled", "quantityFulfilled"))
+    assert line[fields["vat_amount"]] == "84.02" and line["lineUniqueKey"] == "200"
+    assert "custcol_fw_vat_amount" not in line and "custcol_unrelated_private" not in line
+
+
 @pytest.mark.parametrize("items", [None, {"items": [], "hasMore": True}, {"items": [], "totalResults": 1}])
 async def test_missing_or_partial_lines_are_not_certified(native, items):
     native[1]["invoice/20"]["item"] = items

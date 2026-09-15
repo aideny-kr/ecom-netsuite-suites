@@ -1,4 +1,5 @@
 from copy import deepcopy
+from decimal import ROUND_HALF_UP, Decimal
 
 import pytest
 
@@ -123,11 +124,39 @@ def test_intent_preserves_credit_refund_gross_and_requires_further_validation():
     assert intent["proposed_fields"]["item"]["items"] == [
         {"line": 1, "rate": 400.0, "amount": 400.0, "isTaxable": True}
     ]
-    assert intent["proposed_fields"]["taxRate"] == 10.0
+    assert intent["proposed_fields"]["taxRate"] == "10.0000000"
     assert intent["financial_write_authorized"] is False
     assert intent["status"] == "intent_requires_schema_policy_and_preflight_validation"
     assert "unfrozen" in intent["approval_basis"]
     assert support == original
+
+
+def test_nonterminating_rate_keeps_validated_decimal_through_native_request():
+    import json
+
+    from app.services.transaction_ops.accounting_preview import build_request
+
+    source, review, evidence, support = fixture()
+    source.update(total="1320.01", item_total="1200.01", payment_total="1320.01")
+    source["line_items"][0]["price"] = "1200.01"
+    support["credit"].update(total="439.99", subtotal="439.99", applied="439.99")
+    support["credit"]["line_evidence"]["lines"][0].update(amount="439.99", rate="439.99")
+    support["refund"]["total"] = "439.99"
+    support["refund_graph"]["amount"] = "439.99"
+    support["refund_graph"]["request_links"][0]["amount"] = "439.99"
+    support["credit_gl"]["rows"][0]["debit"] = "439.99"
+    support["credit_gl"]["rows"][1]["credit"] = "439.99"
+    intent = build_intent("tenant", "case", source, review, evidence, support)
+    assert intent is not None
+    rate = intent["proposed_fields"]["taxRate"]
+    assert isinstance(rate, str)
+    assert rate == "10.0002500"
+    request = build_request(intent, account_id="123456-sb1", subsidiary_id="1", currency_id="1")
+    declared = json.loads(request["amendmentJson"])["body"]["taxrate"]
+    assert declared == rate
+    assert (Decimal("399.99") * Decimal(declared) / 100).quantize(Decimal(".01"), rounding=ROUND_HALF_UP) == Decimal(
+        "40"
+    )
 
 
 @pytest.mark.parametrize(

@@ -8,6 +8,7 @@ import json
 import re
 from decimal import Decimal
 
+from app.services.transaction_ops.accounting_field_map import LEGACY_FIELDS
 from app.services.transaction_ops.credit_classification import reference
 
 BODY = {"taxItem": "taxitem", "taxRate": "taxrate", "taxTotal": "taxtotal", "isTaxable": "istaxable"}
@@ -48,9 +49,18 @@ def _field(key, value):
     return _decimal(value)
 
 
-def build_request(intent, *, account_id, subsidiary_id, currency_id):
+def build_request(intent, *, account_id, subsidiary_id, currency_id, field_map=None):
     """Retain native line IDs; never use source IDs or array positions as targets."""
     try:
+        from app.services.transaction_ops.native_accounting_profile import NativeFieldMap
+
+        fields_map = NativeFieldMap.model_validate(LEGACY_FIELDS if field_map is None else field_map).model_dump()
+        line_fields = {
+            "rate": "rate",
+            "amount": "amount",
+            "isTaxable": "istaxable",
+            fields_map["vat_amount"]: fields_map["vat_amount"],
+        }
         expected_type = {"credit_tax_reallocation": "creditmemo", "sales_order_line_alignment": "salesorder"}
         if expected_type.get(intent["kind"]) != intent["record_type"]:
             raise PreviewContractError("unsupported_preview_kind")
@@ -73,7 +83,7 @@ def build_request(intent, *, account_id, subsidiary_id, currency_id):
             raise PreviewContractError("ambiguous_native_line_identity")
         lines, seen = [], set()
         for proposed in item["items"]:
-            if set(proposed) - (set(LINE) | {"line"}) or not (set(proposed) & set(LINE)):
+            if set(proposed) - (set(line_fields) | {"line"}) or not (set(proposed) & set(line_fields)):
                 raise PreviewContractError("unsupported_preview_line_field")
             line = _id(proposed["line"])
             if line not in keys or line in seen:
@@ -83,7 +93,7 @@ def build_request(intent, *, account_id, subsidiary_id, currency_id):
                 {
                     "line": line,
                     "lineUniqueKey": keys[line],
-                    "fields": {LINE[k]: _field(k, v) for k, v in proposed.items() if k != "line"},
+                    "fields": {line_fields[k]: _field(k, v) for k, v in proposed.items() if k != "line"},
                 }
             )
         if not body and not lines:
@@ -98,6 +108,7 @@ def build_request(intent, *, account_id, subsidiary_id, currency_id):
             "recordId": _id(intent["record_id"]),
             "subsidiaryId": _id(subsidiary_id),
             "currencyId": _id(currency_id),
+            "fieldMapJson": json.dumps(fields_map, sort_keys=True, separators=(",", ":")),
             "amendmentJson": json.dumps({"body": body, "lines": lines}, sort_keys=True, separators=(",", ":")),
             "expectedJson": json.dumps(expected, sort_keys=True, separators=(",", ":")),
         }
@@ -108,12 +119,13 @@ def build_request(intent, *, account_id, subsidiary_id, currency_id):
         raise PreviewContractError("incomplete_preview_intent") from exc
 
 
-def for_intent(intent, review, native_record):
+def for_intent(intent, review, native_record, *, field_map=None):
     return build_request(
         intent,
         account_id=review["scope"]["netsuite_account_id"],
         subsidiary_id=review["scope"]["subsidiary_id"],
         currency_id=reference(native_record, "currency"),
+        field_map=field_map,
     )
 
 

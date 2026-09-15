@@ -117,8 +117,11 @@ async def review_page(db, tenant_id, run_ids, *, limit=50, offset=0, status=None
             .one()
         )
         total = await db.scalar(select(func.count()).select_from(filtered_query(latest, status, search).subquery()))
+    from app.services.transaction_ops.accounting_projection import project_rows
+
+    projected = await project_rows(db, tenant_id, rows)
     return {
-        "items": [result_item(row) for row in rows],
+        "items": [result_item(row) for row in projected],
         "summary": summary,
         "total": total,
         "has_next": offset + len(rows) < total,

@@ -1,7 +1,8 @@
 """Existing-credit tax allocation: evidence and proposal construction only.
 
-The credit's gross amount and refund/application remain unchanged. This module
-is not yet registered as an executor; it cannot issue a card or perform a write.
+The credit's gross amount and refund/application remain unchanged. This pure
+builder supplies intents to the separately configured native preview, signed
+approval and dispatcher; it cannot itself issue a card or perform a write.
 """
 
 from copy import deepcopy
@@ -19,7 +20,7 @@ from app.services.transaction_ops.sales_credit import _gl_proves, _native_number
 KIND = "credit_tax_reallocation"
 
 
-def build_intent(tenant_id, case_id, source, review, evidence, support):
+def build_intent(tenant_id, case_id, source, review, evidence, support, *, field_map=None):
     """Construct a reviewable intent for an already-refunded price reduction.
 
     Requires complete order refund ownership, exact source repricing arithmetic,
@@ -28,20 +29,23 @@ def build_intent(tenant_id, case_id, source, review, evidence, support):
     Human review must establish source/tax authority; these observations alone
     never certify tax legality or authorize a posting.
     """
+    from app.services.transaction_ops.accounting_field_map import resolve
+
+    fields = resolve(field_map)
     try:
         with localcontext() as ctx:
             ctx.prec = 60
             invoice, credit, refund = (support[k] for k in ("invoice", "credit", "refund"))
             scope = review["scope"]
-            basis = source_revision_delta(source, evidence, invoice["id"]) or source_tax_refund_delta(
-                source, evidence, invoice["id"]
-            )
+            basis = source_revision_delta(
+                source, evidence, invoice["id"], field_map=field_map
+            ) or source_tax_refund_delta(source, evidence, invoice["id"])
             if not basis:
                 return None
             gross, tax, net = (-_money(basis[k]) for k in ("gross_delta", "tax_delta", "net_delta"))
             changes = [
                 c
-                for c in compare_source_lines(source, evidence)["changes"]
+                for c in compare_source_lines(source, evidence, field_map=field_map)["changes"]
                 if str(c["target_record_id"]) == str(invoice["id"])
             ]
             if net > 0 and any(not c.get("tax_observation") for c in changes):
@@ -65,7 +69,7 @@ def build_intent(tenant_id, case_id, source, review, evidence, support):
                 or gross != net + tax
                 or review.get("configuration_status") != "scoped_configuration_found"
                 or review.get("connection_active") is not True
-                or not review.get("native_mcp_connector_id")
+                or (not review.get("native_mcp_connector_id") and not review.get("native_accounting_profile"))
                 or source.get("payment_state") != "paid"
                 or _money(source["payment_total"]) != _money(source["total"])
                 or graph.get("complete") is not True
@@ -79,7 +83,7 @@ def build_intent(tenant_id, case_id, source, review, evidence, support):
                 or any(reference(d, "subsidiary") != str(scope["subsidiary_id"]) for d in (invoice, credit, refund))
                 or any(_money(d["exchangeRate"]) != 1 for d in (invoice, credit, refund))
                 or reference(credit, "entity") != reference(invoice, "entity")
-                or credit.get("custbody_fw_order_number") != source["number"]
+                or credit.get(fields["order_reference"]) != source["number"]
                 or _money(invoice["amountRemaining"]) != 0
                 or _money(invoice["amountPaid"]) != _money(invoice["total"])
                 or _money(credit["total"]) != gross
@@ -176,7 +180,9 @@ def build_intent(tenant_id, case_id, source, review, evidence, support):
                     "sales_order_id": reference(invoice, "createdFrom"),
                     "lock_record_type": "invoice",
                     "mutation_type": "update",
-                    "connector_id": str(review["native_mcp_connector_id"]),
+                    "connector_id": str(review["native_mcp_connector_id"])
+                    if review.get("native_mcp_connector_id")
+                    else None,
                     "connection_id": str(review["netsuite_connection_id"]),
                     "config_id": str(review["config_id"]),
                     "scope": scope,
@@ -194,7 +200,7 @@ def build_intent(tenant_id, case_id, source, review, evidence, support):
                     "period": period,
                     "proposed_fields": {
                         "taxItem": {"id": str(tax_item["id"])},
-                        **({"taxRate": float(rate)} if rate is not None else {"taxTotal": _native_number(tax)}),
+                        **({"taxRate": str(rate)} if rate is not None else {"taxTotal": _native_number(tax)}),
                         "isTaxable": True,
                         "item": {
                             "items": [
@@ -233,12 +239,12 @@ def build_intent(tenant_id, case_id, source, review, evidence, support):
         return None
 
 
-async def collect_support(db, tenant_id, source, review, evidence):
+async def collect_support(db, tenant_id, source, review, evidence, *, field_map=None):
     """Complete the current credit/refund graph before proposing any reallocation.
 
     This is read-only discovery. A returned intent is deliberately not an
-    executable candidate: schema, account policy and native save behavior must
-    still be verified before wiring this treatment to the approval dispatcher.
+    executable candidate: the configured native preview and signed approval
+    dispatcher must separately verify account policy and native behavior.
     """
     from datetime import datetime, timezone
 
@@ -250,7 +256,7 @@ async def collect_support(db, tenant_id, source, review, evidence):
     if len(invoices) != 1 or invoices[0].get("record_type") != "invoice":
         return None
     invoice = invoices[0]
-    basis = source_revision_delta(source, evidence, invoice.get("id")) or source_tax_refund_delta(
+    basis = source_revision_delta(source, evidence, invoice.get("id"), field_map=field_map) or source_tax_refund_delta(
         source, evidence, invoice.get("id")
     )
     if not basis or _money(basis["net_delta"]) > 0 or any(_money(basis[k]) >= 0 for k in ("gross_delta", "tax_delta")):
@@ -347,8 +353,8 @@ def solution_summary(intent):
         "approval_basis": intent["approval_basis"],
         "remaining_requirements": [
             "Verify account tax treatment and source authority.",
-            "Validate the exact keyed amendment against the connected tool's schema and native save behavior.",
-            "Implement preflight, post-save verification and recovery for this treatment before issuing an approval.",
+            "Enable the account-scoped native amendment connection and validate its unsaved tax preview.",
+            "Obtain exact human approval after fresh source, ledger and application preflight.",
             "Prepare the separate sales-order alignment; retain the paid invoice and existing cash/refund records.",
         ],
         "executable": False,

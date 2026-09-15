@@ -185,6 +185,10 @@ export function AccountingGroupCard({
                     <span className="mt-1 block text-xs text-muted-foreground">
                       {p.profile.currency} · {p.kind === "sales_order_source_alignment" ? "Sales order discount" : "Invoice discount"} {creditAmount(p.expected_after.discountTotal, p.profile.currency)} · Total {creditAmount(p.before.total, p.profile.currency)} → {creditAmount(p.expected_after.total, p.profile.currency)}
                     </span>
+                  ) : (p?.kind === "credit_tax_reallocation" || p?.kind === "sales_order_line_alignment") ? (
+                    <span className="mt-1 block text-xs text-muted-foreground">
+                      {p.kind === "credit_tax_reallocation" ? "Existing credit allocation" : "Sales-order alignment"} · Tax {creditAmount(p.before.taxTotal, String(p.source.currency || ""))} → {creditAmount(p.expected_after.taxTotal, String(p.source.currency || ""))} · Total {creditAmount(p.before.total, String(p.source.currency || ""))} → {creditAmount(p.expected_after.total, String(p.source.currency || ""))}
+                    </span>
                   ) : p && (
                     <span className="mt-1 block text-xs text-muted-foreground">
                       {String(p.before.currency_code || "Currency unknown")} ·

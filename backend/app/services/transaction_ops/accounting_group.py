@@ -93,7 +93,8 @@ def build_group_card(members, selection, session_id):
             m["card"]["accounting_review"]["scope"]["netsuite_account_id"],
             m["card"]["accounting_review"].get("lock_record_type", m["card"]["record_type"]),
             m["card"]["accounting_review"]["invoice_id"]
-            if m["card"]["accounting_review"].get("kind") == "sales_order_source_alignment"
+            if m["card"]["accounting_review"].get("kind")
+            in {"sales_order_source_alignment", "credit_tax_reallocation", "sales_order_line_alignment"}
             else m["card"]["accounting_review"]["record_id"],
         )
         for m in eligible
@@ -183,8 +184,9 @@ async def prepare_group_confirmation(*, db, tenant_id, actor_id, correlation_id,
                         await child_db.commit()
                         return {**member, "confirmation_id": str(uuid.uuid4()), "card": value}
                     reason = (
-                        "No validated accounting correction is ready. "
-                        "Continue the shared investigation using the recorded evidence."
+                        "Solution identified. Account configuration, native preview and approval are still required."
+                        if collected.get("resolution_intents")
+                        else "No validated correction is ready. Continue investigation using the recorded evidence."
                     )
             except Exception as exc:
                 await child_db.rollback()
@@ -399,7 +401,8 @@ def validate_manifest(so, session_id):
                 p["scope"]["netsuite_account_id"],
                 p.get("lock_record_type", card["record_type"]),
                 p.get("invoice_id", p["record_id"])
-                if p.get("kind") == "sales_order_source_alignment"
+                if p.get("kind")
+                in {"sales_order_source_alignment", "credit_tax_reallocation", "sales_order_line_alignment"}
                 else p["record_id"],
             )
         )
@@ -425,7 +428,11 @@ async def accounting_write_slot(proposal, *, lock_engine=None):
         try:
             record_type = "invoice" if proposal.get("kind") == "sales_adjustment_credit" else proposal["record_type"]
             record_id = proposal["record_id"]
-            if proposal.get("kind") == "sales_order_source_alignment":
+            if proposal.get("kind") in {
+                "sales_order_source_alignment",
+                "credit_tax_reallocation",
+                "sales_order_line_alignment",
+            }:
                 record_type, record_id = "invoice", proposal["invoice_id"]
             record = key(f"accounting-write:{account}:{record_type}:{record_id}")
             if not await connection.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": record}):

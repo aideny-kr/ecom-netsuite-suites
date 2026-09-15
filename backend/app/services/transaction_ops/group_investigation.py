@@ -81,12 +81,13 @@ def summarize(evidence):
     sections = evidence.get("sections") or {}
     documents = sections.get("posting_documents") or []
     invoice = documents[0] if len(documents) == 1 else {}
+    posting = evidence.get("posting_balance") or {}
     reasons = []
     if not source:
         reasons.append("Current source evidence unavailable.")
     if len(documents) != 1 or invoice.get("record_type") != "invoice":
         reasons.append("A unique linked invoice has not been established.")
-    if source and invoice:
+    if source and invoice and not evidence.get("resolution_intents"):
         if difference(source.get("included_tax_total"), source.get("tax_total")) != "0":
             reasons.append("The included-VAT correction does not cover this source tax basis.")
         if difference(source.get("total"), source.get("tax_total")) != difference(
@@ -130,9 +131,15 @@ def summarize(evidence):
             for k in ("id", "total", "taxTotal", "subtotal", "amountPaid", "amountRemaining", "postingPeriod")
         },
         "variance": {
-            "total": difference(source.get("total"), invoice.get("total")),
-            "tax": difference(source.get("tax_total"), invoice.get("taxTotal")),
+            "total": (posting.get("amounts", {}).get("order_total") or {}).get("delta")
+            if posting
+            else difference(source.get("total"), invoice.get("total")),
+            "tax": (posting.get("amounts", {}).get("tax") or {}).get("delta")
+            if posting
+            else difference(source.get("tax_total"), invoice.get("taxTotal")),
         },
+        "posting_balance": posting or None,
+        "solution_status": (evidence.get("resolution_assessment") or {}).get("status"),
         "reasons": reasons,
         "record_links": evidence.get("record_links") or [],
         "resolution_intents": [

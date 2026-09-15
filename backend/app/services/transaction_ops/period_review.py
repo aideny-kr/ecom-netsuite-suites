@@ -291,6 +291,9 @@ async def review_results(db, tenant_id, run_id, *, limit=25, offset=0, status=No
         .mappings()
         .all()
     )
+    from app.services.transaction_ops.accounting_projection import project_rows
+
+    rows = await project_rows(db, tenant_id, rows)
     items = []
     for row in rows:
         report = row["report_json"]

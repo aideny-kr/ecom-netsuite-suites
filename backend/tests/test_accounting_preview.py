@@ -34,7 +34,7 @@ def test_preview_preserves_native_keys_and_is_never_an_approval():
     request, _ = request_and_intent()
     amendment = json.loads(request["amendmentJson"])
     assert request["accountId"] == "test-sb1"
-    assert amendment["body"] == {"taxitem": "61", "taxrate": "10.0", "istaxable": True}
+    assert amendment["body"] == {"taxitem": "61", "taxrate": "10.0000000", "istaxable": True}
     assert amendment["lines"][0] == {
         "line": "1",
         "lineUniqueKey": "100",

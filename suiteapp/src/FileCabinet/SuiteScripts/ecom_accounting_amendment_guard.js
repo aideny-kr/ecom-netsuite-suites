@@ -114,12 +114,20 @@ define(['./ecom_accounting_amendment_core', 'N/record', 'N/runtime', 'N/log'], (
     };
     const get = input => {
         try {
+            if (input && input.action === 'capabilities' && String(input.schema_version) === '1') {
+                if (Object.keys(input).some(key => !['action', 'schema_version', 'subsidiaryId'].includes(key))) fail('unsupported_request_field');
+                const profile = core.configuration(undefined, input.subsidiaryId);
+                return {success: true, schema_version: 1, profile, financial_writes: 0, execution_authorized: false,
+                    apply_enabled: runtime.getCurrentScript().getParameter({name: 'custscript_ecom_acct_amend_enabled'}) === true,
+                    treatments: ['credit_tax_reallocation', 'sales_order_line_alignment'],
+                    suitetax: runtime.isFeatureInEffect({feature: 'SUITETAXENGINE'})};
+            }
             if (!input || input.action !== 'snapshot' || String(input.schema_version) !== '1') fail('unsupported_action');
             const allowed = new Set(['action', 'schema_version', 'accountId', 'recordType', 'recordId', 'subsidiaryId', 'currencyId']);
             if (Object.keys(input).some(key => !allowed.has(key))) fail('unsupported_request_field');
             const snapshot = core.snapshot(core.load(input));
             return {success: true, schema_version: 1, record_type: input.recordType, record_id: input.recordId,
-                native_snapshot: snapshot, financial_writes: 0, execution_authorized: false};
+                profile: core.configuration(undefined, input.subsidiaryId), native_snapshot: snapshot, financial_writes: 0, execution_authorized: false};
         } catch (error) {
             return {success: false, schema_version: 1, financial_writes: 0, error: String(error.message || error).slice(0, 240)};
         }

@@ -70,6 +70,10 @@ async def test_group_handoff_emits_one_real_card_without_another_model_hop():
 
 
 def kind_proposal(kind):
+    if kind == "native_credit":
+        from tests.test_native_accounting_service import prepared
+
+        return prepared()[0]
     if kind == "sales_order":
         from app.services.transaction_ops.sales_order_alignment import build_candidate as build_order
         from tests.test_sales_order_alignment import inputs as order_inputs
@@ -97,6 +101,10 @@ def kind_proposal(kind):
 
 
 def inputs(p):
+    if p.get("kind") in {"credit_tax_reallocation", "sales_order_line_alignment"}:
+        from app.services.transaction_ops.native_accounting_service import TOOL, signed_input
+
+        return TOOL, signed_input(p)
     if p.get("kind") == "sales_adjustment_credit":
         return (
             f"ext__{p['connector_id'].replace('-', '')}__ns_createRecord",
@@ -170,12 +178,12 @@ async def test_agent_emits_exact_accounting_card_without_executing_or_duplicate_
     "kind,outcome",
     [
         (kind, outcome)
-        for kind in ("tax", "credit", "discount", "sales_order")
+        for kind in ("tax", "credit", "discount", "sales_order", "native_credit")
         for outcome in ("stale", "verified", "unverified", "rejected")
     ]
     + [
         (kind, outcome)
-        for kind in ("credit", "discount", "sales_order")
+        for kind in ("credit", "discount", "sales_order", "native_credit")
         for outcome in ("unknown_verified", "unknown_missing", "unreadable_verified")
     ],
 )
@@ -193,6 +201,11 @@ async def test_approval_preflight_execution_verification_and_actor_audit(outcome
         session_id=str(session_id),
         current_record=p["before"],
     )
+    if kind == "native_credit":
+        from app.services.transaction_ops.native_accounting_service import confirmation
+
+        with patch("app.services.audit_service.log_event", AsyncMock()):
+            card, _ = await confirmation(AsyncMock(), _TENANT_ID, _USER_ID, str(session_id), p, None, None)
     card.accounting_review = p
     message = ChatMessage(
         id=uuid.uuid4(),
@@ -221,6 +234,8 @@ async def test_approval_preflight_execution_verification_and_actor_audit(outcome
             return "unreadable receipt"
         if outcome.startswith("unknown"):
             return json.dumps({"outcome_indeterminate": True, "error": "timeout"})
+        if kind == "native_credit" and outcome != "rejected":
+            return json.dumps({"success": True, "record_id": p["record_id"], "record_type": p["record_type"]})
         return json.dumps(
             {"error": "Period locked"} if outcome == "rejected" else {"success": True, "id": p["record_id"]}
         )
@@ -290,7 +305,17 @@ async def test_approval_preflight_execution_verification_and_actor_audit(outcome
         assert verification["payload"]["approved_by"] == str(_USER_ID)
         assert verification["payload"]["before"] == p["before"]
         content = " ".join(e["message"]["content"] for e in events if e.get("type") == "message")
-        assert ("independently re-read and verified" in content) == verified_outcome
+        assert ("independently" in content and "verified" in content) == verified_outcome
+        if kind == "native_credit":
+            if outcome in {"verified", "unverified"}:
+                assert so["accounting_execution"]["receipt"]["record_id"] == p["record_id"]
+                assert so["accounting_execution"]["receipt"]["record_type"] == p["record_type"]
+            if verified_outcome:
+                assert "123456-sb1.app.netsuite.com" in content
+                assert (
+                    so["record_url"]
+                    == f"https://123456-sb1.app.netsuite.com/app/accounting/transactions/transaction.nl?id={p['record_id']}"
+                )
         if not verified_outcome:
             assert "executed successfully" not in content
         if outcome.startswith("unknown") or outcome == "unreadable_verified":

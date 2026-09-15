@@ -13,6 +13,8 @@ KINDS = {
     "invoice_sales_adjustment": "Apply invoice sales adjustment",
     "sales_adjustment_credit": "Create and apply Sales Adjustments credit",
     "sales_order_source_alignment": "Align sales order with source",
+    "credit_tax_reallocation": "Correct existing credit tax allocation",
+    "sales_order_line_alignment": "Align sales-order lines and tax with source",
 }
 
 
@@ -23,6 +25,14 @@ def fingerprint(value):
 
 
 def rules_fingerprint(proposal):
+    if proposal.get("kind") in {"credit_tax_reallocation", "sales_order_line_alignment"}:
+        return fingerprint(
+            {
+                "scope": proposal["scope"],
+                "config_id": proposal["config_id"],
+                "native_profile": proposal["native_profile"],
+            }
+        )
     return fingerprint(
         {
             key: proposal.get(key)
@@ -43,6 +53,10 @@ def rules_fingerprint(proposal):
 
 def source_basis(proposal):
     source = proposal.get("source") or {}
+    if proposal.get("kind") in {"credit_tax_reallocation", "sales_order_line_alignment"}:
+        # New treatments bind keyed lines, revision dates and jurisdiction too.
+        # Do not change the existing recipes' historical operation identities.
+        return source
     return {
         key: source.get(key)
         for key in (
@@ -86,10 +100,16 @@ def proposal_plan(proposal, report):
     kind = proposal.get("kind") or "invoice_tax"
     if kind not in KINDS:
         raise ValueError("unsupported_accounting_plan")
-    order_step = kind == "sales_order_source_alignment"
+    order_step = kind in {"sales_order_source_alignment", "sales_order_line_alignment"}
     before = proposal["before"]
-    order_id = proposal["record_id"] if order_step else (before.get("createdFrom") or {}).get("id")
-    invoice_id = proposal.get("invoice_id") if order_step else proposal.get("record_id")
+    order_id = (
+        proposal["record_id"]
+        if order_step
+        else proposal.get("sales_order_id") or (before.get("createdFrom") or {}).get("id")
+    )
+    invoice_id = (
+        proposal.get("invoice_id") if order_step or kind == "credit_tax_reallocation" else proposal.get("record_id")
+    )
     amounts = (report.get("balance") or {}).get("amounts") or {}
     total = amounts.get("order_total") or {}
     source = proposal.get("source") or {}
@@ -129,6 +149,21 @@ def proposal_plan(proposal, report):
         if order_step
         else "After posting verification, read the sales order again and prepare an exact amendment if needed.",
     }
+    if kind == "credit_tax_reallocation":
+        posting.update(
+            record_id=proposal["record_id"],
+            current_total=before.get("total"),
+            target_total=proposal["expected_after"]["total"],
+        )
+    elif kind == "sales_order_line_alignment":
+        predecessor = proposal["posting_predecessor"]["proposal"]
+        posting.update(
+            record_type="creditmemo",
+            record_id=predecessor["record_id"],
+            current_total=predecessor["expected_after"]["total"],
+            target_total=predecessor["expected_after"]["total"],
+            evidence_basis="verified_existing_credit_tax_allocation",
+        )
     return {
         "version": 1,
         "plan_id": plan_id,
@@ -170,7 +205,9 @@ def completed_plan(proposal, report, status, next_step):
             step["status"] = "needs_review"
         elif step["id"] == "sales_order":
             step["status"] = (
-                "awaiting_approval" if next_step.get("kind") == "sales_order_source_alignment" else "waiting"
+                "awaiting_approval"
+                if next_step.get("kind") in {"sales_order_source_alignment", "sales_order_line_alignment"}
+                else "waiting"
             )
     return plan
 

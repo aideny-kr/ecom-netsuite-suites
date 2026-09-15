@@ -164,7 +164,7 @@ def record_links(p, verification, report):
         order = {"id": report["targets"][0].get("record_id"), "tranId": p["order_reference"]}
     documents = []
     invoice = verification.get("invoice") or (p.get("support") or {}).get("invoice")
-    if not invoice and p.get("kind") != "sales_order_source_alignment":
+    if not invoice and p.get("kind") not in {"sales_order_source_alignment", "sales_order_line_alignment"}:
         invoice = {**p["before"], "id": p["record_id"]}
     if invoice:
         documents.append({**invoice, "record_type": "invoice"})

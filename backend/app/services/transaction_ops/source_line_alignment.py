@@ -15,7 +15,10 @@ from app.services.transaction_ops.line_evidence import (
 )
 
 
-def build_intent(source, evidence, posting_intent):
+def build_intent(source, evidence, posting_intent, *, field_map=None):
+    from app.services.transaction_ops.accounting_field_map import resolve
+
+    fields = resolve(field_map)
     order = (evidence.get("sections") or {}).get("sales_order") or {}
     if (
         not posting_intent
@@ -23,12 +26,16 @@ def build_intent(source, evidence, posting_intent):
         or str(posting_intent.get("sales_order_id")) != str(order.get("id"))
     ):
         return None
-    basis = source_revision_delta(source, evidence, order.get("id")) or (
+    basis = source_revision_delta(source, evidence, order.get("id"), field_map=field_map) or (
         source_tax_refund_delta(source, evidence, order.get("id")) if posting_intent.get("tax_only") else None
     )
     if not basis:
         return None
-    changes = [c for c in compare_source_lines(source, evidence)["changes"] if c["target_record_id"] == order["id"]]
+    changes = [
+        c
+        for c in compare_source_lines(source, evidence, field_map=field_map)["changes"]
+        if c["target_record_id"] == order["id"]
+    ]
     try:
         with localcontext() as ctx:
             ctx.prec = 60
@@ -40,7 +47,7 @@ def build_intent(source, evidence, posting_intent):
                 return None
             amended, identities = [], []
             if posting_intent.get("tax_only"):
-                tax_changes = _tax_only_changes(source, order)
+                tax_changes = _tax_only_changes(source, order, field_map=field_map)
                 if tax_changes is None:
                     return None
                 amended, identities = tax_changes
@@ -62,7 +69,7 @@ def build_intent(source, evidence, posting_intent):
                         "line": change["target_line"],
                         "rate": str(price),
                         "amount": str(price * quantity),
-                        "custcol_fw_vat_amount": str(line_tax),
+                        fields["vat_amount"]: str(line_tax),
                     }
                 )
                 identities.append(
@@ -107,13 +114,16 @@ def build_intent(source, evidence, posting_intent):
         return None
 
 
-def _tax_only_changes(source, order):
+def _tax_only_changes(source, order, *, field_map=None):
     """Match unchanged extended values for tax allocation only, never reprice kits.
 
     A missing integration line ID can use a unique, explicitly stored original
     ecommerce SKU within this already verified order. Conflicting IDs, repeated
     SKUs or unequal extended values are never silently resolved by this fallback.
     """
+    from app.services.transaction_ops.accounting_field_map import resolve
+
+    fields = resolve(field_map)
     from collections import Counter
 
     from app.services.transaction_ops.line_evidence import tax_observation
@@ -129,12 +139,12 @@ def _tax_only_changes(source, order):
     source_tax = Decimal(0)
     for line in source_lines:
         sku = source_sku(line)
-        by_id = [n for n in native if str(n.get("custcol_fw_solidus_line_id")) == str(line.get("id"))]
+        by_id = [n for n in native if str(n.get(fields["source_line_id"])) == str(line.get("id"))]
         matches = by_id or [
             n
             for n in native
-            if n.get("custcol_fw_solidus_line_id") in (None, "")
-            and n.get("custcol_fw_original_ecom_sku") == sku
+            if n.get(fields["source_line_id"]) in (None, "")
+            and n.get(fields["original_sku"]) == sku
             and counts[sku] == 1
         ]
         if len(matches) != 1 or not sku:
@@ -142,20 +152,20 @@ def _tax_only_changes(source, order):
         target = matches[0]
         key = str(target.get("lineUniqueKey"))
         if (
-            target.get("custcol_fw_original_ecom_sku") != sku
+            target.get(fields["original_sku"]) != sku
             or not key.isdigit()
             or key in used
             or not str(target.get("line", "")).isdigit()
             or number(line["price"]) * number(line["quantity"]) != number(target.get("amount"))
         ):
             return None
-        detail = tax_observation(line, target)
+        detail = tax_observation(line, target, field_map=field_map)
         if not detail or number(detail["delta"]) is None:
             return None
         source_tax += number(detail["source_adjustment_amount"])
         used.add(key)
         if number(detail["delta"]) != 0:
-            changes.append({"line": target["line"], "custcol_fw_vat_amount": detail["source_adjustment_amount"]})
+            changes.append({"line": target["line"], fields["vat_amount"]: detail["source_adjustment_amount"]})
             identities.append(
                 {
                     "source_line_id": str(line["id"]),
@@ -173,7 +183,7 @@ def _tax_only_changes(source, order):
         if str(line.get("lineUniqueKey")) not in used and (
             number(line.get("amount")) != 0
             or number(line.get("rate")) != 0
-            or (line.get("custcol_fw_vat_amount") is not None and number(line["custcol_fw_vat_amount"]) != 0)
+            or (line.get(fields["vat_amount"]) is not None and number(line[fields["vat_amount"]]) != 0)
         ):
             return None
     if source_tax != number(source["tax_total"]):

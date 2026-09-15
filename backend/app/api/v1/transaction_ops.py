@@ -126,6 +126,23 @@ class AccountingProfileUpdate(BaseModel):
     sales_credit_profile: dict | None
 
 
+class NativeAccountingProfileUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    profile: dict | None
+
+
+@router.put("/configs/{config_id}/native-accounting-profile")
+async def configure_native_accounting_profile(
+    config_id: UUID, request: NativeAccountingProfileUpdate, user: Manager, db: Database
+):
+    from app.services.transaction_ops.native_accounting_profile import configure_profile
+
+    try:
+        return await configure_profile(db, user.tenant_id, config_id, request.profile, actor=user)
+    except service.StateError as exc:
+        raise _http_error(exc) from None
+
+
 @router.put("/configs/{config_id}/accounting-profile")
 async def configure_accounting_profile(config_id: UUID, request: AccountingProfileUpdate, user: Manager, db: Database):
     from app.services.transaction_ops.accounting_profiles import configure_sales_credit_profile
@@ -308,7 +325,13 @@ async def list_cases(
 @router.get("/cases/{case_id}", response_model=CaseOut)
 async def get_case(case_id: UUID, user: Reader, db: Database):
     try:
-        return await case_service.get_case(db, user.tenant_id, case_id)
+        from app.services.transaction_ops.accounting_projection import project_rows
+
+        case = await case_service.get_case(db, user.tenant_id, case_id)
+        rows = await project_rows(
+            db, user.tenant_id, [{"report_json": {**case.latest_report_json, "case_id": str(case.id)}}]
+        )
+        return CaseOut.model_validate(case).model_copy(update={"latest_report_json": rows[0]["report_json"]})
     except service.StateError as exc:
         raise _http_error(exc) from None
 

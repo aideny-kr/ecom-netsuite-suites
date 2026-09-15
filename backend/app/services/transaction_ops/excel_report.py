@@ -105,7 +105,10 @@ def build_workbook(rows, scopes, *, status, search, generated_at, report_id):
             if group_id not in groups:
                 groups[group_id] = [group_id, _pattern(row), name, row["currency"], row["target_state"], 0]
             groups[group_id][-1] += 1
-        amounts = balance.get("amounts") or {}
+        posting = balance.get("posting_reconciliation") or {}
+        verified_posting = posting.get("basis") == "verified_source_revision_and_owned_credit_refund"
+        amounts = (posting if verified_posting else balance).get("amounts") or {}
+        order_amounts = balance.get("amounts") or {}
         details.append(
             [
                 row["order_reference"],
@@ -125,6 +128,15 @@ def build_workbook(rows, scopes, *, status, search, generated_at, report_id):
                 str(row["run_id"]),
                 row["updated_at"].isoformat(),
                 row["review_run_id"],
+                "Invoice less owned credit" if verified_posting else "Order record",
+                *[(amounts.get("net") or {}).get(side) for side in ("source", "target", "delta")],
+                *[
+                    (order_amounts.get(metric) or {}).get(side)
+                    for metric in ("order_total", "tax")
+                    for side in ("source", "target", "delta")
+                ],
+                posting.get("audit_id") if verified_posting else None,
+                posting.get("observed_at") if verified_posting else None,
             ]
         )
     wb = Workbook()
@@ -140,6 +152,12 @@ def build_workbook(rows, scopes, *, status, search, generated_at, report_id):
         ["Grouped orders", sum(group[-1] for group in groups.values())],
         ["Coverage", "Recorded evidence only. Exporting does not complete a period scan or certify settlement."],
         ["Variance", "Source minus ERP. Order total includes tax; do not add tax variance to order variance."],
+        [
+            "Comparison basis",
+            "Verified invoice-minus-credit positions take precedence where supported by an audited "
+            "source revision and owned credit/refund chain. Non-posting sales-order alignment stays separate. "
+            "Finding status remains open until all required records reconcile.",
+        ],
         ["Amounts", "Every nonzero delta is retained. Unknown = —. Values exceeding Excel precision stay exact text."],
         ["Currency", "Amounts are in each row's currency; different currencies are never totaled together."],
         [
@@ -183,7 +201,13 @@ def build_workbook(rows, scopes, *, status, search, generated_at, report_id):
         "Observed at (UTC)",
         "Review run ID",
     ]
-    _sheet(wb, "Reconciliation", columns, details, money_columns=range(6, 15))
+    columns += ["Comparison basis"]
+    columns += [f"Before tax — {side}" for side in ("Source", "ERP", "Variance")]
+    columns += [
+        f"Sales order {metric} — {side}" for metric in ("total", "tax") for side in ("Source", "ERP", "Variance")
+    ]
+    columns += ["Accounting evidence audit ID", "Accounting observed at (UTC)"]
+    _sheet(wb, "Reconciliation", columns, details, money_columns=(*range(6, 15), *range(23, 32)))
     _sheet(
         wb,
         "Issue groups",
@@ -250,6 +274,7 @@ async def export_review(db, actor, run_ids, *, status=None, search=""):
                         source.c.updated_at,
                         source.c.report_json["balance"].label("balance"),
                         source.c.report_json["case_id"].astext.label("case_id"),
+                        source.c.report_json.label("report_json"),
                         *columns,
                         identifier,
                     )
@@ -262,6 +287,10 @@ async def export_review(db, actor, run_ids, *, status=None, search=""):
         )
         if len(rows) > MAX_EXPORT_ROWS:
             raise StateError("export_too_large_narrow_period_or_filters", 422)
+        from app.services.transaction_ops.accounting_projection import project_rows
+
+        projected = await project_rows(db, tenant_id, rows)
+        rows = [{**row, "balance": row["report_json"].get("balance")} for row in projected]
         content, count, group_count = build_workbook(
             rows, scopes, status=status, search=search, generated_at=datetime.now(timezone.utc), report_id=report_id
         )

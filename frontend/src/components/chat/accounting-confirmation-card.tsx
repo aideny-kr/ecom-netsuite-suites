@@ -5,6 +5,7 @@ import { cn } from "@/lib/utils";
 import { SalesOrderAlignmentConfirmationCard } from "./sales-order-alignment-confirmation-card";
 import { InvoiceDiscountConfirmationCard } from "./invoice-discount-confirmation-card";
 import { SalesCreditConfirmationCard } from "./sales-credit-confirmation-card";
+import { NativeAccountingConfirmationCard } from "./native-accounting-confirmation-card";
 
 function label(value: unknown): string {
   if (value && typeof value === "object") {
@@ -44,6 +45,9 @@ export function AccountingConfirmationCard({
   groupState?: WriteConfirmationData["status"];
 }) {
   const p = data.accounting_review!;
+  if (p.kind === "credit_tax_reallocation" || p.kind === "sales_order_line_alignment") {
+    return <NativeAccountingConfirmationCard key={data.confirmation_token} data={data} proposal={p} onConfirm={onConfirm} onReject={onReject} disabled={disabled} readOnly={readOnly} groupState={groupState} />;
+  }
   if (p.kind === "sales_adjustment_credit") {
     return <SalesCreditConfirmationCard key={data.confirmation_token} data={data} proposal={p} onConfirm={onConfirm} onReject={onReject} disabled={disabled} readOnly={readOnly} groupState={groupState} />;
   }

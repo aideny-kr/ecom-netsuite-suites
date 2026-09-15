@@ -276,4 +276,11 @@ async def accounting_context(db, tenant_id, scope, report=None):
         native_tax_regime="not_verified",
         business_entity_subsidiaries=mapping.get("business_entity_subsidiaries", {}),
     )
+    from app.services.transaction_ops.native_accounting_profile import NAMESPACE, get_profile
+
+    if connection and NAMESPACE in (connection.metadata_json or {}):
+        try:
+            context["native_accounting_profile"] = await get_profile(db, tenant_id, config)
+        except (ValueError, TypeError):
+            context["native_accounting_profile_status"] = "invalid_configuration"
     return context

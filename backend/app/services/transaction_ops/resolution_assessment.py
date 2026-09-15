@@ -31,7 +31,10 @@ def assess(evidence, report, review, correction=None, references=None):
     payment_state = "fully_unpaid_no_applications" if fully_unpaid else "not_established"
     if paid is not None and remaining is not None and paid > 0:
         payment_state = "partially_paid" if remaining > 0 else "payment_observed_no_remaining_receivable"
-    selected = (correction.get("kind") or "invoice_tax") if correction else None
+    intents = evidence.get("resolution_intents") or []
+    selected = (
+        (correction.get("kind") or "invoice_tax") if correction else (intents[0].get("kind") if intents else None)
+    )
     existing_resolution = evidence.get("commercial_credit_resolution")
     related = sections.get("related_refund_documents") or {}
     from app.services.transaction_ops.resolution_plan import KINDS
@@ -97,6 +100,14 @@ def assess(evidence, report, review, correction=None, references=None):
             "complete billed/fulfilled order evidence and unchanged linked accounting records.",
         }
     )
+    for intent in intents:
+        options.append(
+            {
+                "kind": intent["kind"],
+                "status": "solution_identified_requires_preview_and_approval",
+                "reason": intent.get("approval_basis"),
+            }
+        )
     if fully_unpaid:
         options[3].update(
             status="not_selected",
@@ -104,20 +115,28 @@ def assess(evidence, report, review, correction=None, references=None):
             "unsupported unpaid cases do not fall back to credit creation.",
         )
     for option in options:
-        if option["kind"] == selected:
+        if correction and option["kind"] == selected:
             option.update(status="supported_exact_proposal", reason=correction["approval_basis"])
     result = {
         "version": 1,
-        "status": "ready_for_human_approval" if correction else "investigation_required",
+        "status": "ready_for_human_approval"
+        if correction
+        else "solution_identified"
+        if intents
+        else "investigation_required",
         "selected_treatment": selected,
         "execution_capabilities": {
             "implemented_correction_kinds": list(KINDS),
             "exact_proposal_available": correction is not None,
+            "solution_identified": bool(intents) or correction is not None,
+            "native_amendment_configured": bool(review.get("native_accounting_profile")),
             "interpretation": "These are implemented executors, not an exhaustive list of legitimate accounting "
             "treatments. Missing evidence requires investigation; a missing executor requires implementation. "
             "Neither an observed discrepancy nor repeated reads grants execution or approval.",
         },
         "facts": facts,
+        "posting_balance": evidence.get("posting_balance"),
+        "planned_steps": intents,
         "alternatives": options,
         "observed_comparison_status": (report.get("balance") or {}).get("status"),
         "comparison_signature": _issue(report),

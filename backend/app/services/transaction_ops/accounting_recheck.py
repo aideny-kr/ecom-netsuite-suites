@@ -20,7 +20,14 @@ from app.services.transaction_ops.settlement import SCOPE
 def supports(proposal):
     """Only the implemented invoice corrections have native verification contracts."""
     return bool(proposal) and (
-        proposal.get("kind") in {"sales_adjustment_credit", "invoice_sales_adjustment", "sales_order_source_alignment"}
+        proposal.get("kind")
+        in {
+            "sales_adjustment_credit",
+            "invoice_sales_adjustment",
+            "sales_order_source_alignment",
+            "credit_tax_reallocation",
+            "sales_order_line_alignment",
+        }
         or (
             proposal.get("kind") in {None, "invoice_tax"}
             and proposal.get("record_type") == "invoice"

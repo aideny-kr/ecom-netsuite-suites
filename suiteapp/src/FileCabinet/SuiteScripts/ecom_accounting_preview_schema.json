@@ -33,6 +33,10 @@
           "expectedJson": {
             "type": "string",
             "description": "JSON object containing expected subtotal, taxtotal and total as decimal strings."
+          },
+          "fieldMapJson": {
+            "type": "string",
+            "description": "Explicit JSON source field map: order_reference, source_line_id, original_sku and vat_amount. Evidence only, never a write allowlist."
           }
         },
         "required": [
@@ -42,7 +46,8 @@
           "subsidiaryId",
           "currencyId",
           "amendmentJson",
-          "expectedJson"
+          "expectedJson",
+          "fieldMapJson"
         ],
         "nullable": []
       },

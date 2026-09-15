@@ -278,6 +278,10 @@ async def revalidate(db, tenant_id, proposal):
 
 
 async def verify_after(db, tenant_id, proposal, receipt=None):
+    if proposal.get("kind") in {"credit_tax_reallocation", "sales_order_line_alignment"}:
+        from app.services.transaction_ops.native_accounting_service import verify_after as verify_native
+
+        return await verify_native(db, tenant_id, proposal, receipt)
     if proposal.get("kind") == "sales_order_source_alignment":
         from app.services.transaction_ops.sales_order_alignment import verify_after as verify_order
 
@@ -350,6 +354,12 @@ async def verify_after(db, tenant_id, proposal, receipt=None):
 
 
 async def validate_approved(db, tenant_id, tool_name, tool_input, proposal):
+    if tool_name == "transaction_ops_accounting_amendment_apply":
+        from app.services.transaction_ops.native_accounting_service import validate_binding
+
+        # Full fresh evidence runs once in the durable native send dispatcher.
+        validate_binding(tenant_id, tool_name, tool_input, proposal)
+        return
     from urllib.parse import urlsplit
 
     from app.services.chat.tools import parse_external_tool_name
@@ -449,6 +459,10 @@ async def candidate_confirmation(*, db, tenant_id, actor_id, correlation_id, ses
         return None
     if not p or p.get("case_id") != case_id:
         return None
+    if p.get("kind") in {"credit_tax_reallocation", "sales_order_line_alignment"}:
+        from app.services.transaction_ops.native_accounting_service import confirmation
+
+        return await confirmation(db, tenant_id, actor_id, session_id, p, policy, correlation_id)
     creating_credit = p.get("kind") == "sales_adjustment_credit"
     mutation = "create" if creating_credit else "update"
     operation = "ns_createRecord" if creating_credit else "ns_updateRecord"

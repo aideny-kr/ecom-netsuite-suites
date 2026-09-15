@@ -5,12 +5,35 @@
  */
 define(['N/record', 'N/runtime'], (record, runtime) => {
     const BODY = new Set(['taxitem', 'taxrate', 'istaxable', 'taxtotal']);
-    const LINE = new Set(['rate', 'amount', 'istaxable', 'custcol_fw_vat_amount']);
     const TYPES = new Set(['creditmemo', 'salesorder', 'invoice']);
     const AMOUNTS = ['subtotal', 'taxtotal', 'total'];
     const account = value => String(value).replace(/_/g, '-').toLowerCase();
     const id = value => typeof value === 'string' && /^[1-9][0-9]*$/.test(value);
     const fail = code => { throw new Error(code); };
+    // Installation-owned configuration, never model/request-supplied write fields.
+    // No customer mapping is a default for another account.
+    const configuration = (previewProfile, subsidiaryId) => {
+        const raw = previewProfile === undefined ?
+            runtime.getCurrentScript().getParameter({name: 'custscript_ecom_acct_amend_profile'}) : JSON.stringify(previewProfile);
+        if (typeof raw !== 'string' || raw.length > 8000) fail('native_profile_required');
+        const configured = JSON.parse(raw);
+        const profiles = Array.isArray(configured) ? configured : [configured];
+        if (!profiles.length || profiles.length > 20) fail('native_profile_scope_mismatch');
+        const matches = profiles.filter(p => p && (subsidiaryId === undefined || p.subsidiary_id === subsidiaryId));
+        if (matches.length !== 1) fail('native_profile_scope_mismatch');
+        const profile = matches[0];
+        if (!profile || profile.schema_version !== 1 || profile.tax_regime !== 'legacy' ||
+            account(profile.account_id) !== account(runtime.accountId) || !id(profile.subsidiary_id) ||
+            !id(profile.role_id) || profile.role_id !== String(runtime.getCurrentUser().role)) fail('native_profile_scope_mismatch');
+        const fields = profile.fields;
+        const names = ['order_reference', 'source_line_id', 'original_sku', 'vat_amount'];
+        if (!fields || Object.keys(fields).length !== names.length || names.some(name =>
+            typeof fields[name] !== 'string' || !(name === 'order_reference' ?
+                /^custbody_[a-z0-9_]{1,100}$/ : /^custcol_[a-z0-9_]{1,100}$/).test(fields[name])) ||
+            new Set(Object.values(fields)).size !== names.length) fail('native_profile_fields_invalid');
+        return {schema_version: 1, account_id: account(runtime.accountId), subsidiary_id: profile.subsidiary_id,
+            role_id: profile.role_id, tax_regime: 'legacy', fields};
+    };
     const decimal = value => {
         if (typeof value !== 'string' && typeof value !== 'number') fail('decimal_required');
         const text = String(value);
@@ -49,7 +72,8 @@ define(['N/record', 'N/runtime'], (record, runtime) => {
     };
     // Preserve native state needed by a subsequent conditional amendment.
     // Missing fields remain null; a receipt is never authority to assume zero.
-    const protectedSnapshot = rec => {
+    const protectedSnapshot = (rec, previewProfile) => {
+        const fields = configuration(previewProfile, String(rec.getValue({fieldId: 'subsidiary'}))).fields;
         const scalar = value => {
             if (value === undefined || value === null || value === '') return null;
             if (Object.prototype.toString.call(value) === '[object Date]') return value.toISOString();
@@ -63,10 +87,10 @@ define(['N/record', 'N/runtime'], (record, runtime) => {
             'account', 'postingperiod', 'createdfrom', 'status', 'trandate', 'department', 'class', 'location',
             'taxitem', 'taxrate', 'istaxable', 'subtotal', 'taxtotal', 'total', 'applied', 'unapplied',
             'discountitem', 'discountrate', 'shippingcost', 'handlingcost', 'shippingtax1rate',
-            'shippingtaxcode', 'shipmethod', 'shipaddresslist', 'custbody_ecom_tx_ops_work_key'];
+            'shippingtaxcode', 'shipmethod', 'shipaddresslist', 'custbody_ecom_tx_ops_work_key', fields.order_reference];
         const lineFields = ['line', 'lineuniquekey', 'item', 'itemtype', 'quantity', 'quantityfulfilled',
             'quantitybilled', 'isclosed', 'rate', 'amount', 'istaxable', 'department', 'class', 'location',
-            'custcol_fw_solidus_line_id', 'custcol_fw_original_ecom_sku', 'custcol_fw_vat_amount'];
+            fields.source_line_id, fields.original_sku, fields.vat_amount];
         const count = rec.getLineCount({sublistId: 'item'});
         if (count > 500) fail('native_line_limit');
         return {body: Object.fromEntries(bodyFields.map(fieldId => [fieldId, scalar(rec.getValue({fieldId}))])),
@@ -114,7 +138,9 @@ define(['N/record', 'N/runtime'], (record, runtime) => {
             }
         }
     };
-    const load = args => {
+    const load = (args, previewProfile) => {
+        const profile = configuration(previewProfile, args.subsidiaryId);
+        if (args.subsidiaryId !== profile.subsidiary_id) fail('native_profile_subsidiary_mismatch');
         if (account(args.accountId) !== account(runtime.accountId)) fail('account_scope_mismatch');
         if (!TYPES.has(args.recordType) || !id(args.recordId) || !id(args.subsidiaryId) || !id(args.currencyId)) {
             fail('verified_record_scope_required');
@@ -125,7 +151,14 @@ define(['N/record', 'N/runtime'], (record, runtime) => {
             String(rec.getValue({fieldId: 'currency'})) !== args.currencyId) fail('record_scope_mismatch');
         return rec;
     };
-    const prepare = args => {
+    const prepare = (args, previewProfile) => {
+            const profile = configuration(previewProfile, args.subsidiaryId);
+            if (args.fieldMapJson !== undefined) {
+                const requested = parse(args.fieldMapJson, 2000);
+                if (Object.keys(requested).length !== Object.keys(profile.fields).length ||
+                    Object.keys(profile.fields).some(key => requested[key] !== profile.fields[key])) fail('native_field_map_mismatch');
+            }
+            const LINE = new Set(['rate', 'amount', 'istaxable', profile.fields.vat_amount]);
             if (account(args.accountId) !== account(runtime.accountId)) fail('account_scope_mismatch');
             if (!TYPES.has(args.recordType) || !id(args.recordId) || !id(args.subsidiaryId) || !id(args.currencyId)) {
                 fail('verified_record_scope_required');
@@ -156,9 +189,9 @@ define(['N/record', 'N/runtime'], (record, runtime) => {
                 for (const [field, value] of Object.entries(line.fields)) nativeValue(field, value);
             }
             if (runtime.getCurrentScript().getRemainingUsage() < 100) fail('insufficient_governance');
-            const rec = load(args);
+            const rec = load(args, previewProfile);
             const before = readAmounts(rec);
-            const beforeSnapshot = protectedSnapshot(rec);
+            const beforeSnapshot = protectedSnapshot(rec, previewProfile);
             const count = rec.getLineCount({sublistId: 'item'});
             if (count > 500) fail('native_line_limit');
             const indices = new Map();
@@ -180,7 +213,7 @@ define(['N/record', 'N/runtime'], (record, runtime) => {
                     fail('native_line_identity_changed');
                 }
                 rec.selectLine({sublistId: 'item', line: index});
-                for (const field of ['istaxable', 'rate', 'amount', 'custcol_fw_vat_amount']) {
+                for (const field of ['istaxable', 'rate', 'amount', profile.fields.vat_amount]) {
                     if (Object.prototype.hasOwnProperty.call(line.fields, field)) {
                         rec.setCurrentSublistValue({sublistId: 'item', fieldId: field, value: nativeValue(field, line.fields[field])});
                     }
@@ -192,7 +225,7 @@ define(['N/record', 'N/runtime'], (record, runtime) => {
             }
             if (taxOverride) rec.setValue({fieldId: 'taxtotal', value: nativeValue('taxtotal', body.taxtotal)});
             const after = readAmounts(rec);
-            const afterSnapshot = protectedSnapshot(rec);
+            const afterSnapshot = protectedSnapshot(rec, previewProfile);
             preservation(beforeSnapshot, afterSnapshot, amendment);
             declaredValues(afterSnapshot, amendment);
             amountIdentity(before, after);
@@ -203,12 +236,12 @@ define(['N/record', 'N/runtime'], (record, runtime) => {
                 accountId: account(runtime.accountId), roleId: String(runtime.getCurrentUser().role),
                 recordType: args.recordType, recordId: args.recordId,
                 subsidiaryId: args.subsidiaryId, currencyId: args.currencyId,
-                taxRegime: 'legacy', amendment, before, after, expected, matches,
+                taxRegime: 'legacy', profile, amendment, before, after, expected, matches,
                 beforeSnapshot, afterSnapshot,
                 saved: false, financialWrites: 0, executionAuthorized: false,
                 limitations: ['Save-time scripts and GL effects are not simulated.',
                     'Fresh preflight, exact approval and independent post-save verification remain required.'],
             }};
     };
-    return {prepare, load, snapshot: protectedSnapshot, preservation, declaredValues, amountIdentity, decimal};
+    return {prepare, load, snapshot: protectedSnapshot, preservation, declaredValues, amountIdentity, decimal, configuration};
 });

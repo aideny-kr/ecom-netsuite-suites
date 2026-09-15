@@ -7,6 +7,10 @@
     <description>Conditional credit tax and sales-order amendments. Application claims require exact human approval; native values and record versions are checked before save. Disabled by default.</description>
     <scriptfile>[/SuiteScripts/ecom_accounting_amendment_guard.js]</scriptfile>
     <scriptcustomfields>
+        <scriptcustomfield scriptid="custscript_ecom_acct_amend_profile">
+            <label>Verified accounting account and field profile (JSON)</label>
+            <fieldtype>LONGTEXT</fieldtype>
+        </scriptcustomfield>
         <scriptcustomfield scriptid="custscript_ecom_acct_amend_enabled">
             <label>Enable approved accounting amendments</label>
             <fieldtype>CHECKBOX</fieldtype>

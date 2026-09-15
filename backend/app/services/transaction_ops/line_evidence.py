@@ -13,12 +13,15 @@ def number(value):
         return None
 
 
-def tax_observation(line, target):
+def tax_observation(line, target, *, field_map=None):
     """Source adjustment amounts versus the integration's custom VAT field.
 
     Neither is native line-tax allocation or proof of tax legality. Preserve
     recalculation flags without turning them into accounting authority.
     """
+    from app.services.transaction_ops.accounting_field_map import resolve
+
+    fields = resolve(field_map)
     adjustments = line.get("adjustments")
     if not isinstance(adjustments, list) or any(not isinstance(a, dict) for a in adjustments):
         return None
@@ -34,7 +37,7 @@ def tax_observation(line, target):
         for a in taxes
     ):
         return None
-    custom_vat = number(target.get("custcol_fw_vat_amount"))
+    custom_vat = number(target.get(fields["vat_amount"]))
     with localcontext() as ctx:
         ctx.prec = 60
         amount = sum(number(a["amount"]) for a in taxes)
@@ -47,13 +50,16 @@ def tax_observation(line, target):
         }
 
 
-def compare_source_lines(source, evidence):
+def compare_source_lines(source, evidence, *, field_map=None):
     """Compare order line prices, never the product catalog's current price.
 
     Custom source IDs are used only inside the collector's verified case scope.
     SKU corroborates identity; it never replaces a missing or duplicated ID.
     Rate deltas are observed values, not automatic credit or GL instructions.
     """
+    from app.services.transaction_ops.accounting_field_map import resolve
+
+    fields = resolve(field_map)
     result = {
         "changes": [],
         "unverified": [],
@@ -78,7 +84,7 @@ def compare_source_lines(source, evidence):
         if detail.get("complete") is not True or not isinstance(native, list):
             result["unverified"].append(f"{document.get('record_type')}:{document.get('id')}:incomplete_lines")
             continue
-        native_ids = Counter(str(line.get("custcol_fw_solidus_line_id")) for line in native if isinstance(line, dict))
+        native_ids = Counter(str(line.get(fields["source_line_id"])) for line in native if isinstance(line, dict))
         for line in lines:
             if not isinstance(line, dict):
                 continue
@@ -86,18 +92,20 @@ def compare_source_lines(source, evidence):
             if not identifier.isdigit() or source_ids[identifier] != 1 or native_ids[identifier] != 1:
                 result["unverified"].append(f"{document.get('id')}:source_line:{identifier}:identity_not_unique")
                 continue
-            target = next(row for row in native if str(row.get("custcol_fw_solidus_line_id")) == identifier)
+            target = next(row for row in native if str(row.get(fields["source_line_id"])) == identifier)
             variant = line.get("variant") or {}
             sku = line.get("sku") or (variant.get("sku") if isinstance(variant, dict) else None)
             # A source bundle may expand to a different ERP component SKU.
             # The account's explicit original-ecommerce SKU preserves that mapping.
-            target_sku = target.get("custcol_fw_original_ecom_sku") or target.get("custcol_fw_item_sku")
+            target_sku = target.get(fields["original_sku"]) or (
+                target.get("custcol_fw_item_sku") if field_map is None else None
+            )
             quantity, target_quantity = number(line.get("quantity")), number(target.get("quantity"))
             price, target_price = number(line.get("price")), number(target.get("rate"))
             if not sku or sku != target_sku or None in (quantity, target_quantity, price, target_price):
                 result["unverified"].append(f"{document.get('id')}:source_line:{identifier}:values_or_sku_unverified")
                 continue
-            tax_detail = tax_observation(line, target)
+            tax_detail = tax_observation(line, target, field_map=field_map)
             tax_delta = number(tax_detail.get("delta")) if tax_detail else None
             if price == target_price and quantity == target_quantity and tax_delta in (None, 0):
                 continue
@@ -123,13 +131,16 @@ def compare_source_lines(source, evidence):
     return result
 
 
-def _zero_value_components(source_lines, native_lines):
+def _zero_value_components(source_lines, native_lines, *, field_map=None):
     """Retain corroborated, zero-priced inventory additions in arithmetic proof.
 
     Integrations may expand a source SKU into a priced item plus zero-priced
     components. This proves neither the mapping policy nor their native tax
     allocation; it only establishes that these observed lines add no subtotal.
     """
+    from app.services.transaction_ops.accounting_field_map import resolve
+
+    fields = resolve(field_map)
     if any(not isinstance(line, dict) for line in native_lines):
         return None
     source_ids = {str(line["id"]) for line in source_lines}
@@ -137,13 +148,13 @@ def _zero_value_components(source_lines, native_lines):
     keys = Counter(str(line.get("lineUniqueKey")) for line in native_lines)
     additional = []
     for line in native_lines:
-        if str(line.get("custcol_fw_solidus_line_id")) in source_ids:
+        if str(line.get(fields["source_line_id"])) in source_ids:
             continue
-        sku = line.get("custcol_fw_original_ecom_sku")
+        sku = line.get(fields["original_sku"])
         quantity = number(line.get("quantity"))
         item_type = line.get("itemType")
         if (
-            line.get("custcol_fw_solidus_line_id") not in (None, "")
+            line.get(fields["source_line_id"]) not in (None, "")
             or not isinstance(sku, str)
             or not sku
             or skus[sku] < 1
@@ -156,7 +167,7 @@ def _zero_value_components(source_lines, native_lines):
             or not str(line.get("line", "")).isdigit()
             or not str(line.get("lineUniqueKey", "")).isdigit()
             or keys[str(line["lineUniqueKey"])] != 1
-            or (line.get("custcol_fw_vat_amount") is not None and number(line["custcol_fw_vat_amount"]) != 0)
+            or (line.get(fields["vat_amount"]) is not None and number(line[fields["vat_amount"]]) != 0)
         ):
             return None
         additional.append(
@@ -174,14 +185,14 @@ def _zero_value_components(source_lines, native_lines):
     return additional
 
 
-def source_revision_delta(source, evidence, record_id):
+def source_revision_delta(source, evidence, record_id, *, field_map=None):
     """Prove the arithmetic of same-quantity source line repricing.
 
     This is a reusable evidence basis for planning, not a write candidate. It
     neither authorizes changing an issued document nor ignores existing credits.
     Tax legality and the commercial reason remain outside this proof.
     """
-    comparison = compare_source_lines(source, evidence)
+    comparison = compare_source_lines(source, evidence, field_map=field_map)
     identifier = str(record_id)
     if comparison["unverified"]:
         return None
@@ -195,7 +206,7 @@ def source_revision_delta(source, evidence, record_id):
     source_lines = source.get("line_items") or []
     native_lines = (document.get("line_evidence") or {}).get("lines") or []
     try:
-        additional = _zero_value_components(source_lines, native_lines)
+        additional = _zero_value_components(source_lines, native_lines, field_map=field_map)
         if (
             source.get("state") != "complete"
             or source.get("requires_review") is not False

@@ -124,8 +124,28 @@ def historical_refund_context(review, report):
     return context
 
 
-async def collect_accounting_evidence(db, tenant_id, review, report, *, posting_detail=True):
+async def collect_accounting_evidence(db, tenant_id, review, report, *, posting_detail=True, field_map=None):
     """Read one case's native evidence chain, preserving partial failures and scope conflicts."""
+    from app.services.transaction_ops.accounting_field_map import resolve
+
+    native_fields = resolve(field_map)
+    document_fields = (
+        DOCUMENT_FIELDS
+        if field_map is None
+        else (*(key for key in DOCUMENT_FIELDS if not key.startswith("custbody_")), native_fields["order_reference"])
+    )
+    line_fields = (
+        LINE_FIELDS
+        if field_map is None
+        else frozenset(
+            {
+                *(key for key in LINE_FIELDS if not key.startswith("custcol_")),
+                native_fields["source_line_id"],
+                native_fields["original_sku"],
+                native_fields["vat_amount"],
+            }
+        )
+    )
     scope = review.get("scope") or {}
     targets = (review.get("observed_scope") or {}).get("target_records") or []
     result = {
@@ -230,7 +250,7 @@ async def collect_accounting_evidence(db, tenant_id, review, report, *, posting_
             if currency.get("symbol") != expected_currency:
                 result["blockers"].append(f"{label}:currency_conflict")
                 return None
-            projected = _project(raw, DOCUMENT_FIELDS)
+            projected = _project(raw, document_fields)
             projected["currency_code"] = currency["symbol"]
             projected["record_type"] = kind.lower()
             address = raw.get("shippingAddress")
@@ -240,7 +260,7 @@ async def collect_accounting_evidence(db, tenant_id, review, report, *, posting_
                     projected["tax_jurisdiction"] = jurisdiction
             if kind in {"salesOrder", "invoice", "cashSale", "creditMemo"}:
                 problems = []
-                lines = _sublist(raw, "item", "item_lines", LINE_FIELDS, problems)
+                lines = _sublist(raw, "item", "item_lines", line_fields, problems)
                 projected["line_evidence"] = {
                     "complete": lines is not None and not problems,
                     "lines": lines,
@@ -362,11 +382,11 @@ async def collect_accounting_evidence(db, tenant_id, review, report, *, posting_
                 if doc is None:
                     continue
                 if not (
-                    doc.get("custbody_fw_order_number") == report.get("order_reference")
+                    doc.get(native_fields["order_reference"]) == report.get("order_reference")
                     or _ref(doc.get("createdFrom")) in known_origins
                 ) or (
-                    doc.get("custbody_fw_order_number")
-                    and doc["custbody_fw_order_number"] != report.get("order_reference")
+                    doc.get(native_fields["order_reference"])
+                    and doc[native_fields["order_reference"]] != report.get("order_reference")
                 ):
                     result["blockers"].append(f"credit:{identifier}:order_identity_unverified")
                     continue

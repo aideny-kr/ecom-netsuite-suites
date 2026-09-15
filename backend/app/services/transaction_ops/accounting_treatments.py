@@ -16,6 +16,7 @@ def treatment_batches(members):
             "invoice_sales_adjustment",
             "sales_order_source_alignment",
         }
+        native = proposal.get("kind") in {"credit_tax_reallocation", "sales_order_line_alignment"}
         treatment = {
             "kind": proposal.get("kind") or "invoice_tax",
             "scope": proposal["scope"],
@@ -24,11 +25,17 @@ def treatment_batches(members):
             "currency": proposal.get("source", {}).get("currency") or proposal["before"].get("currency_code"),
             "accounting_book": proposal["accounting_book"],
             "ar_account": proposal["ar_account"],
-            "offset_account": proposal.get("sales_adjustment_account") if commercial else proposal["tax_account"],
+            "offset_account": proposal.get("sales_adjustment_account")
+            if commercial or native
+            else proposal["tax_account"],
             "period": {
                 key: (proposal.get("period") or {}).get(key) for key in ("id", "closed", "arLocked", "allLocked")
             },
-            "profile": proposal["profile"] if commercial else {"tax_item_id": proposal["tax_item"].get("id")},
+            "profile": proposal["native_profile"]
+            if native
+            else proposal["profile"]
+            if commercial
+            else {"tax_item_id": proposal["tax_item"].get("id")},
         }
         key = business_digest(treatment)
         if key not in batches:
@@ -36,8 +43,10 @@ def treatment_batches(members):
                 "treatment_id": key,
                 "label": "Sales Adjustments credit and invoice application"
                 if credit
+                else "Existing credit tax allocation"
+                if proposal.get("kind") == "credit_tax_reallocation"
                 else "Sales order source alignment"
-                if proposal.get("kind") == "sales_order_source_alignment"
+                if proposal.get("kind") in {"sales_order_source_alignment", "sales_order_line_alignment"}
                 else "Sales Adjustment on unpaid invoice"
                 if commercial
                 else "Invoice tax correction",

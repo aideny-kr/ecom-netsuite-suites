@@ -420,6 +420,8 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
             db.info.pop("accounting_correction_candidate", None)
             return await read_observation(db, tenant_id, actor.id, case.id, params, context.get("correlation_id"))
         review = await accounting_context(db, tenant_id, case.scope_json, case.latest_report_json)
+        native_profile = review.get("native_accounting_profile")
+        native_fields = native_profile["fields"] if native_profile else None
         import json
 
         from app.models.audit import AuditEvent
@@ -444,7 +446,13 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
         # can be selected. The collector's native call budget remains enforced.
         evidence = json.loads(
             json.dumps(
-                await collect_accounting_evidence(db, tenant_id, review, case.latest_report_json),
+                await collect_accounting_evidence(
+                    db,
+                    tenant_id,
+                    review,
+                    case.latest_report_json,
+                    **({"field_map": native_fields} if native_fields else {}),
+                ),
                 default=str,
             )
         )
@@ -483,12 +491,13 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
             evidence["source_refresh"] = source
             from app.services.transaction_ops.line_evidence import compare_source_lines, source_revision_delta
 
-            evidence["line_comparison"] = compare_source_lines(source, evidence)
+            evidence["line_comparison"] = compare_source_lines(source, evidence, field_map=native_fields)
             sections = evidence.get("sections") or {}
             evidence["source_revision_deltas"] = [
                 delta
                 for document in [sections.get("sales_order") or {}, *(sections.get("posting_documents") or [])]
-                if (delta := source_revision_delta(source, evidence, document.get("id"))) is not None
+                if (delta := source_revision_delta(source, evidence, document.get("id"), field_map=native_fields))
+                is not None
             ]
             # Existing recipes retain their signed source shape and exact
             # revalidation semantics. The full observation remains above.
@@ -529,7 +538,24 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
                 )
 
                 try:
-                    support = await collect_support(db, tenant_id, evidence["source_refresh"], review, evidence)
+                    support = await collect_support(
+                        db,
+                        tenant_id,
+                        evidence["source_refresh"],
+                        review,
+                        evidence,
+                        **({"field_map": native_fields} if native_fields else {}),
+                    )
+                    from app.services.transaction_ops.posting_balance import repriced_credit_balance
+
+                    evidence["posting_balance"] = repriced_credit_balance(
+                        evidence["source_refresh"],
+                        review,
+                        evidence,
+                        support,
+                        case.latest_report_json,
+                        field_map=native_fields,
+                    )
                     intent = (
                         build_intent(
                             tenant_id,
@@ -538,6 +564,7 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
                             review,
                             evidence,
                             support,
+                            **({"field_map": native_fields} if native_fields else {}),
                         )
                         if support
                         else None
@@ -546,17 +573,40 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
                         from app.services.transaction_ops.source_line_alignment import build_intent as alignment_intent
 
                         evidence["resolution_intents"] = [solution_summary(intent)]
-                        alignment = alignment_intent(evidence["source_refresh"], evidence, intent)
+                        alignment = alignment_intent(
+                            evidence["source_refresh"], evidence, intent, field_map=native_fields
+                        )
                         if alignment:
                             evidence["resolution_intents"].append(alignment)
                         evidence["credit_reallocation_support"] = support
                         from app.services.transaction_ops.accounting_preview import for_intent
 
-                        evidence["native_preview_requests"] = [for_intent(intent, review, support["credit"])]
+                        evidence["native_preview_requests"] = [
+                            for_intent(intent, review, support["credit"], field_map=native_fields)
+                        ]
                         if alignment:
                             evidence["native_preview_requests"].append(
-                                for_intent(alignment, review, evidence["sections"]["sales_order"])
+                                for_intent(
+                                    alignment, review, evidence["sections"]["sales_order"], field_map=native_fields
+                                )
                             )
+                        if native_profile:
+                            from app.services.transaction_ops.native_accounting_service import preview_candidate
+
+                            correction = await preview_candidate(db, tenant_id, intent, review, native_profile)
+                    elif native_profile and support:
+                        from app.services.transaction_ops.native_accounting_service import prepare_alignment
+
+                        correction = await prepare_alignment(
+                            db,
+                            tenant_id,
+                            case.id,
+                            evidence["source_refresh"],
+                            review,
+                            evidence,
+                            support,
+                            native_profile,
+                        )
                 except (ValueError, KeyError, NetSuiteEvidenceError) as exc:
                     evidence["blockers"].append(f"credit_reallocation:{exc}")
             if correction:
@@ -569,27 +619,45 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
                 correction["case_id"] = str(case.id)
                 correction["tenant_id"] = str(tenant_id)
                 db.info["accounting_correction_candidate"] = correction
-                evidence["correction_candidate"] = {
-                    "next_action": "Call this tool to DISPLAY an approval card. Execution requires human approval.",
-                    "tool_name": f"ext__{uuid.UUID(correction['connector_id']).hex}__"
-                    + ("ns_createRecord" if correction.get("kind") == "sales_adjustment_credit" else "ns_updateRecord"),
-                    "params": {
-                        "recordType": correction["record_type"],
-                        **(
-                            {}
+                if correction.get("native_request"):
+                    # The native action is not a generic model tool. The server
+                    # presents the signed exact card after this evidence turn.
+                    evidence["correction_candidate"] = {
+                        "next_action": "The server will display the exact approval card for this supported correction.",
+                        "kind": correction["kind"],
+                        "expected_after": correction["expected_after"],
+                        "approval_basis": correction["approval_basis"],
+                        "financial_writes": 0,
+                    }
+                else:
+                    evidence["correction_candidate"] = {
+                        "next_action": "Call this tool to DISPLAY an approval card. Execution requires human approval.",
+                        "tool_name": f"ext__{uuid.UUID(correction['connector_id']).hex}__"
+                        + (
+                            "ns_createRecord"
                             if correction.get("kind") == "sales_adjustment_credit"
-                            else {"recordId": correction["record_id"]}
+                            else "ns_updateRecord"
                         ),
-                        "data": json.dumps(correction["proposed_fields"]),
-                    },
-                    "expected_after": correction["expected_after"],
-                    "approval_basis": correction["approval_basis"],
-                }
+                        "params": {
+                            "recordType": correction["record_type"],
+                            **(
+                                {}
+                                if correction.get("kind") == "sales_adjustment_credit"
+                                else {"recordId": correction["record_id"]}
+                            ),
+                            "data": json.dumps(correction["proposed_fields"]),
+                        },
+                        "expected_after": correction["expected_after"],
+                        "approval_basis": correction["approval_basis"],
+                    }
         except SourceReadError as exc:
             evidence["blockers"].append(f"source_refresh:{exc}")
         from app.services.transaction_ops.record_links import evidence_record_links
 
         evidence = json.loads(json.dumps(evidence, default=str))
+        from app.services.transaction_ops.accounting_projection import comparison_fingerprint
+
+        evidence["comparison_fingerprint"] = comparison_fingerprint(case.latest_report_json)
         evidence["record_links"] = evidence_record_links(evidence)
         from app.services.transaction_ops.resolution_guidance import investigation_guidance
 
@@ -613,6 +681,9 @@ async def execute_accounting_evidence(params: dict, **kwargs) -> dict:
             plan = proposal_plan(correction, case.latest_report_json)
             correction["resolution_plan"] = plan
             evidence["resolution_plan"] = plan
+        from datetime import datetime, timezone
+
+        evidence["completed_at"] = datetime.now(timezone.utc).isoformat()
         evidence_event = await log_event(
             db,
             tenant_id,

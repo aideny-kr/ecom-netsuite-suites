@@ -1,10 +1,13 @@
 const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
+const nativeProfile = () => ({schema_version: 1, account_id: 'test-sb1', subsidiary_id: '1',
+  role_id: '7', tax_regime: 'legacy', fields: {order_reference: 'custbody_test_order',
+    source_line_id: 'custcol_test_source_line', original_sku: 'custcol_test_sku', vat_amount: 'custcol_test_vat'}});
 
 function setup({suiteTax = false, wrongCurrency = false, recalculate = true,
   allowApply = false, periodOpen = true, saveMode = 'forbidden', workField = true,
-  onCommit = () => {}, onStamp = () => {}, onSave = () => {}} = {}) {
+  profile = nativeProfile(), onCommit = () => {}, onStamp = () => {}, onSave = () => {}} = {}) {
   const workKey = 'custbody_ecom_tx_ops_work_key';
   let storedBody = {subsidiary: '1', currency: wrongCurrency ? '2' : '1', entity: '8', account: '11',
     postingperiod: '90', exchangerate: 1, lastmodifieddate: '2026-01-01T00:00:00Z',
@@ -54,7 +57,8 @@ function setup({suiteTax = false, wrongCurrency = false, recalculate = true,
   }), submitFields: jest.fn(), create: jest.fn(), delete: jest.fn()};
   const runtime = {accountId: 'TEST_SB1', isFeatureInEffect: () => suiteTax,
     getCurrentUser: () => ({role: '7'}), getCurrentScript: () => ({getRemainingUsage: () => 500,
-      getParameter: () => allowApply})};
+      getParameter: ({name}) => name === 'custscript_ecom_acct_amend_profile' ?
+        (profile === null ? null : JSON.stringify(profile)) : allowApply})};
   const logger = {error: jest.fn(), audit: jest.fn()};
   let core, tool, guard;
   const scripts = path.join(__dirname,'../src/FileCabinet/SuiteScripts');
@@ -210,7 +214,7 @@ test('sales-order amendment preserves billing and fulfillment quantities', () =>
   const args = request(); args.recordType = 'salesorder';
   // Consume the initial fixture object, then set real existing native quantities.
   guard.post({schema_version:1,action:'preview',request:args});
-  mutate({}, {quantitybilled:1, quantityfulfilled:1, custcol_fw_vat_amount:0});
+  mutate({}, {quantitybilled:1, quantityfulfilled:1, custcol_test_vat:0});
   const input = approval(guard,args);
   expect(guard.post(input)).toMatchObject({success:true,financial_writes:1,
     native_snapshot:{lines:[{quantity:'1',quantitybilled:'1',quantityfulfilled:'1'}]}});
@@ -266,10 +270,66 @@ test('reused work key never proves a different amendment was applied', () => {
   const input = approval(guard);
   expect(guard.post(input).financial_writes).toBe(1);
   const amendment = JSON.parse(input.request.amendmentJson);
-  amendment.lines[0].fields.custcol_fw_vat_amount='99';
+  amendment.lines[0].fields.custcol_test_vat='99';
   input.request.amendmentJson=JSON.stringify(amendment);
   expect(guard.post(input)).toMatchObject({status:'prior_submission_requires_verification',
     amounts_match_requested:true,financial_writes:0,retry_allowed:false,
-    native_snapshot:{lines:[{custcol_fw_vat_amount:null}]}});
+    native_snapshot:{lines:[{custcol_test_vat:null}]}});
   expect(allSaves).toHaveBeenCalledTimes(1);
+});
+
+test('capabilities binds account, role and explicit fields without loading or saving records', () => {
+  const {guard,record,allSaves} = setup();
+  expect(guard.get({schema_version:'1',action:'capabilities'})).toMatchObject({success:true,
+    profile:nativeProfile(),apply_enabled:false,financial_writes:0,execution_authorized:false,suitetax:false});
+  expect(record.load).not.toHaveBeenCalled(); expect(allSaves).not.toHaveBeenCalled();
+});
+
+test.each(['absent','account','role','subsidiary','field'])('native profile %s fails before record loading', scenario => {
+  let profile=nativeProfile();
+  if(scenario==='absent') profile=null;
+  if(scenario==='account') profile.account_id='another';
+  if(scenario==='role') profile.role_id='999';
+  if(scenario==='subsidiary') profile.subsidiary_id='999';
+  if(scenario==='field') profile.fields.vat_amount='quantity';
+  const {guard,record,allSaves}=setup({profile,allowApply:true});
+  expect(guard.post({schema_version:1,action:'preview',request:request()}).success).toBe(false);
+  expect(record.load).not.toHaveBeenCalled();expect(allSaves).not.toHaveBeenCalled();
+});
+
+test('another customer changes only its configured VAT field; old Framework field is rejected',()=>{
+  const profile=nativeProfile();profile.fields.vat_amount='custcol_customer_two_vat';
+  const {guard,allSaves}=setup({profile});const args=request();
+  const amend=JSON.parse(args.amendmentJson);amend.lines[0].fields.custcol_customer_two_vat='40';
+  args.amendmentJson=JSON.stringify(amend);
+  expect(guard.post({schema_version:1,action:'preview',request:args})).toMatchObject({success:true,
+    afterSnapshot:{lines:[{custcol_customer_two_vat:'40'}]},financialWrites:0});
+  amend.lines[0].fields.custcol_fw_vat_amount='40';args.amendmentJson=JSON.stringify(amend);
+  expect(guard.post({schema_version:1,action:'preview',request:args})).toMatchObject({success:false,error:'unsupported_amendment_field'});
+  expect(allSaves).not.toHaveBeenCalled();
+});
+
+test('standalone preview accepts explicit fields without a deployment and cannot authorize apply',()=>{
+  const {tool,guard,allSaves}=setup({profile:null,allowApply:true});const args=request();
+  args.fieldMapJson=JSON.stringify(nativeProfile().fields);
+  expect(tool.previewAccountingAmendment(args)).toMatchObject({success:true});
+  expect(guard.post({schema_version:1,action:'preview',request:args})).toMatchObject({success:false,error:'native_profile_required'});
+  expect(allSaves).not.toHaveBeenCalled();
+});
+
+test('request field map cannot replace installation-owned apply configuration',()=>{
+  const {guard,allSaves}=setup({allowApply:true,saveMode:'ok'});const input=approval(guard);
+  input.request.fieldMapJson=JSON.stringify({...nativeProfile().fields,vat_amount:'custcol_other_vat'});
+  expect(guard.post(input)).toMatchObject({success:false,status:'not_submitted',error:'native_field_map_mismatch'});
+  expect(allSaves).not.toHaveBeenCalled();
+});
+
+test('one installation supports distinct explicit subsidiary profiles without a default or ambiguous selection',()=>{
+  const first=nativeProfile(); const second={...nativeProfile(),subsidiary_id:'2',fields:{...nativeProfile().fields,vat_amount:'custcol_other_sub_vat'}};
+  const {guard,allSaves}=setup({profile:[first,second]});
+  expect(guard.get({action:'capabilities',schema_version:'1',subsidiaryId:'2'})).toMatchObject({success:true,profile:second});
+  expect(guard.get({action:'capabilities',schema_version:'1'}).success).toBe(false);
+  expect(guard.get({action:'capabilities',schema_version:'1',subsidiaryId:'3'}).success).toBe(false);
+  expect(allSaves).not.toHaveBeenCalled();
+  expect(setup({profile:[first,first]}).guard.get({action:'capabilities',schema_version:'1',subsidiaryId:'1'}).success).toBe(false);
 });

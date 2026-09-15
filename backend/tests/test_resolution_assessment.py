@@ -5,6 +5,17 @@ import pytest
 from app.services.transaction_ops.resolution_assessment import assess
 
 
+def test_known_treatment_is_a_solution_even_when_no_native_executor_is_configured():
+    e = evidence()
+    e["resolution_intents"] = [{"kind": "credit_tax_reallocation", "approval_basis": "Reallocate existing credit."}]
+    result = assess(e, {}, {})
+    assert result["status"] == "solution_identified"
+    assert result["selected_treatment"] == "credit_tax_reallocation"
+    assert result["execution_capabilities"]["exact_proposal_available"] is False
+    assert result["execution_capabilities"]["native_amendment_configured"] is False
+    assert result["financial_write_authorized"] is False
+
+
 def evidence(paid="0", remaining="100", complete=True, links=None):
     return {
         "sections": {

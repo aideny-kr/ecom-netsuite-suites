@@ -1,5 +1,6 @@
 import { actionLabel, dateLabel, exactValue, objectValue } from "./format";
 import type { JsonObject, TransactionFinding } from "./types";
+import { PostingBalanceComparison } from "../transactions/variance";
 
 export const cardClass = "rounded-xl border bg-card p-5 shadow-soft";
 export const inputClass =
@@ -200,6 +201,9 @@ export function ComparisonEvidence({ report }: { report: JsonObject }) {
 function BalanceEvidence({ balance }: { balance: JsonObject }) {
   const amounts = objectValue(balance.amounts);
   const posting = objectValue(balance.posting_reconciliation);
+  if (posting.basis === "verified_source_revision_and_owned_credit_refund") {
+    return <PostingBalanceComparison posting={posting} />;
+  }
   if (!Object.keys(amounts).length) return null;
   return (
     <div className="overflow-x-auto">

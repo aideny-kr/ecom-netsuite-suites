@@ -556,6 +556,14 @@ async def _execute_tool_call_once(
             )
     # ── End HITL guard ──
 
+    if tool_name == "transaction_ops_accounting_amendment_apply":
+        from app.services.transaction_ops.native_accounting_dispatch import execute as execute_native
+
+        result = await execute_native(
+            db, tenant_id, actor_id, session_id, tool_input, approval_context, correlation_id=correlation_id
+        )
+        return json.dumps(result, default=str, allow_nan=False)
+
     if tool_name == "escalate_reasoning":
         # Control signal handled by the agent loop (it bumps thinking depth).
         # Returning a terse ack keeps the tool-result contract intact.
