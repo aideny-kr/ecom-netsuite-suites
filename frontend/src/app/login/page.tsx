@@ -149,7 +149,7 @@ export default function LoginPage() {
 
           </>}
 
-          <p className="mt-6 text-center text-[13px] text-muted-foreground">
+          {process.env.NEXT_PUBLIC_SINGLE_COMPANY !== "true" && <p className="mt-6 text-center text-[13px] text-muted-foreground">
             Don&apos;t have an account?{" "}
             <Link
               href="/register"
@@ -157,7 +157,7 @@ export default function LoginPage() {
             >
               Create one
             </Link>
-          </p>
+          </p>}
     </OrbitalLoginShell>
   );
 }

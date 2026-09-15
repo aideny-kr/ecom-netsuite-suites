@@ -110,6 +110,9 @@ def inputs(p):
 
 @pytest.mark.parametrize("kind", ["tax", "credit", "discount", "sales_order"])
 async def test_agent_emits_exact_accounting_card_without_executing_or_duplicate_prefetch(kind):
+    # Load the option module before tool mocks, as full-suite collection does.
+    from app.services.chat import slot_option_sources  # noqa: F401
+
     p = kind_proposal(kind)
     p["tenant_id"] = str(_TENANT_ID)
     name, params = inputs(p)
@@ -126,7 +129,12 @@ async def test_agent_emits_exact_accounting_card_without_executing_or_duplicate_
     adapter.build_assistant_message.return_value = {"role": "assistant", "content": []}
     adapter.build_tool_result_message.return_value = {"role": "user", "content": []}
     execute = AsyncMock()
+    external_audit = AsyncMock()
     with (
+        patch("app.services.chat.external_tool_audit.append_event", external_audit),
+        # Label hydration uses its own imported dispatcher. This card-structure
+        # test must not perform provider reads or commit independent audit rows.
+        patch("app.services.chat.reference_field_labels.resolve_reference_labels", AsyncMock(return_value={})),
         patch("app.services.policy_service.get_active_policy", AsyncMock(return_value=None)),
         patch("app.services.chat.agents.base_agent._metadata_fetched_this_turn", return_value=True),
         patch(
@@ -156,6 +164,7 @@ async def test_agent_emits_exact_accounting_card_without_executing_or_duplicate_
     assert cards[0]["proposed_fields"] == p["proposed_fields"]
     assert not cards[0].get("invariant_errors")
     execute.assert_not_awaited()
+    external_audit.assert_not_awaited()
     text = " ".join(v for k, v in events if k == "text")
     if kind == "tax":
         assert "7030.02" in text and "7046.00" in text and "Posting period" in text

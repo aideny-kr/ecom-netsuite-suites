@@ -25,6 +25,7 @@ afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
 describe("sign-in presentation", () => {
   it("works without Google and preserves the existing signup link", () => {
     vi.stubEnv("NEXT_PUBLIC_GOOGLE_CLIENT_ID", "");
+    vi.stubEnv("NEXT_PUBLIC_SINGLE_COMPANY", "false");
     render(<LoginPage />);
     expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
     expect(screen.queryByText("Google sign-in option")).not.toBeInTheDocument();
@@ -33,6 +34,7 @@ describe("sign-in presentation", () => {
 
   it("retains configured Google login and signup for hosted installs", () => {
     vi.stubEnv("NEXT_PUBLIC_GOOGLE_CLIENT_ID", "test-client-id");
+    vi.stubEnv("NEXT_PUBLIC_SINGLE_COMPANY", "false");
     render(<LoginPage />);
     expect(screen.getByText("Google sign-in option")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Create one" })).toBeInTheDocument();
@@ -49,4 +51,13 @@ it("keeps password sign-in working when background motion is paused", async () =
   fireEvent.change(screen.getByLabelText("Password"), { target: { value: "test-password" } });
   fireEvent.click(screen.getByRole("button", { name: "Sign in" }));
   await waitFor(() => expect(login).toHaveBeenCalledWith({ email: "operator@example.com", password: "test-password" }));
+});
+
+
+it.each(["", "test-client-id"])("hides public signup for a dedicated company with Google config %s", (googleClientId) => {
+  vi.stubEnv("NEXT_PUBLIC_SINGLE_COMPANY", "true");
+  vi.stubEnv("NEXT_PUBLIC_GOOGLE_CLIENT_ID", googleClientId);
+  render(<LoginPage />);
+  expect(screen.getByRole("button", { name: "Sign in" })).toBeInTheDocument();
+  expect(screen.queryByRole("link", { name: "Create one" })).not.toBeInTheDocument();
 });

@@ -1,0 +1,105 @@
+# Local evaluation profile. Ports bind to loopback; production hosting is a
+# separate release with TLS, recovery, access-control and operational checks.
+name: suite-studio-local
+
+x-app: &app
+  image: suite-studio-local-backend
+  build: ./backend
+  environment: &app-env
+    SINGLE_COMPANY: "true"
+    APP_ENV: development
+    APP_DEBUG: "false"
+    DATABASE_URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:?Run scripts/install/local.sh init}@postgres:5432/suite_studio
+    DATABASE_URL_SYNC: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/suite_studio
+    DATABASE_URL_DIRECT: ""
+    DATABASE_URL_DIRECT_SYNC: ""
+    REDIS_URL: redis://redis:6379/0
+    CELERY_BROKER_URL: redis://redis:6379/1
+    CELERY_RESULT_BACKEND: redis://redis:6379/2
+    JWT_SECRET_KEY: ${JWT_SECRET_KEY:?Run scripts/install/local.sh init}
+    ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Run scripts/install/local.sh init}
+    CORS_ORIGINS: http://localhost:${FRONTEND_PORT:-13002}
+    FRONTEND_URL: http://localhost:${FRONTEND_PORT:-13002}
+    NETSUITE_OAUTH_REDIRECT_URI: http://localhost:${BACKEND_PORT:-18000}/api/v1/connections/netsuite/callback
+    GOOGLE_CLIENT_ID: ""
+    EMAIL_PROVIDER: console
+    WEB_CONCURRENCY: "1"
+  volumes:
+    - workspace:/tmp/workspace_storage
+    - ./knowledge:/knowledge:ro
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: suite_studio
+    volumes:
+      - database:/var/lib/postgresql/data
+      - ./backend/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U postgres -d suite_studio]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  migrate:
+    <<: *app
+    profiles: [setup]
+    command: [alembic, upgrade, head]
+
+  backend:
+    <<: *app
+    command: [uvicorn, app.main:app, --host, 0.0.0.0, --port, "8000", --workers, "1"]
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-18000}:8000"
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  worker:
+    <<: *app
+    command: [celery, -A, app.workers.celery_app, worker, --loglevel=info, --concurrency=2, -Q, "default,sync,recon,export"]
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  beat:
+    <<: *app
+    command: [celery, -A, app.workers.celery_app, beat, --loglevel=info, --schedule=/tmp/celerybeat-schedule]
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:${BACKEND_PORT:-18000}
+        NEXT_PUBLIC_GOOGLE_CLIENT_ID: ""
+        NEXT_PUBLIC_SINGLE_COMPANY: "true"
+        NEXT_PUBLIC_BUILD_ID: ${BUILD_ID:-single-company-local}
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-13002}:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  database:
+  workspace:

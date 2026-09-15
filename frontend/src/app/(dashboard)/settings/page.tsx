@@ -173,6 +173,18 @@ function PlanInfoSection() {
 
   if (!planInfo) return null;
 
+  if (planInfo.plan === "self_hosted") {
+    return (
+      <div className="rounded-xl border bg-card p-6 shadow-soft space-y-2">
+        <h3 className="text-lg font-semibold">Your company deployment</h3>
+        <p className="text-[13px] text-muted-foreground">
+          No trial expiry or plan quotas. Create workflows and schedule recurring jobs
+          using your connected services. Job budgets, permissions and approvals still apply.
+        </p>
+      </div>
+    );
+  }
+
   const tier = PLAN_TIERS[planInfo.plan] ?? PLAN_TIERS.free;
 
   return (

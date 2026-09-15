@@ -11,6 +11,19 @@ from app.models.tenant import Tenant
 logger = structlog.get_logger()
 
 PLAN_LIMITS = {
+    "self_hosted": {
+        "max_connections": -1,
+        "max_schedules": -1,
+        "max_exports_per_day": -1,
+        "max_users": -1,
+        "mcp_tools": True,
+        "chat": True,
+        "byok_ai": True,
+        "workspace": True,
+        "onboarding": True,
+        "chat_api": True,
+        "policies": True,
+    },
     "free": {
         "max_connections": -1,
         "max_schedules": 5,
