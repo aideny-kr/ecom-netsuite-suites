@@ -69,3 +69,18 @@ describe("ChatInput initialMessage (compose prefill)", () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 });
+
+it("reserves file-context space and keeps oversized text in the composer", async () => {
+  get.mockImplementation((path: string) => Promise.resolve(path.endsWith("/health") ? { max_input_chars: 100 } : []));
+  const onSend = vi.fn();
+  render(<ChatInput onSend={onSend} isLoading={false} reservedChars={20} />, { wrapper });
+  const textarea = screen.getByRole("textbox");
+  fireEvent.change(textarea, { target: { value: "x".repeat(81) } });
+  await waitFor(() => expect(screen.getByText(/81\/80/)).toBeInTheDocument());
+  fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+  expect(onSend).not.toHaveBeenCalled();
+  expect(textarea).toHaveValue("x".repeat(81));
+  fireEvent.change(textarea, { target: { value: "x".repeat(80) } });
+  fireEvent.keyDown(textarea, { key: "Enter", code: "Enter" });
+  expect(onSend).toHaveBeenCalledWith("x".repeat(80), undefined);
+});

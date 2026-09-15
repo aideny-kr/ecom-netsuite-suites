@@ -49,10 +49,10 @@ function makeSseResponse(events: string[]): Response {
   });
 }
 
-function wrapper({ children }: { children: React.ReactNode }) {
-  const qc = new QueryClient({
+function Wrapper({ children }: { children: React.ReactNode }) {
+  const [qc] = React.useState(() => new QueryClient({
     defaultOptions: { queries: { retry: false } },
-  });
+  }));
   return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
 }
 
@@ -95,7 +95,7 @@ describe("useWorkspaceChat — SSE stream contract", () => {
       makeSseResponse(sseEvents),
     );
 
-    const { result } = renderHook(() => useWorkspaceChat(workspaceId), { wrapper });
+    const { result } = renderHook(() => useWorkspaceChat(workspaceId), { wrapper: Wrapper });
 
     await act(async () => {
       await result.current.handleSend("explain me about this script");
@@ -147,12 +147,12 @@ describe("useWorkspaceChat — SSE stream contract", () => {
       makeSseResponse([]),
     );
 
-    const { result } = renderHook(() => useWorkspaceChat(workspaceId), { wrapper });
+    const { result } = renderHook(() => useWorkspaceChat(workspaceId), { wrapper: Wrapper });
 
     expect(result.current.isSending).toBe(false);
 
     // Kick off send; do NOT await yet
-    let sendPromise: Promise<void> | undefined;
+    let sendPromise: ReturnType<typeof result.current.handleSend> | undefined;
     act(() => {
       sendPromise = result.current.handleSend("hello");
     });
@@ -207,7 +207,7 @@ describe("useWorkspaceChat — SSE stream contract", () => {
       ]),
     );
 
-    const { result } = renderHook(() => useWorkspaceChat(workspaceId), { wrapper });
+    const { result } = renderHook(() => useWorkspaceChat(workspaceId), { wrapper: Wrapper });
 
     act(() => {
       result.current.setActiveSessionId(sessionId);
@@ -221,4 +221,64 @@ describe("useWorkspaceChat — SSE stream contract", () => {
       expect(path).toContain("last_id=0");
     });
   });
+  it("returns keyed admission before streaming finishes, preserves attachment retries and cancels only the active run", async () => {
+    const receipt = { session_id: "s1", run_id: "r1", request_id: "key1" };
+    vi.mocked(apiClient.post).mockResolvedValue(receipt);
+    vi.mocked(apiClient.streamGet).mockImplementation(() => new Promise(() => {}));
+    const { result } = renderHook(() => useWorkspaceChat("w1"), { wrapper: Wrapper });
+    act(() => result.current.setActiveSessionId("s1"));
+    await act(async () => {
+      expect(await result.current.handleSend("long input", "attachment1", { request_id: "key1" })).toEqual(receipt);
+    });
+    expect(result.current.isSending).toBe(true);
+    await act(async () => {
+      await result.current.handleSend("long input", "attachment1", { request_id: "key1" });
+    });
+    expect(vi.mocked(apiClient.post).mock.calls.slice(0, 2)).toEqual([
+      ["/api/v1/chat/sessions/s1/messages", { content: "long input", file_id: "attachment1", request_id: "key1" }],
+      ["/api/v1/chat/sessions/s1/messages", { content: "long input", file_id: "attachment1", request_id: "key1" }],
+    ]);
+    expect(apiClient.streamGet).toHaveBeenCalledTimes(1);
+    await expect(result.current.cancelActiveRun("wrong")).rejects.toThrow("matching active");
+    await act(async () => { await result.current.handleStop(); });
+    expect(apiClient.post).toHaveBeenLastCalledWith("/api/v1/chat/runs/r1/cancel", {});
+  });
+
+  it("does not dispatch a message after changing workspace during session creation", async () => {
+    let resolveCreate!: (session: unknown) => void;
+    vi.mocked(apiClient.post).mockImplementation(() => new Promise((resolve) => { resolveCreate = resolve; }));
+    const { result, rerender } = renderHook(({ id }) => useWorkspaceChat(id), { initialProps: { id: "w1" }, wrapper: Wrapper });
+    let pending: ReturnType<typeof result.current.handleSend>;
+    act(() => { pending = result.current.handleSend("original workspace only"); });
+    await waitFor(() => expect(resolveCreate).toBeDefined());
+    rerender({ id: "w2" });
+    await act(async () => { resolveCreate({ id: "s1", workspace_id: "w1" }); await pending; });
+    expect(apiClient.post).toHaveBeenCalledTimes(1);
+    expect(result.current.activeSessionId).toBe(null);
+    await waitFor(() => expect(result.current.isSending).toBe(false));
+    expect(apiClient.streamGet).not.toHaveBeenCalled();
+  });
+
+  it("ignores an old stream's late events and cleanup after selecting a new conversation", async () => {
+    let oldController!: ReadableStreamDefaultController<Uint8Array>;
+    const oldStream = new Response(new ReadableStream<Uint8Array>({ start(controller) { oldController = controller; } }));
+    vi.mocked(apiClient.streamGet).mockResolvedValueOnce(oldStream).mockImplementation(() => new Promise(() => {}));
+    vi.mocked(apiClient.post).mockImplementation(async (path) => ({ session_id: path.includes("s1") ? "s1" : "s2", run_id: path.includes("s1") ? "r1" : "r2" }));
+    const { result } = renderHook(() => useWorkspaceChat("w1"), { wrapper: Wrapper });
+    act(() => result.current.setActiveSessionId("s1"));
+    await act(async () => { await result.current.handleSend("first", undefined, { request_id: "k1" }); });
+    act(() => result.current.setActiveSessionId("s2"));
+    await act(async () => { await result.current.handleSend("second", undefined, { request_id: "k2" }); });
+    await act(async () => {
+      oldController.enqueue(new TextEncoder().encode('data: {"type":"error","message":"stale error"}\n\ndata: {"type":"text","content":"stale text"}\n\n'));
+      oldController.close();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(result.current.activeSessionId).toBe("s2");
+    expect(result.current.activeRunId).toBe("r2");
+    expect(result.current.isSending).toBe(true);
+    expect(result.current.error).toBe(null);
+    expect(result.current.streamBlocks).toEqual([]);
+  });
+
 });

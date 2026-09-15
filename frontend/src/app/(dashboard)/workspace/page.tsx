@@ -102,6 +102,8 @@ import {
   Separator as PanelResizeHandle,
   type PanelImperativeHandle,
 } from "react-resizable-panels";
+import { useWebMcpTools } from "@/hooks/use-webmcp-tools";
+import { createWorkspaceTools } from "@/lib/webmcp-workspace";
 import { useMockData } from "@/hooks/use-mock-data";
 import { parseSuiteScriptMetadata } from "@/lib/suitescript-parser";
 
@@ -350,12 +352,12 @@ export default function WorkspacePage() {
   // ── Data hooks ──────────────────────────────────────────────────────
   const { data: workspaces = [] } = useWorkspaces();
   const createWs = useCreateWorkspace();
-  const { data: fileTree = [] } = useWorkspaceFiles(selectedWorkspaceId);
-  const { data: fileContent } = useFileContent(selectedWorkspaceId, selectedFileId);
-  const { data: searchResults } = useSearchFiles(selectedWorkspaceId, searchQuery);
-  const { data: changesets = [] } = useChangesets(selectedWorkspaceId);
-  const { data: runs = [] } = useRuns(selectedWorkspaceId);
-  const { data: diffData } = useChangesetDiff(viewingDiffId);
+  const { data: fileTree = [], isSuccess: filesSuccess, isFetching: filesFetching } = useWorkspaceFiles(selectedWorkspaceId);
+  const { data: fileContent, isSuccess: fileSuccess, isFetching: fileFetching } = useFileContent(selectedWorkspaceId, selectedFileId);
+  const { data: searchResults, isSuccess: searchSuccess, isFetching: searchFetching } = useSearchFiles(selectedWorkspaceId, searchQuery);
+  const { data: changesets = [], isSuccess: changesetsSuccess, isFetching: changesetsFetching } = useChangesets(selectedWorkspaceId);
+  const { data: runs = [], isSuccess: runsSuccess, isFetching: runsFetching } = useRuns(selectedWorkspaceId);
+  const { data: diffData, isSuccess: diffSuccess, isFetching: diffFetching } = useChangesetDiff(viewingDiffId);
   const searchParams = useSearchParams();
   const router = useRouter();
   const queryClient = useQueryClient();
@@ -597,6 +599,23 @@ export default function WorkspacePage() {
   const handleChangesetAction = useCallback(() => {
     setBottomTab("changesets");
   }, []);
+
+  useWebMcpTools(`workspace:${surface}`, surface === "files" ? createWorkspaceTools(() => ({
+    id: selectedWorkspaceId, workspaces, files: fileTree, fileId: selectedFileId, file: fileContent,
+    filesReady: !!selectedWorkspaceId && filesSuccess && !filesFetching,
+    fileReady: !viewingDiffId && !!selectedFileId && fileSuccess && !fileFetching && fileContent?.id === selectedFileId,
+    search: searchQuery, results: searchResults,
+    searchReady: searchQuery.length >= 2 && searchSuccess && !searchFetching,
+    runs, runsReady: !!selectedWorkspaceId && runsSuccess && !runsFetching,
+    selectWorkspace: handleWorkspaceSwitch, selectFile: handleFileSelect, setSearch: setSearchQuery,
+    panel: bottomTab, setPanel: setBottomTab, changesets,
+    changesetsReady: !!selectedWorkspaceId && changesetsSuccess && !changesetsFetching,
+    diffId: viewingDiffId, diff: diffData,
+    diffReady: !!viewingDiffId && changesetsSuccess && !changesetsFetching &&
+      changesets.some((change) => change.id === viewingDiffId && change.workspace_id === selectedWorkspaceId) &&
+      diffSuccess && !diffFetching && diffData?.changeset_id === viewingDiffId,
+    openDiff: handleChatViewDiff,
+  })) : []);
 
   // ── Render ──────────────────────────────────────────────────────────
   return (
@@ -1247,6 +1266,7 @@ export default function WorkspacePage() {
                   <div className="flex-1 overflow-hidden">
                     {bottomTab === "chat" && (
                       <WorkspaceChatPanel
+                        key={selectedWorkspaceId}
                         workspaceId={selectedWorkspaceId}
                         currentFilePath={selectedFilePath || undefined}
                         onMentionClick={handleMentionClick}

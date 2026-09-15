@@ -13,6 +13,8 @@ vi.mock("@/providers/auth-provider", () => ({
     refreshUser: vi.fn(),
   }),
 }));
+// Keep this navigation layout test independent of the root query provider.
+vi.mock("@/hooks/use-features", () => ({ useFeatures: () => ({ data: {} }) }));
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn() }),
   usePathname: () => "/tables/orders",

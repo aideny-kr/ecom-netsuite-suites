@@ -10,6 +10,7 @@ import { OnboardingWizard } from "@/components/onboarding/onboarding-wizard";
 import { AlertTriangle, X, Menu } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ConnectionAlertBanner } from "@/components/connection-alert-banner";
+import { SuiteStudioWebMcp } from "@/components/suite-studio-webmcp";
 
 export default function DashboardLayout({
   children,
@@ -142,6 +143,7 @@ export default function DashboardLayout({
 
   return (
     <div className="flex h-screen overflow-hidden">
+      <SuiteStudioWebMcp />
       {showOnboarding && (
         <OnboardingWizard onComplete={handleOnboardingComplete} />
       )}
