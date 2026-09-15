@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select, text
 
 from app.core.database import async_session_factory, engine, set_tenant_context
-from app.models.chat import ChatMessage, ChatSession
+from app.models.chat import ChatMessage
 from app.services.audit_service import log_event
 from app.services.chat.write_confirmation_service import (
     WriteConfirmationPayload,
@@ -24,6 +24,12 @@ from app.services.chat.write_confirmation_service import (
 )
 
 CONCURRENCY = 3
+
+
+class AccountingCapacityBusyError(ValueError):
+    code = "accounting_capacity_busy"
+
+
 PREPARATION_TIMEOUT = 450  # Leave time to publish an explicit result within the chat budget.
 MAX_GROUP_BYTES = 4 * 1024 * 1024
 
@@ -348,7 +354,10 @@ async def authorize_accounting_write(db, tenant_id, actor_id, tool_name, tool_in
 
     # Long-running workers can retain stale policy objects and role relationships.
     # An independent session plus uncached flags reads the current persisted grants.
-    async with _authorization_session_factory() as auth_db:
+    # Celery owns disposable event-loop-local engines. Never borrow the app's
+    # global pool from a worker loop.
+    factory = getattr(db, "info", {}).get("accounting_authorization_session_factory", _authorization_session_factory)
+    async with factory() as auth_db:
         await set_tenant_context(auth_db, str(tenant_id))
         await _authorize({"db": auth_db, "tenant_id": tenant_id, "actor_id": actor_id}, create=True, fresh=True)
         policy = await get_active_policy(auth_db, tenant_id)
@@ -428,7 +437,9 @@ async def accounting_write_slot(proposal, *, lock_engine=None):
                     keys.append(slot)
                     break
             else:
-                raise ValueError("Three corrections are already running for this account. This update was not sent.")
+                raise AccountingCapacityBusyError(
+                    "Three corrections are already running for this account. This update was not sent."
+                )
             yield
         finally:
             try:
@@ -441,10 +452,11 @@ async def accounting_write_slot(proposal, *, lock_engine=None):
 
 async def run_group_confirmation(*, db, session, message, so, action, user_id, tenant_id, correlation_id):
     from app.mcp.tools.transaction_ops_tools import _authorize
-    from app.services.chat.orchestrator import _cas_claim_write_confirmation, run_chat_turn
-    from app.services.policy_service import evaluate_tool_call, get_active_policy
+    from app.services.chat.orchestrator import _cas_claim_write_confirmation
 
-    await _authorize({"db": db, "tenant_id": tenant_id, "actor_id": user_id}, create=True)
+    if action not in {"approve", "reject"}:
+        raise ValueError("Unsupported group decision.")
+    await _authorize({"db": db, "tenant_id": tenant_id, "actor_id": user_id}, create=True, fresh=True)
     members = validate_manifest(so, str(session.id))
     if action == "approve" and (so.get("invariant_errors") or not so["tool_input"]["confirmation_ids"]):
         raise ValueError("No supported corrections are ready for approval.")
@@ -478,240 +490,26 @@ async def run_group_confirmation(*, db, session, message, so, action, user_id, t
             "confirmation_ids": so["tool_input"]["confirmation_ids"],
         },
     )
-    if not await _cas_claim_write_confirmation(db, message, so, "executing"):
-        raise ValueError("This group approval was already claimed.")
-    stop = asyncio.Event()
+    from app.services.transaction_ops.accounting_dispatch import accept_dispatch, publish
 
-    async def execute(member):
-        if not member.get("confirmation_id"):
-            return member
-        async with async_session_factory() as child_db:
-            await set_tenant_context(child_db, str(tenant_id))
-            child_session = await child_db.scalar(
-                select(ChatSession).where(
-                    ChatSession.id == session.id, ChatSession.tenant_id == tenant_id, ChatSession.user_id == user_id
-                )
-            )
-            try:
-                await _authorize({"db": child_db, "tenant_id": tenant_id, "actor_id": user_id}, create=True)
-                policy = await get_active_policy(child_db, tenant_id)
-                card = member["card"]
-                if (
-                    action == "approve"
-                    and not evaluate_tool_call(policy, card["tool_name"], card["tool_input"])["allowed"]
-                ):
-                    raise ValueError("Current policy blocks this correction.")
-                errors = []
-                child_db.info["accounting_group_execution"] = {
-                    "group_approval_id": str(message.id),
-                    "manifest_digest": so["tool_input"]["manifest_digest"],
-                    "confirmation_id": member["confirmation_id"],
-                    "card_digest": digest(card),
-                    "session_id": str(session.id),
-                    "tenant_id": str(tenant_id),
-                    "action": action,
-                }
-                async with asyncio.timeout(150):
-                    async for event in run_chat_turn(
-                        db=child_db,
-                        session=child_session,
-                        user_message="",
-                        user_id=user_id,
-                        tenant_id=tenant_id,
-                        write_confirm={"action": action, "confirmation_id": member["confirmation_id"]},
-                    ):
-                        if event.get("type") == "error":
-                            errors.append(event.get("error", "Correction needs review."))
-                reason = errors[0] if errors else None
-            except Exception as exc:
-                reason = f"Correction needs review ({type(exc).__name__}); check its persisted outcome before retrying."
-                stop.set()
-            finally:
-                child_db.info.pop("accounting_group_execution", None)
-            await child_db.rollback()
-            await set_tenant_context(child_db, str(tenant_id))
-            child_db.expire_all()
-            child = await child_db.scalar(
-                select(ChatMessage).where(
-                    ChatMessage.id == uuid.UUID(member["confirmation_id"]),
-                    ChatMessage.tenant_id == tenant_id,
-                    ChatMessage.session_id == session.id,
-                )
-            )
-            value = child.structured_output if child else member["card"]
-            # A successful provider response can leave an approved child whose
-            # accounting outcome is still unverified. Only verified outcomes
-            # permit further queued writes; approval status alone is insufficient.
-            if value.get("status") in {"executing", "indeterminate"} or (
-                action == "approve" and (value.get("accounting_verification") or {}).get("status") != "verified"
-            ):
-                stop.set()
-            await log_event(
-                child_db,
-                tenant_id,
-                category="transaction_ops",
-                action="accounting_group.case.completed",
-                actor_id=user_id,
-                resource_type="chat_message",
-                resource_id=member["confirmation_id"],
-                correlation_id=correlation_id,
-                payload={
-                    "group_approval_id": str(message.id),
-                    "approved_by": str(user_id) if action == "approve" else None,
-                    "case_id": member["case_id"],
-                    "status": value.get("status"),
-                    "reason": reason,
-                    "verification": value.get("accounting_verification"),
-                },
-            )
-            await child_db.commit()
-            return {**member, "card": value, **({"reason": reason} if reason else {})}
-
-    try:
-        outcomes = await bounded_map(members, execute, stop=stop)
-    except BaseException:
-        # A timeout/disconnect is not evidence that a submitted write failed.
-        # Preserve completed children, explicitly stop the batch and never retry.
-        await asyncio.shield(persist_interrupted_group(tenant_id, session.id, message.id, so, user_id, correlation_id))
-        raise
-    verified = sum(
-        (m.get("card", {}).get("accounting_verification") or {}).get("status") == "verified" for m in outcomes
-    )
-    eligible_count = len(so["tool_input"]["confirmation_ids"])
-    rejected = sum(m.get("card", {}).get("status") == "rejected" for m in outcomes)
-    status = (
-        ("rejected" if rejected == eligible_count else "indeterminate")
-        if action == "reject"
-        else "approved"
-        if verified == eligible_count
-        else "indeterminate"
-    )
-    await set_tenant_context(db, str(tenant_id))
-    # Completion workers may publish a dependent stage while this batch drains.
-    # Preserve that durable publication identity under the same parent row lock.
-    durable = await db.scalar(
-        select(ChatMessage)
-        .where(
-            ChatMessage.id == message.id,
-            ChatMessage.tenant_id == tenant_id,
-            ChatMessage.session_id == session.id,
-        )
-        .with_for_update()
-        .execution_options(populate_existing=True)
-    )
-    if durable is None:
-        raise ValueError("The group approval is unavailable.")
-    final = {
-        **durable.structured_output,
-        "status": status,
-        "accounting_group_dispatch": {"status": "finished", "finished_at": datetime.now(timezone.utc).isoformat()},
-        "accounting_group": {**so["accounting_group"], "members": outcomes},
-    }
-    message.structured_output = final
+    so = await accept_dispatch(db, tenant_id, session, message, so, action, user_id, correlation_id)
     note = (
-        f"Verified {verified} of {eligible_count} approved record corrections. "
-        "Each order retains its approval and execution audit. Full case and cash settlement remain separate."
-        if action == "approve"
-        else f"Rejected {rejected} of {eligible_count} proposed corrections."
-        + (
-            " Rejection is incomplete. Review each recorded outcome; no automatic retry."
-            if rejected != eligible_count
-            else ""
-        )
+        f"Group {'approval' if action == 'approve' else 'rejection'} accepted. "
+        "Processing each order in the background; you can leave this page."
     )
-    message.content = note
-    if action == "approve":
-        # A bounded read-only recovery may finish an earlier child while this
-        # batch is still draining. Render durable outcomes, not stale snapshots.
-        from app.services.transaction_ops.accounting_recovery import refresh_group
-
-        await db.flush()
-        await refresh_group(db, tenant_id, session.id, message.id)
-        final, note = message.structured_output, message.content
-        status = final["status"]
-        verified = sum(
-            (m.get("card", {}).get("accounting_verification") or {}).get("status") == "verified"
-            for m in final["accounting_group"]["members"]
-        )
-    await log_event(
-        db,
-        tenant_id,
-        category="transaction_ops",
-        action="accounting_group.completed",
-        actor_id=user_id,
-        resource_type="chat_message",
-        resource_id=str(message.id),
-        correlation_id=correlation_id,
-        payload={
-            "status": status,
-            "verified": verified,
-            "rejected": rejected,
-            "eligible": eligible_count,
-            "confirmation_ids": so["tool_input"]["confirmation_ids"],
-        },
-    )
-    await db.commit()
+    if not await _cas_claim_write_confirmation(db, message, so, "executing", content=note):
+        await db.rollback()
+        raise ValueError("This group approval was already claimed.")
+    # The outbox and approval audit committed atomically. A broker failure does
+    # not lose the job: the existing action collector republishes durable work.
+    await publish(tenant_id, message.id)
     yield {
         "type": "message",
         "message": {
             "id": str(message.id),
             "role": "assistant",
             "content": note,
-            "structured_output": final,
+            "structured_output": {**so, "status": "executing"},
             "created_at": datetime.now(timezone.utc).isoformat(),
         },
     }
-
-
-async def persist_interrupted_group(tenant_id, session_id, message_id, so, actor_id, correlation_id):
-    async with async_session_factory() as db:
-        await set_tenant_context(db, str(tenant_id))
-        parent = await db.scalar(
-            select(ChatMessage)
-            .where(
-                ChatMessage.id == message_id, ChatMessage.tenant_id == tenant_id, ChatMessage.session_id == session_id
-            )
-            .with_for_update()
-        )
-        members = []
-        for member in so["accounting_group"]["members"]:
-            value = dict(member)
-            if member.get("confirmation_id"):
-                child = await db.scalar(
-                    select(ChatMessage).where(
-                        ChatMessage.id == uuid.UUID(member["confirmation_id"]),
-                        ChatMessage.tenant_id == tenant_id,
-                        ChatMessage.session_id == session_id,
-                    )
-                )
-                value["card"] = child.structured_output if child else member["card"]
-                value["reason"] = "Batch interrupted. Check this order’s recorded outcome; no automatic retry."
-            members.append(value)
-        parent.structured_output = {
-            **parent.structured_output,
-            "status": "indeterminate",
-            "accounting_group_dispatch": {
-                "status": "interrupted",
-                "finished_at": datetime.now(timezone.utc).isoformat(),
-            },
-            "accounting_group": {**so["accounting_group"], "members": members},
-        }
-        parent.content = (
-            "Group execution was interrupted. Review each recorded result before proposing further changes."
-        )
-        from app.services.transaction_ops.accounting_plan_group import refresh
-
-        await refresh(db, tenant_id, parent)
-        await log_event(
-            db,
-            tenant_id,
-            category="transaction_ops",
-            action="accounting_group.interrupted",
-            actor_id=actor_id,
-            resource_type="chat_message",
-            resource_id=str(message_id),
-            correlation_id=correlation_id,
-            payload={"approved_by": str(actor_id), "confirmation_ids": so["tool_input"]["confirmation_ids"]},
-            status="error",
-        )
-        await db.commit()

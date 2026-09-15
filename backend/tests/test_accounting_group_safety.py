@@ -42,7 +42,7 @@ def child_object(so, session):
 
 
 @asynccontextmanager
-async def no_lock(_):
+async def no_lock(_, **kwargs):
     yield
 
 
@@ -116,12 +116,10 @@ async def test_cancelled_group_call_keeps_durable_exact_approval_to_call_link(mo
 
     audit = AsyncMock()
     tool_audit = AsyncMock()
-    interrupted = AsyncMock()
     monkeypatch.setattr(group, "async_session_factory", factory)
     monkeypatch.setattr(group, "set_tenant_context", AsyncMock())
     monkeypatch.setattr(group, "accounting_write_slot", no_lock)
     monkeypatch.setattr(group, "log_event", audit)
-    monkeypatch.setattr(group, "persist_interrupted_group", interrupted)
     monkeypatch.setattr("app.mcp.tools.transaction_ops_tools._authorize", AsyncMock())
     monkeypatch.setattr("app.services.policy_service.get_active_policy", AsyncMock(return_value=None))
     monkeypatch.setattr("app.services.transaction_ops.tax_correction.validate_approved", AsyncMock())
@@ -131,20 +129,26 @@ async def test_cancelled_group_call_keeps_durable_exact_approval_to_call_link(mo
     monkeypatch.setattr(orchestrator, "log_event", audit)
     monkeypatch.setattr(external_tool_audit, "append_event", tool_audit)
 
+    from app.services.transaction_ops import accounting_dispatch as dispatch
+
+    monkeypatch.setattr(dispatch, "message", AsyncMock(return_value=child))
+    monkeypatch.setattr(group, "authorize_accounting_write", AsyncMock())
+
+    # The boundary loads the session once; the recursive signed-write path then
+    # queries whether this exact financial intent has an earlier execution.
     async def run():
-        return [
-            e
-            async for e in group.run_group_confirmation(
-                db=db,
-                session=session,
-                message=parent,
-                so=so,
-                action="approve",
-                user_id=session.user_id,
-                tenant_id=session.tenant_id,
-                correlation_id="parent-review-correlation",
-            )
-        ]
+        await dispatch.invoke_child(
+            child_db,
+            session.tenant_id,
+            parent.id,
+            {
+                "session_id": str(session.id),
+                "actor_id": str(session.user_id),
+                "action": "approve",
+                "manifest_digest": so["tool_input"]["manifest_digest"],
+            },
+            {**so["accounting_group"]["members"][0], "card_digest": group.digest(child.structured_output)},
+        )
 
     task = asyncio.create_task(run())
     await asyncio.wait_for(started.wait(), timeout=3)
@@ -153,7 +157,6 @@ async def test_cancelled_group_call_keeps_durable_exact_approval_to_call_link(mo
         await task
     assert child.structured_output["status"] == "executing"
     assert [c.kwargs["action"] for c in tool_audit.await_args_list] == ["tool.requested", "tool.interrupted"]
-    assert [c.kwargs["action"] for c in audit.await_args_list] == ["accounting_group.approve.requested"]
     requested = tool_audit.await_args_list[0].kwargs
     assert requested["correlation_id"] != "parent-review-correlation"
     assert requested["payload"]["approval"] == {
@@ -162,50 +165,13 @@ async def test_cancelled_group_call_keeps_durable_exact_approval_to_call_link(mo
         "manifest_digest": so["tool_input"]["manifest_digest"],
     }
     assert tool_audit.await_args_list[1].kwargs["payload"]["approval"] == requested["payload"]["approval"]
-    interrupted.assert_awaited_once()
 
 
-@pytest.mark.asyncio
-async def test_group_reject_reports_incomplete_when_child_remains_pending(monkeypatch):
-    so, session = group_fixture(1)
-    child = child_object(so, session)
-    parent = SimpleNamespace(id=uuid4(), structured_output=so)
-    db = MagicMock()
-    db.scalar = AsyncMock(return_value=child)
-    db.commit = AsyncMock()
-    child_db = MagicMock()
-    child_db.scalar = AsyncMock(side_effect=[session, child])
-    child_db.rollback = AsyncMock()
-    child_db.commit = AsyncMock()
+def test_rejected_parent_cannot_claim_success_for_unprocessed_child():
+    from app.services.transaction_ops.accounting_dispatch import outcome
 
-    @asynccontextmanager
-    async def factory():
-        yield child_db
-
-    # A permission removal between parent validation and child processing blocks child rejection.
-    auth = AsyncMock(side_effect=[None, ValueError("permission_denied")])
-    monkeypatch.setattr(group, "async_session_factory", factory)
-    monkeypatch.setattr(group, "set_tenant_context", AsyncMock())
-    monkeypatch.setattr(group, "log_event", AsyncMock())
-    monkeypatch.setattr("app.mcp.tools.transaction_ops_tools._authorize", auth)
-    monkeypatch.setattr(orchestrator, "_cas_claim_write_confirmation", AsyncMock(return_value=True))
-    events = [
-        e
-        async for e in group.run_group_confirmation(
-            db=db,
-            session=session,
-            message=parent,
-            so=so,
-            action="reject",
-            user_id=session.user_id,
-            tenant_id=session.tenant_id,
-            correlation_id="review",
-        )
-    ]
-    assert events[-1]["message"]["content"].startswith("Rejected 0 of 1 proposed corrections.")
-    assert "incomplete" in events[-1]["message"]["content"]
-    assert parent.structured_output["status"] == "indeterminate"
-    assert parent.structured_output["accounting_group"]["members"][0]["card"]["status"] == "pending"
+    assert outcome({"status": "pending"}, "reject")["status"] == "needs_review"
+    assert outcome({"status": "rejected"}, "reject")["status"] == "rejected"
 
 
 @pytest.mark.parametrize("blocked_by", ["permission", "policy", "revoked_during_preflight"])

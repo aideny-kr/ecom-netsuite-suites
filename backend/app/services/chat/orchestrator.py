@@ -1799,6 +1799,8 @@ async def _cas_claim_write_confirmation(
     confirm_msg: ChatMessage,
     so: dict[str, Any],
     new_status: str,
+    *,
+    content: str | None = None,
 ) -> bool:
     """Atomically claim a pending write-confirmation row: ``UPDATE ... WHERE
     id = confirm_msg.id AND status = 'pending'``, setting ``status`` to
@@ -1843,7 +1845,7 @@ async def _cas_claim_write_confirmation(
             ChatMessage.id == confirm_msg.id,
             ChatMessage.structured_output["status"].astext == "pending",
         )
-        .values(structured_output={**so, "status": new_status})
+        .values(structured_output={**so, "status": new_status}, **({"content": content} if content is not None else {}))
     )
     if cas_result.rowcount == 0:
         return False
@@ -2056,7 +2058,7 @@ async def run_chat_turn(
                     ):
                         yield event
                 except ValueError as exc:
-                    yield {"type": "error", "error": str(exc)}
+                    yield {"type": "error", "error": str(exc), "code": getattr(exc, "code", None)}
                 return
 
             # A transaction investigation cannot use an older generic card to
@@ -2117,7 +2119,10 @@ async def run_chat_turn(
                     yield {"type": "error", "error": "Confirmation token is invalid or tampered."}
                     return
                 try:
-                    async with accounting_write_slot(_so["accounting_review"]):
+                    async with accounting_write_slot(
+                        _so["accounting_review"],
+                        **({"lock_engine": db.bind} if db.info.get("accounting_worker") else {}),
+                    ):
                         db.info["accounting_write_lock"] = str(_confirm_msg.id)
                         try:
                             async for event in run_chat_turn(
@@ -2139,7 +2144,7 @@ async def run_chat_turn(
                         finally:
                             db.info.pop("accounting_write_lock", None)
                 except ValueError as exc:
-                    yield {"type": "error", "error": str(exc)}
+                    yield {"type": "error", "error": str(exc), "code": getattr(exc, "code", None)}
                 return
 
             if _wc_action == "approve":

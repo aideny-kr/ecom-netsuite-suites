@@ -967,6 +967,12 @@ export interface WriteConfirmationData {
     resolution?: Record<string, unknown>;
   } | null;
   accounting_group?: AccountingGroup | null;
+  accounting_group_dispatch?: {
+    version: number;
+    status: "queued" | "running" | "finished" | "needs_review";
+    next_at?: string;
+    members: Record<string, { status: string; reason?: string }>;
+  };
   accounting_group_child?: boolean;
   accounting_receipt?: {
     plan?: AccountingResolutionPlan;

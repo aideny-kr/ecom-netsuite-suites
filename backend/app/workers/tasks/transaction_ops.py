@@ -11,6 +11,33 @@ from app.workers.celery_app import RECON_COLLECTOR_PRIORITY, RECON_COLLECTOR_QUE
 
 @celery_app.task(
     base=InstrumentedTask,
+    name="tasks.transaction_ops_dispatch_group",
+    queue="recon",
+    max_retries=0,
+    soft_time_limit=1650,
+    time_limit=1700,
+)
+def transaction_ops_dispatch_group(tenant_id: str, message_id: str):
+    async def execute():
+        from app.services.transaction_ops.accounting_dispatch import publish, run_slice
+
+        tenant, parent = uuid.UUID(tenant_id), uuid.UUID(message_id)
+        async with worker_async_session() as db:
+            # Each child owns its disposable pool; no shared AsyncSession or
+            # app-global event-loop connections enter this Celery task.
+            result = await run_slice(db, tenant, parent, session_factory=worker_async_session)
+        if result.get("status") == "queued":
+            result.update(await publish(tenant, parent))
+        return result
+
+    try:
+        return asyncio.run(execute())
+    except Exception:
+        raise RuntimeError("accounting_group_dispatch_failed") from None
+
+
+@celery_app.task(
+    base=InstrumentedTask,
     name="tasks.transaction_ops_run",
     queue="recon",
     max_retries=0,

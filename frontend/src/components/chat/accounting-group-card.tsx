@@ -27,6 +27,9 @@ export function AccountingGroupCard({
   ).length;
   const pending = data.status === "pending";
   const progress = data.accounting_plan_progress;
+  const dispatch = data.accounting_group_dispatch;
+  const processed = Object.values(dispatch?.members || {}).filter((m) =>
+    m.status !== "queued" && m.status !== "dispatching").length;
   const blocked = Boolean(
     data.invariant_errors?.length || data.unfillable_line_fields?.length,
   );
@@ -63,6 +66,13 @@ export function AccountingGroupCard({
                     : `${verified} / ${eligible.length} verified`}
           </span>
         </div>
+        {dispatch && (
+          <p role="status" className="text-[13px] text-muted-foreground">
+            {processed} / {eligible.length} corrections processed · {verified} verified.
+            {(dispatch.status === "queued" || dispatch.status === "running") &&
+              " Processing continues in the background. You can leave this page."}
+          </p>
+        )}
         {progress && progress.results_ready > 0 && (
           <p role="status" className="text-[13px] font-medium">
             {progress.reconciled} / {progress.orders} orders reconciled · {progress.remaining} need further review

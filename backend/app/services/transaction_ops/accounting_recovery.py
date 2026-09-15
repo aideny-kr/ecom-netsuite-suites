@@ -167,6 +167,11 @@ async def refresh_group(db, tenant_id, session_id, parent_id, *, depth=0):
         )
         if child and child.session_id == session_id:
             member = {**member, "card": child.structured_output}
+            dispatch_result = ((so.get("accounting_group_dispatch") or {}).get("members") or {}).get(
+                member["confirmation_id"], {}
+            )
+            if dispatch_result.get("reason"):
+                member["reason"] = dispatch_result["reason"]
             if (child.structured_output.get("accounting_verification") or {}).get("status") == "verified":
                 member.pop("reason", None)
         members.append(member)
@@ -178,7 +183,11 @@ async def refresh_group(db, tenant_id, session_id, parent_id, *, depth=0):
     )
     parent.structured_output = {
         **so,
-        "status": "approved" if eligible_members and verified == len(eligible_members) else "indeterminate",
+        "status": "executing"
+        if (so.get("accounting_group_dispatch") or {}).get("status") in {"queued", "running"}
+        else "approved"
+        if eligible_members and verified == len(eligible_members)
+        else "indeterminate",
         "accounting_group": {**so["accounting_group"], "members": members},
     }
     parent.content = (

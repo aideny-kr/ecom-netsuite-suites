@@ -1,5 +1,4 @@
 import asyncio
-from contextlib import asynccontextmanager
 from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -219,64 +218,29 @@ async def test_real_postgres_locks_protect_same_invoice_and_cap_account_across_c
         await engine.dispose()
 
 
-@pytest.mark.parametrize(
-    "outcome", ["verified", "unverified", "missing_verification", "changed", "duplicate", "wrong_tenant"]
-)
-async def test_group_uses_existing_human_approval_path_and_persists_per_order_results(monkeypatch, outcome):
+@pytest.mark.parametrize("outcome", ["accepted", "changed", "duplicate", "wrong_tenant"])
+async def test_group_acceptance_queues_exact_approval_without_inline_execution(monkeypatch, outcome):
+    from app.services.transaction_ops import accounting_dispatch as dispatch
+
     so, session = group_fixture(4)
     parent = SimpleNamespace(id=uuid4(), structured_output=so)
-    children = {
-        m["confirmation_id"]: SimpleNamespace(structured_output=deepcopy(m["card"]))
-        for m in so["accounting_group"]["members"]
-    }
+    children = [SimpleNamespace(structured_output=deepcopy(m["card"])) for m in so["accounting_group"]["members"]]
     db = MagicMock()
-    db.scalar = AsyncMock(side_effect=[*children.values(), parent])
-    db.commit = AsyncMock()
-    db.flush = AsyncMock()
+    db.scalar = AsyncMock(side_effect=children)
+    db.rollback = AsyncMock()
     if outcome == "changed":
-        next(iter(children.values())).structured_output["status"] = "approved"
-    elif outcome == "wrong_tenant":
-        session.tenant_id = uuid4()
-    child_sessions = []
-
-    @asynccontextmanager
-    async def factory():
-        child_db = MagicMock()
-        child_db.rollback = AsyncMock()
-        child_db.commit = AsyncMock()
-        child_db.scalar = AsyncMock(return_value=session)
-        child_sessions.append(child_db)
-        yield child_db
-
-    approved = []
-
-    async def original_path(**kwargs):
-        wc = kwargs["write_confirm"]
-        assert wc["action"] == "approve"
-        child = children[wc["confirmation_id"]]
-        assert child.structured_output["status"] == "pending"
-        approved.append(wc["confirmation_id"])
-        child.structured_output = {
-            **child.structured_output,
-            "status": "approved",
-            "accounting_verification": {"status": "needs_review" if outcome == "unverified" else "verified"},
-        }
-        if outcome == "missing_verification":
-            child.structured_output.pop("accounting_verification")
-        kwargs["db"].scalar.return_value = child
-        yield {"type": "done"}
-
-    audit = AsyncMock()
+        children[0].structured_output["status"] = "approved"
+    queued = {**so, "accounting_group_dispatch": {"status": "queued"}}
+    accept = AsyncMock(return_value=queued)
+    publish = AsyncMock()
     claim = AsyncMock(return_value=outcome != "duplicate")
-    monkeypatch.setattr(mod, "async_session_factory", factory)
-    monkeypatch.setattr(mod, "set_tenant_context", AsyncMock())
-    monkeypatch.setattr(mod, "log_event", audit)
+    monkeypatch.setattr(mod, "log_event", AsyncMock())
     monkeypatch.setattr("app.mcp.tools.transaction_ops_tools._authorize", AsyncMock())
-    monkeypatch.setattr("app.services.policy_service.get_active_policy", AsyncMock(return_value=None))
     monkeypatch.setattr("app.services.chat.orchestrator._cas_claim_write_confirmation", claim)
-    monkeypatch.setattr("app.services.chat.orchestrator.run_chat_turn", original_path)
-    monkeypatch.setattr("app.services.transaction_ops.accounting_recovery.refresh_group", AsyncMock())
-    tenant_id = uuid4() if outcome == "wrong_tenant" else session.tenant_id
+    execute = AsyncMock(side_effect=AssertionError("Acceptance must not execute a child"))
+    monkeypatch.setattr("app.services.chat.orchestrator.run_chat_turn", execute)
+    monkeypatch.setattr(dispatch, "accept_dispatch", accept)
+    monkeypatch.setattr(dispatch, "publish", publish)
     iterator = mod.run_group_confirmation(
         db=db,
         session=session,
@@ -284,26 +248,19 @@ async def test_group_uses_existing_human_approval_path_and_persists_per_order_re
         so=so,
         action="approve",
         user_id=session.user_id,
-        tenant_id=tenant_id,
+        tenant_id=uuid4() if outcome == "wrong_tenant" else session.tenant_id,
         correlation_id="test",
     )
-    if outcome in {"changed", "duplicate", "wrong_tenant"}:
-        with pytest.raises(ValueError):
-            _ = [v async for v in iterator]
-        assert not approved
+    if outcome == "accepted":
+        events = [event async for event in iterator]
+        assert events[-1]["message"]["structured_output"]["accounting_group_dispatch"]["status"] == "queued"
+        assert claim.await_args.args[2] is queued
+        publish.assert_awaited_once()
     else:
-        events = [v async for v in iterator]
-        assert len({id(d) for d in child_sessions}) == len(approved)
-        if outcome == "verified":
-            assert len(approved) == 4
-        else:
-            assert 1 <= len(approved) <= mod.CONCURRENCY
-            assert list(children.values())[-1].structured_output["status"] == "pending"
-        assert parent.structured_output["status"] == ("approved" if outcome == "verified" else "indeterminate")
-        assert events[-1]["message"]["structured_output"] == parent.structured_output
-        per_order = [c.kwargs for c in audit.await_args_list if c.kwargs["action"] == "accounting_group.case.completed"]
-        assert len(per_order) == len(approved)
-        assert all(c["payload"]["approved_by"] == str(session.user_id) for c in per_order)
+        with pytest.raises(ValueError):
+            _ = [event async for event in iterator]
+        publish.assert_not_awaited()
+    execute.assert_not_awaited()
 
 
 @pytest.mark.parametrize("same_invoice", [False, True])

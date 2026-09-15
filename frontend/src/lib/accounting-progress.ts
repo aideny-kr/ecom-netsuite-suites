@@ -2,6 +2,14 @@
 export function accountingProgressPending(messages: Array<{ structured_output?: unknown }>, now = Date.now()): boolean {
   return messages.some((message) => {
     const so = message.structured_output as Record<string, unknown> | undefined;
+    if (so?.accounting_group) {
+      const group = so.accounting_group as { members?: Array<{ card?: unknown }> };
+      const dispatch = so.accounting_group_dispatch as { status?: string; next_at?: string } | undefined;
+      const updated = Date.parse(dispatch?.next_at || "");
+      if ((dispatch?.status === "queued" || dispatch?.status === "running") &&
+          Number.isFinite(updated) && now - updated <= 30 * 60 * 1000) return true;
+      return accountingProgressPending((group.members || []).map((m) => ({ structured_output: m.card })), now);
+    }
     if (!so?.accounting_review) return false;
     const execution = so.accounting_execution as { accepted_at?: string } | undefined;
     const completion = so.accounting_completion as { status?: string } | undefined;
