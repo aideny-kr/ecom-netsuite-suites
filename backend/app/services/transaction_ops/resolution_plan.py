@@ -255,7 +255,8 @@ async def previous_execution(db, tenant_id, message_id, proposal):
     """Called while the existing account/invoice lock is held, before a new CAS.
 
     A timed-out or unknown result blocks another send. Only a recorded failure
-    of preconditions with zero writes can relinquish the same business intent.
+    of preconditions with zero writes, or an adapter proof of a rejected update
+    with a freshly unchanged subledger, can relinquish the same business intent.
     """
     from sqlalchemy import select
 
@@ -277,7 +278,7 @@ async def previous_execution(db, tenant_id, message_id, proposal):
             AuditEvent.payload["financial_writes"].astext == "0",
         )
     )
-    message = await db.scalar(
+    query = (
         select(ChatMessage)
         .where(
             ChatMessage.tenant_id == tenant_id,
@@ -288,13 +289,36 @@ async def previous_execution(db, tenant_id, message_id, proposal):
         .order_by(ChatMessage.created_at.desc())
         .limit(1)
     )
-    if message is None:
-        return None
-    so = message.structured_output
-    return {
-        "confirmation_id": str(message.id),
-        "session_id": str(message.session_id),
-        "status": so.get("status"),
-        "verification": so.get("accounting_verification"),
-        "operation_key": key,
-    }
+    from app.services.audit_service import log_event
+    from app.services.transaction_ops.accounting_retry import rejected_credit_unchanged
+
+    # Inspect every prior attempt, so a rejected newest attempt cannot conceal
+    # an older successful/uncertain one. Fail closed on unusually long histories.
+    released = []
+    for attempt in range(20):
+        message = await db.scalar(query.where(ChatMessage.id.not_in(released)))
+        if message is None:
+            return None
+        proof = await rejected_credit_unchanged(db, tenant_id, message, proposal) if attempt < 19 else None
+        if proof:
+            await log_event(
+                db,
+                tenant_id,
+                "transaction_ops",
+                "accounting_correction.rejection_verified_unchanged",
+                actor_type="system",
+                resource_type="chat_message",
+                resource_id=str(message.id),
+                payload={**proof, "replacement_confirmation_id": str(message_id), "operation_key": key},
+            )
+            released.append(message.id)
+            continue
+        so = message.structured_output
+        return {
+            "confirmation_id": str(message.id),
+            "session_id": str(message.session_id),
+            "status": so.get("status"),
+            "verification": so.get("accounting_verification"),
+            "operation_key": key,
+        }
+    return None
