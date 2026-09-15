@@ -1,7 +1,7 @@
 import React from "react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import ConnectionsPage from "./page";
+import { ConnectionOverview as ConnectionsPage } from "@/components/settings/connection-overview";
 
 const mocks = vi.hoisted(() => ({ metabase: false, manage: true, tenant: "a", remove: vi.fn(), removeMcp: vi.fn(), test: vi.fn(), toast: vi.fn(), fail: false }));
 vi.mock("@/providers/auth-provider", () => ({ useAuth: () => ({ user: { tenant_id: mocks.tenant } }) }));
@@ -26,6 +26,8 @@ it("shows API and MCP controls and removes each through its own endpoint", async
   expect(screen.getByText("Warehouse MCP")).toBeVisible();
   expect(screen.queryByText("Removed API")).not.toBeInTheDocument();
   expect(screen.queryByText("Celigo duplicate")).not.toBeInTheDocument();
+  expect(screen.getByText("Celigo management")).not.toBeVisible();
+  fireEvent.click(screen.getByText("Celigo", { exact: true }));
   expect(screen.getByText("Celigo management")).toBeVisible();
   fireEvent.click(screen.getByRole("button", { name: "Delete Framework" }));
   expect(mocks.remove).not.toHaveBeenCalled();

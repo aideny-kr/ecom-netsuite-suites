@@ -298,8 +298,8 @@ export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, v
     <div
       className={cn(
         isTerminal
-          ? "shrink-0 bg-[var(--card)]/60 backdrop-blur-md border-t border-[var(--chat-surface-mid)] px-10 py-6"
-          : "shrink-0 border-t bg-card px-6 py-4",
+          ? "shrink-0 bg-card/60 backdrop-blur-md border-t border-[var(--chat-surface-mid)] px-4 py-4 md:px-10 md:py-6"
+          : "shrink-0 bg-card px-4 pb-4 pt-2 md:px-6 md:pb-5",
       )}
     >
       <div className="mx-auto max-w-3xl">
@@ -352,11 +352,12 @@ export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, v
         <div
           className={cn(
             isTerminal
-              ? "relative flex items-end gap-3 p-2 bg-[var(--card)] border border-[var(--chat-surface-mid)] shadow-2xl group"
-              : "relative flex items-end gap-3 rounded-2xl border bg-background p-2 shadow-soft transition-shadow focus-within:shadow-soft-md focus-within:ring-1 focus-within:ring-ring",
+              ? "relative flex items-end gap-3 p-2 bg-card border border-[var(--chat-surface-mid)] shadow-2xl group"
+              : "orbital-composer relative flex items-end gap-2 rounded-lg border bg-background p-3",
           )}
         >
           <textarea
+            aria-label="Message"
             ref={textareaRef}
             value={value}
             onChange={handleChange}
@@ -368,8 +369,8 @@ export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, v
             }
             disabled={isLoading}
             rows={1}
-            className="flex-1 resize-none bg-transparent px-2 py-1.5 text-[14px] placeholder:text-muted-foreground focus-visible:outline-none disabled:opacity-50"
-            style={{ minHeight: "2rem", maxHeight: "8rem" }}
+            className="min-h-[4.5rem] flex-1 resize-none bg-transparent px-2 py-1.5 text-[14px] md:min-h-[2rem] placeholder:text-muted-foreground focus-visible:outline-none disabled:opacity-50"
+            style={{ maxHeight: "8rem" }}
             onInput={(e) => {
               const target = e.target as HTMLTextAreaElement;
               target.style.height = "auto";
@@ -417,6 +418,7 @@ export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, v
                 ? "text-[var(--chat-accent)]/60 hover:text-[var(--chat-accent)]"
                 : "text-muted-foreground hover:text-foreground",
             )}
+            aria-label="Attach file"
             title="Attach file"
           >
             <Paperclip className="h-4 w-4" />
@@ -427,6 +429,7 @@ export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, v
               variant="destructive"
               className="h-8 w-8 rounded-lg shrink-0"
               onClick={onStop}
+              aria-label="Stop response"
               title="Stop response"
             >
               <Square className="h-4 w-4" />
@@ -437,7 +440,7 @@ export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, v
               disabled={!canSend}
               aria-label="Send message"
               title="Send message"
-              className="w-10 h-10 flex items-center justify-center bg-[var(--chat-accent)] text-white hover:bg-[var(--chat-accent-hover)] transition-all active:scale-95 disabled:opacity-50"
+              className="w-10 h-10 flex items-center justify-center bg-[var(--chat-accent)] text-primary-foreground hover:bg-[var(--chat-accent-hover)] transition-all active:scale-95 disabled:opacity-50"
             >
               <ArrowRight className="h-4 w-4" />
             </button>
@@ -476,7 +479,7 @@ export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, v
                     isTerminal ? "rounded-none" : "rounded-lg",
                     idx === selectedIndex
                       ? isTerminal
-                        ? "bg-[var(--chat-accent)] text-white"
+                        ? "bg-[var(--chat-accent)] text-primary-foreground"
                         : "bg-primary text-primary-foreground"
                       : "text-foreground hover:bg-muted",
                   )}

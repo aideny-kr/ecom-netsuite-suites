@@ -115,6 +115,9 @@ function sessionDetailPayload(messages: unknown[]) {
 }
 
 beforeAll(() => {
+  Object.defineProperty(window, "matchMedia", { configurable: true, value: vi.fn(() => ({
+    matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn(),
+  })) });
   HTMLElement.prototype.scrollIntoView = vi.fn();
   (global as unknown as { ResizeObserver: unknown }).ResizeObserver = class {
     observe() {}

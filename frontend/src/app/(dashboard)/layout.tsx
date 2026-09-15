@@ -5,9 +5,12 @@ import Link from "next/link";
 import { useRouter, usePathname } from "next/navigation";
 import { useAuth } from "@/providers/auth-provider";
 import { apiClient } from "@/lib/api-client";
+import { TransactionsSection } from "@/components/transactions/section";
+import { isTransactionPath } from "@/components/transactions/navigation";
 import { Sidebar } from "@/components/sidebar";
 import { OnboardingWizard } from "@/components/onboarding/onboarding-wizard";
-import { AlertTriangle, X, Menu } from "lucide-react";
+import { AlertTriangle, Plug, X, Menu, ChevronRight } from "lucide-react";
+import { NAV_ITEMS } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 import { ConnectionAlertBanner } from "@/components/connection-alert-banner";
 
@@ -26,6 +29,8 @@ export default function DashboardLayout({
     pathname?.startsWith("/workspace") ||
     pathname?.startsWith("/chat") ||
     pathname?.startsWith("/reports/");
+  const routeLabel = isTransactionPath(pathname) ? "Transactions" : (pathname === "/connections" ? "Settings" : NAV_ITEMS.find((item) => pathname === item.href || pathname.startsWith(`${item.href}/`))?.label) || "Workspace";
+  const showNetSuiteSetup = pathname.startsWith("/reconciliation") || pathname.startsWith("/transaction-operations");
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [connectionHealth, setConnectionHealth] = useState<
     | { state: "ok" }
@@ -143,7 +148,8 @@ export default function DashboardLayout({
   }
 
   return (
-    <div className="flex h-screen overflow-hidden">
+    <div className="orbital-shell flex h-screen overflow-hidden">
+      <a href="#main-content" className="sr-only z-50 rounded-md bg-primary p-3 text-primary-foreground focus:not-sr-only focus:fixed focus:left-3 focus:top-3">Skip to content</a>
       {showOnboarding && (
         <OnboardingWizard onComplete={handleOnboardingComplete} />
       )}
@@ -165,36 +171,36 @@ export default function DashboardLayout({
           />
         </Suspense>
       </div>
-      <main className="min-w-0 flex-1 overflow-auto bg-background scrollbar-thin">
-        {sidebarCollapsed && (
-          <button
-            onClick={() => setSidebarCollapsed(false)}
-            className="fixed left-3 top-3 z-30 rounded-md border border-border bg-background p-1.5 shadow-sm transition-colors hover:bg-accent"
-            aria-label="Open sidebar"
-          >
-            <Menu className="h-4 w-4 text-muted-foreground" />
-          </button>
-        )}
+      <main id="main-content" tabIndex={-1} className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background">
+        <header className="flex h-14 shrink-0 items-center justify-between gap-4 border-b bg-card/40 px-4 md:px-8">
+          <div className="flex min-w-0 items-center gap-3">
+            {sidebarCollapsed && <button onClick={() => setSidebarCollapsed(false)} className="rounded-md border border-input p-2 text-primary hover:border-primary hover:bg-accent" aria-label="Open sidebar" aria-expanded={false}><Menu className="h-4 w-4" /></button>}
+            <Link href="/dashboard" className="text-xs text-muted-foreground hover:text-primary">Workspace</Link>
+            <ChevronRight aria-hidden="true" className="h-3 w-3 text-muted-foreground" />
+            <span className="truncate text-xs text-foreground">{routeLabel}</span>
+          </div>
+          <span className="hidden truncate text-[11px] text-muted-foreground sm:block">{user.tenant_name}</span>
+        </header>
         <ConnectionAlertBanner />
         {/* Connection warning banner — missing */}
-        {connectionHealth.state === "missing" && !bannerDismissed && (
-          <div className="mx-8 mt-6 flex items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 dark:border-amber-800 dark:bg-amber-950/50">
+        {connectionHealth.state === "missing" && showNetSuiteSetup && !bannerDismissed && (
+          <div className="orbital-notice mx-4 mt-4 shrink-0 md:mx-8" role="status">
             <div className="flex items-center gap-3">
-              <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
-              <p className="text-sm text-amber-800 dark:text-amber-200">
-                NetSuite is not connected.{" "}
+              <Plug className="h-4 w-4 shrink-0 text-primary" />
+              <p className="text-[13px] text-muted-foreground">
+                Connect NetSuite when your work needs NetSuite data.{" "}
                 <Link
-                  href="/settings"
-                  className="font-medium underline underline-offset-2 hover:text-amber-900 dark:hover:text-amber-100"
+                  href="/settings#connections"
+                  className="font-medium underline underline-offset-2 hover:text-primary"
                 >
-                  Go to Settings
-                </Link>{" "}
-                to set up your MCP and OAuth connections.
+                  Manage connections
+                </Link>
               </p>
             </div>
             <button
+              aria-label="Dismiss connection warning"
               onClick={() => setBannerDismissed(true)}
-              className="shrink-0 rounded p-1 text-amber-600 hover:bg-amber-100 dark:text-amber-400 dark:hover:bg-amber-900"
+              className="shrink-0 rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
             >
               <X className="h-4 w-4" />
             </button>
@@ -203,22 +209,23 @@ export default function DashboardLayout({
 
         {/* Connection warning banner — expired */}
         {connectionHealth.state === "expired" && !bannerDismissed && (
-          <div className="mx-8 mt-6 flex items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 dark:border-red-800 dark:bg-red-950/50">
+          <div className="orbital-notice mx-4 mt-4 shrink-0 md:mx-8" data-tone="error" role="status">
             <div className="flex items-center gap-3">
               <AlertTriangle className="h-4 w-4 shrink-0 text-red-600 dark:text-red-400" />
-              <p className="text-sm text-red-800 dark:text-red-200">
+              <p className="text-[13px] text-foreground">
                 {connectionHealth.reason}{" "}
                 <Link
-                  href="/connections"
-                  className="font-medium underline underline-offset-2 hover:text-red-900 dark:hover:text-red-100"
+                  href="/settings#connections"
+                  className="font-medium underline underline-offset-2 hover:text-primary"
                 >
-                  Re-authorize on Connections
+                  Reconnect in Settings
                 </Link>
               </p>
             </div>
             <button
+              aria-label="Dismiss connection warning"
               onClick={() => setBannerDismissed(true)}
-              className="shrink-0 rounded p-1 text-red-600 hover:bg-red-100 dark:text-red-400 dark:hover:bg-red-900"
+              className="shrink-0 rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
             >
               <X className="h-4 w-4" />
             </button>
@@ -226,13 +233,13 @@ export default function DashboardLayout({
         )}
         <div
           className={cn(
-            "mx-auto",
+            "mx-auto w-full min-h-0 flex-1 overflow-auto scrollbar-thin",
             isFluid
-              ? "h-full min-h-0 w-full min-w-0 max-w-none"
-              : "max-w-[1400px] px-4 pb-6 pt-16 md:px-8 md:py-8",
+              ? "min-w-0 max-w-none"
+              : "max-w-[1400px] px-4 py-6 md:px-8 md:py-8",
           )}
         >
-          {children}
+          {isTransactionPath(pathname) ? <TransactionsSection>{children}</TransactionsSection> : children}
         </div>
       </main>
     </div>
