@@ -10,9 +10,7 @@ def inputs():
         "number": "R123",
         "currency": "USD",
         "updated_at": "version1",
-        "line_items": [
-            {"id": "101", "price": "1200", "quantity": "1", "variant": {"sku": "MEM64", "price": "1600"}}
-        ],
+        "line_items": [{"id": "101", "price": "1200", "quantity": "1", "variant": {"sku": "MEM64", "price": "1600"}}],
     }
     order = {
         "id": "10",
@@ -196,4 +194,74 @@ def test_incomplete_or_different_economics_do_not_fit_repricing_basis(change):
         doc["discountTotal"] = "10"
     else:
         source["currency"] = "CAD"
+    assert source_revision_delta(source, evidence, "10") is None
+
+
+def zero_component(source):
+    return {
+        "line": 2,
+        "lineUniqueKey": "200",
+        "itemType": {"id": "InvtPart"},
+        "custcol_fw_solidus_line_id": None,
+        "custcol_fw_original_ecom_sku": source["line_items"][0]["variant"]["sku"],
+        "quantity": "1",
+        "rate": "0",
+        "amount": "0",
+    }
+
+
+def test_zero_price_bundle_components_are_retained_without_blocking_repricing_arithmetic():
+    from app.services.transaction_ops.line_evidence import source_revision_delta
+
+    source, evidence = revision_inputs()
+    evidence["sections"]["sales_order"]["line_evidence"]["lines"].append(zero_component(source))
+    proof = source_revision_delta(source, evidence, "10")
+    assert proof["net_delta"] == "-400" and proof["gross_delta"] == "-440"
+    assert proof["additional_zero_value_components"][0]["line_unique_key"] == "200"
+    assert proof["additional_zero_value_components"][0]["tax_allocation_verified"] is False
+    assert "proposed_fields" not in proof
+    assert len(evidence["sections"]["sales_order"]["line_evidence"]["lines"]) == 2
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("amount", "1"),
+        ("amount", None),
+        ("rate", "1"),
+        ("rate", None),
+        ("quantity", "0"),
+        ("quantity", None),
+        ("custcol_fw_solidus_line_id", "999"),
+        ("custcol_fw_original_ecom_sku", "UNRELATED"),
+        ("lineUniqueKey", None),
+        ("itemType", {"id": "Discount"}),
+        ("custcol_fw_vat_amount", "1"),
+    ],
+)
+def test_additional_lines_need_exact_zero_economics_and_source_sku_corroboration(field, value):
+    from app.services.transaction_ops.line_evidence import source_revision_delta
+
+    source, evidence = revision_inputs()
+    extra = zero_component(source)
+    extra[field] = value
+    evidence["sections"]["sales_order"]["line_evidence"]["lines"].append(extra)
+    assert source_revision_delta(source, evidence, "10") is None
+
+
+def test_duplicate_component_identity_does_not_establish_repricing_basis():
+    from app.services.transaction_ops.line_evidence import source_revision_delta
+
+    source, evidence = revision_inputs()
+    extra = zero_component(source)
+    evidence["sections"]["sales_order"]["line_evidence"]["lines"].extend([extra, deepcopy(extra)])
+    assert source_revision_delta(source, evidence, "10") is None
+
+
+@pytest.mark.parametrize("extra", [None, [], {"itemType": ["InvtPart"]}])
+def test_malformed_component_is_unverified_instead_of_crashing(extra):
+    from app.services.transaction_ops.line_evidence import source_revision_delta
+
+    source, evidence = revision_inputs()
+    evidence["sections"]["sales_order"]["line_evidence"]["lines"].append(extra)
     assert source_revision_delta(source, evidence, "10") is None

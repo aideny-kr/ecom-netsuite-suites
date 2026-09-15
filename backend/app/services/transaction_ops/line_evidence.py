@@ -121,6 +121,55 @@ def compare_source_lines(source, evidence):
     return result
 
 
+def _zero_value_components(source_lines, native_lines):
+    """Retain corroborated, zero-priced inventory additions in arithmetic proof.
+
+    Integrations may expand a source SKU into a priced item plus zero-priced
+    components. This proves neither the mapping policy nor their native tax
+    allocation; it only establishes that these observed lines add no subtotal.
+    """
+    if any(not isinstance(line, dict) for line in native_lines):
+        return None
+    source_ids = {str(line["id"]) for line in source_lines}
+    skus = Counter(line.get("sku") or (line.get("variant") or {}).get("sku") for line in source_lines)
+    keys = Counter(str(line.get("lineUniqueKey")) for line in native_lines)
+    additional = []
+    for line in native_lines:
+        if str(line.get("custcol_fw_solidus_line_id")) in source_ids:
+            continue
+        sku = line.get("custcol_fw_original_ecom_sku")
+        quantity = number(line.get("quantity"))
+        item_type = line.get("itemType")
+        if (
+            line.get("custcol_fw_solidus_line_id") not in (None, "")
+            or not isinstance(sku, str)
+            or not sku
+            or skus[sku] != 1
+            or not isinstance(item_type, dict)
+            or item_type.get("id") != "InvtPart"
+            or quantity is None
+            or quantity <= 0
+            or number(line.get("rate")) != 0
+            or number(line.get("amount")) != 0
+            or not str(line.get("line", "")).isdigit()
+            or not str(line.get("lineUniqueKey", "")).isdigit()
+            or keys[str(line["lineUniqueKey"])] != 1
+            or (line.get("custcol_fw_vat_amount") is not None and number(line["custcol_fw_vat_amount"]) != 0)
+        ):
+            return None
+        additional.append(
+            {
+                "line": str(line["line"]),
+                "line_unique_key": str(line["lineUniqueKey"]),
+                "original_source_sku": sku,
+                "quantity": str(quantity),
+                "amount": "0",
+                "tax_allocation_verified": False,
+            }
+        )
+    return additional
+
+
 def source_revision_delta(source, evidence, record_id):
     """Prove the arithmetic of same-quantity source line repricing.
 
@@ -142,12 +191,14 @@ def source_revision_delta(source, evidence, record_id):
     source_lines = source.get("line_items") or []
     native_lines = (document.get("line_evidence") or {}).get("lines") or []
     try:
+        additional = _zero_value_components(source_lines, native_lines)
         if (
             not changes
             or source.get("state") != "complete"
             or source.get("requires_review") is not False
             or not source.get("updated_at")
-            or len(native_lines) != len(source_lines)
+            or additional is None
+            or len(native_lines) != len(source_lines) + len(additional)
             or number(source.get("included_tax_total")) != 0
             or number(source.get("ship_total")) != 0
             or number(document.get("shippingCost")) != 0
@@ -185,6 +236,7 @@ def source_revision_delta(source, evidence, record_id):
                 "tax_delta": str(tax_delta),
                 "gross_delta": str(gross_delta),
                 "source_line_ids": [c["source_line_id"] for c in changes],
+                "additional_zero_value_components": additional,
                 "authority": "Observed source revision arithmetic only. Inspect existing credits/applications and "
                 "account policy before choosing a treatment. Source authority and tax legality are not certified.",
             }
