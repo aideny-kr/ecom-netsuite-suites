@@ -170,10 +170,13 @@ async def test_period_exclusion_supersedes_old_variance_and_can_be_replaced_by_p
         **failed.report_json,
         "source_eligibility": {"eligible": False, "reason": "source_payment_failed"},
     }
+    # Explicitly date the JSON update; the ORM's onupdate clock otherwise
+    # replaces the synthetic timestamp and can tie the original observation.
+    failed.updated_at = root.created_at + timedelta(seconds=2)
     await db.flush()
     result = await review_results(db, actor.tenant_id, root.id)
     assert result["total"] == 0 and result["summary"]["checked"] == 0
     assert old.report_json["balance"]["status"] == "difference"
     paid_run = await recheck(db, actor, root)
-    await evidence(db, actor, paid_run, "R123456789", "matched", root.created_at + timedelta(seconds=2))
+    await evidence(db, actor, paid_run, "R123456789", "matched", root.created_at + timedelta(seconds=3))
     assert (await review_results(db, actor.tenant_id, root.id))["summary"]["matched"] == 1

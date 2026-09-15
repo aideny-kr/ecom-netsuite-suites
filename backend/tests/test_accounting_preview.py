@@ -38,7 +38,7 @@ def test_preview_preserves_native_keys_and_is_never_an_approval():
     assert amendment["lines"][0] == {
         "line": "1",
         "lineUniqueKey": "100",
-        "fields": {"rate": "400.0", "amount": "400.0", "istaxable": True},
+        "fields": {"rate": "400", "amount": "400", "istaxable": True},
     }
     receipt = validate_receipt(request, response(request))
     assert receipt["executable"] is False and receipt["financial_write_authorized"] is False
