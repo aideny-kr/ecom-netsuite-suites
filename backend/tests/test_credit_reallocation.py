@@ -122,7 +122,7 @@ def test_intent_preserves_credit_refund_gross_and_requires_further_validation():
     assert intent["expected_after"]["total"] == "440"
     assert intent["expected_after"]["taxTotal"] == "40"
     assert intent["proposed_fields"]["item"]["items"] == [
-        {"line": 1, "rate": 400.0, "amount": 400.0, "isTaxable": True}
+        {"line": 1, "rate": "400", "amount": "400", "isTaxable": True}
     ]
     assert intent["proposed_fields"]["taxRate"] == "10.0000000"
     assert intent["financial_write_authorized"] is False
@@ -291,7 +291,7 @@ def test_tax_only_refund_requires_native_amount_preview_never_invents_an_infinit
     assert intent and intent["tax_only"] is True
     assert intent["expected_after"]["subtotal"] == "0"
     assert intent["expected_after"]["taxTotal"] == "40"
-    assert intent["proposed_fields"]["taxTotal"] == 40.0
+    assert intent["proposed_fields"]["taxTotal"] == "40"
     assert "taxRate" not in intent["proposed_fields"]
     assert intent["required_transport"] == "native_accounting_amendment_with_tax_preview"
     assert intent["financial_write_authorized"] is False

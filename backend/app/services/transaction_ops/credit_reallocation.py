@@ -15,7 +15,7 @@ from app.services.transaction_ops.line_evidence import (
     source_revision_delta,
     source_tax_refund_delta,
 )
-from app.services.transaction_ops.sales_credit import _gl_proves, _native_number
+from app.services.transaction_ops.sales_credit import _gl_proves
 
 KIND = "credit_tax_reallocation"
 
@@ -200,14 +200,14 @@ def build_intent(tenant_id, case_id, source, review, evidence, support, *, field
                     "period": period,
                     "proposed_fields": {
                         "taxItem": {"id": str(tax_item["id"])},
-                        **({"taxRate": str(rate)} if rate is not None else {"taxTotal": _native_number(tax)}),
+                        **({"taxRate": str(rate)} if rate is not None else {"taxTotal": str(tax)}),
                         "isTaxable": True,
                         "item": {
                             "items": [
                                 {
                                     "line": line["line"],
-                                    "rate": _native_number(net),
-                                    "amount": _native_number(net),
+                                    "rate": str(net),
+                                    "amount": str(net),
                                     "isTaxable": True,
                                 }
                             ]
