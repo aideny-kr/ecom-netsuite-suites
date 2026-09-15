@@ -42,8 +42,13 @@ Require the destination's `system_identifier` from `SELECT system_identifier FRO
 pg_control_system()` as `--expected-system-identifier`. Obtain this identifier from
 the independently verified destination provisioning/restore record, not by asking
 an unverified application connection what value would make its check pass. This
-binds adoption to a PostgreSQL cluster even when two restored copies have identical
-database names and company identities. It requires operator access to that function.
+distinguishes independently initialized clusters, including logical restores that
+retain the same database name and company identities. Physical copies (PITR,
+pg_basebackup, disk/volume clones and replicas) retain the system identifier.
+**This adoption procedure supports logical restores into independently initialized
+clusters only.** Physical-clone adoption needs a separately verified restore marker
+before it can be supported; the cluster check alone cannot distinguish those copies.
+The check requires operator access to that function.
 The UUID and slug must match the restored company. An empty, shared, inactive,
 misidentified or administrator-less company database is rejected.
 
