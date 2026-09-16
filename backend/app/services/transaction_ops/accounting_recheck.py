@@ -81,7 +81,7 @@ async def queue(db, tenant_id, message, actor_id, *, now):
                 "order_references": [p["order_reference"]],
             },
             config_snapshot=snapshot,
-            max_api_calls=min(config.max_api_calls, 64),
+            max_api_calls=min(config.max_api_calls, 128 if p.get("execution_transport") == "mcp_record_api" else 64),
             max_orders=1,
             deadline_at=now + timedelta(seconds=config.deadline_seconds),
             progress_json={},
@@ -119,12 +119,19 @@ def report_in_scope(run, p, report, now):
     try:
         targets = report["targets"]
         verified_at = datetime.fromisoformat(run.params_json["verified_at"])
+        if p.get("kind") in {"sales_order_source_alignment", "sales_order_line_alignment"}:
+            target_id = p["record_id"]
+        elif p.get("kind") == "credit_tax_reallocation":
+            # A credit can be created from an invoice (or have no createdFrom).
+            # Bind to the independently collected invoice -> sales-order edge.
+            target_id = p["sales_order_id"]
+            if not target_id or str(target_id) != str(p["support"]["invoice"]["createdFrom"]["id"]):
+                return False
+        else:
+            target_id = p["before"]["createdFrom"]["id"]
         return (
             len(targets) == 1
-            and str(targets[0]["record_id"])
-            == str(
-                p["record_id"] if p.get("kind") == "sales_order_source_alignment" else p["before"]["createdFrom"]["id"]
-            )
+            and str(targets[0]["record_id"]) == str(target_id)
             and str(report["source"]["record_id"]) == str(p["source"]["id"])
             and report["balance"]["currency"]
             == (
@@ -145,6 +152,10 @@ def report_in_scope(run, p, report, now):
 async def bound_report(db, tenant_id, run, report, *, now):
     _, p = await approval_for_run(db, tenant_id, run)
     if report_in_scope(run, p, report, now):
+        if p.get("kind") == "credit_tax_reallocation" and p.get("execution_transport") == "mcp_record_api":
+            from app.services.transaction_ops.accounting_credit_recheck import reconcile
+
+            return await reconcile(db, tenant_id, run, p, report)
         return report
     return {
         **report,

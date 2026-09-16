@@ -16,26 +16,35 @@ def treatment_batches(members):
             "invoice_sales_adjustment",
             "sales_order_source_alignment",
         }
-        native = proposal.get("kind") in {"credit_tax_reallocation", "sales_order_line_alignment"}
+        amendment = proposal.get("kind") in {"credit_tax_reallocation", "sales_order_line_alignment"}
+        transport = proposal.get("execution_transport")
+        if amendment and transport == "mcp_record_api":
+            profile = {"connector_schema": proposal["connector_schema"]}
+        elif amendment:
+            profile = proposal["native_profile"]
+        elif commercial:
+            profile = proposal["profile"]
+        else:
+            profile = {"tax_item_id": proposal["tax_item"].get("id")}
         treatment = {
             "kind": proposal.get("kind") or "invoice_tax",
             "scope": proposal["scope"],
             "connection_id": proposal.get("connection_id"),
             "connector_id": proposal.get("connector_id"),
+            "execution_transport": transport,
             "currency": proposal.get("source", {}).get("currency") or proposal["before"].get("currency_code"),
             "accounting_book": proposal["accounting_book"],
             "ar_account": proposal["ar_account"],
             "offset_account": proposal.get("sales_adjustment_account")
-            if commercial or native
+            if commercial or amendment
             else proposal["tax_account"],
             "period": {
                 key: (proposal.get("period") or {}).get(key) for key in ("id", "closed", "arLocked", "allLocked")
             },
-            "profile": proposal["native_profile"]
-            if native
-            else proposal["profile"]
-            if commercial
-            else {"tax_item_id": proposal["tax_item"].get("id")},
+            "profile": profile,
+            "tax_account": proposal.get("tax_account"),
+            "tax_item_id": (proposal.get("tax_item") or {}).get("id"),
+            "tax_agency": proposal.get("tax_agency"),
         }
         key = business_digest(treatment)
         if key not in batches:

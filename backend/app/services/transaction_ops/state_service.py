@@ -675,7 +675,7 @@ async def record_finding(db, tenant_id, run_id, order_reference, report_json, *,
     )
     run = await get_run(db, tenant_id, run_id, lock=True)
     _lease(run, lease_token, now)
-    if run.origin == "recovery" and run.params_json.get("approval_message_id"):
+    if final and run.origin == "recovery" and run.params_json.get("approval_message_id"):
         from app.services.transaction_ops.accounting_recheck import bound_report
 
         request = request.model_copy(
