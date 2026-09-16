@@ -80,7 +80,8 @@ not put a connection URL/password in shell arguments, logs or a PR body.
 
    Review its classification/result, then repeat with `--apply`. The operation is
    atomic. It refuses mismatched identities, foreign tenant rows, unclassified
-   global tables, existing unmanaged roles, elevated memberships/ownership and
+   global tables, sequences/views/materialized views/foreign tables, existing
+   unmanaged roles, elevated memberships/ownership and
    unreviewed SECURITY DEFINER functions. A repeat preserves the installed role's
    password and company binding; this is not a password-rotation command.
 6. Put that runtime credential in the two runtime URL secret files. Start the
@@ -88,6 +89,10 @@ not put a connection URL/password in shell arguments, logs or a PR body.
    Startup checks the actual login role, database binding, tenant context, table
    policy coverage, read-only metadata and forbidden privileges. A newly migrated
    table blocks startup until the operator reviews/reapplies provisioning.
+   Other relations in `public` (sequences, views, materialized views and foreign
+   tables) are unsupported: they block provisioning and startup until a reviewed
+   code change classifies their authority in both provisioning and startup checks.
+   Reapplying provisioning alone cannot enable them.
 7. Verify image IDs/digests, real user/permission flows, a bounded synthetic
    scheduled job and negative cross-company/permission checks. No live financial
    write is authorized by this procedure. Record exact revision and evidence.

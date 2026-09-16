@@ -159,6 +159,9 @@ async def provision(
             # The CLI also suppresses exception bodies and accepts a private file.
             await conn.execute("SET LOCAL log_statement = 'none'")
             await conn.execute("SET LOCAL log_min_error_statement = 'panic'")
+            await conn.execute("SET LOCAL log_min_duration_statement = -1")
+            await conn.execute("SET LOCAL log_min_duration_sample = -1")
+            await conn.execute("SET LOCAL log_transaction_sample_rate = 0")
             escaped = password.replace("'", "''")
             await conn.execute(
                 f"CREATE ROLE {RUNTIME_ROLE} LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE "

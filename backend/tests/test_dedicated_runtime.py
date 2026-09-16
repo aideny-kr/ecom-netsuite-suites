@@ -99,7 +99,9 @@ async def installation(monkeypatch, tmp_path):
         # Serialize tests sharing a cluster without blocking the provisioning
         # transaction's separate advisory lock. Never adopt an existing role.
         await control.execute("SELECT pg_advisory_lock(731920260917)")
-        assert not await control.fetchval("SELECT EXISTS(SELECT FROM pg_roles WHERE rolname=$1)", RUNTIME_ROLE)
+        assert not await control.fetchval("SELECT EXISTS(SELECT FROM pg_roles WHERE rolname=$1)", RUNTIME_ROLE), (
+            "suite_runtime already exists: use a fresh disposable cluster; never remove an unverified role"
+        )
         await control.execute(f'CREATE DATABASE "{name}"')
         database_created = True
         env = dict(
@@ -188,7 +190,7 @@ async def installation(monkeypatch, tmp_path):
             if database_created:
                 await control.execute(f'DROP DATABASE "{name}" WITH (FORCE)')
             if role_created:
-                await control.execute(f"DROP ROLE {RUNTIME_ROLE}")
+                await control.execute(f"DROP ROLE IF EXISTS {RUNTIME_ROLE}")
         finally:
             # Closing also releases the cluster-wide test lock, even on refusal.
             await control.close()
@@ -437,13 +439,13 @@ async def test_real_runtime_boundaries_and_api(installation, monkeypatch):
     ):
         await op.execute(ddl)
         async with factory() as db:
-            with pytest.raises(ValueError, match="inventory"):
+            with pytest.raises(ValueError, match="relation inventory"):
                 await validate_runtime_database(db)
         await op.execute(f"DROP {relation} unclassified")
     # New tables stop startup until the operator classifies/provisions them.
     await op.execute("CREATE TABLE newly_added(id uuid, tenant_id uuid)")
     async with factory() as db:
-        with pytest.raises(ValueError, match="inventory"):
+        with pytest.raises(ValueError, match="table inventory"):
             await validate_runtime_database(db)
 
 
