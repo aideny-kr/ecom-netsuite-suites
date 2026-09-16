@@ -87,6 +87,12 @@ class StateError(ValueError):
         self.http_status = http_status
 
 
+def lineage_work_key(base_work_key: str, retry_of_operation_id) -> str:
+    """The work key of a retry: the business identity plus the attempt it retries, so the
+    one-attempt-per-work rule admits it and the row still inherits the base key."""
+    return business_digest({"base_work": base_work_key, "retry_of_operation": str(retry_of_operation_id)})
+
+
 def permit_consumed(operation) -> bool:
     """Whether the one-use send permit was reserved on this row. A consumed permit cannot be
     told apart from a sent request, so every outcome after it is at least ``unknown``."""
@@ -1041,21 +1047,7 @@ async def claim_approved_operation(db, tenant_id, proposal_id, *, expected_evide
     )
     db.add(operation)
     await db.flush()
-    intent = ClaimedOperation(
-        operation_id=operation.id,
-        proposal_id=row.id,
-        approval_id=row.id,
-        work_key=row.work_key,
-        config_id=row.config_id,
-        action=row.action,
-        currency=row.currency,
-        netsuite_account_id=row.netsuite_account_id,
-        subsidiary_id=row.subsidiary_id,
-        record_type=row.record_type,
-        target_record_id=row.target_record_id,
-        before_json=row.before_json,
-        after_json=row.after_json,
-    )
+    intent = _claimed_from_proposal(operation.id, row)
     await _audit(db, tenant_id, "operation.attempt", operation)
     await _commit(db, tenant_id)
     return intent
@@ -1333,17 +1325,18 @@ async def reserve_operation_dispatch(
         raise StateError("operation_not_executable")
     if operation.provider != provider:
         raise StateError("unsupported_dispatch_provider")
+    if now >= operation.deadline_at or operation.api_calls_used >= operation.max_api_calls:
+        # A spent attempt is settled here, before the approval source is asked anything.
+        await _exhaust_operation(db, tenant_id, operation, now, "operation_budget_exhausted")
+        raise StateError("operation_budget_exhausted")
     await authorize(db, tenant_id, operation, claimed, now)
     return await _grant_permit(db, tenant_id, operation, provider, payload_fingerprint, now)
 
 
-async def _proposal_still_authorized(db, tenant_id, operation, claimed, now):
-    """The transaction proposal's permit-time re-check: the claim still matches the
-    proposal exactly, the proposal is approved and fresh, the config still proposes
-    actions, the feature is on, and the decider is still a permitted human."""
-    proposal = await get_proposal(db, tenant_id, claimed.proposal_id, lock=True)
-    expected = ClaimedOperation(
-        operation_id=operation.id,
+def _claimed_from_proposal(operation_id, proposal) -> ClaimedOperation:
+    """The claim a transaction proposal produces; rebuilt at the permit to compare."""
+    return ClaimedOperation(
+        operation_id=operation_id,
         proposal_id=proposal.id,
         approval_id=proposal.id,
         work_key=proposal.work_key,
@@ -1357,7 +1350,14 @@ async def _proposal_still_authorized(db, tenant_id, operation, claimed, now):
         before_json=proposal.before_json,
         after_json=proposal.after_json,
     )
-    if claimed != expected:
+
+
+async def _proposal_still_authorized(db, tenant_id, operation, claimed, now):
+    """The transaction proposal's permit-time re-check: the claim still matches the
+    proposal exactly, the proposal is approved and fresh, the config still proposes
+    actions, the feature is on, and the decider is still a permitted human."""
+    proposal = await get_proposal(db, tenant_id, claimed.proposal_id, lock=True)
+    if claimed != _claimed_from_proposal(operation.id, proposal):
         raise StateError("claimed_operation_mismatch")
     if proposal.status != "approved":
         raise StateError("operation_not_executable")

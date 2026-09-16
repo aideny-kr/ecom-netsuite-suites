@@ -18,6 +18,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from app.models.transaction_ops import TransactionOperation
 from app.services.chat.tool_call_results import _extract_error_message
 from app.services.chat.write_outcome import classify_write_outcome
 from app.services.transaction_ops import chat_confirmation
@@ -112,7 +113,12 @@ class AccountingCardAdapter:
             self.refusal = REFUSALS.get(exc.code, "The approval no longer holds. No update was sent.")
             raise PreconditionChangedError(exc.code) from exc
         if not granted:
-            return self._sent({"status": "unknown", "code": "dispatch_already_reserved", "verified": False})
+            # An earlier delivery consumed the permit; whatever it recorded is this
+            # delivery's receipt too, so the card and the audit do not lose it.
+            row = await state._one(db, tenant_id, TransactionOperation, claimed.operation_id)
+            self.receipt = (row.result_json or {}).get("receipt")
+            self.sent = "accepted" if self.receipt else "unknown"
+            return {"status": "unknown", "code": "dispatch_already_reserved", "verified": False}
         raw = await self.dispatch(
             human_approved=True,
             approval_context=self.approval_context,
