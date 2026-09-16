@@ -932,7 +932,7 @@ async def claim_approved_operation(db, tenant_id, proposal_id, *, expected_evide
             .join(related, and_(related.id == TransactionOperation.proposal_id, related.tenant_id == tenant_id))
             .where(
                 TransactionOperation.tenant_id == tenant_id,
-                TransactionOperation.status.in_(("executing", "unknown")),
+                TransactionOperation.status.in_(("executing", *SETTLED)),
                 func.lower(func.replace(related.netsuite_account_id, "_", "-"))
                 == row.netsuite_account_id.replace("_", "-").lower(),
                 related.subsidiary_id == row.subsidiary_id,
@@ -1028,6 +1028,15 @@ async def claim_approved_operation(db, tenant_id, proposal_id, *, expected_evide
     return intent
 
 
+async def operation_for_work(db, tenant_id, work_key):
+    """The ledger row for a piece of work, or None; the duplicate check's own lookup."""
+    await set_tenant_context(db, str(tenant_id))
+    query = select(TransactionOperation).where(
+        TransactionOperation.tenant_id == tenant_id, TransactionOperation.work_key == work_key
+    )
+    return (await db.execute(query.execution_options(populate_existing=True))).scalar_one_or_none()
+
+
 async def record_receipt(db, tenant_id, operation_id, receipt, *, now=None):
     """The provider identified the record as saved: the attempt is committed, not yet proven.
 
@@ -1061,6 +1070,13 @@ async def complete_operation(db, tenant_id, operation_id, *, outcome, result_jso
     # reconciliation; this service never dispatches it again.
     if row.status == "unknown" and evidence.get("reconciled") is not True:
         raise StateError("reconciliation_evidence_required")
+    if row.status == "committed_unverified":
+        # A receipt exists, so the attempt can never be called "before effect" or
+        # "unknown" again, and only an independent readback may call it verified.
+        if outcome in ("rejected_before_effect", "unknown"):
+            raise StateError("receipt_recorded")
+        if outcome == "verified" and not evidence.get("verification"):
+            raise StateError("verification_evidence_required")
     row.status, row.completed_at = outcome, _clock(now)
     row.result_json = {**(row.result_json or {}), **evidence, "termination_reason": TERMINATION[outcome]}
     proposal = await get_proposal(db, tenant_id, row.proposal_id)

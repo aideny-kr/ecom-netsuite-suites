@@ -77,7 +77,7 @@ async def observe_finding(db, tenant_id, run, finding, *, now):
             .where(
                 TransactionOperation.tenant_id == tenant_id,
                 TransactionOperation.entity_key == entity_key,
-                TransactionOperation.status.in_(["executing", "unknown"]),
+                TransactionOperation.status.in_(["executing", "unknown", "committed_unverified"]),
             )
             .limit(1)
         )

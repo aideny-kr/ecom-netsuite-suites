@@ -8,7 +8,7 @@ from app.core.database import set_tenant_context
 from app.models.transaction_ops import TransactionOperation
 from app.services.transaction_ops import state_service as state
 from app.services.transaction_ops.celigo_actions import MAX_READ_CALLS, read_celigo_resolution
-from app.services.transaction_ops.executor import _result, verify_outcome
+from app.services.transaction_ops.executor import verify_outcome
 from app.services.transaction_ops.netsuite_create import prepare_create_input
 from app.services.transaction_ops.netsuite_reader import read_netsuite_order
 from app.services.transaction_ops.netsuite_transport import (
@@ -19,6 +19,7 @@ from app.services.transaction_ops.netsuite_transport import (
 from app.services.transaction_ops.normalization import TransactionMapping
 from app.services.transaction_ops.runner import build_report, enabled, limit_report
 from app.services.transaction_ops.source_reader import read_framework_order
+from app.services.transaction_ops.write_kernel import result_of as _result
 
 
 async def recover_operation(db, tenant_id, operation_id, *, _clock=None):
