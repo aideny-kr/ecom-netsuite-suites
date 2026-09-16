@@ -2875,7 +2875,7 @@ export default function SettingsPage() {
           </>}
         </SettingsSection>
         <SettingsSection id="agent" label="Agent">
-          <div className="rounded-xl border bg-card p-5"><h3 className="font-semibold">Skills and company context</h3><p className="mt-2 text-sm text-muted-foreground">Browse expertise in <Link className="text-primary underline" href="/skills">Skills</Link> and review saved context in <Link className="text-primary underline" href="/settings#workspace">Company profile</Link>.</p></div>
+          <div className="rounded-xl border bg-card p-5"><h3 className="font-semibold">Skills and company context</h3><p className="mt-2 text-sm text-muted-foreground">Browse expertise in <Link className="text-primary underline" href="/skills">Skills</Link> and review saved context in <a className="text-primary underline" href="#workspace">Company profile</a>.</p></div>
           {isAdmin && <><AiConfigSection /><ChatSettingsSection /><SoulSection /><SectionErrorBoundary name="Governance Policy"><GovernancePolicySection /></SectionErrorBoundary></>}
           {!isAdmin && <p className="text-sm text-muted-foreground">An administrator manages agent configuration and approval policy.</p>}
         </SettingsSection>

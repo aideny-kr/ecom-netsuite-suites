@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { readFile } from "node:fs/promises";
 import { Blob as NodeBlob } from "node:buffer";
 import { strFromU8, unzipSync, zipSync, strToU8 } from "fflate";
@@ -38,5 +38,16 @@ describe("Excel export presentation", () => {
     expect(await presentExcelExport(invalid)).toBe(invalid);
     const unknown = blob(zipSync({"hello.txt":strToU8("unchanged")}));
     expect(await presentExcelExport(unknown)).toBe(unknown);
+  });
+  it("returns large workbooks byte-for-byte without parsing worksheet XML on the main thread", async () => {
+    const input = unzipSync(await readFile("e2e/fixtures/export-loaded-rows.xlsx"));
+    const sheet = strFromU8(input["xl/worksheets/sheet1.xml"]);
+    input["xl/worksheets/sheet1.xml"] = strToU8(sheet.replace("</sheetData>", `<row r="9999"><c r="A9999" t="inlineStr"><is><t>${"data".repeat(250_001)}</t></is></c></row></sheetData>`));
+    const original = blob(zipSync(input));
+    const parseSpy = vi.spyOn(DOMParser.prototype, "parseFromString");
+    try {
+      expect(await presentExcelExport(original)).toBe(original);
+      expect(parseSpy).not.toHaveBeenCalled();
+    } finally { parseSpy.mockRestore(); }
   });
 });

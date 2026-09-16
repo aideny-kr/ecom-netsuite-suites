@@ -87,6 +87,15 @@ export function presentReportHtml(html: string): string {
         const value = row.insertCell(); value.className = "orbital-exact"; value.textContent = point.exact;
       }
       figure.append(table);
+      // The renderer caps category charts. Keep its completeness disclosure
+      // alongside the replacement table, not inside the SVG being removed.
+      for (const text of Array.from(svg.querySelectorAll(":scope > text"))) {
+        if (!/^Showing \d+ largest of \d+ categories$/.test(text.textContent?.trim() ?? "")) continue;
+        const disclosure = document.createElement("p");
+        disclosure.className = "orbital-chart-note";
+        disclosure.textContent = text.textContent;
+        figure.append(disclosure);
+      }
       const note = document.createElement("p"); note.className = "orbital-chart-note";
       note.textContent = "Bars share a zero baseline. Full values are shown as supplied by the report.";
       figure.append(note);

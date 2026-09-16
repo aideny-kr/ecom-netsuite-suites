@@ -45,6 +45,13 @@ describe("frozen report reading presentation", () => {
     expect(doc.querySelector("script, iframe, object, embed")).toBeNull();
     expect(doc.querySelectorAll(".orbital-exact")).toHaveLength(3);
   });
+  it("retains the source chart's category-limit disclosure with the exact values", () => {
+    const disclosure = "Showing 12 largest of 50 categories";
+    const input = reportReadingFixture.replace("</svg>", `<text x="692" y="44">${disclosure}</text></svg>`);
+    const doc = parse(presentReportHtml(input));
+    expect(doc.querySelector(".orbital-drivers")?.textContent).toContain(disclosure);
+    expect(Array.from(doc.querySelectorAll(".orbital-exact")).map(el => el.textContent)).toEqual(["-1,234.567891", "2,500", "0"]);
+  });
   it("preserves document metadata and supports wide built-in reports", () => {
     const input = reportReadingFixture.replace('lang="en"', 'lang="fr" dir="ltr"').replace('<body>', '<body class="tenant-report" data-note="a &gt; b">').replace('class="report"', 'class="report report--wide"');
     const doc = parse(presentReportHtml(input));

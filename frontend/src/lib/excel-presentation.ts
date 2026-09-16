@@ -2,6 +2,10 @@ import { strFromU8, strToU8, unzip, zip } from "fflate";
 
 const NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 const MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+// XML parsing/mutation is synchronous even though ZIP work uses workers.
+// Large exports retain their original workbook instead of freezing the UI
+// for a cosmetic pass (50k rows measured an ~878ms main-thread pause).
+const MAX_PRESENTATION_XML_BYTES = 1_000_000;
 
 function parse(bytes: Uint8Array): Document {
   const document = new DOMParser().parseFromString(strFromU8(bytes), "application/xml");
@@ -22,6 +26,7 @@ export async function presentExcelExport(blob: Blob): Promise<Blob> {
     });
     if (!files["xl/styles.xml"] || !files["xl/worksheets/sheet1.xml"]) return blob;
     if (Object.keys(files).filter(path => /^xl\/worksheets\/sheet\d+\.xml$/.test(path)).length !== 1) return blob;
+    if (files["xl/styles.xml"].byteLength + files["xl/worksheets/sheet1.xml"].byteLength > MAX_PRESENTATION_XML_BYTES) return blob;
     const styles = parse(files["xl/styles.xml"]);
     const sheet = parse(files["xl/worksheets/sheet1.xml"]);
     const all = (root: Document | Element, name: string) => Array.from(root.getElementsByTagNameNS(NS, name));

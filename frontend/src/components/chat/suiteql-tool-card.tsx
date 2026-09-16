@@ -39,6 +39,8 @@ export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
   const savedSearchId = (step.params?.savedSearchId as string) ?? (step.params?.searchId as string) ?? "";
   const effectiveQueryText = queryText || (savedSearchId ? `Saved Search: ${savedSearchId}` : "");
   const resultPayload = getTablePayload(step);
+  const isPartial = !!resultPayload && (resultPayload.truncated || resultPayload.row_count > resultPayload.rows.length);
+  const onlyLoadedRowsAvailable = isPartial && !queryText;
   const hasStructuredRows = !!resultPayload;
   const isError = !hasStructuredRows && !!step.result_summary;
   const isMcpTool = step.tool !== "netsuite_suiteql";
@@ -52,9 +54,9 @@ export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
   async function handleExport(format: "csv" | "xlsx", loadedOnly = false) {
     if (!resultPayload || isExporting) return;
     setExportError("");
-    const title = `query-results${loadedOnly ? "-loaded-rows" : ""}-${new Date().toISOString().slice(0, 10)}`;
+    const title = `query-results${loadedOnly || onlyLoadedRowsAvailable ? "-loaded-rows" : ""}-${new Date().toISOString().slice(0, 10)}`;
     try {
-      const needsServerExport = resultPayload.truncated || (format === "csv" && resultPayload.rows.length > DISPLAY_ROW_CAP);
+      const needsServerExport = isPartial || (format === "csv" && resultPayload.rows.length > DISPLAY_ROW_CAP);
       if (!loadedOnly && needsServerExport && queryText) {
         await exportFromQuery({ queryText, title, format });
       } else if (format === "xlsx") {
@@ -237,7 +239,7 @@ export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
             className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground hover:text-primary transition-colors disabled:opacity-50"
           >
             <Download className="h-3 w-3" />
-            Export CSV
+            Export CSV{onlyLoadedRowsAvailable ? " (loaded rows)" : ""}
           </button>
           <button
             onClick={() => void handleExport("xlsx")}
@@ -249,7 +251,7 @@ export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
             ) : (
               <FileSpreadsheet className="h-3 w-3" />
             )}
-            Export Excel
+            Export Excel{onlyLoadedRowsAvailable ? " (loaded rows)" : ""}
           </button>
           <SaveQueryBar
             saveMode={saveMode}
@@ -260,9 +262,9 @@ export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
             onSave={handleSave}
           />
         </div>
-        {(resultPayload.truncated || resultPayload.rows.length > DISPLAY_ROW_CAP) && queryText && (
+        {(isPartial || (resultPayload.rows.length > DISPLAY_ROW_CAP && queryText)) && (
           <div className="rounded-md border bg-muted/20 p-3 text-xs">
-            <p className="text-muted-foreground">Re-running an export requires a direct NetSuite connection. You can also download the {resultPayload.rows.length.toLocaleString()} rows already loaded{resultPayload.truncated ? " — this is a partial result" : ""}.</p>
+            <p className="text-muted-foreground">{queryText ? "Re-running an export requires a direct NetSuite connection. You can also download the " : "Downloads contain only the "}{resultPayload.rows.length.toLocaleString()} rows already loaded{isPartial ? " — this is a partial result" : ""}.</p>
             <div className="mt-2 flex flex-wrap gap-4">
               <button type="button" disabled={isExporting || !resultPayload.rows.length} onClick={() => void handleExport("csv", true)} className="text-primary underline underline-offset-4 disabled:opacity-50">Download loaded rows as CSV</button>
               <button type="button" disabled={isExporting || !resultPayload.rows.length} onClick={() => void handleExport("xlsx", true)} className="text-primary underline underline-offset-4 disabled:opacity-50">Download loaded rows as Excel</button>

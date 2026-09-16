@@ -756,3 +756,17 @@ test('persisted MCP Chat table downloads CSV and Excel without a REST query', as
   expect(await page.evaluate(()=>document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await screenshot(page,'chat-data-frame-downloads-mobile');
 });
+
+
+test("Company profile deep link selects Workspace from Agent and supports back navigation", async ({page}) => {
+  await fixture(page);
+  await page.goto('/settings#agent');
+  const sections = page.getByRole('navigation', {name:'Settings sections'});
+  await expect(sections.getByRole('link', {name:/Agent Models/})).toHaveAttribute('aria-current','location');
+  await page.getByRole('link', {name:'Company profile',exact:true}).click();
+  await expect(page).toHaveURL(/#workspace$/);
+  await expect(sections.getByRole('link', {name:/Workspace Profile/})).toHaveAttribute('aria-current','location');
+  await expect(page.getByRole('heading', {name:'Company profile',exact:true})).toBeVisible();
+  await page.goBack();
+  await expect(sections.getByRole('link', {name:/Agent Models/})).toHaveAttribute('aria-current','location');
+});

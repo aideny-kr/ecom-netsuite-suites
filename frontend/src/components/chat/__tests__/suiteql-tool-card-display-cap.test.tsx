@@ -126,3 +126,12 @@ it("shows full-export failures and can export the loaded rows without rerunning 
   expect(URL.createObjectURL).toHaveBeenCalled();
   expect(exportFromQueryMock).toHaveBeenCalledTimes(1);
 });
+
+it("labels partial MCP downloads without a rerunnable query as loaded rows", () => {
+  const step = {...buildStep(2, {truncated:true}), tool:"ns_runSavedSearch", params:{savedSearchId:"123"}};
+  render(<SuiteQLToolCard step={step} />);
+  expect(screen.getByText(/Downloads contain only the 2 rows already loaded.*partial result/)).toBeVisible();
+  fireEvent.click(screen.getByRole("button", {name:"Export Excel (loaded rows)"}));
+  expect(exportToExcelMock).toHaveBeenCalledWith(expect.objectContaining({title:expect.stringContaining("-loaded-rows-")}));
+  expect(exportFromQueryMock).not.toHaveBeenCalled();
+});
