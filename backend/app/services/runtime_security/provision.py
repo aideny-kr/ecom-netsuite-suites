@@ -56,6 +56,10 @@ async def provision(
             or not rows[0]["is_active"]
         ):
             raise ValueError("Expected exactly the adopted active company; export/import first")
+        if await conn.fetchval("""SELECT EXISTS(SELECT FROM pg_class c
+          JOIN pg_namespace n ON n.oid=c.relnamespace
+          WHERE n.nspname='public' AND c.relkind IN ('S','v','m','f'))"""):
+            raise ValueError("Unclassified relations require operator review before provisioning")
         tables = await conn.fetch("""
             SELECT c.relname, c.relrowsecurity,
               EXISTS (SELECT FROM pg_attribute a WHERE a.attrelid=c.oid
@@ -150,8 +154,11 @@ async def provision(
         if not apply:
             return result
         if not exists:
-            # asyncpg never logs statements; the CLI also suppresses database
-            # exception bodies. Password is input privately, never a CLI flag.
+            # Suppress standard PostgreSQL statement/error logging for the
+            # credential-bearing DDL; transaction-local settings revert on exit.
+            # The CLI also suppresses exception bodies and accepts a private file.
+            await conn.execute("SET LOCAL log_statement = 'none'")
+            await conn.execute("SET LOCAL log_min_error_statement = 'panic'")
             escaped = password.replace("'", "''")
             await conn.execute(
                 f"CREATE ROLE {RUNTIME_ROLE} LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE "

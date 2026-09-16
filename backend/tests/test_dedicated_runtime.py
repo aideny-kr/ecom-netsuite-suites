@@ -82,22 +82,26 @@ def test_dedicated_config_accepts_private_profile():
 async def installation(monkeypatch, tmp_path):
     url = make_url(settings.DATABASE_URL_DIRECT or settings.DATABASE_URL)
     if (
-        settings.APP_ENV != "development"
+        settings.APP_ENV not in {"development", "test"}
         or url.host not in {"127.0.0.1", "localhost", "postgres"}
         or url.database not in {"ecom_netsuite", "ecom_netsuite_test"}
     ):
         pytest.fail("Runtime isolation tests require the disposable local/CI Postgres contract")
     control = await asyncpg.connect(url.set(drivername="postgresql").render_as_string(hide_password=False))
     name = "ecom_runtime_test_" + uuid.uuid4().hex[:12]
-    # A pre-existing role might belong to another deployment: never alter it.
-    assert not await control.fetchval("SELECT EXISTS(SELECT FROM pg_roles WHERE rolname=$1)", RUNTIME_ROLE)
-    await control.execute(f'CREATE DATABASE "{name}"')
     op_url = url.set(database=name)
     runtime_password = secrets.token_urlsafe(36)
     engine = create_async_engine(op_url, echo=False)
     operator = None
     runtime_engine = None
+    database_created = role_created = False
     try:
+        # Serialize tests sharing a cluster without blocking the provisioning
+        # transaction's separate advisory lock. Never adopt an existing role.
+        await control.execute("SELECT pg_advisory_lock(731920260917)")
+        assert not await control.fetchval("SELECT EXISTS(SELECT FROM pg_roles WHERE rolname=$1)", RUNTIME_ROLE)
+        await control.execute(f'CREATE DATABASE "{name}"')
+        database_created = True
         env = dict(
             os.environ,
             DATABASE_URL=op_url.render_as_string(hide_password=False),
@@ -148,7 +152,25 @@ async def installation(monkeypatch, tmp_path):
                 await provision(operator, **args, apply=apply)
         assert not await control.fetchval("SELECT EXISTS(SELECT FROM pg_roles WHERE rolname=$1)", RUNTIME_ROLE)
         await operator.execute("DROP TABLE policy_gap")
-        assert (await provision(operator, **args, apply=True))["password_set"]
+        for ddl, relation in (
+            ("CREATE SEQUENCE unclassified", "SEQUENCE"),
+            ("CREATE VIEW unclassified AS SELECT 1", "VIEW"),
+        ):
+            await operator.execute(ddl)
+            with pytest.raises(ValueError, match="Unclassified relations"):
+                await provision(operator, **args)
+            await operator.execute(f"DROP {relation} unclassified")
+        logging_before = await operator.fetchrow(
+            "SELECT current_setting('log_statement'),current_setting('log_min_error_statement')"
+        )
+        role_created = (await provision(operator, **args, apply=True))["password_set"]
+        assert role_created
+        assert (
+            await operator.fetchrow(
+                "SELECT current_setting('log_statement'),current_setting('log_min_error_statement')"
+            )
+            == logging_before
+        )
         # Rerun must preserve the original password and permissive-policy coverage.
         assert not (await provision(operator, **{**args, "password": secrets.token_urlsafe(36)}, apply=True))[
             "password_set"
@@ -162,9 +184,14 @@ async def installation(monkeypatch, tmp_path):
         await engine.dispose()
         if operator:
             await operator.close()
-        await control.execute(f'DROP DATABASE "{name}" WITH (FORCE)')
-        await control.execute(f"DROP ROLE IF EXISTS {RUNTIME_ROLE}")
-        await control.close()
+        try:
+            if database_created:
+                await control.execute(f'DROP DATABASE "{name}" WITH (FORCE)')
+            if role_created:
+                await control.execute(f"DROP ROLE {RUNTIME_ROLE}")
+        finally:
+            # Closing also releases the cluster-wide test lock, even on refusal.
+            await control.close()
 
 
 async def test_real_runtime_boundaries_and_api(installation, monkeypatch):
@@ -404,6 +431,15 @@ async def test_real_runtime_boundaries_and_api(installation, monkeypatch):
         with pytest.raises(ValueError, match="coverage"):
             await validate_runtime_database(db)
     await op.execute("CREATE POLICY users_tenant_isolation ON users USING (tenant_id=get_current_tenant_id())")
+    for ddl, relation in (
+        ("CREATE SEQUENCE unclassified", "SEQUENCE"),
+        ("CREATE VIEW unclassified AS SELECT 1", "VIEW"),
+    ):
+        await op.execute(ddl)
+        async with factory() as db:
+            with pytest.raises(ValueError, match="inventory"):
+                await validate_runtime_database(db)
+        await op.execute(f"DROP {relation} unclassified")
     # New tables stop startup until the operator classifies/provisions them.
     await op.execute("CREATE TABLE newly_added(id uuid, tenant_id uuid)")
     async with factory() as db:

@@ -109,7 +109,7 @@ async def validate_runtime_database(db: AsyncSession) -> None:
     tables = (
         (
             await db.execute(
-                text("""SELECT c.relname, c.relrowsecurity,
+                text("""SELECT c.relname, c.relkind::text kind, c.relrowsecurity,
         pg_has_role(current_user,c.relowner,'MEMBER') owns,
         has_table_privilege(c.oid,'TRUNCATE') truncates,
         has_table_privilege(c.oid,'TRIGGER') triggers,
@@ -119,13 +119,15 @@ async def validate_runtime_database(db: AsyncSession) -> None:
         ARRAY(SELECT p.polcmd::text FROM pg_policy p WHERE p.polrelid=c.oid AND p.polpermissive
           AND (0=ANY(p.polroles) OR (SELECT oid FROM pg_roles WHERE rolname=current_user)=ANY(p.polroles))) commands
         FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-        WHERE n.nspname='public' AND c.relkind IN ('r','p')""")
+        WHERE n.nspname='public' AND c.relkind IN ('r','p','S','v','m','f')""")
             )
         )
         .mappings()
         .all()
     )
     for row in tables:
+        if row["kind"] not in {"r", "p"}:
+            raise ValueError("Runtime relation inventory changed; operator review is required")
         if row["owns"] or row["truncates"] or row["triggers"]:
             raise ValueError("Runtime has excessive table authority")
         if not row["readable"] or (row["relname"] not in READ_ONLY and (not row["relrowsecurity"] or not row["bound"])):
