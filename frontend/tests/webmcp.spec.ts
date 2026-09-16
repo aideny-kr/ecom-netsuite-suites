@@ -316,7 +316,8 @@ test("switching away from a running chat cannot cancel that run through another 
     await expect.poll(async () => JSON.parse(await callTool(page, "chat_get_state")).active_run_id ?? null).toBeNull();
     await callTool(page, "chat_select_session", { session_id: nextId });
     await expect.poll(async () => JSON.parse(await callTool(page, "chat_get_state")).ready).toBe(true);
-    await expect(callTool(page, "chat_cancel_run", { session_id: nextId, run_id: runId })).rejects.toThrow(/invocation failed/);
+    const denied = JSON.parse(await callTool(page, "chat_cancel_run", { session_id: nextId, run_id: runId }));
+    expect(denied.error.message).toBe("Run is not active in the selected chat.");
     expect(cancelCalls).toBe(0);
   } finally {
     releaseStream?.();
