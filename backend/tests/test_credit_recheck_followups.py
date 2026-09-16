@@ -9,6 +9,7 @@
 3. The MCP recheck ceiling is derived from the read budget it exists to afford.
 """
 
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -40,12 +41,19 @@ def _run(now, *, max_api_calls=200):
     )
 
 
-def _patch_state(monkeypatch, run):
+def _patch_state(monkeypatch, run, *, read_db=None):
     audit, commit, get_run, lease = AsyncMock(), AsyncMock(), AsyncMock(return_value=run), Mock()
     monkeypatch.setattr(recheck.state, "_audit", audit)
     monkeypatch.setattr(recheck.state, "_commit", commit)
     monkeypatch.setattr(recheck.state, "get_run", get_run)
     monkeypatch.setattr(recheck.state, "_lease", lease)
+
+    @asynccontextmanager
+    async def read_session(db):
+        yield read_db if read_db is not None else db
+
+    monkeypatch.setattr(recheck, "_read_session", read_session)
+    monkeypatch.setattr(recheck, "set_tenant_context", AsyncMock())
     return audit, commit, get_run, lease
 
 
@@ -272,26 +280,36 @@ async def test_lease_lost_after_a_clean_read_publishes_nothing_but_the_audit(mcp
     assert commit.await_count == 2
 
 
-async def test_interim_write_with_a_mismatched_approval_binds_closed_instead_of_raising(mcp_credit, monkeypatch):  # noqa: F811
+@pytest.mark.parametrize("final", [False, True], ids=["interim", "final"])
+@pytest.mark.parametrize(
+    "raised, published",
+    [
+        ("accounting_recheck_approval_mismatch", "accounting_recheck_approval_mismatch"),
+        ("not_found", "accounting_recheck_approval_unavailable"),  # a foreign lookup code is never published verbatim
+    ],
+)
+async def test_a_write_with_a_mismatched_approval_binds_closed_instead_of_raising(
+    mcp_credit,  # noqa: F811
+    monkeypatch,
+    final,
+    raised,
+    published,
+):
     now = datetime.now(timezone.utc)
     p, _, report = corrected(mcp_credit, now)
-    monkeypatch.setattr(
-        accounting_recheck,
-        "approval_for_run",
-        AsyncMock(side_effect=state_service.StateError("accounting_recheck_approval_mismatch")),
-    )
+    monkeypatch.setattr(accounting_recheck, "approval_for_run", AsyncMock(side_effect=state_service.StateError(raised)))
     spy = AsyncMock()
     monkeypatch.setattr(recheck, "reconcile", spy)
     run = SimpleNamespace(params_json={"verified_at": (now - timedelta(seconds=1)).isoformat()})
 
     bound = await accounting_recheck.bound_report(
-        AsyncMock(), p["tenant_id"], run, report, now=now, subledger_recheck=False
+        AsyncMock(), p["tenant_id"], run, report, now=now, subledger_recheck=final
     )
 
     assert bound["balance"]["status"] == "not_verified"
-    assert bound["balance"]["reason"] == "accounting_recheck_approval_mismatch"
-    assert bound["evidence_limits"] == {"code": "accounting_recheck_approval_mismatch"}
-    spy.assert_not_awaited()
+    assert bound["balance"]["reason"] == published
+    assert bound["evidence_limits"] == {"code": published}
+    spy.assert_not_awaited()  # the final write never spends the subledger budget on a dead approval
 
 
 async def test_interim_finding_survives_an_approval_that_stopped_matching(
@@ -342,26 +360,108 @@ def test_mcp_recheck_ceiling_applies_to_every_mcp_transported_kind(mcp_credit): 
     assert accounting_recheck.needs_subledger_recheck(other) is False  # but only the credit re-reads the subledger
 
 
-async def test_defect_rolls_back_the_session_before_the_ownership_recheck(mcp_credit, monkeypatch):  # noqa: F811
+@pytest.mark.parametrize(
+    "raised, expected",
+    [(RuntimeError("aborted transaction"), RuntimeError), (TimeoutError(), None)],
+    ids=["defect", "timeout"],
+)
+async def test_a_failed_read_never_touches_the_callers_session(mcp_credit, monkeypatch, raised, expected):  # noqa: F811
+    """The provider read runs on its own session; the caller's rows stay loaded and locked."""
     now = datetime.now(timezone.utc)
     p, _, report = corrected(mcp_credit, now)
     run = _run(now)
-    _patch_state(monkeypatch, run)
-    monkeypatch.setattr(credit_api_correction, "fresh", AsyncMock(side_effect=RuntimeError("aborted transaction")))
-    db = AsyncMock()
-    with pytest.raises(RuntimeError):
+    read_db = AsyncMock(name="read_session")
+    audit, _, get_run, _ = _patch_state(monkeypatch, run, read_db=read_db)
+    fresh = AsyncMock(side_effect=raised)
+    monkeypatch.setattr(credit_api_correction, "fresh", fresh)
+    db = AsyncMock(name="caller_session")
+    if expected is None:
         await recheck.reconcile(db, p["tenant_id"], run, p, report)
-    db.rollback.assert_awaited_once()
+    else:
+        with pytest.raises(expected):
+            await recheck.reconcile(db, p["tenant_id"], run, p, report)
+    assert fresh.await_args.args[0] is read_db
+    db.rollback.assert_not_awaited()
+    assert get_run.await_args.args[2] == run.id
+    assert len(_posted(audit)) == 1
 
 
-async def test_evidence_failure_does_not_roll_back_the_session(mcp_credit, monkeypatch):  # noqa: F811
+@pytest.mark.parametrize(
+    "raised, expected, outcome",
+    [
+        (RuntimeError("aborted transaction"), RuntimeError, "credit_recheck_internal_error"),
+        (TimeoutError(), None, "credit_recheck_evidence_unavailable"),
+    ],
+    ids=["defect", "timeout"],
+)
+async def test_failed_read_on_a_real_session_still_audits_the_exit(
+    db,
+    approved_credit,  # noqa: F811
+    mcp_credit,  # noqa: F811
+    monkeypatch,
+    raised,
+    expected,
+    outcome,
+):
+    """reconcile() must leave the caller's real AsyncSession usable after a failed read.
+
+    The unit tests drive reconcile() with an AsyncMock session and a SimpleNamespace
+    run, so a read that poisoned the caller's session (and the rollback that then
+    expired the caller's rows) were invisible to them. This runs the real thing: the
+    read touches its session and fails; the exit must still be audited and committed,
+    and the run row record_finding holds must still be readable without IO.
+    """
+    from app.models.audit import AuditEvent
+
+    actor, config, case, message, _, _ = approved_credit
     now = datetime.now(timezone.utc)
     p, _, report = corrected(mcp_credit, now)
-    run = _run(now)
-    _patch_state(monkeypatch, run)
-    monkeypatch.setattr(
-        credit_api_correction, "fresh", AsyncMock(side_effect=SourceReadError("source_transport_failed"))
+    p.update(
+        tenant_id=str(actor.tenant_id),
+        config_id=str(config.id),
+        case_id=str(case.id),
+        scope=case.scope_json,
+        order_reference=case.order_reference,
     )
-    db = AsyncMock()
-    await recheck.reconcile(db, p["tenant_id"], run, p, report)
-    db.rollback.assert_not_awaited()
+    so = deepcopy(message.structured_output)
+    so["accounting_review"] = p
+    message.structured_output = so
+    await db.flush()
+    run = await accounting_recheck.queue(db, actor.tenant_id, message, actor.id, now=now - timedelta(seconds=1))
+    await db.commit()
+    await state_service.claim_run(db, actor.tenant_id, run.id, now=now)
+    run = await state_service.get_run(db, actor.tenant_id, run.id, lock=True)  # as record_finding holds it
+    assert run.max_api_calls >= recheck.READ_CALLS, "fixture budget must afford the read"
+    tenant_id, message_id = actor.tenant_id, str(message.id)
+    seen = {}
+
+    async def failing_read(read_db, tenant_id, proposal):
+        seen["session"] = read_db
+        await read_db.execute(select(TransactionFinding).where(TransactionFinding.run_id == run.id))
+        raise raised
+
+    monkeypatch.setattr(credit_api_correction, "fresh", failing_read)
+
+    if expected is None:
+        result = await recheck.reconcile(db, tenant_id, run, p, report)
+        assert result["balance"]["status"] == "not_verified"
+        assert result["balance"]["reason"] == outcome
+    else:
+        with pytest.raises(expected):
+            await recheck.reconcile(db, tenant_id, run, p, report)
+
+    assert seen["session"] is not db  # the read never ran on the caller's session
+    # The caller's rows are still loaded: record_finding reads these synchronously next.
+    assert run.status == "running" and run.deadline_at is not None
+    # The exit was audited and committed regardless of what the read did to its session.
+    audits = (
+        await db.scalars(
+            select(AuditEvent).where(
+                AuditEvent.tenant_id == tenant_id,
+                AuditEvent.action == "transaction_ops.accounting_recheck.posting_observed",
+                AuditEvent.payload["approval_message_id"].astext == message_id,
+            )
+        )
+    ).all()
+    assert len(audits) == 1
+    assert audits[0].payload["balance"]["reason"] == outcome

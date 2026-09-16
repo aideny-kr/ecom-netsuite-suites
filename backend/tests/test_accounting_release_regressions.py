@@ -203,7 +203,15 @@ async def test_readonly_recheck_reserves_budget_audits_and_never_reuses_failed_e
     monkeypatch.setattr(recheck.state, "_commit", AsyncMock())
     monkeypatch.setattr(recheck.state, "get_run", AsyncMock(return_value=run))
     monkeypatch.setattr(recheck.state, "_lease", lambda *args: None)
-    result = await recheck.reconcile(AsyncMock(), p["tenant_id"], run, p, report)
+    db = AsyncMock()
+
+    @asynccontextmanager
+    async def read_session(caller_db):
+        yield db  # the provider read runs on its own session; here the same mock stands in for both
+
+    monkeypatch.setattr(recheck, "_read_session", read_session)
+    monkeypatch.setattr(recheck, "set_tenant_context", AsyncMock())
+    result = await recheck.reconcile(db, p["tenant_id"], run, p, report)
     assert result["balance"]["status"] == expected
     assert fresh.await_count == (remaining_calls >= recheck.READ_CALLS)
     assert audit.call_args.kwargs["payload"]["financial_writes"] == 0
