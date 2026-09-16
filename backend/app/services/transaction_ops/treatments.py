@@ -114,8 +114,10 @@ def treatment_of(proposal) -> Treatment:
 
 def family_of(proposal):
     """The treatment family, or None for a proposal whose kind is not a registered treatment."""
-    row = REGISTRY.get((proposal or {}).get("kind") or DEFAULT_KIND)
-    return row.family if row else None
+    try:
+        return treatment_of(proposal).family
+    except KeyError:
+        return None
 
 
 def is_mcp(proposal) -> bool:
@@ -149,15 +151,15 @@ def treatment_profile(proposal) -> dict:
         return proposal["native_profile"]
     if treatment.family == "commercial":
         return proposal["profile"]
-    return {"tax_item_id": (proposal.get("tax_item") or {}).get("id")}
+    return {"tax_item_id": proposal["tax_item"].get("id")}
 
 
 def collision_key(proposal) -> tuple[str, str]:
     """The document that two approved corrections must never touch concurrently."""
     treatment = treatment_of(proposal)
     if treatment.lock == "invoice":
-        # Approval-time validation tolerated a missing invoice id before; keep that.
-        return "invoice", str(proposal.get("invoice_id") or proposal["record_id"])
+        # Fail closed: a lock keyed on the wrong document is worse than no lock.
+        return "invoice", str(proposal["invoice_id"])
     if treatment.lock == "invoice_record":
         return "invoice", str(proposal["record_id"])
     return proposal["record_type"], str(proposal["record_id"])
@@ -166,9 +168,10 @@ def collision_key(proposal) -> tuple[str, str]:
 def reconciliation_target_id(proposal):
     """The sales order a recheck report must describe, or None when it cannot be established.
 
-    A declared ``reconciliation_target`` is used, but never trusted over evidence: when
-    the proposal's own derivation or the collected invoice -> sales-order edge names a
-    different order, the answer is None and the recheck refuses rather than guesses.
+    A declared ``reconciliation_target`` is used, but never trusted over evidence: the
+    existing-credit rule still requires the independently collected invoice -> sales-order
+    edge, and when that edge or the proposal's own derivation names a different order the
+    answer is None and the recheck refuses rather than guesses.
     Without a declaration the family rule applies: sales-order corrections are their own
     target, invoice corrections were created from the order, and an existing-credit
     correction binds through the collected edge.
@@ -186,10 +189,8 @@ def reconciliation_target_id(proposal):
             if not candidate or (declared and derived and declared != derived):
                 return None
             edge = (((proposal.get("support") or {}).get("invoice") or {}).get("createdFrom") or {}).get("id")
-            if edge is not None and str(edge) != candidate:
-                return None  # the collected edge disagrees: refuse, never guess
-            if not declared and edge is None:
-                return None  # nothing independent confirms the derived order
+            if edge is None or str(edge) != candidate:
+                return None  # no independently collected edge, or one that disagrees: refuse, never guess
             return candidate
         else:
             derived = str(proposal["before"]["createdFrom"]["id"])
