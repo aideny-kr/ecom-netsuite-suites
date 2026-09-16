@@ -119,7 +119,7 @@ def test_declared_target_is_used_but_never_over_disagreeing_evidence():
         "credit_tax_reallocation", reconciliation_target={"record_type": "salesorder", "record_id": "12"}
     )
     no_edge["support"]["invoice"].pop("createdFrom")
-    assert reconciliation_target_id(no_edge) == "12"  # declared, nothing contradicts it
+    assert reconciliation_target_id(no_edge) is None  # a declaration never replaces the collected edge
     disagreeing = _proposal(
         "credit_tax_reallocation", reconciliation_target={"record_type": "salesorder", "record_id": "77"}
     )
@@ -200,10 +200,49 @@ async def test_mcp_credit_prepare_declares_its_reconciliation_target(mcp_credit)
     p, _, report = corrected(mcp_credit, now)
     run = SimpleNamespace(params_json={"verified_at": (now - timedelta(seconds=1)).isoformat()})
     assert accounting_recheck.report_in_scope(run, p, report, now)
-    # A declared target is authoritative even when the collected edge is missing.
+    # The declaration never replaces the independently collected edge.
     p["support"]["invoice"].pop("createdFrom")
-    assert accounting_recheck.report_in_scope(run, p, report, now)
-    # ...and a stored proposal without the declaration still binds through the edge.
+    assert not accounting_recheck.report_in_scope(run, p, report, now)
+    # A stored proposal without the declaration still binds through the edge.
     legacy = {k: v for k, v in p.items() if k != "reconciliation_target"}
     legacy["support"]["invoice"]["createdFrom"] = {"id": p["sales_order_id"]}
     assert accounting_recheck.report_in_scope(run, legacy, report, now)
+
+
+@pytest.mark.parametrize(
+    "kind", ["sales_order_source_alignment", "credit_tax_reallocation", "sales_order_line_alignment"]
+)
+def test_collision_key_fails_closed_without_the_invoice_id(kind):
+    p = _proposal(kind)
+    del p["invoice_id"]
+    with pytest.raises(KeyError):
+        collision_key(p)
+
+
+def test_treatment_profile_fails_closed_without_a_tax_item():
+    p = _proposal("invoice_tax")
+    del p["tax_item"]
+    with pytest.raises(KeyError):
+        treatment_profile(p)
+
+
+def test_family_of_tolerates_unregistered_kinds():
+    assert treatments.family_of({"kind": "tax_reversal"}) is None
+    assert treatments.family_of({}) == "invoice_tax"
+
+
+async def test_group_manifest_rejects_a_member_without_its_lock_document(mcp_credit):  # noqa: F811
+    from uuid import uuid4
+
+    from app.services.transaction_ops import accounting_group
+    from tests.test_accounting_release_regressions import member
+
+    p, _, _ = mcp_credit
+    session_id = uuid4()
+    card = accounting_group.build_group_card(
+        [member(p, session_id)], {"group_id": "g", "scope": p["scope"]}, str(session_id)
+    )
+    so = card.model_dump(mode="json")
+    del so["accounting_group"]["members"][0]["card"]["accounting_review"]["invoice_id"]
+    with pytest.raises(ValueError):
+        accounting_group.validate_manifest(so, str(session_id))
