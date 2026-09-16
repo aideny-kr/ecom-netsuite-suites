@@ -10,7 +10,7 @@ treatment's own reads and the dispatcher are stubbed: what is under test is the 
 import json
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -85,7 +85,11 @@ async def approve(db, card, *, preflight=None, dispatch=None, readback=None, aut
         patch("app.services.transaction_ops.tax_correction.verify_after", readback),
         patch("app.services.transaction_ops.accounting_recheck.queue", recheck),
         patch("app.services.chat.orchestrator.execute_tool_call", dispatch),
-        patch("app.services.mcp_connector_service.get_mcp_connector", AsyncMock(return_value=None)),
+        # the record link resolves the account from the connector that executed the write
+        patch(
+            "app.services.mcp_connector_service.get_mcp_connector",
+            AsyncMock(return_value=MagicMock(provider="netsuite_mcp", metadata_json={"account_id": "123456_SB1"})),
+        ),
     ):
         events = [
             e
@@ -127,7 +131,18 @@ async def test_a_verified_correction_is_one_ledger_row_one_send_and_a_queued_rec
     assert so["status"] == "approved" and so["operation_id"] == str(row.id)
     assert so["accounting_verification"]["status"] == "verified"
     assert so["accounting_recheck"] == {"status": "queued", "run_id": "recheck-run"}
-    assert "accounting_execution" not in so  # the ledger row replaced the card's own claim
+    # The ledger row is the claim; the card carries a projection of it (version 1, attempts
+    # spent) so the completion, history and group readers that read the card's claim keep
+    # working, while the legacy recovery scan never picks a kernel card up.
+    from app.services.transaction_ops import accounting_history, accounting_recovery
+
+    claim = so["accounting_execution"]
+    assert claim["operation_id"] == str(row.id) and claim["approved_by"] == str(actor.id)
+    assert claim["operation_key"] == row.base_work_key and claim["receipt"] == {"id": "30"}
+    assert claim["termination_reason"] == "done" and claim["ledger_status"] == "verified"
+    assert accounting_history._claim(message) == claim
+    assert not accounting_recovery.eligible(so, datetime.now(timezone.utc) + timedelta(days=1))
+    assert "[View" in _text(events) and "/app/" in _text(events)  # the record link, as before
     assert stubs["dispatch"].await_count == 1
     sent = stubs["dispatch"].await_args.kwargs
     assert sent["human_approved"] is True and sent["tool_input"] == params
@@ -231,7 +246,9 @@ async def test_a_second_approval_of_the_same_work_sends_nothing(db, card):
     dispatch = AsyncMock()
     events, so, _ = await approve(db, (actor, session, twin, p, None), dispatch=dispatch)
     assert dispatch.await_count == 0
-    assert so["status"] == "failed" and "already has an execution record" in so["error"]
+    # The cross-card history sees the first card's projected claim and refuses before the
+    # CAS, so the twin stays pending and untouched; the ledger would have refused too.
+    assert so["status"] == "pending"
     assert await _row(db, twin) is None
     assert any("No duplicate update was sent" in e.get("error", "") for e in events if e.get("type") == "error")
 
@@ -430,4 +447,67 @@ async def test_a_refusal_before_any_effect_can_be_retried_as_a_lineage_row(db, c
     db.add(third)
     await db.flush()
     events, so, _ = await approve(db, (actor, session, third, p, None), dispatch=AsyncMock())
-    assert so["status"] == "failed" and "already has an execution record" in so["error"]
+    assert so["status"] == "pending" and await _row(db, third) is None
+    assert any("No duplicate update was sent" in e.get("error", "") for e in events if e.get("type") == "error")
+
+
+async def test_a_verified_kernel_write_can_be_completed_by_the_recheck_pipeline(db, card):
+    """accounting_completion.enqueue reads the card's claim; a kernel-claimed card must
+    enqueue exactly like a legacy one (gate round two: it silently no-op'd before)."""
+    from types import SimpleNamespace
+
+    from app.services.transaction_ops import accounting_completion
+
+    _, _, message, _, _ = card
+    await approve(db, card)
+    await db.refresh(message)
+    run = SimpleNamespace(id=uuid.uuid4())
+    accounting_completion.enqueue(message, run, datetime.now(timezone.utc))
+    completion = message.structured_output.get("accounting_completion")
+    assert completion and completion["run_id"] == str(run.id) and completion["status"] == "pending"
+
+
+async def test_a_redelivery_carries_the_receipt_the_ledger_recorded(db, card):
+    """A second delivery whose permit is refused does not lose the first delivery's
+    receipt: the adapter reads it from the row, so the audit and the card show it."""
+    _, _, message, _, _ = card
+    await approve(db, card, readback=AsyncMock(return_value={"status": "needs_review", "reason": "gl_mismatch"}))
+    row = await _row(db, message)
+    assert row.status == "committed_unverified"
+    from app.services.transaction_ops import accounting_adapter
+
+    adapter = accounting_adapter.AccountingCardAdapter(
+        name="x",
+        message=message,
+        tool_name=message.structured_output["tool_name"],
+        tool_input=message.structured_output["tool_input"],
+        actor_id="a",
+        session_id=str(message.session_id),
+        correlation_id="c",
+        validate=AsyncMock(),
+        dispatch=AsyncMock(),
+        readback=AsyncMock(),
+    )
+    from app.schemas.transaction_runs import ClaimedOperation
+    from app.services.transaction_ops.chat_confirmation import claim as _claim_card  # noqa: F401
+
+    claimed = ClaimedOperation(
+        operation_id=row.id,
+        proposal_id=None,
+        approval_kind="chat_confirmation",
+        approval_id=message.id,
+        work_key=row.work_key,
+        config_id=None,
+        action="x",
+        currency=None,
+        netsuite_account_id="a",
+        subsidiary_id="s",
+        record_type="r",
+        target_record_id=None,
+        before_json={},
+        after_json={},
+    )
+    receipt = await adapter.send(db, message.tenant_id, claimed, {})
+    assert receipt["status"] == "unknown" and receipt["code"] == "dispatch_already_reserved"
+    assert adapter.receipt == {"status": "accepted", "verified": False, "id": "30"}
+    assert adapter.dispatch.await_count == 0

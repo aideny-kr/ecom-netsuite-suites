@@ -2578,6 +2578,18 @@ async def run_chat_turn(
                     )
                     _kernel_result = await _write_kernel.execute(db, tenant_id, _claimed, _kernel_adapter)
                     await set_tenant_context(db, str(tenant_id))
+                    # The row is the claim; the card carries a projection of it for the
+                    # completion, history and group readers.
+                    from app.models.transaction_ops import TransactionOperation as _Operation
+                    from app.services.transaction_ops import state_service as _state
+
+                    _kernel_row = await _state._one(db, tenant_id, _Operation, _claimed.operation_id)
+                    _so = {
+                        **_so,
+                        "accounting_execution": _chat_confirmation.execution_projection(
+                            _confirm_msg.id, _kernel_row, _approval_context
+                        ),
+                    }
                     if _kernel_result["status"] == "rejected_before_effect" and _kernel_adapter.receipt is None:
                         _reason = _kernel_adapter.refusal or "the approved evidence no longer holds"
                         await _refuse_before_send(_reason)
@@ -2627,6 +2639,54 @@ async def run_chat_turn(
                 _mutation_type = _so.get("mutation_type", "write")
                 _record_type = _so.get("record_type", "record")
 
+                async def _record_link(_exec_result):
+                    """A link to what was just written. Without it the operator is told "Done"
+                    and left to find the record by searching NetSuite for a name, or by
+                    knowing the URL shape for an internal id. Best-effort by construction:
+                    an unknown record type or a tenant with no NetSuite account id yields no
+                    link rather than a guessed one, and nothing here may turn a SUCCESSFUL
+                    write into an error. Returns ``(url, record_id)`` or ``(None, None)``."""
+                    try:
+                        from sqlalchemy import select as _sel
+
+                        from app.models.tenant import Tenant as _Tenant
+                        from app.services.chat.netsuite_record_url import build_record_url
+                        from app.services.chat.tools import parse_external_tool_name as _parse_ext
+                        from app.services.mcp_connector_service import get_mcp_connector as _get_conn
+
+                        _native_review = _so.get("accounting_review") or {}
+                        _native_amendment = family_of(_native_review) == "amendment"
+                        _new_id = (
+                            _exec_result.get("recordId")
+                            or _exec_result.get("id")
+                            or _exec_result.get("internalId")
+                            or (_exec_result.get("record_id") if _native_amendment else None)
+                            if isinstance(_exec_result, dict)
+                            else None
+                        )
+                        if not _new_id and _mutation_type == "update":
+                            _new_id = _so.get("record_id")
+                        if not _new_id:
+                            return None, None
+                        # Resolve the account from the CONNECTOR that executed this write,
+                        # not from the tenant's single netsuite_account_id: a tenant with a
+                        # sandbox and a production connector must never get a sandbox
+                        # write's link into PRODUCTION. The connector id is recoverable
+                        # from the signed tool_name.
+                        _acct = _native_review["scope"]["netsuite_account_id"] if _native_amendment else None
+                        _parsed_conn = _parse_ext(tool_name)
+                        if _parsed_conn:
+                            _conn_row = await _get_conn(db, _parsed_conn[0], tenant_id)
+                            _acct = ((_conn_row.metadata_json or {}) or {}).get("account_id") if _conn_row else None
+                        if not _acct and not _native_amendment:
+                            # Single-connector tenants have no ambiguity; fall back rather
+                            # than drop the link entirely.
+                            _acct = await db.scalar(_sel(_Tenant.netsuite_account_id).where(_Tenant.id == tenant_id))
+                        return build_record_url(_acct, _record_type, _new_id), _new_id
+                    except Exception:
+                        logger.warning("record link could not be built", exc_info=True)
+                        return None, None
+
                 _exec_succeeded = False
                 # Initialised BEFORE the try/except branches below —
                 # this file's own rule (chat-orchestration.md #19,
@@ -2648,6 +2708,11 @@ async def run_chat_turn(
                     _write_outcome, _exec_succeeded, _exec_error, _confirm_content = _kernel_rendering(
                         _kernel_result, _kernel_adapter, record_type=_record_type, mutation_type=_mutation_type
                     )
+                    if _exec_succeeded:
+                        _record_url, _new_id = await _record_link(_exec_result)
+                        if _record_url:
+                            _updated_so_record_url = _record_url
+                            _confirm_content += f"\n\n[View {_record_type} {_new_id} in NetSuite]({_record_url})"
                 if not _via_kernel:
                     # The generic card and the native amendment card classify the dispatcher's
                     # answer here; a kernel outcome was rendered above.
@@ -2696,73 +2761,10 @@ async def run_chat_turn(
                             _confirm_content = (
                                 f"Done — the {_record_type} {_mutation_type} has been executed successfully."
                             )
-                            # Hand back a link to what was just written. Without
-                            # it the operator is told "Done" and left to find the
-                            # record by searching NetSuite for a name, or by
-                            # knowing the URL shape for an internal id. The id is
-                            # already in the response; only the link was missing.
-                            # Best-effort by construction: an unknown record type
-                            # or a tenant with no NetSuite account id yields no
-                            # link rather than a guessed one, and nothing here may
-                            # turn a SUCCESSFUL write into an error.
-                            try:
-                                from sqlalchemy import select as _sel
-
-                                from app.models.tenant import Tenant as _Tenant
-                                from app.services.chat.netsuite_record_url import build_record_url
-                                from app.services.chat.tools import parse_external_tool_name as _parse_ext
-                                from app.services.mcp_connector_service import get_mcp_connector as _get_conn
-
-                                _native_review = _so.get("accounting_review") or {}
-                                _native_amendment = family_of(_native_review) == "amendment"
-                                _new_id = (
-                                    _exec_result.get("recordId")
-                                    or _exec_result.get("id")
-                                    or _exec_result.get("internalId")
-                                    or (_exec_result.get("record_id") if _native_amendment else None)
-                                    if isinstance(_exec_result, dict)
-                                    else None
-                                )
-                                if not _new_id and _mutation_type == "update":
-                                    _new_id = _so.get("record_id")
-                                if _new_id:
-                                    # Resolve the account from the CONNECTOR that
-                                    # executed this write, not from the tenant's
-                                    # single netsuite_account_id. The moment a
-                                    # tenant has both a sandbox and a production
-                                    # connector, a tenant-wide value sends a
-                                    # sandbox write's link into PRODUCTION — worse
-                                    # than no link, because it invites someone to
-                                    # conclude the write failed, or to go hunting
-                                    # in production for a record deliberately kept
-                                    # out of it. The connector id is recoverable
-                                    # from the signed tool_name.
-                                    _acct = (
-                                        _native_review["scope"]["netsuite_account_id"] if _native_amendment else None
-                                    )
-                                    _parsed_conn = _parse_ext(tool_name)
-                                    if _parsed_conn:
-                                        _conn_row = await _get_conn(db, _parsed_conn[0], tenant_id)
-                                        _acct = (
-                                            ((_conn_row.metadata_json or {}) or {}).get("account_id")
-                                            if _conn_row
-                                            else None
-                                        )
-                                    if not _acct and not _native_amendment:
-                                        # Single-connector tenants have no
-                                        # ambiguity; fall back rather than drop the
-                                        # link entirely.
-                                        _acct = await db.scalar(
-                                            _sel(_Tenant.netsuite_account_id).where(_Tenant.id == tenant_id)
-                                        )
-                                    _record_url = build_record_url(_acct, _record_type, _new_id)
-                                    if _record_url:
-                                        _updated_so_record_url = _record_url
-                                        _confirm_content += (
-                                            f"\n\n[View {_record_type} {_new_id} in NetSuite]({_record_url})"
-                                        )
-                            except Exception:
-                                logger.warning("record link could not be built", exc_info=True)
+                            _record_url, _new_id = await _record_link(_exec_result)
+                            if _record_url:
+                                _updated_so_record_url = _record_url
+                                _confirm_content += f"\n\n[View {_record_type} {_new_id} in NetSuite]({_record_url})"
                     except (json.JSONDecodeError, TypeError):
                         # UNPARSEABLE result. This used to report SUCCESS — telling
                         # the operator a write had executed on the strength of a

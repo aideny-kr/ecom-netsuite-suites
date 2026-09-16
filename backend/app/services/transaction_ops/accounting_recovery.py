@@ -306,9 +306,48 @@ def _orphaned(message, now) -> bool:
     )
 
 
-async def _release_orphan(db, tenant_id, message):
+async def _locked_message(db, tenant_id, message_id):
+    return await db.scalar(
+        select(ChatMessage)
+        .where(ChatMessage.tenant_id == tenant_id, ChatMessage.id == message_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+
+
+async def tenants_with_open_cards(db):
+    """Tenants holding a kernel-claimed card that is not terminal; the scan reaches them
+    whether or not the scheduled feature's flags are on."""
+    from app.services.transaction_ops import state_service as state
+
+    return list(
+        (
+            await db.scalars(
+                select(TransactionOperation.tenant_id)
+                .where(
+                    TransactionOperation.approval_kind == "chat_confirmation",
+                    TransactionOperation.status.in_(state.IN_FLIGHT),
+                )
+                .distinct()
+            )
+        ).all()
+    )
+
+
+async def _release_orphan(db, tenant_id, message_id, now):
     """Release a card whose process died between its own claim and the ledger's: no ledger
-    row means no permit was minted, so nothing was sent and the intent is free again."""
+    row means no permit was minted, so nothing was sent and the intent is free again. The
+    card is re-read under a row lock: a sender that caught up in the meantime keeps it."""
+    from app.services.transaction_ops import state_service as state
+
+    message = await _locked_message(db, tenant_id, message_id)
+    if (
+        message is None
+        or not _orphaned(message, now)
+        or await state.operation_for_approval(db, tenant_id, "chat_confirmation", message_id) is not None
+    ):
+        await db.rollback()
+        return {"termination_reason": "busy", "financial_writes": 0}
     reason = "The approval was interrupted before it was claimed on the ledger; nothing was sent."
     message.structured_output = {**message.structured_output, "status": "failed", "error": reason}
     message.content = reason + " Prepare a fresh correction to try again."
@@ -339,7 +378,7 @@ async def recover(db, tenant_id, message_id, *, now=None, lock_engine=None):
         return await recover_card(db, tenant_id, operation, now=now, lock_engine=lock_engine)
     message = await _message(db, tenant_id, message_id)
     if message is not None and _orphaned(message, now):
-        return await _release_orphan(db, tenant_id, message)
+        return await _release_orphan(db, tenant_id, message_id, now)
     if not message or not eligible(message.structured_output or {}, now):
         return {"termination_reason": "done", "financial_writes": 0}
     locked = False
@@ -530,8 +569,11 @@ async def recover_card(db, tenant_id, operation, *, now, lock_engine=None):
             )
             verified = operation.status == "verified"
             message = await _message(db, tenant_id, operation.approval_id)
+            from app.services.transaction_ops.chat_confirmation import execution_projection
+
             so = {
                 **(message.structured_output or {}),
+                "accounting_execution": execution_projection(message.id, operation),
                 "status": "approved" if verified else "indeterminate",
                 "accounting_verification": {
                     **verification,
@@ -586,8 +628,14 @@ async def recover_card(db, tenant_id, operation, *, now, lock_engine=None):
 
 
 async def _render_terminal(db, tenant_id, message, operation):
+    from app.services.transaction_ops.chat_confirmation import execution_projection
+
     result = operation.result_json or {}
-    so = {**(message.structured_output or {}), "operation_id": str(operation.id)}
+    so = {
+        **(message.structured_output or {}),
+        "operation_id": str(operation.id),
+        "accounting_execution": execution_projection(message.id, operation),
+    }
     if operation.status == "rejected_before_effect":
         reason = "The approval was interrupted before any send; nothing was sent."
         so.update(status="failed", error=reason)

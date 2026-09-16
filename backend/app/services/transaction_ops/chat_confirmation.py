@@ -66,16 +66,12 @@ def intent_of(tenant_id, message, so, *, actor_id, now, retry_of=None) -> state.
     if p.get("tenant_id") != str(tenant_id):
         raise state.StateError("accounting_operation_tenant_mismatch")
     treatment = treatment_of(p)
-    record_type, document = collision_key(p)
+    collision_key(p)  # refuses (TreatmentError) a card without its lock document
     scope = p["scope"]
     account = str(scope["netsuite_account_id"]).replace("_", "-").lower()
     subsidiary = str(scope.get("subsidiary_id") or "")
     identity = operation_identity(p)
-    work_key = (
-        state.business_digest({"base_work": retry_of.base_work_key, "retry_of_operation": str(retry_of.id)})
-        if retry_of is not None
-        else identity
-    )
+    work_key = state.lineage_work_key(retry_of.base_work_key, retry_of.id) if retry_of is not None else identity
     return state.ApprovedIntent(
         approval_kind=KIND,
         approval_id=message.id,
@@ -87,8 +83,16 @@ def intent_of(tenant_id, message, so, *, actor_id, now, retry_of=None) -> state.
         work_key=work_key,
         retry_of_operation_id=retry_of.id if retry_of is not None else None,
         order_reference=str(p.get("order_reference") or "") or None,
+        # The collision scope is the business document, in the shape the scheduled path
+        # uses (state_service.claim_approved_operation), so an attempt in flight from
+        # either approval source blocks the other on the same order.
         entity_key=state.business_digest(
-            {"account": account, "subsidiary": subsidiary, "record_type": record_type, "document": document}
+            {
+                "account": account,
+                "subsidiary": subsidiary,
+                "record_type": scope.get("record_type"),
+                "order_reference": p.get("order_reference"),
+            }
         ),
         netsuite_account_id=str(scope["netsuite_account_id"]),
         subsidiary_id=subsidiary,
@@ -126,6 +130,32 @@ def refusal_text(exc) -> str:
     authorization's own message (it is written for people)."""
     code = getattr(exc, "code", None)
     return CLAIM_REFUSALS.get(code, str(exc))
+
+
+def execution_projection(message_id, operation, approval_context=None) -> dict:
+    """The card's view of its ledger row, in the shape the completion, history and group
+    readers consume (``accounting_execution``). The row is the claim; this is derived
+    from it, never the other way round. ``attempts`` is spent so the legacy recovery
+    scan never picks a kernel card up (the ledger scan does)."""
+    from app.services.transaction_ops.accounting_recovery import MAX_ATTEMPTS
+
+    result = operation.result_json or {}
+    receipt = {k: v for k, v in (result.get("receipt") or {}).items() if k not in ("status", "verified")}
+    return {
+        "version": 1,
+        "confirmation_id": str(message_id),
+        "operation_id": str(operation.id),
+        "ledger_status": operation.status,
+        "approved_by": result.get("approved_by"),
+        "accepted_at": operation.attempted_at.isoformat(),
+        "evidence_digest": result.get("evidence_digest"),
+        "operation_key": operation.base_work_key,
+        "approval_context": approval_context or {"confirmation_id": str(message_id)},
+        "attempts": MAX_ATTEMPTS,
+        "next_at": operation.attempted_at.isoformat(),
+        "receipt": receipt,
+        "termination_reason": result.get("termination_reason", "stall"),
+    }
 
 
 async def _session_owner(db, tenant_id, message):

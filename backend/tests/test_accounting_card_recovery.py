@@ -192,13 +192,13 @@ async def orphan(db, approved_credit):  # noqa: F811
     )
     db.add(message)
     await db.flush()
-    return actor.tenant_id, message.id
+    return actor.tenant_id, actor.id, message.id
 
 
 async def test_a_card_that_died_before_its_ledger_claim_is_released_after_the_grace_period(db, orphan):
     """No ledger row means no permit was ever minted, so nothing was sent: after the grace
     period the card is released (failed, with the reason) and the intent is free again."""
-    tenant_id, message_id = orphan
+    tenant_id, _, message_id = orphan
     now = datetime.now(timezone.utc)
     assert await mod.candidates(db, tenant_id, now, limit=10) == []  # the sender may still be between commits
     later = now + mod.ORPHAN_GRACE + timedelta(seconds=1)
@@ -217,3 +217,45 @@ async def test_a_card_that_died_before_its_ledger_claim_is_released_after_the_gr
     )
     assert released.payload["financial_writes"] == 0 and released.actor_type == "system"
     assert await mod.candidates(db, tenant_id, later, limit=10) == []
+
+
+async def test_an_orphan_release_re_checks_the_card_under_a_lock(db, orphan, monkeypatch):
+    """Between the scan and the release, the sender may have caught up (a ledger row now
+    exists for the card): the release re-reads the locked card and does nothing."""
+    from app.services.transaction_ops import chat_confirmation
+
+    tenant_id, actor_id, message_id = orphan
+    later = datetime.now(timezone.utc) + mod.ORPHAN_GRACE + timedelta(seconds=1)
+    original = mod._locked_message
+    monkeypatch.setattr(chat_confirmation, "authorize_accounting_write", AsyncMock())
+
+    async def caught_up(db_, tenant_id_, message_id_):
+        locked = await original(db_, tenant_id_, message_id_)
+        await chat_confirmation.claim(db_, tenant_id_, locked, actor_id=actor_id)  # the sender's claim lands
+        return await original(db_, tenant_id_, message_id_)
+
+    monkeypatch.setattr(mod, "_locked_message", caught_up)
+    result = await mod.recover(db, tenant_id, message_id, now=later)
+    assert result["termination_reason"] == "busy"
+    message = await db.get(ChatMessage, message_id)
+    await db.refresh(message)
+    assert message.structured_output["status"] == "executing"
+    assert await state.operation_for_approval(db, tenant_id, "chat_confirmation", message_id) is not None
+
+
+async def test_the_scheduler_reaches_a_tenant_without_the_reconciliation_flags(db, interrupted, monkeypatch):
+    """A card's tenant is found by its ledger rows, not by the scheduled feature's flags."""
+    from unittest.mock import AsyncMock
+
+    from app.services.transaction_ops import action_scheduler
+
+    tenant_id, _, message_id, claimed = interrupted
+    from app.services import feature_flag_service
+
+    monkeypatch.setattr(feature_flag_service, "list_tenants_with_flags", AsyncMock(return_value=[]))
+    publish = AsyncMock()
+    monkeypatch.setattr(action_scheduler, "_dispatch", publish)
+    later = (await _row(db, claimed)).deadline_at + timedelta(seconds=1)
+    stats = await action_scheduler.collect_due_actions(db, later)
+    assert stats["credit_recoveries"] == 1
+    assert publish.call_args.args[:3] == (tenant_id, "credit_recover", message_id)

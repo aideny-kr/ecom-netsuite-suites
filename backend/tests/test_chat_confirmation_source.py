@@ -6,6 +6,7 @@ immutability are the database's, not the test's.
 """
 
 import uuid
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -18,8 +19,11 @@ from app.services.transaction_ops import chat_confirmation
 from app.services.transaction_ops import state_service as state
 from app.services.transaction_ops.accounting_recovery import evidence_digest
 from app.services.transaction_ops.resolution_plan import operation_identity
+from tests import test_transaction_ops_dispatch as dispatch_fixtures
 from tests.test_accounting_recheck import approved_credit  # noqa: F401
 from tests.test_accounting_recovery import interrupted_credit  # noqa: F401
+
+ready = dispatch_fixtures.ready
 
 FINGERPRINT = "c" * 64
 
@@ -248,3 +252,50 @@ async def test_a_reconstructed_claim_cannot_use_another_rows_permit(db, interrup
     with pytest.raises(state.StateError, match="claimed_operation_mismatch"):
         await _reserve(db, actor.tenant_id, forged)
     assert not state.permit_consumed(await _row(db, claimed))
+
+
+async def test_a_scheduled_attempt_on_the_same_order_blocks_the_card(db, ready, interrupted_credit, authorized):  # noqa: F811
+    """The collision scope is the business document (account, subsidiary, record type, order),
+    computed the same way for both approval sources, so a scheduled attempt in flight on an
+    order blocks a card on that order, and the other way round."""
+    proposal_actor, config, proposal, claim = ready
+    actor, _, _, message, _, _ = interrupted_credit
+    assert proposal_actor.tenant_id == actor.tenant_id
+    so = message.structured_output
+    p = {
+        **so["accounting_review"],
+        "order_reference": proposal.order_reference,
+        "scope": {
+            **so["accounting_review"]["scope"],
+            "netsuite_account_id": proposal.netsuite_account_id,
+            "subsidiary_id": proposal.subsidiary_id,
+            "record_type": proposal.record_type,
+        },
+    }
+    message.structured_output = {**so, "accounting_review": p}
+    await db.flush()
+    intent = chat_confirmation.intent_of(
+        actor.tenant_id, message, message.structured_output, actor_id=actor.id, now=datetime.now(timezone.utc)
+    )
+    row = await _row(db, claim)
+    assert intent.entity_key == row.entity_key
+    with pytest.raises(state.StateError, match="entity_in_flight"):
+        await chat_confirmation.claim(db, actor.tenant_id, message, actor_id=actor.id)
+
+
+async def test_an_exhausted_attempt_is_refused_before_the_source_is_consulted(db, interrupted_credit, authorized):  # noqa: F811
+    actor, _, _, message, _, _ = interrupted_credit
+    claimed = await chat_confirmation.claim(db, actor.tenant_id, message, actor_id=actor.id)
+    await _bind_card(db, message, claimed)
+    await state.reserve_operation_budget(db, actor.tenant_id, claimed.operation_id, api_calls=96)
+    asked = AsyncMock(side_effect=AssertionError("the source must not be asked for a spent attempt"))
+    with pytest.raises(state.StateError, match="operation_budget_exhausted"):
+        await state.reserve_operation_dispatch(
+            db,
+            actor.tenant_id,
+            claimed,
+            provider=chat_confirmation.PROVIDER_MCP,
+            payload_fingerprint=FINGERPRINT,
+            authorize=asked,
+        )
+    asked.assert_not_awaited()
