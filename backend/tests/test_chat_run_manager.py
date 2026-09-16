@@ -184,3 +184,22 @@ class TestSingleton:
         a = get_run_manager()
         b = get_run_manager()
         assert a is b
+
+
+@skip_no_redis
+@pytest.mark.parametrize("action", ["status", "outcome", "event", "cancel"])
+def test_ownership_ttl_is_refreshed_with_run_data(mgr, action):
+    run_id = "test-ttl-" + action
+    mgr.create_run(run_id, "test-session-ttl")
+    key = f"chat:run:{run_id}:session"
+    mgr._redis.expire(key, 2)
+    if action == "status":
+        mgr.set_status(run_id, "complete")
+    elif action == "outcome":
+        mgr.set_outcome(run_id, "complete")
+    elif action == "event":
+        mgr.write_event(run_id, {"type": "text", "content": "fixture"})
+    else:
+        mgr.request_cancel(run_id)
+    assert mgr.get_session(run_id) == "test-session-ttl"
+    assert mgr._redis.ttl(key) > 1700

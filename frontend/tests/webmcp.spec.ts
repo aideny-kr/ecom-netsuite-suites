@@ -145,6 +145,8 @@ test("native chat uses UI submission, receipts, structured output and route clea
   const invalid = JSON.parse(await callTool(page, "chat_send_message", { ...input, write_confirm: { action: "approve" } }));
   expect(invalid.error.message).toContain("Invalid tool arguments");
   expect(submissions).toBe(1);
+  await callTool(page, "chat_select_session", { session_id: null });
+  await expect.poll(async () => JSON.parse(await callTool(page, "chat_get_state")).session_id).toBe(null);
   await callTool(page, "navigate", { path: "/audit" });
   await expect.poll(() => listTools(page)).toHaveLength(3);
 });

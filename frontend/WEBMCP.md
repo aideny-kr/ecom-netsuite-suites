@@ -61,6 +61,10 @@ can still throw; Chrome may normalize their exceptions to `UnknownError`.
    file references stay structured; `truncated` marks an incomplete preview.
 7. To stop, call `chat_cancel_run` with the selected session and active run. Wait
    for terminal status. Cancellation does not undo already executed tools.
+   If stopping takes too long, call `chat_select_session` with `session_id: null`
+   (or `workspace_chat_select_session` in workspace Chat), then create a session
+   for **new independent work**. This opens a fresh composer without claiming the
+   old worker stopped. Do not repeat an uncertain operation in the new session.
 
 A missing/expired run is **not** proof of success. Inspect persisted messages;
 never invent a fresh request ID to bypass an uncertain receipt. Conversation
@@ -104,7 +108,9 @@ Close/reopen the Chat panel to rediscover sessions and reconnect to active work.
 ## Backend compatibility and safety
 
 - Migration `108_chat_submissions` adds a tenant-scoped receipt table with row-level
-  security. Receipt and user message commit together under a session row lock.
+  security, including FORCE for the non-bypass table owner. Receipt and user
+  message commit together under a session row lock. Matching retries return the
+  existing receipt without consuming new-message burst quota.
   Retries remain deduplicated after HTTP loss, browser reload and Redis expiry.
 - `POST /api/v1/chat/sessions/{id}/messages` accepts optional UUID `request_id`.
   Existing callers remain valid. Retry-aware clients require background execution;
@@ -130,8 +136,14 @@ Close/reopen the Chat panel to rediscover sessions and reconnect to active work.
 This is **at-most-once admission**, not a durable background job queue. A process
 crash after receipt commit but before starting its worker can leave an admitted
 run without an answer. Retries preserve the receipt and do not launch duplicate
-model work. Redis run/event metadata has a 30-minute TTL; message history and
-admission receipts persist with the conversation.
+model work. Cancellation stays nonterminal while a worker may still be executing;
+repeated cancellation never forcibly frees that session. Live background tasks
+have a 600-second timeout; a dead worker can leave its session blocked until the
+Redis lease expires. New-conversation navigation is the safe escape for independent
+work. Force-settling would permit overlapping workers and uncertain external writes,
+so durable recovery/fencing remains a separate improvement. Redis run/event metadata has a 30-minute TTL; message history and
+admission receipts persist with the conversation. Ownership TTL is refreshed
+with status, outcome, event and cancellation writes so retained data stays readable.
 
 Before integration/release, apply the additive migration in the target's approved
 migration workflow and deploy the compatible backend before the frontend. Runs

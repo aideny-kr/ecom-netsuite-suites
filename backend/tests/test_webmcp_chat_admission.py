@@ -173,14 +173,18 @@ async def test_cancel_cannot_overwrite_completed_run(fixture_store):
     assert manager.get_status(receipt["run_id"]) == "complete"
 
 
-async def test_receipt_rls_under_non_bypass_role(fixture_store):
+async def test_receipt_rls_under_non_bypass_table_owner(fixture_store):
     factory, _, user, _, _ = fixture_store
     await submit(fixture_store, chat.SendMessageRequest(content="one", request_id=uuid.uuid4()))
     role = "webmcp_test_" + uuid.uuid4().hex
     async with factory() as db:
         # Role creation and grants roll back with this test transaction.
-        await db.execute(text(f"CREATE ROLE {role} NOLOGIN"))
-        await db.execute(text(f"GRANT SELECT, INSERT ON chat_submissions TO {role}"))
+        assert await db.scalar(
+            text("SELECT relforcerowsecurity FROM pg_class WHERE oid = 'chat_submissions'::regclass")
+        )
+        await db.execute(text(f"CREATE ROLE {role} NOLOGIN NOSUPERUSER NOBYPASSRLS"))
+        await db.execute(text(f"GRANT USAGE, CREATE ON SCHEMA public TO {role}"))
+        await db.execute(text(f"ALTER TABLE chat_submissions OWNER TO {role}"))
         await db.execute(text(f"SET LOCAL ROLE {role}"))
         await db.execute(text(f"SET LOCAL app.current_tenant_id = '{user.tenant_id}'"))
         assert await db.scalar(select(func.count()).select_from(ChatSubmission)) == 1
@@ -267,3 +271,20 @@ async def test_worker_outcome_distinguishes_failure_and_human_attention(fixture_
     assert manager.get_outcome(receipt["run_id"]) == outcome
     assert manager.get_status(receipt["run_id"]) == ("failed" if outcome == "failed" else "complete")
     assert manager.get_active_run(str(session_id)) is None
+
+
+async def test_retry_receipt_does_not_consume_new_submission_burst_quota(fixture_store, monkeypatch):
+    body = chat.SendMessageRequest(content="one logical request", request_id=uuid.uuid4())
+    original = await submit(fixture_store, body)
+    # The limiter itself is sync and runs in to_thread; count calls without model work.
+    from unittest.mock import Mock
+
+    limiter = Mock(return_value=False)
+    monkeypatch.setattr(chat, "check_chat_burst_limit", limiter)
+    retry = await submit(fixture_store, body)
+    assert retry["run_id"] == original["run_id"] and retry["replayed"]
+    limiter.assert_not_called()
+    with pytest.raises(HTTPException) as denied:
+        await submit(fixture_store, chat.SendMessageRequest(content="new work", request_id=uuid.uuid4()))
+    assert denied.value.status_code == 429
+    limiter.assert_called_once()

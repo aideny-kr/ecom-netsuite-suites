@@ -20,7 +20,7 @@ export interface WebMcpChatState {
   workspaceId?: string;
   filePath?: string | null;
   create: () => Promise<ChatSession>;
-  select: (id: string) => void;
+  select: (id: string | null) => void;
   send: (content: string, requestId: string, assertCurrent: () => void) => Promise<ChatSubmissionReceipt | undefined>;
   cancel: (runId: string) => Promise<unknown>;
 }
@@ -47,7 +47,11 @@ export function createChatTools(getState: () => WebMcpChatState, workspace = fal
       const session = await getState().create();
       return { session_id: session.id, status: "selection_requested" };
     }),
-    actionTool("chat_select_session", "Select a session from chat_get_state. Changes the visible conversation. Does not cancel a background run.", false, { session_id: uuidSchema }, ["session_id"], ({ session_id }) => {
+    actionTool("chat_select_session", "Select a session from chat_get_state, or pass null to open a fresh composer when the old run is still stopping. Does not cancel or retry the old work. Call chat_create_session afterward for new independent work.", false, { session_id: { anyOf: [uuidSchema, { type: "null" }] } }, ["session_id"], ({ session_id }) => {
+      if (session_id === null) {
+        getState().select(null);
+        return { session_id: null, status: "selection_requested" };
+      }
       const id = uuidArgument(session_id, "session_id");
       if (!getState().sessions.some((session) => session.id === id)) throw new Error("Choose a session from chat_get_state.");
       getState().select(id);
