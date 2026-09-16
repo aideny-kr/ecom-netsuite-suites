@@ -495,7 +495,8 @@ async def candidate_confirmation(*, db, tenant_id, actor_id, correlation_id, ses
     from app.services.transaction_ops.case_resolution_scope import validate
 
     await validate(db, tenant_id, p)
-    if treatment_of(p).family == "amendment" and not is_mcp(p):
+    treatment = treatment_of(p)
+    if treatment.family == "amendment" and not is_mcp(p):
         from app.services.transaction_ops.native_accounting_service import confirmation
 
         return await confirmation(db, tenant_id, actor_id, session_id, p, policy, correlation_id)
@@ -518,7 +519,7 @@ async def candidate_confirmation(*, db, tenant_id, actor_id, correlation_id, ses
         raise ValueError("The configured policy blocks this correction.")
     if await classify_connector_mutation(name, db, tenant_id) != mutation:
         raise ValueError("The scoped connector does not expose a verified update operation.")
-    if treatment_of(p).prefetch_metadata or is_mcp(p):
+    if treatment.prefetch_metadata or is_mcp(p):
         from app.services.chat.record_metadata_service import prefetch_scoped_invoice_metadata
 
         await prefetch_scoped_invoice_metadata(db, tenant_id, actor_id, p, correlation_id)

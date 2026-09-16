@@ -19,7 +19,7 @@ from app.models.user import User
 from app.services.audit_service import log_event
 from app.services.transaction_ops.accounting_history import _claim, verified_resolution
 from app.services.transaction_ops.resolution_plan import completed_plan, operation_identity
-from app.services.transaction_ops.treatments import treatment_of
+from app.services.transaction_ops.treatments import treatment_or_none
 
 MAX_ATTEMPTS = 3
 RETRY_DELAY = timedelta(minutes=3)
@@ -166,8 +166,10 @@ def record_links(p, verification, report):
     documents = []
     invoice = verification.get("invoice") or (p.get("support") or {}).get("invoice")
     # A correction whose reconciliation target is its own record is the sales order
-    # itself; every other treatment's "before" document is the invoice it corrected.
-    if not invoice and treatment_of(p).reconciliation_target != "record":
+    # itself; every other treatment's "before" document (and a foreign kind's, as
+    # before this registry) is the invoice it corrected.
+    row = treatment_or_none(p)
+    if not invoice and (row is None or row.reconciliation_target != "record"):
         invoice = {**p["before"], "id": p["record_id"]}
     if invoice:
         documents.append({**invoice, "record_type": "invoice"})
