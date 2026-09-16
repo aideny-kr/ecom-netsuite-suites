@@ -45,7 +45,15 @@ async def backfill_tenant(tenant_id: str, dry_run: bool) -> tuple[int, int]:
     async with async_session_factory() as session:
         async with session.begin():
             await set_tenant_context(session, tenant_id)
-            reports = (await session.execute(select(Report).where(Report.tenant_id == tenant_id))).scalars().all()
+            reports = (
+                (
+                    await session.execute(
+                        select(Report).where(Report.tenant_id == tenant_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
             total = len(reports)
             for report in reports:
                 fresh_html = render_report_html(report.spec_json)
@@ -69,7 +77,9 @@ async def main() -> int:
         metavar="UUID",
         help="Tenant UUID to backfill (repeatable). Required — reports is FORCE-RLS.",
     )
-    parser.add_argument("--dry-run", action="store_true", help="Report counts without writing.")
+    parser.add_argument(
+        "--dry-run", action="store_true", help="Report counts without writing."
+    )
     args = parser.parse_args()
 
     grand_changed = 0
