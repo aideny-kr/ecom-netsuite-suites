@@ -314,3 +314,27 @@ async def test_full_runner_persists_credit_recheck_case_and_audit_without_writes
         )
     )
     assert len(audits) == 1 and audits[0].payload["financial_writes"] == 0
+
+
+async def test_mixed_legacy_and_mcp_members_build_and_validate_one_group_card(mcp_credit):
+    """The group crash was an MCP proposal meeting a native-only branch; a mixed group must build and sign."""
+    from tests.test_accounting_group import group_fixture
+
+    p, _, _ = mcp_credit
+    so, session = group_fixture(2)
+    legacy = so["accounting_group"]["members"]
+    first, second = [m["card"]["accounting_review"] for m in legacy]
+    second.update({key: first[key] for key in ("connector_id", "connection_id")})
+    members = [*legacy, member(p, session.id), {"case_id": "unfinished", "reason": "deadline"}]
+
+    card = accounting_group.build_group_card(members, {"group_id": "mixed", "scope": p["scope"]}, str(session.id))
+
+    assert card.proposed_fields == {"eligible_orders": 3}
+    batches = {b["treatment"]["kind"]: b for b in card.accounting_group["treatment_batches"]}
+    assert set(batches) == {"credit_tax_reallocation", "invoice_tax"}
+    assert batches["credit_tax_reallocation"]["treatment"]["execution_transport"] == "mcp_record_api"
+    assert "connector_schema" in batches["credit_tax_reallocation"]["treatment"]["profile"]
+    assert batches["invoice_tax"]["treatment"]["execution_transport"] is None
+    assert sorted(batches["invoice_tax"]["case_ids"]) == sorted(m["case_id"] for m in legacy)
+    assert len(card.accounting_group["investigation_batches"]) == 1
+    assert accounting_group.validate_manifest(card.model_dump(mode="json"), str(session.id)) == members
