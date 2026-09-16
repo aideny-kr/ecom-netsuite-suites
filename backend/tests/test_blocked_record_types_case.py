@@ -47,8 +47,17 @@ async def test_the_dispatcher_refuses_a_blocked_type_even_with_human_approval():
             human_approved=True,
         )
 
+    async def passthrough(execute, **_audit_fields):
+        return await execute()
+
     spy = AsyncMock(return_value={"success": True, "recordId": "1"})
-    with patch.object(tools_mod, "_execute_external_tool", spy):
+    with (
+        patch.object(tools_mod, "_execute_external_tool", spy),
+        # The audit wrapper opens its own session when db is None; that session comes from
+        # the app's global pool, whose connections belong to earlier tests' event loops.
+        # The deny-list sits before the wrapper, so bypass it and keep the test loop-safe.
+        patch("app.services.chat.external_tool_audit.audited_external_call", passthrough),
+    ):
         for blocked in ("Employee", "ACCOUNT", " customRecordType ", None):
             out = json.loads(await call(blocked))
             assert out.get("blocked_record_type") is True, blocked
