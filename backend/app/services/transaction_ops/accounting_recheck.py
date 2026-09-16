@@ -25,8 +25,13 @@ RECHECK_CALLS = 64
 MCP_RECHECK_HEADROOM = 8
 
 
+def needs_subledger_recheck(proposal):
+    """The one recheck that re-reads the subledger: an existing-credit correction sent over MCP."""
+    return proposal.get("kind") == "credit_tax_reallocation" and proposal.get("execution_transport") == "mcp_record_api"
+
+
 def recheck_call_ceiling(proposal):
-    if proposal.get("execution_transport") == "mcp_record_api":
+    if needs_subledger_recheck(proposal):
         return RECHECK_CALLS + accounting_credit_recheck.READ_CALLS + MCP_RECHECK_HEADROOM
     return RECHECK_CALLS
 
@@ -172,11 +177,7 @@ async def bound_report(db, tenant_id, run, report, *, now, subledger_recheck=Tru
     """
     _, p = await approval_for_run(db, tenant_id, run)
     if report_in_scope(run, p, report, now):
-        if (
-            subledger_recheck
-            and p.get("kind") == "credit_tax_reallocation"
-            and p.get("execution_transport") == "mcp_record_api"
-        ):
+        if subledger_recheck and needs_subledger_recheck(p):
             return await accounting_credit_recheck.reconcile(db, tenant_id, run, p, report)
         return report
     return {

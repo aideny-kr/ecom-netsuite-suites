@@ -112,6 +112,21 @@ EVIDENCE_FAILURES = (
 )
 
 
+def _observed(run, p, report, reason, defect, *, balance=None):
+    """The posting_observed audit payload; every exit of reconcile() writes one."""
+    if balance is None:
+        balance = {**report["balance"], "status": "not_verified", "reason": reason}
+    payload = {
+        "approval_message_id": run.params_json["approval_message_id"],
+        "case_id": p["case_id"],
+        "financial_writes": 0,
+        "balance": balance,
+    }
+    if defect is not None:
+        payload["error_type"] = type(defect).__name__
+    return payload
+
+
 async def reconcile(db, tenant_id, run, p, report):
     now = datetime.now(timezone.utc)
     reason = "credit_recheck_evidence_unavailable"
@@ -145,22 +160,23 @@ async def reconcile(db, tenant_id, run, p, report):
         # Reservation releases the database lock during provider I/O. Recheck
         # ownership before publishing evidence or changing the case verdict —
         # on every exit, including the ones that will be re-raised below.
-        run = await state.get_run(db, tenant_id, run.id, lock=True)
-        state._lease(run, lease_token, datetime.now(timezone.utc))
+        try:
+            run = await state.get_run(db, tenant_id, run.id, lock=True)
+            state._lease(run, lease_token, datetime.now(timezone.utc))
+        except state.StateError as lost:
+            # Ownership moved during the read. This worker may not publish a verdict,
+            # but the exit is still audited so a captured defect is never lost with it.
+            payload = _observed(run, p, report, "credit_recheck_lease_lost", defect)
+            await state._audit(db, tenant_id, "accounting_recheck.posting_observed", run, payload=payload)
+            await state._commit(db, tenant_id)
+            raise lost from defect
     if result is None:
         result = {
             **report,
             "balance": {**report["balance"], "status": "not_verified", "reason": reason},
             "evidence_limits": {"code": reason},
         }
-    payload = {
-        "approval_message_id": run.params_json["approval_message_id"],
-        "case_id": p["case_id"],
-        "financial_writes": 0,
-        "balance": result["balance"],
-    }
-    if defect is not None:
-        payload["error_type"] = type(defect).__name__
+    payload = _observed(run, p, report, None, defect, balance=result["balance"])
     await state._audit(db, tenant_id, "accounting_recheck.posting_observed", run, payload=payload)
     if defect is not None:
         # The audit only flushes; the caller's own commit is never reached once we

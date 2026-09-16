@@ -230,3 +230,43 @@ def test_mcp_recheck_ceiling_is_derived_from_the_read_budget(mcp_credit):  # noq
     assert mcp == 128  # the ceiling the previous literal allowed; not silently shrunk
     legacy = {**p, "execution_transport": None}
     assert accounting_recheck.recheck_call_ceiling(legacy) == accounting_recheck.RECHECK_CALLS
+
+
+async def test_lease_lost_during_recheck_still_audits_the_exit_and_a_captured_defect(mcp_credit, monkeypatch):  # noqa: F811
+    now = datetime.now(timezone.utc)
+    p, _, report = corrected(mcp_credit, now)
+    run = _run(now)
+    audit, commit, _, lease = _patch_state(monkeypatch, run)
+    lease.side_effect = state_service.StateError("run_lease_lost")
+    monkeypatch.setattr(credit_api_correction, "fresh", AsyncMock(side_effect=RuntimeError("session poisoned")))
+
+    with pytest.raises(state_service.StateError) as raised:
+        await recheck.reconcile(AsyncMock(), p["tenant_id"], run, p, report)
+
+    assert isinstance(raised.value.__cause__, RuntimeError)  # the defect rides along, never dropped
+    posted = _posted(audit)
+    assert len(posted) == 1
+    payload = posted[0].kwargs["payload"]
+    assert payload["balance"]["status"] == "not_verified"
+    assert payload["balance"]["reason"] == "credit_recheck_lease_lost"
+    assert payload["error_type"] == "RuntimeError"
+    assert payload["financial_writes"] == 0
+    assert commit.await_count == 2  # reservation, then the audit that must survive the raise
+
+
+async def test_lease_lost_after_a_clean_read_publishes_nothing_but_the_audit(mcp_credit, monkeypatch):  # noqa: F811
+    now = datetime.now(timezone.utc)
+    p, current, report = corrected(mcp_credit, now)
+    run = _run(now)
+    audit, commit, _, lease = _patch_state(monkeypatch, run)
+    lease.side_effect = state_service.StateError("run_lease_lost")
+    monkeypatch.setattr(credit_api_correction, "fresh", AsyncMock(return_value=current))
+
+    with pytest.raises(state_service.StateError):
+        await recheck.reconcile(AsyncMock(), p["tenant_id"], run, p, report)
+
+    posted = _posted(audit)
+    assert len(posted) == 1
+    assert posted[0].kwargs["payload"]["balance"]["reason"] == "credit_recheck_lease_lost"
+    assert "error_type" not in posted[0].kwargs["payload"]
+    assert commit.await_count == 2
