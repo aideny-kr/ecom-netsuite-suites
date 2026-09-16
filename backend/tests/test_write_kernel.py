@@ -225,6 +225,31 @@ async def test_a_ledger_read_failure_after_an_exception_leaves_the_attempt_to_ex
     assert (await _row(db, claim)).status == "executing"
 
 
+async def test_a_failure_to_record_a_decided_outcome_is_not_reinterpreted(db, ready, monkeypatch):
+    """The completion write is not part of the attempt: if it fails, the kernel raises that
+    failure and leaves the row as the attempt left it, instead of re-deriving a different
+    outcome from the ledger and recording that (a verified attempt must never be written
+    down as verification_unavailable because an audit insert hiccuped)."""
+    from sqlalchemy.exc import OperationalError
+
+    actor, _, _, claim = ready
+    original = state.complete_operation
+    calls = []
+
+    async def flaky(*args, **kwargs):
+        calls.append(kwargs["outcome"])
+        if len(calls) == 1:
+            raise OperationalError("INSERT", {}, Exception("connection reset"))
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(write_kernel.state, "complete_operation", flaky)
+    with pytest.raises(OperationalError):
+        await write_kernel.execute(db, actor.tenant_id, claim, FakeAdapter(proof={"source_unchanged": True}))
+    row = await _row(db, claim)
+    assert calls == ["verified"]  # decided once; never re-derived into something else
+    assert row.status == "committed_unverified" and "code" not in row.result_json
+
+
 def test_the_adapter_registry_and_the_ledger_vocabulary_agree():
     """state_service names the provider and adapter the ledger records; write_adapters
     constructs the class. One table must not drift from the other."""

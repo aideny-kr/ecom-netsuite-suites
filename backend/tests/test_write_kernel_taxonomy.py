@@ -13,13 +13,14 @@ writing it keep working against a shared database; nothing here writes it.
 """
 
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 
+from app.models.audit import AuditEvent
 from app.models.transaction_ops import TransactionOperation
 from app.services.transaction_ops import recovery
 from app.services.transaction_ops import state_service as state
@@ -27,6 +28,7 @@ from tests import test_transaction_ops_dispatch as dispatch_fixtures
 from tests import test_transaction_ops_executor as execution_fixtures
 from tests.test_transaction_ops_dispatch import reserve
 from tests.test_transaction_ops_executor import execute, operation
+from tests.test_transaction_ops_state_db import new_proposal
 
 execution_case = execution_fixtures.execution_case
 ready = dispatch_fixtures.ready
@@ -114,33 +116,132 @@ async def test_terminal_rows_are_frozen_by_the_database(db, ready):
     await db.rollback()
 
 
-async def test_the_migration_renames_legacy_failed_rows_under_the_legacy_check(db, ready):
-    """Run 109's downgrade and upgrade in-process, inside the test transaction, with a
-    legacy ``failed`` row present: the rename must happen while the CHECK that allows the
-    new value is in force. Gate round three: the UPDATE ran before the CHECK swap."""
+def _confirmation_row(actor, *, status="executing", work="w", entity="e", result_json=None):
+    """A ledger row claimed by a chat confirmation: no proposal, its approval on the row."""
+    now = datetime.now(timezone.utc)
+    return TransactionOperation(
+        tenant_id=actor.tenant_id,
+        proposal_id=None,
+        approval_kind="chat_confirmation",
+        approval_id=uuid.uuid4(),
+        surface="chat",
+        provider="netsuite_mcp",
+        adapter="credit_api",
+        work_key=work * 64,
+        entity_key=entity * 64,
+        base_work_key=work * 64,
+        attempted_at=now,
+        deadline_at=now + timedelta(minutes=5),
+        max_api_calls=96,
+        api_calls_used=0,
+        status=status,
+        result_json={"approved_by": str(actor.id), "evidence_digest": "d" * 64, **(result_json or {})},
+    )
+
+
+@pytest.mark.parametrize("outcome", ["rejected_before_effect", "needs_review"])
+async def test_a_confirmation_row_completes_without_a_proposal(db, ready, outcome):
+    """A row claimed by a chat confirmation has no proposal; completing it records the
+    approval it does have and never looks for the proposal it does not."""
+    actor, _, _, _ = ready
+    row = _confirmation_row(actor)
+    db.add(row)
+    await db.flush()
+    done = await state.complete_operation(db, actor.tenant_id, row.id, outcome=outcome, result_json={"code": "x"})
+    assert done.status == outcome and done.completed_at is not None
+    audit = await db.scalar(
+        select(AuditEvent).where(
+            AuditEvent.resource_id == str(row.id), AuditEvent.action == "transaction_ops.operation.complete"
+        )
+    )
+    assert audit.payload["approval_kind"] == "chat_confirmation"
+    assert audit.payload["approval_id"] == str(row.approval_id)
+    assert audit.payload["approved_by"] == str(actor.id)
+    assert "run_id" not in audit.payload
+
+
+def _migration():
     import importlib.util
     from pathlib import Path
-
-    from alembic.migration import MigrationContext
-    from alembic.operations import Operations
 
     path = Path(__file__).resolve().parents[1] / "alembic" / "versions" / "109_write_kernel_operations.py"
     spec = importlib.util.spec_from_file_location("migration_109", path)
     migration = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(migration)
+    return migration
+
+
+def _run_step(connection, step):
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+
+    with Operations.context(MigrationContext.configure(connection)):
+        step()
+
+
+async def test_the_downgrade_refuses_to_erase_confirmation_rows(db, ready):
+    """A downgrade cannot un-happen a send: rows a legacy reader cannot address are kept
+    by refusing the downgrade, never deleted."""
+    actor, _, _, _ = ready
+    db.add(_confirmation_row(actor, status="needs_review"))
+    await db.commit()
+    connection = await db.connection()
+    with pytest.raises(RuntimeError, match="proposal"):
+        await connection.run_sync(_run_step, _migration().downgrade)
+
+
+async def test_the_downgrade_folds_needs_review_by_whether_a_permit_was_consumed(db, ready):
+    """needs_review has no legacy value: with a permit consumed it becomes unknown (blocks a
+    resend), without one it becomes failed (nothing was sent). Two open rows on one
+    document would break the legacy index, so that downgrade refuses instead."""
+    actor, _, _, claim = ready
+    await state.complete_operation(
+        db, actor.tenant_id, claim.operation_id, outcome="needs_review", result_json={"code": "x"}
+    )
+    quiet = (
+        await db.execute(select(TransactionOperation).where(TransactionOperation.id == claim.operation_id))
+    ).scalar_one()
+    await db.commit()
+    connection = await db.connection()
+    await connection.run_sync(_run_step, _migration().downgrade)
+    assert (
+        await db.scalar(text("SELECT status FROM transaction_ops_operations WHERE id = :id"), {"id": quiet.id})
+    ) == "failed"
+    await connection.run_sync(_run_step, _migration().upgrade)
+
+
+async def test_the_downgrade_refuses_two_open_attempts_on_one_document(db, ready):
+    actor, _, proposal, claim = ready
+    executing = (
+        await db.execute(select(TransactionOperation).where(TransactionOperation.id == claim.operation_id))
+    ).scalar_one()
+    run = await state.get_run(db, actor.tenant_id, proposal.run_id)
+    other = await new_proposal(db, actor, run, currency="EUR")  # a second piece of work on the same order
+    sent = _confirmation_row(actor, status="needs_review", work="s", result_json={"dispatch_reserved": True})
+    sent.proposal_id = sent.approval_id = other.id
+    sent.approval_kind, sent.surface = "transaction_proposal", "scheduled"
+    sent.work_key = sent.base_work_key = other.work_key
+    sent.entity_key = executing.entity_key
+    db.add(sent)
+    await db.commit()
+    connection = await db.connection()
+    with pytest.raises(RuntimeError, match="document"):
+        await connection.run_sync(_run_step, _migration().downgrade)
+
+
+async def test_the_migration_renames_legacy_failed_rows_under_the_legacy_check(db, ready):
+    """Run 109's downgrade and upgrade in-process, inside the test transaction, with a
+    legacy ``failed`` row present: the rename must happen while the CHECK that allows the
+    new value is in force. Gate round three: the UPDATE ran before the CHECK swap."""
+    migration = _migration()
     actor, _, _, claim = ready
     await db.commit()  # the claim's savepoint; DDL below runs on the same connection
-
-    def run(connection, step):
-        with Operations.context(MigrationContext.configure(connection)):
-            step()
-
     connection = await db.connection()
-    await connection.run_sync(run, migration.downgrade)
+    await connection.run_sync(_run_step, migration.downgrade)
     await db.execute(
         text("UPDATE transaction_ops_operations SET status = 'failed' WHERE id = :id"), {"id": claim.operation_id}
     )
-    await connection.run_sync(run, migration.upgrade)
+    await connection.run_sync(_run_step, migration.upgrade)
     status = await db.scalar(
         text("SELECT status FROM transaction_ops_operations WHERE id = :id"), {"id": claim.operation_id}
     )
@@ -404,7 +505,7 @@ async def test_a_receipt_becomes_verified_only_with_a_readback_proof(db, ready):
     assert row.status == "verified"
 
 
-@pytest.mark.parametrize("status", ["rejected_before_effect", "unknown"])
+@pytest.mark.parametrize("status", ["rejected_before_effect", "unknown", "failed"])
 async def test_the_database_refuses_to_downgrade_a_receipt(db, ready, status):
     """The receipt invariant is the database's, not only complete_operation's: no writer,
     however it reaches the table, can call a receipted attempt before-effect or unknown."""
@@ -441,7 +542,6 @@ async def test_a_committed_unverified_attempt_blocks_a_new_claim_on_the_same_ord
     """The in-flight guard at claim time counts a receipted-but-unproven attempt as in flight,
     like the partial unique index, settlement and the scheduler already do."""
     from app.schemas.transaction_runs import ProposalDecision
-    from tests.test_transaction_ops_state_db import new_proposal
 
     actor, _, proposal, claim = ready
     assert await reserve(db, actor.tenant_id, claim)

@@ -121,9 +121,12 @@ async def _candidates(db, tenant_id, now):
                     Operation.tenant_id == tenant_id,
                     Config.enabled.is_(True),
                     ~recovery_busy_or_done,
+                    # An open row (executing, or receipted and still being read back by
+                    # the process that sent it) is recovered only after its deadline; an
+                    # unknown one has no process left and is due at once.
                     or_(
-                        and_(Operation.status == "executing", Operation.deadline_at <= now),
-                        Operation.status.in_(state.SETTLED),
+                        and_(Operation.status.in_(state.OPEN), Operation.deadline_at <= now),
+                        Operation.status == "unknown",
                     ),
                 )
                 .order_by(Operation.attempted_at, Operation.id)

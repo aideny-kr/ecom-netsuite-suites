@@ -155,7 +155,7 @@ class GuardRestletAdapter(_ScheduledAdapter):
         source, targets, report = await self.pair(db, tenant_id, read)
         guard = creation = None
         if claimed.action == "correct_amounts":
-            guard = await read(self.reads.max_guard_calls, self.reads.guard, self.config, claimed.target_record_id)
+            guard = await self._guard_read(read, claimed)
         else:  # sync_missing_order: the registry admits no third action for this adapter
             if report["comparison"]["recommended_action"] != "propose_missing_sync":
                 raise PreconditionChangedError("approved_evidence_changed")
@@ -174,7 +174,7 @@ class GuardRestletAdapter(_ScheduledAdapter):
         source, _, report = await self.pair(db, tenant_id, read)
         guard = creation = None
         if claimed.action == "correct_amounts":
-            guard = await read(self.reads.max_guard_calls, self.reads.guard, self.config, claimed.target_record_id)
+            guard = await self._guard_read(read, claimed)
         else:
             creation = self._creation(source)
             if len(report["targets"]) == 1:
@@ -186,6 +186,9 @@ class GuardRestletAdapter(_ScheduledAdapter):
                     claimed.after_json,
                 )
         return verify_outcome(self.proposal, report, guard=guard, creation=creation, now=self.clock())
+
+    async def _guard_read(self, read, claimed):
+        return await read(self.reads.max_guard_calls, self.reads.guard, self.config, claimed.target_record_id)
 
     def _creation(self, source):
         return prepare_create_input(

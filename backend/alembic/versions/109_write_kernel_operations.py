@@ -70,7 +70,7 @@ DEFAULTS_TRIGGER = (
 
 RECEIPT_RULE = """
             IF OLD.status = 'committed_unverified' AND (
-                NEW.status IN ('rejected_before_effect', 'unknown')
+                NEW.status IN ('rejected_before_effect', 'unknown', 'failed')
                 OR (NEW.status = 'verified' AND jsonb_typeof(NEW.result_json->'verification') IS DISTINCT FROM 'object')
             ) THEN
                 RAISE EXCEPTION 'immutable operation receipt';
@@ -85,13 +85,15 @@ def _guard(terminal: str, settled: str, receipt: str = "") -> str:
     return f"""
         CREATE OR REPLACE FUNCTION transaction_ops_operation_guard() RETURNS trigger LANGUAGE plpgsql AS $$
         DECLARE mutable text[] := ARRAY['status','completed_at','result_json','updated_at','api_calls_used'];
+                old_row jsonb := to_jsonb(OLD);
+                new_row jsonb := to_jsonb(NEW);
         BEGIN
-            IF (to_jsonb(NEW) - mutable) IS DISTINCT FROM (to_jsonb(OLD) - mutable)
+            IF (new_row - mutable) IS DISTINCT FROM (old_row - mutable)
                 OR NEW.api_calls_used < OLD.api_calls_used THEN
                 RAISE EXCEPTION 'immutable operation budget or evidence';
             END IF;
             IF (OLD.status IN {terminal} AND
-                (to_jsonb(NEW) - 'updated_at') IS DISTINCT FROM (to_jsonb(OLD) - 'updated_at'))
+                (new_row - 'updated_at') IS DISTINCT FROM (old_row - 'updated_at'))
                 OR (OLD.status IN {settled} AND NEW.status = 'executing') THEN
                 RAISE EXCEPTION 'immutable operation attempt';
             END IF;
@@ -179,14 +181,51 @@ def upgrade():
     op.execute(DEFAULTS_TRIGGER)
 
 
+LEGACY_OPEN = (
+    "(status IN ('executing','unknown','committed_unverified') "
+    "OR (status = 'needs_review' AND result_json->'dispatch_reserved' = 'true'::jsonb))"
+)
+
+
+def _refuse_lossy_downgrade():
+    """A downgrade cannot un-happen a send. It stops, with the schema untouched, when it
+    would erase rows only this revision can address or fold two open attempts on one
+    document into the legacy index's single slot; a person moves those rows first."""
+    bind = op.get_bind()
+    orphans = bind.execute(sa.text(f"SELECT count(*) FROM {TABLE} WHERE proposal_id IS NULL")).scalar()
+    if orphans:
+        raise RuntimeError(
+            f"downgrade refused: {orphans} operation(s) were claimed without a proposal (a chat confirmation); "
+            "a legacy schema cannot hold them and deleting a write's ledger row is never acceptable"
+        )
+    crowded = bind.execute(
+        sa.text(
+            f"SELECT count(*) FROM (SELECT tenant_id, entity_key FROM {TABLE} WHERE {LEGACY_OPEN} "
+            "GROUP BY tenant_id, entity_key HAVING count(*) > 1) crowded"
+        )
+    ).scalar()
+    if crowded:
+        raise RuntimeError(
+            f"downgrade refused: {crowded} document(s) carry two open attempts (a needs_review row whose permit "
+            "was consumed beside an in-flight one); the legacy index admits one, and neither may be forgotten"
+        )
+
+
 def downgrade():
+    _refuse_lossy_downgrade()
     op.execute(f"DROP TRIGGER IF EXISTS transaction_ops_operation_defaults ON {TABLE}")
     op.execute("DROP FUNCTION IF EXISTS transaction_ops_operation_defaults()")
     op.execute(f"DROP TRIGGER transaction_ops_immutable ON {TABLE}")
     # Fold the wider taxonomy back into the four legacy values without ever making a
-    # sent-but-unproven attempt look final: unknown blocks a resend, failed does not.
-    op.execute(f"UPDATE {TABLE} SET status = 'unknown' WHERE status IN ('committed_unverified','needs_review')")
-    op.execute(f"UPDATE {TABLE} SET status = 'failed' WHERE status = 'rejected_before_effect'")
+    # sent-but-unproven attempt look final: a consumed permit becomes unknown (blocks a
+    # resend); needs_review without one, and rejected_before_effect, become failed.
+    op.execute(
+        f"UPDATE {TABLE} SET status = CASE "
+        "WHEN status = 'committed_unverified' THEN 'unknown' "
+        "WHEN status = 'needs_review' AND result_json->'dispatch_reserved' = 'true'::jsonb THEN 'unknown' "
+        "WHEN status IN ('needs_review', 'rejected_before_effect') THEN 'failed' "
+        "ELSE status END"
+    )
     op.drop_index("uq_tx_operation_unsettled_entity", table_name=TABLE)
     op.create_index(
         "uq_tx_operation_unsettled_entity",
@@ -202,7 +241,6 @@ def downgrade():
     op.drop_constraint("fk_tx_operation_retry_of", TABLE, type_="foreignkey")
     op.drop_constraint(f"{TABLE}_tenant_id_id_key", TABLE, type_="unique")
     op.drop_constraint("uq_tx_operation_approval", TABLE, type_="unique")
-    op.execute(f"DELETE FROM {TABLE} WHERE proposal_id IS NULL")  # rows no legacy reader can address
     op.create_unique_constraint(f"{TABLE}_tenant_id_proposal_id_key", TABLE, ["tenant_id", "proposal_id"])
     for column in (
         "retry_of_operation_id",

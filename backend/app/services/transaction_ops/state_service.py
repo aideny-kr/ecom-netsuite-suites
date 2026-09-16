@@ -1078,15 +1078,30 @@ async def complete_operation(db, tenant_id, operation_id, *, outcome, result_jso
         # "unknown" again, and only an independent readback may call it verified.
         if outcome in ("rejected_before_effect", "unknown"):
             raise StateError("receipt_recorded")
-        if outcome == "verified" and not evidence.get("verification"):
-            raise StateError("verification_evidence_required")
+        if outcome == "verified" and not isinstance(evidence.get("verification"), dict):
+            raise StateError("verification_evidence_required")  # the guard trigger asks the same question
     row.status, row.completed_at = outcome, _clock(now)
     row.result_json = {**(row.result_json or {}), **evidence, "termination_reason": TERMINATION[outcome]}
-    proposal = await get_proposal(db, tenant_id, row.proposal_id)
-    if outcome == "verified":
+    # A transaction proposal's row settles its case and records the proposal's approval; a
+    # row from any other approval source (a chat confirmation) records the approval it
+    # carries on itself, and its own surface owns what follows a verified outcome.
+    proposal = await get_proposal(db, tenant_id, row.proposal_id) if row.proposal_id is not None else None
+    if outcome == "verified" and proposal is not None:
         from app.services.transaction_ops.settlement import queue
 
         await queue(db, tenant_id, row, proposal, now=row.completed_at)
+    approval = {"approval_kind": row.approval_kind, "approval_id": str(row.approval_id)}
+    if proposal is not None:
+        approval.update(
+            run_id=str(proposal.run_id),
+            config_id=str(proposal.config_id),
+            approved_by=str(proposal.decided_by),
+            approved_at=proposal.decided_at.isoformat(),
+            evidence_fingerprint=proposal.evidence_fingerprint,
+        )
+    else:
+        recorded = row.result_json or {}
+        approval.update(approved_by=recorded.get("approved_by"), evidence_digest=recorded.get("evidence_digest"))
     await _audit(
         db,
         tenant_id,
@@ -1095,11 +1110,7 @@ async def complete_operation(db, tenant_id, operation_id, *, outcome, result_jso
         payload={
             "outcome": outcome,
             "code": evidence.get("code"),
-            "run_id": str(proposal.run_id),
-            "config_id": str(proposal.config_id),
-            "approved_by": str(proposal.decided_by),
-            "approved_at": proposal.decided_at.isoformat(),
-            "evidence_fingerprint": proposal.evidence_fingerprint,
+            **approval,
             # The result verifies the approved operation. A separate fresh case
             # observation must establish agreement on gross, tax and refunds.
             "settlement_status": "not_evaluated",
@@ -1381,7 +1392,7 @@ async def finish_operation_recovery(db, tenant_id, run_id, *, lease_token, reaso
             **details,
             "termination_reason": "done" if proof is not None else reason,
         }
-        if proof is not None:
+        if proof is not None and operation.proposal_id is not None:
             from app.services.transaction_ops.settlement import queue
 
             proposal = await get_proposal(db, tenant_id, operation.proposal_id)
