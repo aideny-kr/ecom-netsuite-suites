@@ -11,6 +11,7 @@ import hashlib
 import json
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, localcontext
 
@@ -91,6 +92,33 @@ def permit_consumed(operation) -> bool:
     """Whether the one-use send permit was reserved on this row. A consumed permit cannot be
     told apart from a sent request, so every outcome after it is at least ``unknown``."""
     return (operation.result_json or {}).get("dispatch_reserved") is True
+
+
+@dataclass(frozen=True)
+class ApprovedIntent:
+    """What an approval source hands the ledger to claim: the approval's identity, the
+    business identity of the work (``work_key``), the collision scope (``entity_key``) and
+    the provider/adapter that will carry it. The source has already checked the approval is
+    valid; the ledger checks the work is new and the document free."""
+
+    approval_kind: str
+    approval_id: uuid.UUID
+    approved_by: uuid.UUID
+    surface: str
+    provider: str
+    adapter: str
+    action: str
+    work_key: str
+    entity_key: str
+    netsuite_account_id: str
+    subsidiary_id: str
+    record_type: str
+    target_record_id: str | None
+    evidence_digest: str
+    valid_until: datetime
+    currency: str | None = None
+    config_id: uuid.UUID | None = None
+    retry_of_operation_id: uuid.UUID | None = None
 
 
 def _clock(now=None):
@@ -1022,6 +1050,7 @@ async def claim_approved_operation(db, tenant_id, proposal_id, *, expected_evide
     intent = ClaimedOperation(
         operation_id=operation.id,
         proposal_id=row.id,
+        approval_id=row.id,
         work_key=row.work_key,
         config_id=row.config_id,
         action=row.action,
@@ -1036,6 +1065,106 @@ async def claim_approved_operation(db, tenant_id, proposal_id, *, expected_evide
     await _audit(db, tenant_id, "operation.attempt", operation)
     await _commit(db, tenant_id)
     return intent
+
+
+async def claim_intent(db, tenant_id, intent: ApprovedIntent, *, now=None) -> ClaimedOperation:
+    """Claim approved work from any approval source before its fresh, budgeted reads.
+
+    The source (chat_confirmation.claim, or claim_approved_operation for a proposal) has
+    already established the approval is valid. This is the generic half: the tenant lock,
+    one attempt per approval, one attempt per piece of work (``work_key``), one in-flight
+    attempt per document (``entity_key``; the partial unique index is the backstop), the
+    lineage of a retry, the executing row, its audit and the commit.
+    """
+    now = _clock(now)
+    await set_tenant_context(db, str(tenant_id))
+    await db.execute(select(Tenant.id).where(Tenant.id == tenant_id).with_for_update())
+    claimed = (
+        await db.execute(
+            select(TransactionOperation.id).where(
+                TransactionOperation.tenant_id == tenant_id,
+                TransactionOperation.approval_kind == intent.approval_kind,
+                TransactionOperation.approval_id == intent.approval_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if claimed is not None:
+        raise StateError("approval_already_claimed")
+    attempted = (
+        await db.execute(
+            select(TransactionOperation.id).where(
+                TransactionOperation.tenant_id == tenant_id, TransactionOperation.work_key == intent.work_key
+            )
+        )
+    ).scalar_one_or_none()
+    if attempted is not None:
+        raise StateError("operation_already_attempted")
+    in_flight = (
+        await db.execute(
+            select(TransactionOperation.id).where(
+                TransactionOperation.tenant_id == tenant_id,
+                TransactionOperation.entity_key == intent.entity_key,
+                TransactionOperation.status.in_(IN_FLIGHT),
+            )
+        )
+    ).scalar_one_or_none()
+    if in_flight is not None:
+        raise StateError("entity_in_flight")
+    previous = None
+    if intent.retry_of_operation_id is not None:
+        previous = await _one(db, tenant_id, TransactionOperation, intent.retry_of_operation_id)
+        if previous.status != "rejected_before_effect":
+            raise StateError("retry_requires_rejected_before_effect")
+    operation = TransactionOperation(
+        tenant_id=tenant_id,
+        proposal_id=None,
+        approval_kind=intent.approval_kind,
+        approval_id=intent.approval_id,
+        surface=intent.surface,
+        provider=intent.provider,
+        adapter=intent.adapter,
+        work_key=intent.work_key,
+        entity_key=intent.entity_key,
+        base_work_key=previous.base_work_key if previous is not None else intent.work_key,
+        retry_of_operation_id=previous.id if previous is not None else None,
+        attempted_at=now,
+        deadline_at=min(now + _OPERATION_TIME, intent.valid_until),
+        max_api_calls=_OPERATION_CALLS,
+        api_calls_used=0,
+        status="executing",
+        result_json={"evidence_digest": intent.evidence_digest, "approved_by": str(intent.approved_by)},
+    )
+    db.add(operation)
+    await db.flush()
+    claimed = ClaimedOperation(
+        operation_id=operation.id,
+        proposal_id=None,
+        approval_kind=intent.approval_kind,
+        approval_id=intent.approval_id,
+        work_key=intent.work_key,
+        config_id=intent.config_id,
+        action=intent.action,
+        currency=intent.currency,
+        netsuite_account_id=intent.netsuite_account_id,
+        subsidiary_id=intent.subsidiary_id,
+        record_type=intent.record_type,
+        target_record_id=intent.target_record_id,
+        before_json={},
+        after_json={},
+    )
+    await _audit(
+        db,
+        tenant_id,
+        "operation.attempt",
+        operation,
+        payload={
+            "approval_kind": intent.approval_kind,
+            "approval_id": str(intent.approval_id),
+            "surface": intent.surface,
+        },
+    )
+    await _commit(db, tenant_id)
+    return claimed
 
 
 async def operation_for_work(db, tenant_id, work_key):
@@ -1128,13 +1257,17 @@ async def complete_operation(db, tenant_id, operation_id, *, outcome, result_jso
 
 
 async def reserve_operation_dispatch(
-    db, tenant_id, claimed: ClaimedOperation, *, provider, payload_fingerprint, now=None
+    db, tenant_id, claimed: ClaimedOperation, *, provider, payload_fingerprint, now=None, authorize=None
 ):
     """Consume one durable send permit. A crash after this commit permits only reads.
 
     An adapter calls this after its final fresh provider preflight and before
     its single mutation. No job retry or reconstructed claim can reserve again.
     Provider receipts never grant approval, reset the permit, or prove success.
+
+    A transaction proposal's claim is re-checked against the proposal here. Any other
+    approval source passes ``authorize(db, tenant_id, operation, claimed, now)``, which
+    raises StateError when the approval no longer holds; without it no permit is minted.
     """
     now = _clock(now)
     if not isinstance(payload_fingerprint, str) or not re.fullmatch(r"[a-f0-9]{64}", payload_fingerprint):
@@ -1147,11 +1280,32 @@ async def reserve_operation_dispatch(
     ).scalar_one_or_none()
     if tenant is None or not tenant.is_active:
         raise StateError("tenant_unavailable", 403)
+    if claimed.proposal_id is None:
+        operation = await _one(db, tenant_id, TransactionOperation, claimed.operation_id, lock=True)
+        if (
+            operation.proposal_id is not None
+            or operation.approval_kind != claimed.approval_kind
+            or operation.approval_id != claimed.approval_id
+            or operation.work_key != claimed.work_key
+        ):
+            raise StateError("claimed_operation_mismatch")
+        if permit_consumed(operation):
+            await _commit(db, tenant_id)
+            return False
+        if operation.status != "executing":
+            raise StateError("operation_not_executable")
+        if operation.provider != provider:
+            raise StateError("unsupported_dispatch_provider")
+        if authorize is None:
+            raise StateError("approval_source_required")
+        await authorize(db, tenant_id, operation, claimed, now)
+        return await _grant_permit(db, tenant_id, operation, provider, payload_fingerprint, now)
     proposal = await get_proposal(db, tenant_id, claimed.proposal_id, lock=True)
     operation = await _one(db, tenant_id, TransactionOperation, claimed.operation_id, lock=True)
     expected = ClaimedOperation(
         operation_id=operation.id,
         proposal_id=proposal.id,
+        approval_id=proposal.id,
         work_key=proposal.work_key,
         config_id=proposal.config_id,
         action=proposal.action,
@@ -1188,6 +1342,12 @@ async def reserve_operation_dispatch(
         )
     ).scalar_one_or_none()
     await _human(db, tenant_id, actor, "recon.run")
+    return await _grant_permit(db, tenant_id, operation, provider, payload_fingerprint, now)
+
+
+async def _grant_permit(db, tenant_id, operation, provider, payload_fingerprint, now):
+    """The one-use permit itself: budgeted, written to the row, audited, committed. Every
+    approval source's refusals run before this; nothing after it may refuse."""
     if now >= operation.deadline_at or operation.api_calls_used >= operation.max_api_calls:
         await _exhaust_operation(db, tenant_id, operation, now, "operation_budget_exhausted")
         raise StateError("operation_budget_exhausted")
