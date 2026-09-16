@@ -1,6 +1,7 @@
 """Partition verified proposals by accounting treatment, not similar deltas."""
 
 from app.services.transaction_ops.state_service import business_digest
+from app.services.transaction_ops.treatments import treatment_of, treatment_profile
 
 
 def treatment_batches(members):
@@ -10,24 +11,13 @@ def treatment_batches(members):
         if not card:
             continue
         proposal = card["accounting_review"]
-        credit = proposal.get("kind") == "sales_adjustment_credit"
-        commercial = proposal.get("kind") in {
-            "sales_adjustment_credit",
-            "invoice_sales_adjustment",
-            "sales_order_source_alignment",
-        }
-        amendment = proposal.get("kind") in {"credit_tax_reallocation", "sales_order_line_alignment"}
+        kind = treatment_of(proposal)
+        commercial = kind.family == "commercial"
+        amendment = kind.family == "amendment"
         transport = proposal.get("execution_transport")
-        if amendment and transport == "mcp_record_api":
-            profile = {"connector_schema": proposal["connector_schema"]}
-        elif amendment:
-            profile = proposal["native_profile"]
-        elif commercial:
-            profile = proposal["profile"]
-        else:
-            profile = {"tax_item_id": proposal["tax_item"].get("id")}
+        profile = treatment_profile(proposal)
         treatment = {
-            "kind": proposal.get("kind") or "invoice_tax",
+            "kind": kind.kind,
             "scope": proposal["scope"],
             "connection_id": proposal.get("connection_id"),
             "connector_id": proposal.get("connector_id"),
@@ -50,15 +40,7 @@ def treatment_batches(members):
         if key not in batches:
             batches[key] = {
                 "treatment_id": key,
-                "label": "Sales Adjustments credit and invoice application"
-                if credit
-                else "Existing credit tax allocation"
-                if proposal.get("kind") == "credit_tax_reallocation"
-                else "Sales order source alignment"
-                if proposal.get("kind") in {"sales_order_source_alignment", "sales_order_line_alignment"}
-                else "Sales Adjustment on unpaid invoice"
-                if commercial
-                else "Invoice tax correction",
+                "label": kind.batch_label,
                 "treatment": treatment,
                 "case_ids": [],
                 "confirmation_ids": [],

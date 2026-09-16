@@ -8,14 +8,11 @@ correction is verified, never from a fabricated future native snapshot.
 import hashlib
 import json
 
-KINDS = {
-    "invoice_tax": "Correct invoice tax",
-    "invoice_sales_adjustment": "Apply invoice sales adjustment",
-    "sales_adjustment_credit": "Create and apply Sales Adjustments credit",
-    "sales_order_source_alignment": "Align sales order with source",
-    "credit_tax_reallocation": "Correct existing credit tax allocation",
-    "sales_order_line_alignment": "Align sales-order lines and tax with source",
-}
+from app.services.transaction_ops.treatments import (  # noqa: F401  (KINDS re-exported)
+    DEPENDENT_KINDS,
+    KINDS,
+    treatment_of,
+)
 
 
 def fingerprint(value):
@@ -42,7 +39,7 @@ def rules_fingerprint(proposal):
                 )
             }
         )
-    if proposal.get("kind") in {"credit_tax_reallocation", "sales_order_line_alignment"}:
+    if treatment_of(proposal).family == "amendment":
         return fingerprint(
             {
                 "scope": proposal["scope"],
@@ -70,7 +67,7 @@ def rules_fingerprint(proposal):
 
 def source_basis(proposal):
     source = proposal.get("source") or {}
-    if proposal.get("kind") in {"credit_tax_reallocation", "sales_order_line_alignment"}:
+    if treatment_of(proposal).family == "amendment":
         # New treatments bind keyed lines, revision dates and jurisdiction too.
         # Do not change the existing recipes' historical operation identities.
         return source
@@ -117,7 +114,7 @@ def proposal_plan(proposal, report):
     kind = proposal.get("kind") or "invoice_tax"
     if kind not in KINDS:
         raise ValueError("unsupported_accounting_plan")
-    order_step = kind in {"sales_order_source_alignment", "sales_order_line_alignment"}
+    order_step = kind in DEPENDENT_KINDS
     before = proposal["before"]
     order_id = (
         proposal["record_id"]
@@ -243,11 +240,7 @@ def completed_plan(proposal, report, status, next_step):
         elif step["id"] == "reconcile":
             step["status"] = "needs_review"
         elif step["id"] == "sales_order":
-            step["status"] = (
-                "awaiting_approval"
-                if next_step.get("kind") in {"sales_order_source_alignment", "sales_order_line_alignment"}
-                else "waiting"
-            )
+            step["status"] = "awaiting_approval" if next_step.get("kind") in DEPENDENT_KINDS else "waiting"
     return plan
 
 
