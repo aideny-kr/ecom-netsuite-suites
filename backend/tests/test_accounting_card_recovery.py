@@ -378,3 +378,39 @@ async def test_the_scheduler_reaches_a_tenant_whose_only_stuck_work_is_an_orphan
     stats = await action_scheduler.collect_due_actions(db, later)
     assert stats["credit_recoveries"] == 1
     assert publish.call_args.args[:3] == (tenant_id, "credit_recover", message_id)
+
+
+async def test_a_row_that_settled_while_its_card_never_heard_is_found_by_the_scan(db, interrupted, readback):
+    """The sender may die between completing the row and writing the card: the row is
+    terminal, the card still says executing. The scan must find that card and render it."""
+    tenant_id, actor_id, message_id, claimed = interrupted
+    await state.complete_operation(
+        db, tenant_id, claimed.operation_id, outcome="needs_review", result_json={"code": "adapter_defect"}
+    )
+    now = datetime.now(timezone.utc)
+    assert await mod.candidates(db, tenant_id, now, limit=10) == [message_id]
+    with patch("app.services.transaction_ops.accounting_group.accounting_write_slot", _no_lock):
+        assert (await mod.recover(db, tenant_id, message_id, now=now))["termination_reason"] == "done"
+    message = await db.get(ChatMessage, message_id)
+    await db.refresh(message)
+    assert message.structured_output["status"] == "indeterminate"
+    assert message.structured_output["accounting_execution"]["ledger_status"] == "needs_review"
+    assert await mod.candidates(db, tenant_id, now, limit=10) == []
+    readback.assert_not_awaited()
+
+
+async def test_a_card_edited_since_its_claim_is_not_read_back_but_handed_to_a_person(db, interrupted, readback):
+    tenant_id, actor_id, message_id, claimed = interrupted
+    message = await db.get(ChatMessage, message_id)
+    message.structured_output = {
+        **message.structured_output,
+        "tool_input": {**message.structured_output["tool_input"], "data": "{}"},
+    }
+    await db.flush()
+    later = (await _row(db, claimed)).deadline_at + timedelta(seconds=1)
+    with patch("app.services.transaction_ops.accounting_group.accounting_write_slot", _no_lock):
+        result = await mod.recover(db, tenant_id, message_id, now=later)
+    assert result["termination_reason"] == "blocked"
+    readback.assert_not_awaited()
+    row = await _row(db, claimed)
+    assert row.status == "needs_review" and row.result_json["code"] == "confirmation_changed"

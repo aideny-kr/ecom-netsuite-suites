@@ -43,7 +43,10 @@ async def queue(db, tenant_id, message, actor_id, *, now, config_id=None):
         )
         if existing:
             return existing
-        config = await state.get_config(db, tenant_id, UUID(str(config_id or p["config_id"])))
+        effective = config_id or effective_config_id(so)
+        if not effective:
+            raise state.StateError("accounting_recheck_unscoped")
+        config = await state.get_config(db, tenant_id, UUID(str(effective)))
         snapshot = ConfigOut.model_validate(config).model_dump(mode="json")
         for field in ("source_connection_id", "source_step_id", "netsuite_account_id", "subsidiary_id", "record_type"):
             actual, approved = snapshot.get(field), p["scope"].get(field)
@@ -92,11 +95,19 @@ async def approval_for_run(db, tenant_id, run):
         or (so.get("accounting_verification") or {}).get("status") != "verified"
         or p.get("tenant_id") != str(tenant_id)
         or not supports(p)
-        or str(run.config_id) != p.get("config_id")
+        or str(run.config_id) != str(effective_config_id(so) or "")
         or run.params_json["order_references"] != [p.get("order_reference")]
     ):
         raise state.StateError("accounting_recheck_approval_mismatch")
     return message, p
+
+
+def effective_config_id(so) -> str | None:
+    """The config a card's recheck runs under: the one its review names, else the one its
+    ledger claim recorded as the recovery scope (a card whose builder set none)."""
+    p = so.get("accounting_review") or {}
+    claim = so.get("accounting_execution") or {}
+    return p.get("config_id") or ((claim.get("recovery_scope") or {}).get("config_id"))
 
 
 def report_in_scope(run, p, report, now):

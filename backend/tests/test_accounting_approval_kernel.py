@@ -142,6 +142,19 @@ async def test_a_verified_correction_is_one_ledger_row_one_send_and_a_queued_rec
     assert claim["termination_reason"] == "done" and claim["ledger_status"] == "verified"
     assert accounting_history._claim(message) == claim
     assert not accounting_recovery.eligible(so, datetime.now(timezone.utc) + timedelta(days=1))
+    assert claim["recovery_scope"]["order_reference"] == p["order_reference"]
+    # The completion job proves provenance by the approval-claimed audit row; a kernel
+    # card writes it from the projection, with the fields that check matches on.
+    claimed_audit = await db.scalar(
+        select(AuditEvent).where(
+            AuditEvent.resource_id == str(message.id),
+            AuditEvent.action == accounting_recovery.CLAIM_ACTION,
+            AuditEvent.actor_id == actor.id,
+            AuditEvent.payload["evidence_digest"].astext == claim["evidence_digest"],
+            AuditEvent.payload["accepted_at"].astext == claim["accepted_at"],
+        )
+    )
+    assert claimed_audit is not None and claimed_audit.payload["financial_writes"] == 0
     assert "[View" in _text(events) and "/app/" in _text(events)  # the record link, as before
     assert stubs["dispatch"].await_count == 1
     sent = stubs["dispatch"].await_args.kwargs
@@ -372,6 +385,8 @@ async def test_a_cancelled_group_child_keeps_its_claim_and_the_exact_approval_li
     await db.refresh(stored)
     assert stored.structured_output["status"] == "executing"
     assert stored.structured_output["operation_id"] == str(row.id)
+    # the group link is on the card from the claim on, so recovery can refresh the parent
+    assert stored.structured_output["accounting_execution"]["approval_context"]["group_approval_id"] == str(parent_id)
     assert [c.kwargs["action"] for c in tool_audit.await_args_list] == ["tool.requested", "tool.interrupted"]
     requested = tool_audit.await_args_list[0].kwargs
     assert requested["payload"]["approval"] == {
@@ -513,3 +528,42 @@ async def test_a_redelivery_carries_the_receipt_the_ledger_recorded(db, card):
     assert receipt["status"] == "unknown" and receipt["code"] == "dispatch_already_reserved"
     assert adapter.receipt == {"status": "accepted", "verified": False, "id": "30"}
     assert adapter.dispatch.await_count == 0
+
+
+async def test_a_kernel_card_without_a_config_key_still_queues_its_recheck_under_the_recorded_config(db, card):
+    """The recheck queue used to index the card's config with bracket access; a card without
+    the key raised KeyError, swallowed as "not queued"."""
+    from app.services.transaction_ops import accounting_recheck
+
+    actor, session, message, p, _ = card
+    p2 = dict(p)
+    p2.pop("config_id", None)
+    message.structured_output = {**message.structured_output, "accounting_review": p2}
+    from app.services.chat.write_confirmation_service import build_confirmation_payload as _build
+
+    name, params = message.structured_output["tool_name"], message.structured_output["tool_input"]
+    payload = _build(
+        mutation_type=message.structured_output["mutation_type"],
+        record_type=p2["record_type"],
+        tool_name=name,
+        tool_input=params,
+        session_id=str(session.id),
+        current_record=p2["before"],
+    )
+    payload.accounting_review = p2
+    message.structured_output = {**payload.model_dump(mode="json"), "status": "pending"}
+    await db.flush()
+    recorded = []
+
+    async def queue(db_, tenant_id, msg, actor_id, *, now, config_id=None):
+        recorded.append(config_id)
+        return MagicMock(id="recheck-run")
+
+    with patch("app.services.transaction_ops.accounting_recheck.queue", queue):
+        pass
+    events, so, stubs = await approve(db, (actor, session, message, p2, params))
+    assert so["status"] == "approved"
+    # the real queue would refuse a card whose scope names no config with a code, never KeyError
+    with pytest.raises(Exception) as exc:
+        await accounting_recheck.queue(db, actor.tenant_id, message, actor.id, now=datetime.now(timezone.utc))
+    assert "KeyError" not in repr(exc.value) and not isinstance(exc.value, KeyError)

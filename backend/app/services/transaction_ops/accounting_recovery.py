@@ -95,6 +95,14 @@ async def ledger_candidates(db, tenant_id, now, *, limit):
             ),
         )
     )
+    so = ChatMessage.structured_output
+    card_never_heard = exists(
+        select(ChatMessage.id).where(
+            ChatMessage.tenant_id == tenant_id,
+            ChatMessage.id == TransactionOperation.approval_id,
+            so["status"].astext == "executing",
+        )
+    )
     return list(
         (
             await db.scalars(
@@ -102,10 +110,19 @@ async def ledger_candidates(db, tenant_id, now, *, limit):
                 .where(
                     TransactionOperation.tenant_id == tenant_id,
                     TransactionOperation.approval_kind == "chat_confirmation",
-                    ~busy_or_done,
                     or_(
-                        and_(TransactionOperation.status.in_(state.OPEN), TransactionOperation.deadline_at <= now),
-                        TransactionOperation.status == "unknown",
+                        and_(
+                            ~busy_or_done,
+                            or_(
+                                and_(
+                                    TransactionOperation.status.in_(state.OPEN),
+                                    TransactionOperation.deadline_at <= now,
+                                ),
+                                TransactionOperation.status == "unknown",
+                            ),
+                        ),
+                        # the row settled but the sender died before the card was written
+                        and_(TransactionOperation.status.in_(state.TERMINAL), card_never_heard),
                     ),
                 )
                 .order_by(TransactionOperation.attempted_at, TransactionOperation.id)
@@ -544,6 +561,13 @@ async def recover_card(db, tenant_id, operation, *, now, lock_engine=None):
     so = message.structured_output or {}
     p = so.get("accounting_review") or {}
     approver = (operation.result_json or {}).get("approved_by")
+    if evidence_digest(so) != (operation.result_json or {}).get("evidence_digest"):
+        # The card is not the one that was claimed: nothing on it may drive a read.
+        operation = await state.complete_operation(
+            db, tenant_id, operation.id, outcome="needs_review", result_json={"code": "confirmation_changed"}
+        )
+        await _render_terminal(db, tenant_id, message, operation)
+        return {"termination_reason": "blocked", "financial_writes": 0}
     locked = False
     try:
         lock_options = {"lock_engine": lock_engine} if lock_engine is not None else {}
