@@ -167,3 +167,51 @@ async def test_partial_send_failure_names_the_failed_recipient_and_keeps_the_row
     assert row.payload["recipients"] == [bad.email, good.email]
     assert row.payload["failed_recipients"] == [bad.email]
     assert row.status == "error"
+
+
+async def test_an_unresolved_indeterminate_card_stays_in_every_digest(db, unknown_case):
+    """A standing condition: the card's updated_at stops moving once recovery gives up, so a
+    window keyed on the previous digest would report it once and then never again."""
+    from app.models.chat import ChatMessage, ChatSession
+
+    tenant_id = unknown_case.actor.tenant_id
+    first_run = datetime.now(timezone.utc) - timedelta(days=2)
+    await ops_digest.run_ops_digest(db, now=first_run, sender=AsyncMock(), tenant_ids=[tenant_id])
+    session = ChatSession(tenant_id=tenant_id, user_id=unknown_case.actor.id)
+    db.add(session)
+    await db.flush()
+    card = ChatMessage(
+        tenant_id=tenant_id,
+        session_id=session.id,
+        role="assistant",
+        content="",
+        structured_output={"type": "write_confirmation", "status": "indeterminate", "mutation_type": "create"},
+        created_at=first_run - timedelta(hours=1),
+        updated_at=first_run - timedelta(hours=1),  # before the previous digest, never touched since
+    )
+    db.add(card)
+    await db.flush()
+    sender = AsyncMock()
+
+    await ops_digest.run_ops_digest(db, now=datetime.now(timezone.utc), sender=sender, tenant_ids=[tenant_id])
+
+    payload = (await _digest_rows(db, tenant_id))[-1].payload
+    assert payload["counts"]["cards"] == 1 and str(card.id) in payload["ids"]["cards"]
+
+
+async def test_tenants_are_served_longest_waiting_first_so_the_cap_rotates(db):
+    """A fixed cap over a fixed order would leave the same tenants beyond it every run."""
+    served_before = await create_test_tenant(db, name="Served Before Corp")
+    never_served = await create_test_tenant(db, name="Never Served Corp")
+    await ops_digest.run_ops_digest(
+        db, now=datetime.now(timezone.utc), sender=AsyncMock(), tenant_ids=[served_before.id]
+    )
+
+    order = [t.id for (t,) in [(x,) for x in (await ops_digest.tenants_due(db))[0]]]
+    assert order.index(never_served.id) < order.index(served_before.id)
+
+    await ops_digest.run_ops_digest(
+        db, now=datetime.now(timezone.utc), sender=AsyncMock(), tenant_ids=[never_served.id]
+    )
+    order = [t.id for t in (await ops_digest.tenants_due(db))[0]]
+    assert order.index(served_before.id) < order.index(never_served.id)  # the older digest now waits longer

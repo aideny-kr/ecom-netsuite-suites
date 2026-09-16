@@ -211,6 +211,17 @@ def outcome(card, action, *, interrupted=False):
         return {"status": "rejected"}
     if status == "approved" and (card.get("accounting_verification") or {}).get("status") == "verified":
         return {"status": "verified"}
+    if status == "failed" and card.get("repair_exit_reason") == "dispatch_disabled":
+        # The orchestrator's switch halted this member after its claim. Nothing was sent
+        # (audited as a zero-write precondition failure), so there is nothing to verify;
+        # the member needs a fresh approval once dispatch is re-enabled.
+        return {
+            "status": "blocked",
+            "reason": (
+                "Sending was disabled by the operator before this correction was sent. Nothing was "
+                "sent; prepare a fresh approval once dispatch is re-enabled."
+            ),
+        }
     if card.get("accounting_execution") or status in {"executing", "indeterminate", "approved"}:
         return {
             "status": "verification_pending",
@@ -461,5 +472,10 @@ async def _drain(db, tenant_id, parent_id, factory):
             },
         )
     await db.commit()
-    status = "blocked" if halted else "waiting" if waiting else work["status"]
+    if halted:
+        status = "blocked"
+    elif waiting:
+        status = "waiting"
+    else:
+        status = work["status"]
     return {"status": status, "remaining": pending, "orders": len(work["members"])}

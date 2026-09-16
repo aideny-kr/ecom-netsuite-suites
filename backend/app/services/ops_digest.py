@@ -9,8 +9,9 @@ What counts as needing a human, per tenant:
 
 * transaction-ops operations that ended ``unknown`` or ``failed`` since the last digest;
 * recovery runs whose settlement verdict is unverified or shows a difference;
-* write-confirmation cards left ``indeterminate``, or ``executing`` longer than one tool
-  ceiling plus a grace period (a worker died mid-write);
+* write-confirmation cards left ``indeterminate`` (a standing condition: it stays in every
+  digest until a person resolves it), or ``executing`` longer than one tool ceiling plus a
+  grace period (a worker died mid-write);
 * connections currently in ``error`` (a standing condition, not windowed);
 * jobs that failed since the last digest.
 
@@ -43,7 +44,7 @@ ACTION = "ops.digest"
 TASK_NAME = "tasks.ops_digest"
 WINDOW = timedelta(hours=24)
 ROW_LIMIT = 50  # ids carried per category in the audit row; counts stay exact
-TENANT_LIMIT = 500  # tenants per run; more than this ends the run with reason "budget"
+TENANT_LIMIT = 500  # tenants per run, longest-waiting first; more than this ends the run with reason "budget"
 STALE_GRACE = timedelta(minutes=10)
 # `settlement.status` is written as unverified | succeeded | difference (settlement.py,
 # accounting_recheck.py). "not_verified" is the sibling balance/cash_settlement value and
@@ -113,8 +114,10 @@ async def collect(db, tenant_id: UUID, *, now: datetime, since: datetime) -> dic
                 ChatMessage.tenant_id == tenant_id,
                 ChatMessage.structured_output["type"].astext == "write_confirmation",
                 or_(
-                    (ChatMessage.structured_output["status"].astext == "indeterminate")
-                    & (ChatMessage.updated_at >= since),
+                    # Standing, never windowed by `since`: an indeterminate card's updated_at
+                    # stops moving once recovery gives up on it, and a window keyed on the
+                    # last digest would report it exactly once and then never again.
+                    ChatMessage.structured_output["status"].astext == "indeterminate",
                     (ChatMessage.structured_output["status"].astext == "executing")
                     & (ChatMessage.updated_at < stale_before),
                 ),
@@ -143,6 +146,36 @@ async def collect(db, tenant_id: UUID, *, now: datetime, since: datetime) -> dic
         counts[name], ids[name] = await _category(db, stmt, order_by)
         truncated[name] = counts[name] > len(ids[name])
     return {"counts": counts, "ids": ids, "truncated": truncated}
+
+
+def _epoch(value: datetime | None) -> float:
+    if value is None:
+        return 0.0
+    return (value if value.tzinfo else value.replace(tzinfo=timezone.utc)).timestamp()
+
+
+async def tenants_due(db, *, tenant_ids: list[UUID] | None = None) -> tuple[list[Tenant], bool]:
+    """Active tenants in the order this run should serve them, and whether the cap cut it.
+
+    Tenants that have never had a digest come first, then the longest-waiting. A fixed
+    cap over a fixed order would leave the same tenants beyond it every single run.
+    With explicit ``tenant_ids`` the caller's order is kept and the cap does not apply.
+    """
+    if tenant_ids is not None:
+        rows = {t.id: t for t in await db.scalars(select(Tenant).where(Tenant.id.in_(tenant_ids)))}
+        return [rows[i] for i in tenant_ids if i in rows], False
+    tenants = list(await db.scalars(select(Tenant).where(Tenant.is_active.is_(True))))
+    last = dict(
+        (
+            await db.execute(
+                select(AuditEvent.tenant_id, func.max(AuditEvent.timestamp))
+                .where(AuditEvent.action == ACTION)
+                .group_by(AuditEvent.tenant_id)
+            )
+        ).all()
+    )
+    tenants.sort(key=lambda t: (last.get(t.id) is not None, _epoch(last.get(t.id)), str(t.id)))
+    return tenants[:TENANT_LIMIT], len(tenants) > TENANT_LIMIT
 
 
 async def admin_emails(db, tenant_id: UUID) -> list[str]:
@@ -208,21 +241,12 @@ async def run_ops_digest(
     send = sender or email_service.send_ops_digest_email
     stats = {"tenants": 0, "sent": 0, "tenant_failed": 0, "truncated": False, "termination_reason": "done"}
 
-    if tenant_ids is None:
-        rows = list(
-            await db.scalars(
-                select(Tenant.id).where(Tenant.is_active.is_(True)).order_by(Tenant.id).limit(TENANT_LIMIT + 1)
-            )
-        )
-        stats["truncated"] = len(rows) > TENANT_LIMIT
-        tenant_ids = rows[:TENANT_LIMIT]
+    tenants, stats["truncated"] = await tenants_due(db, tenant_ids=tenant_ids)
 
-    for tenant_id in tenant_ids:
+    for tenant in tenants:
+        tenant_id = tenant.id
         try:
             await set_tenant_context(db, str(tenant_id))
-            tenant = await db.scalar(select(Tenant).where(Tenant.id == tenant_id))
-            if tenant is None:
-                continue
             since = (await previous_digest_at(db, tenant_id)) or (now - window)
             digest = await collect(db, tenant_id, now=now, since=since)
             total = sum(digest["counts"].values())

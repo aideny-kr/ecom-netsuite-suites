@@ -386,3 +386,17 @@ async def test_previous_execution_releases_a_halted_card_only_through_the_precon
     await db.flush()
     prior = await previous_execution(db, actor.tenant_id, uuid.uuid4(), p)
     assert (prior is None) is released_by_precondition_audit, prior
+
+
+def test_group_member_halted_by_the_switch_is_blocked_not_verification_pending():
+    """A member halted by the orchestrator's switch after its claim carries accounting_execution
+    but nothing was sent: there is nothing to verify, and the member needs a fresh approval."""
+    halted = {
+        "status": "failed",
+        "repair_exit_reason": "dispatch_disabled",
+        "accounting_execution": {"approved_by": str(_USER_ID)},
+    }
+    assert dispatch.outcome(halted, "approve")["status"] == "blocked"
+    # A genuine in-flight attempt still waits for verification and is never resent.
+    executing = {"status": "executing", "accounting_execution": {"approved_by": str(_USER_ID)}}
+    assert dispatch.outcome(executing, "approve")["status"] == "verification_pending"
