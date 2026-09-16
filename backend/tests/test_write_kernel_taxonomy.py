@@ -46,6 +46,8 @@ async def _claimed_row(db, claim):
 )
 async def test_the_ledger_accepts_each_kernel_status(db, ready, status):
     actor, _, _, claim = ready
+    if status == "committed_unverified":
+        assert await reserve(db, actor.tenant_id, claim)  # a receipt is only ever recorded behind the permit
     await db.execute(
         text("UPDATE transaction_ops_operations SET status = :status WHERE id = :id"),
         {"status": status, "id": claim.operation_id},
@@ -139,16 +141,30 @@ def _confirmation_row(actor, *, status="executing", work="w", entity="e", result
     )
 
 
-@pytest.mark.parametrize("outcome", ["rejected_before_effect", "needs_review"])
+@pytest.mark.parametrize("outcome", ["rejected_before_effect", "needs_review", "verified"])
 async def test_a_confirmation_row_completes_without_a_proposal(db, ready, outcome):
     """A row claimed by a chat confirmation has no proposal; completing it records the
-    approval it does have and never looks for the proposal it does not."""
+    approval it does have, never looks for the proposal it does not, and a verified
+    outcome queues no case settlement (the card's own surface owns what follows)."""
+    from app.models.transaction_ops import TransactionRun
+
     actor, _, _, _ = ready
     row = _confirmation_row(actor)
     db.add(row)
     await db.flush()
-    done = await state.complete_operation(db, actor.tenant_id, row.id, outcome=outcome, result_json={"code": "x"})
+    evidence = {"code": "x"}
+    if outcome == "verified":
+        # verified needs a consumed permit and a readback proof
+        row.api_calls_used += 1
+        row.result_json = {**row.result_json, "dispatch_reserved": True, "provider": "netsuite_mcp"}
+        await db.flush()
+        evidence["verification"] = {"source_unchanged": True}
+    done = await state.complete_operation(db, actor.tenant_id, row.id, outcome=outcome, result_json=evidence)
     assert done.status == outcome and done.completed_at is not None
+    settlement = await db.scalar(
+        select(TransactionRun.id).where(TransactionRun.params_json["operation_id"].astext == str(row.id))
+    )
+    assert settlement is None
     audit = await db.scalar(
         select(AuditEvent).where(
             AuditEvent.resource_id == str(row.id), AuditEvent.action == "transaction_ops.operation.complete"
@@ -190,23 +206,25 @@ async def test_the_downgrade_refuses_to_erase_confirmation_rows(db, ready):
         await connection.run_sync(_run_step, _migration().downgrade)
 
 
-async def test_the_downgrade_folds_needs_review_by_whether_a_permit_was_consumed(db, ready):
-    """needs_review has no legacy value: with a permit consumed it becomes unknown (blocks a
-    resend), without one it becomes failed (nothing was sent). Two open rows on one
-    document would break the legacy index, so that downgrade refuses instead."""
+@pytest.mark.parametrize("permit", [False, True])
+async def test_the_downgrade_folds_needs_review_to_unknown_whether_or_not_a_permit_was_consumed(db, ready, permit):
+    """needs_review has no legacy value and may hide an effect (an adapter-reported save the
+    ledger could not tie to a permit is the permit-less case), so it becomes unknown, which
+    blocks a resend; only rejected_before_effect becomes failed."""
     actor, _, _, claim = ready
+    if permit:
+        assert await reserve(db, actor.tenant_id, claim)
     await state.complete_operation(
         db, actor.tenant_id, claim.operation_id, outcome="needs_review", result_json={"code": "x"}
     )
-    quiet = (
-        await db.execute(select(TransactionOperation).where(TransactionOperation.id == claim.operation_id))
-    ).scalar_one()
     await db.commit()
     connection = await db.connection()
     await connection.run_sync(_run_step, _migration().downgrade)
     assert (
-        await db.scalar(text("SELECT status FROM transaction_ops_operations WHERE id = :id"), {"id": quiet.id})
-    ) == "failed"
+        await db.scalar(
+            text("SELECT status FROM transaction_ops_operations WHERE id = :id"), {"id": claim.operation_id}
+        )
+    ) == "unknown"
     await connection.run_sync(_run_step, _migration().upgrade)
 
 
@@ -217,7 +235,7 @@ async def test_the_downgrade_refuses_two_open_attempts_on_one_document(db, ready
     ).scalar_one()
     run = await state.get_run(db, actor.tenant_id, proposal.run_id)
     other = await new_proposal(db, actor, run, currency="EUR")  # a second piece of work on the same order
-    sent = _confirmation_row(actor, status="needs_review", work="s", result_json={"dispatch_reserved": True})
+    sent = _confirmation_row(actor, status="needs_review", work="s")
     sent.proposal_id = sent.approval_id = other.id
     sent.approval_kind, sent.surface = "transaction_proposal", "scheduled"
     sent.work_key = sent.base_work_key = other.work_key
@@ -520,6 +538,17 @@ async def test_the_database_refuses_to_downgrade_a_receipt(db, ready, status):
             {"id": claim.operation_id, "status": status},
         )
     assert "immutable operation receipt" in str(exc.value)
+    await db.rollback()
+
+
+async def test_the_database_refuses_a_receipt_on_a_row_that_never_consumed_a_permit(db, ready):
+    actor, _, _, claim = ready
+    with pytest.raises(Exception) as exc:
+        await db.execute(
+            text("UPDATE transaction_ops_operations SET status = 'committed_unverified' WHERE id = :id"),
+            {"id": claim.operation_id},
+        )
+    assert "receipt requires a permit" in str(exc.value)
     await db.rollback()
 
 

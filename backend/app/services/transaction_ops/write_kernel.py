@@ -14,8 +14,9 @@ Every exit is a row in the operation ledger with one of state_service.OUTCOMES
 
 Adapters (write_adapters.py) own the provider-specific reads, the wire payload and the one
 send. They never write the ledger and cannot mint a permit: the permit comes from
-state_service.reserve_operation_dispatch, called inside their ``send``, and the guard
-trigger refuses a receipt on a row that never consumed one.
+state_service.reserve_operation_dispatch, called inside their ``send``, and both
+state_service.record_receipt and the guard trigger refuse a receipt on a row that never
+consumed one.
 """
 
 import asyncio
@@ -76,6 +77,12 @@ def result_of(row) -> dict:
     }
 
 
+# complete_operation's refusals that mean "the ledger already holds a better outcome than
+# this delivery reached", never "this delivery is wrong": a receipt from an earlier delivery
+# outranks a later delivery's lack of one, and a settled unknown moves only by recovery.
+LEDGER_KNOWS_BETTER = frozenset({"operation_terminal", "receipt_recorded", "reconciliation_evidence_required"})
+
+
 def _recorded(row) -> bool:
     """Whether the ledger already holds an outcome a failure must not overwrite: a terminal
     row, or an open one that budget exhaustion, a recovery pass or an earlier delivery
@@ -128,9 +135,12 @@ async def execute(db, tenant_id, claimed, adapter: WriteAdapter, *, clock=None) 
                 db, tenant_id, claimed.operation_id, outcome=outcome, result_json={"code": code, **details}, now=clock()
             )
         except state.StateError as exc:
-            if exc.code != "operation_terminal":
+            if exc.code not in LEDGER_KNOWS_BETTER:
                 raise
-            # A duplicate delivery of a settled claim reads the durable outcome.
+            # A duplicate delivery of a claim the ledger already settled reads the durable
+            # outcome: the transport answers a spent permit with an unknown receipt, so this
+            # delivery decided "unknown" against a row that holds an earlier receipt
+            # (receipt_recorded) or that only reconciliation may move (unknown).
             row = await state._one(db, tenant_id, TransactionOperation, claimed.operation_id)
         return result_of(row)
 
