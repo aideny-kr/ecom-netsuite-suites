@@ -60,7 +60,10 @@ class RunManager:
 
     def set_outcome(self, run_id: str, outcome: str) -> None:
         if self._redis is not None:
-            self._redis.set(f"chat:run:{run_id}:outcome", outcome, ex=_RUN_TTL)
+            pipe = self._redis.pipeline()
+            pipe.set(f"chat:run:{run_id}:outcome", outcome, ex=_RUN_TTL)
+            pipe.expire(f"chat:run:{run_id}:session", _RUN_TTL)
+            pipe.execute()
 
     def get_outcome(self, run_id: str) -> str | None:
         return self._redis.get(f"chat:run:{run_id}:outcome") if self._redis is not None else None
@@ -86,7 +89,10 @@ class RunManager:
         if r is None:
             return
         key = f"chat:run:{run_id}:status"
-        r.set(key, status, ex=_RUN_TTL)
+        pipe = r.pipeline()
+        pipe.set(key, status, ex=_RUN_TTL)
+        pipe.expire(f"chat:run:{run_id}:session", _RUN_TTL)
+        pipe.execute()
 
     # ------------------------------------------------------------------
     # Session -> run mapping
@@ -125,9 +131,11 @@ class RunManager:
         if r is None:
             return None
         key = f"chat:run:{run_id}:events"
-        stream_id = r.xadd(key, {"payload": json.dumps(event)})
-        r.expire(key, _RUN_TTL)
-        return stream_id
+        pipe = r.pipeline()
+        pipe.xadd(key, {"payload": json.dumps(event)})
+        pipe.expire(key, _RUN_TTL)
+        pipe.expire(f"chat:run:{run_id}:session", _RUN_TTL)
+        return pipe.execute()[0]
 
     def read_events(
         self,
@@ -193,11 +201,13 @@ class RunManager:
             if state ~= 'running' then return 0 end
             redis.call('SET', KEYS[2], '1', 'EX', ARGV[1])
             redis.call('SET', KEYS[1], 'cancelling', 'EX', ARGV[1])
+            redis.call('EXPIRE', KEYS[3], ARGV[1])
             return 1
             """,
-                2,
+                3,
                 f"chat:run:{run_id}:status",
                 f"chat:run:{run_id}:cancel",
+                f"chat:run:{run_id}:session",
                 _RUN_TTL,
             )
         )

@@ -279,3 +279,24 @@ The newer layout test also needed its feature-query dependency stubbed; both
 layout responsiveness tests now pass with the native-tool mount present. No
 runtime authentication or feature checks were relaxed. PR #260 remains draft
 for CI and independent release review; no deployment was requested/performed.
+
+## Independent release review (2026-09-15)
+
+Claude Opus 5 independently reviewed 7780a5cc against 430d5751 through all eight
+risk angles. It requested FORCE RLS and flagged cancellation recovery; two minor
+findings covered replay burst quota and ownership TTL. Implementer remains GPT-6
+Astra. Evidence: /tmp/webmcp-release-review/result.json.
+
+Fixes add FORCE RLS with the repo tenant helper and test the actual non-bypass
+table-owner role; matching receipt replays bypass new-message burst quota; Redis
+ownership TTL follows retained run data. Agents can select session_id:null to use
+the existing New Chat behavior for independent work while a prior run stops.
+
+Cancellation disposition: do not force-settle a possibly live worker after a
+timer or second cancel. CAS protects the Redis pointer only; it does not fence
+old worker message writes or external tool side effects. Reopening the same
+session early can overlap workers. Keep truthful cancelling + 600-second live
+worker timeout + the documented lost-worker/TTL bound. A fresh-conversation escape
+is safe; retrying an uncertain operation under another session/key is not.
+Bounded dead-worker recovery needs durable fencing and is explicitly deferred.
+A focused independent follow-up must assess this rationale and the fixes.

@@ -66,6 +66,14 @@ describe("chat actions", () => {
     expect(() => call(createChatTools(() => state), "chat_send_message", { session_id: sid, request_id: key, content: "test", ...extra })).toThrow("Invalid tool arguments");
     expect(state.send).not.toHaveBeenCalled();
   });
+  it("can open a fresh composer while the previous conversation remains busy", async () => {
+    state.busy = true;
+    expect(await call(createChatTools(() => state), "chat_select_session", { session_id: null }))
+      .toMatchObject({ session_id: null, status: "selection_requested" });
+    expect(state.select).toHaveBeenCalledWith(null);
+    expect(state.cancel).not.toHaveBeenCalled();
+    expect(state.send).not.toHaveBeenCalled();
+  });
   it("refuses to cancel an unrelated run", () => {
     expect(() => call(createChatTools(() => state), "chat_cancel_run", { session_id: sid, run_id: key })).toThrow("not active");
     expect(state.cancel).not.toHaveBeenCalled();

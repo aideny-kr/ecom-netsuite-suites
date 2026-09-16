@@ -692,7 +692,7 @@ export default function ChatPage() {
     clearStreamingState();
   }, [clearStreamingState]);
 
-  const handleSelectSession = useCallback((sessionId: string) => {
+  const handleSelectSession = useCallback((sessionId: string | null) => {
     if (sessionId === activeSessionId) return;
     clearStreamingState();
     setActiveSessionId(sessionId);

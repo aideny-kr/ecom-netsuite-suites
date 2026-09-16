@@ -29,10 +29,11 @@ def upgrade() -> None:
     )
     op.create_index("ix_chat_submissions_tenant_id", "chat_submissions", ["tenant_id"])
     op.execute("ALTER TABLE chat_submissions ENABLE ROW LEVEL SECURITY")
+    op.execute("ALTER TABLE chat_submissions FORCE ROW LEVEL SECURITY")
     op.execute("""
         CREATE POLICY chat_submissions_tenant_isolation ON chat_submissions
-        USING (tenant_id = nullif(current_setting('app.current_tenant_id', true), '')::uuid)
-        WITH CHECK (tenant_id = nullif(current_setting('app.current_tenant_id', true), '')::uuid)
+        USING (tenant_id = get_current_tenant_id())
+        WITH CHECK (tenant_id = get_current_tenant_id())
     """)
 
 
