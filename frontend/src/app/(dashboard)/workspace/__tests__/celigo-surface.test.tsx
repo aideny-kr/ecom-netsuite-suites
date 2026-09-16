@@ -29,6 +29,12 @@ vi.mock("next/navigation", () => ({
   usePathname: () => "/workspace",
 }));
 
+// This surface test does not exercise native tools; supply the layout auth
+// dependency. WebMCP registration and identity changes have dedicated tests.
+vi.mock("@/providers/auth-provider", () => ({
+  useAuth: () => ({ user: null, isLoading: false }),
+}));
+
 const features = vi.hoisted(() => vi.fn());
 vi.mock("@/hooks/use-features", () => ({
   useFeature: () => features(),

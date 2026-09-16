@@ -12,7 +12,12 @@ import {
 import { Button } from "@/components/ui/button";
 import { MessageList } from "@/components/chat/message-list";
 import { ChatInput } from "@/components/chat/chat-input";
-import { useWorkspaceChat } from "@/hooks/use-workspace-chat";
+import { useWorkspaceChat, type WorkspaceSendOptions } from "@/hooks/use-workspace-chat";
+import { useQuery } from "@tanstack/react-query";
+import { apiClient } from "@/lib/api-client";
+import { useWebMcpState, useWebMcpTools } from "@/hooks/use-webmcp-tools";
+import { createChatTools, type WebMcpChatState } from "@/lib/webmcp-chat";
+import { workspaceChatContent } from "@/lib/workspace-chat-context";
 
 interface WorkspaceChatPanelProps {
   workspaceId: string;
@@ -35,6 +40,11 @@ export function WorkspaceChatPanel({
     setActiveSessionId,
     sessionDetail,
     isLoadingDetail,
+    isLoadingSessions,
+    createConversation,
+    cancelActiveRun,
+    handleStop,
+    activeRunId,
     pendingMessage,
     error,
     setError,
@@ -45,24 +55,34 @@ export function WorkspaceChatPanel({
     streamingMessage,
   } = useWorkspaceChat(workspaceId);
 
-  // Auto-inject current file context so the AI knows what the user is viewing
+  const { data: health } = useQuery<{ max_input_chars: number }>({
+    queryKey: ["chat-health"],
+    queryFn: () => apiClient.get("/api/v1/chat/health"),
+    staleTime: 60_000,
+  });
+  // The same file-context and attachment path serves both human and agent sends.
   const handleSendWithContext = useCallback(
-    (content: string) => {
-      let enrichedContent = content;
-      if (currentFilePath) {
-        const prefix = `[Currently viewing file: ${currentFilePath}]\n\n`;
-        // Backend max is 4000 chars — leave room for prefix
-        const maxContentLen = 4000 - prefix.length;
-        if (content.length > maxContentLen) {
-          enrichedContent = prefix + content.slice(0, maxContentLen);
-        } else {
-          enrichedContent = prefix + content;
-        }
+    async (content: string, fileId?: string, opts: WorkspaceSendOptions = {}) => {
+      try {
+        opts.assert_current?.();
+        const enriched = workspaceChatContent(content, currentFilePath, health?.max_input_chars || 32000);
+        return await handleSend(enriched, fileId, opts);
+      } catch (error) {
+        if (opts.request_id) throw error;
+        setError(error instanceof Error ? error.message : "Failed to send message.");
       }
-      handleSend(enrichedContent);
     },
-    [handleSend, currentFilePath],
+    [handleSend, currentFilePath, health?.max_input_chars, setError],
   );
+  const chatState = useWebMcpState<WebMcpChatState>({
+    sessionId: activeSessionId, sessions, detail: sessionDetail,
+    workspaceId, filePath: currentFilePath || null, activeRunId,
+    busy: isSending, loading: isLoadingSessions || (!!activeSessionId && sessionDetail?.id !== activeSessionId),
+    hasError: !!error, create: createConversation, select: setActiveSessionId,
+    send: (content, requestId, assertCurrent) => handleSendWithContext(content, undefined, { request_id: requestId, assert_current: assertCurrent }),
+    cancel: cancelActiveRun,
+  });
+  useWebMcpTools(`workspace-chat:${workspaceId}`, createChatTools(chatState, true));
 
   const inputRef = useRef<{ insertText: (text: string) => void }>(null);
   const [attachedHint, setAttachedHint] = useState<string | null>(null);
@@ -178,6 +198,9 @@ export function WorkspaceChatPanel({
       <div className="border-t">
         <ChatInput
           onSend={handleSendWithContext}
+          onStop={handleStop}
+          isRunning={!!activeRunId}
+          reservedChars={currentFilePath ? `[Currently viewing file: ${currentFilePath}]\n\n`.length : 0}
           isLoading={isSending}
           workspaceId={workspaceId}
         />
