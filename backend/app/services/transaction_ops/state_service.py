@@ -19,6 +19,7 @@ from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
+from app.core.config import settings
 from app.core.database import set_tenant_context
 from app.models.celigo import CeligoFlow, CeligoFlowStep
 from app.models.connection import ACTIVE_CONNECTION_STATUSES, Connection
@@ -1104,6 +1105,12 @@ async def reserve_operation_dispatch(
     if now >= operation.deadline_at or operation.api_calls_used >= operation.max_api_calls:
         await _exhaust_operation(db, tenant_id, operation, now, "operation_budget_exhausted")
         raise StateError("operation_budget_exhausted")
+    if not settings.TRANSACTION_OPS_DISPATCH_ENABLED:
+        # The operator switch is the LAST refusal before the permit, so it only
+        # speaks for operations that would otherwise have been sent. Anything a more
+        # specific check would have refused anyway keeps that reason.
+        await _block_operation(db, tenant_id, operation, now, "dispatch_disabled")
+        raise StateError("dispatch_disabled")
     operation.api_calls_used += 1
     operation.result_json = {
         **(operation.result_json or {}),
@@ -1121,6 +1128,22 @@ async def reserve_operation_dispatch(
     )
     await _commit(db, tenant_id)
     return True
+
+
+async def _block_operation(db, tenant_id, operation, now, code):
+    """The operator switch refused the send before the one-use permit existed.
+
+    Nothing was sent, so this is a known failure, never an unknown: ``dispatch_reserved``
+    is never set, a duplicate delivery reads the terminal row and spends nothing, and the
+    approved work needs a fresh human decision once dispatch is re-enabled. Every more
+    specific refusal (provider, stale evidence, config, flags, actor, budget) runs first,
+    so a ``blocked`` row always means "this would have been sent".
+    """
+    operation.status = "failed"
+    operation.completed_at = now
+    operation.result_json = {**(operation.result_json or {}), "termination_reason": "blocked", "code": code}
+    await _audit(db, tenant_id, "operation.blocked", operation, payload={"code": code, "financial_writes": 0})
+    await _commit(db, tenant_id)
 
 
 async def _exhaust_operation(db, tenant_id, operation, now, code):

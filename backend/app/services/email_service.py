@@ -54,14 +54,28 @@ async def send_invite_email(
         f"This invitation expires in 7 days."
     )
     html_body = _build_invite_html(inviter_name, tenant_brand_name, role_display_name, accept_url)
+    await _deliver(
+        "INVITE EMAIL",
+        to_email=to_email,
+        subject=subject,
+        text_body=text_body,
+        html_body=html_body,
+        console_extra=(f"Accept URL: {accept_url}",),
+    )
 
+
+async def _deliver(
+    label: str, *, to_email: str, subject: str, text_body: str, html_body: str, console_extra: tuple[str, ...] = ()
+) -> None:
+    """The one provider dispatch for every outbound email: console prints, resend posts."""
     if EMAIL_PROVIDER == "console":
         print(f"\n{'=' * 60}", flush=True)
-        print("INVITE EMAIL (console mode)", flush=True)
+        print(f"{label} (console mode)", flush=True)
         print(f"To: {to_email}", flush=True)
         print(f"Subject: {subject}", flush=True)
         print(f"Body:\n{text_body}", flush=True)
-        print(f"Accept URL: {accept_url}", flush=True)
+        for line in console_extra:
+            print(line, flush=True)
         print(f"{'=' * 60}\n", flush=True)
         return
 
@@ -99,3 +113,8 @@ async def _send_via_resend(to: str, subject: str, html: str, text: str) -> None:
         raise RuntimeError(f"Resend API error: {response.status_code} — {response.text}")
 
     logger.info("email.sent", provider="resend", to=to, subject=subject)
+
+
+async def send_ops_digest_email(*, to_email: str, subject: str, text_body: str, html_body: str) -> None:
+    """Deliver the daily ops digest through the same provider as invitations."""
+    await _deliver("OPS DIGEST EMAIL", to_email=to_email, subject=subject, text_body=text_body, html_body=html_body)
