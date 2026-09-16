@@ -58,6 +58,26 @@ _OPERATION_TIME = timedelta(seconds=300)
 _LEDGER_RESULT_KEYS = frozenset(
     {"dispatch_reserved", "provider", "payload_fingerprint", "dispatch_reserved_at", "termination_reason"}
 )
+# The write kernel's outcome taxonomy (docs/superpowers/specs/2026-09-15-write-kernel-design.md,
+# section 3). The repair rule is a function of the status: a retry is allowed only from
+# rejected_before_effect and only as a lineage row; unknown may only be reconciled by reads;
+# committed_unverified may only be verified by reads; needs_review waits for a person.
+OUTCOMES = frozenset({"rejected_before_effect", "committed_unverified", "unknown", "verified", "needs_review"})
+TERMINAL = frozenset({"verified", "rejected_before_effect", "needs_review"})
+SETTLED = frozenset({"unknown", "committed_unverified"})  # a permit was consumed; reads only from here
+# The states the write kernel may still write to. ``unknown`` is settled but not open: only
+# read-only reconciliation (recovery) may move it, never the attempt that produced it.
+OPEN = frozenset({"executing", "committed_unverified"})
+IN_FLIGHT = frozenset({"executing", *SETTLED})  # an attempt that blocks a new one on the same work or entity
+TERMINATION = {
+    "verified": "done",
+    "unknown": "stall",
+    "committed_unverified": "stall",
+    "rejected_before_effect": "error",
+    "needs_review": "blocked",
+}
+PROVIDERS = {"correct_amounts": "netsuite", "sync_missing_order": "netsuite", "resolve_celigo_error": "celigo"}
+ADAPTERS = {"netsuite": "guard_restlet", "celigo": "celigo"}
 
 
 class StateError(ValueError):
@@ -65,6 +85,12 @@ class StateError(ValueError):
         super().__init__(code)
         self.code = code
         self.http_status = http_status
+
+
+def permit_consumed(operation) -> bool:
+    """Whether the one-use send permit was reserved on this row. A consumed permit cannot be
+    told apart from a sent request, so every outcome after it is at least ``unknown``."""
+    return (operation.result_json or {}).get("dispatch_reserved") is True
 
 
 def _clock(now=None):
@@ -818,9 +844,9 @@ async def propose(db, tenant_id, run_id, request: ProposalCreate, *, lease_token
             await _commit(db, tenant_id)
             return existing
         if attempted is not None:
-            result = attempted.result_json or {}
-            known_no_write = attempted.status == "failed" and (
-                result.get("dispatch_reserved") is not True or result.get("code") == "provider_rejected_without_save"
+            known_no_write = attempted.status in ("failed", "rejected_before_effect") and (
+                not permit_consumed(attempted)
+                or (attempted.result_json or {}).get("code") == "provider_rejected_without_save"
             )
             if not known_no_write or attempt_number == 2:
                 await _commit(db, tenant_id)
@@ -916,7 +942,7 @@ async def claim_approved_operation(db, tenant_id, proposal_id, *, expected_evide
             .join(related, and_(related.id == TransactionOperation.proposal_id, related.tenant_id == tenant_id))
             .where(
                 TransactionOperation.tenant_id == tenant_id,
-                TransactionOperation.status.in_(("executing", "unknown")),
+                TransactionOperation.status.in_(IN_FLIGHT),
                 func.lower(func.replace(related.netsuite_account_id, "_", "-"))
                 == row.netsuite_account_id.replace("_", "-").lower(),
                 related.subsidiary_id == row.subsidiary_id,
@@ -958,11 +984,33 @@ async def claim_approved_operation(db, tenant_id, proposal_id, *, expected_evide
         await _audit(db, tenant_id, "proposal.invalidate", row)
         await _commit(db, tenant_id)
         return None
+    # Lineage: a retry proposal names the attempt it corrects; the new row keeps that
+    # attempt's base work key so the business identity is never changed to pass the
+    # duplicate check.
+    retry = (row.evidence_json or {}).get("retry") or {}
+    previous = None
+    if retry.get("previous_operation_id"):
+        previous = (
+            await db.execute(
+                select(TransactionOperation).where(
+                    TransactionOperation.tenant_id == tenant_id,
+                    TransactionOperation.id == uuid.UUID(str(retry["previous_operation_id"])),
+                )
+            )
+        ).scalar_one_or_none()
+    provider = PROVIDERS.get(row.action)
     operation = TransactionOperation(
         tenant_id=tenant_id,
         proposal_id=row.id,
+        approval_kind="transaction_proposal",
+        approval_id=row.id,
+        surface="scheduled",
+        provider=provider,
+        adapter=ADAPTERS.get(provider),
         work_key=row.work_key,
         entity_key=entity_key,
+        base_work_key=previous.base_work_key if previous is not None else row.work_key,
+        retry_of_operation_id=previous.id if previous is not None else None,
         attempted_at=now,
         deadline_at=min(now + _OPERATION_TIME, row.valid_until),
         max_api_calls=_OPERATION_CALLS,
@@ -990,30 +1038,77 @@ async def claim_approved_operation(db, tenant_id, proposal_id, *, expected_evide
     return intent
 
 
+async def operation_for_work(db, tenant_id, work_key):
+    """The ledger row for a piece of work, or None; the duplicate check's own lookup."""
+    await set_tenant_context(db, str(tenant_id))
+    query = select(TransactionOperation).where(
+        TransactionOperation.tenant_id == tenant_id, TransactionOperation.work_key == work_key
+    )
+    return (await db.execute(query.execution_options(populate_existing=True))).scalar_one_or_none()
+
+
+async def record_receipt(db, tenant_id, operation_id, receipt, *, now=None):
+    """The provider identified the record as saved: the attempt is committed, not yet proven.
+
+    Written between the send and the independent readback, so the row says what is true
+    if the process dies in between. Only reads may follow; the permit is already spent.
+    """
+    evidence = _bounded_json({"receipt": receipt})
+    row = await _one(db, tenant_id, TransactionOperation, operation_id, lock=True)
+    if row.status != "executing":
+        await _commit(db, tenant_id)
+        return row
+    if not permit_consumed(row):
+        raise StateError("receipt_without_permit")
+    row.status = "committed_unverified"
+    row.result_json = {**(row.result_json or {}), **evidence, "termination_reason": "stall"}
+    await _audit(db, tenant_id, "operation.receipt", row, payload={"receipt": evidence["receipt"]})
+    await _commit(db, tenant_id)
+    return row
+
+
 async def complete_operation(db, tenant_id, operation_id, *, outcome, result_json, now=None):
-    if outcome not in {"verified", "unknown", "failed"}:
+    if outcome not in OUTCOMES:
         raise ValueError("Invalid operation outcome")
     evidence = _bounded_json(result_json)
     if _LEDGER_RESULT_KEYS.intersection(evidence):
         raise StateError("reserved_operation_result_key")
     row = await _one(db, tenant_id, TransactionOperation, operation_id, lock=True)
-    if row.status not in {"executing", "unknown"}:
+    if row.status not in IN_FLIGHT:
         raise StateError("operation_terminal")
-    # An unknown attempt can become verified/failed only after caller-provided
-    # read-only provider verification; this service never dispatches it again.
+    # An unknown attempt can move only after caller-provided read-only provider
+    # reconciliation; this service never dispatches it again.
     if row.status == "unknown" and evidence.get("reconciled") is not True:
         raise StateError("reconciliation_evidence_required")
+    if row.status == "committed_unverified":
+        # A receipt exists, so the attempt can never be called "before effect" or
+        # "unknown" again, and only an independent readback may call it verified.
+        if outcome in ("rejected_before_effect", "unknown"):
+            raise StateError("receipt_recorded")
+        if outcome == "verified" and not isinstance(evidence.get("verification"), dict):
+            raise StateError("verification_evidence_required")  # the guard trigger asks the same question
     row.status, row.completed_at = outcome, _clock(now)
-    row.result_json = {
-        **(row.result_json or {}),
-        **evidence,
-        "termination_reason": {"verified": "done", "unknown": "stall", "failed": "error"}[outcome],
-    }
-    proposal = await get_proposal(db, tenant_id, row.proposal_id)
-    if outcome == "verified":
+    row.result_json = {**(row.result_json or {}), **evidence, "termination_reason": TERMINATION[outcome]}
+    # A transaction proposal's row settles its case and records the proposal's approval; a
+    # row from any other approval source (a chat confirmation) records the approval it
+    # carries on itself, and its own surface owns what follows a verified outcome.
+    proposal = await get_proposal(db, tenant_id, row.proposal_id) if row.proposal_id is not None else None
+    if outcome == "verified" and proposal is not None:
         from app.services.transaction_ops.settlement import queue
 
         await queue(db, tenant_id, row, proposal, now=row.completed_at)
+    approval = {"approval_kind": row.approval_kind, "approval_id": str(row.approval_id)}
+    if proposal is not None:
+        approval.update(
+            run_id=str(proposal.run_id),
+            config_id=str(proposal.config_id),
+            approved_by=str(proposal.decided_by),
+            approved_at=proposal.decided_at.isoformat(),
+            evidence_fingerprint=proposal.evidence_fingerprint,
+        )
+    else:
+        recorded = row.result_json or {}
+        approval.update(approved_by=recorded.get("approved_by"), evidence_digest=recorded.get("evidence_digest"))
     await _audit(
         db,
         tenant_id,
@@ -1022,11 +1117,7 @@ async def complete_operation(db, tenant_id, operation_id, *, outcome, result_jso
         payload={
             "outcome": outcome,
             "code": evidence.get("code"),
-            "run_id": str(proposal.run_id),
-            "config_id": str(proposal.config_id),
-            "approved_by": str(proposal.decided_by),
-            "approved_at": proposal.decided_at.isoformat(),
-            "evidence_fingerprint": proposal.evidence_fingerprint,
+            **approval,
             # The result verifies the approved operation. A separate fresh case
             # observation must establish agreement on gross, tax and refunds.
             "settlement_status": "not_evaluated",
@@ -1074,17 +1165,12 @@ async def reserve_operation_dispatch(
     )
     if claimed != expected or operation.proposal_id != proposal.id or operation.work_key != proposal.work_key:
         raise StateError("claimed_operation_mismatch")
-    if (operation.result_json or {}).get("dispatch_reserved") is True:
+    if permit_consumed(operation):
         await _commit(db, tenant_id)
         return False
     if operation.status != "executing" or proposal.status != "approved":
         raise StateError("operation_not_executable")
-    required_provider = {
-        "correct_amounts": "netsuite",
-        "sync_missing_order": "netsuite",
-        "resolve_celigo_error": "celigo",
-    }
-    if required_provider.get(proposal.action) != provider:
+    if PROVIDERS.get(proposal.action) != provider:
         raise StateError("unsupported_dispatch_provider")
     if now >= proposal.valid_until:
         raise StateError("stale_evidence")
@@ -1133,13 +1219,14 @@ async def reserve_operation_dispatch(
 async def _block_operation(db, tenant_id, operation, now, code):
     """The operator switch refused the send before the one-use permit existed.
 
-    Nothing was sent, so this is a known failure, never an unknown: ``dispatch_reserved``
-    is never set, a duplicate delivery reads the terminal row and spends nothing, and the
-    approved work needs a fresh human decision once dispatch is re-enabled. Every more
-    specific refusal (provider, stale evidence, config, flags, actor, budget) runs first,
-    so a ``blocked`` row always means "this would have been sent".
+    Nothing was sent, so this is a refusal before any effect, never an unknown:
+    ``dispatch_reserved`` is never set, a duplicate delivery reads the terminal row and
+    spends nothing, and the approved work needs a fresh human decision once dispatch is
+    re-enabled (the taxonomy admits a lineage retry from this state). Every more specific
+    refusal (provider, stale evidence, config, flags, actor, budget) runs first, so a
+    ``blocked`` row always means "this would have been sent".
     """
-    operation.status = "failed"
+    operation.status = "rejected_before_effect"
     operation.completed_at = now
     operation.result_json = {**(operation.result_json or {}), "termination_reason": "blocked", "code": code}
     await _audit(db, tenant_id, "operation.blocked", operation, payload={"code": code, "financial_writes": 0})
@@ -1150,7 +1237,10 @@ async def _exhaust_operation(db, tenant_id, operation, now, code):
     # This lock is shared with the dispatch permit. An old worker cannot send
     # after recovery marks a pre-dispatch operation failed. A consumed permit
     # cannot be distinguished from a sent request, so it always stays unknown.
-    operation.status = "unknown" if (operation.result_json or {}).get("dispatch_reserved") is True else "failed"
+    if operation.status == "executing":
+        # Only an executing attempt changes state on exhaustion; a settled one (a receipt
+        # exists, the readback ran out of budget) keeps its state and gains the reason.
+        operation.status = "unknown" if permit_consumed(operation) else "rejected_before_effect"
     operation.completed_at = now
     operation.result_json = {**(operation.result_json or {}), "termination_reason": "budget", "code": code}
     await _audit(db, tenant_id, "operation.exhaust", operation, payload={"outcome": operation.status, "code": code})
@@ -1176,7 +1266,10 @@ async def reserve_operation_budget(db, tenant_id, operation_id, *, api_calls, no
     if tenant is None or not tenant.is_active:
         raise StateError("tenant_unavailable", 403)
     operation = await _one(db, tenant_id, TransactionOperation, operation_id, lock=True)
-    if operation.status != "executing":
+    # Reads are budgeted while the attempt is executing and, after a receipt, while it is
+    # committed but unverified: the independent readback is what proves it. A send permit
+    # still requires `executing` (reserve_operation_dispatch), so this never enables a resend.
+    if operation.status not in OPEN:
         raise StateError("operation_not_executable")
     if now >= operation.deadline_at or operation.api_calls_used + api_calls > operation.max_api_calls:
         await _exhaust_operation(db, tenant_id, operation, now, "operation_budget_exhausted")
@@ -1200,9 +1293,12 @@ async def recover_expired_operation(db, tenant_id, operation_id, *, now=None):
     if operation.status != "executing" or now < operation.deadline_at:
         await _commit(db, tenant_id)
         return None
-    sent = (operation.result_json or {}).get("dispatch_reserved") is True
     await _exhaust_operation(
-        db, tenant_id, operation, now, "interrupted_after_dispatch" if sent else "interrupted_before_dispatch"
+        db,
+        tenant_id,
+        operation,
+        now,
+        "interrupted_after_dispatch" if permit_consumed(operation) else "interrupted_before_dispatch",
     )
     return operation
 
@@ -1236,7 +1332,7 @@ async def create_operation_recovery(db, tenant_id, operation_id, *, actor=None, 
     if existing:
         await _commit(db, tenant_id)
         return existing
-    if operation.status != "unknown" or (operation.result_json or {}).get("dispatch_reserved") is not True:
+    if operation.status not in SETTLED or not permit_consumed(operation):
         raise StateError("operation_not_recoverable")
     proposal = await get_proposal(db, tenant_id, operation.proposal_id)
     config = await get_config(db, tenant_id, proposal.config_id)
@@ -1309,7 +1405,9 @@ async def finish_operation_recovery(db, tenant_id, run_id, *, lease_token, reaso
     ):
         _lease(run, lease_token, now)
     _finish(run, reason, now)
-    if operation.status == "unknown":
+    if operation.status in SETTLED:
+        # Reads only: a proof moves the row to verified; without one it keeps its state
+        # (unknown stays unknown, committed_unverified stays committed_unverified).
         details = _bounded_json(
             {
                 "reconciled": True,
@@ -1317,14 +1415,14 @@ async def finish_operation_recovery(db, tenant_id, run_id, *, lease_token, reaso
                 **({"verification": proof} if proof is not None else {}),
             }
         )
-        operation.status = "verified" if proof is not None else "unknown"
+        operation.status = "verified" if proof is not None else operation.status
         operation.completed_at = now
         operation.result_json = {
             **(operation.result_json or {}),
             **details,
             "termination_reason": "done" if proof is not None else reason,
         }
-        if proof is not None:
+        if proof is not None and operation.proposal_id is not None:
             from app.services.transaction_ops.settlement import queue
 
             proposal = await get_proposal(db, tenant_id, operation.proposal_id)

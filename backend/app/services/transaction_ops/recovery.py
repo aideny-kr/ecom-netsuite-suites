@@ -8,7 +8,6 @@ from app.core.database import set_tenant_context
 from app.models.transaction_ops import TransactionOperation
 from app.services.transaction_ops import state_service as state
 from app.services.transaction_ops.celigo_actions import MAX_READ_CALLS, read_celigo_resolution
-from app.services.transaction_ops.executor import _result, verify_outcome
 from app.services.transaction_ops.netsuite_create import prepare_create_input
 from app.services.transaction_ops.netsuite_reader import read_netsuite_order
 from app.services.transaction_ops.netsuite_transport import (
@@ -19,13 +18,15 @@ from app.services.transaction_ops.netsuite_transport import (
 from app.services.transaction_ops.normalization import TransactionMapping
 from app.services.transaction_ops.runner import build_report, enabled, limit_report
 from app.services.transaction_ops.source_reader import read_framework_order
+from app.services.transaction_ops.write_adapters import verify_outcome
+from app.services.transaction_ops.write_kernel import result_of as _result
 
 
 async def recover_operation(db, tenant_id, operation_id, *, _clock=None):
     clock = _clock or (lambda: datetime.now(timezone.utc))
     await state.recover_expired_operation(db, tenant_id, operation_id, now=clock())
     operation = await state._one(db, tenant_id, TransactionOperation, operation_id)
-    if operation.status != "unknown" or not await enabled(db, tenant_id):
+    if operation.status not in state.SETTLED or not await enabled(db, tenant_id):
         return _result(operation)
     proposal = await state.get_proposal(db, tenant_id, operation.proposal_id)
     if not (await state.get_config(db, tenant_id, proposal.config_id)).enabled:
@@ -66,7 +67,7 @@ async def reconcile_operation_run(db, tenant_id, run_id, *, _clock=None):
             return await function(db, tenant_id, *args, **kwargs)
 
     try:
-        if operation.status == "unknown":
+        if operation.status in state.SETTLED:
             # A reclaimed lease resumes this exact order. Charge every read
             # again, while counting the immutable order scope only once.
             source = await read(

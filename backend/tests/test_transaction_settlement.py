@@ -175,8 +175,8 @@ async def test_queued_settlement_gets_execution_time_and_cannot_create_proposals
     assert run.progress_json["settlement"]["status"] == "unverified"
 
 
-@pytest.mark.parametrize("settled_operation", ["unknown", "failed"], indirect=True)
-async def test_unknown_or_failed_write_is_not_queued_as_verified_settlement(db, settled_operation):
+@pytest.mark.parametrize("settled_operation", ["unknown", "rejected_before_effect"], indirect=True)
+async def test_unknown_or_rejected_write_is_not_queued_as_verified_settlement(db, settled_operation):
     from app.services.transaction_ops import settlement
 
     actor, _, _, operation, _, _ = settled_operation

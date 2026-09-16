@@ -121,7 +121,7 @@ async def test_failed_payment_after_approval_stops_before_netsuite_reads_or_writ
     case.source["orders"][0]["payment_state"] = "failed"
     case.read_source.return_value = case.source
     result = await execute(db, execution_case)
-    assert result["status"] == "failed"
+    assert result["status"] == "rejected_before_effect"
     case.read_target.assert_not_awaited()
     case.dispatch.assert_not_awaited()
     row = await operation(db, execution_case)
@@ -143,17 +143,19 @@ async def test_changed_approved_evidence_stops_before_every_external_write(db, e
     else:
         execution_case.before["orders"][0]["currency_metadata"]["symbol"] = "USD"
     result = await execute(db, execution_case)
-    assert result["status"] == "failed"
+    assert result["status"] == "rejected_before_effect"
     case.dispatch.assert_not_awaited()
     assert not (await operation(db, execution_case)).result_json.get("dispatch_reserved")
 
 
-async def test_success_receipt_without_changed_provider_state_stays_unknown(db, execution_case):
+async def test_success_receipt_without_changed_provider_state_stays_committed_unverified(db, execution_case):
+    """A receipt says saved; the readback does not prove it. That is committed_unverified: reads may
+    follow (recovery), a resend never may."""
     case = execution_case.case
     case.read_target.side_effect = [execution_case.before, execution_case.before]
     case.read_guard.side_effect = [case.guard, case.guard]
     result = await execute(db, execution_case)
-    assert result["status"] == "unknown"
+    assert result["status"] == "committed_unverified"
     assert (await operation(db, execution_case)).result_json["code"] == "verification_unproven"
     case.dispatch.assert_awaited_once()
 
@@ -205,12 +207,12 @@ async def test_postwrite_source_change_is_not_called_verified(db, execution_case
     changed = deepcopy(case.source)
     changed["orders"][0]["updated_at"] = datetime.now(timezone.utc).isoformat()
     case.read_source.side_effect = [case.source, changed]
-    assert (await execute(db, execution_case))["status"] == "unknown"
+    assert (await execute(db, execution_case))["status"] == "committed_unverified"
 
 
 async def test_whole_guard_state_must_match_after_so_customer_drift_is_visible(db, execution_case):
     execution_case.after_guard["snapshot"]["entity"] = "999"
-    assert (await execute(db, execution_case))["status"] == "unknown"
+    assert (await execute(db, execution_case))["status"] == "committed_unverified"
 
 
 @pytest.mark.parametrize("execution_case", [True], indirect=True)
@@ -232,7 +234,7 @@ async def test_inventory_drift_after_approval_prevents_dispatch(db, execution_ca
         case.source["orders"][0]["line_items"][0]["variant"]["sku"] = "OTHER"
     else:
         execution_case.before["orders"][0]["lines"][0]["custcol_fw_inventory_unit_ids"] = "999"
-    assert (await execute(db, execution_case))["status"] == "failed"
+    assert (await execute(db, execution_case))["status"] == "rejected_before_effect"
     case.dispatch.assert_not_awaited()
 
 
@@ -258,5 +260,5 @@ async def test_changed_final_tax_assessment_invalidates_approval_before_dispatch
     else:
         adjustment["finalized"] = False
         adjustment["eligible"] = True
-    assert (await execute(db, execution_case))["status"] == "failed"
+    assert (await execute(db, execution_case))["status"] == "rejected_before_effect"
     execution_case.case.dispatch.assert_not_awaited()

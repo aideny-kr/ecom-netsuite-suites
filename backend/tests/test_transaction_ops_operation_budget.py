@@ -54,7 +54,7 @@ async def test_no_dispatch_after_read_budget_exhaustion(db, ready):
     assert await state.reserve_operation_budget(db, actor.tenant_id, claim.operation_id, api_calls=96)
     assert await state.reserve_operation_budget(db, actor.tenant_id, claim.operation_id, api_calls=1) is None
     row = await operation(db, claim)
-    assert row.status == "failed"
+    assert row.status == "rejected_before_effect"
     assert row.result_json["termination_reason"] == "budget"
     assert row.result_json["code"] == "operation_budget_exhausted"
     with pytest.raises(state.StateError):
@@ -83,7 +83,7 @@ async def test_dispatch_requires_an_available_call_and_time(db, ready):
     with pytest.raises(state.StateError, match="operation_budget_exhausted"):
         await reserve(db, actor.tenant_id, claim)
     row = await operation(db, claim)
-    assert row.status == "failed"
+    assert row.status == "rejected_before_effect"
     assert row.result_json.get("dispatch_reserved") is not True
 
 
@@ -100,7 +100,7 @@ async def test_crash_recovery_fences_old_worker_before_or_after_send(db, ready, 
         is None
     )
     recovered = await state.recover_expired_operation(db, actor.tenant_id, row.id, now=row.deadline_at)
-    assert recovered.status == ("unknown" if sent else "failed")
+    assert recovered.status == ("unknown" if sent else "rejected_before_effect")
     assert recovered.result_json["termination_reason"] == "budget"
     assert recovered.result_json["code"] == ("interrupted_after_dispatch" if sent else "interrupted_before_dispatch")
     if sent:

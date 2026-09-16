@@ -16,6 +16,7 @@ from app.models.transaction_ops import TransactionProposal as Proposal
 from app.models.transaction_ops import TransactionRun as Run
 from app.services import feature_flag_service
 from app.services.audit_service import log_event
+from app.services.transaction_ops import state_service as state
 from app.services.transaction_ops.scheduler import _BROKER_IO_TIMEOUT, _DISPATCH_TIMEOUT
 from app.workers.base_task import InstrumentedTask
 from app.workers.celery_app import celery_app
@@ -84,7 +85,7 @@ async def _candidates(db, tenant_id, now):
         .join(related, and_(related.id == Operation.proposal_id, related.tenant_id == tenant_id))
         .where(
             Operation.tenant_id == tenant_id,
-            Operation.status.in_(("executing", "unknown")),
+            Operation.status.in_(state.IN_FLIGHT),
             func.lower(func.replace(related.netsuite_account_id, "_", "-"))
             == func.lower(func.replace(Proposal.netsuite_account_id, "_", "-")),
             related.subsidiary_id == Proposal.subsidiary_id,
@@ -129,8 +130,11 @@ async def _candidates(db, tenant_id, now):
                     Operation.tenant_id == tenant_id,
                     Config.enabled.is_(True),
                     ~recovery_busy_or_done,
+                    # An open row (executing, or receipted and still being read back by
+                    # the process that sent it) is recovered only after its deadline; an
+                    # unknown one has no process left and is due at once.
                     or_(
-                        and_(Operation.status == "executing", Operation.deadline_at <= now),
+                        and_(Operation.status.in_(state.OPEN), Operation.deadline_at <= now),
                         Operation.status == "unknown",
                     ),
                 )

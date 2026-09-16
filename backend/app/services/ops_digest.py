@@ -25,7 +25,7 @@ from datetime import datetime, timedelta, timezone
 from html import escape
 from uuid import UUID
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 
 from app.core.config import settings
 from app.core.database import set_tenant_context
@@ -126,7 +126,17 @@ async def collect(db, tenant_id: UUID, *, now: datetime, since: datetime) -> dic
         "operations": (
             select(TransactionOperation.id).where(
                 TransactionOperation.tenant_id == tenant_id,
-                TransactionOperation.status.in_(("unknown", "failed")),
+                # The write kernel's taxonomy: an outcome nobody can settle without a
+                # person (unknown, needs_review), a receipt whose verification window
+                # has passed without a verdict, and the legacy ``failed`` value kept in
+                # the CHECK for one release (migration 109).
+                or_(
+                    TransactionOperation.status.in_(("unknown", "needs_review", "failed")),
+                    and_(
+                        TransactionOperation.status == "committed_unverified",
+                        TransactionOperation.deadline_at <= now,
+                    ),
+                ),
                 TransactionOperation.updated_at >= since,
             ),
             TransactionOperation.updated_at.desc(),
