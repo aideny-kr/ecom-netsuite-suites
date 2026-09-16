@@ -338,13 +338,21 @@ async def tenants_with_open_cards(db, now):
     from app.services.transaction_ops import state_service as state
 
     so = ChatMessage.structured_output
+    card_never_heard = exists(
+        select(ChatMessage.id).where(
+            ChatMessage.id == TransactionOperation.approval_id, so["status"].astext == "executing"
+        )
+    )
     claimed = list(
         (
             await db.scalars(
                 select(TransactionOperation.tenant_id)
                 .where(
                     TransactionOperation.approval_kind == "chat_confirmation",
-                    TransactionOperation.status.in_(state.IN_FLIGHT),
+                    or_(
+                        TransactionOperation.status.in_(state.IN_FLIGHT),
+                        and_(TransactionOperation.status.in_(state.TERMINAL), card_never_heard),
+                    ),
                 )
                 .distinct()
             )
@@ -538,7 +546,6 @@ async def recover_card(db, tenant_id, operation, *, now, lock_engine=None):
     one budgeted readback under its own recovery run, and only a proof moves it to
     verified. The card is then rendered from the row. Nothing here sends.
     """
-    from app.services.transaction_ops import accounting_recheck
     from app.services.transaction_ops import state_service as state
     from app.services.transaction_ops.accounting_adapter import json_copy, ledger_safe
     from app.services.transaction_ops.accounting_group import accounting_write_slot
@@ -548,26 +555,28 @@ async def recover_card(db, tenant_id, operation, *, now, lock_engine=None):
     operation = await state._one(db, tenant_id, TransactionOperation, operation.id)
     message = await _message(db, tenant_id, operation.approval_id)
     if message is None:
-        return {"termination_reason": "error", "financial_writes": 0}
+        # The card is gone (a deleted session): the row cannot be read for, and must not be
+        # re-dispatched every minute. A person decides.
+        if operation.status in state.SETTLED:
+            await state.complete_operation(
+                db, tenant_id, operation.id, outcome="needs_review", result_json={"code": "card_missing"}
+            )
+            return {"termination_reason": "blocked", "financial_writes": 0}
+        return {"termination_reason": "done" if operation.status in state.TERMINAL else "busy", "financial_writes": 0}
     if operation.status not in state.SETTLED:
         if operation.status in state.TERMINAL and (message.structured_output or {}).get("status") == "executing":
             # The row settled (by expiry, or by a sender that died after completing it)
             # while the card never heard: render the card from the row.
-            await _render_terminal(db, tenant_id, message, operation)
+            await render_settled_card(db, tenant_id, message, operation, now=now)
             return {"termination_reason": "done", "financial_writes": 0}
         # Terminal already, or still executing before its deadline: the sender may be alive.
         reason = "done" if operation.status in state.TERMINAL else "busy"
         return {"termination_reason": reason, "financial_writes": 0}
     so = message.structured_output or {}
     p = so.get("accounting_review") or {}
-    approver = (operation.result_json or {}).get("approved_by")
     if evidence_digest(so) != (operation.result_json or {}).get("evidence_digest"):
         # The card is not the one that was claimed: nothing on it may drive a read.
-        operation = await state.complete_operation(
-            db, tenant_id, operation.id, outcome="needs_review", result_json={"code": "confirmation_changed"}
-        )
-        await _render_terminal(db, tenant_id, message, operation)
-        return {"termination_reason": "blocked", "financial_writes": 0}
+        return await _escalate(db, tenant_id, message, operation, "confirmation_changed", now=now)
     locked = False
     try:
         lock_options = {"lock_engine": lock_engine} if lock_engine is not None else {}
@@ -578,19 +587,12 @@ async def recover_card(db, tenant_id, operation, *, now, lock_engine=None):
             except state.StateError as exc:
                 if exc.code == "operation_not_recoverable":
                     return {"termination_reason": "done", "financial_writes": 0}
-                if exc.code == "recovery_unscoped":
-                    # Nothing to read under: a person decides, and the document is freed.
-                    operation = await state.complete_operation(
-                        db, tenant_id, operation.id, outcome="needs_review", result_json={"code": "recovery_unscoped"}
-                    )
-                    await _render_terminal(
-                        db, tenant_id, await _message(db, tenant_id, operation.approval_id), operation
-                    )
-                    return {"termination_reason": "blocked", "financial_writes": 0}
-                raise
+                # Nothing to read under (no scope, a disabled config, a vanished config): a
+                # person decides, the document is freed, the scan stops re-dispatching.
+                return await _escalate(db, tenant_id, message, operation, exc.code, now=now)
             if run.status == "finished":
                 return {"termination_reason": "done", "financial_writes": 0}
-            run_id, operation_id = run.id, operation.id  # a rollback below expires the ORM rows
+            run_id = run.id  # a rollback below expires the ORM rows
             receipt = (operation.result_json or {}).get("receipt")
             token = await state.claim_run(db, tenant_id, run_id, now=now)
             if token is None:
@@ -617,64 +619,10 @@ async def recover_card(db, tenant_id, operation, *, now, lock_engine=None):
             operation = await state.finish_operation_recovery(
                 db, tenant_id, run_id, lease_token=token, reason=reason, proof=proof, now=now
             )
-            verified = operation.status == "verified"
             message = await _message(db, tenant_id, operation.approval_id)
-            from app.services.transaction_ops.chat_confirmation import execution_projection
-
-            context = ((message.structured_output or {}).get("accounting_execution") or {}).get("approval_context")
-            so = {
-                **(message.structured_output or {}),
-                "accounting_execution": execution_projection(message.id, operation, context),
-                "status": "approved" if verified else "indeterminate",
-                "accounting_verification": {
-                    **verification,
-                    "receipt_outcome": "indeterminate",
-                    "recovered_by_read": verified,
-                },
-            }
-            if verified:
-                so.pop("error", None)
-            message.structured_output = so
-            recheck = None
-            if verified:
-                try:
-                    scope = (operation.result_json or {}).get("recovery_scope") or {}
-                    recheck_run = await accounting_recheck.queue(
-                        db, tenant_id, message, UUID(str(approver)), now=now, config_id=scope.get("config_id")
-                    )
-                    recheck = {"status": "queued", "run_id": str(recheck_run.id)}
-                except Exception as exc:
-                    recheck = {"status": "not_queued", "reason": type(exc).__name__}
-                    reason = "error"
-                message.structured_output = {**so, "accounting_recheck": recheck}
-            message.content = (
-                "The approved accounting correction and GL were verified by read-only recovery. "
-                "No additional financial write was sent. Full case reconciliation and cash settlement remain separate."
-                if verified
-                else "The interrupted accounting correction is not verified. "
-                "The case still needs review. Do not repeat this write."
+            reason = await render_settled_card(
+                db, tenant_id, message, operation, now=now, verification=verification, reason=reason
             )
-            await log_event(
-                db,
-                tenant_id,
-                "transaction_ops",
-                "accounting_recovery.completed",
-                actor_type="system",
-                resource_type="chat_message",
-                resource_id=str(message.id),
-                payload={
-                    "operation_id": str(operation_id),
-                    "approved_by": approver,
-                    "termination_reason": reason,
-                    "verification": verification,
-                    "financial_writes": 0,
-                    "accounting_recheck": recheck,
-                },
-            )
-            parent_id = (context or {}).get("group_approval_id")
-            if parent_id:
-                await refresh_group(db, tenant_id, message.session_id, parent_id)
-            await db.commit()
             return {"termination_reason": reason, "financial_writes": 0}
     except ValueError:
         if locked:
@@ -684,31 +632,95 @@ async def recover_card(db, tenant_id, operation, *, now, lock_engine=None):
         return {"termination_reason": "busy", "financial_writes": 0}
 
 
-async def _render_terminal(db, tenant_id, message, operation):
+async def _escalate(db, tenant_id, message, operation, code, *, now):
+    from app.services.transaction_ops import state_service as state
+
+    operation = await state.complete_operation(
+        db, tenant_id, operation.id, outcome="needs_review", result_json={"code": code}
+    )
+    await render_settled_card(db, tenant_id, message, operation, now=now)
+    return {"termination_reason": "blocked", "financial_writes": 0}
+
+
+async def render_settled_card(db, tenant_id, message, operation, *, now, verification=None, reason=None):
+    """The one place a card is rendered from its ledger row after the sender is gone: the
+    projection (keeping the group link), the status, what the readback saw, the audit
+    the cross-card history releases a refused intent by, the recheck every verified
+    correction queues, the recovery audit, and the group parent. Returns the termination
+    reason (``reason`` when given, downgraded to ``error`` if the recheck cannot queue)."""
+    from app.services.transaction_ops import accounting_recheck
+    from app.services.transaction_ops import state_service as state
     from app.services.transaction_ops.chat_confirmation import execution_projection
 
     result = operation.result_json or {}
-    context = ((message.structured_output or {}).get("accounting_execution") or {}).get("approval_context")
+    approver = result.get("approved_by")
+    stored = message.structured_output or {}
+    context = (stored.get("accounting_execution") or {}).get("approval_context")
     so = {
-        **(message.structured_output or {}),
+        **stored,
         "operation_id": str(operation.id),
         "accounting_execution": execution_projection(message.id, operation, context),
     }
+    reason = reason or ("done" if operation.status in state.TERMINAL else "stall")
+    recheck = None
+    receipt_outcome = "accepted" if result.get("receipt") else "indeterminate"
     if operation.status == "rejected_before_effect":
-        reason = "The approval was interrupted before any send; nothing was sent."
-        so.update(status="failed", error=reason)
-        message.content = reason + " Prepare a fresh correction to try again."
-    elif operation.status == "verified":
-        so.update(status="approved", accounting_verification=result.get("verification") or {"status": "verified"})
-        message.content = "The approved accounting correction was verified; the card is updated from the ledger."
-    else:  # needs_review
-        so.update(
-            status="indeterminate",
-            error=result.get("code"),
-            accounting_verification={"status": "needs_review", "reason": result.get("code"), "retry_allowed": False},
+        text = "The approval was interrupted before any send; nothing was sent."
+        so.update(status="failed", error=text)
+        message.content = text + " Prepare a fresh correction to try again."
+        # the same audit every other before-effect refusal writes: the cross-card
+        # history check releases the intent by it
+        await log_event(
+            db,
+            tenant_id,
+            "transaction_ops",
+            "accounting_correction.precondition_failed",
+            actor_type="system",
+            resource_type="chat_message",
+            resource_id=str(message.id),
+            payload={"approved_by": approver, "financial_writes": 0, "reason": result.get("code") or text},
+            status="error",
         )
-        message.content = "The accounting correction needs review. Do not repeat this write."
-    message.structured_output = so
+    elif operation.status == "verified":
+        seen = verification or result.get("verification") or {"status": "verified"}
+        so.update(
+            status="approved",
+            accounting_verification={**seen, "receipt_outcome": receipt_outcome, "recovered_by_read": True},
+        )
+        so.pop("error", None)
+        message.content = (
+            "The approved accounting correction and GL were verified by read-only recovery. "
+            "No additional financial write was sent. Full case reconciliation and cash settlement remain separate."
+        )
+        message.structured_output = so  # the recheck queue reads the card as it will be stored
+        try:
+            scope = result.get("recovery_scope") or {}
+            run = await accounting_recheck.queue(
+                db, tenant_id, message, UUID(str(approver)), now=now, config_id=scope.get("config_id")
+            )
+            recheck = {"status": "queued", "run_id": str(run.id)}
+        except Exception as exc:
+            recheck = {"status": "not_queued", "reason": type(exc).__name__}
+            reason = "error"
+        so = {**so, "accounting_recheck": recheck}  # a new object: an in-place change after the flush is invisible
+    else:
+        # committed_unverified (a receipt without proof), unknown, or needs_review
+        seen = verification or {"status": "needs_review", "reason": result.get("code"), "retry_allowed": False}
+        receipted = operation.status == "committed_unverified"
+        so.update(
+            status="approved" if receipted else "indeterminate",
+            accounting_verification={**seen, "receipt_outcome": receipt_outcome, "recovered_by_read": False},
+        )
+        if not receipted:
+            so["error"] = result.get("code")
+        message.content = (
+            "The accounting correction was sent and saved but is not verified. The case still needs review. "
+            "Do not repeat this write."
+            if receipted
+            else "The interrupted accounting correction is not verified. The case still needs review. "
+            "Do not repeat this write."
+        )
+    message.structured_output = dict(so)
     await log_event(
         db,
         tenant_id,
@@ -719,13 +731,16 @@ async def _render_terminal(db, tenant_id, message, operation):
         resource_id=str(message.id),
         payload={
             "operation_id": str(operation.id),
-            "approved_by": result.get("approved_by"),
-            "termination_reason": "done",
+            "approved_by": approver,
+            "termination_reason": reason,
             "rendered_from_ledger": operation.status,
+            "verification": verification,
             "financial_writes": 0,
+            "accounting_recheck": recheck,
         },
     )
     parent_id = (context or {}).get("group_approval_id")
     if parent_id:
         await refresh_group(db, tenant_id, message.session_id, parent_id)
     await db.commit()
+    return reason

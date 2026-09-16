@@ -553,17 +553,26 @@ async def test_a_kernel_card_without_a_config_key_still_queues_its_recheck_under
     payload.accounting_review = p2
     message.structured_output = {**payload.model_dump(mode="json"), "status": "pending"}
     await db.flush()
-    recorded = []
-
-    async def queue(db_, tenant_id, msg, actor_id, *, now, config_id=None):
-        recorded.append(config_id)
-        return MagicMock(id="recheck-run")
-
-    with patch("app.services.transaction_ops.accounting_recheck.queue", queue):
-        pass
     events, so, stubs = await approve(db, (actor, session, message, p2, params))
     assert so["status"] == "approved"
-    # the real queue would refuse a card whose scope names no config with a code, never KeyError
+    row = await _row(db, message)
+    # the orchestrator queues the recheck under the config the claim recorded
+    assert stubs["recheck"].await_args.kwargs["config_id"] == row.result_json["recovery_scope"]["config_id"]
+    assert accounting_recheck.effective_config_id(so) == row.result_json["recovery_scope"]["config_id"]
+    # a card whose scope names no config is refused by the real queue with a code, never KeyError
+    bare = {**so, "accounting_execution": {**so["accounting_execution"], "recovery_scope": {}}}
+    message.structured_output = bare
     with pytest.raises(Exception) as exc:
         await accounting_recheck.queue(db, actor.tenant_id, message, actor.id, now=datetime.now(timezone.utc))
-    assert "KeyError" not in repr(exc.value) and not isinstance(exc.value, KeyError)
+    assert not isinstance(exc.value, KeyError) and "unscoped" in str(exc.value)
+
+
+async def test_a_transient_revalidation_failure_is_reported_as_itself_not_as_changed_evidence(db, card):
+    events, so, stubs = await approve(
+        db, card, preflight=AsyncMock(side_effect=RuntimeError("connection reset by peer"))
+    )
+    assert so["status"] == "failed" and stubs["dispatch"].await_count == 0
+    assert "connection reset by peer" in so["error"]
+    assert "no longer holds" not in so["error"]
+    row = await _row(db, card[2])
+    assert row.result_json["code"] == "evidence_revalidation_failed"  # the ledger keeps the code, not the text
