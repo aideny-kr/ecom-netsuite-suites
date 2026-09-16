@@ -258,7 +258,10 @@ async def test_a_halted_accounting_card_is_a_zero_write_precondition_failure(dis
     """An accounting correction halted by the switch must be released for a fresh approval once
     dispatch is back. previous_execution releases a failed card only when it carries the
     accounting_correction.precondition_failed audit with zero writes, so the approve branch
-    must write that audit for accounting cards, not only write.dispatch_disabled."""
+    must write that audit for accounting cards, not only write.dispatch_disabled. An MCP card
+    runs through the write kernel, and the switch trips before the ledger claim: the halted
+    card carries no execution record at all, so there is nothing a later card could mistake
+    for a prior attempt."""
     from datetime import datetime, timezone
 
     from app.services.chat.orchestrator import run_chat_turn
@@ -300,7 +303,8 @@ async def test_a_halted_accounting_card_is_a_zero_write_precondition_failure(dis
     execute_tool.assert_not_awaited()
     assert [e for e in events if e.get("type") == "error" and e.get("code") == "dispatch_disabled"]
     so = confirm_msg.structured_output
-    assert so["status"] == "failed" and so["accounting_execution"]["approved_by"] == str(_USER_ID)
+    assert so["status"] == "failed" and so["repair_exit_reason"] == "dispatch_disabled"
+    assert "accounting_execution" not in so and "operation_id" not in so
     # The CAS claim audit is logged positionally; the branch audits by keyword.
     by_action = {
         (c.kwargs.get("action") or (c.args[3] if len(c.args) > 3 else None)): (c.kwargs or {"positional": c.args})

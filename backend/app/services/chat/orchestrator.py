@@ -2519,6 +2519,7 @@ async def run_chat_turn(
                         "error": f"{_disabled_error} Prepare a fresh approval once dispatch is re-enabled.",
                     }
                     return
+
                 async def _refuse_before_send(reason: str) -> None:
                     """Nothing was sent: the card says why and the audit releases the intent."""
                     _confirm_msg.structured_output = {**_so, "status": "failed", "error": reason}
