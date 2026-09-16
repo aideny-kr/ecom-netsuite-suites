@@ -128,7 +128,7 @@ async def record_outcome(db, tenant_id, run, reason, *, now):
                 .where(
                     TransactionOperation.tenant_id == tenant_id,
                     TransactionOperation.entity_key == operation.entity_key,
-                    TransactionOperation.status.in_(("executing", "unknown")),
+                    TransactionOperation.status.in_(("executing", "unknown", "committed_unverified")),
                 )
                 .limit(1)
             )

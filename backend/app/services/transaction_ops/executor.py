@@ -171,7 +171,7 @@ async def execute_proposal(db, tenant_id, proposal_id, *, _clock=None):
 
     async def complete(outcome, code, **details):
         row = await _operation(db, tenant_id, proposal, operation_id=claimed.operation_id)
-        if row.status != "executing":
+        if row.status not in ("executing", "committed_unverified"):
             return _result(row)
         row = await state.complete_operation(
             db, tenant_id, row.id, outcome=outcome, result_json={"code": code, **details}, now=clock()
@@ -185,7 +185,7 @@ async def execute_proposal(db, tenant_id, proposal_id, *, _clock=None):
             guard = await read(MAX_GUARD_READ_CALLS, read_guard_snapshot, config, claimed.target_record_id)
         elif claimed.action == "sync_missing_order":
             if report["comparison"]["recommended_action"] != "propose_missing_sync":
-                return await complete("failed", "approved_evidence_changed")
+                return await complete("rejected_before_effect", "approved_evidence_changed")
             creation = prepare_create_input(
                 source, mapping, account_id=config.netsuite_account_id, subsidiary_id=config.subsidiary_id, now=clock()
             )
@@ -206,14 +206,18 @@ async def execute_proposal(db, tenant_id, proposal_id, *, _clock=None):
             or fresh.before_json != claimed.before_json
             or fresh.after_json != claimed.after_json
         ):
-            return await complete("failed", "approved_evidence_changed")
+            return await complete("rejected_before_effect", "approved_evidence_changed")
         # Adapters own the final live guard + committed one-use send reservation.
         if claimed.action in {"correct_amounts", "sync_missing_order"}:
             receipt = await dispatch_netsuite_operation(db, tenant_id, claimed)
         else:
             receipt = await dispatch_celigo_resolution(db, tenant_id, claimed, celigo)
         if receipt["status"] == "failed":
-            return await complete("failed", "provider_rejected_without_save")
+            return await complete("rejected_before_effect", "provider_rejected_without_save")
+        if receipt["status"] == "accepted":
+            # Saved by the provider's own account, not yet proven by an independent read:
+            # the row says so before the readback, in case nothing after this runs.
+            await state.record_receipt(db, tenant_id, claimed.operation_id, receipt, now=clock())
         source, _, report = await pair()
         guard = resolution = creation = None
         if claimed.action == "correct_amounts":
@@ -237,15 +241,21 @@ async def execute_proposal(db, tenant_id, proposal_id, *, _clock=None):
         proof = verify_outcome(proposal, report, guard=guard, resolution=resolution, creation=creation, now=clock())
         if proof is not None:
             return await complete("verified", "independently_verified", verification=proof)
-        return await complete("unknown", "verification_unproven")
+        # A receipt without proof stays committed_unverified (readback again later); no
+        # receipt at all is unknown (existence must be reconciled first). Never a resend.
+        return await complete(
+            "committed_unverified" if receipt["status"] == "accepted" else "unknown", "verification_unproven"
+        )
     except Exception as exc:
         # A transport exception may follow an actual send; only the committed
         # ledger decides whether failure is known. Never expose raw exceptions.
         row = await _operation(db, tenant_id, proposal, operation_id=claimed.operation_id)
-        if row.status != "executing":
+        if row.status not in ("executing", "committed_unverified"):
             return _result(row)
+        if row.status == "committed_unverified":
+            return await complete("committed_unverified", "verification_unavailable")
         sent = (row.result_json or {}).get("dispatch_reserved") is True
         code = "verification_unavailable" if sent else "evidence_revalidation_failed"
         if isinstance(exc, ExecutionStoppedError) and str(exc) == FAILED_PAYMENT:
             code = FAILED_PAYMENT
-        return await complete("unknown" if sent else "failed", code)
+        return await complete("unknown" if sent else "rejected_before_effect", code)

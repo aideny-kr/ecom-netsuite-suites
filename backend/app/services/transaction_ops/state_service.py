@@ -57,6 +57,22 @@ _OPERATION_TIME = timedelta(seconds=300)
 _LEDGER_RESULT_KEYS = frozenset(
     {"dispatch_reserved", "provider", "payload_fingerprint", "dispatch_reserved_at", "termination_reason"}
 )
+# The write kernel's outcome taxonomy (docs/superpowers/specs/2026-09-15-write-kernel-design.md,
+# section 3). The repair rule is a function of the status: a retry is allowed only from
+# rejected_before_effect and only as a lineage row; unknown may only be reconciled by reads;
+# committed_unverified may only be verified by reads; needs_review waits for a person.
+OUTCOMES = frozenset({"rejected_before_effect", "committed_unverified", "unknown", "verified", "needs_review"})
+TERMINAL = frozenset({"verified", "rejected_before_effect", "needs_review"})
+SETTLED = frozenset({"unknown", "committed_unverified"})  # a permit was consumed; reads only from here
+TERMINATION = {
+    "verified": "done",
+    "unknown": "stall",
+    "committed_unverified": "stall",
+    "rejected_before_effect": "error",
+    "needs_review": "blocked",
+}
+PROVIDERS = {"correct_amounts": "netsuite", "sync_missing_order": "netsuite", "resolve_celigo_error": "celigo"}
+ADAPTERS = {"netsuite": "guard_restlet", "celigo": "celigo"}
 
 
 class StateError(ValueError):
@@ -812,7 +828,7 @@ async def propose(db, tenant_id, run_id, request: ProposalCreate, *, lease_token
             return existing
         if attempted is not None:
             result = attempted.result_json or {}
-            known_no_write = attempted.status == "failed" and (
+            known_no_write = attempted.status in ("failed", "rejected_before_effect") and (
                 result.get("dispatch_reserved") is not True or result.get("code") == "provider_rejected_without_save"
             )
             if not known_no_write or attempt_number == 2:
@@ -951,11 +967,33 @@ async def claim_approved_operation(db, tenant_id, proposal_id, *, expected_evide
         await _audit(db, tenant_id, "proposal.invalidate", row)
         await _commit(db, tenant_id)
         return None
+    # Lineage: a retry proposal names the attempt it corrects; the new row keeps that
+    # attempt's base work key so the business identity is never changed to pass the
+    # duplicate check.
+    retry = (row.evidence_json or {}).get("retry") or {}
+    previous = None
+    if retry.get("previous_operation_id"):
+        previous = (
+            await db.execute(
+                select(TransactionOperation).where(
+                    TransactionOperation.tenant_id == tenant_id,
+                    TransactionOperation.id == uuid.UUID(str(retry["previous_operation_id"])),
+                )
+            )
+        ).scalar_one_or_none()
+    provider = PROVIDERS.get(row.action)
     operation = TransactionOperation(
         tenant_id=tenant_id,
         proposal_id=row.id,
+        approval_kind="transaction_proposal",
+        approval_id=row.id,
+        surface="scheduled",
+        provider=provider,
+        adapter=ADAPTERS.get(provider),
         work_key=row.work_key,
         entity_key=entity_key,
+        base_work_key=previous.base_work_key if previous is not None else row.work_key,
+        retry_of_operation_id=previous.id if previous is not None else None,
         attempted_at=now,
         deadline_at=min(now + _OPERATION_TIME, row.valid_until),
         max_api_calls=_OPERATION_CALLS,
@@ -983,25 +1021,41 @@ async def claim_approved_operation(db, tenant_id, proposal_id, *, expected_evide
     return intent
 
 
+async def record_receipt(db, tenant_id, operation_id, receipt, *, now=None):
+    """The provider identified the record as saved: the attempt is committed, not yet proven.
+
+    Written between the send and the independent readback, so the row says what is true
+    if the process dies in between. Only reads may follow; the permit is already spent.
+    """
+    evidence = _bounded_json({"receipt": receipt})
+    row = await _one(db, tenant_id, TransactionOperation, operation_id, lock=True)
+    if row.status != "executing":
+        await _commit(db, tenant_id)
+        return row
+    if (row.result_json or {}).get("dispatch_reserved") is not True:
+        raise StateError("receipt_without_permit")
+    row.status = "committed_unverified"
+    row.result_json = {**(row.result_json or {}), **evidence, "termination_reason": "stall"}
+    await _audit(db, tenant_id, "operation.receipt", row, payload={"receipt": evidence["receipt"]})
+    await _commit(db, tenant_id)
+    return row
+
+
 async def complete_operation(db, tenant_id, operation_id, *, outcome, result_json, now=None):
-    if outcome not in {"verified", "unknown", "failed"}:
+    if outcome not in OUTCOMES:
         raise ValueError("Invalid operation outcome")
     evidence = _bounded_json(result_json)
     if _LEDGER_RESULT_KEYS.intersection(evidence):
         raise StateError("reserved_operation_result_key")
     row = await _one(db, tenant_id, TransactionOperation, operation_id, lock=True)
-    if row.status not in {"executing", "unknown"}:
+    if row.status not in {"executing", *SETTLED}:
         raise StateError("operation_terminal")
-    # An unknown attempt can become verified/failed only after caller-provided
-    # read-only provider verification; this service never dispatches it again.
+    # An unknown attempt can move only after caller-provided read-only provider
+    # reconciliation; this service never dispatches it again.
     if row.status == "unknown" and evidence.get("reconciled") is not True:
         raise StateError("reconciliation_evidence_required")
     row.status, row.completed_at = outcome, _clock(now)
-    row.result_json = {
-        **(row.result_json or {}),
-        **evidence,
-        "termination_reason": {"verified": "done", "unknown": "stall", "failed": "error"}[outcome],
-    }
+    row.result_json = {**(row.result_json or {}), **evidence, "termination_reason": TERMINATION[outcome]}
     proposal = await get_proposal(db, tenant_id, row.proposal_id)
     if outcome == "verified":
         from app.services.transaction_ops.settlement import queue
@@ -1072,12 +1126,7 @@ async def reserve_operation_dispatch(
         return False
     if operation.status != "executing" or proposal.status != "approved":
         raise StateError("operation_not_executable")
-    required_provider = {
-        "correct_amounts": "netsuite",
-        "sync_missing_order": "netsuite",
-        "resolve_celigo_error": "celigo",
-    }
-    if required_provider.get(proposal.action) != provider:
+    if PROVIDERS.get(proposal.action) != provider:
         raise StateError("unsupported_dispatch_provider")
     if now >= proposal.valid_until:
         raise StateError("stale_evidence")
@@ -1121,7 +1170,11 @@ async def _exhaust_operation(db, tenant_id, operation, now, code):
     # This lock is shared with the dispatch permit. An old worker cannot send
     # after recovery marks a pre-dispatch operation failed. A consumed permit
     # cannot be distinguished from a sent request, so it always stays unknown.
-    operation.status = "unknown" if (operation.result_json or {}).get("dispatch_reserved") is True else "failed"
+    sent = (operation.result_json or {}).get("dispatch_reserved") is True
+    if operation.status == "committed_unverified":
+        pass  # a receipt exists; the budget ran out before the readback proved it, so it stays as it is
+    else:
+        operation.status = "unknown" if sent else "rejected_before_effect"
     operation.completed_at = now
     operation.result_json = {**(operation.result_json or {}), "termination_reason": "budget", "code": code}
     await _audit(db, tenant_id, "operation.exhaust", operation, payload={"outcome": operation.status, "code": code})
@@ -1147,7 +1200,10 @@ async def reserve_operation_budget(db, tenant_id, operation_id, *, api_calls, no
     if tenant is None or not tenant.is_active:
         raise StateError("tenant_unavailable", 403)
     operation = await _one(db, tenant_id, TransactionOperation, operation_id, lock=True)
-    if operation.status != "executing":
+    # Reads are budgeted while the attempt is executing and, after a receipt, while it is
+    # committed but unverified: the independent readback is what proves it. A send permit
+    # still requires `executing` (reserve_operation_dispatch), so this never enables a resend.
+    if operation.status not in ("executing", "committed_unverified"):
         raise StateError("operation_not_executable")
     if now >= operation.deadline_at or operation.api_calls_used + api_calls > operation.max_api_calls:
         await _exhaust_operation(db, tenant_id, operation, now, "operation_budget_exhausted")
@@ -1207,7 +1263,7 @@ async def create_operation_recovery(db, tenant_id, operation_id, *, actor=None, 
     if existing:
         await _commit(db, tenant_id)
         return existing
-    if operation.status != "unknown" or (operation.result_json or {}).get("dispatch_reserved") is not True:
+    if operation.status not in SETTLED or (operation.result_json or {}).get("dispatch_reserved") is not True:
         raise StateError("operation_not_recoverable")
     proposal = await get_proposal(db, tenant_id, operation.proposal_id)
     config = await get_config(db, tenant_id, proposal.config_id)
@@ -1280,7 +1336,9 @@ async def finish_operation_recovery(db, tenant_id, run_id, *, lease_token, reaso
     ):
         _lease(run, lease_token, now)
     _finish(run, reason, now)
-    if operation.status == "unknown":
+    if operation.status in SETTLED:
+        # Reads only: a proof moves the row to verified; without one it keeps its state
+        # (unknown stays unknown, committed_unverified stays committed_unverified).
         details = _bounded_json(
             {
                 "reconciled": True,
@@ -1288,7 +1346,7 @@ async def finish_operation_recovery(db, tenant_id, run_id, *, lease_token, reaso
                 **({"verification": proof} if proof is not None else {}),
             }
         )
-        operation.status = "verified" if proof is not None else "unknown"
+        operation.status = "verified" if proof is not None else operation.status
         operation.completed_at = now
         operation.result_json = {
             **(operation.result_json or {}),

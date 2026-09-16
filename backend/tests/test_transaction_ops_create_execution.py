@@ -145,13 +145,17 @@ async def test_changed_creation_evidence_fails_before_dispatch(db, create_execut
         value.case.guard["preview"]["record"]["body"]["exchangerate"] = "1.2"
     if kind == "already exists":
         value.case.target_reader.side_effect = [value.after]
-    assert (await execute(db, value))["status"] == "failed"
+    assert (await execute(db, value))["status"] == "rejected_before_effect"
     value.case.dispatch.assert_not_awaited()
     assert not (await operation(db, value)).result_json.get("dispatch_reserved")
 
 
 @pytest.mark.parametrize("kind", ["work key", "native state", "amount", "quantity", "duplicate", "version", "address"])
-async def test_unproven_created_order_remains_unknown_without_another_send(db, create_execution_case, kind):
+async def test_unproven_created_order_remains_committed_unverified_without_another_send(
+    db, create_execution_case, kind
+):
+    """The provider returned a record id, so the save is committed; the attributed readback did not
+    prove it is the approved order, so it is not verified. Reads may follow, a resend never may."""
     value = create_execution_case
     native = value.after["orders"][0]
     if kind == "work key":
@@ -170,8 +174,8 @@ async def test_unproven_created_order_remains_unknown_without_another_send(db, c
         changed = deepcopy(value.case.source)
         changed["orders"][0]["ship_address"]["address1"] = "Changed after save"
         value.case.source_reader.side_effect = [value.case.source, changed]
-    assert (await execute(db, value))["status"] == "unknown"
-    assert (await execute(db, value))["status"] == "unknown"
+    assert (await execute(db, value))["status"] == "committed_unverified"
+    assert (await execute(db, value))["status"] == "committed_unverified"
     value.case.dispatch.assert_awaited_once()
 
 
@@ -193,7 +197,8 @@ async def test_recovery_of_lost_creation_checks_attribution_and_never_constructs
 ):
     value = create_execution_case
     value.case.created_reader.side_effect = RuntimeError("Read temporarily unavailable")
-    assert (await execute(db, value))["status"] == "unknown"
+    # The provider returned a record id, then the attributed readback failed: committed, unverified.
+    assert (await execute(db, value))["status"] == "committed_unverified"
     row = await operation(db, value)
     spent = row.api_calls_used
     monkeypatch.setattr(recovery, "read_framework_order", AsyncMock(return_value=value.case.source))
@@ -215,7 +220,7 @@ async def test_large_approved_creation_persists_bounded_proof_without_losing_nat
     value = create_execution_case
     if recover:
         value.case.created_reader.side_effect = RuntimeError("Temporary read failure")
-        assert (await execute(db, value))["status"] == "unknown"
+        assert (await execute(db, value))["status"] == "committed_unverified"
         row = await operation(db, value)
         spent = row.api_calls_used
         monkeypatch.setattr(recovery, "read_framework_order", AsyncMock(return_value=value.case.source))
@@ -252,5 +257,8 @@ async def test_large_approved_creation_persists_bounded_proof_without_losing_nat
 async def test_large_creation_does_not_summarize_away_a_post_save_money_mismatch(db, create_execution_case):
     value = create_execution_case
     value.after["orders"][0]["header"]["total"] = "9001"
-    assert (await execute(db, value))["status"] == "unknown"
+    # Saved (a record id came back) but the readback contradicts the approved amounts. The
+    # executor cannot yet tell "contradicted" from "unavailable", so it stays committed but
+    # unverified for recovery's readback; the adapter protocol's verify() will split the two.
+    assert (await execute(db, value))["status"] == "committed_unverified"
     value.case.dispatch.assert_awaited_once()

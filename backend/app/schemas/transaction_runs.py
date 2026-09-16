@@ -236,8 +236,15 @@ class ProposalOut(OutputModel):
 class OperationOut(OutputModel):
     id: UUID
     tenant_id: UUID
-    proposal_id: UUID
+    proposal_id: UUID | None
+    approval_kind: str
+    approval_id: UUID
+    surface: str
+    provider: str | None
+    adapter: str | None
     work_key: str
+    base_work_key: str
+    retry_of_operation_id: UUID | None
     status: str
     attempted_at: datetime
     deadline_at: datetime
