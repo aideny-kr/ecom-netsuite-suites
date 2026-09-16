@@ -664,6 +664,7 @@ export default function ChatPage() {
   );
 
   const clearStreamingState = useCallback(() => {
+    activeRunRef.current = null;
     pendingSubmissionRef.current = null;
     streamVersionRef.current++;
     bufferRef.current = [];
